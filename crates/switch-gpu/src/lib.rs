@@ -4589,6 +4589,20 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    /// The device, or `None` with a notice; with `REQUIRE_GPU` set, a panic.
+    fn device() -> Option<super::Gpu> {
+        match super::Gpu::open() {
+            Ok(gpu) => Some(gpu),
+            Err(why) if std::env::var_os("REQUIRE_GPU").is_some_and(|v| !v.is_empty()) => {
+                panic!("REQUIRE_GPU is set and there is no device: {why}")
+            }
+            Err(why) => {
+                eprintln!("[gpu] skipped: {why}");
+                None
+            }
+        }
+    }
+
     /// Why `shader::wgsl` ends its dispatch function with a `return false;`
     /// nothing can reach, and the check that will say when it can go.
     ///
@@ -4604,7 +4618,7 @@ mod tests {
     /// full of warnings: can go.
     #[test]
     fn naga_still_needs_a_return_after_a_loop_that_cannot_fall_through() {
-        let Ok(gpu) = super::Gpu::open() else { return };
+        let Some(gpu) = device() else { return };
         let module = |name: &str, trailing: &str| {
             let src = [
                 "fn f() -> bool {",
@@ -4657,9 +4671,7 @@ mod tests {
         use switch_core::gpu::shader::isa::{Instruction, Operand, Pred, ShflMode};
         use switch_core::gpu::shader::{Op, Program};
 
-        let Ok(gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(gpu) = device() else { return };
         let mut program = Program::default();
         for (index, op) in [
             Op::Shfl {
@@ -4705,9 +4717,7 @@ mod tests {
         use switch_core::gpu::shader::isa::{self, Instruction, Pred};
         use switch_core::gpu::shader::{Op, Program};
 
-        let Ok(gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(gpu) = device() else { return };
         let mut program = Program::default();
         let words = [0xc03a0087fff70400, 0xc1ba0087f0970400, 0x3a2c03e060c70907];
         let ops = words.map(|word| isa::decode(word).op);
@@ -4863,9 +4873,7 @@ mod tests {
     #[test]
     fn a_lost_device_is_reported_rather_than_failing_the_flush() {
         use switch_core::gpu::renderer::Renderer;
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         let mut h = Harness::new();
         h.triangle([1.0, 0.0, 1.0, 1.0]);
         h.draw_with(&mut gpu).expect("the draw");
@@ -4888,7 +4896,7 @@ mod tests {
     /// had nowhere to put it.
     #[test]
     fn a_rejection_nothing_asked_about_is_still_counted_and_reported() {
-        let Ok(gpu) = super::Gpu::open() else { return };
+        let Some(gpu) = device() else { return };
         assert_eq!(gpu.device_errors(), (0, Vec::new()), "nothing rejected yet");
 
         // Rejected for a reason that cannot become valid: `bool` is not a
@@ -4951,9 +4959,7 @@ mod tests {
     /// is the whole of what multisampling is, and the whole of what the two
     /// routes through it have to get right.
     fn compare(mode: u32, samples_x: u32, samples_y: u32, set_up: impl Fn(&mut Harness)) {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         let colour = [1.0f32, 1.0, 1.0, 1.0];
 
         let build = |gpu: Option<&mut super::Gpu>| {
@@ -5008,9 +5014,7 @@ mod tests {
         tune: impl Fn(&mut super::Gpu),
         set_up: impl Fn(&mut Harness),
     ) {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         tune(&mut gpu);
         let build = |gpu: Option<&mut super::Gpu>| {
             let mut h = new();
@@ -5136,9 +5140,7 @@ mod tests {
         use switch_core::gpu::shader::isa::{self, Instruction, Pred};
         use switch_core::gpu::shader::{Op, Program};
 
-        let Ok(gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(gpu) = device() else { return };
         let mut program = Program::default();
         let words = [0xdf48008180470800, 0xc83a0086aff70208];
         let ops = words.map(|word| isa::decode(word).op);
@@ -5175,9 +5177,7 @@ mod tests {
         use switch_core::gpu::shader::isa::{self, Instruction, Pred};
         use switch_core::gpu::shader::{Op, Program};
 
-        let Ok(gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(gpu) = device() else { return };
         let mut program = Program::default();
         let words = [0x5ce0800000170aff, 0x50a0038000070d07];
         let ops = words.map(|word| isa::decode(word).op);
@@ -5241,9 +5241,7 @@ mod tests {
     /// rasterizer draws the clear value.
     #[test]
     fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         let build = |gpu: Option<&mut super::Gpu>| {
             let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
             h.bindless_texture();
@@ -5308,9 +5306,7 @@ mod tests {
     /// top-left corner of a padded one, which Nintendo Switch Sports samples.
     #[test]
     fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         for width in [testing::TARGET_WIDTH, testing::TARGET_WIDTH / 2] {
             let build = |gpu: Option<&mut super::Gpu>, clear: f32| {
                 let mut h = Harness::with_fragment_shader(testing::shadow_fragment_shader());
@@ -5384,9 +5380,7 @@ mod tests {
     /// where the rasterizer draws the clear colour.
     #[test]
     fn a_held_surface_stands_in_for_a_smaller_texture_laid_out_the_same_way() {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         let build = |gpu: Option<&mut super::Gpu>| {
             let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
             h.bindless_texture();
@@ -5529,11 +5523,28 @@ mod tests {
         // the same approximation, so an interpolated channel can land a
         // 255th either side of a rounding boundary. A half is exactly such a
         // boundary; a one and a zero are not near one.
-        for func in [0x0201, 0x0203, 0x0204, 0x0207] {
-            agrees(move |h| {
+        for (func, passes) in [
+            (0x0201, false),
+            (0x0203, false),
+            (0x0204, true),
+            (0x0207, true),
+        ] {
+            let set_up = move |h: &mut Harness| {
                 h.depth_target(func);
                 h.triangle([1.0, 0.0, 1.0, 1.0]);
-            });
+            };
+            agrees(set_up);
+            // The surface starts at 0 and the triangle sits at 0.5 (Z24 0x800000).
+            let mut h = Harness::new();
+            set_up(&mut h);
+            h.draw_with(&mut Software).expect("the draw");
+            let (colour, depth) = if passes {
+                (0xffff_00ff, 0x8000_0000)
+            } else {
+                (0, 0)
+            };
+            assert_eq!(h.texel(1, 1), colour, "func {func:#x}: colour");
+            assert_eq!(h.depth()[17], depth, "func {func:#x}: depth");
         }
     }
 
@@ -5567,13 +5578,18 @@ mod tests {
         // No colour target at all, which Just Dance 2017 renders every pass
         // as. The fragment shader has nowhere to put its colour and still has
         // to run.
-        agrees(|h| {
+        let set_up = |h: &mut Harness| {
             h.depth_target(0x0207);
             // Unbind colour target 0: an address of zero is no surface.
             h.engine.regs.set(0x200, 0);
             h.engine.regs.set(0x201, 0);
             h.triangle([1.0, 1.0, 1.0, 1.0]);
-        });
+        };
+        agrees(set_up);
+        let mut h = Harness::new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        assert_eq!(h.depth()[17], 0x8000_0000, "depth 0.5 at (1, 1)");
     }
 
     #[test]
@@ -5582,11 +5598,24 @@ mod tests {
         // triangle list is `raster::assemble`, the same call the rasterizer
         // makes, so there is nothing for the two to disagree about.
         for primitive in [6, 9] {
-            agrees(move |h| {
+            // A quad as a four-vertex fan: a list or strip would leave (0, 7) bare.
+            let set_up = move |h: &mut Harness| {
                 h.engine.last_draw.primitive = primitive;
+                h.engine.last_draw.count = 4;
+                let limit = h.vertices() as u32 + 4 * 32 - 1;
+                h.engine.regs.set(0x7C1, limit);
                 h.depth_target(0x0207);
-                h.triangle([1.0, 0.0, 1.0, 1.0]);
-            });
+                let colour = [1.0, 0.0, 1.0, 1.0];
+                h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], colour);
+                h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], colour);
+                h.write_vertex(2, [1.0, -1.0, 0.0, 1.0], colour);
+                h.write_vertex(3, [-1.0, -1.0, 0.0, 1.0], colour);
+            };
+            agrees(set_up);
+            let mut h = Harness::new();
+            set_up(&mut h);
+            h.draw_with(&mut Software).expect("the draw");
+            assert_eq!(h.texel(0, 7), 0xffff_00ff, "primitive {primitive}");
         }
     }
 
@@ -5617,12 +5646,17 @@ mod tests {
         // WebGPU has no BGRA vertex format, so the swap happens in the entry
         // point. Red and blue are the two it exchanges, so a colour with one
         // and not the other is what tells the two apart.
-        agrees(|h| {
+        let set_up = |h: &mut Harness| {
             h.depth_target(0x0207);
             h.triangle([1.0, 0.0, 0.0, 1.0]);
             let raw = h.engine.regs.get(0x459);
             h.engine.regs.set(0x459, raw | 1 << 31);
-        });
+        };
+        agrees(set_up);
+        let mut h = Harness::new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        assert_eq!(h.texel(1, 1), 0xffff_0000, "red arrives as blue");
     }
 
     /// What a host whose readbacks land late does with a frame the device
@@ -5636,9 +5670,7 @@ mod tests {
     /// a fallback is the rasterizer's whole, and so is every frame after it.
     #[test]
     fn a_frame_the_device_cannot_finish_is_a_frame_it_does_not_start() {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         // What a browser teaches it on its first present.
         gpu.deferred_readbacks = true;
         let colour = [1.0f32, 0.0, 1.0, 1.0];
@@ -5698,9 +5730,7 @@ mod tests {
     /// time it has to close again.
     #[test]
     fn the_latch_lets_go_after_clean_frames_and_waits_longer_each_time() {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         gpu.deferred_readbacks = true;
         let mut h = Harness::new();
         h.triangle([1.0, 0.0, 1.0, 1.0]);
@@ -5753,9 +5783,7 @@ mod tests {
     fn a_clear_writes_what_the_rasterizer_would_have_written() {
         // Clears used to go to the rasterizer, which meant handing every
         // surface back first, a whole frame's readback, at every clear.
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         for channels in [[true; 4], [true, false, true, false], [false; 4]] {
             let build = |gpu: Option<&mut super::Gpu>| {
                 let mut h = Harness::new();
@@ -5834,9 +5862,7 @@ mod tests {
     /// and only the pixels an edge crosses are free to differ.
     #[test]
     fn the_device_route_agrees_wherever_an_edge_is_not() {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         gpu.set_device_msaa(true);
         let colour = [1.0f32, 1.0, 1.0, 1.0];
         let mut ran = 0;
@@ -5934,9 +5960,7 @@ mod tests {
 
     #[test]
     fn every_pass_the_backend_builds_for_itself_compiles() {
-        let Ok(mut gpu) = super::Gpu::open() else {
-            return;
-        };
+        let Some(mut gpu) = device() else { return };
         // A surface format that is certainly multisampled, and the two depth
         // formats a readback can reach.
         let colour = wgpu::TextureFormat::Bgra8Unorm;
@@ -6045,14 +6069,6 @@ mod tests {
             // And the inverse really is one: the slot this sample sits in
             // names this sample back.
             assert_eq!(word(34 + (y * 2 + x) as usize), sample);
-        }
-    }
-
-    #[test]
-    fn there_is_a_device_to_render_on() {
-        match super::Gpu::open() {
-            Ok(gpu) => println!("[gpu] opened, max texture {}", gpu.describe()),
-            Err(why) => println!("[gpu] {why}"),
         }
     }
 

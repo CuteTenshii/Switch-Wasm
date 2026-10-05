@@ -1,9 +1,9 @@
-import { expect, test, type Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { crc32, deflateSync } from 'node:zlib';
-import { openPage } from './page';
+import { expect, openPage, test } from './page';
 
-/** A PNG of one colour, as an image file a user would pick. */
-function solidPng(width: number, height: number, rgb: [number, number, number]): Buffer {
+/** A PNG whose column `x` is `rgb(x)`, as an image file a user would pick. */
+function png(width: number, height: number, rgb: (x: number) => [number, number, number]): Buffer {
   const chunk = (type: string, data: Buffer) => {
     const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
     const out = Buffer.alloc(body.length + 8);
@@ -16,7 +16,7 @@ function solidPng(width: number, height: number, rgb: [number, number, number]):
   header.writeUInt32BE(width, 0);
   header.writeUInt32BE(height, 4);
   header.set([8, 2, 0, 0, 0], 8);
-  const line = Buffer.from([0, ...Array.from({ length: width }, () => rgb).flat()]);
+  const line = Buffer.from([0, ...Array.from({ length: width }, (_, x) => rgb(x)).flat()]);
   const pixels = Buffer.concat(Array.from({ length: height }, () => line));
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -92,14 +92,29 @@ test('a console holds at most eight profiles', async ({ page }) => {
 });
 
 test('a picture is cropped to a square JPEG', async ({ page }) => {
-  // Wider than tall, so the crop has something to do.
-  const png = solidPng(300, 200, [200, 60, 40]);
+  // Wider than tall, with blue bands only a crop off centre would keep.
+  const picture = png(300, 200, (x) => (x < 50 || x >= 250 ? [40, 60, 200] : [200, 60, 40]));
   await row(page, 'Player').locator('input[type=file]').setInputFiles({
-    name: 'red.png', mimeType: 'image/png', buffer: png,
+    name: 'red.png', mimeType: 'image/png', buffer: picture,
   });
   const img = row(page, 'Player').locator('img.profile-avatar');
   await expect(img).toBeVisible();
   const size = await img.evaluate((el: HTMLImageElement) => [el.naturalWidth, el.naturalHeight]);
   expect(size).toEqual([256, 256]);
+  const { magic, edges } = await img.evaluate(async (el: HTMLImageElement) => {
+    const bytes = new Uint8Array(await (await fetch(el.src)).arrayBuffer());
+    const canvas = document.createElement('canvas');
+    canvas.width = el.naturalWidth;
+    canvas.height = el.naturalHeight;
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(el, 0, 0);
+    const at = (x: number) => [...ctx.getImageData(x, 128, 1, 1).data.slice(0, 3)];
+    return { magic: [...bytes.slice(0, 3)], edges: [at(2), at(253)] };
+  });
+  expect(magic).toEqual([0xff, 0xd8, 0xff]);
+  for (const [r, , b] of edges) {
+    expect(r).toBeGreaterThan(150);
+    expect(b).toBeLessThan(100);
+  }
   await expect(row(page, 'Player').getByRole('button', { name: 'Remove picture' })).toBeVisible();
 });

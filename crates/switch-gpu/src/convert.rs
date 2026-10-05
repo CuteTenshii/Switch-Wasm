@@ -393,22 +393,18 @@ mod tests {
         // reads them.
         for (raw_format, how) in [(0xEE, Widen::Unorm16), (0xEF, Widen::Snorm16)] {
             let reference = ColorFormat::from_raw(raw_format).expect("a 16-bit red format");
-            for stored in [
+            let stored = [
                 0u16, 1, 0x0100, 0x1234, 0x7fff, 0x8000, 0x8001, 0xfffe, 0xffff,
-            ] {
-                let widened = widen(&stored.to_le_bytes(), how);
-                let got = f32::from_le_bytes(widened.try_into().expect("one f32"));
-                let want = reference.decode(u128::from(stored)).expect("a decode")[0];
-                assert_eq!(got, want, "{how:?} of {stored:#06x}");
+            ];
+            // One row, widened whole, so its stride doubles and each value keeps its place.
+            let row: Vec<u8> = stored.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let widened = widen(&row, how);
+            assert_eq!(widened.len(), row.len() * 2, "{how:?}");
+            for (value, chunk) in stored.iter().zip(widened.as_chunks::<4>().0) {
+                let got = f32::from_le_bytes(*chunk);
+                let want = reference.decode(u128::from(*value)).expect("a decode")[0];
+                assert_eq!(got, want, "{how:?} of {value:#06x}");
             }
         }
-    }
-
-    /// A row is widened whole, padding included, so the stride the caller
-    /// describes stays twice the one it had.
-    #[test]
-    fn widening_doubles_every_byte_of_a_row() {
-        let row = [0u8; 12];
-        assert_eq!(widen(&row, Widen::Unorm16).len(), 24);
     }
 }

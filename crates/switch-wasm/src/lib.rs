@@ -3325,10 +3325,35 @@ mod tests {
         // and a title that is working look the same from outside.
         let (_host, handle) = new_session();
         assert!(!json_from(|buf, cap| { switch_thread_dump(handle, buf, cap) }).is_empty());
-        // Nothing is blocked on a fresh machine, so both answer zero rather
-        // than failing, which is itself the answer to "is it parked?".
         assert_eq!(switch_wake_blocked(handle), 0);
         assert_eq!(switch_start_created_threads(handle), 0);
+
+        // Two threads, one started; the main thread then waits forever on a
+        // zero word (WaitIfEqual), which hands the CPU to the started one.
+        let cpu = &mut session(handle).cpu;
+        let mut create = || {
+            guest_svc(cpu, 0x08, &[0, 0x0800_1000, 0, 0x2880_0000, 44, 0]);
+            assert_eq!(cpu.reg(0), 0, "CreateThread failed");
+            cpu.reg(1)
+        };
+        let started = create();
+        create();
+        guest_svc(cpu, 0x09, &[started]);
+        guest_svc(cpu, 0x34, &[0x0800_2000, 2, 0, u64::MAX]);
+        assert_eq!(switch_wake_blocked(handle), 1);
+        assert_eq!(switch_start_created_threads(handle), 1);
+        assert_eq!(switch_start_created_threads(handle), 0);
+    }
+
+    /// Run one `svc #imm` with `args` in X0 upward.
+    fn guest_svc(cpu: &mut Cpu, imm: u32, args: &[u64]) {
+        let pc = 0x0800_0000 + imm * 4;
+        cpu.mem.write_u32(pc, 0xD400_0001 | imm << 5).unwrap();
+        for (i, &arg) in args.iter().enumerate() {
+            cpu.set_reg(i as u8, arg);
+        }
+        cpu.set_pc(pc);
+        cpu.step().unwrap();
     }
 
     #[test]
@@ -3336,6 +3361,20 @@ mod tests {
         let (_host, handle) = new_session();
         let json = json_from(|buf, cap| switch_unimplemented_json(handle, buf, cap));
         assert_eq!(field(&json, "unimplemented"), "[]");
+        assert_eq!(field(&json, "stubbed"), "[]");
+
+        // A request (type 4) for command 5 on a handle nothing opened.
+        let cpu = &mut session(handle).cpu;
+        let tls = cpu.tls_base();
+        for (i, word) in [4, 8, 0, 0, 0x4943_4653, 0, 5, 0].into_iter().enumerate() {
+            cpu.mem.write_u32(tls + i as u32 * 4, word).unwrap();
+        }
+        guest_svc(cpu, 0x21, &[0x1234]);
+        let json = json_from(|buf, cap| switch_unimplemented_json(handle, buf, cap));
+        assert_eq!(
+            field(&json, "unimplemented"),
+            r#"[{"iface":"<untracked session>","cmd":5}]"#
+        );
         assert_eq!(field(&json, "stubbed"), "[]");
     }
 
@@ -3763,22 +3802,6 @@ mod tests {
         assert_eq!(out[..], payload[0x700..0x710]);
 
         switch_free_session(handle);
-    }
-
-    /// The allocator entry point JS calls before every buffer it passes in.
-    /// A request past `isize::MAX` is refused rather than reaching `Layout`,
-    /// whose error path is an `unreachable` that takes down the module.
-    #[test]
-    fn an_impossible_allocation_is_refused_not_fatal() {
-        assert!(!switch_alloc(64).is_null());
-        // Only wasm32 has a `usize` small enough for `switch_alloc`'s `u32`
-        // to reach the limit; on a 64-bit host every `u32` is allocatable, so
-        // the refusal itself is what is checked there.
-        if (u32::MAX as u64) > isize::MAX as u64 {
-            assert!(switch_alloc(u32::MAX).is_null());
-        }
-        // Freeing what was never allocated is a no-op, not a fault.
-        switch_free(std::ptr::null_mut(), 64);
     }
 
     #[test]

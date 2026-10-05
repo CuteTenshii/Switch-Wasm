@@ -1,5 +1,6 @@
-import { expect, test } from '@playwright/test';
-import { openPage } from './page';
+import { aarch64Elf, bootElf, expect, openPage, test } from './page';
+
+const SVC_EXIT_PROCESS = 0xd40000e1;
 
 test('the core starts and names its build', async ({ page }) => {
   await openPage(page);
@@ -27,8 +28,14 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   );
   await expect(display.locator('#display-debug-data')).toBeHidden();
 
+  await bootElf(page, aarch64Elf([SVC_EXIT_PROCESS]));
+  await expect(page.locator('#state')).toHaveText('halted');
+  await expect(display.locator('#display-debug-badge')).not.toHaveText('no samples');
+  await expect(display.locator('#display-debug-data')).toBeVisible();
+
   await display.getByRole('button', { name: 'Reset samples' }).click();
   await expect(display.locator('#display-debug-badge')).toHaveText('no samples');
+  await expect(display.locator('#display-debug-data')).toBeHidden();
 
   await page.setViewportSize({ width: 320, height: 700 });
   const categoryHeight = await page.getByRole('button', { name: 'Graphics' })
@@ -45,13 +52,15 @@ test('the guest crash screen exposes recovery paths', async ({ page }) => {
 
   const crash = page.locator('#crash');
   await expect(crash).toBeHidden();
-  await crash.evaluate((element) => {
-    element.querySelector('#crash-message')!.textContent = 'CPU: unmapped read at 0x1234';
-    (element as HTMLElement).hidden = false;
-  });
+  // movz x1, #0xfff0, lsl #16; ldr x0, [x1]: a read above the guest address space.
+  await bootElf(page, aarch64Elf([0xd2bffe01, 0xf9400020]));
 
+  await expect(page.locator('#state')).toHaveText('fault');
+  await expect(crash).toBeVisible();
   await expect(crash.getByRole('heading')).toHaveText('Guest crashed');
-  await expect(crash.locator('#crash-message')).toHaveText('CPU: unmapped read at 0x1234');
+  await expect(crash.locator('#crash-message')).toHaveText(
+    'CPU: read from unmapped address 0xfff00000',
+  );
   await expect(crash.getByRole('button', { name: 'Save crash report' })).toBeVisible();
 
   await crash.getByRole('button', { name: 'Open console' }).click();
