@@ -49,6 +49,7 @@ pub(in crate::cpu) struct Jit {
     pub(super) linked: u64,
     pub(super) invalidated: u64,
     pub(super) interpreted: u64,
+    pub(super) interpreted_groups: [u64; 16],
     pub(super) emitted: u64,
     pub(super) entered_emitted: u64,
 }
@@ -78,6 +79,9 @@ pub struct JitStats {
     /// translator did not actually translate: the one number here that says
     /// where the next block of speed is, and the same number on any target.
     pub interpreted: u64,
+    /// One in every 1024 of `interpreted`, by the encoding group in bits
+    /// 28:25 of the instruction.
+    pub interpreted_groups: [u64; 16],
     /// Blocks written out as wasm and compiled by the host. Zero on a build
     /// with nowhere to put them, which is every host build.
     pub emitted: u64,
@@ -103,6 +107,7 @@ impl Default for Jit {
             linked: 0,
             invalidated: 0,
             interpreted: 0,
+            interpreted_groups: [0; 16],
             emitted: 0,
             entered_emitted: 0,
         }
@@ -113,6 +118,15 @@ impl Jit {
     #[inline(always)]
     fn slot(pc: u32) -> usize {
         (pc >> 2) as usize & (LOOKUP_SLOTS - 1)
+    }
+
+    /// Count an instruction the interpreter's dispatcher ran for a block.
+    #[inline(always)]
+    pub(super) fn note_interpreted(&mut self, insn: u32) {
+        self.interpreted += 1;
+        if self.interpreted & 1023 == 0 {
+            self.interpreted_groups[((insn >> 25) & 0xF) as usize] += 1;
+        }
     }
 
     /// The block entered at `pc`, if it is already translated.
@@ -221,6 +235,7 @@ impl Jit {
             linked: self.linked,
             invalidated: self.invalidated,
             interpreted: self.interpreted,
+            interpreted_groups: self.interpreted_groups,
             emitted: self.emitted,
             entered_emitted: self.entered_emitted,
         }

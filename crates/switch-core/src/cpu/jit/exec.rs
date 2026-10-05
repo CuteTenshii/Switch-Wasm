@@ -9,7 +9,7 @@ use super::cache::JitStats;
 use super::decode::translate;
 use super::emit::{emit_block, LEFT};
 use super::host;
-use super::ir::{Block, Code, Exit, Op, Term};
+use super::ir::{Block, Code, Exit, Op, PackedImm, Term};
 use crate::cpu::bits::*;
 use crate::cpu::loadstore::{Acc, PairKind, Wb};
 use crate::cpu::{Cpu, Layout, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
@@ -147,6 +147,9 @@ impl Cpu {
         // costs neither the cache lookup nor the reference count, because the
         // handle is moved out and back rather than cloned.
         let mut held: Option<Rc<Block>> = None;
+        // Block entries counted in locals and committed once, on the way out.
+        let mut executed = 0u64;
+        let mut linked = 0u64;
         while steps < max_steps && !self.halted {
             // The scheduler's preemption point. The interpreter takes it
             // between any two instructions; here it is between blocks, which
@@ -162,10 +165,7 @@ impl Cpu {
             // `jit_block_at` has drained the dirty list.
             let stale = self.mem.has_dirty_code();
             let block = match held.take() {
-                Some(block) if block.start == pc && !stale => {
-                    self.jit.executed += 1;
-                    block
-                }
+                Some(block) if block.start == pc && !stale => block,
                 // Where this block went last time. A block boundary falls every
                 // 6.1 instructions on a retail frame, and the overwhelming
                 // majority of them lead somewhere they have led before, so this
@@ -173,8 +173,7 @@ impl Cpu {
                 // and a pointer that is already in hand.
                 Some(previous) => match previous.successor(pc).filter(|_| !stale) {
                     Some(next) => {
-                        self.jit.executed += 1;
-                        self.jit.linked += 1;
+                        linked += 1;
                         next
                     }
                     None => {
@@ -185,11 +184,43 @@ impl Cpu {
                 },
                 None => self.jit_block_at(pc),
             };
-            let ran = self.exec_block(&block, max_steps - steps)?;
-            held = Some(block);
-            self.slice_used += ran;
-            steps += ran;
+            executed += 1;
+            // Straight on to a linked successor without going back through
+            // the selector above, while nothing it checks has changed.
+            let mut block = block;
+            loop {
+                let ran = match self.exec_block(&block, max_steps - steps) {
+                    Ok(ran) => ran,
+                    Err(e) => {
+                        self.jit.executed += executed;
+                        self.jit.linked += linked;
+                        return Err(e);
+                    }
+                };
+                self.slice_used += ran;
+                steps += ran;
+                let next = if ran == 0
+                    || steps >= max_steps
+                    || self.halted
+                    || self.slice_used >= TIME_SLICE
+                    || self.mem.has_dirty_code()
+                {
+                    None
+                } else {
+                    block.successor(self.pc)
+                };
+                let Some(next) = next else {
+                    held = Some(block);
+                    break;
+                };
+                self.sweep_timed_waits();
+                executed += 1;
+                linked += 1;
+                block = next;
+            }
         }
+        self.jit.executed += executed;
+        self.jit.linked += linked;
         Ok(RunReport {
             steps,
             halted: self.halted,
@@ -205,7 +236,6 @@ impl Cpu {
             let dirty = self.mem.dirty_code_pages();
             self.jit.invalidate(&dirty);
         }
-        self.jit.executed += 1;
         if let Some(block) = self.jit.get(pc) {
             return block;
         }
@@ -294,15 +324,17 @@ impl Cpu {
                 let exit = &branch.exit;
                 let span = branch.span as usize;
                 if i + span > body {
-                    // The budget splits a fused pair. Run the compare's half of it
-                    // and stop on the branch, which is a valid entry point with the
-                    // flags already set. Doing nothing here instead would return no
-                    // progress at all when the pair starts the block, and
-                    // [`Cpu::run_jit`] would spin on it forever.
+                    // The budget splits a fused exit. Run the instructions of it
+                    // that fit and stop on the next, which is a valid entry point
+                    // with their effects already applied. Doing nothing here
+                    // instead would return no progress at all when the exit
+                    // starts the block, and [`Cpu::run_jit`] would spin on it
+                    // forever.
                     if i < body {
-                        self.apply_compare(exit);
-                        i += 1;
-                        pc = pc.wrapping_add(4);
+                        let fit = body - i;
+                        self.apply_compare(exit, fit);
+                        i += fit;
+                        pc = pc.wrapping_add(4 * fit as u32);
                     }
                     break;
                 }
@@ -329,7 +361,7 @@ impl Cpu {
                         }
                         // The block goes on at the target. The run that ends here
                         // goes into the trail now, while its start is still known.
-                        self.record_run(run_pc, (i - run_i) as u32);
+                        self.push_run(run_pc, (i - run_i) as u32);
                         pc = target;
                         run_pc = target;
                         run_i = i;
@@ -501,15 +533,36 @@ impl Cpu {
         self.cycles += ran as u64;
         self.steps += ran as u64;
         if ran > run_i {
-            self.record_run(run_pc, (ran - run_i) as u32);
+            self.push_run(run_pc, (ran - run_i) as u32);
         }
     }
 
-    /// The flag-setting half of a fused compare-and-branch, for the one case
-    /// that cannot run both: a step budget that ends between them.
+    /// The first `fit` instructions of a fused exit, short of its branch, for
+    /// the one case that cannot run all of it: a step budget that ends inside.
     #[inline(always)]
-    fn apply_compare(&mut self, exit: &Exit) {
+    fn apply_compare(&mut self, exit: &Exit, fit: usize) {
         let (a, b, carry, sf) = match *exit {
+            Exit::UpdateCmpImm {
+                rd,
+                source,
+                step,
+                rn,
+                imm,
+                ..
+            } => {
+                self.apply_step(rd, source, step);
+                if fit == 1 {
+                    return;
+                }
+                let sf = imm.sf();
+                let carry = imm.carry();
+                (
+                    self.reg_at(rn) & Cpu::mask(sf),
+                    invert_if(imm.imm(), carry),
+                    carry,
+                    sf,
+                )
+            }
             Exit::CmpImm {
                 rn, imm, carry, sf, ..
             } => (
@@ -526,11 +579,20 @@ impl Cpu {
                 carry,
                 sf,
             ),
-            // Nothing else spans two instructions.
+            // Nothing else spans more than one instruction.
             _ => return,
         };
         let (result, c, v) = Cpu::add_carry_overflow(a, b, u64::from(carry), sf);
         self.set_nzcv_from_alu(result, sf, c, v);
+    }
+
+    /// The update [`Exit::UpdateCmpImm`] folds in: an `ADD`/`SUB` of a
+    /// constant that sets no flags.
+    #[inline(always)]
+    fn apply_step(&mut self, rd: u8, source: u8, step: PackedImm) {
+        let carry = step.carry();
+        let rhs = invert_if(step.imm(), carry);
+        self.add_sub_pre(rd, source, rhs, carry, false, step.sf());
     }
 
     /// Evaluate a branch inside a block, and say where control goes: on to
@@ -556,6 +618,10 @@ impl Cpu {
                 let b = invert_if(u64::from(imm), carry);
                 let (result, c, v) = Cpu::add_carry_overflow(a, b, u64::from(carry), sf);
                 self.set_nzcv_from_alu(result, sf, c, v);
+                (self.condition_holds(cond), target)
+            }
+            Exit::UpdateCmpImm { cond, target, .. } => {
+                self.apply_compare(exit, 2);
                 (self.condition_holds(cond), target)
             }
             Exit::CmpReg {
@@ -613,13 +679,13 @@ impl Cpu {
     fn exec_op(&mut self, op: &Op, here: Here) -> Result<()> {
         match *op {
             Op::Nop => {}
-            // The three arms that re-enter the interpreter are the only ones
+            // The arms that re-enter the interpreter are the only ones
             // that need `pc` in the register file: `execute` resolves
             // PC-relative forms from it, and every fault message names it.
             Op::Interpret { insn } => {
                 let pc = here.pc_of(op);
                 self.pc = pc;
-                self.jit.interpreted += 1;
+                self.jit.note_interpreted(insn);
                 self.execute(insn, pc.wrapping_add(4))?;
             }
             Op::Fp { insn, scalar, form } => {
@@ -644,8 +710,19 @@ impl Cpu {
                 self.system(insn, pc.wrapping_add(4))?;
             }
             Op::Sys { op } => self.exec_sys(op)?,
+            Op::SimdLoadStore { insn } => {
+                let pc = here.pc_of(op);
+                self.pc = pc;
+                if self.try_simd_load_store(insn)? {
+                    self.pc = pc.wrapping_add(4);
+                } else {
+                    self.execute(insn, pc.wrapping_add(4))?;
+                }
+            }
 
             Op::MovConst { rd, val } => self.set_reg_at(rd, val),
+            Op::Mov32 { rd, rn } => self.copy_reg(rd, rn, false),
+            Op::Mov64 { rd, rn } => self.copy_reg(rd, rn, true),
             Op::MovK { rd, shift, val, sf } => self.movk(rd, shift, val, sf),
 
             Op::AddSubImm {
@@ -822,6 +899,22 @@ impl Cpu {
                 signed,
                 sf,
             } => self.divide(rd, rn, rm, signed, sf),
+            Op::Adc {
+                rd,
+                rn,
+                rm,
+                sub,
+                set_flags,
+                sf,
+            } => self.adc(rd, rn, rm, sub, set_flags, sf),
+            Op::OneSource { rd, rn, opcode, sf } => self.one_source(rd, rn, opcode, sf),
+            Op::Crc {
+                rd,
+                rn,
+                rm,
+                sz,
+                castagnoli,
+            } => self.crc(rd, rn, rm, sz, castagnoli),
 
             Op::LoadStoreImm {
                 rt,
@@ -1109,12 +1202,12 @@ impl Cpu {
                 self.syscall(imm)?;
             }
             Term::Interpret { insn, next } => {
-                self.jit.interpreted += 1;
+                self.jit.note_interpreted(insn);
                 self.execute(insn, next)?;
             }
             Term::Fetch => {
                 let insn = self.mem.fetch(pc)?;
-                self.jit.interpreted += 1;
+                self.jit.note_interpreted(insn);
                 self.execute(insn, pc.wrapping_add(4))?;
             }
         }

@@ -95,8 +95,8 @@
 //!
 //! The three conditional branches a block runs *through* are written:
 //! `B.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ`, and the `CMP`-and-`B.cond` pair the
-//! translator fuses, whose compare sets the flags whether or not the branch
-//! is then taken. Each is a test and an `if` that leaves; the not-taken path
+//! translator fuses (with the counter update ahead of it, when there is one),
+//! whose compare sets the flags whether or not the branch is then taken. Each is a test and an `if` that leaves; the not-taken path
 //! is the following instruction, which is the next thing emitted, so nothing
 //! here needs a label or a jump backwards.
 //!
@@ -896,6 +896,35 @@ impl Emitter<'_> {
                 self.compare_flags(carry, sf);
                 self.cond_holds(cond);
                 target
+            }
+            // The update is an instruction of its own and, like the compare,
+            // runs whether or not the branch is taken.
+            Exit::UpdateCmpImm {
+                rd,
+                source,
+                step,
+                rn,
+                imm,
+                cond,
+                target,
+            } => {
+                let update = Op::AddSubImm {
+                    rd,
+                    rn: source,
+                    rhs: invert_if_const(step.imm(), step.carry()),
+                    carry: step.carry(),
+                    set_flags: false,
+                    sf: step.sf(),
+                };
+                let compare = Exit::CmpImm {
+                    rn,
+                    imm: imm.imm() as u32,
+                    carry: imm.carry(),
+                    sf: imm.sf(),
+                    cond,
+                    target,
+                };
+                return self.op(&update, retired - 3) && self.exit(&compare, retired);
             }
             Exit::CmpReg {
                 rn,

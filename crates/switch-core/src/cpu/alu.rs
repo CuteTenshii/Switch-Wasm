@@ -183,6 +183,10 @@ impl Cpu {
                 let sa = (insn >> 10) & 0x3F;
                 let rn = ((insn >> 5) & 0x1F) as u8;
                 let rd = (insn & 0x1F) as u8;
+                if sa == 0 && opc == 1 && !invert && rn == 31 {
+                    self.copy_reg(Self::zr_write_slot(rd), rm, sf);
+                    return Ok(true);
+                }
                 let b = shift_reg(self.read_zr(rm) & Self::mask(sf), st, sa, sf);
                 // `BIC`/`ORN`/`EON` invert the shifted operand, not the
                 // register: `ir.Not(ShiftReg(...))` in dynarmic, and the same
@@ -230,24 +234,15 @@ impl Cpu {
                             let rd_slot = Self::zr_write_slot(rd);
                             match opcode2 {
                                 0b000010 | 0b000011 => {
-                                    self.divide(rd_slot, rn, rm, opcode2 & 1 == 1, sf);
-                                    return Ok(true);
+                                    self.divide(rd_slot, rn, rm, opcode2 & 1 == 1, sf)
                                 }
                                 0b001000..=0b001011 => {
-                                    self.shift_by_reg(rd_slot, rn, rm, (opcode2 & 0b11) as u8, sf);
-                                    return Ok(true);
+                                    self.shift_by_reg(rd_slot, rn, rm, (opcode2 & 0b11) as u8, sf)
                                 }
-                                _ => {}
-                            }
-                            let a = self.read_zr(rn) & Self::mask(sf);
-                            let b = self.read_zr(rm) & Self::mask(sf);
-                            let r = match opcode2 {
                                 0b010000..=0b010111 => {
-                                    // CRC32/CRC32C. The accumulator and the
-                                    // result are always 32-bit; only the
-                                    // doubleword form reads a full 64-bit Rm,
-                                    // and it is the only one encoded with sf
-                                    // set.
+                                    // CRC32/CRC32C. Only the doubleword form
+                                    // reads a full 64-bit Rm, and it is the
+                                    // only one encoded with sf set.
                                     let sz = opcode2 & 0b11;
                                     if (sz == 0b11) != sf {
                                         return Err(Error::Cpu(format!(
@@ -255,8 +250,7 @@ impl Cpu {
                                             self.pc
                                         )));
                                     }
-                                    let castagnoli = ((opcode2 >> 2) & 1) == 1;
-                                    u64::from(crc32(a as u32, b, 8 << sz, castagnoli))
+                                    self.crc(rd_slot, rn, rm, sz as u8, ((opcode2 >> 2) & 1) == 1);
                                 }
                                 _ => {
                                     return Err(Error::Cpu(format!(
@@ -264,31 +258,16 @@ impl Cpu {
                                         opcode2, self.pc
                                     )))
                                 }
-                            };
-                            self.write_zr(rd, r);
+                            }
                         } else if ((insn >> 29) & 0b11) == 0b10 {
                             // 1-source (bits[30:29]=10)
-                            let a = self.read_zr(rn) & Self::mask(sf);
-                            let size = if sf { 64 } else { 32 };
-                            let r = match opcode2 {
-                                0b000000 => reverse_bits(a, size),     // RBIT
-                                0b000001 => reverse_16_lanes(a, size), // REV16
-                                0b000010 => reverse_32_lanes(a, size), // REV32
-                                0b000011 => {
-                                    // REV64 (64-bit only)
-                                    a.swap_bytes()
-                                }
-                                0b000100 => clz(a, size),
-                                0b000101 => cls(a, size),
-                                0b000110 => ctz(a, size),
-                                _ => {
-                                    return Err(Error::Cpu(format!(
-                                        "unimplemented 1-source opcode {} at {:#x}",
-                                        opcode2, self.pc
-                                    )))
-                                }
-                            };
-                            self.write_zr(rd, r & Self::mask(sf));
+                            if opcode2 > 0b000110 {
+                                return Err(Error::Cpu(format!(
+                                    "unimplemented 1-source opcode {} at {:#x}",
+                                    opcode2, self.pc
+                                )));
+                            }
+                            self.one_source(Self::zr_write_slot(rd), rn, opcode2 as u8, sf);
                         } else {
                             return Err(Error::Cpu(format!(
                                 "unimplemented data-processing op at {:#x}",
@@ -336,29 +315,17 @@ impl Cpu {
                             sf,
                         );
                     } else {
-                        // ADC / ADCS / SBC / SBCS
-                        let op = (insn >> 29) & 0b11;
-                        let rn = ((insn >> 5) & 0x1F) as u8;
-                        let rd = (insn & 0x1F) as u8;
-                        let rm = ((insn >> 16) & 0x1F) as u8;
-                        let carry_in = ((self.nzcv >> 29) & 1) as u64;
-                        let a = self.read_zr(rn) & Self::mask(sf);
-                        let b = self.read_zr(rm) & Self::mask(sf);
-                        // bit30 = subtract (SBC), bit29 = S. Reading them the
-                        // other way round made `adcs` subtract and `ngc` negate
-                        // the wrong operand.
-                        let _ = op;
-                        let sub = ((insn >> 30) & 1) == 1;
-                        let set_flags = ((insn >> 29) & 1) == 1;
-                        let (result, carry, overflow) = if sub {
-                            Self::add_carry_overflow(a, !b, carry_in, sf)
-                        } else {
-                            Self::add_carry_overflow(a, b, carry_in, sf)
-                        };
-                        if set_flags {
-                            self.set_nzcv_from_alu(result, sf, carry, overflow);
-                        }
-                        self.write_zr(rd, result);
+                        // ADC / ADCS / SBC / SBCS: bit 30 subtracts, bit 29
+                        // sets flags. Reading them the other way round made
+                        // `adcs` subtract and `ngc` negate the wrong operand.
+                        self.adc(
+                            Self::zr_write_slot((insn & 0x1F) as u8),
+                            ((insn >> 5) & 0x1F) as u8,
+                            ((insn >> 16) & 0x1F) as u8,
+                            ((insn >> 30) & 1) == 1,
+                            ((insn >> 29) & 1) == 1,
+                            sf,
+                        );
                     }
                     Ok(true)
                 }
@@ -481,6 +448,56 @@ impl Cpu {
         let a = self.reg_at(rn) & Self::mask(sf);
         let b = self.reg_at(rm) & Self::mask(sf);
         self.set_reg_at(rd, shift_var(a, b, u32::from(kind), sf));
+    }
+
+    /// `MOV` between registers, the `ORR` with the zero register it aliases.
+    #[inline(always)]
+    pub(super) fn copy_reg(&mut self, rd: u8, rn: u8, sf: bool) {
+        self.set_reg_at(rd, self.reg_at(rn) & Self::mask(sf));
+    }
+
+    /// `RBIT`/`REV16`/`REV32`/`REV`/`CLZ`/`CLS`/`CTZ`, `opcode` being the
+    /// one-source group's own field, at most 6.
+    #[inline(always)]
+    pub(super) fn one_source(&mut self, rd: u8, rn: u8, opcode: u8, sf: bool) {
+        let size = if sf { 64 } else { 32 };
+        let a = self.reg_at(rn) & Self::mask(sf);
+        let r = match opcode {
+            0b000 => reverse_bits(a, size),
+            0b001 => reverse_16_lanes(a, size),
+            0b010 => reverse_32_lanes(a, size),
+            0b011 => a.swap_bytes(),
+            0b100 => clz(a, size),
+            0b101 => cls(a, size),
+            _ => ctz(a, size),
+        };
+        self.set_reg_at(rd, r & Self::mask(sf));
+    }
+
+    /// `CRC32`/`CRC32C` over `8 << sz` bits of Rm. The accumulator and the
+    /// result are always 32-bit.
+    #[inline(always)]
+    pub(super) fn crc(&mut self, rd: u8, rn: u8, rm: u8, sz: u8, castagnoli: bool) {
+        let acc = self.reg_at(rn) as u32;
+        let r = crc32(acc, self.reg_at(rm), 8 << sz, castagnoli);
+        self.set_reg_at(rd, u64::from(r));
+    }
+
+    /// `ADC`/`ADCS`/`SBC`/`SBCS`, the carry in read from NZCV.
+    #[inline(always)]
+    pub(super) fn adc(&mut self, rd: u8, rn: u8, rm: u8, sub: bool, set_flags: bool, sf: bool) {
+        let carry = u64::from((self.nzcv >> 29) & 1);
+        let a = self.reg_at(rn) & Self::mask(sf);
+        let b = self.reg_at(rm) & Self::mask(sf);
+        let (result, c, v) = if sub {
+            Self::add_carry_overflow(a, !b, carry, sf)
+        } else {
+            Self::add_carry_overflow(a, b, carry, sf)
+        };
+        if set_flags {
+            self.set_nzcv_from_alu(result, sf, c, v);
+        }
+        self.set_reg_at(rd, result);
     }
 
     /// `UDIV`/`SDIV`. Division by zero gives 0 rather than trapping, and

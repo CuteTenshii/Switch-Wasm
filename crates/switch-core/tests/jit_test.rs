@@ -8,8 +8,8 @@
 //!
 //! The corpus is real assembler output (`llvm-mc` + `ld.lld`, linked at
 //! `CODE`), chosen to reach every class of operation the translator has an op
-//! for, plus a sample of the ones it deliberately hands back: bit counts,
-//! ADC/SBC, the system registers, and scalar floating point.
+//! for, plus a sample of the ones it deliberately hands back: the system
+//! registers and scalar floating point.
 
 use switch_core::cpu::Cpu;
 
@@ -691,5 +691,99 @@ fn tracing_a_run_still_produces_a_line_per_instruction() {
         trace.lines().count(),
         32,
         "one line per instruction was expected"
+    );
+}
+
+// Reserved two-source opcodes and invalid CRC widths must keep the
+// interpreter's error path instead of reaching a fast helper's unreachable.
+#[test]
+fn invalid_two_source_forms_report_the_interpreters_error() {
+    for sf in [0u32, 1] {
+        for opcode in 0x0C..=0x17 {
+            if opcode >= 0x10 && ((opcode & 3) == 3) == (sf == 1) {
+                continue;
+            }
+            let insn = 0x1AC00000 | (sf << 31) | (opcode << 10);
+            let mut interpreted = loaded(&[insn], false);
+            let mut translated = loaded(&[insn], true);
+            let expected = interpreted.run(1).unwrap_err().to_string();
+            let actual = translated.run(1).unwrap_err().to_string();
+            assert_eq!(actual, expected, "encoding {insn:#010x}");
+            assert_same(
+                &snapshot(&interpreted),
+                &snapshot(&translated),
+                "invalid two-source",
+            );
+        }
+    }
+}
+
+#[test]
+fn register_copies_mask_the_32_bit_form_and_read_the_zero_register() {
+    // (sf, Rm, Rd, expected Rd)
+    let cases = [
+        (0u32, 0u32, 1u32, 0x7654_3210),
+        (1, 0, 1, 0xFEDC_BA98_7654_3210),
+        (1, 31, 1, 0),
+    ];
+    for (sf, rm, rd, expected) in cases {
+        // ORR Rd, ZR, Rm, which is MOV.
+        let insn = 0x2A0003E0 | (sf << 31) | (rm << 16) | rd;
+        let mut interpreted = loaded(&[insn], false);
+        let mut translated = loaded(&[insn], true);
+        for cpu in [&mut interpreted, &mut translated] {
+            cpu.set_reg(0, 0xFEDC_BA98_7654_3210);
+            cpu.set_reg(1, u64::MAX);
+            cpu.run(1).unwrap();
+        }
+        assert_same(&snapshot(&interpreted), &snapshot(&translated), "mov");
+        assert_eq!(translated.read_x(rd as u8), expected, "{insn:#010x}");
+    }
+}
+
+#[test]
+fn fused_updates_match_at_partial_budgets_and_on_resume() {
+    // add w3, w3, #1; cmp w3, #720; b.ne back to the add; b .
+    let code = [0x11000463, 0x710b407f, 0x54ffffc1, 0x14000000];
+    // 718 takes the branch after its update, 719 falls through.
+    for initial in [718, 719] {
+        // A budget ending after the update, after the compare, after the
+        // branch, and one that runs past the fused exit altogether.
+        for budget in [1, 2, 3, 8] {
+            let mut interpreted = loaded(&code, false);
+            let mut translated = loaded(&code, true);
+            for cpu in [&mut interpreted, &mut translated] {
+                cpu.set_reg(3, initial);
+                cpu.run(budget).unwrap();
+            }
+            assert_same(&snapshot(&interpreted), &snapshot(&translated), "partial");
+            interpreted.run(7).unwrap();
+            translated.run(7).unwrap();
+            assert_same(&snapshot(&interpreted), &snapshot(&translated), "resumed");
+        }
+    }
+}
+
+#[test]
+fn simd_loads_and_stores_match_the_interpreter() {
+    let code = [
+        0xd2900002, // mov x2, #DATA
+        0x3d800040, // str q0, [x2]
+        0x3dc00041, // ldr q1, [x2]
+        0xfd000843, // str d3, [x2, #16]
+        0x14000000, // b   .
+    ];
+    let mut interpreted = loaded(&code, false);
+    let mut translated = loaded(&code, true);
+    for cpu in [&mut interpreted, &mut translated] {
+        cpu.set_vreg(0, 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF);
+        cpu.set_vreg(3, 0x0123_4567_89AB_CDEF);
+        cpu.run(4).unwrap();
+    }
+    assert_same(&snapshot(&interpreted), &snapshot(&translated), "simd");
+    assert_eq!(translated.read_vreg(1), translated.read_vreg(0));
+    assert_eq!(
+        translated.mem.read_u64(0x8010).unwrap(),
+        0x0123_4567_89AB_CDEF
     );
 }

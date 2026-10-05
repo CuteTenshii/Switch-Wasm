@@ -1,7 +1,7 @@
 //! Translation: walking forward from an address, turning each instruction
 //! into the one thing it does, and deciding where the block ends.
 
-use super::ir::{Block, Branch, Exit, Op, Term};
+use super::ir::{Block, Branch, Exit, Op, PackedImm, Term};
 use crate::cpu::bits::*;
 use crate::cpu::loadstore::{pair_slot, rt_slot, Acc, Ext, PairKind, Wb};
 use crate::cpu::system::SysOp;
@@ -276,7 +276,48 @@ fn fuse_compares(ops: &mut [Op], exits: &mut [Branch]) {
         // pair is one dispatch covering two instructions.
         ops[prev] = Op::Nop;
         *branch = Branch::new(branch.at - 1, fused);
+        if let Some(update) = fuse_update(ops, prev, fused) {
+            ops[prev - 1] = Op::Nop;
+            *branch = Branch::new(branch.at - 1, update);
+        }
     }
+}
+
+/// A flagless immediate `ADD`/`SUB` just ahead of a fused [`Exit::CmpImm`]
+/// at `at`, folded into it as well.
+fn fuse_update(ops: &[Op], at: usize, fused: Exit) -> Option<Exit> {
+    let Exit::CmpImm {
+        rn,
+        imm,
+        carry,
+        sf,
+        cond,
+        target,
+    } = fused
+    else {
+        return None;
+    };
+    let Op::AddSubImm {
+        rd,
+        rn: source,
+        rhs,
+        carry: step_carry,
+        set_flags: false,
+        sf: step_sf,
+    } = ops[at.checked_sub(1)?]
+    else {
+        return None;
+    };
+    let step = (rhs ^ 0u64.wrapping_sub(u64::from(step_carry))) as u32;
+    Some(Exit::UpdateCmpImm {
+        rd,
+        source,
+        step: PackedImm::new(step, step_carry == 1, step_sf)?,
+        rn,
+        imm: PackedImm::new(imm, carry == 1, sf)?,
+        cond,
+        target,
+    })
 }
 
 /// Classify one instruction the way [`crate::cpu::Cpu::execute`] does, by bits
@@ -594,6 +635,13 @@ fn decode_data_proc_reg(insn: u32) -> Op {
             let sa = ((insn >> 10) & 0x3F) as u8;
             let opc = ((insn >> 29) & 0b11) as u8;
             let invert = ((insn >> 21) & 1) == 1;
+            if sa == 0 && opc == 1 && !invert && rn == 31 {
+                return if sf {
+                    Op::Mov64 { rd, rn: rm }
+                } else {
+                    Op::Mov32 { rd, rn: rm }
+                };
+            }
             if sa == 0 {
                 // `mov xd, xm` and `mvn xd, xm` are both this.
                 Op::LogicalReg {
@@ -664,6 +712,15 @@ fn decode_data_proc_reg(insn: u32) -> Op {
             }
         }
         0b11010 => match (((insn >> 23) & 1), ((insn >> 22) & 1)) {
+            // ADC/ADCS/SBC/SBCS, all of the subgroup as the interpreter has it.
+            (0, 0) => Op::Adc {
+                rd,
+                rn,
+                rm,
+                sub: ((insn >> 30) & 1) == 1,
+                set_flags: ((insn >> 29) & 1) == 1,
+                sf,
+            },
             // Conditional compare.
             (0, 1) => Op::CondCmp {
                 rn,
@@ -686,8 +743,8 @@ fn decode_data_proc_reg(insn: u32) -> Op {
                 sf,
             },
             // The two-source group, under the same test the interpreter
-            // makes. CRC32 stays with the interpreter, which rejects its
-            // malformed operand sizes.
+            // makes. A CRC32 whose operand size disagrees with sf stays with
+            // the interpreter, which rejects it.
             (1, 1) if ((insn >> 29) & 0b11) == 0b00 => match (insn >> 10) & 0x3F {
                 opcode2 @ (0b000010 | 0b000011) => Op::Divide {
                     rd,
@@ -703,10 +760,24 @@ fn decode_data_proc_reg(insn: u32) -> Op {
                     kind: (opcode2 & 0b11) as u8,
                     sf,
                 },
+                opcode2 @ 0b010000..=0b010111 if ((opcode2 & 0b11) == 0b11) == sf => Op::Crc {
+                    rd,
+                    rn,
+                    rm,
+                    sz: (opcode2 & 0b11) as u8,
+                    castagnoli: ((opcode2 >> 2) & 1) == 1,
+                },
                 _ => Op::Interpret { insn },
             },
-            // The one-source group (bit counts, byte reversal) and ADC/SBC:
-            // left to the interpreter.
+            // The one-source group.
+            (1, 1) if ((insn >> 29) & 0b11) == 0b10 && ((insn >> 10) & 0x3F) <= 0b000110 => {
+                Op::OneSource {
+                    rd,
+                    rn,
+                    opcode: ((insn >> 10) & 0x3F) as u8,
+                    sf,
+                }
+            }
             _ => Op::Interpret { insn },
         },
         // Three-source: the multiplies.
@@ -811,7 +882,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         _ => {}
     }
     if ((insn >> 26) & 1) == 1 {
-        return Op::Interpret { insn };
+        return Op::SimdLoadStore { insn };
     }
 
     let opc = ((insn >> 22) & 0b11) as u8;
@@ -896,4 +967,23 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
     }
 
     Op::Interpret { insn }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_update_compare_and_branch_is_one_exit() {
+        let mut mem = Memory::new();
+        // add x5, x5, #4; cmp w3, #0x2d0; b.ne -8; ret
+        let words = [0x910010a5u32, 0x710b407f, 0x54ffffc1, 0xd65f03c0];
+        let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        mem.map(0x1000, &bytes).unwrap();
+        let block = translate(&mem, 0x1000);
+        assert_eq!(block.exits.len(), 1);
+        assert_eq!(block.exits[0].at, 0);
+        assert_eq!(block.exits[0].span, 3);
+        assert!(block.ops.iter().all(|op| matches!(op, Op::Nop)));
+    }
 }

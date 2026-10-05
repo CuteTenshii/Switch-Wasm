@@ -43,6 +43,11 @@ pub(in crate::cpu) enum Op {
     Sys {
         op: SysOp,
     },
+    /// A SIMD&FP load or store, straight to the decoder that owns the V=1
+    /// forms instead of back through the whole load/store group.
+    SimdLoadStore {
+        insn: u32,
+    },
 
     /// A value the translator already computed: `MOVZ`/`MOVN`, and the
     /// PC-relative `ADR`/`ADRP` whose result depends only on where the
@@ -50,6 +55,16 @@ pub(in crate::cpu) enum Op {
     MovConst {
         rd: u8,
         val: u64,
+    },
+    /// `MOV` between registers, the `ORR` with the zero register it aliases,
+    /// with the width in the variant.
+    Mov32 {
+        rd: u8,
+        rn: u8,
+    },
+    Mov64 {
+        rd: u8,
+        rn: u8,
     },
     /// `MOVK`: replace the 16-bit field at `shift` with `val`. Held as a
     /// shift and a halfword rather than a mask and a placed value so the
@@ -185,6 +200,15 @@ pub(in crate::cpu) enum Op {
         sf: bool,
     },
 
+    /// `ADC`/`ADCS`/`SBC`/`SBCS`.
+    Adc {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        sub: bool,
+        set_flags: bool,
+        sf: bool,
+    },
     /// `MADD`/`MSUB`.
     Madd {
         rd: u8,
@@ -225,6 +249,22 @@ pub(in crate::cpu) enum Op {
         rm: u8,
         signed: bool,
         sf: bool,
+    },
+    /// `RBIT`/`REV16`/`REV32`/`REV`/`CLZ`/`CLS`/`CTZ`, by the group's own
+    /// opcode field.
+    OneSource {
+        rd: u8,
+        rn: u8,
+        opcode: u8,
+        sf: bool,
+    },
+    /// `CRC32`/`CRC32C` over `8 << sz` bits of Rm.
+    Crc {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        sz: u8,
+        castagnoli: bool,
     },
 
     LoadStoreImm {
@@ -471,6 +511,18 @@ pub(super) enum Exit {
         cond: u8,
         target: u32,
     },
+    /// A flagless `ADD`/`SUB` of a constant fused ahead of a
+    /// [`Exit::CmpImm`]: a loop counter's step, its test and the branch back.
+    /// Both constants are [`PackedImm`] so the variant still fits two words.
+    UpdateCmpImm {
+        rd: u8,
+        source: u8,
+        step: PackedImm,
+        rn: u8,
+        imm: PackedImm,
+        cond: u8,
+        target: u32,
+    },
     /// The same against a register.
     CmpReg {
         rn: u8,
@@ -488,12 +540,58 @@ pub(super) enum Exit {
 
 impl Exit {
     /// How many instructions the exit covers: two once a compare has been
-    /// folded into it.
+    /// folded into it, three once an update has been folded ahead of that.
     fn span(&self) -> u8 {
         match self {
             Exit::CmpImm { .. } | Exit::CmpReg { .. } => 2,
+            Exit::UpdateCmpImm { .. } => 3,
             _ => 1,
         }
+    }
+}
+
+/// An `ADD`/`SUB`/`CMP`/`CMN` immediate in sixteen bits: the twelve encoded
+/// bits, the `LSL #12` flag, whether it subtracts, and the operand width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PackedImm(u16);
+
+impl PackedImm {
+    const SHIFTED: u16 = 1 << 12;
+    const SUB: u16 = 1 << 13;
+    const SF: u16 = 1 << 14;
+
+    /// `imm` as the instruction encodes it, if it is one an immediate
+    /// `ADD`/`SUB` can encode.
+    pub(super) fn new(imm: u32, sub: bool, sf: bool) -> Option<PackedImm> {
+        let low = if imm & !0xFFF == 0 {
+            imm as u16
+        } else if imm & !0xFF_F000 == 0 {
+            (imm >> 12) as u16 | Self::SHIFTED
+        } else {
+            return None;
+        };
+        let sub = if sub { Self::SUB } else { 0 };
+        let sf = if sf { Self::SF } else { 0 };
+        Some(PackedImm(low | sub | sf))
+    }
+
+    /// The constant, uninverted.
+    pub(super) fn imm(self) -> u64 {
+        let low = u64::from(self.0 & 0xFFF);
+        if self.0 & Self::SHIFTED != 0 {
+            low << 12
+        } else {
+            low
+        }
+    }
+
+    /// 1 for a subtraction, which is also the carry in.
+    pub(super) fn carry(self) -> u8 {
+        u8::from(self.0 & Self::SUB != 0)
+    }
+
+    pub(super) fn sf(self) -> bool {
+        self.0 & Self::SF != 0
     }
 }
 

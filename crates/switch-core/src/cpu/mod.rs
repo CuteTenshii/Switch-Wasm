@@ -15,6 +15,7 @@ use crate::trace::Level;
 use crate::IdMap;
 use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 // The processor.
 mod a32;
@@ -1185,6 +1186,49 @@ pub struct TouchPoint {
     pub y: u32,
 }
 
+/// SIMD register file. Register numbers are decoded from five-bit fields, so
+/// every access is already in range. Keeping that invariant here removes a
+/// bounds-check from the very hot NEON/FP paths while retaining debug checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct VRegs([u128; 32]);
+
+impl Deref for VRegs {
+    type Target = [u128; 32];
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for VRegs {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Index<usize> for VRegs {
+    type Output = u128;
+
+    #[inline(always)]
+    fn index(&self, index: usize) -> &Self::Output {
+        debug_assert!(index < 32);
+        // SAFETY: all architectural register fields are five bits and the
+        // public u8 accessors mask them before indexing.
+        unsafe { self.0.get_unchecked(index) }
+    }
+}
+
+impl IndexMut<usize> for VRegs {
+    #[inline(always)]
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        debug_assert!(index < 32);
+        // SAFETY: see `Index` above.
+        unsafe { self.0.get_unchecked_mut(index) }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
     pub handle: u64,
@@ -1205,7 +1249,7 @@ pub struct ThreadContext {
     cpsr_q: bool,
     cpsr_ge: u8,
     fpscr_nzcv: u32,
-    vregs: [u128; 32],
+    vregs: VRegs,
     fpcr: u32,
     fpsr: u32,
     tpidr: u64,
@@ -1260,7 +1304,7 @@ pub struct Cpu {
     /// SIMD vector registers Q0..=Q31 (128-bit). Only the handful of
     /// instructions libnx's `memset`/`memcpy` rely on are implemented;
     /// full NEON is out of scope for Phase 1.
-    vregs: [u128; 32],
+    vregs: VRegs,
     /// FPCR: the guest's rounding mode, flush-to-zero and default-NaN
     /// controls. Held per thread, since it is part of the FP context.
     fpcr: u32,
@@ -2082,7 +2126,7 @@ impl Cpu {
             regs: [0; REG_FILE],
             pc: 0,
             nzcv: 0,
-            vregs: [0; 32],
+            vregs: VRegs::default(),
             fpcr: 0,
             fpsr: 0,
             out: Vec::new(),
@@ -2343,7 +2387,7 @@ impl Cpu {
                 cpsr_q: false,
                 cpsr_ge: 0,
                 fpscr_nzcv: 0,
-                vregs: [0; 32],
+                vregs: VRegs::default(),
                 fpcr: self.fpcr,
                 fpsr: 0,
                 tpidr: self.tpidr,
@@ -2414,7 +2458,7 @@ impl Cpu {
             cpsr_q: false,
             cpsr_ge: 0,
             fpscr_nzcv: 0,
-            vregs: [0; 32],
+            vregs: VRegs::default(),
             fpcr: 0,
             fpsr: 0,
             tpidr: u64::from(tls),
@@ -3239,6 +3283,22 @@ impl Cpu {
     /// actually needs them.
     #[inline(always)]
     pub(super) fn record_run(&mut self, start: u32, count: u32) {
+        // A single step that continues the last run extends it.
+        if count == 1 && self.recent_len != 0 {
+            let index = (self.recent_len - 1) & (RECENT_LEN - 1);
+            let (last_start, last_count) = self.recent[index];
+            if last_count < RECENT_LEN as u32 && last_start.wrapping_add(last_count * 4) == start {
+                self.recent[index].1 = last_count + 1;
+                return;
+            }
+        }
+        self.push_run(start, count);
+    }
+
+    /// [`Cpu::record_run`] without the single-step merge, which only pays off
+    /// for the interpreter's steps.
+    #[inline(always)]
+    pub(super) fn push_run(&mut self, start: u32, count: u32) {
         self.recent[self.recent_len % RECENT_LEN] = (start, count);
         self.recent_len = self.recent_len.wrapping_add(1);
     }
@@ -4008,7 +4068,7 @@ impl Cpu {
 
     /// Read the 128-bit SIMD&FP register Qn.
     pub fn read_vreg(&self, idx: u8) -> u128 {
-        self.vregs[idx as usize]
+        self.vregs.0[idx as usize]
     }
 
     /// Base of the libnx TLS (thread-local storage) region.
@@ -4018,7 +4078,7 @@ impl Cpu {
 
     /// Write the 128-bit SIMD&FP register Qn.
     pub fn set_vreg(&mut self, idx: u8, val: u128) {
-        self.vregs[idx as usize] = val;
+        self.vregs.0[idx as usize] = val;
     }
 
     /// Read a register in the forms where 31 is `XZR`. No test for 31:
