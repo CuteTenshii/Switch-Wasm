@@ -53,6 +53,19 @@ const BRANCH_LOOP: &[u32] = &[
     0xD65F03C0, // ret  x30
 ];
 
+/// A loop whose block follows a `B` over an instruction, so its ops are not
+/// consecutive in memory and the address of the `n`th one is not
+/// `start + 4 * n`. Assembled with clang.
+#[rustfmt::skip]
+const JUMP_LOOP: &[u32] = &[
+    0xD282001E, // movz x30, #0x1000
+    0x14000002, // b    #+8
+    0xD2800C60, // movz x0,  #0x63, jumped over
+    0xD2824680, // movz x0,  #0x1234
+    0xD503201F, // nop
+    0xD65F03C0, // ret  x30
+];
+
 /// Instructions in one trip round [`BRANCH_LOOP`]: the `RET` is never reached.
 const BRANCH_TRIP: u64 = 3;
 
@@ -119,11 +132,34 @@ extern "C" fn fake_branch(state: usize) -> u32 {
     BRANCH_TRIP as u32 | LEFT
 }
 
+/// Stands in for [`JUMP_LOOP`]'s compiled block, retiring the first
+/// [`RETIRE`] of its four ops: the `movz x30`, the `B`, the `movz x0` and the
+/// `nop`.
+extern "C" fn fake_jump(state: usize) -> u32 {
+    ENTERED.fetch_add(1, Ordering::SeqCst);
+    let retired = RETIRE.load(Ordering::SeqCst);
+    let regs = state + Layout::of_cpu().regs as usize;
+    // SAFETY: as `fake_run`.
+    unsafe {
+        if retired >= 1 {
+            *((regs + 8 * 30) as *mut u64) = u64::from(CODE);
+        }
+        if retired >= 3 {
+            *(regs as *mut u64) = 0x1234;
+        }
+    }
+    retired
+}
+
 /// Which fake the next `install` hands back, because the two loops are not
 /// the same block and the host is one function for the whole binary.
 static EMIT_BRANCH: AtomicBool = AtomicBool::new(false);
+static EMIT_JUMP: AtomicBool = AtomicBool::new(false);
 
 fn fake_for_this_block() -> Entry {
+    if EMIT_JUMP.load(Ordering::SeqCst) {
+        return fake_jump as *const () as Entry;
+    }
     match EMIT_BRANCH.load(Ordering::SeqCst) {
         true => fake_branch as *const () as Entry,
         false => fake_run as *const () as Entry,
@@ -145,7 +181,13 @@ fn release(entry: Entry) {
     // is released when it is dropped, which for the last block of a test is
     // after the test body has finished with it.
     assert!(
-        entry == fake_run as *const () as Entry || entry == fake_branch as *const () as Entry,
+        [
+            fake_run as *const (),
+            fake_branch as *const (),
+            fake_jump as *const ()
+        ]
+        .iter()
+        .any(|&fake| entry == fake as Entry),
         "an entry point came back that was never handed out"
     );
     RELEASED.fetch_add(1, Ordering::SeqCst);
@@ -163,6 +205,7 @@ fn exclusive() -> MutexGuard<'static, ()> {
     LAST_MODULE.store(0, Ordering::SeqCst);
     RETIRE.store(OPS, Ordering::SeqCst);
     EMIT_BRANCH.store(false, Ordering::SeqCst);
+    EMIT_JUMP.store(false, Ordering::SeqCst);
     guard
 }
 
@@ -368,4 +411,27 @@ fn a_block_left_through_a_taken_branch_skips_its_terminator() {
         0u64.wrapping_sub(subs),
         "the loop did not go round as many times as the budget allows"
     );
+}
+
+/// A block that follows a `B` hands back at the right address whether it
+/// stops before the jump, just after it, or runs through to its terminator.
+#[test]
+fn a_block_across_a_followed_branch_hands_back_where_it_stopped() {
+    const JUMP_TRIP: u64 = 5;
+    let _guard = exclusive();
+    EMIT_JUMP.store(true, Ordering::SeqCst);
+    for retired in [1, 2, 4] {
+        RETIRE.store(retired, Ordering::SeqCst);
+        ENTERED.store(0, Ordering::SeqCst);
+        let steps = (HOT as u64 + 100) * JUMP_TRIP + 1;
+        compare_running(
+            JUMP_LOOP,
+            steps,
+            &format!("a block retiring {retired} of 4"),
+        );
+        assert!(
+            ENTERED.load(Ordering::SeqCst) > 0,
+            "the emitted form was never entered"
+        );
+    }
 }

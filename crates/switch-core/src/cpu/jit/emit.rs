@@ -100,13 +100,11 @@
 //! is the following instruction, which is the next thing emitted, so nothing
 //! here needs a label or a jump backwards.
 //!
-//! What is not written is [`super::ir::Exit::Jump`], a `B` the translator
-//! followed. Its ops are the ones at the target rather than the ones after
-//! it, so a block holding one has a body whose instructions are not
-//! consecutive in memory, and every address on the handover path is
-//! `start + 4 * retired`. Terminators are not written either: a block still
-//! ends by falling out of `run` and letting [`super::exec`] run the one it
-//! has.
+//! A `B` the translator followed, [`super::ir::Exit::Jump`], writes nothing:
+//! the ops after it are already the ones at its target. [`super::exec`] maps
+//! a retired count back to an address across those jumps. Terminators are not
+//! written: a block still ends by falling out of `run` and letting
+//! [`super::exec`] run the one it has.
 //!
 //! # Where wasm and A64 disagree
 //!
@@ -329,9 +327,7 @@ const UNALIGNED: u8 = 0;
 /// title's blocks is the list of what to write next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
-    /// The block follows an unconditional `B`, so its instructions are not
-    /// consecutive in memory. The conditional branches are written; this one
-    /// is not.
+    /// An exit the walk over the body never reached.
     ControlFlow,
     /// An op with no emitter, as the instruction word it was decoded from.
     Op(u32),
@@ -965,9 +961,9 @@ impl Emitter<'_> {
                 target
             }
             // A `B` the translator followed, which is not a branch out of the
-            // block at all: it is why the ops after it are the ones at its
-            // target rather than the ones after it in memory.
-            Exit::Jump { .. } => return false,
+            // block at all: the ops after it are the ones at its target, so
+            // there is nothing to write.
+            Exit::Jump { .. } => return true,
         };
         self.leave_if(retired, target);
         true
@@ -1264,6 +1260,20 @@ impl Emitter<'_> {
             Op::MovConst { rd, val } => {
                 self.addr_regs();
                 self.f.i64_const(val as i64);
+                self.store_reg(rd);
+                true
+            }
+
+            Op::Mov32 { rd, rn } => {
+                self.addr_regs();
+                self.read_reg(rn, false);
+                self.store_reg(rd);
+                true
+            }
+
+            Op::Mov64 { rd, rn } => {
+                self.addr_regs();
+                self.read_reg(rn, true);
                 self.store_reg(rd);
                 true
             }
@@ -1850,12 +1860,29 @@ impl Cpu {
     ///
     /// `layout` is where the harness has put guest state in the memory it
     /// hands the module, which for a test is a bare buffer rather than a
-    /// `Cpu`. Reports how many instructions the block covers, so
-    /// the harness can step the interpreter over exactly the same ones.
-    pub fn emit_block_at(&self, pc: u32, layout: Layout) -> Result<(Vec<u8>, usize), Refused> {
+    /// `Cpu`. Reports the address of each instruction the block covers, and
+    /// then of the one after them, so the harness can step the interpreter
+    /// over exactly the same ones: they are not consecutive across a `B` the
+    /// translator followed.
+    pub fn emit_block_at(&self, pc: u32, layout: Layout) -> Result<(Vec<u8>, Vec<u32>), Refused> {
         let block = translate(&self.mem, pc);
         let bytes = emit_block(&block, layout)?;
-        Ok((bytes, block.ops.len()))
+        let mut jumps = block.exits.iter().filter_map(|branch| match branch.exit {
+            Exit::Jump { target } => Some((branch.at as usize + branch.span as usize, target)),
+            _ => None,
+        });
+        let mut next_jump = jumps.next();
+        let mut path = Vec::with_capacity(block.ops.len() + 1);
+        let mut at = pc;
+        for i in 0..=block.ops.len() {
+            if let Some((_, target)) = next_jump.filter(|&(after, _)| after == i) {
+                at = target;
+                next_jump = jumps.next();
+            }
+            path.push(at);
+            at = at.wrapping_add(4);
+        }
+        Ok((bytes, path))
     }
 
     /// The register file by *slot*, which is what an emitted block addresses.
@@ -2005,17 +2032,14 @@ mod tests {
         }
     }
 
-    /// A `B` the translator followed says so, rather than being counted
-    /// against the ops the block contains: the two refusals call for
-    /// completely different work.
     #[test]
-    fn a_followed_branch_refuses_as_control_flow() {
+    fn a_followed_branch_is_emitted() {
         use crate::cpu::jit::ir::{Branch, Exit};
 
         let ops = vec![Op::Nop, Op::MovConst { rd: 0, val: 7 }];
         let exits = vec![Branch::new(0, Exit::Jump { target: 0x2000 })];
         let b = Block::new(0x1000, ops, vec![0, 0], exits, None, vec![1]);
-        assert_eq!(emit_block(&b, LAYOUT), Err(Refused::ControlFlow));
+        assert!(emit_block(&b, LAYOUT).is_ok());
     }
 
     /// An exit the walk never reaches would leave the instructions it guards

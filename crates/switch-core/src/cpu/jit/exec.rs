@@ -280,6 +280,8 @@ impl Cpu {
         // same code.
         if let Some(done) = self.enter_emitted(block, budget) {
             i = done.retired;
+            let at;
+            (at, run_pc, run_i) = self.follow_runs(block, i);
             if done.left {
                 // The branch put its target in `pc` itself, and the
                 // terminator does not run: control has already gone
@@ -287,7 +289,7 @@ impl Cpu {
                 self.retire_runs(run_pc, run_i, i);
                 return Ok(i as u64);
             }
-            pc = block.start.wrapping_add(4 * i as u32);
+            pc = at;
         } else {
             loop {
                 // Run straight through to the next conditional branch, or to the
@@ -473,6 +475,26 @@ impl Cpu {
             retired: retired.min(whole),
             left,
         })
+    }
+
+    /// The address of `block`'s `i`th instruction across the `B`s it follows,
+    /// with the start of the run holding it by address and index. Each run
+    /// before that one goes into the trail, as the op walk puts them there.
+    #[inline(always)]
+    fn follow_runs(&mut self, block: &Block, i: usize) -> (u32, u32, usize) {
+        let (mut run_pc, mut run_i) = (block.start, 0usize);
+        for branch in &block.exits {
+            let Exit::Jump { target } = branch.exit else {
+                continue;
+            };
+            let after = branch.at as usize + branch.span as usize;
+            if after > i {
+                break;
+            }
+            self.push_run(run_pc, (after - run_i) as u32);
+            (run_pc, run_i) = (target, after);
+        }
+        (run_pc.wrapping_add(4 * (i - run_i) as u32), run_pc, run_i)
     }
 
     /// Count a visit to a block with no emitted form, and write it out once it

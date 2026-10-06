@@ -255,10 +255,11 @@ fn main() {
 
                     let before = cpu.reg_slots();
                     let nzcv_before = cpu.nzcv();
-                    let Ok((module, ops)) = cpu.emit_block_at(block_at, LAYOUT) else {
+                    let Ok((module, path)) = cpu.emit_block_at(block_at, LAYOUT) else {
                         refused += 1;
                         continue;
                     };
+                    let ops = path.len() - 1;
 
                     // Everything the seeding and the last case left behind, so
                     // that what is there afterwards belongs to this block. The

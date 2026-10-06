@@ -83,13 +83,9 @@
 //! and on a Just Dance 2019 frame control flow was the larger half: 136 block
 //! entry points against 115 for an op with no emitter.
 //!
-//! What is still refused is a `B` the translator *followed*, whose ops are
-//! the ones at its target, so a block holding one has a body that is not
-//! consecutive in memory while every address on the handover path is
-//! `start + 4 * retired`. That is all [`emit::Refused::ControlFlow`] means
-//! now, and on the same frame it is what all 67 of the remaining refusals
-//! are: the rest of the sample is 82 blocks wanting an op, a list `LDP` and
-//! `STP` are most of, and 59 written out.
+//! A `B` the translator *followed* is written too: its ops are the ones at
+//! its target, and [`exec`] maps a retired count back to an address across
+//! it rather than assuming `start + 4 * retired`.
 //!
 //! [`Cpu::run_jit`] honours a step budget exactly by entering a block and
 //! leaving part-way through it, and emitted code can only be left where it

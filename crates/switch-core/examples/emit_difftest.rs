@@ -113,7 +113,7 @@ fn main() {
         if cases >= CANDIDATES {
             break;
         }
-        let (module, ops) = match cpu.emit_block_at(pc, LAYOUT) {
+        let (module, path) = match cpu.emit_block_at(pc, LAYOUT) {
             Ok(emitted) => emitted,
             Err(Refused::ControlFlow) => {
                 refused_flow += 1;
@@ -135,9 +135,10 @@ fn main() {
         // still the whole of most blocks, and it is real code with real
         // operands, which is what this half is for. What a *mapped* access
         // does is `emit_selftest`'s to check, against a window it owns.
-        let ops = (0..ops)
-            .find(|i| cpu.mem.read_u32(pc + 4 * *i as u32).is_ok_and(defers))
-            .unwrap_or(ops);
+        let whole = path.len() - 1;
+        let ops = (0..whole)
+            .find(|&i| cpu.mem.read_u32(path[i]).is_ok_and(defers))
+            .unwrap_or(whole);
         // A block of one op is nearly always a lone `MOV`; it would pass
         // without saying anything about the operand handling.
         if ops < 2 {
@@ -146,7 +147,7 @@ fn main() {
 
         // Where the interpreter stops, which is the answer the module has to
         // agree with. It runs one instruction at a time and watches the pc:
-        // as long as control stays on the instruction after the last one, the
+        // as long as control stays on the block's next instruction, the
         // block is running straight through, and the step where it does not
         // is a conditional branch the block ran through and took.
         //
@@ -166,7 +167,7 @@ fn main() {
             }
             retired = i + 1;
             let next = cpu.get_pc();
-            if next != pc.wrapping_add(4 * retired as u32) {
+            if next != path[retired] {
                 left = Some(next);
                 break;
             }
