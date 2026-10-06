@@ -7,11 +7,6 @@ use super::{
 use crate::{Error, Result};
 use std::fmt::Write;
 
-/// The cores an application may run threads on: 0, 1 and 2, what the
-/// `ThreadInfo` capability of every retail application's NPDM grants. Core
-/// 3 is the system's.
-const PROCESS_CORE_MASK: u64 = 0b0111;
-
 impl Cpu {
     /// Every SVC a guest issues, except `svc #0`.
     ///
@@ -355,7 +350,7 @@ impl Cpu {
                 }
                 let core = match core as u32 as i32 {
                     IDEAL_CORE_USE_PROCESS_VALUE => self.main_thread_core,
-                    core @ 0..=3 if PROCESS_CORE_MASK >> core & 1 != 0 => core as u8,
+                    core @ 0..=3 if self.process_core_mask >> core & 1 != 0 => core as u8,
                     _ => {
                         self.write_zr(0, RESULT_INVALID_CORE_ID);
                         return Ok(());
@@ -638,7 +633,7 @@ impl Cpu {
                         i32::from(self.main_thread_core),
                         1u64 << self.main_thread_core,
                     )),
-                    _ if affinity & !PROCESS_CORE_MASK != 0 => Err(RESULT_INVALID_CORE_ID),
+                    _ if affinity & !self.process_core_mask != 0 => Err(RESULT_INVALID_CORE_ID),
                     _ if affinity == 0 => Err(RESULT_INVALID_COMBINATION),
                     core @ 0..=3 if affinity & (1 << core) == 0 => Err(RESULT_INVALID_COMBINATION),
                     core @ 0..=3 => Ok((core, affinity)),
@@ -1701,8 +1696,8 @@ impl Cpu {
                     // default) makes `nn::os::GetThreadAvailableCoreMask`
                     // hand `nn::os::RegisterSystemWorkerHandler` an empty
                     // mask, whose "highest set bit" scan then asserts.
-                    0 => PROCESS_CORE_MASK,     // CoreMask: cores 0, 1, 2
-                    1 => 0x0FFF_FFFF_F000_0000, // PriorityMask: 28..=59
+                    0 => self.process_core_mask, // CoreMask
+                    1 => 0x0FFF_FFFF_F000_0000,  // PriorityMask: 28..=59
                     // Alias/Heap region. Real Horizon puts these far above
                     // the 32-bit range (alias at 0x10_0000_0000, heap at
                     // 0x2_0000_0000) and this used to report those figures
@@ -1890,6 +1885,22 @@ mod tests {
         let mut cpu = Cpu::new();
         assert_eq!(create_thread(&mut cpu, 3).0, RESULT_INVALID_CORE_ID);
         assert_eq!(create_thread(&mut cpu, 7).0, RESULT_INVALID_CORE_ID);
+    }
+
+    /// Data Erase's manifest grants core 3 alone, and its startup moves a
+    /// thread there; refusing it is the panic it reports.
+    #[test]
+    fn a_system_applet_gets_the_cores_its_manifest_grants() {
+        let mut cpu = Cpu::new();
+        cpu.set_process_core_mask(0b1000);
+        let me = CURRENT_THREAD_PSEUDO_HANDLE;
+        assert_eq!(set_core_mask(&mut cpu, me, DONT_CARE, 0b1000), 0);
+        assert_eq!(create_thread(&mut cpu, 3).0, 0);
+        assert_eq!(create_thread(&mut cpu, 0).0, RESULT_INVALID_CORE_ID);
+        cpu.write_zr(1, 0);
+        cpu.write_zr(2, 0xFFFF_8001);
+        cpu.horizon_syscall(0x29).unwrap();
+        assert_eq!(cpu.read_zr(1), 0b1000, "svcGetInfo CoreMask");
     }
 
     #[test]

@@ -1288,6 +1288,10 @@ impl Title {
         {
             cpu.set_main_thread_core(core);
         }
+        // And the cores it may use at all: a system applet's are not a game's.
+        if let Some(mask) = switch_core::npdm::Npdm::core_mask_of(&self.exefs_pfs0, &self.exefs) {
+            cpu.set_process_core_mask(mask);
+        }
         // Which instruction set the title runs, from bit 0 of the same
         // manifest's flags. Before the boot, which lays the entry ABI out
         // differently in each state.

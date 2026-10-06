@@ -1527,6 +1527,10 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     if let Some(core) = switch_core::npdm::Npdm::main_thread_core_of(&pfs0, &exefs) {
         cpu.set_main_thread_core(core);
     }
+    // And the cores it may use at all: a system applet's are not a game's.
+    if let Some(mask) = switch_core::npdm::Npdm::core_mask_of(&pfs0, &exefs) {
+        cpu.set_process_core_mask(mask);
+    }
 
     // And which instruction set it runs, from bit 0 of the same manifest's
     // flags. Also before the boot: the entry ABI puts the return trampoline in

@@ -1919,6 +1919,9 @@ pub struct Cpu {
     /// The core the main thread runs on, and the one "the process's default
     /// core" means: see [`Cpu::set_main_thread_core`].
     main_thread_core: u8,
+    /// The cores the process may run threads on: see
+    /// [`Cpu::set_process_core_mask`].
+    process_core_mask: u64,
     /// The id the next thread created gets. The main thread is 1, and every
     /// thread after it the next number, so no two share one: a title that
     /// tells threads apart by id sees them as the kernel's ids make them.
@@ -2291,6 +2294,7 @@ impl Cpu {
             module_names: Vec::new(),
             main_thread_priority: DEFAULT_THREAD_PRIORITY,
             main_thread_core: 0,
+            process_core_mask: crate::npdm::APPLICATION_CORE_MASK,
             next_thread_id: MAIN_THREAD_ID + 1,
         };
         // The framebuffer and input registers are fixed hardware-mapped
@@ -2711,6 +2715,13 @@ impl Cpu {
         {
             main.priority = self.main_thread_priority;
         }
+    }
+
+    /// The cores the process may run threads on, from the title's
+    /// `main.npdm`: what `svcGetInfo` CoreMask reports and what thread
+    /// creation and `svcSetThreadCoreMask` are checked against.
+    pub fn set_process_core_mask(&mut self, mask: u64) {
+        self.process_core_mask = mask;
     }
 
     /// The main thread's core, from the title's `main.npdm`. Applies to the
