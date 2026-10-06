@@ -49,6 +49,9 @@ and tests.
   Minecraft answers that by destroying its peer, nulling its pointer to it
   and calling through it anyway. A datagram with *no* destination, and a
   stream socket with no connection, fail as before.
+- **`ns`** reports a console with nothing installed: `ListApplicationRecord`
+  (app manager cmd 0, read-only record cmd 3) answers zero records with the
+  count written, and `HasApplicationRecord` is `false`.
 - **`sfdnsres`** — `EAI_NONAME` / `HOST_NOT_FOUND`, the *definitive* failure
   rather than try-again, in the **first** word of `SfdnsresRequestResults`.
 - **`pctl`** reports the console unrestricted. Watch the direction:

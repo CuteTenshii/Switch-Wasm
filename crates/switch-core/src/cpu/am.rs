@@ -1307,6 +1307,12 @@ impl Cpu {
                     let h = self.kept_event("am:accumulated-suspended-tick-changed", handle);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
+                // Unknown230(u32) -> u16, meaning unknown. Data Erase asks at
+                // startup.
+                Some(230) => {
+                    self.warn_stub(&iface, cmd_id, "an unknown command, answered 0");
+                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
+                }
                 // GetAccumulatedSuspendedTickValue: nothing has ever been
                 // suspended.
                 Some(90) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),

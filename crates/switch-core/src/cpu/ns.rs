@@ -162,6 +162,9 @@ impl Cpu {
                 // HasApplicationRecord(u64 application_id) -> bool. Nothing is
                 // installed, so nothing has a record.
                 Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // ListApplicationRecord(s32 entry_offset), as on the manager:
+                // no records, with the count written. Data Erase lists here.
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -671,6 +674,13 @@ mod tests {
         cpu.ns_request(TLS, records, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "has record");
+
+        // The same empty list through the read-only interface.
+        cpu.mem.write_u32(TLS + 0x20, 0xFFFF_FFFF).unwrap();
+        write_request(&mut cpu, 3, &0i32.to_le_bytes());
+        cpu.ns_request(TLS, records, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "record count");
     }
 
     #[test]
