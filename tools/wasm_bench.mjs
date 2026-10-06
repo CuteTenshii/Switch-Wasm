@@ -3,6 +3,7 @@
 //
 //     --shot=<file.ppm>  save the final frame after timing for byte comparison
 //     --frames=N          frames to time after the warmup (default 8)
+//     --warmup=N          untimed frames to present first (default 2)
 //     --keys=<file>       prod.keys; every encrypted container needs one
 //     --title-keys=<file> title.keys, for content whose key is not bundled
 //     --firmware=<dir>    register every .nca in it as a system data archive
@@ -44,7 +45,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const USAGE =
   'usage: node tools/wasm_bench.mjs <container> [switch_wasm.wasm]'
-  + ' [--frames=N] [--shot=frame.ppm] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf]';
+  + ' [--frames=N] [--warmup=N] [--shot=frame.ppm] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf]';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -61,7 +62,7 @@ const wasmPath = positional[1] || join(release, 'switch_wasm_bg.wasm');
 // Frames to present before the clock starts. They cover the program's loader
 // and its first upload, and they also let V8 tier the hot code from Liftoff up
 // to TurboFan — timing a baseline-compiled frame is timing the compiler.
-const WARMUP_FRAMES = 2;
+const WARMUP_FRAMES = Number(flag('warmup')) || 2;
 const FRAMES = Number(flag('frames')) || 8;
 
 // The core is a wasm-bindgen module — wgpu reaches WebGPU through its glue —
