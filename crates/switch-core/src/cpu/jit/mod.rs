@@ -67,9 +67,8 @@
 //! answer alone from the part that needs the rest, and emitted code makes the
 //! same separation and hands back the accesses on the far side of it.
 //!
-//! What is left of memory is the pair forms and the exclusives: `LDP`/`STP`
-//! are two accesses sharing one page and one boundary test, and `LDXR`/`STXR`
-//! carry a reservation this model does not have.
+//! What is left of memory is the exclusives: `LDXR`/`STXR` carry a
+//! reservation this model does not have.
 //!
 //! Control flow was the other half, and the conditional branches are written
 //! now: a block runs through `B.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ` and the

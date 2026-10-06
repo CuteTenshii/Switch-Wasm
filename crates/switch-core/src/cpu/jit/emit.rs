@@ -66,9 +66,8 @@
 //! for an emitted store to look. It is a fixed-size bitmap behind a single
 //! pointer now, which is what it always was.
 //!
-//! What is not written is the pair forms and the exclusives. A pair is two
-//! accesses in one page with its own boundary test, and the exclusives carry a
-//! reservation that is not in this model at all.
+//! A pair is two accesses in one page with its own boundary test. The
+//! exclusives are not written: they carry a reservation this model lacks.
 //!
 //! # What a block reports
 //!
@@ -128,7 +127,7 @@ use super::decode::{decode, translate, Decoded};
 use super::ir::{Block, Exit, Op};
 use super::wasm::{Func, Module, I32, I64};
 use crate::cpu::bits::mask_of_width;
-use crate::cpu::loadstore::{Acc, Ext, Wb};
+use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
 use crate::cpu::{Cpu, CONDITION_MASKS};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
@@ -1064,13 +1063,24 @@ impl Emitter<'_> {
     /// address, the write watchpoint, and a page whose contents something has
     /// cached, which a store owes a report to.
     fn page_for_write(&mut self, n: u32, retired: usize) {
+        self.page_for_write_halves(n, None, retired);
+    }
+
+    /// [`Emitter::page_for_write`] for a pair, which
+    /// [`crate::mem::Memory::poke_pair`] also tests for write protection at
+    /// the second half, `second` bytes in.
+    fn page_for_write_halves(&mut self, n: u32, second: Option<u32>, retired: usize) {
         self.page_number();
         let crosses = n > 1;
         if crosses {
             self.crosses_page(n);
         }
-        self.within(self.layout.readonly_lo, self.layout.readonly_hi);
+        self.within(self.layout.readonly_lo, self.layout.readonly_hi, 0);
         if crosses {
+            self.f.i32_or();
+        }
+        if let Some(at) = second {
+            self.within(self.layout.readonly_lo, self.layout.readonly_hi, at);
             self.f.i32_or();
         }
         self.covers(n, self.layout.watch_lo, self.layout.watch_hi);
@@ -1110,12 +1120,19 @@ impl Emitter<'_> {
     /// the full path decides whether that address really is protected. Every
     /// protected range is a module's `.text`, so hardly a store a title makes
     /// is in the envelope at all.
-    fn within(&mut self, lo: u32, hi: u32) {
-        self.f.local_get(L_ADDR);
+    fn within(&mut self, lo: u32, hi: u32, at: u32) {
+        let addr = |e: &mut Self| {
+            e.f.local_get(L_ADDR);
+            if at != 0 {
+                e.f.i32_const(at as i32);
+                e.f.i32_add();
+            }
+        };
+        addr(self);
         self.f.local_get(STATE);
         self.f.i32_load(ALIGN_4, lo);
         self.f.i32_ge_u();
-        self.f.local_get(L_ADDR);
+        addr(self);
         self.f.local_get(STATE);
         self.f.i32_load(ALIGN_4, hi);
         self.f.i32_lt_u();
@@ -1236,6 +1253,36 @@ impl Emitter<'_> {
             Acc::Store32 => self.f.i64_store32(UNALIGNED, 0),
             Acc::Store64 => self.f.i64_store(UNALIGNED, 0),
             _ => unreachable!("only the stores reach here; `writes_rt` is what sorts them"),
+        }
+    }
+
+    /// A load of two `n`-byte registers from `L_ADDR`, both halves checked at
+    /// once as [`crate::mem::Memory::peek`] checks a pair.
+    fn load_pair(&mut self, rt: u8, rt2: u8, n: u32, signed: bool, retired: usize) {
+        self.page_for_read(2 * n, retired);
+        for (slot, at) in [(rt, 0), (rt2, n)] {
+            self.addr_regs();
+            self.in_page();
+            match (n, signed) {
+                (8, _) => self.f.i64_load(UNALIGNED, at),
+                (4, false) => self.f.i64_load32_u(UNALIGNED, at),
+                _ => self.f.i64_load32_s(UNALIGNED, at),
+            }
+            self.store_reg(slot);
+        }
+    }
+
+    /// A store of two `n`-byte registers to `L_ADDR`, with
+    /// [`crate::mem::Memory::poke_pair`]'s checks.
+    fn store_pair(&mut self, rt: u8, rt2: u8, n: u32, retired: usize) {
+        self.page_for_write_halves(2 * n, Some(n), retired);
+        for (slot, at) in [(rt, 0), (rt2, n)] {
+            self.in_page();
+            self.read_reg_raw(slot);
+            match n {
+                8 => self.f.i64_store(UNALIGNED, at),
+                _ => self.f.i64_store32(UNALIGNED, at),
+            }
         }
     }
 
@@ -1777,6 +1824,49 @@ impl Emitter<'_> {
             } => {
                 self.address_reg(rn, rm, ext, shift);
                 self.access(rt, acc, retired);
+                true
+            }
+            Op::PairLoad64 {
+                rt,
+                rt2,
+                rn,
+                offset,
+                wb,
+            } => {
+                self.address(rn, offset, wb);
+                self.load_pair(rt, rt2, 8, false, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::PairStore64 {
+                rt,
+                rt2,
+                rn,
+                offset,
+                wb,
+            } => {
+                self.address(rn, offset, wb);
+                self.store_pair(rt, rt2, 8, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::Pair {
+                rt,
+                rt2,
+                rn,
+                offset,
+                kind,
+                wb,
+            } => {
+                self.address(rn, offset, wb);
+                match kind {
+                    PairKind::Load64 => self.load_pair(rt, rt2, 8, false, retired),
+                    PairKind::Load32 => self.load_pair(rt, rt2, 4, false, retired),
+                    PairKind::Load32Sext => self.load_pair(rt, rt2, 4, true, retired),
+                    PairKind::Store64 => self.store_pair(rt, rt2, 8, retired),
+                    PairKind::Store32 => self.store_pair(rt, rt2, 4, retired),
+                }
+                self.write_back(rn, wb);
                 true
             }
             Op::LoadLiteral { rt, addr, acc } => {
