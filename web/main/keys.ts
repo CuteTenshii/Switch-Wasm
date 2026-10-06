@@ -82,5 +82,5 @@ $('btn-clear-keys').addEventListener('click', () => {
   localStorage.removeItem(KEYS_STORE.title);
   restoredKeys = false;
   void stageKeys();
-  log('Keys cleared.', 'dim');
+  log('Keys cleared.');
 });

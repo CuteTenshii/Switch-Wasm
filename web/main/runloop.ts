@@ -59,7 +59,7 @@ function setRunButton(isRunning: boolean): void {
 // the buttons alone.
 function nothingLoaded(): boolean {
   if (loaded()) return false;
-  log('Nothing is loaded - open a .nro, .elf, .nsp, .xci or .nca to boot one.', 'dim');
+  log('Nothing is loaded - open a .nro, .elf, .nsp, .xci or .nca to boot one.');
   return true;
 }
 
@@ -171,9 +171,9 @@ async function reportPanicContext(): Promise<void> {
       const text = await ask();
       if (!text) continue;
       if (what === 'trace') logTrace(text);
-      else logBlock(text, 'dim');
+      else logBlock(text);
     } catch {
-      log(`The module could not be asked for its ${what}.`, 'dim');
+      log(`The module could not be asked for its ${what}.`);
     }
   }
   log('Take a crash report from the debug panel before resetting - a reset is what loses this.',
@@ -236,7 +236,7 @@ const GUEST_LEVELS: Record<string, LogClass> = {
   FATAL: 'err',
   ERROR: 'err',
   WARN: 'warn',
-  INFO: 'dim',
+  INFO: 'ok',
   TRACE: 'dim',
 };
 

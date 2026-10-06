@@ -385,7 +385,7 @@ async function choose(profile: Profile): Promise<void> {
   }
   log(titleBooted()
     ? `Profiles: ${profile.nickname} plays the next title; the running one keeps its player.`
-    : `Profiles: playing as ${profile.nickname}.`, 'dim');
+    : `Profiles: playing as ${profile.nickname}.`);
   renderProfiles();
   await stageIfIdle();
 }
@@ -424,7 +424,7 @@ async function removeProfile(profile: Profile): Promise<void> {
     await idbRequest((s) => s.delete(profile.uid), 'readwrite');
     await storeCurrent();
     const removed = await deleteSavesOf(profile.uid);
-    log(`Profiles: deleted ${profile.nickname}` + (removed ? ` and ${removed} saved entries` : ''), 'dim');
+    log(`Profiles: deleted ${profile.nickname}` + (removed ? ` and ${removed} saved entries` : ''));
   } catch (err) {
     log('Profiles: the deletion could not be finished (' + (err as Error).message + ')', 'err');
   }

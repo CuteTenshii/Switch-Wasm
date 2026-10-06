@@ -309,7 +309,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   // read through the worker to find out the same thing.
   const files = picked.filter((f) => /\.nca$/i.test(f.name));
   if (picked.length !== files.length) {
-    log('Ignoring ' + (picked.length - files.length) + ' file(s) that are not .nca.', 'dim');
+    log('Ignoring ' + (picked.length - files.length) + ' file(s) that are not .nca.');
   }
   if (!files.length) {
     log('Nothing in that selection is an .nca.', 'err');
@@ -353,7 +353,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   // the ones that are get registered, so the skipped count is expected.
   log('Installed ' + installed + ' title(s) of ' + files.length + ' file(s); '
     + (registered ?? archiveCount) + ' registered as system data archives.',
-  installed ? 'ok' : 'dim');
+  installed ? 'ok' : undefined);
 });
 
 $('btn-erase-nand').addEventListener('click', async () => {

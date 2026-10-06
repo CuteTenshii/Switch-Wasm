@@ -83,19 +83,22 @@ test('the guest crash screen exposes recovery paths', async ({ page }) => {
   await page.evaluate(() => document.getElementById('btn-clear-console')!.click());
 });
 
-test('debug lines show only at the debug level', async ({ page }) => {
+test('trace channels record and show only at the debug level', async ({ page }) => {
   await openPage(page);
-  const line = page.locator('#console div', { hasText: 'Block translation disabled' });
+  // svc #0x29 (GetInfo), then svc #0: the host's halt trap.
+  const program = aarch64Elf([0xd4000521, 0xd4000001]);
+  const svcLine = page.locator('#console div', { hasText: '#0x29' });
 
-  await page.locator('#btn-panel').click();
-  await page.getByRole('tab', { name: 'Debug' }).click();
-  await page.locator('#jit-cb').uncheck();
-  await page.getByRole('tab', { name: 'Console' }).click();
   await expect(page.locator('#log-level')).toHaveValue('log');
-  await expect(line).toHaveCount(0);
-
+  await bootElf(page, program);
+  await expect(page.locator('#state')).toHaveText('halted');
+  await page.locator('#btn-panel').click();
   await page.locator('#log-level').selectOption('debug');
-  await expect(line).toHaveCount(1);
+  await expect(svcLine).toHaveCount(0);
+
+  await bootElf(page, program);
+  await expect(page.locator('#state')).toHaveText('halted');
+  await expect(svcLine).toHaveCount(1);
   await page.locator('#log-level').selectOption('log');
-  await expect(line).toHaveCount(0);
+  await expect(svcLine).toHaveCount(0);
 });

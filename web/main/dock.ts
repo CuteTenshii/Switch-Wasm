@@ -30,7 +30,6 @@ button.addEventListener('click', () => {
     docked
       ? 'Docked - 1080p, boost clocks, no touchscreen.'
       : 'Handheld - 720p, normal clocks, touchscreen.',
-    'dim',
   );
 });
 

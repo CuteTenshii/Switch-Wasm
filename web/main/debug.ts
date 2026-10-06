@@ -40,7 +40,7 @@ export function traceEnabled(): boolean {
 traceCb.addEventListener('change', () => {
   void call('set_trace', traceCb.checked ? 1 : 0);
   setNote('trace-badge', traceCb.checked ? 'on' : 'off', traceCb.checked);
-  if (traceCb.checked) log('Tracing enabled - run slices are capped for readability.', 'dim');
+  if (traceCb.checked) log('Tracing enabled - run slices are capped for readability. The trace shows at the Debug log level.');
 });
 
 // The trace buffer carries more than the per-instruction disassembly: the
@@ -86,7 +86,7 @@ const jitCb = $<HTMLInputElement>('jit-cb');
 jitCb.addEventListener('change', () => {
   void call('set_jit', jitCb.checked ? 1 : 0);
   setNote('jit-badge', jitCb.checked ? 'on' : 'off', jitCb.checked);
-  if (!jitCb.checked) log('Block translation disabled - running the plain interpreter.', 'dim');
+  if (!jitCb.checked) log('Block translation disabled - running the plain interpreter.');
 });
 
 $('btn-jitstats').addEventListener('click', async () => {
@@ -99,7 +99,6 @@ $('btn-jitstats').addEventListener('click', async () => {
     `translation: ${s.enabled ? 'on' : 'off'}, ${s.blocks} blocks cached, `
     + `${s.translated} translated, ${s.executed} entered (${reuse}x each), `
     + `${s.invalidated} invalidated`,
-    'dim',
   );
   // What share of those entries ran compiled code rather than walking the
   // block's ops, which is the number that says what the emitter is worth.
@@ -110,7 +109,6 @@ $('btn-jitstats').addEventListener('click', async () => {
     emitted
       ? `compiled: ${emitted} blocks, entered ${entered} times (${share}% of entries)`
       : 'compiled: nothing - every block was interpreted',
-    'dim',
   );
 });
 
@@ -118,7 +116,7 @@ $('btn-gpustats').addEventListener('click', async () => {
   const g = await call('gpu_report');
   openPanel('console');
   if (!g.backend) {
-    log('rendering: the software rasterizer has the frame - no device is installed.', 'dim');
+    log('rendering: the software rasterizer has the frame - no device is installed.');
     return;
   }
   const drawn = g.drawn ?? 0;
@@ -132,7 +130,6 @@ $('btn-gpustats').addEventListener('click', async () => {
     + `${errors} rejected, `
     + `${g.pipelines ?? 0} pipelines, ${g.modules ?? 0} modules, `
     + `${g.held ?? 0} surfaces held (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`,
-    'dim',
   );
   if (g.gaveUp) {
     const why = g.lostBecause ? `: ${g.lostBecause}` : '';
@@ -140,8 +137,8 @@ $('btn-gpustats').addEventListener('click', async () => {
   } else if (g.softwareFrame) {
     log('rendering: the software-frame latch has tripped - the rasterizer has the frames until the device could draw them all.', 'err');
   }
-  if (g.unlatched) log(`rendering: the software-frame latch has let go ${g.unlatched} time(s).`, 'dim');
-  for (const why of g.reasons ?? []) log('  fell back: ' + why, 'dim');
+  if (g.unlatched) log(`rendering: the software-frame latch has let go ${g.unlatched} time(s).`);
+  for (const why of g.reasons ?? []) log('  fell back: ' + why);
   // Loud, and above the counters: a rejected draw is still counted as drawn,
   // so this is the only line that contradicts a clean-looking 100% device.
   if (errors) {
@@ -160,12 +157,11 @@ $('btn-gpustats').addEventListener('click', async () => {
     log(
       `  read from guest memory: ${mib(r.textures)} MiB textures, ${mib(r.vertex)} MiB vertices, `
       + `${mib(r.constants)} MiB constants, ${mib(r.index)} MiB indices`,
-      'dim',
     );
     const hits = g.textureHits ?? 0;
     const misses = g.textureMisses ?? 0;
     const rate = hits + misses ? ((hits * 100) / (hits + misses)).toFixed(1) : '0';
-    log(`  texture cache: ${hits} hits, ${misses} misses (${rate}%)`, 'dim');
+    log(`  texture cache: ${hits} hits, ${misses} misses (${rate}%)`);
   }
   const t = g.times;
   if (t) {
@@ -173,7 +169,6 @@ $('btn-gpustats').addEventListener('click', async () => {
       `  device time (${g.frames ?? 0} frames): translate ${t.translate}ms, upload ${t.upload}ms, `
       + `modules ${t.modules}ms, pipeline ${t.pipeline}ms, encode ${t.encode}ms, `
       + `flush ${t.flush}ms`,
-      'dim',
     );
     // Split out, because `flush` being most of the frame says nothing about
     // what to do next and these three each name a different fix. Per frame as
@@ -186,7 +181,6 @@ $('btn-gpustats').addEventListener('click', async () => {
         `    flush: ask ${t.flushAsk}ms (${per(t.flushAsk ?? 0)}/frame), `
         + `wait ${t.flushWait}ms (${per(t.flushWait ?? 0)}/frame), `
         + `land ${t.flushLand}ms (${per(t.flushLand)}/frame)`,
-        'dim',
       );
     }
   }
@@ -246,23 +240,23 @@ $('btn-dumptrace').addEventListener('click', async () => {
   const t = await drainTrace();
   openPanel('console');
   if (t) logTrace(t);
-  else log('(no trace)', 'dim');
+  else log('(no trace)');
 });
 
 $('btn-dumpregs').addEventListener('click', async () => {
   const s = await call('dump_regs');
   openPanel('console');
-  if (s) logBlock(s, 'dim');
+  if (s) logBlock(s);
 });
 
 $('btn-threads').addEventListener('click', async () => {
   const dump = await call('thread_dump');
   openPanel('console');
-  if (dump) logBlock(dump, 'dim');
-  else log('(no threads)', 'dim');
+  if (dump) logBlock(dump);
+  else log('(no threads)');
   const frames = await call('backtrace', 16);
   if (frames.length) {
-    log('  backtrace: ' + frames.map((pc) => '0x' + pc.toString(16)).join(' <- '), 'dim');
+    log('  backtrace: ' + frames.map((pc) => '0x' + pc.toString(16)).join(' <- '));
   }
 });
 
@@ -277,7 +271,6 @@ $('btn-wake').addEventListener('click', async () => {
       ? `Woke ${woken} blocked thread(s). A guest re-checks its predicate, so a wake it did not `
       + 'need degrades to a spin rather than to a wrong answer.'
       : 'No thread was blocked - this process is idle for some other reason.',
-    'dim',
   );
 });
 
@@ -288,7 +281,6 @@ $('btn-start-threads').addEventListener('click', async () => {
     started
       ? `Started ${started} thread(s) the guest created and never ran.`
       : 'Every thread the guest created has been started.',
-    'dim',
   );
 });
 
@@ -298,16 +290,16 @@ $('btn-gaps').addEventListener('click', async () => {
   const name = (g: { iface: string; cmd: number | null }) =>
     `${g.iface} cmd=${g.cmd === null ? '-' : g.cmd}`;
   if (!gaps.unimplemented.length && !gaps.stubbed.length) {
-    log('Nothing this title has asked for has been refused or stubbed.', 'dim');
+    log('Nothing this title has asked for has been refused or stubbed.');
     return;
   }
   if (gaps.unimplemented.length) {
     log(`Refused - no implementation behind them (${gaps.unimplemented.length}):`, 'warn');
-    for (const g of gaps.unimplemented) log('  ' + name(g), 'dim');
+    for (const g of gaps.unimplemented) log('  ' + name(g));
   }
   if (gaps.stubbed.length) {
     log(`Answered with nothing behind the answer (${gaps.stubbed.length}):`, 'warn');
-    for (const g of gaps.stubbed) log('  ' + name(g), 'dim');
+    for (const g of gaps.stubbed) log('  ' + name(g));
   }
 });
 

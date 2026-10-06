@@ -251,9 +251,9 @@ window.addEventListener('gamepadconnected', (e) => {
   const layout = pad.mapping === 'standard'
     ? 'standard layout'
     : 'no standard layout, so its buttons may be mismatched';
-  log(`[input] controller connected: ${padName(pad)} (${layout})`, pad.mapping === 'standard' ? 'dim' : 'warn');
+  log(`[input] controller connected: ${padName(pad)} (${layout})`, pad.mapping === 'standard' ? undefined : 'warn');
 });
 window.addEventListener('gamepaddisconnected', (e) => {
   inputStatus('none');
-  log(`[input] controller disconnected: ${padName(e.gamepad)}`, 'dim');
+  log(`[input] controller disconnected: ${padName(e.gamepad)}`);
 });
