@@ -45,6 +45,7 @@ jobs:
         run: make test
 
   build:
+    needs: [test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -93,25 +94,8 @@ jobs:
         env:
           CI: "true"
 
-      - name: Save site for deployment
-        if: forgejo.ref == 'refs/heads/master' && forgejo.event_name != 'pull_request'
-        uses: actions/upload-artifact@v3
-        with:
-          name: site
-          path: dist/
-
-  deploy:
-    needs: [build, test]
-    if: forgejo.ref == 'refs/heads/master' && forgejo.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Restore built site
-        uses: actions/download-artifact@v3
-        with:
-          name: site
-          path: dist/
-
       - name: Deploy to Pages
+        if: forgejo.ref == 'refs/heads/master' && forgejo.event_name != 'pull_request'
         uses: actions/git-pages@v2
         with:
           site: https://tenshii.moe/Switch-Wasm/
