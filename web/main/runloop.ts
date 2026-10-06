@@ -21,15 +21,14 @@ import { holdWakeLock, releaseWakeLock } from './wakelock';
 // between them. There is no overall step budget - hbmenu never halts - so the
 // loop is driven by the pause flag and by faults.
 //
-// The slice length *is* the input sampling period: the worker is single
-// threaded, so a `set_input` posted mid-slice sits in its queue until
-// `switch_run` returns. At the ~23M steps/s the wasm build manages, the old
-// 5,000,000 was a 240ms slice, and every keypress waited that long before the
-// guest could possibly see it. Slice size costs the interpreter nothing
-// (`Cpu::run` is a bare loop with no per-call setup - measured flat from 100k
-// to 5M steps), only the round trips below, so this buys ~5x lower input
-// latency for ~6% of throughput.
-const RUN_SLICE = 1_000_000;
+// A slice's length is the input sampling period, since input reaches the worker
+// only between slices, and each slice costs a round trip to the worker. So the
+// instruction budget follows the emulator's speed to keep a slice near one
+// display frame.
+const SLICE_TARGET_MS = 16;
+const FIRST_SLICE = 1_000_000;
+const MIN_SLICE = 100_000;
+const MAX_SLICE = 50_000_000;
 // Slices between panel refreshes. `updatePc`/`drainOutput`/`drainDiagnostics`/
 // `sdFlush` are eight postMessage round trips of debug-panel text that nothing
 // time-critical reads, so running them once per slice would spend more of the
@@ -79,7 +78,8 @@ export async function run(): Promise<void> {
   // A guest that runs for minutes without a keypress is a page the browser
   // would otherwise let the screen sleep on.
   holdWakeLock();
-  const slice = traceEnabled() ? TRACE_SLICE : RUN_SLICE;
+  const tracing = traceEnabled();
+  let slice = tracing ? TRACE_SLICE : FIRST_SLICE;
   let steps: number;
   let tick = 0;
   try {
@@ -100,6 +100,10 @@ export async function run(): Promise<void> {
       // `Cpu::run` only stops short of its budget when the machine halted, so
       // a short slice means this run is over - no separate `halted` round trip.
       const done = steps < 0 || steps < slice;
+      if (!tracing) {
+        const scale = Math.min(2, Math.max(0.5, SLICE_TARGET_MS / Math.max(sliceMs, 0.1)));
+        slice = Math.min(MAX_SLICE, Math.max(MIN_SLICE, Math.round(slice * scale)));
+      }
       // Audio has to track the guest or the stream gaps; the panel does not.
       await pumpAudio();
       if (done || ++tick % HOUSEKEEPING_EVERY === 0) {
