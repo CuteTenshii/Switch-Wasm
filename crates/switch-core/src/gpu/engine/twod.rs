@@ -7,7 +7,8 @@
 
 use crate::gpu::engine::Registers;
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::surface::{ColorFormat, Layout, Surface};
+use crate::gpu::surface::{blend, taps, ColorFormat, Layout, Surface};
+use crate::mem::Memory;
 use crate::{Error, Result};
 
 const SET_DST_FORMAT: u32 = 0x080;
@@ -269,8 +270,7 @@ impl Engine2D {
                 // copy reads what it has already written, so overlapping
                 // surfaces keep going a row at a time. The hardware does not
                 // promise an order either.
-                let disjoint = u64::from(src_base) + u64::from(src.size()) <= u64::from(dst_base)
-                    || u64::from(dst_base) + u64::from(dst.size()) <= u64::from(src_base);
+                let disjoint = disjoint((&src, src_base), (&dst, dst_base));
                 if disjoint
                     && self.blit_staged(ctx, (&src, src_base), (&dst, dst_base), &rows, &columns)?
                 {
@@ -298,6 +298,25 @@ impl Engine2D {
                 }
                 ctx.stats.copies += 1;
                 return Ok(());
+            }
+        }
+
+        let inside = u64::from(dst_x0) + u64::from(dst_w) <= u64::from(dst.width)
+            && u64::from(dst_y0) + u64::from(dst_h) <= u64::from(dst.height);
+        if filtered && inside {
+            if let (Some(src_base), Some(dst_base)) = (mapped(&src, ctx), mapped(&dst, ctx)) {
+                if disjoint((&src, src_base), (&dst, dst_base)) {
+                    blit_filtered(
+                        ctx,
+                        (&src, src_base),
+                        (&dst, dst_base),
+                        (dst_x0, dst_y0, dst_w, dst_h),
+                        (src_x0, src_y0),
+                        (du_dx, dv_dy),
+                    )?;
+                    ctx.stats.copies += 1;
+                    return Ok(());
+                }
             }
         }
 
@@ -525,6 +544,73 @@ fn scatter<const N: usize>(
     }
 }
 
+/// The per-texel loop's filtered blit, decoding each source row once instead
+/// of four texels per destination pixel. The surfaces must be disjoint and
+/// each in one mapping, and the destination rectangle inside its surface.
+fn blit_filtered(
+    ctx: &mut ExecCtx,
+    (src, src_base): (&Surface, u32),
+    (dst, dst_base): (&Surface, u32),
+    (dst_x0, dst_y0, dst_w, dst_h): (u32, u32, u32, u32),
+    (src_x0, src_y0): (f64, f64),
+    (du_dx, dv_dy): (f64, f64),
+) -> Result<()> {
+    let last_x = src.width.saturating_sub(1);
+    let last_y = src.height.saturating_sub(1);
+    let columns: Vec<(u32, u32, f32)> = (0..dst_w)
+        .map(|x| {
+            let (x0, fx) = taps(src_x0 + du_dx * x as f64);
+            (x0.min(last_x), x0.saturating_add(1).min(last_x), fx)
+        })
+        .collect();
+    let Some(lo) = columns.iter().map(|c| c.0).min() else {
+        return Ok(());
+    };
+    let hi = columns.iter().map(|c| c.1).max().unwrap_or(lo);
+    let (src_bpp, dst_bpp) = (src.format.bytes_per_pixel, dst.format.bytes_per_pixel);
+    let (src_width, dst_width) = (src.width_bytes(), dst.width_bytes());
+    let (source, target) = (src.format.codec(), dst.format.codec());
+    let decode_row = |mem: &Memory, y: u32, row: &mut Vec<[f32; 4]>| -> Result<()> {
+        row.clear();
+        let at = src_base.wrapping_add(src.layout.row_offset(y, src_width));
+        for x in lo..=hi {
+            let texel = at.wrapping_add(src.layout.column_offset(x * src_bpp));
+            row.push(source.decode(mem.read_le(texel, src_bpp)?)?);
+        }
+        Ok(())
+    };
+    // The two source rows the destination row being written blends.
+    let mut rows: [(Option<u32>, Vec<[f32; 4]>); 2] = Default::default();
+    for y in 0..dst_h {
+        let (y0, fy) = taps(src_y0 + dv_dy * y as f64);
+        let (top, bottom) = (y0.min(last_y), y0.saturating_add(1).min(last_y));
+        for want in [top, bottom] {
+            if rows.iter().all(|(held, _)| *held != Some(want)) {
+                let keep = rows[0].0 == Some(top) || rows[0].0 == Some(bottom);
+                let slot = usize::from(keep);
+                decode_row(ctx.mem, want, &mut rows[slot].1)?;
+                rows[slot].0 = Some(want);
+            }
+        }
+        let upper = &rows[usize::from(rows[1].0 == Some(top))].1;
+        let lower = &rows[usize::from(rows[1].0 == Some(bottom))].1;
+        let at = dst_base.wrapping_add(dst.layout.row_offset(dst_y0 + y, dst_width));
+        for (x, &(a, b, fx)) in (dst_x0..).zip(&columns) {
+            let (a, b) = ((a - lo) as usize, (b - lo) as usize);
+            let color = blend(upper[a], upper[b], lower[a], lower[b], fx, fy);
+            let to = at.wrapping_add(dst.layout.column_offset(x * dst_bpp));
+            ctx.mem.write_le(to, dst_bpp, target.encode(color)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether two surfaces, at the guest addresses given, share no byte.
+fn disjoint((a, a_base): (&Surface, u32), (b, b_base): (&Surface, u32)) -> bool {
+    u64::from(a_base) + u64::from(a.size()) <= u64::from(b_base)
+        || u64::from(b_base) + u64::from(b.size()) <= u64::from(a_base)
+}
+
 /// Recombine the 32.32 fixed-point pairs the engine takes.
 fn fixed(int_part: u32, frac: u32) -> f64 {
     int_part as i32 as f64 + frac as f64 / 4_294_967_296.0
@@ -686,6 +772,114 @@ mod tests {
         let (staged, walked) = (resolve(false), resolve(true));
         let differs = staged.iter().zip(&walked).position(|(a, b)| a != b);
         assert_eq!(differs, None, "first differing byte, from {SRC:#x}");
+    }
+
+    /// A filtered blit gives what sampling each destination pixel on its own
+    /// gives, for a 2:1 resolve and for fractional steps that clamp at the
+    /// source's edges.
+    #[test]
+    fn a_filtered_blit_matches_per_pixel_sampling() {
+        const SRC: u32 = 0x3000_0000;
+        const DST: u32 = 0x3004_0000;
+        const BLOCK_16_GOBS: u32 = 4 << 4;
+        let fixed_pair = |v: f64| {
+            (
+                v.floor() as i32 as u32,
+                (v.fract() * 4_294_967_296.0) as u32,
+            )
+        };
+        for (step, origin, (w, h)) in [
+            ((2.0, 1.0), (0.5, 0.0), (37, 45)),
+            ((1.5, 0.75), (0.25, 0.1), (60, 70)),
+        ] {
+            let mut mem = Memory::new();
+            mem.map_zero(SRC, 0x8_0000).unwrap();
+            for i in 0..0x4_0000 / 4 {
+                mem.write_u32(SRC + i * 4, i.wrapping_mul(0x9E37_79B9))
+                    .unwrap();
+            }
+            let mut vmm = AddressSpace::new();
+            let base = vmm.map(SRC, 0x8_0000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+            let mut host1x = Host1x::new();
+            let mut stats = GpuStats::default();
+            let mut engine = Engine2D::new();
+            for (format, layout, block, width, height, offset, sw, sh, at) in [
+                (
+                    SET_SRC_FORMAT,
+                    SET_SRC_MEMORY_LAYOUT,
+                    SET_SRC_BLOCK_SIZE,
+                    SET_SRC_WIDTH,
+                    SET_SRC_HEIGHT,
+                    SET_SRC_OFFSET,
+                    74,
+                    90,
+                    base,
+                ),
+                (
+                    SET_DST_FORMAT,
+                    SET_DST_MEMORY_LAYOUT,
+                    SET_DST_BLOCK_SIZE,
+                    SET_DST_WIDTH,
+                    SET_DST_HEIGHT,
+                    SET_DST_OFFSET,
+                    w,
+                    h,
+                    base + u64::from(DST - SRC),
+                ),
+            ] {
+                engine.regs.set(format, 0xD5);
+                engine.regs.set(layout, 0);
+                engine.regs.set(block, BLOCK_16_GOBS);
+                engine.regs.set(width, sw);
+                engine.regs.set(height, sh);
+                set_iova(&mut engine, offset, at);
+            }
+            engine.regs.set(SET_OPERATION, OPERATION_SRC_COPY);
+            engine.regs.set(SAMPLE_MODE, FILTER_BILINEAR << 4);
+            engine.regs.set(DST_WIDTH, w);
+            engine.regs.set(DST_HEIGHT, h);
+            for (int_reg, frac_reg, value) in [
+                (DU_DX_INT, DU_DX_FRAC, step.0),
+                (DV_DY_INT, DV_DY_FRAC, step.1),
+                (SRC_X0_INT, SRC_X0_FRAC, origin.0),
+            ] {
+                let (int_part, frac) = fixed_pair(value);
+                engine.regs.set(int_reg, int_part);
+                engine.regs.set(frac_reg, frac);
+            }
+            let (y0_int, y0_frac) = fixed_pair(origin.1);
+            engine.regs.set(SRC_Y0_FRAC, y0_frac);
+            let (src, dst) = (
+                engine.surface(false).unwrap(),
+                engine.surface(true).unwrap(),
+            );
+            let mut ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
+            engine.write(SRC_Y0_INT, y0_int, &mut ctx).unwrap();
+            let as_engine = |v: f64| {
+                let (int_part, frac) = fixed_pair(v);
+                fixed(int_part, frac)
+            };
+            for y in 0..h {
+                for x in 0..w {
+                    let u = as_engine(origin.0) + as_engine(step.0) * x as f64;
+                    let v = as_engine(origin.1) + as_engine(step.1) * y as f64;
+                    let want = dst
+                        .format
+                        .encode(src.sample_bilinear(u, v, &ctx).unwrap())
+                        .unwrap();
+                    let got = ctx
+                        .read_pixel(dst.addr + dst.offset(x, y) as u64, 4)
+                        .unwrap();
+                    assert_eq!(got, want, "pixel ({x}, {y}) of a {step:?} step");
+                }
+            }
+        }
     }
 
     /// A copy that reuses the texels it gathered last time has to notice

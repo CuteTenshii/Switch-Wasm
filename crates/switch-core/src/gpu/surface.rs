@@ -638,17 +638,7 @@ impl ColorFormat {
         // The general path below computes the same word, but the rasterizer
         // stores one of these per covered pixel.
         if let Some(order) = self.order8() {
-            let unorm8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-            let (r, g, b) = (unorm8(rgba[0]), unorm8(rgba[1]), unorm8(rgba[2]));
-            let a = if self.has_alpha() {
-                unorm8(rgba[3])
-            } else {
-                0xFF
-            };
-            return Ok(match order {
-                Order8::Rgba => (r | (g << 8) | (b << 16) | (a << 24)) as u128,
-                Order8::Bgra => (b | (g << 8) | (r << 16) | (a << 24)) as u128,
-            });
+            return Ok(encode_order8(order, self.has_alpha(), rgba));
         }
         let mut stored = 0u128;
         for (i, channel) in packing.channels.iter().enumerate() {
@@ -771,14 +761,7 @@ impl ColorFormat {
         })?;
         // The mirror of `encode_stored`'s shuffle, for the same reason.
         if let Some(order) = self.order8() {
-            let unorm8 = |v: u32| UNORM8[(v & 0xFF) as usize];
-            let v = raw as u32;
-            let (c0, c1, c2, c3) = (v, v >> 8, v >> 16, v >> 24);
-            let a = if self.has_alpha() { unorm8(c3) } else { 1.0 };
-            return Ok(match order {
-                Order8::Rgba => [unorm8(c0), unorm8(c1), unorm8(c2), a],
-                Order8::Bgra => [unorm8(c2), unorm8(c1), unorm8(c0), a],
-            });
+            return Ok(decode_order8(order, self.has_alpha(), raw));
         }
         let mut rgba = [0.0f32; 4];
         for (i, out) in rgba.iter_mut().enumerate() {
@@ -788,6 +771,67 @@ impl ColorFormat {
             rgba[3] = 1.0;
         }
         Ok(rgba)
+    }
+}
+
+impl ColorFormat {
+    /// This format's conversions with its layout looked up once, for a caller
+    /// converting many texels.
+    pub fn codec(&self) -> Codec {
+        let plain8 = match self.is_srgb() {
+            true => None,
+            false => self.order8().map(|order| (order, self.has_alpha())),
+        };
+        Codec {
+            format: *self,
+            plain8,
+        }
+    }
+}
+
+/// [`ColorFormat::decode`] and [`ColorFormat::encode`] for one format.
+#[derive(Debug, Clone, Copy)]
+pub struct Codec {
+    format: ColorFormat,
+    /// The channel order and whether alpha is stored, for a linear 8-bit
+    /// UNORM format, which converts with no further lookups.
+    plain8: Option<(Order8, bool)>,
+}
+
+impl Codec {
+    pub fn decode(&self, raw: u128) -> Result<[f32; 4]> {
+        match self.plain8 {
+            Some((order, alpha)) => Ok(decode_order8(order, alpha, raw)),
+            None => self.format.decode(raw),
+        }
+    }
+
+    pub fn encode(&self, rgba: [f32; 4]) -> Result<u128> {
+        match self.plain8 {
+            Some((order, alpha)) => Ok(encode_order8(order, alpha, rgba)),
+            None => self.format.encode(rgba),
+        }
+    }
+}
+
+fn decode_order8(order: Order8, alpha: bool, raw: u128) -> [f32; 4] {
+    let unorm8 = |v: u32| UNORM8[(v & 0xFF) as usize];
+    let v = raw as u32;
+    let (c0, c1, c2, c3) = (v, v >> 8, v >> 16, v >> 24);
+    let a = if alpha { unorm8(c3) } else { 1.0 };
+    match order {
+        Order8::Rgba => [unorm8(c0), unorm8(c1), unorm8(c2), a],
+        Order8::Bgra => [unorm8(c2), unorm8(c1), unorm8(c0), a],
+    }
+}
+
+fn encode_order8(order: Order8, alpha: bool, rgba: [f32; 4]) -> u128 {
+    let unorm8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    let (r, g, b) = (unorm8(rgba[0]), unorm8(rgba[1]), unorm8(rgba[2]));
+    let a = if alpha { unorm8(rgba[3]) } else { 0xFF };
+    match order {
+        Order8::Rgba => (r | (g << 8) | (b << 16) | (a << 24)) as u128,
+        Order8::Bgra => (b | (g << 8) | (r << 16) | (a << 24)) as u128,
     }
 }
 
@@ -1090,28 +1134,69 @@ pub fn bilinear(
     v: f64,
     mut texel: impl FnMut(u32, u32) -> Result<[f32; 4]>,
 ) -> Result<[f32; 4]> {
-    let u = (u - 0.5).max(0.0);
-    let v = (v - 0.5).max(0.0);
-    let x0 = u as u32;
-    let y0 = v as u32;
-    let fx = (u - x0 as f64) as f32;
-    let fy = (v - y0 as f64) as f32;
+    let (x0, fx) = taps(u);
+    let (y0, fy) = taps(v);
     let c00 = texel(x0, y0)?;
     let c10 = texel(x0 + 1, y0)?;
     let c01 = texel(x0, y0 + 1)?;
     let c11 = texel(x0 + 1, y0 + 1)?;
+    Ok(blend(c00, c10, c01, c11, fx, fy))
+}
+
+/// The first of the two texels a bilinear filter reads along one axis at
+/// coordinate `c`, and the weight of the second.
+#[inline]
+pub fn taps(c: f64) -> (u32, f32) {
+    let c = (c - 0.5).max(0.0);
+    let first = c as u32;
+    (first, (c - first as f64) as f32)
+}
+
+/// Four bilinear taps blended by the weights [`taps`] gives.
+#[inline]
+pub fn blend(
+    c00: [f32; 4],
+    c10: [f32; 4],
+    c01: [f32; 4],
+    c11: [f32; 4],
+    fx: f32,
+    fy: f32,
+) -> [f32; 4] {
     let mut out = [0.0f32; 4];
     for i in 0..4 {
         let top = c00[i] + (c10[i] - c00[i]) * fx;
         let bottom = c01[i] + (c11[i] - c01[i]) * fx;
         out[i] = top + (bottom - top) * fy;
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_codec_converts_as_its_format_does() {
+        // RGBA8, BGRA8, sRGB RGBA8, BGRX8 and B5G6R5.
+        for raw in [0xD5, 0xCF, 0xD6, 0xE6, 0xE8] {
+            let format = ColorFormat::from_raw(raw).unwrap();
+            let codec = format.codec();
+            for word in [0u128, 0x8040_20FF, 0xFFFF_FFFF, 0x1234_5678] {
+                assert_eq!(
+                    codec.decode(word).unwrap(),
+                    format.decode(word).unwrap(),
+                    "{raw:#x}"
+                );
+            }
+            for rgba in [[0.0, 0.5, 1.0, 0.25], [0.2, 0.7, -1.0, 2.0]] {
+                assert_eq!(
+                    codec.encode(rgba).unwrap(),
+                    format.encode(rgba).unwrap(),
+                    "{raw:#x}"
+                );
+            }
+        }
+    }
 
     /// Pack a `MultisampleSampleLocations` register table the way the four
     /// registers hold it: one byte per sample, low byte first.
