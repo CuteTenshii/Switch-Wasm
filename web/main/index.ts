@@ -10,7 +10,7 @@ import { watchBattery } from './battery';
 import { initFbSize, resetDisplay } from './display';
 import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
-import { clearConsole, log, offerPreviousLog } from './log';
+import { clearConsole, log, logLevel, offerPreviousLog, onLogLevel } from './log';
 import { initNand } from './nand';
 import { call, initWorker, setSession, whenReady } from './rpc';
 import { updatePc } from './runloop';
@@ -28,6 +28,10 @@ import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
 import './boot';
 import './dock';
 import './input';
+
+// Every diagnostic channel's line is debug output, so the channels record only
+// when the console would show them.
+onLogLevel((level) => void call('set_trace_channels', level === 'debug'));
 
 // Bringing the core up is the page's own load, and every step of it is
 // something that can take a visible moment on a cold cache or a full SD card.
@@ -49,13 +53,14 @@ async function init(): Promise<void> {
       loadProfiles().then(stageUsers),
       initFbSize(),
       offerPreviousLog(),
+      call('set_trace_channels', logLevel() === 'debug'),
       hasKeys() ? stageKeys() : undefined,
     ]);
     // The build, named on the status bar and in the log. A report that does
     // not say which code produced it can only be read by guessing at its age,
     // and this is the line somebody copies without being asked to.
     $('wasm-ver').textContent = 'core ' + version;
-    log('core ready - build ' + version, 'dim');
+    log('core ready - build ' + version, 'ok');
     updateKeysState();
     // And then the NAND, which needs those keys to parse a header. Only its
     // index is waited for here; the archives it holds register behind the

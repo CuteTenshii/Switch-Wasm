@@ -125,6 +125,9 @@ export const CMD: CommandHandlers = {
     api().switch_set_trace(handle(), on ? 1 : 0);
     return 0;
   },
+  set_trace_channels(on) {
+    api().switch_set_trace_channels(on ? 1 : 0);
+  },
   set_jit(on) {
     api().switch_set_jit(handle(), on ? 1 : 0);
     return 0;

@@ -208,14 +208,6 @@ fn seed() -> u32 {
             mask |= channel.bit();
         }
     }
-    // Browser runs have no environment variables to enable tracing. Start all
-    // channels so their diagnostic records are available without UI switches.
-    #[cfg(target_arch = "wasm32")]
-    {
-        mask |= ALL
-            .iter()
-            .fold(0, |enabled, channel| enabled | channel.bit());
-    }
     MASK.store(mask, Ordering::Relaxed);
     mask
 }
@@ -228,6 +220,13 @@ pub fn mask() -> u32 {
         return seed();
     }
     mask
+}
+
+/// Turn every channel on or off. The browser has no environment to seed the
+/// mask from, so its log level decides instead.
+pub fn set_all(on: bool) {
+    let all = ALL.iter().fold(0, |mask, channel| mask | channel.bit());
+    MASK.store(if on { all } else { 0 }, Ordering::Relaxed);
 }
 
 /// Whether `what` is on.

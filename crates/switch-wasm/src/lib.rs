@@ -2180,6 +2180,13 @@ pub extern "C" fn switch_start_created_threads(handle: u32) -> u32 {
     session(handle).cpu.start_created_threads() as u32
 }
 
+/// Turn every diagnostic channel on (nonzero) or off. The page's log level
+/// decides: channel lines are debug output.
+#[no_mangle]
+pub extern "C" fn switch_set_trace_channels(on: u32) {
+    switch_core::trace::set_all(on != 0);
+}
+
 /// What this build is, so a report can be read against the code that produced
 /// it.
 #[no_mangle]
@@ -3219,6 +3226,18 @@ mod tests {
             );
         }
         assert_eq!(floor_char_boundary(msg, msg.len() + 10), msg.len());
+    }
+
+    #[test]
+    fn the_page_turns_every_trace_channel_on_and_off() {
+        let _host = HOST.lock().unwrap_or_else(|e| e.into_inner());
+        switch_set_trace_channels(1);
+        let all_on = switch_core::trace::ALL
+            .iter()
+            .all(|&channel| switch_core::trace::enabled(channel));
+        switch_set_trace_channels(0);
+        assert!(all_on);
+        assert_eq!(switch_core::trace::mask(), 0);
     }
 
     #[test]

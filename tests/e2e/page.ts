@@ -1,7 +1,7 @@
 import { test as base, expect, type Page } from '@playwright/test';
 
-/** Playwright's `test`, failing any test the page threw or logged an error
- *  during, at whatever point it happened. */
+/** Playwright's `test`, failing any test the page threw during or that left
+ *  an error in the page's console. */
 export const test = base.extend<{ pageErrors: string[] }>({
   pageErrors: [async ({ page }, use) => {
     const errors: string[] = [];
@@ -10,7 +10,8 @@ export const test = base.extend<{ pageErrors: string[] }>({
       if (m.type() === 'error') errors.push(m.text());
     });
     await use(errors);
-    expect(errors).toEqual([]);
+    const logged = await page.locator('#console .err').allTextContents();
+    expect([...errors, ...logged]).toEqual([]);
   }, { auto: true }],
 });
 

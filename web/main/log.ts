@@ -1,5 +1,5 @@
-/* The on-page console: everything the emulator has to say, mirrored into
-   DevTools so it can be filtered by severity there too. */
+/* The on-page console: everything the emulator has to say, shown down to the
+   chosen level. */
 
 import { $, el } from './dom';
 import type { LogClass } from '../shared/protocol';
@@ -11,7 +11,54 @@ export type { LogClass } from '../shared/protocol';
 
 const consoleEl = $('console');
 const autoscrollCb = $<HTMLInputElement>('autoscroll-cb');
-const TAG = '[switch-wasm]';
+const levelSelect = $<HTMLSelectElement>('log-level');
+
+export type LogLevel = 'error' | 'warn' | 'log' | 'debug';
+
+const LEVELS: LogLevel[] = ['error', 'warn', 'log', 'debug'];
+const LEVEL_KEY = 'switch-wasm-log-level';
+
+function levelOf(cls?: LogClass): LogLevel {
+  if (cls === 'err') return 'error';
+  if (cls === 'warn') return 'warn';
+  if (cls === 'dim') return 'debug';
+  return 'log';
+}
+
+function storedLevel(): LogLevel {
+  try {
+    const stored = localStorage.getItem(LEVEL_KEY) as LogLevel | null;
+    return stored && LEVELS.includes(stored) ? stored : 'log';
+  } catch {
+    return 'log';
+  }
+}
+
+let level = storedLevel();
+levelSelect.value = level;
+
+function shown(cls?: LogClass): boolean {
+  return LEVELS.indexOf(levelOf(cls)) <= LEVELS.indexOf(level);
+}
+
+export function logLevel(): LogLevel {
+  return level;
+}
+
+const levelListeners: ((level: LogLevel) => void)[] = [];
+
+export function onLogLevel(listener: (level: LogLevel) => void): void {
+  levelListeners.push(listener);
+}
+
+levelSelect.addEventListener('change', () => {
+  level = levelSelect.value as LogLevel;
+  try {
+    localStorage.setItem(LEVEL_KEY, level);
+  } catch { /* the choice still holds for this session */ }
+  renderConsole();
+  for (const listener of levelListeners) listener(level);
+});
 
 /** How many entries the console keeps on the page.
  *
@@ -49,22 +96,17 @@ const backlog: Entry[] = [];
 let lastRow: HTMLElement | null = null;
 
 export function log(msg: string, cls?: LogClass): void {
-  // Real browser console (DevTools): route by severity for filterability.
-  // A repeat goes through here too -- DevTools keeps a count of its own, and
-  // dropping repeats would leave its copy of the log disagreeing with this one
-  // about what happened.
-  if (cls === 'err') console.error(TAG, msg);
-  else if (cls === 'warn') console.warn(TAG, msg);
-  else if (cls === 'ok') console.info(TAG, msg);
-  else if (cls === 'dim') console.debug(TAG, msg);
-  else console.log(TAG, msg);
-
   mirrorDirty = true;
+  const visible = shown(cls);
 
   // `isConnected` rather than a null check: a row the view has evicted is
   // still referenced here, and counting into a detached element would swallow
   // the repeat instead of showing it.
   const last = backlog[backlog.length - 1];
+  if (last && last.text === msg && last.cls === cls && !visible) {
+    last.count += 1;
+    return;
+  }
   if (last && last.text === msg && last.cls === cls && lastRow?.isConnected) {
     last.count += 1;
     lastRow.dataset.repeat = String(last.count);
@@ -77,14 +119,34 @@ export function log(msg: string, cls?: LogClass): void {
 
   backlog.push({ text: msg, cls, count: 1 });
   if (backlog.length > KEPT_MAX) backlog.splice(0, backlog.length - KEPT_MAX);
+  if (!visible) return;
 
-  // On-page console mirror.
-  lastRow = el('div', cls, msg);
+  lastRow = row({ text: msg, cls, count: 1 });
   consoleEl.appendChild(lastRow);
   while (consoleEl.childElementCount > SHOWN_MAX) consoleEl.firstElementChild!.remove();
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
   // Anything that went wrong is worth surfacing even with the panel closed.
   if (cls === 'err') openPanel('console');
+}
+
+function row(entry: Entry): HTMLElement {
+  const line = el('div', entry.cls, entry.text);
+  if (entry.count > 1) line.dataset.repeat = String(entry.count);
+  return line;
+}
+
+/** Rebuild the view from the backlog at the current level. */
+function renderConsole(): void {
+  const rows: HTMLElement[] = [];
+  lastRow = null;
+  for (let i = backlog.length - 1; i >= 0 && rows.length < SHOWN_MAX; i--) {
+    if (!shown(backlog[i].cls)) continue;
+    const line = row(backlog[i]);
+    if (i === backlog.length - 1) lastRow = line;
+    rows.push(line);
+  }
+  consoleEl.replaceChildren(...rows.reverse());
+  if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
 /** How many paths a line about stored changes names before it summarises. */

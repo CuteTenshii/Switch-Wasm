@@ -54,8 +54,10 @@ The `.nro`/`.nsp` files are gitignored.
   only the i-th draw on the device, so a difference is exactly one draw's.
 - Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`,
   `TRACE_NV`, `TRACE_GPU`, ...). The environment seeds it, so a CLI run sets
-  them exactly as it always did. `std::env::var` always fails on wasm, so a
-  browser build starts with every channel in `switch_core::trace::ALL` on.
+  them exactly as it always did. `std::env::var` always fails on wasm, so in
+  the browser the console's log level decides: **Debug** turns every channel
+  in `switch_core::trace::ALL` on, any other level turns them off. Debug is
+  slow on a busy title; leave it on Log unless a channel is needed.
 - **The browser display path** is under **Debug > Graphics > Display**. Guest
   frames and canvas updates say whether the page is dropping intermediate
   frames; merged requests say how often several run slices shared one browser

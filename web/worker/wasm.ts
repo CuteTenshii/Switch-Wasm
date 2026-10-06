@@ -53,6 +53,7 @@ export interface WasmExports {
 
   switch_set_trace(handle: number, enabled: number): void;
   switch_set_jit(handle: number, enabled: number): void;
+  switch_set_trace_channels(on: number): void;
   switch_jit_stats_json(handle: number, buf: number, maxlen: number): number;
   switch_gpu_report_json(handle: number, buf: number, maxlen: number): number;
   switch_gpu_lost(handle: number): number;

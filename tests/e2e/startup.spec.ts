@@ -47,7 +47,7 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   expect(panelOverflows).toBe(false);
 });
 
-test('the guest crash screen exposes recovery paths', async ({ page, pageErrors }) => {
+test('the guest crash screen exposes recovery paths', async ({ page }) => {
   await openPage(page);
 
   const crash = page.locator('#crash');
@@ -63,9 +63,11 @@ test('the guest crash screen exposes recovery paths', async ({ page, pageErrors 
   );
   await expect(crash.getByRole('button', { name: 'Save crash report' })).toBeVisible();
 
-  // The fault report is logged as console errors on purpose; anything else still fails.
-  expect(pageErrors).toContain('[switch-wasm] Fault: CPU: read from unmapped address 0xfff00000');
-  pageErrors.splice(0, pageErrors.length, ...pageErrors.filter((e) => !e.startsWith('[switch-wasm] ')));
+  // The fault report is logged as errors on purpose; the fixture fails on any
+  // left in the console, so it is cleared once checked.
+  await expect(page.locator('#console .err', {
+    hasText: 'Fault: CPU: read from unmapped address 0xfff00000',
+  })).toHaveCount(1);
 
   await crash.getByRole('button', { name: 'Open console' }).click();
   await expect(page.locator('body')).toHaveClass(/panel-open/);
@@ -78,4 +80,22 @@ test('the guest crash screen exposes recovery paths', async ({ page, pageErrors 
   expect(actionHeights.every((height) => height >= 44)).toBe(true);
   const overflows = await crash.evaluate((element) => element.scrollWidth > element.clientWidth);
   expect(overflows).toBe(false);
+  await page.evaluate(() => document.getElementById('btn-clear-console')!.click());
+});
+
+test('debug lines show only at the debug level', async ({ page }) => {
+  await openPage(page);
+  const line = page.locator('#console div', { hasText: 'Block translation disabled' });
+
+  await page.locator('#btn-panel').click();
+  await page.getByRole('tab', { name: 'Debug' }).click();
+  await page.locator('#jit-cb').uncheck();
+  await page.getByRole('tab', { name: 'Console' }).click();
+  await expect(page.locator('#log-level')).toHaveValue('log');
+  await expect(line).toHaveCount(0);
+
+  await page.locator('#log-level').selectOption('debug');
+  await expect(line).toHaveCount(1);
+  await page.locator('#log-level').selectOption('log');
+  await expect(line).toHaveCount(0);
 });

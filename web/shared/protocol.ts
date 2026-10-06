@@ -247,6 +247,7 @@ export interface Commands {
 
   set_trace(on: number): number;
   set_jit(on: number): number;
+  set_trace_channels(on: boolean): void;
   set_input(mask: number, slx: number, sly: number, srx: number, sry: number): number;
   set_touch(points: Uint32Array): number;
   set_battery(percent: number, charging: number): number;
