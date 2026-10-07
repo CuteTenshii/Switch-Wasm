@@ -447,9 +447,12 @@ code, rather than returning to the interpreter between every one.
    different address sequence. Booted without its update the title deadlocks for
    real at 765M steps; patched with 1.0.1 it presents 76 frames and dies
    elsewhere.
-4. **NX-Shell regressed** to 433,783 steps with no output, from a recorded clean
-   `ExitProcess` at 15,692,155 steps *with* output. The cheapest bisect here:
-   the `.nro` is in `test-nros/`.
+4. **NX-Shell faults in Dear ImGui's font index.** It used to exit at 433,783
+   steps: `sm:` answered Atmosphère's `HasService("fsp-usb")` with an empty
+   success, which read as present. Refused now, it runs to 224M steps, where
+   `ImFont::GrowIndex` asks for 0x40000000 entries, `malloc` returns NULL, and
+   the -1.0 fill writes from address 0 up to the read-only `0x08000000`. The bad
+   size is upstream, most likely a codepoint from the `pl:u` font data.
 5. **Check Checkpoint's text.** `SHFL`/`FSWZADD` and the quad are implemented and
    tested but the title has never been run against them; its `.nro` is not in the
    tree.

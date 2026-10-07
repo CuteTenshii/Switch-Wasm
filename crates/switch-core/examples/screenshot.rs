@@ -1,7 +1,8 @@
 //! Boot an NRO and write the Nth presented frame to a PPM:
-//! `screenshot <path.nro> <out.ppm> [frame] [font.ttf]`.
+//! `screenshot <path.nro> <out.ppm> [frame] [font.ttf]`. Takes the [`common::Debug`] knobs.
 mod common;
 
+use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
 
 fn main() {
@@ -24,10 +25,24 @@ fn main() {
     }
     cpu.boot_homebrew(&data).expect("boot");
 
-    let run = common::run_to(&mut cpu, common::env_u64("STEPS", 200_000_000), |cpu| {
-        cpu.nv.gpu.frames >= want
+    let mut debug = common::Debug::from_env();
+    debug.arm(&mut cpu);
+    let pace = if debug.stepwise() {
+        Pace::Instructions
+    } else {
+        Pace::Blocks
+    };
+    let budget = common::env_u64("STEPS", 200_000_000);
+    let run = common::drive(&mut cpu, pace, budget, |cpu, done| {
+        if cpu.nv.gpu.frames >= want {
+            return Flow::Stop;
+        }
+        debug.tick(cpu, done);
+        Flow::Continue
     });
     common::report(&cpu, &run);
+    debug.report();
+    debug.stop_state(&cpu);
 
     if cpu.nv.gpu.framebuffer.is_empty() {
         println!("no frame was presented");
