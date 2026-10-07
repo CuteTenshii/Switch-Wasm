@@ -787,3 +787,147 @@ fn the_ex_form_of_a_creation_is_the_same_creation() {
     assert_eq!(applet.id, APPLET_WEB);
     assert_eq!(applet.mode, FOREGROUND);
 }
+
+#[test]
+fn player_select_with_one_user_hands_back_that_user() {
+    let (mut cpu, accessor) = library_applet(super::APPLET_PLAYER_SELECT);
+    let uid = cpu.current_user().uid;
+
+    write_request(&mut cpu, 105, &[]); // GetPopOutDataEvent
+    cpu.applet_request(TLS, accessor, Some(105)).unwrap();
+    let out_event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+    assert_eq!(cpu.event_signaled(out_event), Some(false), "not started");
+
+    write_request(&mut cpu, 10, &[]); // Start
+    cpu.applet_request(TLS, accessor, Some(10)).unwrap();
+    assert_eq!(cpu.event_signaled(out_event), Some(true));
+
+    write_request(&mut cpu, 30, &[]); // GetResult
+    cpu.applet_request(TLS, accessor, Some(30)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+
+    write_request(&mut cpu, 101, &[]); // PopOutData
+    cpu.applet_request(TLS, accessor, Some(101)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+    let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+    let data = &cpu.am_storages[&Cpu::object_key(storage, 0)];
+    assert_eq!(data[..8], [0; 8], "PselUiReturnArg result");
+    assert_eq!(data[8..], uid);
+    assert_eq!(cpu.event_signaled(out_event), Some(false));
+
+    write_request(&mut cpu, 101, &[]);
+    cpu.applet_request(TLS, accessor, Some(101)).unwrap();
+    assert_eq!(
+        cpu.mem.read_u32(TLS + 0x18).unwrap(),
+        128 | (3 << 9),
+        "popped once"
+    );
+}
+
+#[test]
+fn player_select_with_several_users_is_cancelled() {
+    let ann = crate::services::acc::UserAccount::new([1; 16], "Ann", None);
+    let ben = crate::services::acc::UserAccount::new([2; 16], "Ben", None);
+    let mut payload = [0u8; 8];
+    payload[..4].copy_from_slice(&super::APPLET_PLAYER_SELECT.to_le_bytes());
+    let mut cpu = request(false, 0, &payload);
+    cpu.set_users(vec![ann, ben], [2; 16]).unwrap();
+    cpu.register_service_handle(9, "am:library-applet-creator");
+    cpu.applet_request(TLS, 9, Some(0)).unwrap();
+    let accessor = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+
+    write_request(&mut cpu, 10, &[]);
+    cpu.applet_request(TLS, accessor, Some(10)).unwrap();
+    write_request(&mut cpu, 30, &[]);
+    cpu.applet_request(TLS, accessor, Some(30)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (22 << 9));
+    write_request(&mut cpu, 101, &[]);
+    cpu.applet_request(TLS, accessor, Some(101)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (3 << 9));
+}
+
+#[test]
+fn ensure_save_data_creates_the_users_save() {
+    const TITLE: u64 = 0x0100_0000_0001_0000;
+    let user = [7u8; 16];
+    let mut cpu = request(false, 20, &user);
+    cpu.set_program_id(TITLE);
+    cpu.register_service_handle(9, "am:application-functions");
+    cpu.applet_request(TLS, 9, Some(20)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+    assert_eq!(
+        cpu.mem.read_u64(TLS + 0x20).unwrap(),
+        0,
+        "nothing more needed"
+    );
+    assert!(cpu
+        .save_data(crate::cpu::SaveKey { id: TITLE, user })
+        .is_some());
+}
+
+#[test]
+fn a_transfer_memory_storage_is_as_long_as_the_memory() {
+    let mut payload = [0u8; 16];
+    payload[0] = 1; // writable
+    payload[8..].copy_from_slice(&0x8000u64.to_le_bytes());
+    let mut cpu = request(false, 11, &payload);
+    cpu.register_service_handle(9, "am:library-applet-creator");
+    cpu.applet_request(TLS, 9, Some(11)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+    let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+    assert_eq!(cpu.service_name(storage), Some("am:storage"));
+    assert_eq!(cpu.am_storages[&Cpu::object_key(storage, 0)].len(), 0x8000);
+}
+
+#[test]
+fn the_keyboard_waits_for_the_host_and_hands_back_its_text() {
+    const APPLET_SWKBD: u32 = 0x11;
+    const ARGS: u64 = 0x21;
+    const CONFIG: u64 = 0x22;
+    let (mut cpu, accessor) = library_applet(APPLET_SWKBD);
+    let mut config = vec![0u8; 0x4C8];
+    for (index, unit) in "Name?".encode_utf16().enumerate() {
+        config[0x24 + index * 2..0x26 + index * 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    config[0x3AC..0x3B0].copy_from_slice(&8u32.to_le_bytes());
+    for (storage, data) in [(ARGS, vec![0u8; 0x20]), (CONFIG, config)] {
+        cpu.register_service_handle(storage, "am:storage");
+        cpu.am_storages.insert(Cpu::object_key(storage, 0), data);
+        push_storage(&mut cpu, 100, storage);
+        cpu.applet_request(TLS, accessor, Some(100)).unwrap();
+    }
+
+    write_request(&mut cpu, 0, &[]);
+    cpu.applet_request(TLS, accessor, Some(0)).unwrap();
+    let state = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+    write_request(&mut cpu, 10, &[]);
+    cpu.applet_request(TLS, accessor, Some(10)).unwrap();
+    assert_eq!(cpu.event_signaled(state), Some(false), "still typing");
+    let request = cpu.keyboard_request().unwrap();
+    assert_eq!((request.header.as_str(), request.max_length), ("Name?", 8));
+
+    assert!(cpu.answer_keyboard(Some("Link")));
+    assert!(cpu.keyboard_request().is_none());
+    assert_eq!(cpu.event_signaled(state), Some(true));
+
+    write_request(&mut cpu, 30, &[]);
+    cpu.applet_request(TLS, accessor, Some(30)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+    write_request(&mut cpu, 101, &[]);
+    cpu.applet_request(TLS, accessor, Some(101)).unwrap();
+    let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+    let data = &cpu.am_storages[&Cpu::object_key(storage, 0)];
+    assert_eq!(&data[..4], &[0; 4], "SwkbdResult_Ok");
+    assert_eq!(&data[4..14], &[b'L', 0, b'i', 0, b'n', 0, b'k', 0, 0, 0]);
+}
+
+#[test]
+fn a_keyboard_without_a_config_is_cancelled_as_before() {
+    let (mut cpu, accessor) = library_applet(0x11);
+    write_request(&mut cpu, 10, &[]);
+    cpu.applet_request(TLS, accessor, Some(10)).unwrap();
+    assert!(cpu.keyboard_request().is_none());
+    write_request(&mut cpu, 30, &[]);
+    cpu.applet_request(TLS, accessor, Some(30)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (22 << 9));
+}

@@ -159,6 +159,20 @@
     <p class="muted tiny" id="profile-add-note" hidden>A console holds up to eight profiles.</p>
   </dialog>
 
+  <dialog class="keyboard" id="keyboard" aria-labelledby="keyboard-title">
+    <form class="keyboard-form" id="keyboard-form" method="dialog">
+      <h2 id="keyboard-title"></h2>
+      <p class="muted tiny" id="keyboard-sub" hidden></p>
+      <input class="text keyboard-text" id="keyboard-text" autocomplete="off" spellcheck="false"
+             aria-labelledby="keyboard-title" autofocus>
+      <p class="muted tiny" id="keyboard-count" aria-live="polite"></p>
+      <div class="keyboard-actions">
+        <button type="button" class="btn" id="btn-keyboard-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="btn-keyboard-ok"></button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="files" id="files" aria-labelledby="files-title">
     <header class="files-head">
       <h2 id="files-title">Storage</h2>

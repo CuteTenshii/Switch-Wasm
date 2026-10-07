@@ -34,6 +34,7 @@ mod container;
 mod debug;
 mod display;
 mod input;
+mod keyboard;
 mod nand;
 mod run;
 mod stats;

@@ -47,6 +47,7 @@ pub use jit::{
 
 pub use crate::services::acc::{UserAccount, UsersRefused, MAX_USERS, NICKNAME_LEN};
 pub(crate) use crate::services::acc::{DEFAULT_NICKNAME, DEFAULT_USER_UID};
+pub use crate::services::am::KeyboardRequest;
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
 
@@ -229,6 +230,8 @@ pub struct Cpu {
     pub(crate) am_storage_of: IdMap<u64, u64>,
     /// Library applets created through `ILibraryAppletCreator`, by accessor object.
     pub(crate) am_applets: IdMap<u64, am::LibraryApplet>,
+    /// The software keyboard waiting on the host for text.
+    pub(crate) am_keyboard: Option<am::PendingKeyboard>,
     /// The process's own RomFS (`OpenDataStorageByCurrentProcess`), read by range.
     /// `None` for homebrew, which reads RomFS from the SD card.
     pub(crate) romfs: Option<Box<dyn crate::source::ByteSource>>,
@@ -483,6 +486,7 @@ impl Cpu {
             am_storages: IdMap::default(),
             am_storage_of: IdMap::default(),
             am_applets: IdMap::default(),
+            am_keyboard: None,
             romfs: None,
             touch_sample_counter: 0,
             touch_published: 0,

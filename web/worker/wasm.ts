@@ -108,6 +108,9 @@ export interface WasmExports {
     editedAt: bigint, picturePtr: number, pictureLen: number): void;
   switch_users_commit(handle: number, currentLo: bigint, currentHi: bigint): number;
   switch_take_profile_edits(handle: number): number;
+  switch_keyboard_json(handle: number, buf: number, maxlen: number): number;
+  switch_keyboard_answer(
+    handle: number, textPtr: number, textLen: number, submitted: number): number;
   switch_users_json(handle: number, buf: number, maxlen: number): number;
   switch_user_picture(
     handle: number, uidLo: bigint, uidHi: bigint, buf: number, maxlen: number): number;

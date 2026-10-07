@@ -6,6 +6,10 @@ use crate::trace::Level;
 use crate::Result;
 
 mod request;
+mod swkbd;
+
+pub use swkbd::KeyboardRequest;
+pub(crate) use swkbd::PendingKeyboard;
 
 /// `am` 2, NoDataInChannel.
 const AM_NO_DATA_IN_CHANNEL: u32 = 128 | (2 << 9);
@@ -36,15 +40,33 @@ pub(crate) struct LibraryApplet {
     mode: u32,
     finished: bool,
     events: [Option<u64>; 3],
+    /// Ends with this result storage instead of cancelled.
+    answer: Option<Vec<u8>>,
+    answer_popped: bool,
+    /// Storages the caller pushed with `PushInData`, in order.
+    in_data: Vec<Vec<u8>>,
 }
 
 impl LibraryApplet {
-    fn new(id: u32, mode: u32) -> Self {
+    fn new(id: u32, mode: u32, answer: Option<Vec<u8>>) -> Self {
         Self {
             id,
             mode,
+            answer,
             ..Self::default()
         }
+    }
+
+    fn take_answer(&mut self) -> Option<Vec<u8>> {
+        if !self.finished || self.answer_popped {
+            return None;
+        }
+        self.answer_popped = true;
+        self.answer.clone()
+    }
+
+    fn has_unpopped_answer(&self) -> bool {
+        self.finished && !self.answer_popped && self.answer.is_some()
     }
 
     fn finish(&mut self) {
@@ -135,6 +157,16 @@ fn applet_name(applet_id: u32) -> &'static str {
         0x1A => "myPage",
         _ => "unknown applet",
     }
+}
+
+/// `AppletId_LibraryAppletPlayerSelect`.
+const APPLET_PLAYER_SELECT: u32 = 0x10;
+
+/// `PselUiReturnArg { u64 result; AccountUid uid }`, a successful pick of `user`.
+fn player_select_answer(user: [u8; 16]) -> Vec<u8> {
+    let mut data = vec![0u8; 8];
+    data.extend_from_slice(&user);
+    data
 }
 
 /// Whether a title id is one of the firmware's library applets.
@@ -403,6 +435,13 @@ impl Cpu {
         {
             self.signal_event(event);
         }
+    }
+
+    /// Whether the applet behind an accessor has ended with a storage not yet popped.
+    fn library_applet_has_answer(&self, key: u64) -> bool {
+        self.am_applets
+            .get(&key)
+            .is_some_and(LibraryApplet::has_unpopped_answer)
     }
 
     /// Whether the applet behind an accessor has ended.

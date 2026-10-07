@@ -1,7 +1,8 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, UserRecord,
+  CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, KeyboardRequest,
+  UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered, resetActivity } from './activity';
@@ -540,5 +541,16 @@ export const CMD: CommandHandlers = {
             fromWasm(buf, api().switch_user_picture(handle(), ...uidHalves(user.uid), buf, pictureLen)))
         : null,
     }));
+  },
+
+  keyboard_request() {
+    if (handle() < 0) return null;
+    return readJson<KeyboardRequest | null>(
+      8192, (buf, cap) => api().switch_keyboard_json(handle(), buf, cap), null);
+  },
+  keyboard_answer(text) {
+    if (handle() < 0) return 0;
+    return withPath(text ?? '', (ptr, len) =>
+      api().switch_keyboard_answer(handle(), ptr, len, text === null ? 0 : 1));
   },
 };

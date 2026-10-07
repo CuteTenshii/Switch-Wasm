@@ -275,9 +275,17 @@ impl Cpu {
                         }
                     }
                 }
-                // EnsureSaveData.
+                // EnsureSaveData(u128 uid) -> s64 bytes still needed: the user's save, created.
                 Some(20) => {
-                    self.warn_stub(&iface, cmd_id, "0 bytes ensured; no save was created");
+                    let at = self.ipc_request_data(tls);
+                    let mut user = [0u8; 16];
+                    for (index, byte) in user.iter_mut().enumerate() {
+                        *byte = self.mem.read_u8(at.wrapping_add(index as u32))?;
+                    }
+                    if user != [0; 16] {
+                        let id = self.program_id();
+                        self.save_data_mut(crate::cpu::SaveKey { id, user });
+                    }
                     self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
                 }
                 // ExtendSaveData(u8 type, u128 uid, s64 size, s64 journal): granted and remembered.
@@ -752,39 +760,64 @@ impl Cpu {
                     let at = self.ipc_request_data(tls);
                     let id = self.mem.read_u32(at)?;
                     let mode = self.mem.read_u32(at.wrapping_add(4))?;
-                    self.diagnostic(
-                        Level::Warn,
-                        &format!(
-                            "[am] CreateLibraryApplet: {} (mode {mode}); nothing here runs it, \
-                         so it will report itself cancelled",
-                            applet_name(id)
-                        ),
-                    );
+                    let answer = (id == APPLET_PLAYER_SELECT && self.users.len() == 1)
+                        .then(|| player_select_answer(self.current_user().uid));
+                    if answer.is_some() {
+                        self.diagnostic(
+                            Level::Info,
+                            &format!(
+                                "[am] CreateLibraryApplet: playerSelect (mode {mode}); \
+                                 answered with the only user"
+                            ),
+                        );
+                    } else if id == APPLET_SWKBD && mode == 0 {
+                        self.diagnostic(
+                            Level::Info,
+                            "[am] CreateLibraryApplet: swkbd (mode 0); the page asks for the text",
+                        );
+                    } else {
+                        self.diagnostic(
+                            Level::Warn,
+                            &format!(
+                                "[am] CreateLibraryApplet: {} (mode {mode}); nothing here runs \
+                                 it, so it will report itself cancelled",
+                                applet_name(id)
+                            ),
+                        );
+                    }
                     let key =
                         self.reply_with_interface(tls, handle, "am:library-applet-accessor")?;
-                    self.am_applets.insert(key, LibraryApplet::new(id, mode));
+                    self.am_applets
+                        .insert(key, LibraryApplet::new(id, mode, answer));
                     Ok(())
                 }
                 // TerminateAllLibraryApplets / AreAnyLibraryAppletsLeft.
                 Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 Some(2) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                // CreateStorage(s64 size) -> IStorage.
-                Some(10) => {
+                // CreateStorage(s64 size) / CreateTransferMemoryStorage(u8 writable, s64 size,
+                // handle) -> IStorage. Transfer memory is not tracked, so its storage is zeros.
+                Some(10) | Some(11) => {
                     const MAX_STORAGE: u64 = 64 * 1024 * 1024;
                     /// `KERNELRESULT(OutOfMemory)`.
                     const OUT_OF_MEMORY: u32 = 1 | (104 << 9);
-                    let size = self.mem.read_u64(self.ipc_request_data(tls))?;
+                    let size_at = if cmd_id == Some(11) { 8 } else { 0 };
+                    let size = self
+                        .mem
+                        .read_u64(self.ipc_request_data(tls).wrapping_add(size_at))?;
                     if size > MAX_STORAGE {
                         return self.write_ipc_response(tls, OUT_OF_MEMORY, &[], &[], &[]);
+                    }
+                    if cmd_id == Some(11) {
+                        self.warn_stub(&iface, cmd_id, "zeros, not the transfer memory's contents");
                     }
                     let key = self.reply_with_interface(tls, handle, "am:storage")?;
                     self.am_storages.insert(key, vec![0u8; size as usize]);
                     Ok(())
                 }
-                // CreateTransferMemoryStorage / CreateHandleStorage: no backing memory to read.
+                // CreateHandleStorage: no backing memory to read.
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // ILibraryAppletAccessor: the applet finishes, cancelled, as soon as it starts.
+            // ILibraryAppletAccessor.
             "am:library-applet-accessor" => {
                 let key = self.ipc_object_key(tls, handle);
                 match cmd_id {
@@ -801,32 +834,85 @@ impl Cpu {
                         let done = u8::from(self.library_applet_finished(key));
                         self.write_ipc_response(tls, 0, &[], &done.to_le_bytes(), &[])
                     }
+                    // Start: a host keyboard waits for the page, anything else ends now.
+                    Some(10)
+                        if self
+                            .am_applets
+                            .get(&key)
+                            .is_some_and(LibraryApplet::is_host_keyboard)
+                            && self.start_keyboard(key) =>
+                    {
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
                     // Start / RequestExit / Terminate.
                     Some(10) | Some(20) | Some(25) => {
+                        self.forget_keyboard(key);
                         if let Some(applet) = self.am_applets.get_mut(&key) {
                             applet.finish();
                         }
                         self.signal_library_applet_event(key, STATE_CHANGED_EVENT);
+                        if self.library_applet_has_answer(key) {
+                            self.signal_library_applet_event(key, POP_OUT_DATA_EVENT);
+                        }
                         self.write_ipc_response(tls, 0, &[], &[], &[])
                     }
-                    // GetResult: cancelled.
+                    // GetResult: cancelled unless answered.
                     Some(30) => {
                         /// `am` description 22, `LibAppletExitReason_Canceled`.
                         const CANCELLED: u32 = 128 | (22 << 9);
-                        self.write_ipc_response(tls, CANCELLED, &[], &[], &[])
+                        let answered = self
+                            .am_applets
+                            .get(&key)
+                            .is_some_and(|applet| applet.finished && applet.answer.is_some());
+                        let result = if answered { 0 } else { CANCELLED };
+                        self.write_ipc_response(tls, result, &[], &[], &[])
                     }
-                    // PushInData / PushExtraStorage / PushInteractiveInData: dropped.
-                    Some(100) | Some(102) | Some(103) => {
+                    // PushInData: kept for the applet's arguments.
+                    Some(100) => {
+                        let data = self
+                            .ipc_input_object_key(tls, handle, 0)
+                            .and_then(|storage| self.am_storages.get(&storage))
+                            .cloned()
+                            .unwrap_or_default();
+                        if let Some(applet) = self.am_applets.get_mut(&key) {
+                            applet.in_data.push(data);
+                        }
                         self.write_ipc_response(tls, 0, &[], &[], &[])
                     }
-                    // PopOutData / PopInteractiveOutData: nothing produced.
-                    Some(101) | Some(104) => {
+                    // PushExtraStorage / PushInteractiveInData: dropped.
+                    Some(102) | Some(103) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    // PopOutData: the answer, once.
+                    Some(101) => {
+                        let answer = self
+                            .am_applets
+                            .get_mut(&key)
+                            .and_then(LibraryApplet::take_answer);
+                        let Some(answer) = answer else {
+                            const NO_DATA: u32 = 128 | (3 << 9);
+                            return self.write_ipc_response(tls, NO_DATA, &[], &[], &[]);
+                        };
+                        if let Some(event) = self
+                            .am_applets
+                            .get(&key)
+                            .and_then(|a| a.events[POP_OUT_DATA_EVENT])
+                        {
+                            self.clear_event(event);
+                        }
+                        let storage = self.reply_with_interface(tls, handle, "am:storage")?;
+                        self.am_storages.insert(storage, answer);
+                        Ok(())
+                    }
+                    // PopInteractiveOutData: nothing produced.
+                    Some(104) => {
                         const NO_DATA: u32 = 128 | (3 << 9);
                         self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
                     }
-                    // GetPopOutDataEvent / GetPopInteractiveOutDataEvent: never signalled.
+                    // GetPopOutDataEvent / GetPopInteractiveOutDataEvent.
                     Some(105) => {
                         let event = self.library_applet_event(key, POP_OUT_DATA_EVENT);
+                        if self.library_applet_has_answer(key) {
+                            self.signal_event(event);
+                        }
                         self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                     }
                     Some(106) => {

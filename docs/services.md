@@ -150,7 +150,7 @@ stored, not answered: one caller writes, another reads back.
 
 ### `crates/switch-core/src/services/acc.rs`
 
-- Users and the playing user are set by the host before the title starts (a title asks once and keeps the answer); every user is signed in. `nn::account::Initialize` runs before save data mounts, and `GetLastOpenedUser`/`TrySelectUserWithoutInteraction` pick whose save opens, so a zero uid ("nobody") is never returned. `TrySelectUserWithoutInteraction` returns the playing user even with several users, since there is no selector applet. `IsUserAccountSwitchLocked` is true and `IsUserRegistrationRequestPermitted` false for the same reason.
+- Users and the playing user are set by the host before the title starts (a title asks once and keeps the answer); every user is signed in. `nn::account::Initialize` runs before save data mounts, and `GetLastOpenedUser`/`TrySelectUserWithoutInteraction` pick whose save opens, so a zero uid ("nobody") is never returned. `TrySelectUserWithoutInteraction` returns the playing user even with several users, since there is no selector applet; the playerSelect applet answers only when there is one user (see `am`). `IsUserAccountSwitchLocked` is true and `IsUserRegistrationRequestPermitted` false for the same reason.
 - `acc:u0`/`acc:u1`/`acc:su` share commands 0..=51; from 100 up ids differ (100 is `InitializeApplicationInfo` on `acc:u0` but `GetUserRegistrationNotifier` on `acc:u1`), so the domain object keeps its service name and those arms dispatch on it.
 - `InitializeApplicationInfo` is 100, 140 (6.0.0+), and 160 (current SDK, sent by Tomodachi Life as a type-6 request with pid and one u64 placeholder). Refusing it aborts `nnSdk`. 140 was once misread as `ListQualifiedUsers` (that is 141).
 - List commands carry no count: callers scan for the first all-zero uid, so the whole buffer must be written (the Home Menu aborted when stale stack data looked like a third uid). Likewise `Get` zeroes `AccountUserData` and `GetNintendoAccountUserResourceCache` zeroes its output buffers, since unwritten caller buffers read back as stack garbage.
@@ -202,7 +202,7 @@ stored, not answered: one caller writes, another reads back.
 
 ### `crates/switch-core/src/services/am/mod.rs`
 
-- No library applet process is ever run. A created applet finishes immediately on start and reports `am` 22 (`LibAppletExitReason_Canceled`), the outcome callers are written to survive; a success with an empty output storage would be read as user input, and an unknown command id is fatal under `nnSdk`. The state-changed event is always signalled (non-auto-clearing, allocated once per slot) so callers never hang.
+- No library applet process is ever run. A created applet finishes immediately on start and reports `am` 22 (`LibAppletExitReason_Canceled`), the outcome callers are written to survive; a success with an empty output storage would be read as user input, and an unknown command id is fatal under `nnSdk`. The state-changed event is always signalled (non-auto-clearing, allocated once per slot) so callers never hang. The one exception is playerSelect with a single user: it succeeds and pops a `PselUiReturnArg` naming that user, and its pop-out event is signalled until the storage is popped. With several users it stays cancelled. swkbd in mode 0 is answered by the page: `PushInData` storages are kept, `Start` reads the second one as `SwkbdConfigCommon` and leaves the applet running until the host calls `answer_keyboard`, which pops a 0x7D8-byte result (`u32 SwkbdResult`, then the text in UTF-16, or UTF-8 when the config asks). Without a config, or inline (any other mode), it is cancelled as before. The initial text lives in the transfer-memory work buffer and is not shown.
 - When a library applet is run directly, the host is its caller: `PopInData` is synthesized (`LibAppletCommonArguments` plus each applet's private launch storages; swkbd and the controller applet need two, swkbd a third 0x1000 work buffer). `PushOutData` and `PushInteractiveOutData` are kept for the host and logged; interactive replies come from the host via `push_applet_interactive_in_data`. Pop events track queue state (manual-reset), since a signalled event over an empty queue sends `nnSdk` to a fatal pop.
 - `LaVersion` per applet is the firmware-style number its 18.0.1 build expects (swkbd 0x8000D, controller 0x8, myPage 0x10000, web 0x80000); claiming version 1 describes a different, smaller launch struct.
 - Library applet title ids run `0100000000001000..1013` in AppletId order, except `starter` (a SystemApplication) breaks the run.
@@ -212,13 +212,14 @@ stored, not answered: one caller writes, another reads back.
 - `SetHandlesRequestToDisplay` must queue `RequestToDisplay`; the Home Menu waits for it (then calls `ApproveToDisplay`) before dequeuing a buffer.
 - Operation mode: Handheld is 0, Console is 1. Mode and default display resolution both come from `OperationMode` so they cannot disagree.
 - `PopLaunchParameter` is a pop: each kind is handed over once. `PreselectedUser` must be a strict 0x88-byte block (magic, version, uid at 8); a zero uid makes `nn::account::OpenPreselectedUser` assert. `UserChannel` is not answered.
+- `EnsureSaveData` creates the running title's save for the given user (a zero uid creates nothing) and reports 0 bytes still needed.
 - `ExtendSaveData` is granted and remembered so `GetSaveDataSize` reads back the new size. `GetSaveDataSizeMax` reports the NACP's ceiling as-is (0 means "never grows").
 - Capture buffer acquires must name a real slot (the first past the two shared frame buffers, soft-mapped zeros); answering "nothing written, slot -1" makes `nnSdk` retry forever.
 - `ILockAccessor` events are created signalled and manual-reset: the Home Menu aborts if the HOME-button lock event reads clear.
 - `IGlobalStateController` sleep/shutdown/reboot are deliberately not implemented: answering "done" to a shutdown not performed is worse than refusing.
 - Interface-returning commands must return a real object: `nnSdk` reads a move handle, and a bare success yields a null `SharedPointer` that faults later.
 - Setters with a matching getter (idle time detection, auto-sleep, HOME double-click) must store and read back the value.
-- `CreateTransferMemoryStorage`/`CreateHandleStorage` are refused: transfer memory records no address here, so the storage would be zeroes posing as caller data.
+- `CreateTransferMemoryStorage` returns a zero-filled storage of the requested size: transfer memory records no address here, and refusing it stopped swkbd's caller before `Start`. Nothing reads it, since pushed storages are dropped. `CreateHandleStorage` is refused.
 
 ### `crates/switch-core/src/services/log.rs`
 

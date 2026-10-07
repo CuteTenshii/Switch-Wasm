@@ -1407,6 +1407,39 @@ body.resizing {
   }
 }
 
+/* Keyboard dialog: text the running title asked for. */
+.keyboard {
+  width: min(420px, calc(100vw - 32px));
+  padding: 16px;
+  background: var(--chrome);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.keyboard::backdrop { background: rgb(3 4 8 / 60%); }
+.keyboard h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.keyboard p { margin: 4px 0; }
+.keyboard-text {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  font-size: 15px;
+}
+.keyboard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (pointer: coarse) {
+  .keyboard-actions .btn { min-height: 44px; }
+}
+
 /* Storage dialog: the profile dialog's frame with a file list. */
 .files {
   display: flex;

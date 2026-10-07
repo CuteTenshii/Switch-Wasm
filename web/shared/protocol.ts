@@ -194,6 +194,18 @@ export interface UserRecord {
   picture: Bytes | null;
 }
 
+// What the guest's software keyboard shows and accepts; lengths are UTF-16 units.
+export interface KeyboardRequest {
+  header: string;
+  sub: string;
+  guide: string;
+  // The submit button's label; empty for the default.
+  ok: string;
+  maxLength: number;
+  minLength: number;
+  password: boolean;
+}
+
 export interface Commands {
   // Quoted, since unquoted `new()` is a construct signature.
   // eslint-disable-next-line @stylistic/quote-props
@@ -289,6 +301,11 @@ export interface Commands {
   users_take_edits(): boolean;
   // The users as the session holds them, including guest edits.
   users_read(): UserRecord[];
+
+  // The keyboard waiting for text, or null.
+  keyboard_request(): KeyboardRequest | null;
+  // Send the typed text, or null to cancel; 1 if a keyboard was waiting.
+  keyboard_answer(text: string | null): number;
 }
 
 export type CommandName = keyof Commands;
