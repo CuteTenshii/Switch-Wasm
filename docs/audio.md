@@ -72,7 +72,7 @@ to match on *every* packet; samples only have to pass `opus_compare`.
 
 - Every resampler path is padded to the same total delay so a bandwidth switch does not shift the signal in time.
 
-### `crates/switch-core/src/cpu/audout.rs`
+### `crates/switch-core/src/services/audout.rs`
 
 - The device plays in time: a buffer is released once the emulated CPU has run as long as its samples take at the device rate, queued behind what is still playing (`free_at`). Releasing on arrival ran audio at 205x real time in Just Dance 2019 and its video player dropped every frame. A silent device restarts from now, so a submission gap is a gap, not a debt.
 - `audio_tick` is the audio counterpart of the display tick in `svcWaitSynchronization`: it returns a deadline so a waiter can sleep knowing when the device will wake it; it also folds in the renderer's 5 ms frame clock.
@@ -83,7 +83,7 @@ to match on *every* packet; samples only have to pass `opus_compare`.
 - `IAudioDevice` volume is stored and read back exactly: the web applet aborts if `GetAudioDeviceOutputVolumeAuto` differs from what it set.
 - `audctl`: settings are stored per target; the only target is the speaker and the only layout stereo. Command 5000 (19.0.0+) returns another reference to the same controller; `nnSdk` reads the reply as a move handle.
 
-### `crates/switch-core/src/cpu/audren.rs`
+### `crates/switch-core/src/services/audren.rs`
 
 - The renderer is a mixer: the guest re-sends the whole state (mempools, channels, voices, mixes, sinks) every update as one flat buffer whose header declares each section's size. Sections are walked by the guest's declared sizes so one parser works across revisions (entries grew between revisions).
 - The reply mirrors it; `audrvUpdate` and `nnSdk` check every section size against sizes computed from the counts the renderer was opened with, and abort on mismatch, every frame. Revision 5 added `RendererInfoOut`; revision 9 widened `EffectOutStatus` to 0x90.

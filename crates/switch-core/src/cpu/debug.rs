@@ -39,7 +39,7 @@ impl Cpu {
     }
 
     /// Count one failed nvdrv ioctl towards the next [`Cpu::take_nv_errors`].
-    pub(super) fn count_nv_error(&mut self, node: &str, request: u32, error: u32) {
+    pub(crate) fn count_nv_error(&mut self, node: &str, request: u32, error: u32) {
         /// Distinct failures held between readings.
         const CAP: usize = 64;
         if let Some(calls) = self
@@ -132,14 +132,14 @@ impl Cpu {
     }
 
     /// Append an unmarked line, a continuation of the previous one.
-    pub(super) fn trace_line(&mut self, line: &str) {
+    pub(crate) fn trace_line(&mut self, line: &str) {
         self.note_dropped_trace();
         self.trace.extend_from_slice(line.as_bytes());
         self.trim_trace();
     }
 
     /// Append a line at `level`, inherited by following unmarked lines.
-    pub(super) fn trace_marked(&mut self, level: Level, line: &str) {
+    pub(crate) fn trace_marked(&mut self, level: Level, line: &str) {
         self.note_dropped_trace();
         self.trace.push(level.marker());
         self.trace.extend_from_slice(line.as_bytes());
@@ -176,7 +176,7 @@ impl Cpu {
         self.trace_dropped = true;
     }
 
-    pub(super) fn trace_regs(&mut self, pc: u32) {
+    pub(crate) fn trace_regs(&mut self, pc: u32) {
         let dump = self.reg_dump();
         self.trace_line(&dump);
         let _ = pc;
@@ -189,7 +189,7 @@ impl Cpu {
     }
 
     /// [`Cpu::backtrace`] over any register file, live or saved.
-    pub(super) fn walk_frames(
+    pub(crate) fn walk_frames(
         &self,
         regs: &[u64; REG_FILE],
         mode: ExecMode,

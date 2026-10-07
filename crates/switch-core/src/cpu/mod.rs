@@ -1,5 +1,5 @@
 //! AArch64 (A64) interpreter core: decode and execute, with instruction groups,
-//! services (reached through `svc`), A32 in `a32`, and the block JIT in `jit`.
+//! A32 in `a32`, and the block JIT in `jit`.
 
 use crate::mem::Memory;
 use crate::trace::Level;
@@ -12,71 +12,37 @@ mod a32;
 mod alu;
 mod bits;
 mod crypto;
+mod debug;
+mod exec;
 mod fp;
 mod jit;
 mod loadstore;
+mod regs;
 mod simd;
-mod svc;
 mod system;
 
-// Horizon's services: `ipc` marshalling plus one module per domain, dispatched from `svc.rs`.
-mod acc;
-mod am;
-mod audout;
-mod audren;
-mod erpt;
-mod fs;
-mod hid;
-mod hwopus;
-mod ipc;
-mod ldr;
-mod log;
-mod mii;
-mod net;
-mod ns;
-mod nv;
-mod online;
-mod pl;
-mod power;
-mod settings;
-mod thread_report;
-mod time;
-mod vi;
+use crate::kernel::*;
+use crate::services::*;
 
-mod audio;
-mod boot;
-mod debug;
-mod events;
-mod exec;
-mod fonts;
-mod input;
-mod layout;
-mod machine;
-mod regs;
-mod sched;
-mod storage;
-mod sync;
-mod thread;
-
-pub use audio::*;
-use events::*;
-pub use fonts::*;
-pub use input::*;
-pub use layout::*;
+pub(crate) use crate::kernel::events::*;
+pub use crate::kernel::layout::*;
+pub use crate::kernel::sched::*;
+pub(crate) use crate::kernel::sync::*;
+pub use crate::services::audio::*;
+pub use crate::services::fonts::*;
+pub use crate::services::input::*;
 pub use regs::*;
-pub use sched::*;
-use sync::*;
 
+pub use crate::kernel::ipc::POINTER_BUFFER_SIZE;
+pub use crate::kernel::thread_report::ThreadReport;
+pub use crate::services::fs::{FsActivity, SaveDataQuota};
 pub use a32::ExecMode;
-pub use fs::{FsActivity, SaveDataQuota};
-pub use ipc::POINTER_BUFFER_SIZE;
 pub use jit::{
     defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused, HOT, LEFT,
 };
-pub use thread_report::ThreadReport;
 
-pub use acc::{UserAccount, UsersRefused, MAX_USERS, NICKNAME_LEN};
-use acc::{DEFAULT_NICKNAME, DEFAULT_USER_UID};
+pub use crate::services::acc::{UserAccount, UsersRefused, MAX_USERS, NICKNAME_LEN};
+pub(crate) use crate::services::acc::{DEFAULT_NICKNAME, DEFAULT_USER_UID};
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
 
@@ -204,31 +170,31 @@ pub enum ArbiterWait {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Event {
     /// Diagnostics only.
-    name: &'static str,
+    pub(crate) name: &'static str,
     /// Events start unsignalled.
-    signaled: bool,
+    pub(crate) signaled: bool,
     /// Whether a successful wait consumes the signal (auto-clear).
-    auto_clear: bool,
+    pub(crate) auto_clear: bool,
 }
 
 /// One style the pad can present in hid's shared memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NpadPresentation {
+pub(crate) struct NpadPresentation {
     /// `HidNpadStyleTag` bit.
-    style: u32,
+    pub(crate) style: u32,
     /// `HidDeviceTypeBits`.
-    device_type: u32,
+    pub(crate) device_type: u32,
     /// The per-style LIFO.
-    lifo: u32,
+    pub(crate) lifo: u32,
     /// `HidNpadAttribute`.
-    attributes: u32,
+    pub(crate) attributes: u32,
     /// `HidNpadJoyAssignmentMode`.
-    joy_assignment: u32,
+    pub(crate) joy_assignment: u32,
 }
 
 /// SIMD register file; indices come from 5-bit fields, so accesses are in range.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct VRegs([u128; 32]);
+pub(crate) struct VRegs([u128; 32]);
 
 impl Deref for VRegs {
     type Target = [u128; 32];
@@ -271,63 +237,63 @@ impl IndexMut<usize> for VRegs {
 pub struct ThreadContext {
     pub handle: u64,
     /// Kernel thread id (`svcGetThreadId`), distinct from the handle.
-    id: u64,
+    pub(crate) id: u64,
     pub state: ThreadState,
     /// Suspended by `svcSetThreadActivity`; independent of `state`.
-    paused: bool,
+    pub(crate) paused: bool,
     /// Saved register file, SP included; see [`REG_SLOTS`].
-    regs: [u64; REG_FILE],
-    pc: u32,
-    nzcv: u32,
-    mode: ExecMode,
-    cpsr_q: bool,
-    cpsr_ge: u8,
-    fpscr_nzcv: u32,
-    vregs: VRegs,
-    fpcr: u32,
-    fpsr: u32,
-    tpidr: u64,
-    tpidr_rw: u64,
+    pub(crate) regs: [u64; REG_FILE],
+    pub(crate) pc: u32,
+    pub(crate) nzcv: u32,
+    pub(crate) mode: ExecMode,
+    pub(crate) cpsr_q: bool,
+    pub(crate) cpsr_ge: u8,
+    pub(crate) fpscr_nzcv: u32,
+    pub(crate) vregs: VRegs,
+    pub(crate) fpcr: u32,
+    pub(crate) fpsr: u32,
+    pub(crate) tpidr: u64,
+    pub(crate) tpidr_rw: u64,
     /// 0 (most urgent) to 63; see [`Cpu::pick_next`].
-    priority: u8,
+    pub(crate) priority: u8,
     /// Current core, ideal core (-1 for none) and affinity mask. Not scheduled on;
     /// `core` is what `GetCurrentProcessorNumber` answers.
-    core: u8,
-    ideal_core: i32,
-    affinity: u64,
+    pub(crate) core: u8,
+    pub(crate) ideal_core: i32,
+    pub(crate) affinity: u64,
     /// Decisions passed over while runnable; see [`STARVE_DECISIONS`].
-    passed_over: u32,
+    pub(crate) passed_over: u32,
     /// Entry point and argument (an `nn::os` thread's `ThreadType`), for the thread report.
-    entry: u32,
-    arg: u64,
+    pub(crate) entry: u32,
+    pub(crate) arg: u64,
     /// Instructions retired and times scheduled since the last [`ThreadReport`].
-    ran: u64,
-    switches: u64,
+    pub(crate) ran: u64,
+    pub(crate) switches: u64,
     /// Clock when it last did real work; see [`ThreadReport::idle_ms`].
-    busy_at: u64,
+    pub(crate) busy_at: u64,
 }
 
 #[derive(Debug)]
 pub struct Cpu {
     pub mem: Memory,
     /// X0..=X30 and the three meanings of register 31; see [`REG_SLOTS`].
-    regs: [u64; REG_FILE],
-    pc: u32,
+    pub(crate) regs: [u64; REG_FILE],
+    pub(crate) pc: u32,
     /// NZCV as PSTATE packs it (N=31, Z=30, C=29, V=28); shared with AArch32's CPSR.
-    nzcv: u32,
-    mode: ExecMode,
+    pub(crate) nzcv: u32,
+    pub(crate) mode: ExecMode,
     /// AArch32 CPSR.Q, sticky until an APSR write.
-    cpsr_q: bool,
+    pub(crate) cpsr_q: bool,
     /// CPSR.GE, written by parallel adds and read by `SEL`.
-    cpsr_ge: u8,
+    pub(crate) cpsr_ge: u8,
     /// AArch32 FPSCR N/Z/C/V, separate from [`Cpu::nzcv`] (moved by `VMRS APSR_nzcv`).
-    pub(super) fpscr_nzcv: u32,
+    pub(crate) fpscr_nzcv: u32,
     /// Q0..=Q31.
-    vregs: VRegs,
+    pub(crate) vregs: VRegs,
     /// Per-thread FPCR: rounding mode, flush-to-zero, default NaN.
-    fpcr: u32,
+    pub(crate) fpcr: u32,
     /// FPSR cumulative exception flags, sticky until written.
-    fpsr: u32,
+    pub(crate) fpsr: u32,
     /// Console output from the UART syscall mode.
     pub out: Vec<u8>,
     /// Debug trace: per-instruction disassembly (when enabled) and fault context.
@@ -339,271 +305,271 @@ pub struct Cpu {
     trace_dropped: bool,
     pub halted: bool,
     /// The last `fatal:u` report, kept to classify a later `ExitProcess` as a crash.
-    guest_fatal: Option<String>,
+    pub(crate) guest_fatal: Option<String>,
     /// Clock in 1.02 GHz cycles (`svcGetSystemTick`). One instruction is one cycle, but
     /// [`Cpu::reschedule`] also idles it forward, so it is not an instruction count.
     pub cycles: u64,
     /// Instructions actually retired; idling does not advance it.
     pub steps: u64,
     /// Ring buffer of the last `RECENT_LEN` straight-line runs `(first pc, count)`, dumped on fault.
-    recent: [(u32, u32); RECENT_LEN],
-    recent_len: usize,
+    pub(crate) recent: [(u32, u32); RECENT_LEN],
+    pub(crate) recent_len: usize,
     /// TPIDRRO_EL0: kernel-set TLS base, where the IPC buffer lives.
-    tpidr: u64,
+    pub(crate) tpidr: u64,
     /// TPIDR_EL0: guest-writable, separate from `tpidr` (the SDK writes it).
-    tpidr_rw: u64,
+    pub(crate) tpidr_rw: u64,
     /// Next domain IPC out-object id.
-    next_object_id: u32,
+    pub(crate) next_object_id: u32,
     /// Fake handles from `ConnectToNamedPort`/`GetService` to their service name.
-    service_handles: IdMap<u64, String>,
+    pub(crate) service_handles: IdMap<u64, String>,
     /// Next fake handle; 0 is invalid.
-    next_handle: u32,
-    next_domain_object_id: u32,
+    pub(crate) next_handle: u32,
+    pub(crate) next_domain_object_id: u32,
     /// (session handle, domain object id) to interface name.
-    domain_objects: HashMap<(u64, u32), String>,
+    pub(crate) domain_objects: HashMap<(u64, u32), String>,
     /// Non-domain vi session handles to their sub-interface.
-    vi_ifaces: IdMap<u64, String>,
+    pub(crate) vi_ifaces: IdMap<u64, String>,
     /// AM's message queue for the running applet; each state change is queued once.
-    applet_messages: VecDeque<u32>,
+    pub(crate) applet_messages: VecDeque<u32>,
     /// Shared `GetEventHandle` event, signalled when a message is queued.
-    applet_event: Option<u64>,
+    pub(crate) applet_event: Option<u64>,
     /// Whether the startup focus message has been handed out.
-    applet_focus_announced: bool,
+    pub(crate) applet_focus_announced: bool,
     /// The applet's sleep-lock event and whether the lock is held.
-    sleep_lock_event: Option<u64>,
-    sleep_lock_acquired: bool,
+    pub(crate) sleep_lock_event: Option<u64>,
+    pub(crate) sleep_lock_acquired: bool,
     /// Events for `IApplicationFunctions` 210 and `aoc` list changes.
-    application_functions_210_event: Option<u64>,
-    aoc_list_changed_event: Option<u64>,
+    pub(crate) application_functions_210_event: Option<u64>,
+    pub(crate) aoc_list_changed_event: Option<u64>,
     /// `GetDefaultDisplayResolutionChangeEvent`, fired on dock changes.
-    display_resolution_event: Option<u64>,
+    pub(crate) display_resolution_event: Option<u64>,
     /// `GetApplicationRecordUpdateSystemEvent`; starts signalled, as the Home Menu waits on it.
-    application_record_event: Option<u64>,
+    pub(crate) application_record_event: Option<u64>,
     /// `IApplicationManagerInterface`'s SD and game card events, by command id; never fired.
-    ns_manager_events: BTreeMap<u32, u64>,
+    pub(crate) ns_manager_events: BTreeMap<u32, u64>,
     /// `GetPopFromGeneralChannelEvent`; never fired.
-    general_channel_event: Option<u64>,
+    pub(crate) general_channel_event: Option<u64>,
     /// The `ILockAccessor` event: always signalled. See `Cpu::am_lock_accessor_event`.
-    lock_accessor_event: Option<u64>,
+    pub(crate) lock_accessor_event: Option<u64>,
     /// `IHOSBinderDriver::GetNativeHandle`'s event, always signalled.
-    binder_event: Option<u64>,
+    pub(crate) binder_event: Option<u64>,
     /// The title's NACP save quota, reported by `IApplicationFunctions`; set through
     /// [`Cpu::set_save_data_quota`] and not enforced.
-    save_data_quota: fs::SaveDataQuota,
+    pub(crate) save_data_quota: fs::SaveDataQuota,
     /// Chosen from the NPDM system resource size and program id.
-    memory_layout: MemoryLayout,
+    pub(crate) memory_layout: MemoryLayout,
     /// Kept because the layout also depends on the program id, which may arrive later.
-    system_resource_size: u32,
+    pub(crate) system_resource_size: u32,
     /// The system shared buffer's nvmap `(handle, id)` and the next slot to acquire.
-    shared_buffer: Option<(u32, u32)>,
-    shared_buffer_slot: u32,
+    pub(crate) shared_buffer: Option<(u32, u32)>,
+    pub(crate) shared_buffer_slot: u32,
     /// See [`Cpu::set_operation_mode`].
-    operation_mode: OperationMode,
+    pub(crate) operation_mode: OperationMode,
     /// Application proxy (told `FocusStateChanged`) vs applet (told `ChangeIntoForeground`).
-    applet_is_application: bool,
+    pub(crate) applet_is_application: bool,
     /// `ISelfController` auto-sleep settings, stored so getters read them back.
-    idle_time_detection_extension: u32,
-    auto_sleep_disabled: bool,
+    pub(crate) idle_time_detection_extension: u32,
+    pub(crate) auto_sleep_disabled: bool,
     /// Stored so the getter reads it back.
-    home_button_double_click_enabled: bool,
+    pub(crate) home_button_double_click_enabled: bool,
     /// Last `SetTerminateResult`, read back by `GetLastApplicationExitReason`.
-    am_terminate_result: u32,
+    pub(crate) am_terminate_result: u32,
     /// Count of `BuildRandom` Miis; picks the face and stamps the create id.
-    mii_random_sequence: u32,
+    pub(crate) mii_random_sequence: u32,
     /// Unimplemented `(interface, command)` pairs already warned about.
-    unimplemented_ipc: HashSet<(String, Option<u32>)>,
+    pub(crate) unimplemented_ipc: HashSet<(String, Option<u32>)>,
     /// Stubbed `(interface, command)` pairs already warned about; see [`Cpu::warn_stub`].
-    stubbed_ipc: HashSet<(String, Option<u32>)>,
+    pub(crate) stubbed_ipc: HashSet<(String, Option<u32>)>,
     /// Calls to service gaps since the host last asked; see [`Cpu::take_service_gaps`].
-    gap_calls: BTreeMap<(GapKind, String, Option<u32>), u64>,
+    pub(crate) gap_calls: BTreeMap<(GapKind, String, Option<u32>), u64>,
     /// Failed nvdrv ioctls since the host last asked; see [`Cpu::take_nv_errors`].
     nv_errors: BTreeMap<(String, u32, u32), u64>,
     /// Reused objects for [`Cpu::reply_with_fabricated_object`], by `(session, command)`:
     /// domain object id, sub-session handle, event.
-    fabricated_objects: HashMap<(u64, u32), (u32, u64, u64)>,
+    pub(crate) fabricated_objects: HashMap<(u64, u32), (u32, u64, u64)>,
     /// NROs mapped by `ldr:ro`, by mapped address; see [`Cpu::ldr_ro_request`].
-    ro_modules: BTreeMap<u32, ldr::RoModule>,
+    pub(crate) ro_modules: BTreeMap<u32, ldr::RoModule>,
     /// Registered NRRs, by address. Signatures are not checked.
-    ro_registrations: BTreeMap<u32, u32>,
+    pub(crate) ro_registrations: BTreeMap<u32, u32>,
     /// Handles modelled as kernel events. Other handles are treated as always signalled
     /// by `WaitSynchronization`.
-    events: IdMap<u64, Event>,
+    pub(crate) events: IdMap<u64, Event>,
     /// The vsync event, fired on present and at each display refresh.
-    vsync_event: Option<u64>,
-    last_vsync_frame: u64,
+    pub(crate) vsync_event: Option<u64>,
+    pub(crate) last_vsync_frame: u64,
     /// For the refresh that fires without a present.
-    last_vsync_cycles: u64,
+    pub(crate) last_vsync_cycles: u64,
     /// Open SD directory handles to the entries not yet yielded.
-    fs_dirs: IdMap<u64, Vec<crate::vfs::DirEntry>>,
+    pub(crate) fs_dirs: IdMap<u64, Vec<crate::vfs::DirEntry>>,
     /// Open `IFile` objects: domain object id to path.
-    fs_files: IdMap<u64, String>,
+    pub(crate) fs_files: IdMap<u64, String>,
     /// `am` `IStorage` contents, by object.
-    am_storages: IdMap<u64, Vec<u8>>,
+    pub(crate) am_storages: IdMap<u64, Vec<u8>>,
     /// System data archives by data id, as sources.
-    data_archives: IdMap<u64, Box<dyn crate::source::ByteSource>>,
+    pub(crate) data_archives: IdMap<u64, Box<dyn crate::source::ByteSource>>,
     /// DLC indices `aoc:u` reports; the content is in `data_archives`.
-    add_on_content: std::collections::BTreeSet<u32>,
+    pub(crate) add_on_content: std::collections::BTreeSet<u32>,
     /// Base DLC id from the NACP; zero means derive it from the program id.
-    add_on_content_base_id: u64,
+    pub(crate) add_on_content_base_id: u64,
     /// Save data, by save key.
-    saves: HashMap<SaveKey, crate::vfs::Vfs>,
+    pub(crate) saves: HashMap<SaveKey, crate::vfs::Vfs>,
     /// The save an `fsp-srv` object addresses; absent for the SD card.
-    fs_mount: IdMap<u64, SaveKey>,
+    pub(crate) fs_mount: IdMap<u64, SaveKey>,
     /// The data archive an open `IStorage` serves; absent for the process's own RomFS.
-    fs_storage_archive: IdMap<u64, u64>,
+    pub(crate) fs_storage_archive: IdMap<u64, u64>,
     /// `SetGlobalAccessLogMode`'s value; round-trips because `nnSdk` reads it at startup.
-    fs_access_log_mode: u32,
+    pub(crate) fs_access_log_mode: u32,
     /// `SetSpeedEmulationMode`'s value; round-trips, no effect.
-    fs_speed_emulation_mode: u32,
+    pub(crate) fs_speed_emulation_mode: u32,
     /// Result of the most recent IPC reply, for `TRACE_FS`.
-    last_ipc_result: Option<u32>,
+    pub(crate) last_ipc_result: Option<u32>,
     pub fs_activity: FsActivity,
     /// RomFS file index per storage (`None` key for the process's own RomFS);
     /// `None` value for unreadable tables.
-    romfs_indexes: BTreeMap<Option<u64>, Option<crate::romfs::RomFsIndex>>,
+    pub(crate) romfs_indexes: BTreeMap<Option<u64>, Option<crate::romfs::RomFsIndex>>,
     /// Each card slot's `IEventNotifier` event, by opening command.
-    fs_detection_events: BTreeMap<u32, u64>,
+    pub(crate) fs_detection_events: BTreeMap<u32, u64>,
     /// Storages queued for `PopInData`.
-    am_in_data: VecDeque<Vec<u8>>,
+    pub(crate) am_in_data: VecDeque<Vec<u8>>,
     /// What a directly run library applet pushed through `PushOutData`, for the host.
-    am_out_data: Vec<Vec<u8>>,
+    pub(crate) am_out_data: Vec<Vec<u8>>,
     /// Storages queued for `PopInteractiveInData`, filled by [`Cpu::push_applet_interactive_in_data`].
-    am_interactive_in: VecDeque<Vec<u8>>,
+    pub(crate) am_interactive_in: VecDeque<Vec<u8>>,
     /// The applet's interactive output, capped.
-    am_interactive_out: Vec<Vec<u8>>,
+    pub(crate) am_interactive_out: Vec<Vec<u8>>,
     /// `GetPopInDataEvent`/`GetPopInteractiveInDataEvent` events, by [`am::AppletQueue`] slot.
-    am_pop_events: [Option<u64>; 2],
+    pub(crate) am_pop_events: [Option<u64>; 2],
     /// Launch parameters by `LaunchParameterKind`, each delivered once.
-    am_launch_parameters: IdMap<u32, Vec<u8>>,
+    pub(crate) am_launch_parameters: IdMap<u32, Vec<u8>>,
     /// The storage an `IStorageAccessor` addresses.
-    am_storage_of: IdMap<u64, u64>,
+    pub(crate) am_storage_of: IdMap<u64, u64>,
     /// Library applets created through `ILibraryAppletCreator`, by accessor object.
-    am_applets: IdMap<u64, am::LibraryApplet>,
+    pub(crate) am_applets: IdMap<u64, am::LibraryApplet>,
     /// The process's own RomFS (`OpenDataStorageByCurrentProcess`), read by range.
     /// `None` for homebrew, which reads RomFS from the SD card.
-    romfs: Option<Box<dyn crate::source::ByteSource>>,
+    pub(crate) romfs: Option<Box<dyn crate::source::ByteSource>>,
     /// Guest address of hid shared memory; 0 until mapped.
-    hid_shmem_addr: u32,
+    pub(crate) hid_shmem_addr: u32,
     /// Handle used to recognise hid's shared memory in `svcMapSharedMemory`.
-    hid_shmem_handle: Option<u64>,
+    pub(crate) hid_shmem_handle: Option<u64>,
     /// Supported npad styles and joy-con hold type, read back by their getters.
-    npad_style_set: u32,
+    pub(crate) npad_style_set: u32,
     /// `AcquireNpadStyleSetUpdateEventHandle`'s auto-clearing event.
-    npad_style_update_event: Option<u64>,
-    npad_joy_hold_type: u64,
+    pub(crate) npad_style_update_event: Option<u64>,
+    pub(crate) npad_joy_hold_type: u64,
     /// Rumble amplitudes (low band, high band).
-    vibration: (f32, f32),
+    pub(crate) vibration: (f32, f32),
     /// `ssl` state: interface revision, context count, and per-context options.
-    ssl_interface_version: u32,
-    ssl_contexts: u32,
-    ssl_options: HashMap<(u64, u32), u32>,
+    pub(crate) ssl_interface_version: u32,
+    pub(crate) ssl_contexts: u32,
+    pub(crate) ssl_options: HashMap<(u64, u32), u32>,
     /// Built-in CA certificates, loaded on first use; empty if the store is missing.
-    ssl_certificates: Option<Vec<net::SslCertificate>>,
+    pub(crate) ssl_certificates: Option<Vec<net::SslCertificate>>,
     /// Next imported PKI id; 0 means "nothing imported".
-    ssl_next_pki_id: u64,
+    pub(crate) ssl_next_pki_id: u64,
     /// Service events by (purpose, object), so repeat requests get the same handle.
     /// See [`Cpu::kept_event`].
-    service_events: HashMap<(&'static str, u64), u64>,
+    pub(crate) service_events: HashMap<(&'static str, u64), u64>,
     /// `lbl` backlight settings.
-    backlight: settings::Backlight,
+    pub(crate) backlight: settings::Backlight,
     /// `set:sys` settings, read from save data on first use; see [`Cpu::system_settings`].
-    system_settings: Option<settings::SystemSettings>,
+    pub(crate) system_settings: Option<settings::SystemSettings>,
     /// Settings items requested but missing, reported once each.
-    missing_settings_items: HashSet<String>,
+    pub(crate) missing_settings_items: HashSet<String>,
     /// `audctl`'s system-wide audio settings.
-    audio_control: audout::AudioControl,
+    pub(crate) audio_control: audout::AudioControl,
     /// `nfc:sys` initialized flag; see [`Cpu::nfc_request`].
-    nfc_initialized: bool,
+    pub(crate) nfc_initialized: bool,
     /// `btm:sys`: whether controller pairing is running.
-    bt_gamepad_pairing: bool,
+    pub(crate) bt_gamepad_pairing: bool,
     /// `notif` alarms and the next alarm id.
-    notif_alarms: Vec<settings::AlarmSetting>,
-    notif_next_alarm_id: u16,
+    pub(crate) notif_alarms: Vec<settings::AlarmSetting>,
+    pub(crate) notif_next_alarm_id: u16,
     /// `erpt` journal state, kept only for the session.
-    erpt_contexts: Vec<erpt::ErrorContext>,
-    erpt_reports: Vec<erpt::ErrorReport>,
-    erpt_attachments: Vec<erpt::ErrorReportAttachment>,
-    erpt_readers: IdMap<u64, erpt::ErrorReportReader>,
+    pub(crate) erpt_contexts: Vec<erpt::ErrorContext>,
+    pub(crate) erpt_reports: Vec<erpt::ErrorReport>,
+    pub(crate) erpt_attachments: Vec<erpt::ErrorReportAttachment>,
+    pub(crate) erpt_readers: IdMap<u64, erpt::ErrorReportReader>,
     /// The journal id, created on first request.
-    erpt_journal_id: Option<[u8; erpt::ERPT_UUID_SIZE]>,
+    pub(crate) erpt_journal_id: Option<[u8; erpt::ERPT_UUID_SIZE]>,
     /// Sampling number for hid npad LIFO entries.
-    sample_counter: u64,
+    pub(crate) sample_counter: u64,
     /// Last pad and contacts, republished by [`Cpu::hid_tick`].
-    last_gamepad: (u64, i32, i32, i32, i32),
-    last_touches: Vec<TouchPoint>,
-    last_hid_cycles: u64,
+    pub(crate) last_gamepad: (u64, i32, i32, i32, i32),
+    pub(crate) last_touches: Vec<TouchPoint>,
+    pub(crate) last_hid_cycles: u64,
     /// Touch LIFO sampling number, separate from npad's.
-    touch_sample_counter: u64,
+    pub(crate) touch_sample_counter: u64,
     /// Touch slots filled at the last publish, so stale ones are cleared.
-    touch_published: usize,
+    pub(crate) touch_published: usize,
     /// Contacts down at the last publish; see [`Cpu::set_touch_state`].
-    touch_down: Vec<TouchPoint>,
+    pub(crate) touch_down: Vec<TouchPoint>,
     /// The TrueType font `pl:u` serves for every shared font type; empty means no text.
-    shared_font: Vec<u8>,
+    pub(crate) shared_font: Vec<u8>,
     /// pl's shared memory image, built by [`Cpu::build_shared_fonts`].
-    pl_shmem_image: Vec<u8>,
+    pub(crate) pl_shmem_image: Vec<u8>,
     /// Each font's place in [`Cpu::pl_shmem_image`], in `PlSharedFontType` order.
-    shared_font_regions: Vec<FontRegion>,
+    pub(crate) shared_font_regions: Vec<FontRegion>,
     /// Guest address of pl's shared memory; 0 until mapped.
-    pl_shmem_addr: u32,
+    pub(crate) pl_shmem_addr: u32,
     /// Per-`IAudioRenderer` state from `OpenAudioRenderer`, used to size update replies.
-    audren_renderers: IdMap<u64, audren::AudioRenderer>,
+    pub(crate) audren_renderers: IdMap<u64, audren::AudioRenderer>,
     /// Open `IAudioOut`s, by session handle.
-    audio_outs: IdMap<u64, audout::AudioOut>,
+    pub(crate) audio_outs: IdMap<u64, audout::AudioOut>,
     /// Open `IHardwareOpusDecoder`s; the guest work buffer is unused.
-    opus_decoders: IdMap<u64, hwopus::HwOpus>,
+    pub(crate) opus_decoders: IdMap<u64, hwopus::HwOpus>,
     /// Bounded queue of interleaved 16-bit PCM not yet taken by the host.
-    audio_pcm: VecDeque<i16>,
+    pub(crate) audio_pcm: VecDeque<i16>,
     /// Samples produced, taken and dropped; see [`Cpu::audio_activity`].
-    audio_produced: u64,
-    audio_taken: u64,
-    audio_dropped: u64,
+    pub(crate) audio_produced: u64,
+    pub(crate) audio_taken: u64,
+    pub(crate) audio_dropped: u64,
     /// Rate and channel count of `audio_pcm`; `(0, 0)` until a device opens.
-    audio_format: (u32, u32),
+    pub(crate) audio_format: (u32, u32),
     /// POSIX seconds for `time:u`/`time:s`; the epoch until [`Cpu::set_unix_time`].
-    unix_time: i64,
+    pub(crate) unix_time: i64,
     /// User accounts in `acc` order; never empty.
-    users: Vec<UserAccount>,
+    pub(crate) users: Vec<UserAccount>,
     /// Index of the playing user in `users`.
-    current_user: usize,
+    pub(crate) current_user: usize,
     /// The user each `IProfile`/`IProfileEditor` object was opened for.
-    acc_profiles: IdMap<u64, [u8; 16]>,
+    pub(crate) acc_profiles: IdMap<u64, [u8; 16]>,
     /// See [`Cpu::take_profile_edits`].
-    profiles_edited: bool,
+    pub(crate) profiles_edited: bool,
     /// Program id for `pm:info`; defaults to the Album applet's, as hbmenu homebrew runs as.
-    program_id: u64,
+    pub(crate) program_id: u64,
     /// Clock rate last set per module; default in `CLOCK_RATES_HZ`.
-    clock_rates: IdMap<u32, u32>,
+    pub(crate) clock_rates: IdMap<u32, u32>,
     /// `mm:u` requests by id: (module, floor).
-    mm_requests: IdMap<u32, (u32, u32)>,
+    pub(crate) mm_requests: IdMap<u32, (u32, u32)>,
     /// `csrng` state, seeded lazily from the clock; zero means unseeded.
-    rng_state: u64,
+    pub(crate) rng_state: u64,
     /// Open `bsd` sockets and their options.
-    bsd_sockets: HashMap<i32, net::BsdSocket>,
-    bsd_socket_options: HashMap<(i32, u32, u32), u32>,
+    pub(crate) bsd_sockets: HashMap<i32, net::BsdSocket>,
+    pub(crate) bsd_socket_options: HashMap<(i32, u32, u32), u32>,
     /// Next descriptor; starts at 3, past the standard streams.
-    next_bsd_fd: i32,
+    pub(crate) next_bsd_fd: i32,
     /// Next ephemeral port, from the bottom of IANA's range.
-    next_bsd_port: u16,
+    pub(crate) next_bsd_port: u16,
     /// `ApmPerformanceConfiguration` for Normal and Boost.
-    apm_configuration: [u32; 2],
+    pub(crate) apm_configuration: [u32; 2],
     /// Battery level for `psm`, 0-100; full until [`Cpu::set_battery`].
-    battery_percent: u8,
-    battery_charging: bool,
+    pub(crate) battery_percent: u8,
+    pub(crate) battery_charging: bool,
     /// The emulated SD card.
     pub fs: crate::vfs::Vfs,
     pub nv: crate::gpu::nvdrv::NvDrv,
     /// The window buffer queue frames are presented through.
     pub display: crate::display::BufferQueue,
     /// Guest threads; index 0 is main. The running thread's slot is stale while it runs.
-    threads: Vec<ThreadContext>,
-    current_thread: usize,
+    pub(crate) threads: Vec<ThreadContext>,
+    pub(crate) current_thread: usize,
     /// Address of the outstanding exclusive load, or `None`. Cleared on context switch.
     pub(crate) exclusive: Option<u32>,
     /// Instructions since the running thread was scheduled, against [`TIME_SLICE`].
-    slice_used: u64,
+    pub(crate) slice_used: u64,
     /// Next cycle at which [`Cpu::sweep_timed_waits`] checks deadlines.
-    next_expiry: u64,
+    pub(crate) next_expiry: u64,
     jit: jit::Jit,
     /// Whether [`Cpu::run`] uses the JIT. `SWITCH_NO_JIT` disables it on the host;
     /// see [`Cpu::set_jit_enabled`].
@@ -617,20 +583,20 @@ pub struct Cpu {
     /// A presented frame awaiting the GPU backend; see [`Cpu::complete_pending_present`].
     pub(crate) pending_present: Option<crate::gpu::DisplayBuffer>,
     /// `steps` when the running thread was last scheduled.
-    switched_in_at: u64,
+    pub(crate) switched_in_at: u64,
     /// Thread lifecycle events since the host last asked; see [`ThreadReport`].
-    thread_log: Vec<String>,
-    thread_log_dropped: u64,
+    pub(crate) thread_log: Vec<String>,
+    pub(crate) thread_log_dropped: u64,
     /// Every loaded module's `(start, end, name)`.
-    module_names: Vec<(u32, u32, String)>,
+    pub(crate) module_names: Vec<(u32, u32, String)>,
     /// See [`Cpu::set_main_thread_priority`].
-    main_thread_priority: u8,
+    pub(crate) main_thread_priority: u8,
     /// See [`Cpu::set_main_thread_core`].
-    main_thread_core: u8,
+    pub(crate) main_thread_core: u8,
     /// See [`Cpu::set_process_core_mask`].
-    process_core_mask: u64,
+    pub(crate) process_core_mask: u64,
     /// Next thread id; the main thread is 1.
-    next_thread_id: u64,
+    pub(crate) next_thread_id: u64,
 }
 
 pub const RECENT_LEN: usize = 64;

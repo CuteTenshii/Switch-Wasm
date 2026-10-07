@@ -118,7 +118,7 @@ Guest memory layout, threads, scheduling, synchronization, boot and diagnostics.
 - `fill_le` writes unit-width stores rather than memcpy from a stamped pattern: in wasm a variable-length copy becomes an out-of-line `memory.copy` call (Just Dance 2019's colour clear: 920k calls/frame, 1.5%). `write_bytes` exists because byte-wise service writes (fsp-srv RomFS reads) made loading Just Dance 2019's JSON as slow as decrypting it. `write_from` serves render target writeback (3.7M texels at 720p 2x MSAA).
 - `copy_range` emulates `svcMapMemory` aliasing by copying (and copying back on unmap); libnx only uses one side at a time (e.g. thread stacks mirrored into the stack region).
 
-## `crates/switch-core/src/cpu/svc.rs`
+## `crates/switch-core/src/kernel/svc.rs`
 
 - MapMemory must really back the destination: `virtmemFindStack` picks the next thread's stack mirror by searching for unmapped ranges (a no-op gave every thread the same stack).
 - MapPhysicalMemory relies on the soft-mapped low 2 GiB for demand paging; `nn::init` asks for far more than the RAM cap. UnmapPhysicalMemory must really free pages.

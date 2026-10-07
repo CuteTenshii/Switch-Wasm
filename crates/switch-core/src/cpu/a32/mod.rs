@@ -181,7 +181,7 @@ impl Cpu {
 /// because a blocking syscall is reissued with the same registers.
 impl Cpu {
     /// A 64-bit syscall argument: one register in A64, the pair `lo:hi` in AArch32.
-    pub(super) fn svc_arg64(&self, a64: u8, lo: u8, hi: u8) -> u64 {
+    pub(crate) fn svc_arg64(&self, a64: u8, lo: u8, hi: u8) -> u64 {
         match self.mode {
             ExecMode::A64 => self.reg_at(a64),
             ExecMode::A32 => u64::from(self.r32(lo)) | (u64::from(self.r32(hi)) << 32),
@@ -189,7 +189,7 @@ impl Cpu {
     }
 
     /// A 64-bit syscall result, split across a register pair in AArch32.
-    pub(super) fn svc_out64(&mut self, a64: u8, lo: u8, hi: u8, val: u64) {
+    pub(crate) fn svc_out64(&mut self, a64: u8, lo: u8, hi: u8, val: u64) {
         match self.mode {
             ExecMode::A64 => self.set_reg(a64, val),
             ExecMode::A32 => {

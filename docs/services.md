@@ -142,12 +142,12 @@ stored, not answered — one caller writes, another reads back.
 
 ## Notes by file
 
-### `crates/switch-core/src/cpu/time.rs`
+### `crates/switch-core/src/services/time.rs`
 
 - `time:*` commands share ids with `ConvertToDomain`/`QueryPointerBufferSize`, which arrive as Control requests (type 5), so the control path must be checked first (same as `vi:m`).
 - No network sync or per-region offset: user, network, and local system clocks are the same clock; `SetCurrentTime`/`SetSystemClockContext` are accepted but ignored. Steady clock is `cycles / 1_000_000` seconds (only monotonicity matters). No TZif database: all conversions are UTC, `LoadTimeZoneRule` fills nothing, `ToPosixTime` always reports one match, and the location name comes from `set:sys` so the two services cannot disagree.
 
-### `crates/switch-core/src/cpu/acc.rs`
+### `crates/switch-core/src/services/acc.rs`
 
 - Users and the playing user are set by the host before the title starts (a title asks once and keeps the answer); every user is signed in. `nn::account::Initialize` runs before save data mounts, and `GetLastOpenedUser`/`TrySelectUserWithoutInteraction` pick whose save opens, so a zero uid ("nobody") is never returned. `TrySelectUserWithoutInteraction` returns the playing user even with several users, since there is no selector applet. `IsUserAccountSwitchLocked` is true and `IsUserRegistrationRequestPermitted` false for the same reason.
 - `acc:u0`/`acc:u1`/`acc:su` share commands 0..=51; from 100 up ids differ (100 is `InitializeApplicationInfo` on `acc:u0` but `GetUserRegistrationNotifier` on `acc:u1`), so the domain object keeps its service name and those arms dispatch on it.
@@ -165,7 +165,7 @@ stored, not answered — one caller writes, another reads back.
 - `REQUEST_BUFFER` must return the registered flattened `GraphicBuffer` (kept verbatim per slot), not `nonNull = 0` with success: the app's `Surface` cache is empty on the first request per slot, and A Short Hike dereferenced the null buffer (fence at `buffer + 0x60`), which landed in soft-mapped low pages and deadlocked the WSI thread far from the cause. An unregistered slot returns Android's bad-index status.
 - Default geometry comes from `OperationMode::Handheld.display_size()` and moves with docking via `set_default_size`, but only as a default; dequeued/queued buffers keep the size the guest asked for.
 
-### `crates/switch-core/src/cpu/hid.rs`
+### `crates/switch-core/src/services/hid.rs`
 
 - Input data lives in hid's 256 KiB shared memory, read directly by the app every frame; IPC is only negotiation. `nnSdk` calls methods on the `IAppletResource` returned by `CreateAppletResource`, so it must be a real object (libnx only maps shared memory by size).
 - `hid` and `hid:dbg` are both `IHidServer`; `hid:sys` is `IHidSystemServer` with its own dispatch. libnx opens `hid:sys` during `hidsysInitialize` and sends a pointer-buffer-size control request, so the session must be routed here.
@@ -178,7 +178,7 @@ stored, not answered — one caller writes, another reads back.
 - Vibration: the two band amplitudes map to the Gamepad API's dual-rumble strong/weak magnitudes; only the first value of SendVibrationValues is used.
 - Interface types: the slot 0 Pro Controller is wired (USB), the handheld pad is on the rails; nothing is Bluetooth.
 
-### `crates/switch-core/src/cpu/nv.rs`
+### `crates/switch-core/src/services/nv.rs`
 
 - Every nvdrv command replies with a `u32` NvError word; replying with an empty raw section looks like success under libnx but libtransistor checks the raw size (SetAruid, Initialize, GetStatus).
 - Syncpoint events are handed out pre-signalled and manual-reset because each submission completes inside its ioctl; left unsignalled, the Home Menu polled forever. The `nvhost-ctrl-gpu` fault event stays dark: signalling it makes the guest tear down its renderer.
@@ -186,20 +186,20 @@ stored, not answered — one caller writes, another reads back.
 - `nvIoctl3`'s second receive buffer must be filled, or callers get zeroed out-of-line payloads (e.g. GPU characteristics).
 - Unset config variables (`NV_CONFIG_VAR_NOT_FOUND`) are normal probe answers, not errors.
 
-### `crates/switch-core/src/cpu/pl.rs`
+### `crates/switch-core/src/services/pl.rs`
 
 - Every shared-font type is answered: the Home Menu looks glyphs up across the whole set. With no firmware fonts, the host font stands in for each type.
 - `GetSharedFontInOrderOfPriority` command 6 (system variant) is answered like 5; leaving it to the catch-all made callers see "loaded, zero fonts" and retry forever. Language priority order is not modelled.
 - The smallest of the three output buffers bounds the entry count, and the reply count must match what was written.
 
-### `crates/switch-core/src/cpu/thread_report.rs`
+### `crates/switch-core/src/kernel/thread_report.rs`
 
 - `THREAD_TYPE_SIZE` was measured from titles that allocate `ThreadType`s back to back; searching further would pick up the neighbour's name.
 - Thread names are found as the first word in the `ThreadType` pointing back into the struct at readable text, since the offset varies by SDK version. Unnamed threads (`Thread_0x...`) print their entry function, since all share the SDK trampoline.
 - Stack walks only accept frames whose return address follows a call (functions like zlib's `inflate_fast` use x29/x30 as data).
 - A thread handle must stay unsignalled until the thread ends; an early join let a title destroy a live thread object.
 
-### `crates/switch-core/src/cpu/am.rs`
+### `crates/switch-core/src/services/am/mod.rs`
 
 - No library applet process is ever run. A created applet finishes immediately on start and reports `am` 22 (`LibAppletExitReason_Canceled`), the outcome callers are written to survive; a success with an empty output storage would be read as user input, and an unknown command id is fatal under `nnSdk`. The state-changed event is always signalled (non-auto-clearing, allocated once per slot) so callers never hang.
 - When a library applet is run directly, the host is its caller: `PopInData` is synthesized (`LibAppletCommonArguments` plus each applet's private launch storages; swkbd and the controller applet need two, swkbd a third 0x1000 work buffer). `PushOutData` and `PushInteractiveOutData` are kept for the host and logged; interactive replies come from the host via `push_applet_interactive_in_data`. Pop events track queue state (manual-reset), since a signalled event over an empty queue sends `nnSdk` to a fatal pop.
@@ -219,12 +219,12 @@ stored, not answered — one caller writes, another reads back.
 - Setters with a matching getter (idle time detection, auto-sleep, HOME double-click) must store and read back the value.
 - `CreateTransferMemoryStorage`/`CreateHandleStorage` are refused: transfer memory records no address here, so the storage would be zeroes posing as caller data.
 
-### `crates/switch-core/src/cpu/log.rs`
+### `crates/switch-core/src/services/log.rs`
 
 - `fatal:u` commands carry the guest's `Result`, its only account of why it stopped; it is reported, and the call succeeds (no error screen policy).
 - `lm` is where `nnSdk`'s `NN_LOG` output goes (not `svcOutputDebugString`). `logSend` marks its buffer AutoSelect and the service answers QueryPointerBufferSize with 0, so packets arrive as map-alias send buffers. Long messages are split across packets (flags bit 0 head, bit 1 tail); the prefix goes on the head and the newline on the tail.
 
-### `crates/switch-core/src/cpu/net.rs`
+### `crates/switch-core/src/services/net.rs`
 
 - Model: an empty network, a state a real console reaches and every caller handles. `sfdnsres` resolves nothing; `nifm` reports a wired LAN link that is up with internet; `ssl` builds contexts that never handshake; `bsd` connections to anything but this console are refused immediately (`ECONNREFUSED`, not a timeout, since a frame loop has no other thread to run while blocked); datagrams sent anywhere leave and are never answered.
 - Loopback works: asio builds a socket pair per `io_context` (bind `127.0.0.1:0`, connect to the port `getsockname` reports, accept) to wake its own `select`; Asphalt 9 asserts on it. Connect completes immediately because both ends are this process.
@@ -240,11 +240,11 @@ stored, not answered — one caller writes, another reads back.
 - `ssl`: `GetCertificates` must return the firmware store (system data 0x0100000000000800, `/ssl_TrustedCerts.bdf`); an empty store aborted the browser applet 10.7M steps in. Imported PKI is accepted and given an id but not kept.
 - `nifm`: all three names (`nifm:u`, `nifm:s`, `nifm:a`) route here. `IGeneralService` command ids: 12 `GetCurrentIpAddress`, 15 `GetCurrentIpConfigInfo`, 18 `GetInternetConnectionStatus`. IP config (address, /24, gateway .1) must agree with `bsd`. `GetCurrentNetworkProfile` must write its buffer. `IRequest` is accepted immediately and both its events start signalled.
 
-### `crates/switch-core/src/cpu/erpt.rs`
+### `crates/switch-core/src/services/erpt.rs`
 
 - `erpt:r` must read back exactly what was filed: callers that cannot find a report they filed conclude the journal is broken.
 
-### `crates/switch-core/src/cpu/mii.rs`
+### `crates/switch-core/src/services/mii.rs`
 
 - The Mii database is empty (no NAND), but the six default Miis live in `nn::mii`'s image, so `BuildDefault` builds them; an empty count plus no defaults would leave every Mii picker unable to open.
 - Default Mii colours are stored in the 3DS/Wii U palette and widened to the Switch palette (`MII_HAIR_COLORS`, `MII_EYE_COLORS`); faceline colour numbers are the same in both.
@@ -254,7 +254,7 @@ stored, not answered — one caller writes, another reads back.
 - `IsBrokenDatabaseWithClearFlag` must be answered: unanswered, the editor reads its stack and may offer to wipe the database.
 - `miiimg` must answer GetCount properly: the generic reply caused the editor to query nonexistent images ~500k times ("running but drawing nothing").
 
-### `crates/switch-core/src/cpu/online.rs`
+### `crates/switch-core/src/services/online.rs`
 
 - Policy: online services answer as an empty console (no friends, news, downloads, network, paired console), never with failures. Empty is a state callers handle; failures put them on hardware-broken paths. None of the events handed out ever signal.
 - Each service's root command (CreateFriendService, CreateBcatService, CreateMonitorService, OpenSender/OpenReceiver, the olsc getter chain) must return a real object: the generic fallback's fabricated object id made entire interfaces unreachable (the Home Menu waited on handle 0 four objects deep in olsc).
@@ -264,7 +264,7 @@ stored, not answered — one caller writes, another reads back.
 - friend `Pop` and bcat `GetImpl`, news `Open`, bcat file/dir services are refused rather than answered with zeroed data that callers would treat as real.
 - news: the five `news:*` names are permission levels; permissions are not modelled.
 
-### `crates/switch-core/src/cpu/ns.rs`
+### `crates/switch-core/src/services/ns.rs`
 
 - Most of `ns` hands out sub-interfaces, and a fabricated object id is not callable, so an unimplemented getter ends the caller's whole chain. The generic fallback used to answer getters with fake ids and then `ListApplicationRecord` with another id that callers read as a record count.
 - From 3.0.0 `ns:am` became a getter (`IServiceGetterInterface`); the manager is one of eleven interfaces at 7988..=7999 (7990 unassigned), ids per libnx `ns.c`. The table was once shifted one too low from 7989 up, so `nsInitialize`'s 7996 got `ns:account-proxy` and JKSV's `ListApplicationRecord` hit the wrong interface.
@@ -277,7 +277,7 @@ stored, not answered — one caller writes, another reads back.
 - 20.0.0+ unnamed `IApplicationManagerInterface` event getters are signalled before handout.
 - `prepo` and `pdm:qry` implement a console that never transmits and has never played anything (factory-fresh); the fallback previously answered void requests with object ids.
 
-### `crates/switch-core/src/cpu/ipc.rs`
+### `crates/switch-core/src/kernel/ipc.rs`
 
 - `POINTER_BUFFER_SIZE` is 0x8000 (what a real `fsp-srv` reports): with 0, `nnSdk` refused explicit `HipcPointer` arguments (`sf` 11-141 `PointerBufferTooSmall`, Tomodachi Life abort). Both descriptor forms land in the same address space, so the number only picks which descriptor callers fill.
 - AutoSelect buffers: `cmifRequestInAutoBuffer` fills a static and a map-alias descriptor and nulls the unused one, so services must use `ipc_input_buffer`/`ipc_output_buffer`. This surfaced when the pointer size became real: `nvdrv` ioctl args went through pointers and the map-alias walk handed the driver nothing. `...Auto` commands writing via map-alias only wrote to address 0.
@@ -298,7 +298,7 @@ stored, not answered — one caller writes, another reads back.
 - `spl:` `GetConfig`: Icosa retail, production, not debug; DramId names the 4 GiB part (`MAX_MAPPED_BYTES` is the real limit). Atmosphère extensions (65000 API version, 65007 emummc type, asked by NX-Fetch) read 0 = no CFW, since claiming one would promise unimplemented behaviour.
 - `pm`'s process id must agree with `svcGetProcessId`. `btm:sys`'s `GetCore` must be real because every other command goes through it; the radio flag is `set:sys`'s Bluetooth flag. `nfc:sys` enabled flag is `set:sys`'s NFC flag; device commands are refused since no device handle was ever handed out. `ngc` must write the output text (callers otherwise read uninitialised buffers) and return a nonzero content version. `npns` `Receive`/`ReceiveRaw` are refused (the empty-queue error is undocumented).
 
-### `crates/switch-core/src/cpu/fs.rs`
+### `crates/switch-core/src/services/fs.rs`
 
 - Any `fsp-srv` command that hands back an object must never answer a bare success: the caller reads out-object id 0, wraps it, and calls through a null vtable. Guest memory is soft-mapped from zero, so the fault surfaces far later at `pc=0` (Asphalt 9 with cmd 9; Just Dance 2017 with cmd 203; JKSV with cmd 68; cmd 400/500/501). Answer "not found" (2002-0001) for content the console lacks.
 - 203 (patch RomFS) must answer `TargetNotFound` (2002-1001/1002): `QueryMountRomCacheSize` treats only those as "no patch".
@@ -309,7 +309,7 @@ stored, not answered — one caller writes, another reads back.
 - Save-quota defaults (64 MiB save, 16 MiB journal) are deliberately generous; nothing enforces quotas, and under-reporting makes titles refuse to save. A real NACP's 0 is passed through.
 - Detection-notifier events never fire (no slot changes) and are one per slot, shared by all callers to avoid handle leaks.
 
-### `crates/switch-core/src/cpu/ldr.rs`
+### `crates/switch-core/src/services/ldr.rs`
 
 - `ldr:ro` maps a copy of the caller's NRO (page storage is not shareable, same constraint as `svcMapMemory` via `Memory::copy_range`); writes to the source buffer do not reach the module, which no guest relies on.
 - NRR registrations are recorded but only the magic is checked (no console key to verify the signature chain), matching a console with the check patched out.
@@ -318,7 +318,7 @@ stored, not answered — one caller writes, another reads back.
 - Module region allocation is first fit over live mappings (keyed by base) so plugin load/unload cycles do not exhaust it. `.text` is marked read-only while mapped and the BSS must be at least the header's size.
 - Results use module 22.
 
-### `crates/switch-core/src/cpu/power.rs`
+### `crates/switch-core/src/services/power.rs`
 
 - `CLOCK_RATES_HZ` are original-console handheld rates (GPU 384 MHz, not docked 768 MHz) to match `am`'s operation mode and `apm` Normal; only the GPU default follows the dock, since the CPU rate defines emulated time (`GetSystemTick`, timed waits).
 - `gpio`: every pad reads High. Buttons are active-low and boot2 enters maintenance mode when both volume pads read Low, so answering 0 boots into maintenance mode.
@@ -327,7 +327,7 @@ stored, not answered — one caller writes, another reads back.
 - `mm:u`: Just Dance 2019 jumped to address 0 when `Initialize` did not hand out a request.
 - NX-Fetch regressions: reading the clkrst device code's low bits as the module put the GPU rate under "CPU"; reading the `ts` device code's low byte showed the PCB temperature as the SoC; sharing dispatch between `ts` server and `ISession` made NX-Fetch draw "8 C".
 
-### `crates/switch-core/src/cpu/settings.rs`
+### `crates/switch-core/src/services/settings/mod.rs`
 
 - `FIRMWARE_VERSION` is 22.5.0. It sat at 12.1.0 to stay below 17.0.0 (`ts` per-device `ISession`) while clearing 6.0.0 (`acc` qualified users); both are now implemented, and titles like Tomodachi Life use `am`/`hid` commands from 18.0.0 and 20.0.0. The number picks which side of feature gates to take, not what is finished. Before `GetFirmwareVersion` was answered, NX-Fetch showed "Horizon OS 115.119.105" (ASCII of a stale uid in the buffer).
 - Settings block format: magic `swsetsys`, then records tagged by the `set:sys` command id; unknown tags are skipped, missing ones keep defaults, wrong-width values are ignored, a truncated record ends the read. The whole block is rewritten on each change (a few hundred bytes).
@@ -342,7 +342,7 @@ stored, not answered — one caller writes, another reads back.
 - `lbl`: the settings applet sets a brightness and reads the applied value, so they must agree; previously the fallback returned a fabricated object id for `LoadCurrentSetting`.
 - `notif`: command 1000 means different things on `notif:a` (Initialize) and `notif:s` (GetNotificationCount).
 
-### `crates/switch-core/src/cpu/vi.rs`
+### `crates/switch-core/src/services/vi.rs`
 
 - Control detection must use `ipc_is_control_request`, not `type == 5`: `nnSdk` sends the with-context control encoding (type 7). Testing for 5 alone ran the Home Menu's `QueryPointerBufferSize` as binder relay command 3 (a parcel transaction).
 - `TransactParcel` (0) must work, not only `TransactParcelAuto` (3, added in 3.0.0): pre-3.0.0 SDK titles like Just Dance 2017 send only 0, and an empty success queued every frame into nothing. Same for domain sessions (libnx's default).

@@ -52,7 +52,7 @@ impl Cpu {
         result
     }
 
-    pub(super) fn record_fault(&mut self, e: &Error, pc: u32, insn: u32) {
+    pub(crate) fn record_fault(&mut self, e: &Error, pc: u32, insn: u32) {
         // Traces from parts without a `Cpu` belong before the fault.
         self.absorb_traces();
         // Unmarked, so the separator does not grade the previous line.
@@ -77,7 +77,7 @@ impl Cpu {
     }
 
     /// Trace the run-up to the current PC, expanding the recorded runs.
-    pub(super) fn trace_trail(&mut self) {
+    pub(crate) fn trace_trail(&mut self) {
         let trail = self.trail_text();
         if !trail.is_empty() {
             self.trace_line(&trail);
@@ -85,7 +85,7 @@ impl Cpu {
     }
 
     /// The trail as text: a heading and one disassembled instruction per line.
-    pub(super) fn trail_text(&self) -> String {
+    pub(crate) fn trail_text(&self) -> String {
         let runs = self.recent_len.min(RECENT_LEN);
         if runs == 0 {
             return String::new();
@@ -138,7 +138,7 @@ impl Cpu {
 
     /// Route an instruction by its top-level group (bits 28:25) to that group's decoder
     /// first, falling back to [`Cpu::execute_chain`].
-    pub(super) fn execute(&mut self, insn: u32, next_pc: u32) -> Result<()> {
+    pub(crate) fn execute(&mut self, insn: u32, next_pc: u32) -> Result<()> {
         let mut pc = next_pc;
         match (insn >> 25) & 0xF {
             // Data processing -- immediate, PC-relative addressing included.
@@ -377,7 +377,7 @@ impl Cpu {
     /// DP immediate, DP register.
     #[cold]
     #[inline(never)]
-    pub(super) fn execute_chain(&mut self, insn: u32, mut next_pc: u32) -> Result<()> {
+    pub(crate) fn execute_chain(&mut self, insn: u32, mut next_pc: u32) -> Result<()> {
         if self.try_branch_or_system(insn, next_pc)? {
             return Ok(());
         }

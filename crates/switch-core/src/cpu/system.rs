@@ -134,7 +134,7 @@ impl Cpu {
     }
 
     /// The 19.2 MHz generic-timer count, read by `CNTPCT_EL0` and `svcGetSystemTick`.
-    pub(super) fn system_tick(&self) -> u64 {
+    pub(crate) fn system_tick(&self) -> u64 {
         (u128::from(self.cycles) * u128::from(TICK_HZ) / u128::from(CLOCK_RATES_HZ[0])) as u64
     }
 
