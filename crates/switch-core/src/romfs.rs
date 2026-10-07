@@ -47,7 +47,7 @@ impl<'a> RomFs<'a> {
         let header_size = crate::nsp::read_u64(image, 0);
         if header_size != HEADER_SIZE {
             return Err(Error::RomFs(format!(
-                "header size is {:#x}, expected {:#x} — not a RomFS image",
+                "header size is {:#x}, expected {:#x}; not a RomFS image",
                 header_size, HEADER_SIZE
             )));
         }
@@ -163,7 +163,7 @@ fn walk(dir_table: &[u8], file_table: &[u8]) -> Result<Vec<RomFsFile>, Error> {
     let spend = |budget: &mut usize| -> Result<(), Error> {
         *budget = budget
             .checked_sub(1)
-            .ok_or_else(|| Error::RomFs("entry chain doesn't terminate — corrupt image".into()))?;
+            .ok_or_else(|| Error::RomFs("entry chain doesn't terminate; corrupt image".into()))?;
         Ok(())
     };
     let mut files = Vec::new();

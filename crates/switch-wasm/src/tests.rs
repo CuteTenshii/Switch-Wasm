@@ -661,8 +661,8 @@ fn a_path_json_cannot_carry_raw_is_escaped() {
 fn a_non_ascii_title_name_survives_the_json() {
     // A `\uXXXX` escape names a code point, so multi-byte characters go out raw.
     let mut out = Vec::new();
-    json_escape("JUST DANCE® 2017 — 日本語", &mut out);
-    assert_eq!(String::from_utf8(out).unwrap(), "JUST DANCE® 2017 — 日本語");
+    json_escape("JUST DANCE® 2017 - 日本語", &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "JUST DANCE® 2017 - 日本語");
 
     let mut out = Vec::new();
     json_escape("a\"b\\c\nd\u{7}e", &mut out);

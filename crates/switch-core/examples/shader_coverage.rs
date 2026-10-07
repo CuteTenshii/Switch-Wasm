@@ -121,8 +121,8 @@ fn report(label: &str, used: &[Used], caps: Caps) {
         pct(ok_programs, programs)
     );
     println!(
-        "  fragment: {ok_fragment} of {fragment} translate ({:.0}%) \
-         — the stage the interpreter spends the frame in",
+        "  fragment: {ok_fragment} of {fragment} translate ({:.0}%), \
+         the stage the interpreter spends the frame in",
         pct(ok_fragment, fragment)
     );
     println!(
@@ -217,7 +217,7 @@ fn main() {
         used.len() - fragment,
     );
     if used.is_empty() {
-        println!("no draw ran in that frame — nothing to translate");
+        println!("no draw ran in that frame; nothing to translate");
         return;
     }
     println!();

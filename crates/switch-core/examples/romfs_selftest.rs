@@ -158,7 +158,7 @@ fn main() {
     let canary = common::env_u64("INJECT", 0) != 0;
     let source: Box<dyn ByteSource> = if canary {
         println!(
-            "INJECT=1: a boundary bug sits in front of the reader — it must be reported \
+            "INJECT=1: a boundary bug sits in front of the reader; it must be reported \
              below, and this run exits 0 only if it was"
         );
         Box::new(Flaky(real))
@@ -234,7 +234,7 @@ fn main() {
             if let Some(bad) = first_difference(&reference[..len as usize], &other, sample.at) {
                 println!(
                     "  MISMATCH at {:#x}: whole read {:#04x}, {how} {:#04x}\n    \
-                     sample {:#x} +{:#x} — {}",
+                     sample {:#x} +{:#x}: {}",
                     bad.at, bad.whole, bad.piecewise, sample.at, sample.len, sample.why
                 );
                 failures += 1;
@@ -264,7 +264,7 @@ fn main() {
         return;
     }
     println!(
-        "{failures} inconsistent sample(s), {} file(s) whose extent leaves the image — \
+        "{failures} inconsistent sample(s), {} file(s) whose extent leaves the image; \
          rerun with SEED={seed} to get the same set",
         overrunning.len()
     );

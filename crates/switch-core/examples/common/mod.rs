@@ -1059,7 +1059,7 @@ impl Title {
         }
         // Before the boot, which lays out the entry ABI per instruction set.
         if !switch_core::npdm::Npdm::is_64_bit_of(&self.exefs_pfs0, &self.exefs) {
-            eprintln!("[npdm] AArch32 title — running the A32 interpreter");
+            eprintln!("[npdm] AArch32 title: running the A32 interpreter");
             cpu.set_mode(switch_core::cpu::ExecMode::A32);
         }
         let modules = self.modules();
@@ -1175,7 +1175,7 @@ pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
                             nca.title_id
                         ),
                         None => println!(
-                            "add-on content {:016x} is not this title's — not mounted",
+                            "add-on content {:016x} is not this title's; not mounted",
                             nca.title_id
                         ),
                     }

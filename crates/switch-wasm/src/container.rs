@@ -103,7 +103,7 @@ pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
         switch_core::nca::ContentType::Program,
     ) else {
         s.last_error =
-            "no Program NCA in this container (or its header couldn't be decrypted — load prod.keys)"
+            "no Program NCA in this container (or its header couldn't be decrypted; load prod.keys)"
                 .into();
         return 0;
     };
@@ -169,7 +169,7 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
     )
     .is_some()
     {
-        s.last_error = "this container holds a program — add-on content is data only".into();
+        s.last_error = "this container holds a program; add-on content is data only".into();
         return 0;
     }
 
@@ -391,7 +391,7 @@ pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
     let found = switch_core::control::find_control_nca(&s.nsp_files, &container, &s.keys);
     let Some((index, nca)) = found else {
         s.last_error =
-            "no Control NCA in this container (or its header couldn't be decrypted — load prod.keys)"
+            "no Control NCA in this container (or its header couldn't be decrypted; load prod.keys)"
                 .into();
         return -1;
     };

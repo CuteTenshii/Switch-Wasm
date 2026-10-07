@@ -141,7 +141,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
         .ok_or_else(|| Error::Nca("no FS header for the update's RomFS section".into()))?;
     if fs.encryption_type != ENCRYPTION_AES_CTR_EX {
         return Err(Error::Nca(
-            "this container's RomFS is not a patch — it is a title in its own right, \
+            "this container's RomFS is not a patch; it is a title in its own right, \
              and boots without a base game"
                 .into(),
         ));
@@ -151,7 +151,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
         .ok_or_else(|| Error::Nca("the base title's Program NCA has no RomFS section".into()))?;
     if base.is_update() {
         return Err(Error::Nca(
-            "the base container is itself an update — updates do not stack, \
+            "the base container is itself an update; updates do not stack, \
              both halves have to be the same title's base game and one update"
                 .into(),
         ));
@@ -171,7 +171,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
     // hactool's check: the subsection table starts where the section's data ends.
     if subsection_total != fs.subsection.offset {
         return Err(Error::Nca(format!(
-            "patch subsection table covers {:#x} bytes but starts at {:#x} — wrong keys or a corrupt update",
+            "patch subsection table covers {:#x} bytes but starts at {:#x}; wrong keys or a corrupt update",
             subsection_total, fs.subsection.offset
         )));
     }
@@ -200,7 +200,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
     const ROMFS_HEADER_SIZE: u64 = 0x50;
     if u64::from_le_bytes(header_size) != ROMFS_HEADER_SIZE {
         return Err(Error::Nca(
-            "the patched RomFS doesn't start with a valid RomFS header — \
+            "the patched RomFS doesn't start with a valid RomFS header; \
              wrong keys, or this update does not belong to this base game"
                 .into(),
         ));
@@ -216,7 +216,7 @@ fn read_table<S: ByteSource>(
 ) -> Result<(Vec<u8>, u64), Error> {
     if table.magic != BKTR_MAGIC {
         return Err(Error::Nca(format!(
-            "{what} table: magic is {:#010x}, not BKTR — this is not a patch section",
+            "{what} table: magic is {:#010x}, not BKTR; this is not a patch section",
             table.magic
         )));
     }
@@ -308,7 +308,7 @@ fn check_covers(first: Option<u64>, count: usize, what: &str) -> Result<(), Erro
     match first {
         Some(0) => Ok(()),
         Some(other) => Err(Error::Nca(format!(
-            "{what} table starts at {other:#x}, not 0 — it does not cover the section"
+            "{what} table starts at {other:#x}, not 0; it does not cover the section"
         ))),
         None => Err(Error::Nca(format!("{what} table has no entries ({count})"))),
     }

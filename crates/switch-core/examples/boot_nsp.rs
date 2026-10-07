@@ -119,7 +119,7 @@ fn main() {
             let quota = switch_core::cpu::SaveDataQuota::from(&control.nacp);
             println!(
                 "save data: {} bytes (+{} journal), extendable to {} (+{}); \
-                 cache storage: {} x {} bytes — all from the NACP",
+                 cache storage: {} x {} bytes, all from the NACP",
                 quota.size,
                 quota.journal_size,
                 quota.size_max,

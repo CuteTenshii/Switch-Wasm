@@ -54,7 +54,7 @@ export async function renderFb(expectedGeneration = displayGeneration): Promise<
     if (expectedGeneration !== displayGeneration) return;
     lastFrame = frames;
   }
-  $('res').textContent = lastFrame > 0 ? w + '×' + h : '—';
+  $('res').textContent = lastFrame > 0 ? w + '×' + h : '-';
   if (lastFrame === 0) {
     showScreen();
     return;
@@ -155,7 +155,7 @@ export function resetDisplay(): void {
   emulatedMs = 0;
   fpsSince = performance.now();
   resetDisplayMetrics();
-  $('res').textContent = '—';
+  $('res').textContent = '-';
   $('fps').textContent = '- fps';
   $('frame-ms').textContent = '- ms';
 }

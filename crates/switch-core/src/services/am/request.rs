@@ -755,7 +755,7 @@ impl Cpu {
                     self.diagnostic(
                         Level::Warn,
                         &format!(
-                            "[am] CreateLibraryApplet: {} (mode {mode}) — nothing here runs it, \
+                            "[am] CreateLibraryApplet: {} (mode {mode}); nothing here runs it, \
                          so it will report itself cancelled",
                             applet_name(id)
                         ),

@@ -77,7 +77,7 @@ impl Ticket {
     pub fn title_key_block(&self) -> Result<[u8; 16], Error> {
         if self.titlekey_type != 0 {
             return Err(Error::Ticket(
-                "personalized ticket — its title key is RSA-wrapped with a console's ETicket key, which this emulator doesn't have".into(),
+                "personalized ticket: its title key is RSA-wrapped with a console's ETicket key, which this emulator doesn't have".into(),
             ));
         }
         Ok(self.wrapped_title_key)

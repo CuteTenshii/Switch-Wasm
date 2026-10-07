@@ -177,7 +177,7 @@ fn main() {
         any_out_of_tolerance |= !compare_astc(&common::read(&path));
     }
     if any_out_of_tolerance {
-        println!("\nsomething is outside tolerance — investigate");
+        println!("\nsomething is outside tolerance; investigate");
     } else {
         println!("\nevery codec agrees with the reference");
     }

@@ -122,7 +122,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
         None => cpu.diagnostic(
             Level::Warn,
             &format!(
-                "[exefs] {:#x} bytes — hash table geometry unrecognised, contents NOT verified",
+                "[exefs] {:#x} bytes; hash table geometry unrecognised, contents NOT verified",
                 exefs.len()
             ),
         ),
@@ -143,7 +143,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
     cpu.diagnostic(
         Level::Info,
         &format!(
-            "[exefs] entries: {} — loading: {}",
+            "[exefs] entries: {}, loading: {}",
             pfs0.files
                 .iter()
                 .map(|f| f.name.as_str())
@@ -191,7 +191,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
     cpu.diagnostic(
         Level::Info,
         &format!(
-            "[npdm] system resource {system_resource:#x} — {}",
+            "[npdm] system resource {system_resource:#x}: {}",
             if system_resource == 0 {
                 "plain heap"
             } else {
@@ -218,7 +218,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
     if !switch_core::npdm::Npdm::is_64_bit_of(&pfs0, &exefs) {
         cpu.diagnostic(
             Level::Info,
-            "[npdm] AArch32 title — running the A32 interpreter",
+            "[npdm] AArch32 title: running the A32 interpreter",
         );
         cpu.set_mode(switch_core::cpu::ExecMode::A32);
     }
@@ -261,7 +261,7 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
                     None => cpu.diagnostic(
                         Level::Warn,
                         &format!(
-                            "[aoc] {:016x} is not this title's add-on content — not mounted",
+                            "[aoc] {:016x} is not this title's add-on content; not mounted",
                             entry.content_id
                         ),
                     ),
@@ -311,7 +311,7 @@ pub extern "C" fn switch_program_nca_index(handle: u32) -> i32 {
         }
         None => {
             s.last_error =
-                "no Program NCA in this container (or its header couldn't be decrypted — load prod.keys)"
+                "no Program NCA in this container (or its header couldn't be decrypted; load prod.keys)"
                     .into();
             -1
         }

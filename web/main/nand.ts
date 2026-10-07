@@ -211,7 +211,7 @@ function updateFirmwareState(): void {
   const held = nandTitles.length ? ', ' + nandTitles.length + ' on the NAND' : '';
   let state: string;
   if (restoreProgress) {
-    state = 'Registering system data archives \u2014 ' + restoreProgress.done
+    state = 'Registering system data archives: ' + restoreProgress.done
       + ' of ' + restoreProgress.total + ' \u2026';
   } else if (archiveCount === 0) {
     state = 'No system data archives. A title that mounts one - an applet\'s'
@@ -241,7 +241,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   let installed = 0;
   const stateEl = $('firmware-state');
   for (const [index, f] of files.entries()) {
-    stateEl.textContent = 'Reading ' + (index + 1) + ' of ' + files.length + ' \u2014 ' + f.name;
+    stateEl.textContent = 'Reading ' + (index + 1) + ' of ' + files.length + ': ' + f.name;
     setNote('nand-badge', (index + 1) + '/' + files.length, false);
     try {
       // Identify from the header without reading the file.

@@ -355,7 +355,7 @@ impl Nca {
                 Error::Nca("no title key loaded for this title's rights id".into())
             } else {
                 Error::Nca(format!(
-                    "missing titlekek_{:02x} in prod.keys — needed to unwrap this title's key",
+                    "missing titlekek_{:02x} in prod.keys, needed to unwrap this title's key",
                     generation
                 ))
             });
@@ -392,7 +392,7 @@ impl Nca {
             .copied()
             .ok_or_else(|| {
                 Error::Nca(
-                    "missing FS header — pass the full NCA (>= 0xC00 bytes) with a loaded header_key"
+                    "missing FS header; pass the full NCA (>= 0xC00 bytes) with a loaded header_key"
                         .into(),
                 )
             })?;
@@ -458,7 +458,7 @@ impl Nca {
         }
         if crate::crypto::sha256(&plain[ht_start..ht_end]) != fs.master_hash {
             return Err(Error::Nca(
-                "decrypted section hash mismatch — wrong keys or a corrupt file".into(),
+                "decrypted section hash mismatch; wrong keys or a corrupt file".into(),
             ));
         }
         self.verify_data_blocks(plain, fs)
@@ -483,7 +483,7 @@ impl Nca {
             let at = table_start + i * 32;
             if crate::crypto::sha256(chunk) != plain[at..at + 32] {
                 return Err(Error::Nca(format!(
-                    "block {} of {} does not match its hash — the {:#x} bytes at section offset {:#x} are not what this NCA says they are",
+                    "block {} of {} does not match its hash; the {:#x} bytes at section offset {:#x} are not what this NCA says they are",
                     i,
                     blocks,
                     chunk.len(),
@@ -593,7 +593,7 @@ impl Nca {
             .ok_or_else(|| Error::Nca(format!("no FS header for section {}", index)))?;
         if fs.encryption_type == ENCRYPTION_AES_CTR_EX {
             return Err(Error::Nca(
-                "this section is an update's patch RomFS — it holds only what the update changed, \
+                "this section is an update's patch RomFS; it holds only what the update changed, \
                  and has to be read over the base title's RomFS (see `bktr::patched_romfs_source`)"
                     .into(),
             ));
@@ -619,7 +619,7 @@ impl Nca {
         const ROMFS_HEADER_SIZE: u64 = 0x50;
         if u64::from_le_bytes(header_size) != ROMFS_HEADER_SIZE {
             return Err(Error::Nca(
-                "decrypted RomFS section doesn't start with a valid RomFS header — wrong keys or a corrupt file".into(),
+                "decrypted RomFS section doesn't start with a valid RomFS header; wrong keys or a corrupt file".into(),
             ));
         }
         Ok(romfs)
