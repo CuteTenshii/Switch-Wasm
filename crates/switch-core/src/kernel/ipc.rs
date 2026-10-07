@@ -850,7 +850,9 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[handle], &[], &[])
             }
             Some(3) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ if self.ipc_is_control_request(tls) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // Atmosphère's `HasService` (65100) included: an empty success leaves its bool unwritten.
+            _ => self.unimplemented_command(tls, "sm:", cmd_id),
         }
     }
 
@@ -1555,6 +1557,14 @@ pub(crate) mod testing {
         write_map_buffer_request(&mut cpu, 0, &[], BUFFER, 0x20, false);
         cpu.csrng_request(TLS, Some(0)).unwrap();
         assert_ne!(cpu.read_bytes(BUFFER, 0x20), first, "a second call differs");
+    }
+
+    #[test]
+    fn sm_refuses_a_command_it_does_not_implement() {
+        // Atmosphère's `HasService("fsp-usb")`: an empty success left its bool unwritten.
+        let mut cpu = request(false, 65100, b"fsp-usb\0");
+        cpu.sm_request(TLS, Some(65100), 0).unwrap();
+        assert_ne!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
     }
 
     #[test]
