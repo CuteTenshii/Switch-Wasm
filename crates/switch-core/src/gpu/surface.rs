@@ -424,7 +424,10 @@ impl ColorFormat {
 
     /// The byte permutation of an 8-bit UNORM format, if it is one.
     fn order8(&self) -> Option<Order8> {
-        let packing = self.packing()?;
+        Self::order8_of(&self.packing()?)
+    }
+
+    fn order8_of(packing: &Packing) -> Option<Order8> {
         if packing.numeric != Numeric::Unorm {
             return None;
         }
@@ -453,13 +456,18 @@ impl ColorFormat {
 
     /// Whether alpha exists as a channel; "X", "Z" and "O" formats have the bits only.
     pub fn has_alpha(&self) -> bool {
+        self.has_alpha_with(self.packing().as_ref())
+    }
+
+    /// [`ColorFormat::has_alpha`] with the packing already looked up.
+    fn has_alpha_with(&self, packing: Option<&Packing>) -> bool {
         if matches!(
             self.raw,
             0xC3 | 0xC4 | 0xC5 | 0xCE | 0xE6 | 0xE7 | 0xF8 | 0xF9 | 0xFA | 0xFD | 0xFE
         ) {
             return false;
         }
-        match self.packing() {
+        match packing {
             Some(packing) => packing.channels[3].bits > 0,
             None => true,
         }
@@ -496,18 +504,15 @@ impl ColorFormat {
                 self.raw
             ))
         })?;
+        let alpha = self.has_alpha_with(Some(&packing));
         // Fast path for the common 8-bit formats.
-        if let Some(order) = self.order8() {
-            return Ok(encode_order8(order, self.has_alpha(), rgba));
+        if let Some(order) = Self::order8_of(&packing) {
+            return Ok(encode_order8(order, alpha, rgba));
         }
         let mut stored = 0u128;
         for (i, channel) in packing.channels.iter().enumerate() {
             // An unused alpha slot stores one, so readers see it as opaque.
-            let value = if i == 3 && !self.has_alpha() {
-                1.0
-            } else {
-                rgba[i]
-            };
+            let value = if i == 3 && !alpha { 1.0 } else { rgba[i] };
             stored |= encode_channel(*channel, packing.numeric, value);
         }
         Ok(stored)
@@ -584,15 +589,16 @@ impl ColorFormat {
                 self.raw
             ))
         })?;
+        let alpha = self.has_alpha_with(Some(&packing));
         // The mirror of `encode_stored`'s shuffle.
-        if let Some(order) = self.order8() {
-            return Ok(decode_order8(order, self.has_alpha(), raw));
+        if let Some(order) = Self::order8_of(&packing) {
+            return Ok(decode_order8(order, alpha, raw));
         }
         let mut rgba = [0.0f32; 4];
         for (i, out) in rgba.iter_mut().enumerate() {
             *out = decode_channel(packing.channels[i], packing.numeric, raw);
         }
-        if !self.has_alpha() {
+        if !alpha {
             rgba[3] = 1.0;
         }
         Ok(rgba)
@@ -712,40 +718,60 @@ impl Packing {
     }
 }
 
+/// The 64-bit word of `raw` holding bit `shift`, shifted down; fields never straddle a word.
+#[inline(always)]
+fn field(raw: u128, shift: u32) -> u64 {
+    match shift >= 64 {
+        true => ((raw >> 64) as u64) >> (shift - 64),
+        false => (raw as u64) >> shift,
+    }
+}
+
+/// `value` placed at bit `shift`; the inverse of [`field`]. Avoids `u128` shifts, a libcall in wasm.
+#[inline(always)]
+fn place(value: u64, shift: u32) -> u128 {
+    match shift >= 64 {
+        true => u128::from(value << (shift - 64)) << 64,
+        false => u128::from(value << shift),
+    }
+}
+
 fn encode_channel(channel: Channel, numeric: Numeric, value: f32) -> u128 {
     if channel.bits == 0 {
         return 0;
     }
-    let mask = (1u128 << channel.bits) - 1;
+    debug_assert!(channel.bits <= 32 && (channel.shift % 64) + channel.bits <= 64);
+    let mask = (1u64 << channel.bits) - 1;
     // A NaN casts to zero.
     let stored = match numeric {
-        Numeric::Unorm => (value.clamp(0.0, 1.0) * mask as f32 + 0.5) as u128,
+        Numeric::Unorm => (value.clamp(0.0, 1.0) * mask as f32 + 0.5) as u64,
         Numeric::Snorm => {
-            let scaled = (value.clamp(-1.0, 1.0) * (mask >> 1) as f32).round() as i128;
-            scaled as u128 & mask
+            let scaled = (value.clamp(-1.0, 1.0) * (mask >> 1) as f32).round() as i64;
+            scaled as u64 & mask
         }
-        Numeric::Uint => (f64::from(value)).clamp(0.0, mask as f64) as u128,
+        Numeric::Uint => (f64::from(value)).clamp(0.0, mask as f64) as u64,
         Numeric::Sint => {
             let max = (mask >> 1) as f64;
-            (f64::from(value)).clamp(-max - 1.0, max) as i128 as u128 & mask
+            (f64::from(value)).clamp(-max - 1.0, max) as i64 as u64 & mask
         }
         Numeric::Float => match channel.bits {
-            32 => u128::from(value.to_bits()),
-            16 => u128::from(f32_to_f16(value)),
-            bits => u128::from(pack_small_float(value, bits - 5)),
+            32 => u64::from(value.to_bits()),
+            16 => u64::from(f32_to_f16(value)),
+            bits => u64::from(pack_small_float(value, bits - 5)),
         },
     };
-    (stored & mask) << channel.shift
+    place(stored & mask, channel.shift)
 }
 
 fn decode_channel(channel: Channel, numeric: Numeric, raw: u128) -> f32 {
     if channel.bits == 0 {
         return 0.0;
     }
-    let mask = (1u128 << channel.bits) - 1;
-    let bits = (raw >> channel.shift) & mask;
-    // Two's complement in `channel.bits`, widened to the whole of an i128.
-    let signed = || ((bits << (128 - channel.bits)) as i128) >> (128 - channel.bits);
+    debug_assert!(channel.bits <= 32 && (channel.shift % 64) + channel.bits <= 64);
+    let mask = (1u64 << channel.bits) - 1;
+    let bits = field(raw, channel.shift) & mask;
+    // Two's complement in `channel.bits`, widened to the whole of an i64.
+    let signed = || ((bits << (64 - channel.bits)) as i64) >> (64 - channel.bits);
     match numeric {
         Numeric::Unorm => bits as f32 / mask as f32,
         // The most negative value clamps to -1.0.

@@ -389,9 +389,14 @@ pub struct DepthLayout {
 impl DepthLayout {
     /// The bits of a pixel the depth field occupies.
     pub fn depth_mask(&self) -> u128 {
-        let width: u128 = match self.depth_bits {
+        u128::from(self.depth_mask64())
+    }
+
+    /// Depth fields sit in the low 64 bits; `u128` shifts are a libcall in wasm.
+    fn depth_mask64(&self) -> u64 {
+        let width: u64 = match self.depth_bits {
             0 => 0xFFFF_FFFF,
-            bits => (1u128 << bits) - 1,
+            bits => (1u64 << bits) - 1,
         };
         width << self.depth_shift
     }
@@ -399,18 +404,18 @@ impl DepthLayout {
     /// `depth` in `0.0..=1.0`, encoded in place; rounds in `f64` since `f32` loses 24-bit precision.
     pub fn encode_depth(&self, depth: f32) -> u128 {
         let stored = match self.depth_bits {
-            0 => depth.to_bits() as u128,
+            0 => u64::from(depth.to_bits()),
             bits => {
                 let max = ((1u64 << bits) - 1) as f64;
-                (depth.clamp(0.0, 1.0) as f64 * max + 0.5) as u128
+                (depth.clamp(0.0, 1.0) as f64 * max + 0.5) as u64
             }
         };
-        stored << self.depth_shift
+        u128::from(stored << self.depth_shift)
     }
 
     /// Inverse of [`DepthLayout::encode_depth`], from a whole stored pixel.
     pub fn decode_depth(&self, pixel: u128) -> f32 {
-        let stored = (pixel & self.depth_mask()) >> self.depth_shift;
+        let stored = (pixel as u64 & self.depth_mask64()) >> self.depth_shift;
         match self.depth_bits {
             0 => f32::from_bits(stored as u32),
             bits => {

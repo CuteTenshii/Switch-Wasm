@@ -117,14 +117,14 @@ globalThis.__benchHostRead = (fileIndex, offset, ptr, len) => {
 };
 
 function toWasm(bytes) {
-  const ptr = api.switch_alloc(bytes.length);
+  const ptr = api.switch_alloc(bytes.length) >>> 0;
   new Uint8Array(api.memory.buffer, ptr, bytes.length).set(bytes);
   return ptr;
 }
 
 function text(call) {
   const cap = 4096;
-  const ptr = api.switch_alloc(cap);
+  const ptr = api.switch_alloc(cap) >>> 0;
   const n = call(ptr, cap);
   const out = new TextDecoder().decode(new Uint8Array(api.memory.buffer, ptr, n));
   api.switch_free(ptr, cap);
@@ -309,7 +309,7 @@ if (shot) {
   const width = api.switch_fb_width(handle);
   const height = api.switch_fb_height(handle);
   const len = width * height * 4;
-  const ptr = api.switch_alloc(len);
+  const ptr = api.switch_alloc(len) >>> 0;
   try {
     const copied = api.switch_fb_snapshot(handle, ptr, len);
     if (copied !== len) throw new Error(`incomplete framebuffer: ${copied}/${len} bytes`);

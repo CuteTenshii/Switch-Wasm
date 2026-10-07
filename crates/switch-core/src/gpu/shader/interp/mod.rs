@@ -416,8 +416,11 @@ impl Invocation {
             // A jump flushes deferred texture writes, placed assuming program order.
             self.pc = pc;
             let jump = |index: u32, pending: &mut Vec<(usize, u8, u32)>, inv: &mut Self| {
-                for (_, reg, val) in pending.drain(..) {
-                    inv.set_reg(reg, val);
+                // `drain` is a real call even when empty.
+                if !pending.is_empty() {
+                    for (_, reg, val) in pending.drain(..) {
+                        inv.set_reg(reg, val);
+                    }
                 }
                 if index == NO_TARGET {
                     return Err(Error::Gpu(format!(
@@ -430,8 +433,10 @@ impl Invocation {
 
             match op {
                 Op::Exit => {
-                    for (_, reg, val) in pending.drain(..) {
-                        self.set_reg(reg, val);
+                    if !pending.is_empty() {
+                        for (_, reg, val) in pending.drain(..) {
+                            self.set_reg(reg, val);
+                        }
                     }
                     return Ok(Halt::Exited);
                 }
