@@ -2,6 +2,17 @@
 
 use crate::cpu::*;
 
+/// A kernel event a service handed the guest a handle to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Event {
+    /// Diagnostics only.
+    pub(crate) name: &'static str,
+    /// Events start unsignalled.
+    pub(crate) signaled: bool,
+    /// Whether a successful wait consumes the signal (auto-clear).
+    pub(crate) auto_clear: bool,
+}
+
 /// The AM messages queued for the running applet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppletMessage {

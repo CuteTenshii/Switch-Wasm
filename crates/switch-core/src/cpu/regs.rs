@@ -2,6 +2,47 @@
 
 use super::*;
 
+/// SIMD register file; indices come from 5-bit fields, so accesses are in range.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct VRegs([u128; 32]);
+
+impl Deref for VRegs {
+    type Target = [u128; 32];
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for VRegs {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Index<usize> for VRegs {
+    type Output = u128;
+
+    #[inline(always)]
+    fn index(&self, index: usize) -> &Self::Output {
+        debug_assert!(index < 32);
+        // SAFETY: all architectural register fields are five bits and the
+        // public u8 accessors mask them before indexing.
+        unsafe { self.0.get_unchecked(index) }
+    }
+}
+
+impl IndexMut<usize> for VRegs {
+    #[inline(always)]
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        debug_assert!(index < 32);
+        // SAFETY: see `Index` above.
+        unsafe { self.0.get_unchecked_mut(index) }
+    }
+}
+
 /// Meaningful register slots: X0..=X30, then the zero register's discard slot and SP,
 /// so register 31's meaning is an index chosen at decode time.
 pub(crate) const REG_SLOTS: usize = 34;

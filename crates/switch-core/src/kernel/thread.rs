@@ -2,6 +2,79 @@
 
 use crate::cpu::*;
 
+/// A guest thread's state. Threads only switch at blocking syscalls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadState {
+    /// Created but not yet started with `svcStartThread`.
+    Created,
+    Runnable,
+    /// Returned from its entry point or called `svcExitThread`.
+    Finished,
+    /// Blocked in `svcArbitrateLock` on the mutex word at this address.
+    WaitMutex(u32),
+    /// Blocked in `svcWaitProcessWideKeyAtomic`; re-acquires `mutex` when woken.
+    /// `deadline` is the expiry cycle for timed waits.
+    WaitKey {
+        key: u32,
+        mutex: u32,
+        deadline: Option<u64>,
+    },
+    /// Blocked in `svcWaitForAddress` until signalled or `deadline` passes.
+    WaitAddress {
+        addr: u32,
+        deadline: Option<u64>,
+    },
+    /// Asleep until `deadline` with the PC on the `svc`, which is reissued on wake.
+    Sleeping {
+        deadline: u64,
+    },
+    /// Blocked in `svcWaitSynchronization` with the PC on the `svc`; reissued when
+    /// [`Cpu::signal_event`] wakes it or at `deadline` (the display tick).
+    WaitEvent {
+        deadline: u64,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ThreadContext {
+    pub handle: u64,
+    /// Kernel thread id (`svcGetThreadId`), distinct from the handle.
+    pub(crate) id: u64,
+    pub state: ThreadState,
+    /// Suspended by `svcSetThreadActivity`; independent of `state`.
+    pub(crate) paused: bool,
+    /// Saved register file, SP included; see [`REG_SLOTS`].
+    pub(crate) regs: [u64; REG_FILE],
+    pub(crate) pc: u32,
+    pub(crate) nzcv: u32,
+    pub(crate) mode: ExecMode,
+    pub(crate) cpsr_q: bool,
+    pub(crate) cpsr_ge: u8,
+    pub(crate) fpscr_nzcv: u32,
+    pub(crate) vregs: VRegs,
+    pub(crate) fpcr: u32,
+    pub(crate) fpsr: u32,
+    pub(crate) tpidr: u64,
+    pub(crate) tpidr_rw: u64,
+    /// 0 (most urgent) to 63; see [`Cpu::pick_next`].
+    pub(crate) priority: u8,
+    /// Current core, ideal core (-1 for none) and affinity mask. Not scheduled on;
+    /// `core` is what `GetCurrentProcessorNumber` answers.
+    pub(crate) core: u8,
+    pub(crate) ideal_core: i32,
+    pub(crate) affinity: u64,
+    /// Decisions passed over while runnable; see [`STARVE_DECISIONS`].
+    pub(crate) passed_over: u32,
+    /// Entry point and argument (an `nn::os` thread's `ThreadType`), for the thread report.
+    pub(crate) entry: u32,
+    pub(crate) arg: u64,
+    /// Instructions retired and times scheduled since the last [`ThreadReport`].
+    pub(crate) ran: u64,
+    pub(crate) switches: u64,
+    /// Clock when it last did real work; see [`ThreadReport::idle_ms`].
+    pub(crate) busy_at: u64,
+}
+
 impl Cpu {
     // ---- guest threads ----
 

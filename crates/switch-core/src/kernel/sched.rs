@@ -204,3 +204,89 @@ impl Cpu {
         self.threads.len().max(1)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::{
+        Cpu, CURRENT_THREAD_PSEUDO_HANDLE, DEFAULT_THREAD_PRIORITY, MAIN_THREAD_HANDLE,
+    };
+
+    #[test]
+    fn the_idle_moves_the_clock_and_leaves_the_step_count_alone() {
+        // Idling advances the clock but not the instruction count.
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        let (clock, steps) = (cpu.cycles, cpu.steps);
+
+        cpu.sleep_until(clock + 1_000_000);
+
+        assert_eq!(
+            cpu.cycles,
+            clock + 1_000_000,
+            "the clock idled to the deadline"
+        );
+        assert_eq!(cpu.steps, steps, "the idle executed nothing");
+    }
+
+    /// Run `rounds` yielding decisions and count how often each thread got the CPU.
+    fn shares(cpu: &mut Cpu, rounds: usize) -> Vec<usize> {
+        let mut held = vec![0; cpu.threads.len()];
+        for _ in 0..rounds {
+            cpu.yield_thread();
+            held[cpu.current_thread] += 1;
+        }
+        held
+    }
+
+    /// The most urgent thread gets most of the CPU; others still run within `STARVE_DECISIONS`.
+    #[test]
+    fn the_most_urgent_thread_runs_most_and_starves_nobody() {
+        let mut cpu = Cpu::new();
+        let urgent = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, 30, 0);
+        let idle = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, 50, 0);
+        assert!(cpu.start_thread(urgent) && cpu.start_thread(idle));
+
+        let held = shares(&mut cpu, 900);
+        assert!(
+            held[1] > held[0] * 4,
+            "the urgent thread dominates: {held:?}"
+        );
+        assert!(
+            held[1] > held[2] * 4,
+            "the urgent thread dominates: {held:?}"
+        );
+        assert!(held[0] > 0 && held[2] > 0, "nobody is starved: {held:?}");
+    }
+
+    /// Equal priorities take turns.
+    #[test]
+    fn threads_of_one_priority_take_turns() {
+        let mut cpu = Cpu::new();
+        let a = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY, 0);
+        let b = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, DEFAULT_THREAD_PRIORITY, 0);
+        assert!(cpu.start_thread(a) && cpu.start_thread(b));
+        assert_eq!(shares(&mut cpu, 300), vec![100, 100, 100]);
+    }
+
+    /// `svcSetThreadPriority` through the pseudo handle affects the next decision.
+    #[test]
+    fn a_priority_set_through_the_pseudo_handle_is_the_one_scheduled_on() {
+        let mut cpu = Cpu::new();
+        let worker = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY, 0);
+        assert!(cpu.start_thread(worker));
+        assert_eq!(cpu.thread_priority(CURRENT_THREAD_PSEUDO_HANDLE), Some(44));
+        assert_eq!(cpu.thread_priority(worker), Some(44));
+        assert_eq!(cpu.thread_priority(0xdead), None, "not a thread");
+
+        assert!(cpu.set_thread_priority(CURRENT_THREAD_PSEUDO_HANDLE, 10));
+        assert_eq!(cpu.thread_priority(MAIN_THREAD_HANDLE), Some(10));
+        cpu.yield_thread();
+        assert_eq!(
+            cpu.current_thread, 0,
+            "the more urgent main thread keeps running"
+        );
+
+        cpu.set_main_thread_priority(20);
+        assert_eq!(cpu.thread_priority(MAIN_THREAD_HANDLE), Some(20));
+    }
+}

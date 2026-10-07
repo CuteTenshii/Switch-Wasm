@@ -2,6 +2,21 @@
 
 use crate::cpu::*;
 
+/// One style the pad can present in hid's shared memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NpadPresentation {
+    /// `HidNpadStyleTag` bit.
+    pub(crate) style: u32,
+    /// `HidDeviceTypeBits`.
+    pub(crate) device_type: u32,
+    /// The per-style LIFO.
+    pub(crate) lifo: u32,
+    /// `HidNpadAttribute`.
+    pub(crate) attributes: u32,
+    /// `HidNpadJoyAssignmentMode`.
+    pub(crate) joy_assignment: u32,
+}
+
 /// Offsets into libnx's `HidSharedMemory` (`switch/services/hid.h`).
 pub(crate) mod hid_shmem {
     /// `offsetof(HidSharedMemory, npad)`.

@@ -2,6 +2,17 @@
 
 use crate::cpu::*;
 
+/// How an `svcWaitForAddress` resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArbiterWait {
+    /// The predicate held and the caller is now blocked.
+    Blocked,
+    /// The word did not hold the expected value; nothing to wait for.
+    Mismatch,
+    /// The predicate held but the timeout was zero.
+    TimedOut,
+}
+
 /// Mutex word bit meaning unlock must go through `svcArbitrateUnlock`.
 pub(crate) const MUTEX_HAS_LISTENERS: u32 = 0x4000_0000;
 
