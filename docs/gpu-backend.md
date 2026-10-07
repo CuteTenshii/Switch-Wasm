@@ -70,3 +70,52 @@ driven over, so a route can be checked without booting a title. **hbmenu is not
 a shader-core test** — its command list is `dkCmdBufCopyBufferToImage` plus a
 fence.
 
+## Notes by file
+
+### `crates/switch-gpu/src/convert.rs`
+
+- Formats behind optional WebGPU features must be refused up front: `createTexture` throws on a missing feature and wgpu's web backend unwraps it, which on wasm is an `unreachable` trap that kills the core (Just Dance 2019's first BC1 texture). Refusal routes the draw to the software rasterizer.
+- Normalized 16-bit formats (`TEXTURE_FORMAT_16BIT_NORM`) are native-only; no browser offers them. Sampled textures in those formats are widened to the 32-bit float sibling, which is exact (`f32` has 24 significand bits) and needs `float32-filterable`. Render targets in those formats stay refused: float targets neither clamp nor blend like normalized ones, and readback copies texels straight into a 16-bit guest surface.
+- Attachment support is checked through the format's allowed usages, not required features: e.g. `rg11b10ufloat` samples without a feature but rendering needs `RG11B10UFLOAT_RENDERABLE`.
+
+### `crates/switch-gpu/src/stats.rs`
+
+- All device rejections are kept (distinct messages capped at 16, plus a total count), not just the first: the only production reader runs before pipeline creation, so later errors went unread.
+- Upload accounting is in bytes rather than time (same on host and V8); it showed textures are ~96.5% of upload bytes, which is why only textures are cached. Cached textures are not counted.
+- `flush` splits into ask/wait/land. In a browser `flush_wait` is ~0 because the wait moved to the slice boundary (`Flush::Pending`).
+- Fallback reasons are JSON-escaped because the page parses the stats with `JSON.parse`.
+
+### `crates/switch-gpu/src/lib.rs`
+
+- `wgpu` lives in its own crate to keep `switch-core` dependency-free; the `Renderer` trait is the only shared surface.
+- Never block in a draw: reading a texture back means awaiting a promise, which deadlocks in a browser. Surfaces stay on the device across draws and go back to guest memory only at `Renderer::flush` (before present). This also turned 88 round trips per frame into one.
+- Device features requested: compressed texture families masked to the adapter; `TEXTURE_FORMAT_16BIT_NORM` (native only, else widen to `r32float`, which needs `FLOAT32_FILTERABLE`); `SUBGROUP` for warp shuffles (native only; browsers use the derivative-based `QUAD_SWAP`); `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` for 2/8 sample counts (without it the device allows only 1 and 4, and the adapter's answer lies, silently producing empty draws); `RG11B10UFLOAT_RENDERABLE` (Tomodachi Life's HDR target); `FLOAT32_BLENDABLE`. Storage buffer limit raised to the adapter's because shaders can read more than the 8 guaranteed banks.
+- The `wgpu::Instance` and adapter must be held for the device's lifetime: a browser loses the device ("A valid external Instance reference no longer exists") once they are collected.
+- Per-draw buffers/textures, readback staging buffers and flushed surfaces are `destroy()`ed rather than dropped: a browser only frees dropped resources on GC, which led to `VK_ERROR_OUT_OF_DEVICE_MEMORY` (Just Dance 2019, 55k draws) and OOM in Persona 5 Royal. `destroy()` is safe once the submission is made.
+- Caches: shader modules keyed by WGSL hash (compiling was ~59 ms vs 2 ms translation); pipelines keyed by `PipelineKey` (Home Menu: 480 draws, 7 pipelines); samplers (Tomodachi Life spent 62% of time in `createSampler`); bind group layouts; translated shaders by address and stage (qlaunch translated 278k times for 24 programs), evicted by page writes and validated against `brx` jump tables read from constant buffers; deswizzled textures (textures are 96.5% of upload bytes), evicted on watched page writes, whole-cache eviction at 256 MiB. Texture source pages are walked only as far as the mapping (Asphalt 9 textures claim 16 MiB in a 6 MiB mapping).
+- Device errors are captured by the uncaptured-error handler and read later (error scopes would require waiting). Device loss is otherwise silent (submissions accepted, readbacks never map); on loss, `give_up` hands every later frame to the rasterizer and the reason goes into the report rather than an error, since flush also runs inside GPU submissions (an error faulted Persona 5 Royal).
+- Readback timing: natively flush waits (`PollType::Wait`, with timeout); in a browser maps complete from the event loop, so flush returns `Flush::Pending` and `Cpu::complete_pending_present` presents from a later slice. Presenting guest memory meanwhile came out black for double-buffered titles. Once a readback is observed to land late (`deferred_readbacks`), frames are not interleaved: a mid-frame fallback would read stale memory and be overwritten by the readback. `GPU_DEFER_READBACKS=1` reproduces this natively; `GPU_INTERLEAVE=1` trades ~0.09% wrong pixels (Home Menu frame 60) for much faster frames. A proper browser fix would yield the pushbuffer at the fallback so the next slice resumes with the readback landed.
+- Software-frame latch: a frame the device cannot fully render goes wholly to the rasterizer. The latch releases after `clean_frames_needed` consecutive frames whose draws all pass `check`, doubling after each relatch (Tomodachi Life has one untranslatable frame in 740). Most fallbacks are `shader::wgsl` coverage gaps (e.g. `ldg b128`).
+- Flush early-out when nothing is held/evicted/pending: flush runs before every fallback draw, and a no-draw browser trace charged 1,755 ms to empty polls.
+- Multisampling: Maxwell stores samples as a texel tile per pixel with samples at texel centres. The default "expanded" route renders the expanded surface per texel, reproducing the rasterizer exactly; the device MSAA route (`GPU_DEVICE_MSAA`) shades per pixel but WebGPU's fixed sample positions differ, so it is off. Sample positions moved off texel centres fall back. `AntiAliasEnable = 0` uses a per-pixel companion.
+- Held surfaces sampled as textures must be copied from the device, not read stale from guest memory (Tomodachi Life's HDR reduction chain and cube faces). `ZF32` held depth is copied via a buffer into `r32float` (Nintendo Switch Sports); padded surfaces sampled at their drawn size use the corner path when row layouts match (`same_rows`). Draws may sample their own target, so held layers are copied in a separate submission, never bound directly.
+- Depth cannot be copied into a `depth32float` from a buffer, so depth uploads and shadow maps go through an `r32float` staging image drawn with `frag_depth` (`LOAD_DEPTH_WGSL`), one layer at a time.
+- Attachments must match in size: the pass covers the colour/depth intersection; a larger depth surface is cropped, a larger colour target draws into a scratch texture copied back (WebGPU copies part of a colour texture but only whole depth textures).
+- WebGPU details: no border address mode (wgpu web panics; the rasterizer also treats border as edge); strip pipelines must name the index format and non-strip pipelines must not, or the whole command buffer is rejected; Metal drops vertices whose stride overruns the buffer; no BGRA vertex format (swapped in the shader); no per-texture swizzle (passed into the layout); y is negated because WebGPU mirrors y itself; stencil is neither tested nor held on the device, so stencil clears go to guest memory.
+- `report_json` nests timings to avoid duplicate "modules" keys (`JSON.parse` keeps only the last), and escapes fallback reasons.
+- `shader::wgsl` dispatch keeps an unreachable trailing `return false;` because naga requires it (Tint warns); a test detects when naga stops requiring it.
+
+### `crates/switch-gpu/src/readback.rs`
+
+- Readback is copy to staging, map, read: three steps that cannot happen in one call on the web. The map callback runs from the event loop, so state is an atomic polled by the next slice. `Gpu::write_back` currently does both halves with a wait between.
+- Depth row bytes are the device format's: `Z24S8` is 4 bytes in memory and 4 bytes of `f32` on the device; `ZF32_X24S8` is 8 and 4.
+- Companion surfaces are gathered on creation and scattered back before read so guest memory only sees the expanded form; the grid is stored because the register file has moved on by flush time.
+
+### `crates/switch-gpu/src/builtin.rs`
+
+- Depth uploads go through a fullscreen draw writing frag depth from an `r32float` texture because a copy cannot write `depth32float`. `depth16unorm` could be copied but uses the same draw path so the two formats cannot diverge.
+- The resample grid is a storage buffer, not a uniform: its tables are indexed by a runtime value and a uniform array pads every element to 16 bytes.
+
+### `crates/switch-gpu/examples/screenshot_gpu.rs`
+
+- Run `screenshot_title` and `screenshot_gpu` on the same frame and `cmp` the PPMs: byte-identical output is the evidence a GPU backend matches the software reference. The example includes `switch-core`'s `examples/common` by path to avoid drifting copies. Docking mid-run (`DOCK_AT`) mirrors a real dock: the running title is told through AM messages. The GPU backend reaches late faults much faster, so it suits `TRAP_WRITE`/`WATCH_PC` debugging.
