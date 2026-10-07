@@ -5,10 +5,10 @@ one is for. AGENTS.md's *Commands* covers the build; this covers the runs.
 
 The `.nro`/`.nsp` files are gitignored.
 
-- `--example screenshot <nro> out.ppm 3` — writes the third presented frame,
+- `--example screenshot <nro> out.ppm 3` - writes the third presented frame,
   feeding in `web/font.ttf` as the shared font unless told otherwise.
-- `--example boot_nx <nro>` — shortest path to "does it halt cleanly".
-- `--example boot_nsp <nsp> <prod.keys> [title.keys] [steps]` — the browser's
+- `--example boot_nx <nro>` - shortest path to "does it halt cleanly".
+- `--example boot_nsp <nsp> <prod.keys> [title.keys] [steps]` - the browser's
   Launch button, without a browser. `SHOT=<f.ppm>` writes a frame; prefer it
   over reading `frames presented: 0` off a budget too short to reach one.
   `UPDATE=<update.nsp>` runs the title patched and `DLC=<a.nsp>,<b.nsp>` mounts
@@ -18,34 +18,34 @@ The `.nro`/`.nsp` files are gitignored.
   alike: `TRAP_WRITE=<addr>:<hex size>` and `TRAP_READ=…` name
   the code that writes to or reads a region, `WATCH_PC=<addr>[,...]` the code
   that reaches one, and `DUMP=<base>[+<hex>][:<hex len>][,...]` hex-dumps guest
-  memory wherever the run stopped — `<base>` being a register, `sp`, `pc` or an
+  memory wherever the run stopped, `<base>` being a register, `sp`, `pc` or an
   address, as in `DUMP=x23+0x1830:0x40`. Each used to live in one tool and be
   spelled differently in the next.
 - Every tool that reads a container takes `<container> <prod.keys>
   [title.keys]`, in that order: the container may be an NSP, an XCI or a bare
   NCA (decided by its header, not its name), and `title.keys` may be left out
   when `prod.keys` already opens the title. A cartridge image is read through
-  its `secure` partition — its `update` partition is a firmware bundle and is
+  its `secure` partition; its `update` partition is a firmware bundle and is
   never the title.
-- `--example dump_exefs …` — flat module images at their real load addresses
+- `--example dump_exefs …` - flat module images at their real load addresses
   plus a sorted `symbols.txt`. **This is what makes a retail backtrace
   readable.** `--example disasm_flat` disassembles them there.
-- `--example retail_trace …` — a ring buffer of the last N instructions, dumped
+- `--example retail_trace …` - a ring buffer of the last N instructions, dumped
   on halt or fault. `RING_MIN` past `rtld` (`0x08004000`), whose lazy-binding
   resolver would otherwise fill the whole ring. `MARK`/`MARK_DUMP` watch an API
   being called in order without recording the steps between.
-- `--example jit_bisect <container> <prod.keys> [title.keys]` — the
+- `--example jit_bisect <container> <prod.keys> [title.keys]` - the
   translator and the interpreter in lockstep on a retail title, narrowed to the
   first 4096-instruction slice they disagree on. Exact until the first thread
   switch: after that the two engines interleave threads differently, both
   correctly, and a disagreement means only that.
-- `node tools/browser_boot.mjs <container> --keys=… --title-keys=…` — the same
+- `node tools/browser_boot.mjs <container> --keys=… --title-keys=…` - the same
   boot in a real browser, sampling the page's run state every five seconds and
   saving the page's console, the worker's output and a thread dump.
-- `--example jit_difftest <nro>` — both engines, with every state difference.
+- `--example jit_difftest <nro>` - both engines, with every state difference.
   `SWITCH_NO_JIT=1` disables translation for host tools.
-- `--example screenshot_title <container> <prod.keys> [title.keys] out.ppm [n]`
-  — the Nth *presented* frame of a retail title, either container kind. Stops
+- `--example screenshot_title <container> <prod.keys> [title.keys] out.ppm [n]` -
+  the Nth *presented* frame of a retail title, either container kind. Stops
   at the frame rather than at a step budget, which `boot_nsp SHOT=` cannot: a
   title needs billions of steps to reach its first, and picking a budget that
   lands after it is guesswork. Was `screenshot_nsp` and `screenshot_nca`.
@@ -74,7 +74,7 @@ The `.nro`/`.nsp` files are gitignored.
   `TRACE_COPY` the DMA copies, inline uploads and 2D blits between them; and
   `TRACE_PRESENT` one line per frame scanned out. `TRACE_GPU` prints the
   draw, copy and present lines too, among every method write.
-- `--example opus_testvectors <dir>` — the Opus decoder against the RFC 8251
+- `--example opus_testvectors <dir>` - the Opus decoder against the RFC 8251
   vectors (`opus_testvectors-rfc8251.tar.gz` from opus-codec.org). It fails on
   the first packet whose range coder state disagrees with the encoder's, and
   writes `<name>.rs.dec` beside each vector for `opus_compare` to score.
