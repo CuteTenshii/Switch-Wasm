@@ -67,7 +67,8 @@ impl Cpu {
         // FMOV (register) between GPR and vector lane; bits[21:16] select direction/size.
         if ((insn >> 24) & 0x7F) == 0b0011110
             && ((insn >> 10) & 0x3F) == 0
-            && matches!((insn >> 16) & 0x3F, 0b100110 | 0b100111)
+            && (matches!((insn >> 16) & 0x3F, 0b100110 | 0b100111)
+                || (insn >> 22) & 0x3FF == 0b10_0111_1010 && (insn >> 17) & 0x1F == 0b10111)
         {
             return FpForm::MovReg;
         }
@@ -242,6 +243,20 @@ impl Cpu {
 
     pub(super) fn fp_mov_reg(&mut self, insn: u32) -> Result<bool> {
         let sel = (insn >> 16) & 0x3F;
+        // `FMOV Xd, Vn.D[1]` and `FMOV Vd.D[1], Xn`: the top half, the bottom kept.
+        if (insn >> 22) & 0b11 == 0b10 {
+            let rd = (insn & 0x1F) as usize;
+            let rn = ((insn >> 5) & 0x1F) as u8;
+            match sel {
+                0b101110 => self.write_zr(rd as u8, (self.vregs[rn as usize] >> 64) as u64),
+                0b101111 => {
+                    let low = self.vregs[rd] & u128::from(u64::MAX);
+                    self.vregs[rd] = low | u128::from(self.read_zr(rn)) << 64;
+                }
+                _ => return Ok(false),
+            }
+            return Ok(true);
+        }
         let double = ((insn >> 22) & 1) == 1;
         let rd = (insn & 0x1F) as u8;
         let rn = ((insn >> 5) & 0x1F) as u8;

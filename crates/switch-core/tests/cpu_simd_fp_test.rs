@@ -15,6 +15,18 @@ fn scalar_fp_fadd_fmov() {
 }
 
 #[test]
+fn fmov_to_and_from_the_top_half() {
+    // `fmov x0, v3.d[1]` = 0x9eae0060, `fmov v0.d[1], x3` = 0x9eaf0060 (clang -arch arm64).
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(3, 0x1111_2222_3333_4444_5555_6666_7777_8888);
+    cpu.set_vreg(0, 0xAAAA_AAAA_AAAA_AAAA_BBBB_BBBB_BBBB_BBBB);
+    cpu.set_reg(3, 0x0123_4567_89AB_CDEF);
+    let cpu = run_program(cpu, 0x1000, &[0x9eae_0060, 0x9eaf_0060, nop()]);
+    assert_eq!(cpu.read_x(0), 0x1111_2222_3333_4444);
+    assert_eq!(cpu.read_vreg(0), 0x0123_4567_89AB_CDEF_BBBB_BBBB_BBBB_BBBB);
+}
+
+#[test]
 fn scalar_fp_fcvtzs() {
     // `scvtf s0, w1` = 0x1e220020 then `fcvtzs w2, s0` = 0x1e380002. Bit 21 is
     // a fixed 1; rmode is bits[20:19], opcode bits[18:16].
