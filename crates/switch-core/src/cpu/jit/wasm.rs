@@ -123,6 +123,12 @@ impl Func {
         self.op(0x0F);
     }
 
+    /// Tail-call the table entry on the stack, with arguments under it, as type `ty`.
+    pub(super) fn return_call_indirect(&mut self, ty: u32) {
+        self.op_idx(0x13, ty);
+        uleb(&mut self.code, 0);
+    }
+
     /// `align` is a log2 hint and must not exceed the address's real alignment.
     fn mem(&mut self, opcode: u8, align: u8, offset: u32) {
         debug_assert!(align <= 3, "an alignment hint is a log2, not a width");
@@ -201,6 +207,18 @@ impl Func {
 
     pub(super) fn i32_add(&mut self) {
         self.op(0x6A);
+    }
+
+    pub(super) fn i32_sub(&mut self) {
+        self.op(0x6B);
+    }
+
+    pub(super) fn i32_eq(&mut self) {
+        self.op(0x46);
+    }
+
+    pub(super) fn i32_ge_s(&mut self) {
+        self.op(0x4E);
     }
 
     pub(super) fn i32_eqz(&mut self) {
@@ -337,9 +355,11 @@ pub(super) struct Type {
     pub(super) results: Vec<u8>,
 }
 
-/// A module that imports the host's linear memory as `e`.`m`.
+/// A module that imports the host's linear memory as `e`.`m`, and with
+/// [`Module::import_table`] its function table as `e`.`t`.
 #[derive(Default)]
 pub(super) struct Module {
+    table: bool,
     types: Vec<Type>,
     /// Type index per defined function.
     funcs: Vec<u32>,
@@ -351,6 +371,10 @@ pub(super) struct Module {
 impl Module {
     pub(super) fn new() -> Module {
         Module::default()
+    }
+
+    pub(super) fn import_table(&mut self) {
+        self.table = true;
     }
 
     pub(super) fn add_type(&mut self, params: Vec<u8>, results: Vec<u8>) -> u32 {
@@ -383,13 +407,19 @@ impl Module {
         section(&mut out, 1, &body);
 
         body.clear();
-        vec_header(&mut body, 1);
+        vec_header(&mut body, 1 + usize::from(self.table));
         name_bytes(&mut body, "e");
         name_bytes(&mut body, "m");
         body.push(0x02);
         // Minimum of zero pages; the host memory is already sized.
         body.push(0x00);
         uleb(&mut body, 0);
+        if self.table {
+            name_bytes(&mut body, "e");
+            name_bytes(&mut body, "t");
+            // A funcref table with a minimum of zero entries.
+            body.extend_from_slice(&[0x01, 0x70, 0x00, 0x00]);
+        }
         section(&mut out, 2, &body);
 
         body.clear();

@@ -115,6 +115,8 @@ export interface JitStats {
   emitted?: number;
   // Block entries that ran compiled code.
   enteredEmitted?: number;
+  // Of those, entries a compiled block made by jumping into the next.
+  chained?: number;
 }
 
 // Firmware NCA kind: 0 program, 1 data archive, 2 other.

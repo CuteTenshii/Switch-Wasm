@@ -9,7 +9,7 @@ use crate::cpu::{Cpu, ZR_DISCARD};
 use crate::mem::{Memory, PAGE_BITS};
 
 /// Longest run of instructions one block may cover, followed branches included.
-const MAX_BLOCK_OPS: usize = 64;
+pub(super) const MAX_BLOCK_OPS: usize = 64;
 
 /// Whether the block translator has a real op for `insn`, or hands it back to
 /// the interpreter to decode again on every execution.

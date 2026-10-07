@@ -93,9 +93,11 @@ $('btn-jitstats').addEventListener('click', async () => {
   const emitted = s.emitted ?? 0;
   const entered = s.enteredEmitted ?? 0;
   const share = s.executed ? ((100 * entered) / s.executed).toFixed(1) : '0';
+  const chained = s.chained ?? 0;
   log(
     emitted
-      ? `compiled: ${emitted} blocks, entered ${entered} times (${share}% of entries)`
+      ? `compiled: ${emitted} blocks, entered ${entered} times (${share}% of entries),`
+      + ` ${chained} of them by a jump from another compiled block`
       : 'compiled: nothing - every block was interpreted',
   );
 });

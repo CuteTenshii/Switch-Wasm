@@ -21,6 +21,9 @@ pub struct JitHost {
     pub install: fn(code: &[u8]) -> Entry,
     /// Free an [`Entry`] for reuse.
     pub release: fn(entry: Entry),
+    /// Whether the engine has tail calls, so compiled blocks may jump into each
+    /// other through the function table, imported as `e`.`t`.
+    pub tail_calls: bool,
 }
 
 static HOST: OnceLock<JitHost> = OnceLock::new();
@@ -33,6 +36,12 @@ pub fn set_jit_host(host: JitHost) -> bool {
 #[inline]
 pub(super) fn available() -> bool {
     HOST.get().is_some()
+}
+
+/// Whether blocks are emitted to jump straight into each other.
+#[inline]
+pub(super) fn chains() -> bool {
+    HOST.get().is_some_and(|host| host.tail_calls)
 }
 
 pub(super) fn install(code: &[u8]) -> Entry {

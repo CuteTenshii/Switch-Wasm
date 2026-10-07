@@ -1206,3 +1206,12 @@ benchmark dropped to 272.6M instructions/s over 16 frames, so inlining remains.
 Replaced the conditional-exit slice lookup with an unchecked indexed read. The
 browser benchmark measured 294.5M instructions/s over 16 frames, neutral to the
 checked lookup, so the safe form remains.
+
+
+### Compiled blocks jump into each other
+
+A compiled block that leaves at a taken branch or a written terminator now tail-calls (`return_call_indirect`) the target's compiled block through a chain table in linear memory, instead of returning to `run_jit`. Fuel set on entry stops a chain exactly where `run_jit` would have stopped following blocks, and the jump writes the trail runs `exec` would, so clock, steps, trail and registers match the interpreter (`jit_wasm_check`, a 6-frame Minecraft capture byte-identical).
+
+The chain table size decides the result. With 4,096 slots for about 10K compiled Minecraft blocks, only 32% of compiled entries came through a jump and the steady frame did not improve; with 65,536 slots it is 90%. Two alternating pairs of Minecraft runs (`wasm_bench`, profiled, 6 frames, machine under outside load) put CPU emulation at 44.0 and 43.8 ms a frame against 70.2 and 60.5 unchained (17.0M instructions a frame), with `run_jit` itself down from about 40 to 14 ms. The boot phase gained about 10%.
+
+Engines without tail calls get unchained blocks; `switch-wasm` probes once at startup.

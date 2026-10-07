@@ -20,6 +20,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 
 - Covers what host tests cannot: emitted blocks use wasm32 field offsets, 4-byte page-table entries (8 on the host), and function-table slots as entry points. Each program runs with the translator on and off and must agree on every register and the clock; the `emitted`/`enteredEmitted` stats guard against a build that silently interprets everything, and `expect` guards against a run that faulted immediately.
 - Programs cover: plain arithmetic, a store/load through the emitted page-table walk, a fused `cmp`+`b.ne` back edge (the block reports its branch target), and a `tbz` branching somewhere other than the block start (so only the emitted target can put control there).
+- It also fails unless some compiled block jumped into another, since a build without tail calls would pass every comparison unchained.
 
 ## `crates/switch-core/src/cpu/jit/exec.rs`
 
@@ -29,6 +30,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 - `exec_block` is inlined into `run_jit`: as a call each entry paid a 384-byte V8 frame; inlining took a Just Dance 2019 wasm frame from 240 to 229 ms with no change in host cycle count (host and wasm timings are not related by a constant).
 - `Here` (stretch start) is carried instead of a per-op address because the per-op version cost a reload, add and spill under V8 on every op.
 - The last-target cache matters: a block boundary falls every ~6.1 instructions on a retail frame and nearly all lead where they led before.
+- Chain fuel is the point where `run_jit` would stop following blocks anyway (the budget less the largest block, the end of the time slice, the next timed-wait sweep), so a chain retires exactly what entering each block from here would. On return the jumped-from blocks' clock and steps are added and the last block is settled as if entered directly; one that handed back at its first instruction is left for the next visit.
 - Clock, step counter, trail, and `pc` are settled at block end or fault, not per instruction. Clock is retired after the terminator, as in `step_inner`: retiring early gave every SVC a tick the interpreter had not spent (sdl-hello diverged by one cycle via a sleep deadline).
 - `take_exit` uses one match for all branch kinds; checking "followed?" first cost 6% of a Just Dance 2019 wasm frame. `exec_op`, `take_exit`, `apply_compare`, `exec_term` take references: by value, the compiler loads the 16-byte `Op` and hoists every field's extraction above the jump table (9 loads + 6 shifts per dispatch); by reference hbmenu retired 7.3% fewer host instructions.
 - `load_store_fast` makes no calls: V8 spills values live across a call at their definition whether or not the call happens (a load paid six stores). The slow path restarts the instruction from scratch, which works because the fast path commits nothing until it finishes. The PLT-stub fold follows the same rule.
@@ -65,6 +67,8 @@ How AArch64 blocks are translated, run, and written out as wasm.
 - `by_page` lists a block under every page it read. Dropping via one page leaves stale entries under the others: these can only cause spurious retranslation, never a stale block. It is rebuilt from the surviving generation on rotation.
 - Invalidation must check both generations, since `get` still reaches `older`. Every drop clears the lookup hints so no hint outlives its block.
 - Diagnostics: `linked / executed` is the link-chaining hit rate; `interpreted` vs the run's step count is the share not translated; `entered_emitted / executed` is the emitter's useful coverage.
+- The chain table maps entry addresses to compiled entries for emitted code, direct-mapped. On a Minecraft frame with about 10K compiled blocks, 4,096 slots chained 32% of compiled entries and 65,536 slots 90%. A vacant slot holds an address that hashes to another slot, so no lookup matches it.
+- A block leaves the chain table when it leaves the cache (invalidation, rotation, clear) or loses its compiled form, which is before its function-table slot can be reused. A block compiled after it left the cache is never chained to.
 
 ## `crates/switch-core/tests/jit_test.rs`
 
@@ -97,6 +101,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 - Guest access is a four-instruction page-table walk. Soft regions, protection, watchpoints and cache reports are not on this path because `Memory::peek`/`poke` already split off the page-table-answerable part; emitted code makes their checks in their order. The cached-pages bitmap had to change from a `Vec` (unknown pointer/length layout) to a fixed-size bitmap behind one pointer so emitted stores can test it. Exclusives are not emitted (no reservation model).
 - An access declines before writing any register, so the interpreter resumes the stopped instruction whole, and resumes by translating at that address rather than re-entering part-way. `defers()` is derived from the emitter (emit under two counts, compare bodies) so it cannot drift from the arms; difftests use it to know which `run` answer is right.
 - `LEFT` is needed rather than inferred from a short count because a branch on the last body instruction retires everything yet must not fall into the terminator. A taken branch counts as retired so a block always makes progress. `B`, `BL`, `BR`, `BLR` and `RET` terminators are emitted and leave with `LEFT`; PLT-folded calls, `SVC` and the rest stay with `exec_term`. On Minecraft this cut `run_jit` time by about 8% and non-GPU CPU time by about 6%.
+- Chained blocks leave a taken exit or written terminator with `return_call_indirect` into the target's compiled block, when the chain table has it and the fuel covers what they retired; otherwise they return as before. The jump does the bookkeeping `exec` would: fuel, a jump count, the last target, and the trail runs. A tail call keeps the native stack flat however long the chain.
 - wasm vs A64: 32-bit variable shifts must mask the distance to 32 themselves; div by zero and `i64::MIN / -1` trap in wasm and are guarded with real branches (not `select`, which evaluates both arms); a 32-bit signed division cannot overflow since operands are sign-extended. No 128-bit integers, so `SMULH`/`UMULH` stay interpreted. In `add_with_carry`, a 32-bit op's carry is bit 32 of the untruncated sum, so only 64-bit ops need the explicit carry chain.
 - Page-table entries are `Option<Box<[u8; PAGE_SIZE]>>`, guaranteed a bare pointer with null for `None`, which is how emitted code tests unmapped pages; 4 bytes on wasm32 (asserted at compile time).
 - The write-protect envelope test is enough inline because every protected range is a module's `.text`; stores inside it hand back. The watched-page bitmap is unallocated until something watches a page (never, without JIT or GPU backend).
@@ -116,6 +121,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 - Synchronous `WebAssembly.Module` is required (blocks are requested inside a run slice); windows refuse >4 KiB synchronously but workers allow any size, and blocks are a few hundred bytes.
 - Freed slots are recycled: the cache drops blocks constantly, which would otherwise hold six figures of unreachable compiled code. A freed slot still points at its old function (no null function entry), so memory is bounded by the peak number installed. Slot 0 is the linker's null and means "not installed"; it must never be handed out. Failure to compile returns 0 and the block stays interpreted forever.
 - `enable` is called before a session runs, so builds that never create one never touch `WebAssembly`.
+- Tail calls are probed once with `tail_call_probe`; without them blocks are emitted unchained. Every module is offered the function table as `e`.`t`, and unchained ones do not import it.
 
 ## `crates/switch-core/src/cpu/jit/host.rs`
 

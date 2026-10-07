@@ -8,13 +8,16 @@
 //! many instructions retired, with [`LEFT`] set when it left at a taken branch or
 //! a terminator [`writes_term`] accepts.
 //! A block with anything the emitter cannot write is [`Refused`].
+//! [`emit_chained`] blocks leave by tail-calling the next compiled block
+//! when the chain table has it and the fuel allows.
 
-use super::decode::{decode, translate, Decoded};
+use super::cache::{Chain, Jit, CHAIN_SLOTS};
+use super::decode::{decode, translate, Decoded, MAX_BLOCK_OPS};
 use super::ir::{Block, Exit, Op, Term};
 use super::wasm::{Func, Module, I32, I64};
 use crate::cpu::bits::mask_of_width;
 use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
-use crate::cpu::{Cpu, CONDITION_MASKS, SELF_RETURN_TRAMPOLINE};
+use crate::cpu::{Cpu, CONDITION_MASKS, RECENT_LEN, SELF_RETURN_TRAMPOLINE};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
 /// Whether the emitter has a way to write `insn` out as wasm. Block-ending and
@@ -42,6 +45,7 @@ pub fn emits(insn: u32) -> bool {
             watched: 0,
             vregs: 0,
         },
+        chain: None,
     }
     .op(&op, 0)
 }
@@ -70,7 +74,12 @@ pub fn defers(insn: u32) -> bool {
             watched: 0,
             vregs: 0,
         };
-        Emitter { f: &mut f, layout }.op(&op, retired);
+        Emitter {
+            f: &mut f,
+            layout,
+            chain: None,
+        }
+        .op(&op, retired);
         f.code().to_vec()
     };
     body(0) != body(1)
@@ -192,6 +201,78 @@ const L_WP: u32 = 11;
 /// A block bigger than this is not emitted, to bound module compile time.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// The most a block can retire, terminator included: fuel keeps this much budget for the next.
+pub(super) const MAX_WHOLE: i64 = MAX_BLOCK_OPS as i64 + 1;
+
+/// Offsets from the `Cpu` of what a jump between blocks touches.
+struct ChainLayout {
+    fuel: u32,
+    hops: u32,
+    last: u32,
+    slots: u32,
+    recent: u32,
+    recent_len: u32,
+    run_start: u32,
+    run_count: u32,
+}
+
+impl ChainLayout {
+    const OF_CPU: ChainLayout = {
+        let chain = std::mem::offset_of!(Cpu, jit) + std::mem::offset_of!(Jit, chain);
+        ChainLayout {
+            fuel: (chain + std::mem::offset_of!(Chain, fuel)) as u32,
+            hops: (chain + std::mem::offset_of!(Chain, hops)) as u32,
+            last: (chain + std::mem::offset_of!(Chain, last)) as u32,
+            slots: (chain + std::mem::offset_of!(Chain, slots)) as u32,
+            recent: std::mem::offset_of!(Cpu, recent) as u32,
+            recent_len: std::mem::offset_of!(Cpu, recent_len) as u32,
+            run_start: std::mem::offset_of!((u32, u32), 0) as u32,
+            run_count: std::mem::offset_of!((u32, u32), 1) as u32,
+        }
+    };
+}
+
+/// The block being emitted, as far as a jump out of it needs: its trail runs.
+pub(super) struct Chaining {
+    start: u32,
+    /// Index after each followed `B`, and its target.
+    jumps: Vec<(usize, u32)>,
+}
+
+impl Chaining {
+    pub(super) fn of(block: &Block) -> Chaining {
+        let jumps = block
+            .exits
+            .iter()
+            .filter_map(|branch| match branch.exit {
+                Exit::Jump { target } => Some((branch.at as usize + branch.span as usize, target)),
+                _ => None,
+            })
+            .collect();
+        Chaining {
+            start: block.start,
+            jumps,
+        }
+    }
+
+    /// The trail runs of the first `retired` instructions, as `exec` pushes them.
+    pub(super) fn runs(&self, retired: usize) -> Vec<(u32, u32)> {
+        let mut runs = Vec::new();
+        let (mut run_pc, mut run_i) = (self.start, 0usize);
+        for &(after, target) in &self.jumps {
+            if after > retired {
+                break;
+            }
+            runs.push((run_pc, (after - run_i) as u32));
+            (run_pc, run_i) = (target, after);
+        }
+        if retired > run_i {
+            runs.push((run_pc, (retired - run_i) as u32));
+        }
+        runs
+    }
+}
+
 /// The immediate of a fused `CMP` inverted at emit time, as
 /// [`Emitter::invert_if`] does at run time.
 fn invert_if_const(v: u64, carry: u8) -> u64 {
@@ -228,6 +309,7 @@ fn size_of(sf: bool) -> u32 {
 struct Emitter<'a> {
     f: &'a mut Func,
     layout: Layout,
+    chain: Option<Chaining>,
 }
 
 impl Emitter<'_> {
@@ -301,6 +383,98 @@ impl Emitter<'_> {
         self.f.local_get(STATE);
         self.f.local_get(L_ADDR);
         self.f.i32_store(ALIGN_4, self.layout.pc);
+    }
+
+    /// Jump into the compiled block at the target (`target`, or `L_ADDR`) if
+    /// the chain table has it and `retired` fits the fuel; otherwise fall through.
+    fn chain(&mut self, retired: usize, target: Option<u32>) {
+        let Some(runs) = self.chain.as_ref().map(|c| c.runs(retired)) else {
+            return;
+        };
+        let at = ChainLayout::OF_CPU;
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, at.fuel);
+        self.f.i32_const(retired as i32);
+        self.f.i32_sub();
+        self.f.local_tee(L_IDX);
+        self.f.i32_const(0);
+        self.f.i32_ge_s();
+        self.f.if_void();
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, at.slots);
+        // A known target's slot is a constant offset; `slot_at` is added to the loads.
+        let slot_at = match target {
+            Some(pc) => (Chain::slot(pc) * 8) as u32,
+            None => {
+                self.f.local_get(L_ADDR);
+                self.f.i32_const(1);
+                self.f.i32_shl();
+                self.f.i32_const(((CHAIN_SLOTS - 1) * 8) as i32);
+                self.f.i32_and();
+                self.f.i32_add();
+                0
+            }
+        };
+        self.f.local_tee(L_PAGE);
+        self.f.i32_load(ALIGN_4, slot_at);
+        self.push_target(target);
+        self.f.i32_eq();
+        self.f.if_void();
+        self.f.local_get(STATE);
+        self.f.local_get(L_IDX);
+        self.f.i32_store(ALIGN_4, at.fuel);
+        self.f.local_get(STATE);
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, at.hops);
+        self.f.i32_const(1);
+        self.f.i32_add();
+        self.f.i32_store(ALIGN_4, at.hops);
+        self.f.local_get(STATE);
+        self.push_target(target);
+        self.f.i32_store(ALIGN_4, at.last);
+        self.push_runs(&runs, &at);
+        self.f.local_get(STATE);
+        self.f.local_get(L_PAGE);
+        self.f.i32_load(ALIGN_4, slot_at + 4);
+        self.f.return_call_indirect(0);
+        self.f.end();
+        self.f.end();
+    }
+
+    fn push_target(&mut self, target: Option<u32>) {
+        match target {
+            Some(pc) => self.f.i32_const(pc as i32),
+            None => self.f.local_get(L_ADDR),
+        }
+    }
+
+    /// Append `runs` to the fault trail, as `Cpu::push_run` does.
+    fn push_runs(&mut self, runs: &[(u32, u32)], at: &ChainLayout) {
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, at.recent_len);
+        self.f.local_set(L_C);
+        for (k, &(start, count)) in runs.iter().enumerate() {
+            self.f.local_get(L_C);
+            self.f.i32_const(k as i32);
+            self.f.i32_add();
+            self.f.i32_const((RECENT_LEN - 1) as i32);
+            self.f.i32_and();
+            self.f.i32_const(3);
+            self.f.i32_shl();
+            self.f.local_get(STATE);
+            self.f.i32_add();
+            self.f.local_tee(L_WP);
+            self.f.i32_const(start as i32);
+            self.f.i32_store(ALIGN_4, at.recent + at.run_start);
+            self.f.local_get(L_WP);
+            self.f.i32_const(count as i32);
+            self.f.i32_store(ALIGN_4, at.recent + at.run_count);
+        }
+        self.f.local_get(STATE);
+        self.f.local_get(L_C);
+        self.f.i32_const(runs.len() as i32);
+        self.f.i32_add();
+        self.f.i32_store(ALIGN_4, at.recent_len);
     }
 
     /// Write the local `L_R` into `regs[slot]`.
@@ -635,6 +809,7 @@ impl Emitter<'_> {
         self.f.local_get(STATE);
         self.f.i32_const(target as i32);
         self.f.i32_store(ALIGN_4, self.layout.pc);
+        self.chain(retired, Some(target));
         self.f.i32_const((retired as u32 | LEFT) as i32);
         self.f.return_();
         self.f.end();
@@ -1648,10 +1823,40 @@ pub(super) fn writes_term(term: &Term) -> bool {
     )
 }
 
+/// A module that validates only if the engine has the tail calls
+/// [`emit_chained`] blocks use; for the embedder to set [`super::JitHost::tail_calls`].
+pub fn tail_call_probe() -> Vec<u8> {
+    let mut f = Func::new();
+    f.local_get(STATE);
+    f.local_get(STATE);
+    f.return_call_indirect(0);
+    f.end();
+    let mut m = Module::new();
+    m.import_table();
+    let ty = m.add_type(vec![I32], vec![I32]);
+    m.add_func(ty, f);
+    m.finish()
+}
+
 /// Emit `block`'s body as a module exporting `run`.
 pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refused> {
+    emit(block, layout, None)
+}
+
+/// [`emit_block`] for a real `Cpu`, jumping straight into compiled successors
+/// through the function table it imports.
+pub(super) fn emit_chained(block: &Block) -> Result<Vec<u8>, Refused> {
+    emit(block, Layout::of_cpu(), Some(Chaining::of(block)))
+}
+
+fn emit(block: &Block, layout: Layout, chain: Option<Chaining>) -> Result<Vec<u8>, Refused> {
+    let chained = chain.is_some();
     let mut f = scratch_func();
-    let mut e = Emitter { f: &mut f, layout };
+    let mut e = Emitter {
+        f: &mut f,
+        layout,
+        chain,
+    };
     let mut next_exit = 0usize;
     let mut i = 0usize;
     while i < block.ops.len() {
@@ -1683,6 +1888,11 @@ pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refus
     match block.term.as_ref().filter(|term| writes_term(term)) {
         Some(term) => {
             e.term(term);
+            let target = match *term {
+                Term::B { target } | Term::Bl { target, .. } => Some(target),
+                _ => None,
+            };
+            e.chain(block.ops.len() + 1, target);
             f.i32_const(((block.ops.len() + 1) as u32 | LEFT) as i32);
         }
         None => f.i32_const(block.ops.len() as i32),
@@ -1690,6 +1900,9 @@ pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refus
     f.end();
 
     let mut m = Module::new();
+    if chained {
+        m.import_table();
+    }
     let ty = m.add_type(vec![I32], vec![I32]);
     let idx = m.add_func(ty, f);
     m.export("run", idx);
@@ -1845,6 +2058,41 @@ mod tests {
             const NOWHERE: u32 = 0xF000_0000;
             let blank = *(table.add((NOWHERE >> PAGE_BITS) as usize * ENTRY) as *const *const u8);
             assert!(blank.is_null(), "an unmapped page is not a null entry");
+        }
+    }
+
+    /// The same for what a jump between blocks touches.
+    #[test]
+    fn a_jump_finds_the_chain_table_and_the_trail_through_its_layout() {
+        let mut cpu = Cpu::new();
+        cpu.jit.chain.fuel = -7;
+        cpu.jit.chain.hops = 11;
+        cpu.jit.chain.last = 0x0800_0010;
+        cpu.jit.chain.slots[5] = [0x0800_0014, 42];
+        cpu.recent[3] = (0x0800_0020, 9);
+        cpu.recent_len = 13;
+
+        let at = ChainLayout::OF_CPU;
+        let base = &cpu as *const Cpu as usize;
+        // SAFETY: as above, in-bounds offsets from a live `Cpu` of the right types.
+        unsafe {
+            let u32_at = |off: u32| *((base + off as usize) as *const u32);
+            assert_eq!(u32_at(at.fuel) as i32, -7, "the fuel moved");
+            assert_eq!(u32_at(at.hops), 11, "the jump count moved");
+            assert_eq!(u32_at(at.last), 0x0800_0010, "the last target moved");
+            let slots = *((base + at.slots as usize) as *const *const u32);
+            assert_eq!(
+                (*slots.add(10), *slots.add(11)),
+                (0x0800_0014, 42),
+                "a chain slot is not two words at eight bytes a slot"
+            );
+            let run = at.recent + 3 * 8;
+            assert_eq!(
+                (u32_at(run + at.run_start), u32_at(run + at.run_count)),
+                (0x0800_0020, 9),
+                "a trail entry is not where a jump writes it"
+            );
+            assert_eq!(u32_at(at.recent_len), 13, "the trail length moved");
         }
     }
 

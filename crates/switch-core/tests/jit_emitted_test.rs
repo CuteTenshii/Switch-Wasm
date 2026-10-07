@@ -152,7 +152,11 @@ fn release(entry: Entry) {
 fn exclusive() -> MutexGuard<'static, ()> {
     static SERIAL: Mutex<()> = Mutex::new(());
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    set_jit_host(JitHost { install, release });
+    set_jit_host(JitHost {
+        install,
+        release,
+        tail_calls: false,
+    });
     ENTERED.store(0, Ordering::SeqCst);
     RELEASED.store(0, Ordering::SeqCst);
     LAST_MODULE.store(0, Ordering::SeqCst);

@@ -211,6 +211,7 @@ const check = (what, a, b) => {
   console.log(`  FAIL ${what}: ${a} interpreted, ${b} translated`);
 };
 
+let totalChained = 0;
 for (const program of PROGRAMS) {
   console.log(`${program.name}:`);
   const interpreted = run(program, false);
@@ -230,10 +231,12 @@ for (const program of PROGRAMS) {
     }
   }
 
-  const { emitted, enteredEmitted, executed } = translated.jit;
+  const { emitted, enteredEmitted, executed, chained } = translated.jit;
   console.log(
-    `  ${emitted} block(s) compiled, entered ${enteredEmitted} of ${executed} times`,
+    `  ${emitted} block(s) compiled, entered ${enteredEmitted} of ${executed} times,`
+    + ` ${chained} by a jump from another`,
   );
+  totalChained += chained;
   if (!emitted) {
     failed = true;
     console.log('  FAIL nothing was compiled, so the comparison proved nothing');
@@ -241,6 +244,11 @@ for (const program of PROGRAMS) {
     failed = true;
     console.log('  FAIL a block was compiled and then never entered');
   }
+}
+
+if (!totalChained) {
+  failed = true;
+  console.log('\nFAIL no compiled block jumped into another');
 }
 
 console.log(failed ? '\nthe emitted path is wrong' : '\nthe emitted path runs');

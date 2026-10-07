@@ -8,7 +8,7 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
     let s = session(handle);
     let stats = s.cpu.jit_stats();
     let json = format!(
-        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"linked\":{},\"invalidated\":{},\"interpreted\":{},\"interpretedGroups\":[{}],\"emitted\":{},\"enteredEmitted\":{}}}",
+        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"linked\":{},\"invalidated\":{},\"interpreted\":{},\"interpretedGroups\":[{}],\"emitted\":{},\"enteredEmitted\":{},\"chained\":{}}}",
         s.cpu.jit_enabled(),
         stats.blocks,
         stats.translated,
@@ -22,7 +22,8 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
             .collect::<Vec<_>>()
             .join(","),
         stats.emitted,
-        stats.entered_emitted
+        stats.entered_emitted,
+        stats.chained
     );
     write_into(buf, maxlen, json.as_bytes())
 }

@@ -3,7 +3,7 @@
 
 use js_sys::{Function, Object, Reflect, Uint8Array, WebAssembly};
 use std::cell::RefCell;
-use switch_core::cpu::{set_jit_host, Entry, JitHost};
+use switch_core::cpu::{set_jit_host, tail_call_probe, Entry, JitHost};
 use wasm_bindgen::{JsCast, JsValue};
 
 thread_local! {
@@ -13,7 +13,18 @@ thread_local! {
 
 /// Lets the core emit blocks.
 pub fn attach() {
-    set_jit_host(JitHost { install, release });
+    set_jit_host(JitHost {
+        install,
+        release,
+        tail_calls: tail_calls(),
+    });
+}
+
+fn tail_calls() -> bool {
+    let probe = tail_call_probe();
+    let bytes = Uint8Array::new_with_length(probe.len() as u32);
+    bytes.copy_from(&probe);
+    WebAssembly::validate(bytes.as_ref()).unwrap_or(false)
 }
 
 fn table() -> Option<WebAssembly::Table> {
@@ -30,9 +41,15 @@ fn compile(code: &[u8]) -> Option<Entry> {
     bytes.copy_from(code);
     let module = WebAssembly::Module::new(bytes.as_ref()).ok()?;
 
-    // The only import is this module's own linear memory.
+    // This module's own linear memory, and its function table for blocks that jump to others.
     let env = Object::new();
     Reflect::set(&env, &JsValue::from_str("m"), &wasm_bindgen::memory()).ok()?;
+    Reflect::set(
+        &env,
+        &JsValue::from_str("t"),
+        &wasm_bindgen::function_table(),
+    )
+    .ok()?;
     let imports = Object::new();
     Reflect::set(&imports, &JsValue::from_str("e"), &env).ok()?;
 

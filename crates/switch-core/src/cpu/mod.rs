@@ -42,7 +42,8 @@ pub use crate::services::fs::{FsActivity, SaveDataQuota};
 pub use crate::services::storage::SaveKey;
 pub use a32::ExecMode;
 pub use jit::{
-    defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused, HOT, LEFT,
+    defers, emits, set_jit_host, tail_call_probe, translates, Entry, JitHost, JitStats, Layout,
+    Refused, HOT, LEFT,
 };
 
 pub use crate::services::acc::{UserAccount, UsersRefused, MAX_USERS, NICKNAME_LEN};

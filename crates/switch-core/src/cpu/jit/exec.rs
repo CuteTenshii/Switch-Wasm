@@ -3,7 +3,7 @@
 
 use super::cache::JitStats;
 use super::decode::translate;
-use super::emit::{emit_block, writes_term, LEFT};
+use super::emit::{emit_block, emit_chained, writes_term, LEFT, MAX_WHOLE};
 use super::host;
 use super::ir::{Block, Code, Exit, Op, PackedImm, Term};
 use crate::cpu::bits::*;
@@ -28,9 +28,14 @@ enum Taken {
 
 #[derive(Clone, Copy)]
 struct Emitted {
+    /// Of the block that answered: the entered one, or the last jumped to.
     retired: usize,
     /// Whether it left through a taken branch, with the target in `pc`.
     left: bool,
+    /// Jumps between compiled blocks before the answer.
+    hops: u32,
+    /// Instructions the jumped-from blocks retired.
+    chained: u64,
 }
 
 /// Where the straight-line stretch being executed starts, in the block body
@@ -62,6 +67,12 @@ impl Here {
 #[inline(always)]
 fn invert_if(v: u64, carry: u8) -> u64 {
     v ^ 0u64.wrapping_sub(u64::from(carry))
+}
+
+/// What an entered emitted block can retire, terminator included.
+#[inline(always)]
+fn whole(block: &Block) -> usize {
+    block.ops.len() + usize::from(block.term.as_ref().is_some_and(writes_term))
 }
 
 impl Cpu {
@@ -127,7 +138,7 @@ impl Cpu {
             // Straight on to a linked successor while nothing it checks has changed.
             let mut block = block;
             loop {
-                let ran = match self.exec_block(&block, max_steps - steps) {
+                let ran = match self.exec_block(&mut block, max_steps - steps) {
                     Ok(ran) => ran,
                     Err(e) => {
                         self.jit.executed += executed;
@@ -186,9 +197,17 @@ impl Cpu {
 
     /// Run at most `budget` of a block's instructions, returning how many
     /// retired. `self.pc` tracks the current instruction, so faults match the
-    /// interpreter.
+    /// interpreter. A chain of compiled blocks leaves `block` on the last one.
     #[inline(always)]
-    fn exec_block(&mut self, block: &Block, budget: u64) -> Result<u64> {
+    fn exec_block(&mut self, block: &mut Rc<Block>, budget: u64) -> Result<u64> {
+        // The emitted form replaces only the op walk; the terminator and accounting are shared.
+        if let Some(done) = self.enter_emitted(block, budget) {
+            if done.hops != 0 {
+                return self.finish_chain(block, done, budget);
+            }
+            return self.finish_emitted(block, done.retired, done.left, budget);
+        }
+        let block: &Block = block;
         let body = (block.ops.len() as u64).min(budget) as usize;
         let mut i = 0usize;
         let mut pc = block.start;
@@ -196,84 +215,127 @@ impl Cpu {
         // Start of the current straight-line run, by address and index.
         let mut run_pc = block.start;
         let mut run_i = 0usize;
-        // The emitted form replaces only the op walk; the terminator and accounting are shared.
-        if let Some(done) = self.enter_emitted(block, budget) {
-            i = done.retired;
-            let at;
-            (at, run_pc, run_i) = self.follow_runs(block, i);
-            if done.left {
-                // The branch set `pc`; the terminator does not run.
-                self.retire_runs(run_pc, run_i, i);
-                return Ok(i as u64);
+        loop {
+            // Run to the next conditional branch or the end of the budget.
+            let stop = match block.exits.get(next_exit) {
+                Some(branch) if (branch.at as usize) < body => branch.at as usize,
+                _ => body,
+            };
+            let segment = &block.ops[i..stop];
+            let here = Here::new(segment, pc);
+            for op in segment {
+                if let Err(e) = self.exec_op(op, here) {
+                    // Clock, steps, trail and `pc` are settled only on a fault;
+                    // the faulting instruction counts.
+                    let pc = here.pc_of(op);
+                    let at = run_i + (pc.wrapping_sub(run_pc) / 4) as usize;
+                    self.retire_runs(run_pc, run_i, at + 1);
+                    self.pc = pc;
+                    self.record_fault(&e, pc, block.words[at]);
+                    return Err(e);
+                }
             }
-            pc = at;
-        } else {
-            loop {
-                // Run to the next conditional branch or the end of the budget.
-                let stop = match block.exits.get(next_exit) {
-                    Some(branch) if (branch.at as usize) < body => branch.at as usize,
-                    _ => body,
-                };
-                let segment = &block.ops[i..stop];
-                let here = Here::new(segment, pc);
-                for op in segment {
-                    if let Err(e) = self.exec_op(op, here) {
-                        // Clock, steps, trail and `pc` are settled only on a fault;
-                        // the faulting instruction counts.
-                        let pc = here.pc_of(op);
-                        let at = run_i + (pc.wrapping_sub(run_pc) / 4) as usize;
-                        self.retire_runs(run_pc, run_i, at + 1);
-                        self.pc = pc;
-                        self.record_fault(&e, pc, block.words[at]);
-                        return Err(e);
-                    }
+            pc = pc.wrapping_add(4 * (stop - i) as u32);
+            i = stop;
+            if stop == body {
+                break;
+            }
+            let branch = &block.exits[next_exit];
+            let exit = &branch.exit;
+            let span = branch.span as usize;
+            if i + span > body {
+                // The budget splits a fused exit: run what fits and stop, so
+                // progress is never zero.
+                if i < body {
+                    let fit = body - i;
+                    self.apply_compare(exit, fit);
+                    i += fit;
+                    pc = pc.wrapping_add(4 * fit as u32);
                 }
-                pc = pc.wrapping_add(4 * (stop - i) as u32);
-                i = stop;
-                if stop == body {
-                    break;
+                break;
+            }
+            i += span;
+            pc = pc.wrapping_add(4 * span as u32);
+            match self.take_exit(exit) {
+                Taken::No => {}
+                Taken::Leave => {
+                    // `take_exit` has already put the target in `pc`.
+                    self.retire_runs(run_pc, run_i, i);
+                    return Ok(i as u64);
                 }
-                let branch = &block.exits[next_exit];
-                let exit = &branch.exit;
-                let span = branch.span as usize;
-                if i + span > body {
-                    // The budget splits a fused exit: run what fits and stop, so
-                    // progress is never zero.
-                    if i < body {
-                        let fit = body - i;
-                        self.apply_compare(exit, fit);
-                        i += fit;
-                        pc = pc.wrapping_add(4 * fit as u32);
-                    }
-                    break;
-                }
-                i += span;
-                pc = pc.wrapping_add(4 * span as u32);
-                match self.take_exit(exit) {
-                    Taken::No => {}
-                    Taken::Leave => {
-                        // `take_exit` has already put the target in `pc`.
+                Taken::Follow(target) => {
+                    // Leave as a terminator would, so `run_jit` notices a store
+                    // to the translated code past here.
+                    if self.mem.has_dirty_code() {
+                        self.pc = target;
                         self.retire_runs(run_pc, run_i, i);
                         return Ok(i as u64);
                     }
-                    Taken::Follow(target) => {
-                        // Leave as a terminator would, so `run_jit` notices a store
-                        // to the translated code past here.
-                        if self.mem.has_dirty_code() {
-                            self.pc = target;
-                            self.retire_runs(run_pc, run_i, i);
-                            return Ok(i as u64);
-                        }
-                        // Record the ending run in the trail while its start is known.
-                        self.push_run(run_pc, (i - run_i) as u32);
-                        pc = target;
-                        run_pc = target;
-                        run_i = i;
-                    }
+                    // Record the ending run in the trail while its start is known.
+                    self.push_run(run_pc, (i - run_i) as u32);
+                    pc = target;
+                    run_pc = target;
+                    run_i = i;
                 }
-                next_exit += 1;
+            }
+            next_exit += 1;
+        }
+        self.finish(block, i, pc, (run_pc, run_i), budget)
+    }
+
+    /// Account for the first `i` instructions an emitted block retired, and run
+    /// its terminator if it did not leave.
+    #[inline(always)]
+    fn finish_emitted(&mut self, block: &Block, i: usize, left: bool, budget: u64) -> Result<u64> {
+        let (pc, run_pc, run_i) = self.follow_runs(block, i);
+        if left {
+            // The branch set `pc`; the terminator does not run.
+            self.retire_runs(run_pc, run_i, i);
+            return Ok(i as u64);
+        }
+        self.finish(block, i, pc, (run_pc, run_i), budget)
+    }
+
+    /// Settle a visit in which compiled blocks jumped into each other: the
+    /// jumped-from blocks' clock and steps (they wrote the trail), then the last.
+    #[inline(never)]
+    fn finish_chain(&mut self, block: &mut Rc<Block>, done: Emitted, budget: u64) -> Result<u64> {
+        let chained = done.chained;
+        self.cycles += chained;
+        self.steps += chained;
+        let hops = u64::from(done.hops);
+        self.jit.chained += hops;
+        self.jit.executed += hops;
+        self.jit.entered_emitted += hops;
+        *block = self
+            .jit
+            .get(self.jit.chain.last)
+            .expect("the chain table holds only cached blocks");
+        // Handed back at its first instruction: `pc` is its start, and the next visit settles it.
+        if done.retired == 0 && !done.left {
+            return Ok(chained);
+        }
+        if let Code::Ready { entry, misses } = block.code.get() {
+            if misses != 0 {
+                block.code.set(Code::Ready { entry, misses: 0 });
             }
         }
+        let retired = done.retired.min(whole(block));
+        let ran = self.finish_emitted(block, retired, done.left, budget - chained)?;
+        Ok(chained + ran)
+    }
+
+    /// Retire the first `i` instructions, whose last run starts at `run`, and
+    /// run the terminator at `pc` if the block got that far.
+    #[inline(always)]
+    fn finish(
+        &mut self,
+        block: &Block,
+        i: usize,
+        pc: u32,
+        (run_pc, run_i): (u32, usize),
+        budget: u64,
+    ) -> Result<u64> {
         self.retire_runs(run_pc, run_i, i);
         let mut ran = i as u64;
         match block.term {
@@ -314,20 +376,35 @@ impl Cpu {
             return None;
         };
         // Only enter a block that fits the remaining budget.
-        let whole = block.ops.len() + usize::from(block.term.as_ref().is_some_and(writes_term));
+        let whole = whole(block);
         if whole as u64 > budget {
             return None;
         }
         self.jit.entered_emitted += 1;
+        let fuel = self.chain_fuel(budget);
+        self.jit.chain.fuel = fuel;
+        self.jit.chain.hops = 0;
         let state = self as *mut Cpu;
         // SAFETY: `entry` came from `host::install` for this block and is only
         // released by `Block::drop_code`; it was emitted against `Layout::of_cpu`.
+        // So were the blocks it can jump to, which leave the chain table first.
         let answer = unsafe { host::enter(entry, state) };
         let left = answer & LEFT != 0;
         let retired = (answer & !LEFT) as usize;
+        let hops = self.jit.chain.hops;
+        if hops != 0 {
+            let chained = (fuel - self.jit.chain.fuel) as u64;
+            return Some(Emitted {
+                retired,
+                left,
+                hops,
+                chained,
+            });
+        }
         if retired == 0 && !left {
             let misses = misses + 1;
             if misses >= MAX_MISSES {
+                self.jit.unchain(block);
                 block.drop_code();
             } else {
                 block.code.set(Code::Ready { entry, misses });
@@ -341,7 +418,24 @@ impl Cpu {
         Some(Emitted {
             retired: retired.min(whole),
             left,
+            hops: 0,
+            chained: 0,
         })
+    }
+
+    /// How many instructions compiled blocks may retire before a jump has to
+    /// come back here: where `run_jit` would stop following blocks (budget,
+    /// time slice, timed-wait sweep), less room for the next block to fit.
+    #[inline(always)]
+    fn chain_fuel(&self, budget: u64) -> i32 {
+        let room = budget.min(i32::MAX as u64) as i64 - MAX_WHOLE;
+        let slice = TIME_SLICE as i64 - 1 - self.slice_used as i64;
+        let sweep = self
+            .next_expiry
+            .saturating_sub(self.cycles)
+            .min(i32::MAX as u64) as i64
+            - 1;
+        room.min(slice).min(sweep).max(-1) as i32
     }
 
     /// The address of `block`'s `i`th instruction across followed `B`s, with
@@ -384,7 +478,9 @@ impl Cpu {
     #[cold]
     #[inline(never)]
     fn install(&mut self, block: &Block) {
+        let chains = host::chains();
         let code = match host::available() {
+            true if chains => emit_chained(block),
             true => emit_block(block, Layout::of_cpu()),
             false => {
                 block.code.set(Code::Never);
@@ -401,6 +497,10 @@ impl Cpu {
         }
         self.jit.emitted += 1;
         block.code.set(Code::Ready { entry, misses: 0 });
+        // A block no longer cached may still be running; nothing may jump to it.
+        if chains && self.jit.holds(block) {
+            self.jit.chain_to(block, entry as u32);
+        }
     }
 
     /// Account for `ran` retired instructions: clock and steps for all, trail
@@ -1060,5 +1160,44 @@ impl Cpu {
         self.record_run(stub, STUB as u32);
         self.pc = target as u32;
         STUB
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::emit::Chaining;
+    use super::super::ir::{Block, Branch, Exit, Op};
+    use crate::cpu::{Cpu, RECENT_LEN};
+
+    #[test]
+    fn a_chained_block_writes_the_trail_exec_would() {
+        // Two followed `B`s: runs at 0x1000, 0x2000 and 0x3000.
+        let exits = vec![
+            Branch::new(1, Exit::Jump { target: 0x2000 }),
+            Branch::new(3, Exit::Jump { target: 0x3000 }),
+        ];
+        let block = Block::new(
+            0x1000,
+            vec![Op::Nop; 6],
+            vec![0; 6],
+            exits,
+            None,
+            vec![1, 2, 3],
+        );
+        let chaining = Chaining::of(&block);
+        for retired in 1..=block.ops.len() + 1 {
+            let mut cpu = Cpu::new();
+            let before = cpu.recent_len;
+            let (_, run_pc, run_i) = cpu.follow_runs(&block, retired);
+            cpu.retire_runs(run_pc, run_i, retired);
+            let pushed: Vec<(u32, u32)> = (before..cpu.recent_len)
+                .map(|k| cpu.recent[k % RECENT_LEN])
+                .collect();
+            assert_eq!(
+                chaining.runs(retired),
+                pushed,
+                "after {retired} instructions"
+            );
+        }
     }
 }

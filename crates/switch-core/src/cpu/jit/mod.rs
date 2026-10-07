@@ -15,7 +15,7 @@ mod wasm;
 
 pub use cache::JitStats;
 pub use decode::translates;
-pub use emit::{defers, emits, Layout, Refused, LEFT};
+pub use emit::{defers, emits, tail_call_probe, Layout, Refused, LEFT};
 pub use exec::HOT;
 pub use host::{set_jit_host, Entry, JitHost};
 
