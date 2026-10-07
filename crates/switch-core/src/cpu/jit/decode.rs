@@ -801,6 +801,26 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         _ => {}
     }
     if ((insn >> 26) & 1) == 1 {
+        // `LDP`/`STP`/`LDNP`/`STNP` of Q registers.
+        if ((insn >> 27) & 0b111) == 0b101 && ((insn >> 25) & 1) == 0 && sz == 0b10 {
+            let kind = match (insn >> 22) & 1 {
+                1 => PairKind::LoadQ,
+                _ => PairKind::StoreQ,
+            };
+            let wb = match (insn >> 23) & 0b11 {
+                0b01 => Wb::Post,
+                0b11 => Wb::Pre,
+                _ => Wb::None,
+            };
+            return Op::pair(
+                pair_slot(insn, kind),
+                pair_slot(insn >> 10, kind),
+                rn,
+                (sext_u64((insn >> 15) & 0x7F, 7) as i64).wrapping_mul(16),
+                kind,
+                wb,
+            );
+        }
         return Op::SimdLoadStore { insn };
     }
 

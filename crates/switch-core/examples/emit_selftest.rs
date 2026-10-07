@@ -28,6 +28,8 @@ const READONLY_HI_AT: u32 = 0x101C;
 const WATCHED_AT: u32 = 0x1020;
 /// Where the guest `pc` is; unused here but required by `Layout`.
 const PC_AT: u32 = 0x1024;
+/// The `[u128; 32]` vector register file.
+const VREGS_AT: u32 = 0x2000;
 
 /// The page table: one four-byte entry per 4 KiB of guest space, zero if unmapped.
 const TABLE_AT: u32 = 0x0010_0000;
@@ -161,6 +163,9 @@ fn main() {
             for set in 0..SEEDS {
                 for &nzcv in flags {
                     seed(&mut cpu, set, nzcv);
+                    for i in 0..32 {
+                        cpu.set_vreg(i, vreg_seed(i));
+                    }
 
                     let before = cpu.reg_slots();
                     let nzcv_before = cpu.nzcv();
@@ -232,6 +237,7 @@ fn main() {
                     }
                     manifest.push_str(" !");
                     manifest.push_str(&memory_delta(&cpu, &start));
+                    manifest.push_str(&vreg_delta(&cpu));
                     manifest.push('\n');
                     cases += 1;
                 }
@@ -260,6 +266,7 @@ fn main() {
          pages_at {PAGES_AT}\n\
          discard_slot {DISCARD_SLOT}\n\
          pc_at {PC_AT}\n\
+         vregs_at {VREGS_AT}\n\
          table_at {TABLE_AT}\n\
          bitmap_at {BITMAP_AT}\n\
          slots {}\n\
@@ -304,7 +311,27 @@ const LAYOUT: Layout = Layout {
     readonly_hi: READONLY_HI_AT,
     watched: WATCHED_AT,
     pc: PC_AT,
+    vregs: VREGS_AT,
 };
+
+/// Vector registers start each case at these, so a wrong register or half shows.
+fn vreg_seed(i: u8) -> u128 {
+    let lo = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(2 * u64::from(i) + 1);
+    let hi = 0xC2B2_AE3D_27D4_EB4Fu64.wrapping_mul(2 * u64::from(i) + 2);
+    u128::from(hi) << 64 | u128::from(lo)
+}
+
+/// ` vN:hex` for each vector register the case changed from its seed.
+fn vreg_delta(cpu: &Cpu) -> String {
+    let mut out = String::new();
+    for i in 0..32 {
+        let v = cpu.read_vreg(i);
+        if v != vreg_seed(i) {
+            let _ = write!(out, " v{i}:{v:032x}");
+        }
+    }
+    out
+}
 
 /// The byte at guest address `a`, distinct across load widths and signs.
 fn pattern(a: u32) -> u8 {

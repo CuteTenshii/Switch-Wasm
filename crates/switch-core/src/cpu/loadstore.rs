@@ -101,14 +101,21 @@ pub(super) enum PairKind {
     Load64,
     Store32,
     Store64,
+    /// SIMD&FP `LDP`/`STP` of Q registers; Rt and Rt2 index `vregs`.
+    LoadQ,
+    StoreQ,
 }
 
 impl PairKind {
     pub(super) fn loads(self) -> bool {
         matches!(
             self,
-            PairKind::Load32 | PairKind::Load32Sext | PairKind::Load64
+            PairKind::Load32 | PairKind::Load32Sext | PairKind::Load64 | PairKind::LoadQ
         )
+    }
+
+    pub(super) fn vector(self) -> bool {
+        matches!(self, PairKind::LoadQ | PairKind::StoreQ)
     }
 }
 
@@ -124,7 +131,7 @@ pub(super) fn rt_slot(rt: u32, acc: Acc) -> u8 {
 
 #[inline]
 pub(super) fn pair_slot(rt: u32, kind: PairKind) -> u8 {
-    if kind.loads() {
+    if kind.loads() && !kind.vector() {
         Cpu::zr_write_slot(rt as u8)
     } else {
         (rt & 0x1F) as u8
@@ -867,6 +874,16 @@ impl Cpu {
             PairKind::Store32 => {
                 self.mem
                     .write_u32_pair(addr, self.reg_at(rt) as u32, self.reg_at(rt2) as u32)?;
+            }
+            // As `try_simd_load_store` does it, so a fault leaves the same partial state.
+            PairKind::LoadQ => {
+                let (v0, v1) = (self.load_q(addr)?, self.load_q(addr.wrapping_add(16))?);
+                self.vregs[rt as usize] = v0;
+                self.vregs[rt2 as usize] = v1;
+            }
+            PairKind::StoreQ => {
+                self.store_q(addr, self.vregs[rt as usize])?;
+                self.store_q(addr.wrapping_add(16), self.vregs[rt2 as usize])?;
             }
         }
         if let Some(v) = wb_val {

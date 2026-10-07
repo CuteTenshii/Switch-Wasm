@@ -29,6 +29,8 @@ const WATCHED_AT: u32 = 4124;
 const PAGES_AT: u32 = 4128;
 /// Guest `pc` offset, written by a taken branch.
 const PC_AT: u32 = 4132;
+/// The `[u128; 32]` vector register file.
+const VREGS_AT: u32 = 8192;
 
 /// Page table offset: one four-byte entry per 4 KiB page.
 const TABLE_AT: u32 = 0x0010_0000;
@@ -46,7 +48,27 @@ const LAYOUT: Layout = Layout {
     readonly_hi: READONLY_HI_AT,
     watched: WATCHED_AT,
     pc: PC_AT,
+    vregs: VREGS_AT,
 };
+
+/// Vector registers start each case at these, so a wrong register or half shows.
+fn vreg_seed(i: u8) -> u128 {
+    let lo = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(2 * u64::from(i) + 1);
+    let hi = 0xC2B2_AE3D_27D4_EB4Fu64.wrapping_mul(2 * u64::from(i) + 2);
+    u128::from(hi) << 64 | u128::from(lo)
+}
+
+/// ` vN:hex` for each vector register the case changed from its seed.
+fn vreg_delta(cpu: &Cpu) -> String {
+    let mut out = String::new();
+    for i in 0..32 {
+        let v = cpu.read_vreg(i);
+        if v != vreg_seed(i) {
+            let _ = write!(out, " v{i}:{v:032x}");
+        }
+    }
+    out
+}
 
 /// Encodings listed in the refusal report.
 const ROWS: usize = 20;
@@ -115,6 +137,9 @@ fn main() {
         }
 
         // Step the interpreter until control leaves the straight-line path.
+        for i in 0..32 {
+            cpu.set_vreg(i, vreg_seed(i));
+        }
         let before = cpu.reg_slots();
         let nzcv_before = cpu.nzcv();
         cpu.set_pc(pc);
@@ -160,8 +185,9 @@ fn main() {
         for v in after {
             let _ = write!(manifest, " {v:016x}");
         }
-        // Empty delta, but the marker is still required.
+        // No memory delta, but the marker is still required.
         manifest.push_str(" !");
+        manifest.push_str(&vreg_delta(&cpu));
         manifest.push('\n');
         cases += 1;
     }
@@ -179,6 +205,7 @@ fn main() {
          pages_at {PAGES_AT}\n\
          discard_slot {DISCARD_SLOT}\n\
          pc_at {PC_AT}\n\
+         vregs_at {VREGS_AT}\n\
          table_at {TABLE_AT}\n\
          slots {}\n\
          wasm_pages {}\n",

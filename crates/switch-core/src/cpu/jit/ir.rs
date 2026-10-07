@@ -568,6 +568,8 @@ pub(super) struct Block {
     pub(super) words: Vec<u32>,
     /// Conditional branches, in ascending order.
     pub(super) exits: Vec<Branch>,
+    /// Whether any exit is a followed [`Exit::Jump`].
+    pub(super) follows: bool,
     pub(super) term: Option<Term>,
     /// Page numbers the block was read from; a store to any drops the block.
     pub(super) pages: Vec<u32>,
@@ -586,6 +588,7 @@ impl Block {
         ops.shrink_to_fit();
         words.shrink_to_fit();
         pages.shrink_to_fit();
+        let follows = exits.iter().any(|b| matches!(b.exit, Exit::Jump { .. }));
         Block {
             link: std::cell::RefCell::new(std::array::from_fn(|_| (NO_LINK, std::rc::Weak::new()))),
             code: std::cell::Cell::new(Code::Cold(0)),
@@ -593,6 +596,7 @@ impl Block {
             ops,
             words,
             exits,
+            follows,
             term,
             pages,
         }

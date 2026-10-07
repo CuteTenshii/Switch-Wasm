@@ -348,6 +348,9 @@ impl Cpu {
     /// the start of its run. Earlier runs go into the trail.
     #[inline(always)]
     fn follow_runs(&mut self, block: &Block, i: usize) -> (u32, u32, usize) {
+        if !block.follows {
+            return (block.start.wrapping_add(4 * i as u32), block.start, 0);
+        }
         let (mut run_pc, mut run_i) = (block.start, 0usize);
         for branch in &block.exits {
             let Exit::Jump { target } = branch.exit else {

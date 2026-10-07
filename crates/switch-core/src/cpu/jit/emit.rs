@@ -40,6 +40,7 @@ pub fn emits(insn: u32) -> bool {
             readonly_lo: 0,
             readonly_hi: 0,
             watched: 0,
+            vregs: 0,
         },
     }
     .op(&op, 0)
@@ -67,6 +68,7 @@ pub fn defers(insn: u32) -> bool {
             readonly_lo: 0,
             readonly_hi: 0,
             watched: 0,
+            vregs: 0,
         };
         Emitter { f: &mut f, layout }.op(&op, retired);
         f.code().to_vec()
@@ -92,6 +94,8 @@ pub struct Layout {
     pub nzcv: u32,
     /// The guest program counter, written only by a taken branch leaving the block.
     pub pc: u32,
+    /// Start of the `[u128; 32]` SIMD&FP register file.
+    pub vregs: u32,
     /// Where the page table's pointer is kept (the table itself is boxed).
     pub pages: u32,
     /// The read watchpoint, as the two `u32`s of its `[start, end)`.
@@ -117,6 +121,7 @@ impl Layout {
             regs: std::mem::offset_of!(Cpu, regs) as u32,
             nzcv: std::mem::offset_of!(Cpu, nzcv) as u32,
             pc: std::mem::offset_of!(Cpu, pc) as u32,
+            vregs: std::mem::offset_of!(Cpu, vregs) as u32,
             pages: mem + m.pages,
             read_watch_lo: mem + m.read_watch_lo,
             read_watch_hi: mem + m.read_watch_hi,
@@ -823,12 +828,12 @@ impl Emitter<'_> {
 
     /// The same for a store, with [`crate::mem::Memory::poke`]'s checks.
     fn page_for_write(&mut self, n: u32, retired: usize) {
-        self.page_for_write_halves(n, None, retired);
+        self.page_for_write_halves(n, &[], retired);
     }
 
-    /// [`Emitter::page_for_write`] for a pair, also testing write protection
-    /// `second` bytes in, as [`crate::mem::Memory::poke_pair`] does.
-    fn page_for_write_halves(&mut self, n: u32, second: Option<u32>, retired: usize) {
+    /// [`Emitter::page_for_write`] for several stores in one page, also testing
+    /// write protection at each of `starts`, as [`crate::mem::Memory::poke_pair`] does.
+    fn page_for_write_halves(&mut self, n: u32, starts: &[u32], retired: usize) {
         self.page_number();
         let crosses = n > 1;
         if crosses {
@@ -838,7 +843,7 @@ impl Emitter<'_> {
         if crosses {
             self.f.i32_or();
         }
-        if let Some(at) = second {
+        for &at in starts {
             self.within(self.layout.readonly_lo, self.layout.readonly_hi, at);
             self.f.i32_or();
         }
@@ -1012,7 +1017,7 @@ impl Emitter<'_> {
     /// A store of two `n`-byte registers to `L_ADDR`, with
     /// [`crate::mem::Memory::poke_pair`]'s checks.
     fn store_pair(&mut self, rt: u8, rt2: u8, n: u32, retired: usize) {
-        self.page_for_write_halves(2 * n, Some(n), retired);
+        self.page_for_write_halves(2 * n, &[n], retired);
         for (slot, at) in [(rt, 0), (rt2, n)] {
             self.in_page();
             self.read_reg_raw(slot);
@@ -1020,6 +1025,34 @@ impl Emitter<'_> {
                 8 => self.f.i64_store(UNALIGNED, at),
                 _ => self.f.i64_store32(UNALIGNED, at),
             }
+        }
+    }
+
+    /// Push the address of `vregs[reg]`'s half `half` (0 low, 1 high).
+    fn vreg_half(&mut self, reg: u8, half: u32) -> u32 {
+        self.f.local_get(STATE);
+        self.layout.vregs + 16 * u32::from(reg) + 8 * half
+    }
+
+    /// `LDP` of two Q registers, checked as one 32-byte access.
+    fn load_pair_q(&mut self, rt: u8, rt2: u8, retired: usize) {
+        self.page_for_read(32, retired);
+        for (i, reg) in [rt, rt, rt2, rt2].into_iter().enumerate() {
+            let at = self.vreg_half(reg, i as u32 & 1);
+            self.in_page();
+            self.f.i64_load(UNALIGNED, 8 * i as u32);
+            self.f.i64_store(ALIGN_8, at);
+        }
+    }
+
+    /// `STP` of two Q registers: four 8-byte stores, each checked as the interpreter's.
+    fn store_pair_q(&mut self, rt: u8, rt2: u8, retired: usize) {
+        self.page_for_write_halves(32, &[8, 16, 24], retired);
+        for (i, reg) in [rt, rt, rt2, rt2].into_iter().enumerate() {
+            self.in_page();
+            let at = self.vreg_half(reg, i as u32 & 1);
+            self.f.i64_load(ALIGN_8, at);
+            self.f.i64_store(UNALIGNED, 8 * i as u32);
         }
     }
 
@@ -1577,6 +1610,8 @@ impl Emitter<'_> {
                     PairKind::Load32Sext => self.load_pair(rt, rt2, 4, true, retired),
                     PairKind::Store64 => self.store_pair(rt, rt2, 8, retired),
                     PairKind::Store32 => self.store_pair(rt, rt2, 4, retired),
+                    PairKind::LoadQ => self.load_pair_q(rt, rt2, retired),
+                    PairKind::StoreQ => self.store_pair_q(rt, rt2, retired),
                 }
                 self.write_back(rn, wb);
                 true
@@ -1720,6 +1755,7 @@ mod tests {
         readonly_lo: 2072,
         readonly_hi: 2076,
         watched: 2080,
+        vregs: 4096,
     };
 
     #[test]

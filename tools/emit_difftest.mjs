@@ -16,7 +16,7 @@ const HEADER_KEYS = new Set([
   'regs_at', 'nzcv_at', 'read_watch_lo_at', 'read_watch_hi_at', 'watch_lo_at',
   'watch_hi_at', 'readonly_lo_at', 'readonly_hi_at', 'watched_at', 'pages_at',
   'table_at', 'bitmap_at', 'slots', 'code_at', 'read_watch', 'watch',
-  'readonly', 'watched_page', 'wasm_pages', 'pc_at', 'discard_slot',
+  'readonly', 'watched_page', 'wasm_pages', 'pc_at', 'discard_slot', 'vregs_at',
 ]);
 const header = {};
 // `(guest address, wasm offset)` per mapped page, in `guest.bin` order.
@@ -52,6 +52,14 @@ const READONLY_LO_AT = need('readonly_lo_at');
 const READONLY_HI_AT = need('readonly_hi_at');
 const WATCHED_AT = need('watched_at');
 const PAGES_AT = need('pages_at');
+const VREGS = need('vregs_at');
+// The harnesses' `vreg_seed`.
+const M64 = (1n << 64n) - 1n;
+const vregSeed = (i) => {
+  const lo = (0x9E3779B97F4A7C15n * BigInt(2 * i + 1)) & M64;
+  const hi = (0xC2B2AE3D27D4EB4Fn * BigInt(2 * i + 2)) & M64;
+  return (hi << 64n) | lo;
+};
 // Only manifests with conditional-branch cases name it.
 const PC_AT = header.pc_at ? header.pc_at[0] : -1;
 // Set in `run`'s result when the block left at a taken branch.
@@ -141,8 +149,13 @@ for (const line of manifest.slice(first)) {
   const bang = f.indexOf('!');
   const before = f.slice(6, bar).map((h) => BigInt('0x' + h));
   const after = f.slice(bar + 1, bang).map((h) => BigInt('0x' + h));
-  // `offset:hex` per run of bytes the block changed in the window.
-  const delta = f.slice(bang + 1).map((run) => {
+  // `vN:hex` per vector register the block changed, then
+  // `offset:hex` per run of bytes it changed in the window.
+  const vdelta = new Map(f.slice(bang + 1).filter((t) => t.startsWith('v')).map((t) => {
+    const [reg, hex] = t.slice(1).split(':');
+    return [Number(reg), BigInt('0x' + hex)];
+  }));
+  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v')).map((run) => {
     const [at, hex] = run.split(':');
     return [Number(at), Uint8Array.from(hex.match(/../g), (b) => parseInt(b, 16))];
   });
@@ -153,6 +166,10 @@ for (const line of manifest.slice(first)) {
 
   resetGuest();
   for (let i = 0; i < SLOTS; i++) view.setBigUint64(REGS + i * 8, before[i], true);
+  for (let i = 0; i < 32; i++) {
+    view.setBigUint64(VREGS + i * 16, vregSeed(i) & M64, true);
+    view.setBigUint64(VREGS + i * 16 + 8, vregSeed(i) >> 64n, true);
+  }
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
   if (PC_AT >= 0) view.setUint32(PC_AT, NO_PC, true);
 
@@ -209,6 +226,13 @@ for (const line of manifest.slice(first)) {
       const got = view.getBigUint64(REGS + i * 8, true);
       if (got !== want[i]) {
         bad.push(`slot ${i}: emitted ${got.toString(16).padStart(16, '0')}, interpreted ${want[i].toString(16).padStart(16, '0')}`);
+      }
+    }
+    for (let i = 0; i < 32; i++) {
+      const wantV = (want === after && vdelta.has(i)) ? vdelta.get(i) : vregSeed(i);
+      const gotV = view.getBigUint64(VREGS + i * 16, true) | (view.getBigUint64(VREGS + i * 16 + 8, true) << 64n);
+      if (gotV !== wantV) {
+        bad.push(`v${i}: emitted ${gotV.toString(16).padStart(32, '0')}, interpreted ${wantV.toString(16).padStart(32, '0')}`);
       }
     }
     const gotNzcv = view.getUint32(NZCV, true) >>> 0;

@@ -32,6 +32,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 - Clock, step counter, trail, and `pc` are settled at block end or fault, not per instruction. Clock is retired after the terminator, as in `step_inner`: retiring early gave every SVC a tick the interpreter had not spent (sdl-hello diverged by one cycle via a sleep deadline).
 - `take_exit` uses one match for all branch kinds; checking "followed?" first cost 6% of a Just Dance 2019 wasm frame. `exec_op`, `take_exit`, `apply_compare`, `exec_term` take references: by value, the compiler loads the 16-byte `Op` and hoists every field's extraction above the jump table (9 loads + 6 shifts per dispatch); by reference hbmenu retired 7.3% fewer host instructions.
 - `load_store_fast` makes no calls: V8 spills values live across a call at their definition whether or not the call happens (a load paid six stores). The slow path restarts the instruction from scratch, which works because the fast path commits nothing until it finishes. The PLT-stub fold follows the same rule.
+- Q-register `LDP`/`STP` are emitted (memset and memcpy loops); the difftests seed and compare all 32 vector registers so loads into them are checked.
 - `BIC`/`ORN`/`EON` invert the shifted operand, not the register (as dynarmic and the ARM ARM do).
 
 ## `crates/switch-core/examples/jit_coverage.rs`
