@@ -216,6 +216,25 @@ pub extern "C" fn switch_save_create_dir(
     0
 }
 
+/// Remove one entry from a save; a directory's contents are removed separately.
+#[no_mangle]
+pub extern "C" fn switch_save_remove(
+    handle: u32,
+    save_id: u64,
+    user_lo: u64,
+    user_hi: u64,
+    path_ptr: *const u8,
+    path_len: u32,
+) -> i32 {
+    let s = session(handle);
+    let path = sd_path(path_ptr, path_len);
+    i32::from(
+        s.cpu
+            .save_data_mut(SaveKey::from_halves(save_id, user_lo, user_hi))
+            .remove(&path),
+    )
+}
+
 /// Size of a file in a save, or -1 when the path is not one.
 #[no_mangle]
 pub extern "C" fn switch_save_file_size(

@@ -159,6 +159,37 @@
     <p class="muted tiny" id="profile-add-note" hidden>A console holds up to eight profiles.</p>
   </dialog>
 
+  <dialog class="files" id="files" aria-labelledby="files-title">
+    <header class="files-head">
+      <h2 id="files-title">Storage</h2>
+      <button type="button" class="icon-btn" id="btn-files-close" aria-label="Close">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+      </button>
+    </header>
+    <div class="files-tabs" role="tablist" aria-label="Storage">
+      <button type="button" class="files-tab is-active" data-volume="sd" role="tab" aria-selected="true">SD card</button>
+      <button type="button" class="files-tab" data-volume="saves" role="tab" aria-selected="false">Saves</button>
+      <button type="button" class="files-tab" data-volume="nand" role="tab" aria-selected="false">System titles</button>
+    </div>
+    <div class="files-bar">
+      <nav class="files-crumbs" id="files-crumbs" aria-label="Location"></nav>
+      <div class="files-tools" id="files-view-tools" hidden></div>
+      <div class="files-tools" id="files-tools">
+        <button type="button" class="btn small" id="btn-files-mkdir">New folder</button>
+        <label class="btn small" id="files-upload-label" for="files-upload">Upload files</label>
+        <input type="file" id="files-upload" multiple hidden>
+        <label class="btn small" id="files-upload-dir-label" for="files-upload-dir">Upload folder</label>
+        <input type="file" id="files-upload-dir" webkitdirectory hidden>
+        <button type="button" class="btn small" id="btn-files-export">Export as .zip</button>
+        <label class="btn small" id="files-install-label" for="firmware-ncas" hidden>Install firmware&hellip;</label>
+      </div>
+    </div>
+    <p class="files-status tiny" id="files-status" role="status" aria-live="polite"></p>
+    <ul class="files-list" id="files-list"></ul>
+    <section class="files-view" id="files-view" aria-label="File contents" hidden></section>
+    <p class="muted tiny" id="files-note"></p>
+  </dialog>
+
   <footer class="statusbar">
     <span class="item">PC <b id="pc">-</b></span>
     <span class="item" title="Guest instructions executed, and how many a second while running">Instructions <b id="instructions">0</b></span>
@@ -368,6 +399,18 @@
   </section>
 
   <section class="tabpanel" data-panel="files">
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Storage</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">The SD card, save data and installed system titles, kept in this browser.</p>
+        <div class="panel-tools">
+          <button type="button" id="btn-files" class="btn small">Browse storage</button>
+        </div>
+      </div>
+    </details>
+
     <details class="section" open>
       <summary class="section-head">
         <span class="section-title">Keys</span>

@@ -124,6 +124,9 @@ export interface WasmExports {
   switch_save_create_dir(
     handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number): number;
+  switch_save_remove(
+    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    pathPtr: number, pathLen: number): number;
   switch_save_file_size(
     handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number): bigint;

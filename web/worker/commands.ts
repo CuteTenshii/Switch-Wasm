@@ -483,6 +483,10 @@ export const CMD: CommandHandlers = {
     return withPath(path, (ptr, len) =>
       api().switch_save_create_dir(handle(), ...saveKey(id), ptr, len));
   },
+  save_remove(id, path) {
+    return withPath(path, (ptr, len) =>
+      api().switch_save_remove(handle(), ...saveKey(id), ptr, len));
+  },
   // The whole file, read in slices, or null when the path is not one.
   save_read_file(id, path) {
     const save = saveKey(id);

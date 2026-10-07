@@ -145,7 +145,7 @@ export async function initNand(): Promise<void> {
   });
 }
 
-function titleLabel(id: string): string {
+export function titleLabel(id: string): string {
   return SYSTEM_TITLES[id] || id;
 }
 
@@ -200,6 +200,46 @@ async function launchInstalled(id: string, entry: NandEntry): Promise<void> {
   // The loader maps the whole image, so programs are booted from bytes.
   const bytes = new Uint8Array(await content.arrayBuffer());
   return doLaunchNca(name, () => call('nand_launch', bytes));
+}
+
+export interface NandTitle {
+  id: string;
+  name: string;
+  kind: number;
+  size: number;
+}
+
+// The installed titles with their content sizes, for the file manager.
+export async function listNandTitles(): Promise<NandTitle[]> {
+  const out: NandTitle[] = [];
+  for (const [id, entry] of nandTitles) {
+    const content = await nandContent(entry.name).catch(() => undefined);
+    out.push({ id, name: entry.name, kind: entry.kind, size: content?.size ?? 0 });
+  }
+  return out;
+}
+
+export function readNandContent(name: string): Promise<Blob | undefined> {
+  return nandContent(name);
+}
+
+// Content and index entry go together; a registered archive stays until the session is replaced.
+export async function removeNandTitle(id: string): Promise<void> {
+  const entry = nandTitles.find(([titleId]) => titleId === id)?.[1];
+  if (!entry) return;
+  const db = await nandIdb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
+    tx.objectStore(NAND_CONTENT).delete(entry.name);
+    tx.objectStore(NAND_TITLES).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+  });
+  nandTitles = nandTitles.filter(([titleId]) => titleId !== id);
+  renderNandTitles();
+  updateFirmwareState();
+  document.dispatchEvent(new Event('nand-changed'));
 }
 
 // Awaited: a title cannot find an archive that is still being registered.
@@ -264,6 +304,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   log('Installed ' + installed + ' title(s) of ' + files.length + ' file(s); '
     + (registered ?? archiveCount) + ' registered as system data archives.',
   installed ? 'ok' : undefined);
+  document.dispatchEvent(new Event('nand-changed'));
 });
 
 $('btn-erase-nand').addEventListener('click', async () => {
@@ -278,4 +319,5 @@ $('btn-erase-nand').addEventListener('click', async () => {
   renderNandTitles();
   updateFirmwareState();
   log('NAND erased.', 'ok');
+  document.dispatchEvent(new Event('nand-changed'));
 });

@@ -115,6 +115,15 @@ The page, the worker, and the wasm bindings between them.
 
 - The emulated SD card lives in session memory; IndexedDB persists it as a path -> bytes map, flushing only guest-changed paths. Restores go through host entry points (not recorded as changes) so restoring does not queue a full write-back. Drained changes cannot be returned to the core, so IndexedDB failures (quota) stay in a per-path backlog until the next flush. Persistent storage is requested so the card is not evicted.
 
+## `web/main/files.ts`
+
+- IndexedDB is the source of truth: the dialog lists and edits the stored entries, so it works with no session. Pending guest changes are flushed before a listing; edits are then mirrored into a live session through the host entry points.
+- A folder can exist only as the prefix of deeper paths, so listings derive folders from paths, and delete and rename act on every path under the target. `Vfs::remove` is not recursive, so the session is told deepest first.
+- Exports are store-only zips (`zip.ts`): saves and SD folders are small, and it needs no dependency. No zip64, so it refuses past 4 GiB or 65535 entries.
+- `shell.ts` binds `.panel .tab` only; the dialog's tabs are `.files-tab` so the panel's handler does not take them.
+- Opening a file (`fileview.ts`): valid UTF-8 without NUL bytes is edited in a textarea (read-only past 4 MiB), PNG/JPEG/GIF/WebP/BMP is shown by magic number, anything else as a hex dump of its first 4 KiB. Leaving or closing with unsaved edits asks first, Escape included.
+- Icons are Lucide (`icons.ts`), imported per icon so the bundle carries only those used.
+
 ## `web/main/session.ts`
 
 - A session is a whole console (RAM, threads, handles) and nothing is cleared per title, so booting a second title must recycle the session. Before booting did this, titles loaded on top of each other: old pages stayed mapped (hundreds of MiB for retail), and after a few swaps guest RAM hit the cap and failed inside unrelated code.

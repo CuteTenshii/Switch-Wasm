@@ -280,6 +280,7 @@ export interface Commands {
   save_create(id: string): number;
   save_write_file(id: string, path: string, bytes: Bytes): number;
   save_create_dir(id: string, path: string): number;
+  save_remove(id: string, path: string): number;
   save_read_file(id: string, path: string): Bytes | null;
 
   // Install `users` with `current` playing; 0 or `switch_users_commit`'s error code.

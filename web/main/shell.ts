@@ -61,17 +61,17 @@ export function openPanel(tab?: string): void {
 }
 
 export function selectTab(name: string): void {
-  document.querySelectorAll<HTMLElement>('.tab').forEach((t) => {
+  document.querySelectorAll<HTMLElement>('.panel .tab').forEach((t) => {
     const on = t.dataset.tab === name;
     t.classList.toggle('is-active', on);
     t.setAttribute('aria-selected', String(on));
   });
-  document.querySelectorAll<HTMLElement>('.tabpanel').forEach((p) => {
+  document.querySelectorAll<HTMLElement>('.panel .tabpanel').forEach((p) => {
     p.classList.toggle('is-active', p.dataset.panel === name);
   });
 }
 
-document.querySelectorAll<HTMLElement>('.tab').forEach((t) => {
+document.querySelectorAll<HTMLElement>('.panel .tab').forEach((t) => {
   t.addEventListener('click', () => selectTab(t.dataset.tab || ''));
 });
 $('btn-panel').addEventListener('click', () => setPanel(!panelOpen()));
