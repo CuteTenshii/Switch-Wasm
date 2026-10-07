@@ -55,6 +55,7 @@ and tests.
 - **`sfdnsres`** - `EAI_NONAME` / `HOST_NOT_FOUND`, the *definitive* failure
   rather than try-again, in the **first** word of `SfdnsresRequestResults`.
 - **`nsd`** - `Resolve`/`ResolveEx` replace `%` with the production environment `lp1` and succeed; other commands are refused.
+- **`usb:ds`/`usb:hs`** - no cable attached and nothing plugged in; see `usb.rs` below.
 - **`pctl`** reports the console unrestricted. Watch the direction:
   `Confirm*`/`Check*Permission` reply with a bare `Result` where success *is*
   permitted, `IsRestriction*` is `false`, `IsFreeCommunicationAvailable`/
@@ -303,6 +304,10 @@ stored, not answered: one caller writes, another reads back.
 - `csrng` is splitmix64 seeded from the emulated clock (no hardware RNG and no OS entropy on wasm32-unknown-unknown); not for keys, but better than leaving the caller's buffer untouched.
 - `spl:` `GetConfig`: Icosa retail, production, not debug; DramId names the 4 GiB part (`MAX_MAPPED_BYTES` is the real limit). Atmosphère extensions (65000 API version, 65007 emummc type, asked by NX-Fetch) read 0 = no CFW, since claiming one would promise unimplemented behaviour.
 - `pm`'s process id must agree with `svcGetProcessId`. `btm:sys`'s `GetCore` must be real because every other command goes through it; the radio flag is `set:sys`'s Bluetooth flag. `nfc:sys` enabled flag is `set:sys`'s NFC flag; device commands are refused since no device handle was ever handed out. `ngc` must write the output text (callers otherwise read uninitialised buffers) and return a nonzero content version. `npns` `Receive`/`ReceiveRaw` are refused (the empty-queue error is undocumented).
+
+### `crates/switch-core/src/services/usb.rs`
+
+- `usb:ds` and `usb:hs` describe a console with no cable and nothing plugged in, using the 11.0.0+ command ids (`usb:ds` 0 opens the `IDsService`). Device state is Detached, speed None, the host side lists no interfaces, and the state, setup and completion events are never signalled. Setup commands (descriptors, `Enable`, endpoints) succeed; transfers, `GetSetupPacket` and `AcquireUsbIf` are refused because they need a host or a device on the other end. Goldleaf panicked (`svcBreak` value 0x1764) on the fabricated `GetState`/`GetSpeed` replies.
 
 ### `crates/switch-core/src/services/fs.rs`
 

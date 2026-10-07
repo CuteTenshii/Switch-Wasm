@@ -274,6 +274,8 @@ pub struct Cpu {
     pub(crate) nfc_initialized: bool,
     /// `btm:sys`: whether controller pairing is running.
     pub(crate) bt_gamepad_pairing: bool,
+    /// `usb:ds` string descriptor slots in use, one bit per index.
+    pub(crate) usb_ds_strings: u64,
     /// `notif` alarms and the next alarm id.
     pub(crate) notif_alarms: Vec<settings::AlarmSetting>,
     pub(crate) notif_next_alarm_id: u16,
@@ -516,6 +518,7 @@ impl Cpu {
             audio_control: audout::AudioControl::default(),
             nfc_initialized: false,
             bt_gamepad_pairing: false,
+            usb_ds_strings: 0,
             notif_alarms: Vec::new(),
             // Starts at 1 so a zero-initialized id never names a real alarm.
             notif_next_alarm_id: 1,

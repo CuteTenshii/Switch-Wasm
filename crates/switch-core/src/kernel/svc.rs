@@ -987,6 +987,11 @@ impl Cpu {
                         "notif:a" | "notif:s" | "notif:event-accessor" => {
                             self.notif_request(tls, handle, cmd_id)?
                         }
+                        // usb:ds and usb:hs, with nothing plugged in.
+                        "usb:ds" | "usb:ds-service" | "usb:ds-interface" | "usb:ds-endpoint" => {
+                            self.usb_ds_request(tls, handle, cmd_id)?
+                        }
+                        "usb:hs" => self.usb_hs_request(tls, handle, cmd_id)?,
                         // erpt, error reports.
                         "erpt:c" => self.erpt_context_request(tls, handle, cmd_id)?,
                         "erpt:r" | "erpt:report" | "erpt:manager" | "erpt:attachment" => {
