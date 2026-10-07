@@ -13,8 +13,11 @@ use std::fmt;
 
 mod alu;
 mod blocks;
+mod convert;
 mod emitter;
+mod float;
 mod helpers;
+mod integer;
 mod layout;
 mod module;
 #[cfg(test)]
