@@ -1,9 +1,43 @@
 //! Horizon IPC: parsing CMIF/HIPC/TIPC requests from the TLS message buffer
 //! and writing replies, plus `sm:` and a few trivial services.
 
-use crate::cpu::{Cpu, GapKind, ServiceGap};
+use crate::cpu::Cpu;
 use crate::trace::Level;
 use crate::Result;
+
+/// How a guest request went unanswered, for [`Cpu::take_service_gaps`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GapKind {
+    /// Unknown command id, refused with an error.
+    Refused,
+    /// Unimplemented service, answered with a fabricated success.
+    Missing,
+    /// Answered, with nothing behind the answer.
+    Stub,
+    /// `nvdrv` ioctl with no handler.
+    Ioctl,
+}
+
+impl GapKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            GapKind::Refused => "refused",
+            GapKind::Missing => "missing",
+            GapKind::Stub => "stub",
+            GapKind::Ioctl => "ioctl",
+        }
+    }
+}
+
+/// One unanswered request and its count since the last [`Cpu::take_service_gaps`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceGap {
+    pub kind: GapKind,
+    /// Interface, service or device node.
+    pub name: String,
+    pub command: Option<u32>,
+    pub calls: u64,
+}
 
 /// Maximum distinct gaps [`Cpu::count_gap`] tracks between readings.
 const GAP_CAP: usize = 64;

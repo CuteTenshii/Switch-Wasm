@@ -36,8 +36,10 @@ pub use crate::services::input::*;
 pub use regs::*;
 
 pub use crate::kernel::ipc::POINTER_BUFFER_SIZE;
+pub use crate::kernel::ipc::{GapKind, ServiceGap};
 pub use crate::kernel::thread_report::ThreadReport;
 pub use crate::services::fs::{FsActivity, SaveDataQuota};
+pub use crate::services::storage::SaveKey;
 pub use a32::ExecMode;
 pub use jit::{
     defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused, HOT, LEFT,
@@ -47,75 +49,6 @@ pub use crate::services::acc::{UserAccount, UsersRefused, MAX_USERS, NICKNAME_LE
 pub(crate) use crate::services::acc::{DEFAULT_NICKNAME, DEFAULT_USER_UID};
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
-
-/// A save's id plus owning user; the zero uid marks shared (system and device) saves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SaveKey {
-    pub id: u64,
-    pub user: [u8; 16],
-}
-
-impl SaveKey {
-    pub const fn shared(id: u64) -> SaveKey {
-        SaveKey { id, user: [0; 16] }
-    }
-
-    /// From the uid's two little-endian halves as the host passes them.
-    pub fn from_halves(id: u64, user_lo: u64, user_hi: u64) -> SaveKey {
-        let mut user = [0u8; 16];
-        user[..8].copy_from_slice(&user_lo.to_le_bytes());
-        user[8..].copy_from_slice(&user_hi.to_le_bytes());
-        SaveKey { id, user }
-    }
-}
-
-impl std::fmt::Display for SaveKey {
-    /// `0100000000001000` for a shared save, `id@uid` (32 hex digits, memory order) for a user's.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:016x}", self.id)?;
-        if self.user != [0; 16] {
-            f.write_str("@")?;
-            for byte in self.user {
-                write!(f, "{byte:02x}")?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// How a guest request went unanswered, for [`Cpu::take_service_gaps`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum GapKind {
-    /// Unknown command id, refused with an error.
-    Refused,
-    /// Unimplemented service, answered with a fabricated success.
-    Missing,
-    /// Answered, with nothing behind the answer.
-    Stub,
-    /// `nvdrv` ioctl with no handler.
-    Ioctl,
-}
-
-impl GapKind {
-    pub const fn name(self) -> &'static str {
-        match self {
-            GapKind::Refused => "refused",
-            GapKind::Missing => "missing",
-            GapKind::Stub => "stub",
-            GapKind::Ioctl => "ioctl",
-        }
-    }
-}
-
-/// One unanswered request and its count since the last [`Cpu::take_service_gaps`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceGap {
-    pub kind: GapKind,
-    /// Interface, service or device node.
-    pub name: String,
-    pub command: Option<u32>,
-    pub calls: u64,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunReport {

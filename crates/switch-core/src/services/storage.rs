@@ -2,6 +2,41 @@
 
 use crate::cpu::*;
 
+/// A save's id plus owning user; the zero uid marks shared (system and device) saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SaveKey {
+    pub id: u64,
+    pub user: [u8; 16],
+}
+
+impl SaveKey {
+    pub const fn shared(id: u64) -> SaveKey {
+        SaveKey { id, user: [0; 16] }
+    }
+
+    /// From the uid's two little-endian halves as the host passes them.
+    pub fn from_halves(id: u64, user_lo: u64, user_hi: u64) -> SaveKey {
+        let mut user = [0u8; 16];
+        user[..8].copy_from_slice(&user_lo.to_le_bytes());
+        user[8..].copy_from_slice(&user_hi.to_le_bytes());
+        SaveKey { id, user }
+    }
+}
+
+impl std::fmt::Display for SaveKey {
+    /// `0100000000001000` for a shared save, `id@uid` (32 hex digits, memory order) for a user's.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.id)?;
+        if self.user != [0; 16] {
+            f.write_str("@")?;
+            for byte in self.user {
+                write!(f, "{byte:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Cpu {
     /// Set the decrypted RomFS that `OpenDataStorageByCurrentProcess` serves, for small images.
     /// See [`Cpu::set_romfs_source`].
