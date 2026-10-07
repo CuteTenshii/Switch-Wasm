@@ -199,7 +199,7 @@ impl Cpu {
                     0b00001 => {
                         // SQADD (signed group) / UQADD (unsigned group).
                         self.simd_elem(rd, rn, rm, q, esize, |a, b| {
-                            saturating_add(a, b, esize, u != 0)
+                            saturating_add(a, b, esize, u == 0)
                         });
                         return Ok(true);
                     }
@@ -228,7 +228,7 @@ impl Cpu {
                     0b00101 => {
                         // SQSUB / UQSUB: saturating subtract.
                         self.simd_elem(rd, rn, rm, q, esize, |a, b| {
-                            saturating_sub(a, b, esize, u != 0)
+                            saturating_sub(a, b, esize, u == 0)
                         });
                         return Ok(true);
                     }

@@ -139,11 +139,12 @@ pub(crate) fn round_to_int_sized(f: f64, r: Rounding, signed: bool, bits: u32) -
 }
 
 pub(crate) fn saturating_add(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
-    let sum = (a as i128) + (b as i128);
     if signed {
-        let (min, max) = (i64::MIN >> (64 - bits), (1i64 << (bits - 1)) - 1);
+        let sum = (sext_u64(a, bits) as i64 as i128) + (sext_u64(b, bits) as i64 as i128);
+        let (min, max) = (i64::MIN >> (64 - bits), i64::MAX >> (64 - bits));
         sum.clamp(min as i128, max as i128) as u64
     } else {
+        let sum = (a as i128) + (b as i128);
         let max = if bits == 64 {
             u64::MAX
         } else {
@@ -154,11 +155,12 @@ pub(crate) fn saturating_add(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
 }
 
 pub(crate) fn saturating_sub(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
-    let diff = (a as i128) - (b as i128);
     if signed {
-        let (min, max) = (i64::MIN >> (64 - bits), (1i64 << (bits - 1)) - 1);
+        let diff = (sext_u64(a, bits) as i64 as i128) - (sext_u64(b, bits) as i64 as i128);
+        let (min, max) = (i64::MIN >> (64 - bits), i64::MAX >> (64 - bits));
         diff.clamp(min as i128, max as i128) as u64
     } else {
+        let diff = (a as i128) - (b as i128);
         let max = if bits == 64 {
             u64::MAX
         } else {

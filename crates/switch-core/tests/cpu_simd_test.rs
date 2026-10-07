@@ -78,6 +78,29 @@ fn simd_three_same_add_sub_compare() {
 }
 
 #[test]
+fn simd_saturating_add_sub_clamp_by_signedness() {
+    let code = [
+        0x6E21_0C02, // uqadd v2.16b, v0.16b, v1.16b
+        0x4E21_0C03, // sqadd v3.16b, v0.16b, v1.16b
+        0x6E21_2C04, // uqsub v4.16b, v0.16b, v1.16b
+        0x4E21_2C05, // sqsub v5.16b, v0.16b, v1.16b
+        0x4EE7_0CC8, // sqadd v8.2d, v6.2d, v7.2d
+        nop(),
+    ];
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x01ff807f_01ff807f_01ff807f_01ff807f);
+    cpu.set_vreg(1, 0x8001ff01_8001ff01_8001ff01_8001ff01);
+    cpu.set_vreg(6, 0xffffffffffffffff_7fffffffffffffff);
+    cpu.set_vreg(7, 0x8000000000000000_0000000000000001);
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_vreg(2), 0x81ffff80_81ffff80_81ffff80_81ffff80);
+    assert_eq!(cpu.read_vreg(3), 0x8100807f_8100807f_8100807f_8100807f);
+    assert_eq!(cpu.read_vreg(4), 0x00fe007e_00fe007e_00fe007e_00fe007e);
+    assert_eq!(cpu.read_vreg(5), 0x7ffe817e_7ffe817e_7ffe817e_7ffe817e);
+    assert_eq!(cpu.read_vreg(8), 0x8000000000000000_7fffffffffffffff);
+}
+
+#[test]
 fn simd_pairwise_addp() {
     // v1 = {0..15}, v2 = {0x10..0x1f}; addp v3.16b, v1.16b, v2.16b puts v1's
     // pairwise sums in the low half and v2's in the high half.
