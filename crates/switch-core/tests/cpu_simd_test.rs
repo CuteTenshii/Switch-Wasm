@@ -1,4 +1,4 @@
-//! Advanced SIMD, scalar floating point, and the crypto extension.
+//! Advanced SIMD integer vector operations.
 
 mod cpu;
 

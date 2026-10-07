@@ -1,5 +1,4 @@
-//! The Horizon services, reached over IPC: `hid`, `am`, `vi`, the audio pair,
-//! `ldr:ro`, `hwopus` and the rest.
+//! Horizon services over IPC without a file of their own: ssl, storage, lm, fatal, pctl, pl, caps, gpio, nifm.
 
 mod cpu;
 
