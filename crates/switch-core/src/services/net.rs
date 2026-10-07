@@ -426,6 +426,29 @@ impl Cpu {
         }
     }
 
+    /// `nsd:a`/`nsd:u`: name resolution for the production environment, `lp1`.
+    pub(crate) fn nsd_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        const FQDN_SIZE: u32 = 0x100;
+        if self.ipc_answer_control(tls, handle, "nsd", cmd_id)? {
+            return Ok(());
+        }
+        match cmd_id {
+            // Resolve / ResolveEx(buffer FQDN in, buffer FQDN out); Ex adds an inner result.
+            Some(20) | Some(21) => {
+                let fqdn = self
+                    .ipc_input_buffer(tls, 0)
+                    .map(|(addr, size)| self.read_string(addr, size.min(FQDN_SIZE)))
+                    .unwrap_or_default();
+                let mut resolved = fqdn.replace('%', "lp1").into_bytes();
+                resolved.resize(FQDN_SIZE as usize, 0);
+                self.write_output_buffer(tls, 0, &resolved);
+                let data: &[u8] = if cmd_id == Some(21) { &[0; 4] } else { &[] };
+                self.write_ipc_response(tls, 0, &[], data, &[])
+            }
+            _ => self.unimplemented_command(tls, "nsd", cmd_id),
+        }
+    }
+
     /// A failed lookup. `SfdnsresRequestResults` is { return value, errno, bytes
     /// written }; the error goes in the first word, errno stays 0.
     fn sfdnsres_failure(&mut self, tls: u32, error: i32) -> Result<()> {
@@ -1172,6 +1195,22 @@ impl Cpu {
 mod tests {
     use crate::cpu::Cpu;
     use crate::kernel::ipc::testing::*;
+
+    #[test]
+    fn nsd_resolves_the_environment_placeholder() {
+        const IN: u32 = 0x1000;
+        const OUT: u32 = 0x1200;
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.map_zero(IN, 0x400).unwrap();
+        cpu.mem.write_bytes(IN, b"%.nintendo.net\0").unwrap();
+        write_buffer_request(&mut cpu, 21, &[], &[(IN, 0x100)], &[(OUT, 0x100)]);
+        cpu.register_service_handle(9, "nsd:a");
+        cpu.nsd_request(TLS, 9, Some(21)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "inner result");
+        assert_eq!(cpu.read_string(OUT, 0x100), "lp1.nintendo.net");
+    }
 
     /// Read a `bsd` command's `{ s32 ret, s32 errno }` reply.
     fn bsd_result(cpu: &Cpu) -> (i32, i32) {

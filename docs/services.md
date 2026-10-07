@@ -54,6 +54,7 @@ and tests.
   count written, and `HasApplicationRecord` is `false`.
 - **`sfdnsres`** - `EAI_NONAME` / `HOST_NOT_FOUND`, the *definitive* failure
   rather than try-again, in the **first** word of `SfdnsresRequestResults`.
+- **`nsd`** - `Resolve`/`ResolveEx` replace `%` with the production environment `lp1` and succeed; other commands are refused.
 - **`pctl`** reports the console unrestricted. Watch the direction:
   `Confirm*`/`Check*Permission` reply with a bare `Result` where success *is*
   permitted, `IsRestriction*` is `false`, `IsFreeCommunicationAvailable`/

@@ -894,6 +894,8 @@ impl Cpu {
                         }
                         // sfdnsres, the DNS resolver.
                         "sfdnsres" => self.sfdnsres_request(tls, cmd_id)?,
+                        // nsd, the environment's host names.
+                        "nsd:a" | "nsd:u" => self.nsd_request(tls, handle, cmd_id)?,
                         // bsd, sockets.
                         "bsd:u" | "bsd:s" => self.bsd_request(tls, handle, cmd_id)?,
                         // apm, clock profiles.
