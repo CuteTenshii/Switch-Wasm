@@ -1,22 +1,8 @@
-//! Where a title that presents frames but draws nothing spends its time once
-//! it has stopped getting anywhere:
+//! Profile a title that presents frames but draws nothing, sampling only after
+//! the Nth presented frame:
 //! `steady_state <container> <prod.keys> [title.keys] [frame] [steps]`.
 //!
-//! `boot_nsp`'s `PROFILE=` samples a whole run, and for a title that spends a
-//! billion instructions booting and then stalls, that is a profile of the part
-//! that *worked*: Just Dance 2019's came back 23% zlib `adler32`, which turned
-//! out to be four calls that all finished before its first frame. The stall
-//! itself was a rounding error in the same numbers.
-//!
-//! So this skips the boot: running it through the block translator, which is
-//! the only fast way to get there, and starts sampling at the Nth presented
-//! frame. Everything it reports happened after the title stopped making
-//! progress, which is the only part that says why.
-//!
-//! Reported per thread, per 4 KiB page and per return address. A page rather
-//! than an address because a loop is a run of instructions and one bucket each
-//! turns a profile into a list; a return address as well because the hot page
-//! of a spin is usually a leaf that says nothing about who is spinning.
+//! Reports samples per thread, per 4 KiB page, and per return address.
 mod common;
 
 use common::{Flow, Pace};
@@ -25,17 +11,15 @@ use switch_core::cpu::Cpu;
 
 const USAGE: &str = "steady_state <container> <prod.keys> [title.keys] [frame] [steps]";
 
-/// How many instructions to sample once the frame is reached. Enough to cover
-/// a few seconds of a stalled title's own loop.
+/// Instructions to sample once the frame is reached.
 const DEFAULT_STEPS: u64 = 200_000_000;
 /// One sample every this many instructions.
 const INTERVAL: u64 = 64;
 /// One call stack every this many samples.
 const STACK_EVERY: u64 = 512;
-/// How much of the boot to allow before giving up on reaching the frame.
+/// Boot budget for reaching the frame.
 const BOOT_BUDGET: u64 = 20_000_000_000;
 
-/// Print one ranked table of samples, as percentages of `total`.
 fn report(title: &str, counts: &BTreeMap<(u64, u32), u64>, total: u64, rows: usize, label: &str) {
     let mut ranked: Vec<_> = counts
         .iter()
@@ -64,9 +48,6 @@ fn main() {
     common::register_firmware(&mut cpu, &title.keys);
     title.boot(&mut cpu);
 
-    // Nothing is sampled here, so the boot runs through the block translator
-    // rather than the interpreter: the difference is 1.8x on real code, and
-    // a title's boot is measured in billions of instructions.
     let boot = common::run_to(&mut cpu, BOOT_BUDGET, |cpu| cpu.nv.gpu.frames >= want_frame);
     if cpu.nv.gpu.frames < want_frame {
         println!(
@@ -84,14 +65,8 @@ fn main() {
 
     let mut pages: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     let mut callers: BTreeMap<(u64, u32), u64> = BTreeMap::new();
-    // Whole call stacks, sampled far more rarely than the pc: walking frame
-    // pointers costs more than reading a register, and what a stack answers is
-    // "which loop is this" rather than "how hot is it", a question a few
-    // thousand samples settle as well as a few million.
     let mut stacks: BTreeMap<(u64, Vec<u32>), u64> = BTreeMap::new();
     let mut sampled = 0u64;
-    // Per-instruction pacing, because a sample has to be taken *between* two
-    // instructions to read the machine at all.
     let run = common::drive(&mut cpu, Pace::Instructions, steps, |cpu, done| {
         if done % INTERVAL == 0 {
             let thread = cpu.current_thread_handle();
@@ -140,9 +115,6 @@ fn main() {
         );
     }
 
-    // What the GPU did *during the window*, which is the whole question a
-    // stalled title raises: frames that carry no draw are frames the title is
-    // not drawing, however many of them there are.
     let after = &cpu.nv.gpu.stats;
     let frames = cpu.nv.gpu.frames - want_frame;
     println!(
@@ -151,10 +123,5 @@ fn main() {
         after.clears - before.clears,
         after.copies - before.copies,
     );
-    // What the window cost is not reported here. It would be a wall clock on
-    // this host, and the frontend's frame rate is made in a browser, out of
-    // the same work run through a different compiler, `tools/wasm_bench.mjs`
-    // times that one. What a stall costs in *work* is above, and
-    // `examples/frame_work.rs` reports it per frame.
     print!("{}", cpu.thread_dump());
 }

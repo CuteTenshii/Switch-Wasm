@@ -1,47 +1,21 @@
-//! `audren`, the audio renderer: the path from a title's voices to the host's
-//! speakers.
-//!
-//! `audout` (in `ipc.rs`) is a *device*: the guest hands it finished PCM and
-//! it plays it. The renderer is a *mixer*, and what the guest hands it is
-//! sources: wave buffers of PCM or ADPCM, a pitch, a volume and a routing
-//! matrix, re-sent in full once every 5 ms. Nearly every retail title reaches
-//! audio this way, through `nn::audio` or libnx's `audrv`; `audout` is mostly
-//! the homebrew path.
-//!
-//! One `RequestUpdateAudioRenderer` carries the whole renderer state, every
-//! mempool, channel resource, voice, mix and sink, as one flat buffer whose
-//! header declares the size of each section. The reply is the mirror of it,
-//! and the caller walks that reply section by section against sizes it
-//! computed itself, so both halves have to agree exactly. See
-//! [`Cpu::audren_write_update_reply`].
-//!
-//! The renderer runs on a clock, for the same reason [`crate::cpu::Cpu::audio_tick`]
-//! makes `audout` release buffers on one: a title schedules against how fast
-//! its audio drains, and a mixer that renders as fast as the guest can ask
-//! runs its clock at whatever multiple of real time the emulator happens to
-//! manage.
+//! `audren`, the audio renderer: a mixer of guest voices, updated in full by each
+//! `RequestUpdateAudioRenderer` and rendered on the emulated clock.
 
 use super::power::CLOCK_RATES_HZ;
 use super::Cpu;
 use crate::mem::Memory;
 use crate::Result;
 
-/// The renderer produces one frame every 5 ms, `AUDREN_TIMER_FREQ_HZ`, 200 Hz
-///: at whatever rate it was opened with. 240 samples at 48 kHz, 160 at 32.
+/// One render frame every 5 ms (200 Hz): 240 samples at 48 kHz, 160 at 32 kHz.
 const FRAMES_PER_SECOND: u64 = 200;
 
-/// A renderer frame in the emulated cycles that are this machine's only clock,
-/// counted the same way [`Cpu::audio_play_cycles`] counts a device's buffer.
+/// A renderer frame in emulated cycles.
 const FRAME_CYCLES: u64 = CLOCK_RATES_HZ[0] as u64 / FRAMES_PER_SECOND;
 
-/// How far behind the renderer is allowed to fall before the backlog is
-/// dropped rather than paid off. A guest that spent half a second loading owes
-/// no half-second of audio: what it did not ask to render was never heard, and
-/// rendering it now only puts every later frame that much further behind.
+/// How far behind the renderer may fall before the backlog is dropped.
 const MAX_CATCHUP_FRAMES: u64 = 8;
 
-/// `AudioRendererChannelInfoIn::mix` is 24 factors long, one per mix buffer
-/// its destination mix can have.
+/// `AudioRendererChannelInfoIn::mix` length, one factor per mix buffer.
 const MAX_MIX_BUFFERS: usize = 24;
 
 /// `AudioRendererVoiceInfoIn::channel_ids`.
@@ -53,9 +27,7 @@ const WAVE_BUFFERS: usize = 4;
 /// `AudioRendererDeviceSinkInfoIn::inputs`.
 const MAX_SINK_INPUTS: usize = 6;
 
-/// Section strides in the update *input*, from libnx's `audren.h`. The reply's
-/// own sizes live in [`Cpu::audren_write_update_reply`], an input entry and
-/// an output entry for the same object are different sizes.
+/// Section strides in the update input, from libnx's `audren.h`.
 const HEADER_SZ: u32 = 0x40;
 const MEMPOOL_IN_SZ: u32 = 0x20;
 const CHANNEL_IN_SZ: u32 = 0x70;
@@ -73,49 +45,36 @@ const PCM_ADPCM: u8 = 6;
 /// `AudioRendererVoicePlayState`.
 const PLAY_STATE_STARTED: u8 = 0;
 
-/// `AudioRendererMemPoolState`. A pool the guest asked to attach comes back
-/// `Attached`, one it asked to detach comes back `Detached`, and anything else
-/// comes back `Invalid`, which means "unchanged", not "broken".
+/// `AudioRendererMemPoolState`. `Invalid` means "unchanged".
 const MEMPOOL_REQUEST_DETACH: u32 = 2;
 const MEMPOOL_DETACHED: u32 = 3;
 const MEMPOOL_REQUEST_ATTACH: u32 = 4;
 const MEMPOOL_ATTACHED: u32 = 5;
 
-/// `AudioRendererSinkType_Device`: the sink that plays through the console's
-/// output, and so through the host's.
+/// `AudioRendererSinkType_Device`: plays through the console's output.
 const SINK_TYPE_DEVICE: u8 = 1;
 
-/// `AudioRendererSinkType_CircularBuffer`: a sink that writes the mix into a
-/// ring in guest memory instead of playing it.
+/// `AudioRendererSinkType_CircularBuffer`: writes the mix to a guest ring.
 const SINK_TYPE_CIRCULAR: u8 = 2;
 
 /// A mix id meaning "not routed anywhere", `AUDREN_UNUSED_MIX_ID`.
 const UNUSED_MIX_ID: u32 = 0x7FFF_FFFF;
 
-/// Nintendo's 4-bit ADPCM packs 14 samples into every 8 bytes: one header byte
-/// carrying the scale and coefficient index, then seven bytes of nibbles.
+/// Nintendo's 4-bit ADPCM: 14 samples per 8 bytes (one header byte, seven of nibbles).
 const ADPCM_SAMPLES_PER_FRAME: u32 = 14;
 const ADPCM_BYTES_PER_FRAME: u32 = 8;
 
 /// The fixed-point shift the ADPCM predictor's coefficients are in.
 const ADPCM_COEF_SHIFT: i64 = 11;
 
-/// One `IAudioRenderer` session: the counts `OpenAudioRenderer` fixed for its
-/// lifetime, and everything the guest has told it about since.
-///
-/// The counts are not bookkeeping: they are what every later
-/// `RequestUpdateAudioRenderer` reply has to be sized against, because
-/// `audrvUpdate` and `nnSdk` both compute the same sizes from the same numbers
-/// and reject a reply that disagrees.
+/// One `IAudioRenderer` session. Every update reply is sized from the counts
+/// `OpenAudioRenderer` fixed.
 #[derive(Debug, Clone)]
 pub(crate) struct AudioRenderer {
-    /// The `REVn` magic the renderer was opened with, echoed into every reply,
-    /// and the parsed revision number that decides which sections the reply
-    /// carries.
+    /// The `REVn` magic echoed into every reply, and its parsed revision number.
     pub revision_magic: u32,
     pub revision: u32,
-    /// The rate the mix is produced at, and how many frames one 5 ms render
-    /// frame is: 48 kHz/240, or 32 kHz/160.
+    /// Mix rate and samples per 5 ms frame.
     pub sample_rate: u32,
     pub sample_count: u32,
     /// How many mix buffers exist across every mix object.
@@ -124,51 +83,30 @@ pub(crate) struct AudioRenderer {
     pub sink_count: u32,
     pub effect_count: u32,
     pub submix_count: u32,
-    /// Whether `StopAudioRenderer` has been called.
-    ///
-    /// Open renderers start *started*. `StartAudioRenderer` exists, but libnx
-    /// never calls it: `audrenInitialize` opens the renderer, queries the
-    /// frame event and returns, so a renderer that only produced sound once
-    /// started would be silent for every libnx title.
+    /// Whether `StopAudioRenderer` has been called. Renderers open started, since
+    /// libnx never calls `StartAudioRenderer`.
     pub started: bool,
-    /// The event `QuerySystemEvent` handed out, fired once per rendered frame.
-    /// This is what `audrenWaitFrame` blocks on, and firing it on the clock is
-    /// what paces a title's mixer to real time.
+    /// Fired once per rendered frame; what `audrenWaitFrame` blocks on.
     pub frame_event: Option<u64>,
-    /// The cycle the next frame is due to be signalled at.
     pub next_frame_at: u64,
-    /// The cycle the mix has been rendered up to. What separates it from
-    /// `next_frame_at` is that the event fires from a wait and the samples are
-    /// produced from an update, and a guest need not interleave the two.
+    /// The cycle the mix has been rendered up to.
     pub rendered_through: u64,
-    /// Frames rendered since the renderer was opened, which is what the
-    /// `RendererInfoOut` tail reports.
+    /// Reported in the `RendererInfoOut` tail.
     pub elapsed_frames: u64,
-    /// Per-voice playback state, indexed by voice id. Rebuilt from the update
-    /// every frame except for the parts only the renderer knows, where in its
-    /// wave buffer each voice has got to.
+    /// Indexed by voice id.
     pub voices: Vec<Voice>,
-    /// The state each mempool should be reported as this update, or 0 for
-    /// "unchanged". Guest memory is the renderer's memory here, so attaching a
-    /// pool is bookkeeping the guest can see and nothing more.
+    /// The state each mempool is reported as this update, or 0 for "unchanged".
     pub mempool_states: Vec<u32>,
-    /// Per-channel-resource mix factors: `mix[i]` is the gain from this
-    /// channel into buffer `i` of the destination mix.
+    /// `mix[i]` is the gain from this channel into buffer `i` of the destination mix.
     pub channels: Vec<ChannelResource>,
-    /// The mix objects, in the order the update sent them.
     pub mixes: Vec<Mix>,
-    /// The sink that plays: its output channel count and which mix buffer
-    /// feeds each of those channels.
+    /// The sink that plays: output channel count and the mix buffer feeding each.
     pub sink: Option<DeviceSink>,
-    /// Whether a sink type this renderer cannot play has already been reported.
     pub warned_unplayable_sink: bool,
-    /// `RequestUpdateAudioRenderer` calls since the renderer was opened, for
-    /// the activity report: a renderer the guest has stopped updating plays
-    /// on from the last state it was given.
+    /// `RequestUpdateAudioRenderer` calls, for the activity report.
     pub updates: u64,
 }
 
-/// A voice's routing: one gain per mix buffer of the mix it plays into.
 #[derive(Debug, Clone)]
 pub(crate) struct ChannelResource {
     pub is_used: bool,
@@ -184,36 +122,27 @@ impl Default for ChannelResource {
     }
 }
 
-/// One mix object: a group of mix buffers, and where they go when they are
-/// done. The final mix (id 0) goes to the sink; a submix goes to another mix
-/// through its own matrix.
+/// One mix object. The final mix (id 0) goes to the sink; a submix to another mix.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Mix {
     pub is_used: bool,
     pub mix_id: u32,
     pub volume: f32,
     pub buffer_count: u32,
-    /// Where this mix's buffers start in the renderer's flat buffer array.
-    /// Assigned in mix-id order, which is how the buffers were handed out:
-    /// the final mix takes the first `buffer_count` of them and each submix
-    /// the next range.
+    /// Start of this mix's buffers in the flat buffer array, assigned in mix-id order.
     pub buffer_offset: u32,
     pub dest_mix_id: u32,
-    /// `mix[src][dest]`, the gain from this mix's buffer `src` into buffer
-    /// `dest` of `dest_mix_id`.
+    /// `mix[src][dest]`: gain from buffer `src` into buffer `dest` of `dest_mix_id`.
     pub matrix: Vec<f32>,
 }
 
-/// The device sink, as the renderer plays it: how many output channels, and
-/// which mix buffer each of them reads.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DeviceSink {
     pub channels: u32,
     pub inputs: [u8; MAX_SINK_INPUTS],
 }
 
-/// One wave buffer as the guest queued it. Offsets are in samples per channel,
-/// not bytes: what a sample *is* depends on the voice's format.
+/// Offsets are in samples per channel, not bytes.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WaveBuf {
     pub address: u32,
@@ -222,25 +151,20 @@ pub(crate) struct WaveBuf {
     pub end: u32,
     pub looping: bool,
     pub end_of_stream: bool,
-    /// Where the ADPCM decoder's history for this buffer is, so a loop can
-    /// restart from the state the encoder left rather than from silence.
+    /// ADPCM history to restart a loop from.
     pub context: u32,
 }
 
-/// The running state of Nintendo's ADPCM predictor: the two previous output
-/// samples, and which sample index they are the history *for*.
+/// Nintendo's ADPCM predictor state: the two previous samples.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AdpcmState {
     pub history0: i16,
     pub history1: i16,
-    /// The next sample index this history is valid for, or `None` when the
-    /// decoder has to re-seed. ADPCM is differential, so a sample can only be
-    /// decoded from the one before it.
+    /// The next sample index this history is valid for, or `None` to re-seed.
     pub next: Option<u32>,
 }
 
-/// One biquad section's stored coefficients, in the Q14 form
-/// `audrvVoiceSetBiquadFilter` writes them in.
+/// One biquad section's coefficients, in Q14.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Biquad {
     pub enabled: bool,
@@ -248,20 +172,15 @@ pub(crate) struct Biquad {
     pub denominator: [i16; 2],
 }
 
-/// A biquad's per-channel delay line, in the transposed direct form II the
-/// renderer's filters are defined in.
+/// A biquad's per-channel delay line (transposed direct form II).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct BiquadState {
     pub s0: f32,
     pub s1: f32,
 }
 
-/// One voice: a source of samples, and where it has got to in them.
-///
-/// Everything down to `wavebufs` is replaced wholesale by every update, the
-/// guest re-sends its whole voice array every frame. Everything below it is
-/// the renderer's own, and survives, because "where in this wave buffer am I"
-/// is the one thing the guest cannot tell it.
+/// One voice. Fields down to `wavebufs` are replaced by every update; the rest
+/// is playback position the renderer keeps.
 #[derive(Debug, Clone)]
 pub(crate) struct Voice {
     pub in_use: bool,
@@ -275,29 +194,18 @@ pub(crate) struct Voice {
     pub channel_ids: [u32; MAX_VOICE_CHANNELS],
     pub wavebufs: [WaveBuf; WAVE_BUFFERS],
     pub biquads: [Biquad; 2],
-    /// The ADPCM coefficient table, from the voice's extra parameters.
     pub adpcm_coefficients: [i16; 16],
-    /// Which slot of the ring is playing, and how many buffers from it are
-    /// still valid. Both are re-seeded from the update's `wavebuf_head` and
-    /// `wavebuf_count`, which the guest advances by the consumed count the
-    /// last reply reported, so the two stay in step without either side
-    /// telling the other where it is.
+    /// Current ring slot and valid buffers, re-seeded from the update's head and count.
     pub slot: usize,
     pub remaining: u32,
-    /// Samples consumed out of the wave buffer in `slot`.
     pub offset: u32,
-    /// The resampler's position between `prev` and `cur`, in samples.
     pub frac: f32,
     pub prev: [f32; MAX_VOICE_CHANNELS],
     pub cur: [f32; MAX_VOICE_CHANNELS],
-    /// Whether `prev`/`cur` hold real samples yet.
     pub primed: bool,
     pub adpcm: AdpcmState,
     pub biquad_state: [[BiquadState; 2]; MAX_VOICE_CHANNELS],
-    /// Cumulative, and reported back every update: the guest reads
-    /// `num_wavebufs_consumed` to know which of its buffers it may refill, and
-    /// a voice that never reports one consumed is a voice whose title runs out
-    /// of buffers and stops.
+    /// Reported back every update; the guest refills buffers by `wavebufs_consumed`.
     pub played_samples: u64,
     pub wavebufs_consumed: u32,
     pub drops: u32,
@@ -335,9 +243,7 @@ impl Default for Voice {
 }
 
 impl Voice {
-    /// Forget where this voice was. `is_new` means the guest has just built
-    /// the voice on a slot whatever was there before had finished with, so
-    /// none of the old position, history or filter state describes it.
+    /// Forget where this voice was, for a voice rebuilt on a reused slot.
     fn restart(&mut self) {
         self.slot = 0;
         self.remaining = 0;
@@ -354,13 +260,8 @@ impl Voice {
     }
 }
 
-/// The version number in an `AudioRendererParameter`'s revision magic,
-/// `REV1`, `REV2`, …, or 0 for anything that is not one. The count runs past
-/// nine into the next ASCII characters (`REV:` is 10), which is why this
-/// subtracts rather than parsing a digit.
-///
-/// The number decides the reply's shape: revision 5 added the renderer-info
-/// tail and revision 9 widened an effect's status.
+/// The version in a `REVn` magic, or 0. Past nine it continues into ASCII
+/// (`REV:` is 10), hence the subtraction.
 pub(crate) fn audren_revision(magic: u32) -> u32 {
     let [r, e, v, version] = magic.to_le_bytes();
     if [r, e, v] == *b"REV" {
@@ -370,7 +271,6 @@ pub(crate) fn audren_revision(magic: u32) -> u32 {
     }
 }
 
-/// Sign-extend the low four bits of an ADPCM nibble.
 fn adpcm_nibble(raw: u8) -> i64 {
     let value = i64::from(raw & 0xF);
     if value >= 8 {
@@ -381,8 +281,7 @@ fn adpcm_nibble(raw: u8) -> i64 {
 }
 
 impl AudioRenderer {
-    /// The mix buffer a `(channel resource, destination buffer)` pair names,
-    /// as an index into the renderer's flat buffer array.
+    /// The flat buffer index a `(mix, destination buffer)` pair names.
     fn buffer_index(&self, mix_id: u32, dest: usize) -> Option<usize> {
         let mix = self.mixes.iter().find(|m| m.mix_id == mix_id)?;
         if dest >= mix.buffer_count as usize {
@@ -393,8 +292,7 @@ impl AudioRenderer {
 }
 
 impl Cpu {
-    /// `IAudioRendererManager` (`audren:u`): opens renderers, and hands out the
-    /// device interface that says which output they play through.
+    /// `IAudioRendererManager` (`audren:u`).
     pub(super) fn audren_request(
         &mut self,
         tls: u32,
@@ -417,16 +315,13 @@ impl Cpu {
         let effect_count = self.mem.read_u32(data.wrapping_add(24)).unwrap_or(0);
         let revision_magic = self.mem.read_u32(data.wrapping_add(48)).unwrap_or(0);
         match cmd_id {
-            // GetWorkBufferSize: any page-sized answer works, nothing here
-            // actually allocates real renderer memory out of it.
+            // GetWorkBufferSize: nothing is allocated from it.
             Some(1) => self.write_ipc_response(tls, 0, &[], &0x10_0000u64.to_le_bytes(), &[]),
             // OpenAudioRenderer.
             Some(0) => {
                 let renderer = self.alloc_handle();
                 self.record_handle(renderer, "audren:iaudiorenderer");
                 let now = self.cycles;
-                // A rate of 0 is a caller that did not fill the field in;
-                // 48 kHz is what every renderer that names a rate asks for.
                 let sample_rate = if sample_rate == 0 {
                     48_000
                 } else {
@@ -465,12 +360,7 @@ impl Cpu {
                 );
                 self.write_ipc_response(tls, 0, &[renderer], &[], &[])
             }
-            // GetAudioDeviceService / GetAudioDeviceServiceWithRevisionInfo
-            // -> IAudioDevice. This used to fall into the catch-all below and
-            // answer *success with no object at all*: the caller stored a null
-            // where its device belonged, closed the session it had just been
-            // given, and jumped through the null vtable several thousand
-            // instructions later, with nothing left to say where it came from.
+            // GetAudioDeviceService / GetAudioDeviceServiceWithRevisionInfo -> IAudioDevice.
             Some(2) | Some(4) => {
                 self.reply_with_interface(tls, handle, "audren:iaudiodevice")?;
                 Ok(())
@@ -479,9 +369,7 @@ impl Cpu {
         }
     }
 
-    /// `IAudioDevice`: which output the renderer is playing through, and how
-    /// loud. There is one device here (the host's) and nothing routes
-    /// between outputs, so it answers as a console docked to a TV.
+    /// `IAudioDevice`. Answers as a console docked to a TV.
     pub(super) fn audio_device_request(
         &mut self,
         tls: u32,
@@ -491,14 +379,10 @@ impl Cpu {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
-        /// `AudioDeviceName` is a fixed 0x100-byte NUL-padded string.
         const NAME_LEN: usize = 0x100;
         const ACTIVE_DEVICE: &[u8] = b"AudioTvOutput";
         match cmd_id {
-            // ListAudioDeviceName (its Auto form, and the output-only list
-            // that replaced it) -> the names, one 0x100-byte slot each, plus
-            // how many were written. Every device here is an output, so the
-            // three answers are the same three names.
+            // ListAudioDeviceName and its variants.
             Some(0) | Some(6) | Some(14) => {
                 let names: [&[u8]; 3] = [
                     ACTIVE_DEVICE,
@@ -521,16 +405,13 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
             }
-            // SetAudioDeviceOutputVolume(f32, name in a buffer). The host
-            // owns the volume that is actually played, but the setting is
-            // still the caller's to read back. See `AudioControl`.
+            // SetAudioDeviceOutputVolume(f32, name in a buffer).
             Some(1) | Some(7) => {
                 let volume = f32::from_bits(self.mem.read_u32(self.ipc_request_data(tls))?);
                 self.audio_control.set_device_volume(volume);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // GetAudioDeviceOutputVolume -> f32: whatever was last set, full
-            // scale until something sets otherwise.
+            // GetAudioDeviceOutputVolume -> f32.
             Some(2) | Some(8) => {
                 let volume = self.audio_control.device_volume();
                 self.write_ipc_response(tls, 0, &[], &volume.to_le_bytes(), &[])
@@ -545,9 +426,7 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // QueryAudioDeviceSystemEvent / ...InputEvent / ...OutputEvent:
-            // copy handles signalled when the audio output changes. Nothing
-            // here ever changes it, so they are handed out and never fire.
+            // QueryAudioDeviceSystemEvent / InputEvent / OutputEvent: never fire.
             Some(4) | Some(11) | Some(12) => {
                 let h = self.alloc_event("audren:device", true);
                 self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
@@ -569,8 +448,7 @@ impl Cpu {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         match cmd_id {
-            // GetSampleRate / GetSampleCount / GetMixBufferCount: what the
-            // renderer was opened with.
+            // GetSampleRate / GetSampleCount / GetMixBufferCount.
             Some(0) | Some(1) | Some(2) => {
                 let renderer = self.audren_renderers.get(&handle);
                 let value = match (cmd_id, renderer) {
@@ -581,7 +459,7 @@ impl Cpu {
                 };
                 self.write_ipc_response(tls, 0, &[], &value.to_le_bytes(), &[])
             }
-            // GetState: 0 while the renderer is running, 1 once it is stopped.
+            // GetState: 0 running, 1 stopped.
             Some(3) => {
                 let started = self
                     .audren_renderers
@@ -594,10 +472,6 @@ impl Cpu {
             // RequestUpdateAudioRenderer, cmd 4 pre-3.0.0 / cmd 10 since.
             Some(4) | Some(10) => {
                 self.audren_update(tls, handle)?;
-                // The update is a round trip into the audio process, and the
-                // caller is descheduled for its duration. Yielding here is
-                // what keeps a mixer that never blocks from owning the CPU,
-                // the same reason `AppendAudioOutBuffer` does it.
                 self.pending_yield = true;
                 Ok(())
             }
@@ -607,19 +481,13 @@ impl Cpu {
                 let now = self.cycles;
                 if let Some(renderer) = self.audren_renderers.get_mut(&handle) {
                     renderer.started = started;
-                    // A renderer coming back from stopped starts its clock
-                    // from the present. The silence while it was stopped is
-                    // not a backlog it owes.
+                    // Restart the clock from now; a stopped renderer owes no backlog.
                     renderer.rendered_through = now;
                     renderer.next_frame_at = now.wrapping_add(FRAME_CYCLES);
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // QuerySystemEvent: the frame event, fired once every 5 ms of
-            // emulated time by `Cpu::audren_tick`. It is a **copy** handle and
-            // a real event: handing back a bare handle instead made every
-            // `audrenWaitFrame` return at once, which is a renderer with no
-            // clock at all.
+            // QuerySystemEvent: the frame event fired by `Cpu::audren_tick`, as a copy handle.
             Some(7) => {
                 let event = match self
                     .audren_renderers
@@ -637,9 +505,7 @@ impl Cpu {
                 };
                 self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
             }
-            // SetAudioRendererRenderingTimeLimit / Get...: the share of a
-            // frame the renderer may spend. Nothing here is scheduled against
-            // it.
+            // SetAudioRendererRenderingTimeLimit / Get.
             Some(8) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             Some(9) => self.write_ipc_response(tls, 0, &[], &100u32.to_le_bytes(), &[]),
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -647,13 +513,7 @@ impl Cpu {
     }
 
     /// Fire the frame event of every renderer whose 5 ms period has come, and
-    /// report the earliest cycle at which one of `handles` will fire.
-    ///
-    /// This is the renderer's half of [`Cpu::audio_tick`], and exists for the
-    /// same reason: nothing runs in the background here, so a periodic tick
-    /// has to be noticed by somebody, and the guest asking to wait is the
-    /// moment that matters. The deadline is what makes the wait safe to
-    /// honour: the waiter can be parked knowing exactly when it will wake.
+    /// return the earliest cycle at which one of `handles` will fire.
     pub(super) fn audren_tick(&mut self, handles: &[u64]) -> Option<u64> {
         let now = self.cycles;
         let mut fire = Vec::new();
@@ -666,8 +526,6 @@ impl Cpu {
                 continue;
             }
             if renderer.next_frame_at <= now {
-                // From now, not from when it was due: a renderer that went
-                // unwaited-on for a while has no backlog of frames to fire.
                 renderer.next_frame_at = now.wrapping_add(FRAME_CYCLES);
                 fire.push(event);
             } else if handles.contains(&event) {
@@ -681,9 +539,7 @@ impl Cpu {
         next
     }
 
-    /// `RequestUpdateAudioRenderer`: take the whole renderer state the guest
-    /// sent, render whatever frames have come due since the last update, and
-    /// report back what the voices did.
+    /// `RequestUpdateAudioRenderer`: parse the state, render due frames, reply.
     fn audren_update(&mut self, tls: u32, handle: u64) -> Result<()> {
         if let Some(renderer) = self.audren_renderers.get_mut(&handle) {
             renderer.updates += 1;
@@ -695,13 +551,7 @@ impl Cpu {
         self.audren_write_update_reply(tls, handle)
     }
 
-    /// Read one update's input buffer into the renderer's state.
-    ///
-    /// The sections are walked using the sizes the *guest* declared in its own
-    /// header rather than sizes computed here. That is what makes one parser
-    /// work across revisions: an effect or a mix entry grew between them, and
-    /// a walk that assumed a stride would land mid-struct on the next section
-    /// and read a voice out of a mix.
+    /// Read one update's input buffer, walking sections by the guest's declared sizes.
     fn audren_parse_update(&mut self, handle: u64, addr: u32, size: u32) {
         let Some(mut renderer) = self.audren_renderers.remove(&handle) else {
             return;
@@ -719,9 +569,7 @@ impl Cpu {
         let effects_sz = read_u32(self, addr.wrapping_add(0x14));
         let mixes_sz = read_u32(self, addr.wrapping_add(0x18));
         let sinks_sz = read_u32(self, addr.wrapping_add(0x1c));
-        // The word libnx leaves zero and calls padding is the splitter
-        // section: a renderer opened with splitters puts one here, and
-        // stepping over it is the only reason to read it.
+        // The word libnx calls padding is the splitter section size.
         let splitters_sz = read_u32(self, addr.wrapping_add(0x24));
 
         let mut at = addr.wrapping_add(HEADER_SZ).wrapping_add(behavior_sz);
@@ -741,10 +589,7 @@ impl Cpu {
         self.audren_renderers.insert(handle, renderer);
     }
 
-    /// `AudioRendererMemPoolInfoIn[]`. Guest memory *is* the renderer's memory
-    /// here, so attaching a pool changes nothing about what can be read, but
-    /// the acknowledgement is not optional: a pool the guest asked to attach
-    /// and never saw attached is one it will keep asking about.
+    /// `AudioRendererMemPoolInfoIn[]`. Attach and detach requests are acknowledged.
     fn audren_parse_mempools(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
         let count = (size / MEMPOOL_IN_SZ) as usize;
         renderer.mempool_states = vec![0; count];
@@ -754,15 +599,12 @@ impl Cpu {
             renderer.mempool_states[i] = match state {
                 MEMPOOL_REQUEST_ATTACH => MEMPOOL_ATTACHED,
                 MEMPOOL_REQUEST_DETACH => MEMPOOL_DETACHED,
-                // Anything else is left alone, which `Invalid` is the word
-                // for: the guest reads it as "no transition happened".
                 _ => 0,
             };
         }
     }
 
-    /// `AudioRendererChannelInfoIn[]`: one voice channel's gain into each
-    /// buffer of the mix it plays into.
+    /// `AudioRendererChannelInfoIn[]`.
     fn audren_parse_channels(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
         let count = (size / CHANNEL_IN_SZ) as usize;
         renderer.channels.resize(count, ChannelResource::default());
@@ -789,8 +631,7 @@ impl Cpu {
         }
         for i in 0..count {
             let at = addr.wrapping_add(i as u32 * VOICE_IN_SZ);
-            // The voice's own id is what indexes the renderer's state, not its
-            // position in the array, nothing promises the two agree.
+            // The voice's id, not its array position, indexes the renderer state.
             let id = self.mem.read_u32(at).unwrap_or(0) as usize;
             let id = if id < renderer.voices.len() { id } else { i };
             let is_new = self.mem.read_u8(at.wrapping_add(0x08)).unwrap_or(0) != 0;
@@ -865,9 +706,7 @@ impl Cpu {
                 voice.channel_ids[channel] = raw.unwrap_or(0);
             }
 
-            // The ADPCM coefficient table travels as the voice's extra
-            // parameters, sixteen s16, the eight predictor pairs a frame
-            // header selects between.
+            // ADPCM coefficients: sixteen s16 in the voice's extra parameters.
             if format == PCM_ADPCM && extra_params != 0 {
                 for n in 0..16 {
                     let raw = self.mem.read_u16(extra_params.wrapping_add(n as u32 * 2));
@@ -875,25 +714,18 @@ impl Cpu {
                 }
             }
 
-            // Where the guest's ring head is now, which it advanced by exactly
-            // the consumed count the last reply reported. Re-seeding from it
-            // every update is what keeps the two sides in step without either
-            // sending the other a position.
             voice.slot = usize::from(wavebuf_head) % WAVE_BUFFERS;
             voice.remaining = wavebuf_count.min(WAVE_BUFFERS as u32);
         }
     }
 
-    /// `AudioRendererMixInfoIn[]`. Mix buffers are handed out in mix-id order,
-    /// the final mix first, so an offset is the sum of the buffer counts
-    /// before it.
+    /// `AudioRendererMixInfoIn[]`. Buffers are assigned in mix-id order.
     fn audren_parse_mixes(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
         let count = (renderer.submix_count + 1) as usize;
         let stride = if count > 0 { size / count as u32 } else { 0 };
         renderer.mixes.clear();
         if stride == 0 {
-            // A renderer whose update carried no mixes still has a final mix
-            // to play through: it is the destination every voice names.
+            // Every voice names a final mix, so one exists even if the update sent none.
             renderer.mixes.push(Mix {
                 is_used: true,
                 mix_id: 0,
@@ -914,8 +746,6 @@ impl Cpu {
             let dest_mix_id = self.mem.read_u32(at.wrapping_add(0x924)).unwrap_or(0);
             let buffer_count = buffer_count.min(MAX_MIX_BUFFERS as u32);
             let mut matrix = Vec::new();
-            // A submix's matrix is only ever read for what it sends onward, so
-            // it is only worth reading for a mix that sends somewhere.
             if dest_mix_id != UNUSED_MIX_ID && buffer_count > 0 {
                 matrix = vec![0.0; MAX_MIX_BUFFERS * MAX_MIX_BUFFERS];
                 for src in 0..buffer_count as usize {
@@ -938,9 +768,7 @@ impl Cpu {
                 matrix,
             });
         }
-        // Assign the buffer ranges in mix-id order: the final mix took the
-        // first of them and each submix the next range, which is the order
-        // `audrvMixAdd` hands them out in.
+        // Assign buffer ranges in mix-id order, as `audrvMixAdd` does.
         renderer.mixes.sort_by_key(|mix| mix.mix_id);
         let mut offset = 0;
         for mix in renderer.mixes.iter_mut() {
@@ -949,7 +777,7 @@ impl Cpu {
         }
     }
 
-    /// `AudioRendererSinkInfoIn[]`: what the finished mix plays through.
+    /// `AudioRendererSinkInfoIn[]`.
     fn audren_parse_sinks(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
         let count = renderer.sink_count as usize;
         let stride = if count > 0 { size / count as u32 } else { 0 };
@@ -974,8 +802,7 @@ impl Cpu {
                 }
                 continue;
             }
-            // The union starts past the type, the node id and three reserved
-            // words; a device sink's name fills the 0x100 bytes after that.
+            // The union starts at 0x20; a device sink's name fills the next 0x100 bytes.
             let sink = at.wrapping_add(0x20);
             let channels = self.mem.read_u32(sink.wrapping_add(0x100)).unwrap_or(0);
             let mut inputs = [0u8; MAX_SINK_INPUTS];
@@ -993,12 +820,7 @@ impl Cpu {
         }
     }
 
-    /// Render every 5 ms frame that has come due and queue the result for the
-    /// host.
-    ///
-    /// The frames are counted off `cycles`, the same clock `audout` releases
-    /// its buffers on, so the mix drains at the rate a real renderer's would
-    /// however fast or slow the emulator is running.
+    /// Render every 5 ms frame that has come due and queue the result for the host.
     fn audren_render(&mut self, handle: u64) {
         let now = self.cycles;
         let Some(mut renderer) = self.audren_renderers.remove(&handle) else {
@@ -1040,23 +862,13 @@ impl Cpu {
         let format = (renderer.sample_rate, channels);
         self.audren_renderers.insert(handle, renderer);
         if !pcm.is_empty() {
-            // Whichever device is actually producing samples defines the
-            // format the host plays them in, the same rule `audout` follows.
             self.audio_format = format;
             self.queue_audio(pcm.into_iter());
         }
     }
 
-    /// `RequestUpdateAudioRenderer`'s reply: an `AudioRendererUpdateDataHeader`
-    /// and then, in this order, one status per mempool, per voice, per effect
-    /// and per sink, the performance and behaviour tails, and the renderer
-    /// info.
-    ///
-    /// Getting the `_sz` fields right matters: both `audrvUpdate` and `nnSdk`
-    /// walk the reply section by section against the sizes they computed from
-    /// the voice/sink/effect counts the renderer was opened with, and abort on
-    /// the first that disagrees: every frame the title is alive, not just at
-    /// startup.
+    /// `RequestUpdateAudioRenderer`'s reply. The guest checks every `_sz` field
+    /// against sizes computed from the open counts and aborts on mismatch.
     pub(super) fn audren_write_update_reply(&mut self, tls: u32, handle: u64) -> Result<()> {
         let Some(renderer) = self.audren_renderers.get(&handle) else {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
@@ -1074,11 +886,9 @@ impl Cpu {
         const SINK_OUT_SZ: u32 = 32;
         const PERFMGR_OUT_SZ: u32 = 16;
         const BEHAVIOR_OUT_SZ: u32 = 176;
-        /// `RendererInfoOut`: an elapsed-frame counter and its reserved half,
-        /// the last section of the reply. Revision 5 added it.
+        /// `RendererInfoOut`, added in revision 5.
         const RENDER_INFO_OUT_SZ: u32 = 16;
-        /// `EffectOutStatus`, and the wider revision-9 form that carries an
-        /// aux-buffer/limiter report alongside the state byte.
+        /// `EffectOutStatus`, and its wider revision-9 form.
         const EFFECT_OUT_SZ: u32 = 16;
         const EFFECT_OUT_V2_SZ: u32 = 0x90;
 
@@ -1107,14 +917,11 @@ impl Cpu {
         reply[8..12].copy_from_slice(&mempools_sz.to_le_bytes());
         reply[12..16].copy_from_slice(&voices_sz.to_le_bytes());
         reply[20..24].copy_from_slice(&effects_sz.to_le_bytes());
-        // channels_sz and mixes_sz stay 0: the renderer reports nothing back
-        // for either, and neither is a section of the reply.
         reply[28..32].copy_from_slice(&sinks_sz.to_le_bytes());
         reply[32..36].copy_from_slice(&PERFMGR_OUT_SZ.to_le_bytes());
         reply[40..44].copy_from_slice(&render_info_sz.to_le_bytes());
         reply[60..64].copy_from_slice(&total_sz.to_le_bytes());
 
-        // `MemPoolInfoOut`: the transition each pool made, or 0 for none.
         let mut at = HEADER_OUT_SZ as usize;
         for i in 0..mempool_count as usize {
             let state = renderer.mempool_states.get(i).copied().unwrap_or(0);
@@ -1122,11 +929,7 @@ impl Cpu {
             at += MEMPOOL_OUT_SZ as usize;
         }
 
-        // `VoiceInfoOut`: how far each voice has got. `num_wavebufs_consumed`
-        // is the load-bearing one, the guest advances its own ring head by
-        // the delta and only refills a buffer this has accounted for, so a
-        // renderer that reports zero is one whose title runs out of buffers
-        // and stops.
+        // `VoiceInfoOut`: the guest refills buffers by `num_wavebufs_consumed`.
         for i in 0..voice_count as usize {
             let (played, consumed, drops) = match renderer.voices.get(i) {
                 Some(voice) => (voice.played_samples, voice.wavebufs_consumed, voice.drops),
@@ -1138,15 +941,12 @@ impl Cpu {
             at += VOICE_OUT_SZ as usize;
         }
 
-        // Effects and sinks report nothing: no effect is processed here, and
-        // `last_written_offset` belongs to the circular-buffer sink, which is
-        // not written. Zero is the truthful answer for both.
+        // Effects and sinks report nothing.
         at += effects_sz as usize;
         at += sinks_sz as usize;
         at += PERFMGR_OUT_SZ as usize;
         at += BEHAVIOR_OUT_SZ as usize;
 
-        // `RendererInfoOut`: frames rendered since the renderer was opened.
         if render_info_sz != 0 && at + 8 <= reply.len() {
             reply[at..at + 8].copy_from_slice(&renderer.elapsed_frames.to_le_bytes());
         }
@@ -1162,9 +962,8 @@ impl Cpu {
     }
 }
 
-/// Render one 5 ms frame: every playing voice into its destination mix, every
-/// submix onward into its own destination, then the final mix out through the
-/// sink as interleaved 16-bit PCM.
+/// Render one 5 ms frame: voices into mixes, submixes onward, then the sink as
+/// interleaved 16-bit PCM.
 fn render_frame(mem: &Memory, renderer: &mut AudioRenderer, out: &mut Vec<i16>) {
     let frames = renderer.sample_count as usize;
     let buffer_count = renderer
@@ -1181,10 +980,7 @@ fn render_frame(mem: &Memory, renderer: &mut AudioRenderer, out: &mut Vec<i16>) 
         render_voice(mem, renderer, index, &mut buffers);
     }
 
-    // Submixes feed their destination before the final mix is read. Highest
-    // mix id first, because a submix is always created after the mix it sends
-    // to, so descending id is the order that never reads a buffer another
-    // mix has yet to write.
+    // Highest mix id first: a submix is created after the mix it sends to.
     let mut order: Vec<usize> = (0..renderer.mixes.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(renderer.mixes[i].mix_id));
     for i in order {
@@ -1233,17 +1029,13 @@ fn render_frame(mem: &Memory, renderer: &mut AudioRenderer, out: &mut Vec<i16>) 
         for channel in 0..sink.channels as usize {
             let index = base + usize::from(sink.inputs[channel]);
             let value = buffers.get(index).map(|buf| buf[sample]).unwrap_or(0.0) * final_volume;
-            // 32768, not 32767: the decoders divide by 32768, so scaling back
-            // by the same figure makes a 16-bit source that passes through at
-            // unity gain come out bit-exact rather than a count light.
+            // 32768 matches the decoders' divisor, so unity-gain 16-bit passes bit-exact.
             out.push((value * 32768.0).clamp(-32768.0, 32767.0) as i16);
         }
     }
 }
 
-/// Mix one voice into the buffers of the mix it plays into: decode its source
-/// samples, resample them to the renderer's rate, filter them, and add them at
-/// the gain its channel resources name.
+/// Mix one voice: decode, resample, filter, and add at its channel gains.
 fn render_voice(
     mem: &Memory,
     renderer: &mut AudioRenderer,
@@ -1263,8 +1055,6 @@ fn render_voice(
         return;
     }
     let channel_count = voice.channel_count as usize;
-    // Where each of this voice's channels goes, resolved once: a gain per mix
-    // buffer, already flattened to the buffer indices they land in.
     let mut routing: Vec<Vec<(usize, f32)>> = Vec::with_capacity(channel_count);
     for channel in 0..channel_count {
         let id = voice.channel_ids[channel] as usize;
@@ -1285,9 +1075,7 @@ fn render_voice(
         routing.push(gains);
     }
     if routing.iter().all(|gains| gains.is_empty()) {
-        // Nothing this voice produces is routed anywhere, so decoding it would
-        // be work with no destination, but it still has to *advance*, or the
-        // guest never gets its wave buffers back.
+        // Unrouted, but it must still advance or the guest never gets its buffers back.
         advance_silently(renderer, index);
         return;
     }
@@ -1295,8 +1083,6 @@ fn render_voice(
     let voice = &mut renderer.voices[index];
     let volume = voice.volume;
     let step = (voice.sample_rate as f32 / rate as f32) * voice.pitch;
-    // A source rate of zero, or a pitch that resamples to a standstill, would
-    // read one sample forever. Nothing plays at that rate.
     if !(step.is_finite() && step > 0.0) {
         return;
     }
@@ -1304,9 +1090,6 @@ fn render_voice(
     let mut mixed = vec![0f32; frames * channel_count];
     for frame in 0..frames {
         if !voice.primed {
-            // Two samples, because interpolating needs the one on either side
-            // of the position. The first output frame sits exactly on the
-            // first sample, so nothing is skipped by reading ahead.
             if !pull_source(mem, voice) {
                 break;
             }
@@ -1327,11 +1110,7 @@ fn render_voice(
             voice.frac -= 1.0;
             voice.prev = voice.cur;
             if !pull_source(mem, voice) {
-                // The voice ran dry. Interpolating toward zero rather than
-                // holding the last sample is what keeps the end of a stream
-                // from leaving a DC step behind, and `primed` stays set so the
-                // sample already in `prev` is still played, clearing it here
-                // dropped the last sample of every wave buffer.
+                // Ran dry: interpolate toward zero, keeping `primed` so `prev` still plays.
                 voice.cur = [0.0; MAX_VOICE_CHANNELS];
             }
         }
@@ -1362,12 +1141,7 @@ fn render_voice(
     }
 }
 
-/// Advance a voice through the samples this frame would have consumed without
-/// mixing them anywhere.
-///
-/// A voice routed nowhere is still playing, and the guest is still waiting for
-/// the wave buffers back. Skipping the decode entirely would leave it holding
-/// them forever.
+/// Advance a voice through this frame's samples without mixing them.
 fn advance_silently(renderer: &mut AudioRenderer, index: usize) {
     let frames = renderer.sample_count as u64;
     let rate = renderer.sample_rate.max(1);
@@ -1385,8 +1159,7 @@ fn advance_silently(renderer: &mut AudioRenderer, index: usize) {
     }
 }
 
-/// Step a voice one source sample forward without decoding it, moving to the
-/// next wave buffer (or looping) exactly as [`pull_source`] would.
+/// Step one source sample forward without decoding, as [`pull_source`] would.
 fn skip_source(voice: &mut Voice) -> bool {
     loop {
         if voice.remaining == 0 {
@@ -1408,13 +1181,8 @@ fn skip_source(voice: &mut Voice) -> bool {
     }
 }
 
-/// How many samples of a wave buffer a voice can actually play.
-///
-/// `end_sample_offset` is the guest's claim about its own buffer and `size` is
-/// the buffer it allocated; where they disagree, the allocation wins. `audout`
-/// learned this the expensive way, the Mii editor submits a descriptor whose
-/// offsets land outside the buffer entirely, and what reached the speakers was
-/// the struct's own pointers read as PCM.
+/// How many samples of a wave buffer a voice can play: the allocation wins over
+/// `end_sample_offset`.
 fn playable_samples(voice: &Voice, wavebuf: WaveBuf) -> u32 {
     if wavebuf.address == 0 {
         return 0;
@@ -1436,24 +1204,19 @@ fn playable_samples(voice: &Voice, wavebuf: WaveBuf) -> u32 {
     wavebuf.end.min(fits).saturating_sub(wavebuf.start)
 }
 
-/// Retire the wave buffer a voice has just played out and move to the next.
 fn finish_wavebuf(voice: &mut Voice, wavebuf: WaveBuf) {
     voice.slot = (voice.slot + 1) % WAVE_BUFFERS;
     voice.remaining = voice.remaining.saturating_sub(1);
     voice.wavebufs_consumed = voice.wavebufs_consumed.wrapping_add(1);
     voice.offset = 0;
-    // The next buffer's ADPCM history is its own, seeded from its context.
     voice.adpcm.next = None;
     if wavebuf.end_of_stream {
         voice.remaining = 0;
     }
 }
 
-/// Decode the next source sample of every channel of a voice into `cur`,
-/// advancing through the wave-buffer ring as buffers run out.
-///
-/// Returns false once the voice has nothing left to play, which is a voice
-/// whose guest has not queued a buffer in time, silence, not an error.
+/// Decode the next source sample of every channel into `cur`. False when the
+/// voice has nothing queued.
 fn pull_source(mem: &Memory, voice: &mut Voice) -> bool {
     loop {
         if voice.remaining == 0 {
@@ -1464,8 +1227,6 @@ fn pull_source(mem: &Memory, voice: &mut Voice) -> bool {
         if voice.offset >= total {
             if wavebuf.looping && total > 0 {
                 voice.offset = 0;
-                // A loop restarts the decoder from the state the encoder left
-                // at the loop point, not from silence.
                 seed_adpcm(mem, voice, wavebuf);
                 continue;
             }
@@ -1476,9 +1237,7 @@ fn pull_source(mem: &Memory, voice: &mut Voice) -> bool {
         let channels = voice.channel_count as usize;
         voice.cur = [0.0; MAX_VOICE_CHANNELS];
         if voice.format == PCM_ADPCM {
-            // ADPCM is a mono codec here: a multi-channel source is encoded as
-            // one voice per channel, which is the only arrangement
-            // `audrvVoiceInit` and every title that uses it produce.
+            // ADPCM voices are mono; multi-channel sources use one voice per channel.
             if voice.adpcm.next != Some(index) {
                 seed_adpcm(mem, voice, wavebuf);
                 decode_adpcm_from_frame_start(mem, voice, wavebuf, index);
@@ -1498,12 +1257,9 @@ fn pull_source(mem: &Memory, voice: &mut Voice) -> bool {
     }
 }
 
-/// Load the ADPCM predictor's history from the wave buffer's context, or clear
-/// it if the buffer carries none.
 fn seed_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf) {
     if wavebuf.context != 0 {
-        // `AudioRendererAdpcmContext`: a frame index, then the two history
-        // samples the decoder should resume with.
+        // `AudioRendererAdpcmContext`: a frame index, then the two history samples.
         voice.adpcm.history0 = mem.read_u16(wavebuf.context.wrapping_add(2)).unwrap_or(0) as i16;
         voice.adpcm.history1 = mem.read_u16(wavebuf.context.wrapping_add(4)).unwrap_or(0) as i16;
     } else {
@@ -1514,11 +1270,6 @@ fn seed_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf) {
 }
 
 /// Decode from the start of the 14-sample frame `index` falls in, up to it.
-///
-/// ADPCM samples are differences from the two before them, so one cannot be
-/// decoded on its own. A frame boundary is the coarsest point the decoder can
-/// resume at, and the predictor converges within a frame, so this is also what
-/// hardware does when a voice seeks.
 fn decode_adpcm_from_frame_start(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf, index: u32) {
     let frame_start = (index / ADPCM_SAMPLES_PER_FRAME) * ADPCM_SAMPLES_PER_FRAME;
     voice.adpcm.next = Some(frame_start);
@@ -1527,7 +1278,6 @@ fn decode_adpcm_from_frame_start(mem: &Memory, voice: &mut Voice, wavebuf: WaveB
     }
 }
 
-/// Decode one 4-bit ADPCM sample, advancing the predictor.
 fn decode_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf, index: u32) -> f32 {
     let frame = index / ADPCM_SAMPLES_PER_FRAME;
     let within = index % ADPCM_SAMPLES_PER_FRAME;
@@ -1551,8 +1301,6 @@ fn decode_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf, index: u32) -
     let history0 = i64::from(voice.adpcm.history0);
     let history1 = i64::from(voice.adpcm.history1);
     let prediction = coef0 * history0 + coef1 * history1;
-    // The rounding constant is half of the coefficients' fixed-point unit, so
-    // the shift rounds to nearest rather than toward negative infinity.
     let rounding = 1 << (ADPCM_COEF_SHIFT - 1);
     let value = ((nibble << scale) << ADPCM_COEF_SHIFT) + prediction + rounding;
     let sample = (value >> ADPCM_COEF_SHIFT).clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16;
@@ -1563,8 +1311,7 @@ fn decode_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf, index: u32) -
     f32::from(sample) / 32768.0
 }
 
-/// Read one interleaved PCM sample of a voice's channel, as a float in
-/// -1.0..=1.0.
+/// One interleaved PCM sample of a voice's channel, in -1.0..=1.0.
 fn decode_pcm(mem: &Memory, voice: &Voice, wavebuf: WaveBuf, index: u32, channel: usize) -> f32 {
     let channels = voice.channel_count.max(1);
     let slot = index.wrapping_mul(channels).wrapping_add(channel as u32);
@@ -1582,8 +1329,6 @@ fn decode_pcm(mem: &Memory, voice: &Voice, wavebuf: WaveBuf, index: u32, channel
             let low = u32::from(mem.read_u8(at).unwrap_or(0));
             let mid = u32::from(mem.read_u8(at.wrapping_add(1)).unwrap_or(0));
             let high = u32::from(mem.read_u8(at.wrapping_add(2)).unwrap_or(0));
-            // Sign-extend from 24 bits by landing the value in the top three
-            // bytes of an i32 and shifting back down.
             let raw = ((low << 8) | (mid << 16) | (high << 24)) as i32;
             (raw >> 8) as f32 / 8_388_608.0
         }
@@ -1604,13 +1349,8 @@ fn decode_pcm(mem: &Memory, voice: &Voice, wavebuf: WaveBuf, index: u32, channel
     }
 }
 
-/// Run one biquad section over a sample.
-///
-/// The coefficients arrive in Q14, `audrvVoiceSetBiquadFilter` scales by
-/// 16384, and the form is the transposed direct II the renderer's filters are
-/// defined in, where the denominators are stored already negated. The output
-/// is clamped because the guest chooses the coefficients and nothing stops it
-/// choosing an unstable set.
+/// One transposed direct form II biquad section, Q14 coefficients with negated
+/// denominators. Clamped since the guest may choose an unstable set.
 fn apply_biquad(biquad: &Biquad, state: &mut BiquadState, input: f32) -> f32 {
     const Q14: f32 = 1.0 / 16384.0;
     let b0 = f32::from(biquad.numerator[0]) * Q14;

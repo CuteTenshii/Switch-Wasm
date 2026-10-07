@@ -1,13 +1,11 @@
-//! Boot an NRO with libtransistor's `sqfs_init` stubbed out to return 0, to
-//! see how far it gets without its embedded filesystem:
-//! `patch_sqfs <path.nro>`.
+//! Boot an NRO with libtransistor's `sqfs_init` stubbed to return 0: `patch_sqfs <path.nro>`.
 mod common;
 
 use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
 use switch_core::nro::{load_nro, symbol_value};
 
-/// Where `load_nro` puts an NRO's first byte.
+/// Load address of an NRO's first byte.
 const BASE: u32 = 0x0800_0000;
 
 fn main() {

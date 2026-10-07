@@ -1,17 +1,7 @@
-//! The Macro Method Expander (MME), the small processor in front of the
-//! Maxwell 3D class.
+//! The Macro Method Expander (MME) in front of the Maxwell 3D class. Methods `0xE00`
+//! and up are 128 macro slots: the even method starts a macro, the odd one pushes arguments.
 //!
-//! Methods `0xE00` and up are not registers: they are 128 macro slots. The
-//! driver uploads a program into the MME instruction RAM
-//! (`LoadMmeInstructionRam`) and binds slot entry points
-//! (`LoadMmeStartAddressRam`). Writing to slot `n`'s even method starts macro
-//! `n` with that value as the first argument; the odd method pushes further
-//! arguments. The macro runs when the pushbuffer's method group ends, and it
-//! emits ordinary method writes back into the class.
-//!
-//! deko3d compiles its draw calls into macros, so nothing draws without this.
-//!
-//! The ISA is 32 bits per instruction with 8 GPRs (R0 reads as zero):
+//! Instruction layout (8 GPRs, R0 reads as zero):
 //!
 //! ```text
 //!  bits 0..2    operation
@@ -26,24 +16,18 @@
 //!  bit 7        exit after the next instruction
 //! ```
 //!
-//! A branch (operation 7) and the exit modifier both have a one-instruction
-//! delay slot: they take effect only after the following instruction has run.
-//! Branch bit 4 selects != 0 vs == 0 and bit 5 annuls the delay slot when the
-//! branch is taken; combining the exit modifier with a branch exits only when
-//! the branch is *not* taken.
+//! Branches and the exit bit have a one-instruction delay slot.
 
 use crate::{Error, Result};
 
-/// Size of the MME instruction RAM in 32-bit words (Maxwell).
+/// Size of the MME instruction RAM in 32-bit words.
 pub const INSTRUCTION_RAM_SIZE: usize = 0x1000;
-/// Number of macro entry-point slots.
 pub const START_ADDRESS_RAM_SIZE: usize = 0x100;
 /// First method address that selects a macro instead of a class register.
 pub const MACRO_METHODS_START: u32 = 0xE00;
 /// Instruction budget per macro, so a corrupt program cannot hang the core.
 const MAX_STEPS: u32 = 100_000;
 
-/// What the macro program wants done with an instruction's result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Assignment {
     IgnoreAndFetch,
@@ -71,25 +55,19 @@ impl Assignment {
     }
 }
 
-/// A method write the macro emitted, for the caller to feed back into the
-/// class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacroWrite {
     pub method: u32,
     pub arg: u32,
 }
 
-/// The class-side interface a running macro needs: read a class register and
-/// apply an emitted method write. Both are called in program order as the
-/// macro runs, so a `read_method` sees the effect of every write the macro has
-/// already emitted (and its side effects, such as a firmware call completing).
+/// Methods are read and written in program order as the macro runs.
 pub trait MacroHost {
     fn read_method(&self, method: u32) -> u32;
     fn write_method(&mut self, write: MacroWrite) -> Result<()>;
 }
 
-/// The MME's storage: instruction RAM plus the per-slot entry points. Lives
-/// for the life of the channel, like the hardware's.
+/// Instruction RAM plus the per-slot entry points.
 #[derive(Debug)]
 pub struct MacroEngine {
     instruction_ram: Vec<u32>,
@@ -98,7 +76,6 @@ pub struct MacroEngine {
     pub instruction_ram_pointer: u32,
     /// Write cursor for `LoadMmeStartAddressRam`.
     pub start_address_pointer: u32,
-    /// Arguments pushed since the current macro was started.
     args: Vec<u32>,
     /// Macro slot the pending arguments belong to; `None` when idle.
     pending: Option<u32>,
@@ -140,8 +117,7 @@ impl MacroEngine {
         self.start_address_pointer = self.start_address_pointer.wrapping_add(1);
     }
 
-    /// Begin collecting arguments for macro `slot` (a write to its even
-    /// method). Any half-collected macro is discarded, as the hardware does.
+    /// A write to macro `slot`'s even method; discards any half-collected macro.
     pub fn start(&mut self, slot: u32, first_arg: u32) {
         self.args.clear();
         self.args.push(first_arg);
@@ -157,10 +133,6 @@ impl MacroEngine {
         self.pending
     }
 
-    /// Run the pending macro against `host`, which supplies the class register
-    /// file for `read` and receives each emitted method write as it happens,
-    /// so a later `read` sees the effect of earlier writes (e.g.
-    /// `WriteHardwareReg`'s firmware-call completion poll).
     pub fn run<H: MacroHost + ?Sized>(&mut self, host: &mut H) -> Result<()> {
         let slot = match self.pending.take() {
             Some(slot) => slot,
@@ -183,10 +155,7 @@ impl MacroEngine {
         // The first argument arrives in R1 rather than through a fetch.
         state.gprs[1] = state.fetch_arg();
         let mut steps = 0u32;
-        // A branch and the exit modifier both have a one-instruction delay slot:
-        // they take effect only after the following instruction has run. A taken
-        // branch overrides a concurrent exit, so an exit in a branch's delay
-        // slot only fires when control falls through instead of jumping.
+        // A taken branch overrides an exit in its delay slot.
         let mut pending_jump: Option<u32> = None;
         let mut pending_exit = false;
         let mut trace: Vec<(u32, u32)> = Vec::new();
@@ -217,8 +186,7 @@ impl MacroEngine {
             state.pc = state.pc.wrapping_add(1);
             let flow = state.execute(word, host)?;
 
-            // The delay slot has just run; resolve the previous instruction's
-            // branch/exit. A jump discards an exit scheduled by the delay slot.
+            // The delay slot has run; resolve the previous instruction's branch or exit.
             let was_delay_slot = pending_jump.is_some();
             if let Some(target) = pending_jump.take() {
                 state.pc = target;
@@ -226,7 +194,6 @@ impl MacroEngine {
                 break;
             }
 
-            // Schedule this instruction's control flow for the next slot.
             if flow.is_branch && flow.taken {
                 if flow.annul {
                     state.pc = flow.target;
@@ -242,8 +209,7 @@ impl MacroEngine {
     }
 }
 
-/// The flow-control intent of a single executed instruction, resolved by the
-/// caller once the instruction's delay slot has run.
+/// Flow-control intent, applied once the delay slot has run.
 struct Flow {
     is_branch: bool,
     taken: bool,
@@ -297,8 +263,6 @@ impl MacroState<'_> {
         Ok(())
     }
 
-    /// Execute one instruction, returning its flow-control intent. The caller
-    /// applies branches and the exit modifier after the delay slot has run.
     fn execute<H: MacroHost + ?Sized>(&mut self, word: u32, host: &mut H) -> Result<Flow> {
         let exit = (word >> 7) & 1 != 0;
         if word & 7 == 7 {
@@ -307,8 +271,7 @@ impl MacroState<'_> {
             let annul = (word >> 5) & 1 != 0;
             let value = self.gpr((word >> 11) & 7);
             let taken = if on_not_zero { value != 0 } else { value == 0 };
-            // The immediate is relative to the branch instruction, and the
-            // pc has already advanced past it.
+            // Relative to the branch, and the pc has already advanced past it.
             let target = self.pc.wrapping_sub(1).wrapping_add(imm(word) as u32);
             return Ok(Flow {
                 is_branch: true,
@@ -425,8 +388,7 @@ impl MacroState<'_> {
                         let field = (b >> src_bit) & mask;
                         (a & !(mask << dst_bit)) | (field << dst_bit)
                     }
-                    // Extract with the shift amount taken from A, then shift
-                    // into place by the immediate destination bit.
+                    // Extract with the shift amount from A, then shift to the destination bit.
                     3 => ((b >> (a & 31)) & mask) << dst_bit,
                     // Extract at a fixed bit, then shift by A.
                     _ => ((b >> src_bit) & mask) << (a & 31),
@@ -441,12 +403,11 @@ impl MacroState<'_> {
     }
 }
 
-/// The sign-extended 18-bit immediate held in bits 14..31.
+/// The sign-extended 18-bit immediate in bits 14..31.
 fn imm(word: u32) -> i32 {
     (word as i32) >> 14
 }
 
-/// Human-readable decode of one MME instruction, for debugging dumps.
 pub fn disasm(word: u32) -> String {
     let op = word & 7;
     let assign = (word >> 4) & 7;
@@ -492,8 +453,7 @@ pub fn disasm(word: u32) -> String {
 mod tests {
     use super::*;
 
-    /// Assemble one "move immediate into a register" instruction:
-    /// `op = AddImmediate(1)`, A = R0 (zero), so the result is the immediate.
+    /// `AddImmediate` with A = R0, so the result is the immediate.
     fn add_imm(dst: u32, src: u32, value: i32, assignment: u32, exit: bool) -> u32 {
         1 | (assignment << 4)
             | ((exit as u32) << 7)
@@ -510,7 +470,6 @@ mod tests {
         }
     }
 
-    /// Run a macro and collect its emitted writes.
     fn run_collect(engine: &mut MacroEngine, read: impl Fn(u32) -> u32) -> Result<Vec<MacroWrite>> {
         struct Host<'a, F> {
             read: F,
@@ -537,8 +496,7 @@ mod tests {
     #[test]
     fn macro_sets_a_method_and_sends_one_value() {
         let mut engine = MacroEngine::new();
-        // R1 holds the first argument (the method address); set it as the
-        // method and send the fetched second argument, then exit.
+        // R1 holds the first argument (the method address); send the fetched second argument, then exit.
         load(
             &mut engine,
             0,
@@ -622,7 +580,7 @@ mod tests {
     #[test]
     fn runaway_macro_is_caught() {
         let mut engine = MacroEngine::new();
-        // Unconditional-ish backward branch on R0 == 0, never exits.
+        // Backward branch on R0 == 0, never exits.
         load(
             &mut engine,
             0,
@@ -632,9 +590,7 @@ mod tests {
         assert!(run_collect(&mut engine, |_| 0).is_err());
     }
 
-    /// deko3d's `FillRegisters` shape: a counting loop whose exit lives in the
-    /// branch's delay slot, so the branch must cancel the exit on the way back
-    /// around. This used to spin for `MAX_STEPS` instructions.
+    /// deko3d's `FillRegisters` shape: the branch must cancel the exit in its delay slot.
     #[test]
     fn branch_delay_slot_cancels_exit() {
         fn branch(src: u32, on_not_zero: bool, annul: bool, imm: i32) -> u32 {
@@ -682,8 +638,7 @@ mod tests {
                 | ((imm as u32) << 14)
         }
         let mut engine = MacroEngine::new();
-        // deko3d's `CommonClearLoop` shape: send, then branch-with-exit back to
-        // the top while a counter is non-zero; the exit fires when it hits zero.
+        // deko3d's `CommonClearLoop` shape: branch-with-exit back to the top while a counter is non-zero.
         load(
             &mut engine,
             0,

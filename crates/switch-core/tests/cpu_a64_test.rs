@@ -1,5 +1,4 @@
-//! The A64 integer core: the ALU, the addressing modes, the branches, the
-//! system registers, and the disassembler that names them.
+//! The A64 integer core: ALU, addressing modes, branches, system registers, and disassembler.
 
 mod cpu;
 
@@ -33,7 +32,7 @@ fn add_immediate_reads_register_31_as_sp() {
 
 #[test]
 fn sub_and_flags() {
-    // SUBS XZR, X2, X1  after x2=3, x1=3 → Z set
+    // SUBS XZR, X2, X1 after x2=3, x1=3: Z set
     let mut cpu = exec(
         &[
             movz(1, 3, 0, true),
@@ -45,7 +44,7 @@ fn sub_and_flags() {
     assert_eq!(cpu.nzcv() & (1 << 30), 1 << 30); // Z
     assert_eq!(cpu.nzcv() & (1 << 31), 0); // N clear
 
-    // SUBS XZR, X1, X2 with x1=1, x2=3 → N set, C clear
+    // SUBS XZR, X1, X2 with x1=1, x2=3: N set, C clear
     cpu = exec(
         &[
             movz(1, 1, 0, true),
@@ -92,7 +91,7 @@ fn stp_ldp_pre_index() {
     let mut cpu = cpu_at(0x2000);
     cpu.set_reg(0, 0x4000);
     let code: [u32; 3] = [
-        0xA9BE_07E0, // STP X0, X1, [SP, #-32]!  -> base SP=0x4000, imm -32
+        0xA9BE_07E0, // STP X0, X1, [SP, #-32]!
         0xA940_0FE2, // LDP X2, X3, [SP]  (offset mode, imm 0)
         0xA8C2_07E0, // LDP X0, X1, [SP], #32 (post-index)
     ];
@@ -136,7 +135,7 @@ fn branches_subroutine_and_link() {
 
 #[test]
 fn conditional_branch_and_compare() {
-    // x1=0; CMP x1,xzr; B.NE +8 (should NOT branch since Z set)
+    // x1=0; CMP x1,xzr; B.NE +8 (not taken since Z set)
     let cpu = exec(
         &[
             movz(1, 0, 0, true),  // x1 = 0
@@ -152,7 +151,7 @@ fn conditional_branch_and_compare() {
 
 #[test]
 fn cbz_tbz() {
-    // x1=0 → CBZ branches past a MOV
+    // x1=0: CBZ branches past a MOV
     let cpu = exec(
         &[
             movz(1, 0, 0, true),
@@ -167,7 +166,7 @@ fn cbz_tbz() {
     assert_eq!(cpu.read_x(3), 0xCC); // branch skipped the movz(2) only
     assert_eq!(cpu.read_x(4), 0xDD);
 
-    // TBZ on bit 0 (x5=1 → bit0 set → TBNZ branches)
+    // TBNZ on bit 0, with x5=1
     let cpu = exec(
         &[
             movz(5, 1, 0, true),
@@ -184,7 +183,7 @@ fn cbz_tbz() {
 
 #[test]
 fn logical_immediate_masks() {
-    // AND X1, X2, #0xFF  → encoding N=0, immr=0, imms=7
+    // AND X1, X2, #0xFF: N=0, immr=0, imms=7
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(2, 0xABCD_EF12_3456_78FF);
     let code: [u32; 1] = [0b0 << 31
@@ -207,7 +206,7 @@ fn logical_immediate_masks() {
 
 #[test]
 fn multiply_add() {
-    // MADD X1, X2, X3, X4 → x1 = 5*7 + 11 = 46
+    // MADD X1, X2, X3, X4: x1 = 5*7 + 11 = 46
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(2, 5);
     cpu.set_reg(3, 7);
@@ -226,11 +225,11 @@ fn multiply_add() {
 
 #[test]
 fn csel_selects_by_condition() {
-    // x1=5, x2=9; CMP x1,x2 (GT? x1<x2 so no); CSEL x3, x1, x2, GT
+    // x1=5, x2=9; CMP x1,x2; CSEL x3, x1, x2, GT
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 5);
     cpu.set_reg(2, 9);
-    // cmp then CSEL X3, X1, X2, GT (GT false → take else operand X2=9)
+    // GT is false, so the else operand X2=9 is taken.
     let code = [
         cmp_reg(1, 2, true),
         1u32 << 31 | 0b011010100 << 21 | (2 << 16) | (0xC << 12) | (1 << 5) | 3,
@@ -247,9 +246,8 @@ fn csel_selects_by_condition() {
 
 #[test]
 fn csel_family_else_ops() {
-    // csinv/csinc/csneg must apply invert/increment only to the ELSE operand.
-    // x1=5, x2=9. EQ true (cmp x1,x1) → all three select x1. EQ false
-    // (cmp x1,x2) → csinv=~9=-10, csinc=10, csneg=-9.
+    // csinv/csinc/csneg modify only the else operand. EQ true selects x1 in all three;
+    // EQ false gives csinv=~9=-10, csinc=10, csneg=-9.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 5);
     cpu.set_reg(2, 9);
@@ -304,7 +302,7 @@ fn udiv_sdiv() {
 
 #[test]
 fn bitfield_extract_and_insert() {
-    // UBFX X1, X2, #4, #8  → UBFM X1, X2, #4, #11 (immr=4, imms=11)
+    // UBFX X1, X2, #4, #8 = UBFM X1, X2, #4, #11
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(2, 0xABCD_EF12_3456_78FF);
     let ubfm =
@@ -319,7 +317,7 @@ fn bitfield_extract_and_insert() {
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(1), (0xABCD_EF12_3456_78FFu64 >> 4) & 0xFF);
 
-    // SBFX: SBFM X3, X2, #0, #7 (sign-extend 8 bits) → -1
+    // SBFX: SBFM X3, X2, #0, #7 (sign-extend 8 bits) gives -1
     let sbfm =
         1u32 << 31 | 0b00 << 29 | 0b100110 << 23 | 1 << 22 | (0 << 16) | (7 << 10) | (2 << 5) | 3;
     let mut bytes = Vec::new();
@@ -335,7 +333,7 @@ fn bitfield_extract_and_insert() {
 
 #[test]
 fn ldr_literal() {
-    // LDR X1, #+8 → loads the u64 at pc+8 (the literal pool value)
+    // LDR X1, #+8 loads the u64 literal at pc+8
     let mut cpu = cpu_at(0x1000);
     let ldr_lit: u32 = 0b01 << 30 | 0b011 << 27 | (8 >> 2) << 5 | 1;
     let mut bytes = Vec::new();
@@ -390,10 +388,7 @@ fn mrs_msr_nzcv() {
 
 #[test]
 fn exclusive_load_store() {
-    // STXR succeeds only against a monitor the thread's own LDXR set. A bare
-    // one -- no exclusive load before it -- fails and stores nothing, which is
-    // what makes an interrupted read-modify-write retry instead of completing
-    // across whatever ran in between.
+    // A bare STXR with no prior LDXR fails and stores nothing.
     let stxr: u32 = 0b11 << 30 | 0b001000000 << 21 | (0 << 16) | (1 << 10) | (1 << 5) | 2;
     let ldxr: u32 = 0b11 << 30 | 0b001000010 << 21 | (1 << 10) | (1 << 5) | 3;
     let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
@@ -501,16 +496,7 @@ fn add_immediate_preserves_flags() {
 
 #[test]
 fn tpidr_el0_roundtrips_and_tpidrro_el0_does_not() {
-    // The two thread pointers are not the same kind of register. TPIDR_EL0 is
-    // the guest's own, to put what it likes in. TPIDRRO_EL0 is the kernel's:
-    // it names the thread's TLS block, the guest reads it to find its own
-    // `nn::os::ThreadType`, and at EL0 it cannot be written -- a `msr` to it
-    // is ignored rather than obeyed.
-    //
-    // Obeying it would be worse than useless. Every thread here is handed its
-    // TLS through that register, so a guest that overwrote it would lose its
-    // own thread's identity, and code that branches on `mrs x9, tpidrro_el0`
-    // -- the Mii editor's IPC dispatcher does -- would take the wrong path.
+    // TPIDRRO_EL0 is read-only at EL0: a `msr` to it is ignored.
     const VALUE: u64 = 0x1234_5678_9ABC_DEF0;
     let mut cpu = Cpu::new();
     cpu.bootstrap();
@@ -539,9 +525,7 @@ fn tpidr_el0_roundtrips_and_tpidrro_el0_does_not() {
 
 #[test]
 fn the_generic_timer_counts_and_reports_its_own_rate() {
-    // `nn::os::GetSystemTick` is `mrs x0, cntpct_el0; ret`, so this register
-    // is the clock a retail title measures its frames against: reading it as
-    // a fixed zero leaves every delta time zero and stops animation dead.
+    // `nn::os::GetSystemTick` reads CNTPCT_EL0, so it must advance.
     const NOPS: usize = 2000;
     let mut cpu = Cpu::new();
     cpu.bootstrap();
@@ -593,7 +577,7 @@ fn sub_shifted_register() {
 
 #[test]
 fn adds_shifted_register() {
-    // ADDS X2, X0, X1 must add AND set flags (previously decoded as SUB).
+    // ADDS X2, X0, X1 must add and set flags.
     let mut cpu = Cpu::new();
     cpu.set_reg(0, 0x10);
     cpu.set_reg(1, 0x20);
@@ -652,8 +636,8 @@ fn fault_trace_shows_recent_instructions() {
 
 #[test]
 fn adrp_adr_with_nonzero_immlo() {
-    // ADRP X0, #0x1000 → page(0x1000) + 0x1000 = 0x2000 (immlo = 01)
-    // ADR  X1, #0x5    → pc(0x1004) + 5 = 0x1009          (immlo = 01)
+    // ADRP X0, #0x1000: page(0x1000) + 0x1000 = 0x2000 (immlo = 01)
+    // ADR X1, #0x5: pc(0x1004) + 5 = 0x1009 (immlo = 01)
     let cpu = exec(
         &[
             1u32 << 31 | 1 << 29 | 0b10000 << 24, // adrp x0, #0x1000
@@ -668,26 +652,12 @@ fn adrp_adr_with_nonzero_immlo() {
 #[test]
 fn disassembler_agrees_with_llvm_on_load_store_size_and_addressing() {
     use switch_core::disasm::disassemble;
-    // Every encoding here is what `llvm-mc --show-encoding` assembles the
-    // named instruction to, and every expected string is what `llvm-mc
-    // --disassemble` gives back for it.
-    //
-    // These come from diffing this disassembler against llvm-mc over the
-    // 150,257 distinct instruction encodings "A Short Hike" executes. That
-    // sweep found four wrong answers, all of them here: every store was named
-    // `str` whatever its width, the unscaled and unprivileged offset forms
-    // were named as if their offset were scaled, the register-offset group
-    // matched only 64-bit accesses, and the acquire/release and exclusive
-    // forms dropped both their size and the `o0` bit. The interpreter had all
-    // of them right -- this is what a *trace* says, and a trace that misnames
-    // a one-byte store as a four-byte one sends a debugging session the wrong
-    // way.
+    // Encodings and expected strings are from `llvm-mc --show-encoding` and `--disassemble`.
     for (insn, want) in [
         // Sizes on the indexed forms.
         (0x38001408u32, "strb w8, [x0], #1"),
         (0x78002c29, "strh w9, [x1, #2]!"),
-        // Unscaled (stur/ldur): a signed 9-bit *byte* offset, where the
-        // scaled form takes an unsigned 12-bit one.
+        // Unscaled (stur/ldur): a signed 9-bit byte offset.
         (0xb81fc062, "stur w2, [x3, #-4]"),
         (0x381ff0a4, "sturb w4, [x5, #-1]"),
         (0xf85f80e6, "ldur x6, [x7, #-8]"),
@@ -695,8 +665,7 @@ fn disassembler_agrees_with_llvm_on_load_store_size_and_addressing() {
         (0xb89fc16a, "ldursw x10, [x11, #-4]"),
         // Unprivileged.
         (0x380039ac, "sttrb w12, [x13, #3]"),
-        // Register offset, narrower than 64-bit -- the whole group used to be
-        // rejected unless bits[31:30] were 11.
+        // Register offset, narrower than 64-bit.
         (0x38214913, "strb w19, [x8, w1, uxtw]"),
         (0x78647862, "ldrh w2, [x3, x4, lsl #1]"),
         // Acquire/release and exclusive: size, and `o0`.
@@ -704,7 +673,7 @@ fn disassembler_agrees_with_llvm_on_load_store_size_and_addressing() {
         (0x48dffcc7, "ldarh w7, [x6]"),
         (0x0801fc62, "stlxrb w1, w2, [x3]"),
         (0xc85ffca4, "ldaxr x4, [x5]"),
-        // SIMD&FP loads and stores, which were not decoded at all.
+        // SIMD&FP loads and stores.
         (0x3d800420, "str q0, [x1, #0x10]"),
         (0xbc5fc062, "ldur s2, [x3, #-4]"),
         (0x6d0127e8, "stp d8, d9, [sp, #0x10]"),
@@ -720,21 +689,16 @@ fn disassembler_agrees_with_llvm_on_load_store_size_and_addressing() {
 #[test]
 fn disassembler_names_rev_ccmp_and_the_barriers() {
     use switch_core::disasm::disassemble;
-    // The 32-bit form reverses the whole register, so it is REV; REV32 only
-    // exists in the 64-bit form.
+    // The 32-bit form reverses the whole register, so it is REV; REV32 is 64-bit only.
     assert_eq!(disassemble(0x5ac00808), "rev w8, w0");
     assert_eq!(disassemble(0xdac00829), "rev32 x9, x1");
     assert_eq!(disassemble(0xdac00c4a), "rev x10, x2");
 
-    // CCMP and CCMN are not aliases of each other -- one subtracts and one
-    // adds -- and bit 30 chooses. These were named the wrong way round.
-    // (The interpreter always had it right: 0x7a400804 really does set the
-    // carry, which only the subtracting form does.)
+    // CCMP subtracts and CCMN adds; bit 30 chooses.
     assert_eq!(disassemble(0x7a400804), "ccmp w0, #0x0, #0x4, eq");
     assert_eq!(disassemble(0x3a411822), "ccmn w1, #0x1, #0x2, ne");
 
-    // The barriers share the hint encoding space but are their own
-    // instructions; an `isb` reading as `hint` hides it in a trace.
+    // The barriers share the hint encoding space but are their own instructions.
     assert_eq!(disassemble(0xd5033bbf), "dmb #0xb");
     assert_eq!(disassemble(0xd5033fdf), "isb #0xf");
     assert_eq!(disassemble(0xd5033f5f), "clrex");
@@ -747,9 +711,9 @@ fn disassembler_produces_readable_output() {
     assert_eq!(disassemble(0xD2824681), "movz x1, #0x1234");
     // ADR X0, #0x54
     assert_eq!(disassemble(0x100002A0), "adr x0, #0x54");
-    // ADRP X0, #0x1000 (non-zero immlo, previously misdecoded)
+    // ADRP X0, #0x1000 (non-zero immlo)
     assert_eq!(disassemble(0xB0000000), "adrp x0, #0x1");
-    // ADRP X0, #0x235 from the crashing binary's trace
+    // ADRP X0, #0x235
     assert_eq!(disassemble(0xB00011A0), "adrp x0, #0x235");
     // SVC #0
     assert_eq!(disassemble(0xD4000001), "svc #0x0");
@@ -773,18 +737,14 @@ fn disassembler_produces_readable_output() {
 
 #[test]
 fn movk32_shift_is_bit21() {
-    // movz w1, #0x4653 ; movk w1, #0x4f43, lsl #16 → 0x4f434653.
-    // The 32-bit hw/shift bit is bit 21 (not bit 22), a regression from the
-    // hbmenu MOD0-magic check that miscomputed w1 as 0x4f43.
+    // movz w1, #0x4653 ; movk w1, #0x4f43, lsl #16 gives 0x4f434653; the 32-bit hw field starts at bit 21.
     let cpu = exec(&[movz(1, 0x4653, 0, false), movk(1, 0x4f43, 1, false)], 2);
     assert_eq!(cpu.read_x(1), 0x4f43_4653);
 }
 
 #[test]
 fn add_carry_overflow_masks_to_operand_size() {
-    // CMP W0, #4 with W0 = 0 must set C=0 (borrow), so B.CC is taken.
-    // A 64-bit `!rhs` leaking into the 32-bit carry computation previously set
-    // C=1 and mis-branched in hbmenu's applet init.
+    // CMP W0, #4 with W0 = 0 must clear C (borrow), so B.CC is taken.
     let cpu = exec(
         &[
             movz(0, 0, 0, false),
@@ -804,8 +764,7 @@ fn add_carry_overflow_masks_to_operand_size() {
 
 #[test]
 fn register_offset_load_32bit() {
-    // ldr w2, [x19, x0], the 0xb8606a62 form hbmenu hit; previously only the
-    // 64-bit register-offset encodings (bits[31:27]==11111) were decoded.
+    // ldr w2, [x19, x0]: a 32-bit register-offset load.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(19, 0x2000);
     cpu.set_reg(0, 0x30);
@@ -838,7 +797,7 @@ fn multiply_long_ops() {
     let cpu = run_program(cpu, 0x1000, &code);
     assert_eq!(cpu.read_x(2), 0x42 + 0x1000 * 0x200);
 
-    // SMULH of i64::MIN * 2 → -1
+    // SMULH of i64::MIN * 2 is -1
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0x8000_0000_0000_0000);
     cpu.set_reg(1, 2);
@@ -849,9 +808,7 @@ fn multiply_long_ops() {
 
 #[test]
 fn ldrsw_sign_extends_and_loads() {
-    // LDRSW must LOAD a 32-bit value and sign-extend it, not be decoded as a
-    // store (opc=10 was misread as store, corrupting the target). Store
-    // 0xFFFF8001 at [x0] then `ldrsw w1, [x0, #0]` must yield 0xFFFFFFFF_FFFF8001.
+    // LDRSW loads and sign-extends: 0xFFFF8001 yields 0xFFFFFFFF_FFFF8001.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0x3000);
     cpu.mem.map_zero(0x3000, 0x10).unwrap();
@@ -865,11 +822,7 @@ fn ldrsw_sign_extends_and_loads() {
 
 #[test]
 fn prfm_is_a_noop_not_ldrsw() {
-    // `prfm pldl1keep, [x1]` = 0xF9800020 (size=11, V=0, opc=10). It is a
-    // prefetch HINT and must not write a register. libtransistor's memcpy
-    // starts with it; decoding it as `ldrsw x0, [x1]` clobbered the
-    // destination register and made memcpy copy to `[source_magic_value]`,
-    // leaving the real destination zeroed.
+    // `prfm pldl1keep, [x1]` = 0xF9800020 is a hint and must not write a register.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0x1234_5678_9ABC_DEF0);
     cpu.set_reg(1, 0x3000);
@@ -884,11 +837,7 @@ fn prfm_is_a_noop_not_ldrsw() {
 
 #[test]
 fn bfi_merges_into_destination_register() {
-    // `bfi w0, w1, #8, #24` = BFM w0, w1, #8, #31 must insert w1's low 24
-    // bits into w0 bits [31:8] and keep w0 bits [7:0]. The old decoder never
-    // read the destination register and shifted the wrong field (verified
-    // against qemu-aarch64: w0=0x5, w1=0xAB -> 0x0000AB05). libtransistor's
-    // squashfs `swab_super` depends on this.
+    // `bfi w0, w1, #8, #24` inserts w1's low 24 bits into w0[31:8] (qemu: w0=0x5, w1=0xAB -> 0x0000AB05).
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0x5);
     cpu.set_reg(1, 0xAB);
@@ -899,9 +848,7 @@ fn bfi_merges_into_destination_register() {
 
 #[test]
 fn bfxil_extracts_field_into_low_bits() {
-    // `bfxil w0, w1, #16, #8` = BFM w0, w1, #16, #7 copies w1 bits [23:16]
-    // into w0 bits [7:0], keeping w0's upper bits. qemu-aarch64: w1=0x00430000
-    // -> w0 = (old_w0 & ~0xFF) | 0x43.
+    // `bfxil w0, w1, #16, #8` copies w1[23:16] into w0[7:0], keeping w0's upper bits.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0x1234_5678);
     cpu.set_reg(1, 0x0043_0000);
@@ -912,10 +859,7 @@ fn bfxil_extracts_field_into_low_bits() {
 
 #[test]
 fn logical_immediate_mask_80808080() {
-    // 0x3201c3f4 = `mov w20, #0x80808080`. The old decoder rejected it because
-    // imms=48 with N=0 has bits above the element size: those are ignored, not
-    // "unallocated" (QEMU logic_imm_decode_wmask). This was the first bug that
-    // stopped sdl-hello.nro from booting.
+    // 0x3201c3f4 = `mov w20, #0x80808080`: imms bits above the element size are ignored.
     let code = [0x3201c3f4, nop()];
     let cpu = run_program(cpu_at(0x1000), 0x1000, &code);
     assert_eq!(cpu.read_x(20), 0x8080_8080);
@@ -923,9 +867,7 @@ fn logical_immediate_mask_80808080() {
 
 #[test]
 fn ldrsw_register_offset_shifts_by_log2() {
-    // `ldrsw x8, [x9, x8, lsl #2]` = 0xb8a87928. The offset is Rm<<2 (the
-    // encoded LSL is log2(size), NOT the byte count); shifting by 4 read the
-    // wrong jump-table slot, loaded 0 and branched into the table itself.
+    // `ldrsw x8, [x9, x8, lsl #2]` = 0xb8a87928: the shift is log2(size), not the byte count.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(8, 0x27);
     cpu.set_reg(9, 0x3000);
@@ -938,8 +880,7 @@ fn ldrsw_register_offset_shifts_by_log2() {
 
 #[test]
 fn dczid_el0_reports_a57_block_size() {
-    // mrs x5, dczid_el0 must return BS=4 (64-byte DC ZVA). musl/newlib memset
-    // strides its cache-zero loop by `4 << BS`; BS=0 made it run away forever.
+    // mrs x5, dczid_el0 must return BS=4 (64-byte DC ZVA).
     let cpu = run_program(cpu_at(0x1000), 0x1000, &[0xd53b00e5, nop()]);
     assert_eq!(cpu.read_x(5), 4);
 }
@@ -964,13 +905,12 @@ fn dc_zva_zeroes_64_bytes() {
 
 #[test]
 fn ccmp_eq_sets_carry_for_unsigned_ge() {
-    // ccmp x21, x1, #0, eq  with x21=0x20, x1=0x18 should leave C=1,
-    // so a following b.hs is taken. Regression caught by libtransistor malloc.
+    // ccmp x21, x1, #0, eq with x21=0x20, x1=0x18 leaves C=1, so b.hs is taken.
     let code: [u32; 5] = [
-        0xd2800a95, // mov x21, #0x20  (0x20 << 5? actually movz x21,#0x20)
+        0xd2800a95, // mov x21, #0x20
         0xd2800301, // mov x1, #0x18
         0xf10000ff, // cmp x7, #0   (sets Z=1; x7 is zero)
-        0xfa4102a0, // ccmp x21, x1, #0, eq  (exact instruction from sdl-hello)
+        0xfa4102a0, // ccmp x21, x1, #0, eq
         0x540000a2, // b.hs #+20
     ];
     let mut cpu = cpu_at(0x1000);
@@ -990,15 +930,12 @@ fn ccmp_eq_sets_carry_for_unsigned_ge() {
 
 #[test]
 fn ccmp_subtract_carry_in() {
-    // CCMP (op=1) computes Rn - imm, which needs the +carry_in the borrow
-    // implies. With Rn=0, imm=0 the result is 0: Z and C must both be set.
-    // Without carry_in, 0 + !0 + 0 = u64::MAX, corrupting N/Z/C. This exact
-    // instruction was what sent NX-Shell's crt0 relocator into svcBreak.
+    // CCMP computes Rn - imm with the implied carry in: 0 - 0 sets Z and C.
     let code: [u32; 4] = [
         0xd2800102, // mov x2, #8
         0xd2800000, // mov x0, #0
-        0xf100005f, // cmp x2, #0      (8-0=8 → Z clear, C set → NE holds)
-        0xfa401800, // ccmp x0, #0, #0, ne   (0 - 0 = 0 → Z set, C set)
+        0xf100005f, // cmp x2, #0 (Z clear, C set)
+        0xfa401800, // ccmp x0, #0, #0, ne (Z set, C set)
     ];
     let cpu = exec(&code, 100);
     assert_eq!(cpu.nzcv() & (1 << 30), 1 << 30, "Z must be set for 0-0");
@@ -1012,8 +949,8 @@ fn ccmp_subtract_carry_in() {
 
 #[test]
 fn ccmp_ccmn_immediate_is_unsigned() {
-    // The 5-bit immediate is unsigned for both CCMP and CCMN (QEMU-verified).
-    // CCMP x0, #0x10 with x0=1 → 1-16 = -15 → N set.
+    // The 5-bit immediate is unsigned for both CCMP and CCMN.
+    // CCMP x0, #0x10 with x0=1: 1-16 = -15, N set.
     let c1: [u32; 3] = [
         0xd2800020, // mov x0, #1
         0xf100001f, // cmp x0, #0      (Z clear → NE holds)
@@ -1023,7 +960,7 @@ fn ccmp_ccmn_immediate_is_unsigned() {
     assert_eq!(cpu.nzcv() & (1 << 31), 1 << 31, "CCMP 1-16 = -15 → N set");
     assert_eq!(cpu.nzcv() & (1 << 30), 0, "CCMP 1-16 ≠ 0 → Z clear");
 
-    // CCMN x0, #0x10 with x0=1 → 1+16 = 17 → all flags clear.
+    // CCMN x0, #0x10 with x0=1: 1+16 = 17, all flags clear.
     let c2: [u32; 3] = [
         0xd2800020, // mov x0, #1
         0xf100001f, // cmp x0, #0
@@ -1035,10 +972,7 @@ fn ccmp_ccmn_immediate_is_unsigned() {
 
 #[test]
 fn sub_shifted_register_reads_xzr_not_sp() {
-    // `neg x1, x0` assembles as `sub x1, xzr, x0` (0xcb0003e1). In the
-    // shifted-register form register 31 is XZR; only the immediate and
-    // extended forms name SP. Reading SP here made newlib's `aligned_alloc`
-    // compute a garbage rounded size, so every aligned allocation failed.
+    // `neg x1, x0` = `sub x1, xzr, x0` (0xcb0003e1): register 31 is XZR in the shifted-register form.
     let mut cpu = cpu_at(0x1000);
     cpu.set_pc_and_sp(0x1000, 0x1000_0000);
     cpu.set_reg(0, 0x1000);
@@ -1057,8 +991,7 @@ fn sub_shifted_register_reads_xzr_not_sp() {
 
 #[test]
 fn add_immediate_still_uses_sp_for_register_31() {
-    // `add sp, sp, #0x10` (0x910043ff) must keep naming SP: the immediate
-    // form is the one where register 31 really is the stack pointer.
+    // `add sp, sp, #0x10` (0x910043ff): in the immediate form register 31 is SP.
     let mut cpu = cpu_at(0x1000);
     cpu.set_pc_and_sp(0x1000, 0x1000_0000);
     let cpu = run_program(cpu, 0x1000, &[0x9100_43ff, nop()]);
@@ -1090,17 +1023,14 @@ fn register_offset_load_sign_extends_a_32_bit_index() {
 
 #[test]
 fn ctr_el0_reports_64_byte_cache_lines() {
-    // `mrs x7, ctr_el0` = 0xd53b0027. Cache-flush loops stride by
-    // `4 << DminLine`; reporting 0 walked NX-Shell's buffers 4 bytes at a time.
+    // `mrs x7, ctr_el0` = 0xd53b0027; cache-flush loops stride by `4 << DminLine`.
     let cpu = run_program(cpu_at(0x1000), 0x1000, &[0xd53b_0027, nop()]);
     assert_eq!(cpu.read_reg(7), 0x8444_C004);
 }
 
 #[test]
 fn blr_reads_its_target_before_linking() {
-    // `blr x30` is a return-and-relink: BLR reads the target register first,
-    // then writes x30. Linking first made it branch to itself+4, hbmenu's NEON
-    // JPEG decoder ends its IDCT that way, so its icon never finished decoding.
+    // `blr x30` reads the target before writing x30.
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map_zero(0x2000, 0x100).unwrap();
     cpu.set_reg(30, 0x2000);
@@ -1116,21 +1046,8 @@ fn blr_reads_its_target_before_linking() {
 
 #[test]
 fn a_logical_immediate_writes_sp_but_ands_writes_the_zero_register() {
-    // `AND`, `ORR` and `EOR` (immediate) spell register 31 as **SP**; only
-    // `ANDS` -- the `TST` alias -- spells it as the zero register. Treating all
-    // four as the zero register throws away every `and sp, xN, #imm`, which is
-    // how LLVM aligns a stack frame it has just made room in:
-    //
-    //     str x28, [sp, #-96]!            save area
-    //     sub x9, sp, #0x260              room for the locals
-    //     stp x29, x30, [sp, #0x50]       the return address, at x29
-    //     add x29, sp, #0x50
-    //     and sp, x9, #0xffffffffffffffc0 <- allocate, 64-byte aligned
-    //
-    // Discard that last one and the frame is never allocated: every local the
-    // function writes then lands 0x260 bytes high, on top of the save area it
-    // just filled in. "A Short Hike" returned through the result and jumped
-    // into a Unity shader name.
+    // `AND`, `ORR` and `EOR` (immediate) write SP for register 31; only `ANDS` (`TST`) writes XZR.
+    // LLVM aligns stack frames with `and sp, x9, #imm`.
     let cpu = exec(
         &[
             0xd2800fe9, // mov x9, #0x7f
@@ -1144,8 +1061,7 @@ fn a_logical_immediate_writes_sp_but_ands_writes_the_zero_register() {
         "and (immediate) has to write SP, not discard"
     );
 
-    // ORR is the same register field; `mov sp, x9` is `orr sp, x9, #0` in
-    // disguise for exactly this reason.
+    // `mov sp, x9` is `orr sp, x9, #0`.
     let cpu = exec(
         &[
             0xd2801fe9, // mov x9, #0xff
@@ -1169,10 +1085,7 @@ fn a_logical_immediate_writes_sp_but_ands_writes_the_zero_register() {
 
 #[test]
 fn thirty_two_bit_writes_clear_the_upper_half() {
-    // Every write to a W register zeroes bits 63:32. SBFM's sign extension was
-    // filling them instead, so `asr w0, w0, #31` produced
-    // 0xFFFF_FFFF_FFFF_FFFF and any later 64-bit use of that register saw a
-    // huge value.
+    // Every write to a W register zeroes bits 63:32, including SBFM's sign extension.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0xFFFF_FF00); // negative as a word, clear upper half
     cpu.set_reg(5, 0x0000_0F00);
@@ -1197,10 +1110,7 @@ fn thirty_two_bit_writes_clear_the_upper_half() {
 
 #[test]
 fn asr_by_register_sign_extends_from_the_operand_width() {
-    // `asr w2, w2, w3` on a negative word must give all-ones. The operand was
-    // masked to 32 bits and then shifted as a positive i64, yielding 1, which
-    // is how libjpeg-turbo's HUFF_EXTEND lost the sign of every DC difference
-    // and hbmenu's icon decoded with the wrong luma and chroma.
+    // `asr w2, w2, w3` on a negative word must give all-ones.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(2, 0xFFFF_FF00);
     cpu.set_reg(3, 31);
@@ -1217,8 +1127,7 @@ fn asr_by_register_sign_extends_from_the_operand_width() {
 
 #[test]
 fn scalar_integer_forms_verified_against_qemu() {
-    // Each of these was wrong until `tools/difftest.py --scalar` compared it
-    // with qemu-aarch64; the values here are qemu's.
+    // Expected values are from qemu-aarch64 via `tools/difftest.py --scalar`.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(10, 0xFFFF_FF00);
     cpu.set_reg(11, 0x1F);
@@ -1234,8 +1143,7 @@ fn scalar_integer_forms_verified_against_qemu() {
     let cpu = run_program(cpu, 0x1000, &[0x93cb_8542, nop()]); // extr x2, x10, x11, #33
     assert_eq!(cpu.read_reg(2), 0x7FFF_FF80_0000_0000);
 
-    // ADCS adds with carry: bit30 selects subtract and bit29 sets the flags, and
-    // having them swapped made `adcs` subtract.
+    // ADCS: bit 30 selects subtract and bit 29 sets the flags.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(10, 0xFFFF_FF00);
     cpu.set_reg(11, 0x1F);
@@ -1272,11 +1180,7 @@ fn the_sysreg_move_helper_encodes_what_the_assembler_does() {
     assert_eq!(mrs(1, 3, 4, 4, 1), 0xD53B_4421, "mrs x1, fpsr");
 }
 
-/// `ExtendReg` truncates to the operation width; it does not clamp to it.
-///
-/// The old code reduced the extended value with `min`, so every negative
-/// 32-bit extend came out as `0xFFFF_FFFF`: `add w0, w2, w1, sxtb` of `0x80`
-/// gave -1 where dynarmic's `SignExtendToWord` gives -128.
+/// `ExtendReg` truncates to the operation width rather than clamping.
 #[test]
 fn a_signed_32_bit_extend_keeps_its_low_bits() {
     let code = &[
@@ -1284,8 +1188,7 @@ fn a_signed_32_bit_extend_keeps_its_low_bits() {
         0x0b21_a047, // add w7, w2, w1, sxth
         0x0b21_c049, // add w9, w2, w1, sxtw
     ];
-    // Negative in all three widths, with a different value in each so a
-    // clamp cannot pass by accident.
+    // Negative in all three widths, with a different value in each.
     let (jit, interp) = both_engines(&[(1, 0xFFFF_FFFF_8000_8080), (2, 0)], code);
     for cpu in [&jit, &interp] {
         assert_eq!(
@@ -1306,12 +1209,7 @@ fn a_signed_32_bit_extend_keeps_its_low_bits() {
     }
 }
 
-/// `BIC`/`ORN`/`EON` invert the *shifted* operand.
-///
-/// The ARM ARM's pseudocode shifts first and inverts second, and so does
-/// dynarmic (`ir.Not(ShiftReg(...))`). Both engines here used to invert the
-/// register and then shift, which agrees only when the shift amount is zero,
-/// so every `mvn`/`mov` alias was right and every shifted form was wrong.
+/// `BIC`/`ORN`/`EON` invert the shifted operand (shift first, then invert).
 #[test]
 fn bic_and_friends_invert_after_shifting() {
     let code = &[
@@ -1332,15 +1230,7 @@ fn bic_and_friends_invert_after_shifting() {
     }
 }
 
-/// A sign-extending load into a **W** register zeroes the top half.
-///
-/// `opc` picks the destination width (10 is the X form, 11 the W form) and
-/// this decoder read only the width of the *access*, so both forms sign-
-/// extended all the way to 64 bits. `ldrsh w6` of `0xff00` left
-/// `0xffffffffffffff00` where hardware leaves `0x00000000ffffff00`, which is
-/// invisible until something reads the X form of a register it filled: the
-/// same class of bug as the `movk w` that forgot to narrow, and found the same
-/// way, by `tools/difftest.py --scalar` against qemu.
+/// A sign-extending load into a W register zeroes the top half.
 #[test]
 fn a_signed_load_into_a_w_register_narrows_like_every_other_w_write() {
     let code = &[
@@ -1349,8 +1239,6 @@ fn a_signed_load_into_a_w_register_narrows_like_every_other_w_write() {
         0x39c0_0803, // ldrsb w3, [x0, #2]
         0x3980_0804, // ldrsb x4, [x0, #2]
     ];
-    // Both engines: the translator resolves the same classifier once per
-    // instruction, so neither can disagree about which form this was.
     for jit in [true, false] {
         let mut cpu = cpu_at(0x1000);
         cpu.set_jit_enabled(jit);
@@ -1366,12 +1254,7 @@ fn a_signed_load_into_a_w_register_narrows_like_every_other_w_write() {
     }
 }
 
-/// `CLREX` clears the local monitor, and a `STXR` after one fails.
-///
-/// It sits in the barrier group, so it was retiring as a hint like `DMB` and
-/// `ISB` beside it, and a guest that abandons a read-modify-write (the
-/// give-up branch of every compare-and-swap) kept its reservation, so the
-/// store it had decided not to make could still land later.
+/// `CLREX` clears the local monitor, so a following `STXR` fails.
 #[test]
 fn clrex_clears_the_reservation_a_store_exclusive_needs() {
     let mut cpu = cpu_at(0x1000);
@@ -1389,12 +1272,7 @@ fn clrex_clears_the_reservation_a_store_exclusive_needs() {
     assert_eq!(cpu.read_x(4), 0, "it stored anyway");
 }
 
-/// A 32-bit `LDXP`/`STXP` pair is two words, not two doublewords.
-///
-/// Both halves were read and written as 64-bit whatever the size field said,
-/// so a `stxp w0, w1, w2, [x3]` wrote sixteen bytes where it should write
-/// eight (over eight bytes belonging to something else) and reported that it
-/// had succeeded.
+/// A 32-bit `LDXP`/`STXP` pair moves two words, not two doublewords.
 #[test]
 fn a_32_bit_exclusive_pair_moves_words() {
     let mut cpu = cpu_at(0x1000);

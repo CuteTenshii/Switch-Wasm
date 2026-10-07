@@ -1,30 +1,13 @@
-/* What the emulator has been doing, in the page's console (and so in
-   DevTools, which it mirrors to).
-
-   Once a second at most, and only for what changed: the frames and the draws,
-   clears and copies behind them, and then each surface on its own line, what
-   was drawn into it, cleared, copied or blitted between which two, and which
-   one each frame presented; every guest thread created, started, paused or
-   ended, and each thread's share of the instructions and what it is waiting
-   on; each file the guest read or wrote, by name,
-   and how much; the guest's path operations (opens, creates, deletes, and the
-   lookups that found nothing), one per line, because "the title looked for a
-   file and it was not there" is the most common silent failure there is; and
-   each file on the host's disk those reads came out of; and the audio, each
-   device and renderer the guest has open and the samples between them and
-   the page, so a silent title says where its sound stopped.
-
-   Then the problems, each summed over the second: service requests nothing
-   answers, draws and compute kernels the GPU refused and why, nvdrv ioctls
-   that failed, threads that have done no work for a long time, the
-   controller styles the title accepts, and memory as it grows. */
+// Once-a-second activity report in the page console: frames, surfaces, threads,
+// files, path operations, audio, and problems (unanswered requests, refused draws,
+// failed ioctls, idle threads, controller styles, memory growth).
 
 import { fmtCount, fmtSize } from '../shared/format';
 import { takeHostIo, type HostIo } from './hostfiles';
 import { workerLog } from './log';
 import { api, readJson, state } from './wasm';
 
-/** Reads and writes through one guest file or storage since the last reading. */
+// Reads and writes through one guest file or storage since the last reading.
 interface FileActivity {
   name: string;
   reads: number;
@@ -33,9 +16,8 @@ interface FileActivity {
   writeBytes: number;
 }
 
-/** One surface's share of what the GPU did since the last reading. `amount`
- *  is vertices for a draw, bytes for a copy or upload, destination pixels for
- *  a blit, and unused for clears and presents. */
+// One surface's GPU work since the last reading. `amount` is vertices for a draw,
+// bytes for a copy or upload, destination pixels for a blit.
 interface GpuEntry {
   kind: 'draw' | 'clear' | 'copy' | 'upload' | 'blit' | 'present';
   label: string;
@@ -44,27 +26,25 @@ interface GpuEntry {
   failed: number;
 }
 
-/** One guest thread, as of the reading. `ran` and `switches` cover the time
- *  since the last one; `state` is what it is doing now, in words. */
+// One guest thread. `ran` and `switches` cover the time since the last reading.
 interface ThreadActivity {
   index: number;
   handle: number;
-  /** 0 is the most urgent, 63 the least. */
+  // 0 is the most urgent, 63 the least.
   priority: number;
   running: boolean;
   ran: number;
   switches: number;
   entry: string;
-  /** Its pc and the frames above it, innermost first. */
+  // Its pc and the frames above it, innermost first.
   at: string;
   state: string;
-  /** Its `nn::os` name, or for a thread never named, the function it runs. */
+  // Its `nn::os` name, or the function an unnamed thread runs.
   name: string | null;
-  /** Guest milliseconds since it last did real work. */
+  // Guest milliseconds since it last did real work.
   idleMs: number;
 }
 
-/** A request the core answered without an implementation, and how often. */
 interface ServiceGap {
   kind: 'refused' | 'missing' | 'stub' | 'ioctl';
   name: string;
@@ -72,14 +52,13 @@ interface ServiceGap {
   calls: number;
 }
 
-/** Draws or compute dispatches the GPU refused for one reason. */
+// Draws or dispatches the GPU refused for one reason.
 interface Refusal {
   kind: 'draw' | 'dispatch';
   reason: string;
   count: number;
 }
 
-/** An nvdrv ioctl that failed, and how often. */
 interface NvError {
   node: string;
   request: number;
@@ -87,7 +66,7 @@ interface NvError {
   calls: number;
 }
 
-/** One open `audout` device. The counts run from when it was opened. */
+// One open `audout` device; counts run from when it opened.
 interface AudioOutput {
   handle: number;
   sampleRate: number;
@@ -98,13 +77,13 @@ interface AudioOutput {
   appendedFrames: number;
   releasedBuffers: number;
   pendingBuffers: number;
-  /** Appended while the device was stopped: never played. */
+  // Appended while stopped: never played.
   discardedFrames: number;
-  /** Descriptors pointing outside their own buffer: never played. */
+  // Descriptors outside their own buffer: never played.
   unplayableBuffers: number;
 }
 
-/** One open audio renderer. The counts run from when it was opened. */
+// One open audio renderer; counts run from when it opened.
 interface AudioRenderer {
   handle: number;
   sampleRate: number;
@@ -113,13 +92,12 @@ interface AudioRenderer {
   renderedFrames: number;
   voices: number;
   voicesPlaying: number;
-  /** 0 when no sink the renderer can play has been configured. */
+  // 0 when no playable sink is configured.
   sinkChannels: number;
 }
 
-/** The guest's audio, as `Cpu::audio_activity` reports it. Sample counts are
- *  interleaved samples from the start of the session; `backlog` is what is
- *  queued for the page now. */
+// `Cpu::audio_activity`. Sample counts are interleaved, from session start;
+// `backlog` is what is queued for the page now.
 interface Audio {
   sampleRate: number;
   channels: number;
@@ -131,9 +109,8 @@ interface Audio {
   renderers: AudioRenderer[];
 }
 
-/** `switch_activity_json`. The GPU counts, `failures` and `audio` run from
- *  the start of the session; `gpu`, `files` and `journal` cover the time
- *  since the last call. */
+// `switch_activity_json`. GPU counts, `failures` and `audio` run from session
+// start; `gpu`, `files` and `journal` cover the time since the last call.
 interface Activity {
   frames: number;
   submissions: number;
@@ -154,8 +131,7 @@ interface Activity {
   journal: string[];
   dropped: number;
   audio: Audio;
-  /** `HidNpadStyleTag` bits: what the title accepts (0 before it says), and
-   *  the one style the pad is presented as. */
+  // `HidNpadStyleTag` bits: what the title accepts (0 before it says) and the pad's style.
   input: { supported: number; presented: number };
   refusals: Refusal[];
   gaps: ServiceGap[];
@@ -165,8 +141,7 @@ interface Activity {
 
 const REPORT_EVERY_MS = 1000;
 
-/** Room for everything the core holds between two readings: 256 files and 256
- *  path operations of a few hundred bytes each. */
+// Room for 256 files and 256 path operations between readings.
 const ACTIVITY_CAP = 256 * 1024;
 
 const ZERO: Activity = {
@@ -208,24 +183,17 @@ const ZERO: Activity = {
 let previous: Activity = ZERO;
 let reportedAt = 0;
 
-/** Each thread's state at the last report, by index, so a thread that sat
- *  still and did not change is not repeated every second. */
+// Each thread's last reported state, so unchanged threads aren't repeated.
 const lastThreadState = new Map<number, string>();
 
-/** How long each thread had been idle at the last warning about it, by
- *  index, so a stuck thread is named at 5 s, 30 s and then once a minute
- *  rather than every second. */
+// Idle time at each thread's last warning: named at 5 s, 30 s, then every minute.
 const idleWarned = new Map<number, number>();
 
-/** Memory at the last line about it. */
 let memoryLogged = { guest: 0, wasm: 0 };
 
-/** Host files registered since the last report, summed rather than listed:
- *  booting from the NAND registers a couple of hundred system archives at
- *  once, and a line each buries everything else. */
+// Host file registrations, summed rather than listed (NAND boot registers hundreds).
 const registered = new Map<string, { count: number; bytes: number }>();
 
-/** Count one host file of kind `what` towards the next report. */
 export function noteRegistered(what: string, bytes: number): void {
   const entry = registered.get(what) ?? { count: 0, bytes: 0 };
   entry.count++;
@@ -233,7 +201,7 @@ export function noteRegistered(what: string, bytes: number): void {
   registered.set(what, entry);
 }
 
-/** Start counting from zero: the session the counts were about is gone. */
+// Reset: the session the counts were about is gone.
 export function resetActivity(): void {
   previous = ZERO;
   reportedAt = 0;
@@ -244,13 +212,8 @@ export function resetActivity(): void {
   takeHostIo();
 }
 
-/** Log what changed since the last report, if a second has passed, or at
- *  once when `now` says so. Called after every run slice; never throws,
- *  because a report is not worth a failed slice.
- *
- *  `now` is for a run that has just stopped, halted or faulted: the second
- *  before that is the one worth reading, and waiting out the interval would
- *  lose it, since no slice follows to report it. */
+// Log what changed if a second has passed, or at once when `now` (the run just
+// stopped). Never throws.
 export function reportActivity(now = false): void {
   if (state.handle < 0) return;
   const at = performance.now();
@@ -280,12 +243,11 @@ export function reportActivity(now = false): void {
   }
 }
 
-/** `n` and the noun, singular when there is one. */
 function count(n: number, noun: string, plural = noun + 's'): string {
   return `${n} ${n === 1 ? noun : plural}`;
 }
 
-/** Only the parts that are not zero, so a quiet second prints nothing. */
+// Only non-zero parts, so a quiet second prints nothing.
 function joined(parts: (string | false)[]): string {
   return parts.filter(Boolean).join(', ');
 }
@@ -309,7 +271,7 @@ function logGpu(before: Activity, now: Activity, seconds: number): void {
     frames > 0 && count(frames, 'frame')
     + (seconds ? ` (${(frames / seconds).toFixed(1)}/s)` : ''),
     draws > 0 && count(draws, 'draw'),
-    // Called out on its own: a skipped draw is a hole in the frame.
+    // A skipped draw is a hole in the frame.
     skipped > 0 && count(skipped, 'draw') + ' skipped',
     clears > 0 && count(clears, 'clear') + (elided ? ` (${elided} elided)` : ''),
     copies > 0 && count(copies, 'copy', 'copies'),
@@ -322,7 +284,6 @@ function logGpu(before: Activity, now: Activity, seconds: number): void {
   }
 }
 
-/** One surface: what was done to it, how often, and how much. */
 function logSurface(entry: GpuEntry): void {
   const { kind, label, count: n, amount, failed } = entry;
   let line: string;
@@ -350,11 +311,7 @@ function logSurface(entry: GpuEntry): void {
   workerLog('[gpu] ' + line, failed ? 'warn' : undefined);
 }
 
-/* The threads: every one created, started, paused or ended since the last
-   report, then each thread that ran or changed what it is doing, with its
-   share of the instructions. A thread at 99% is the one a stalled title is
-   spinning in; one that has been "waiting on" the same thing report after
-   report is the one waiting for something that never comes. */
+// Thread lifecycle events, then each thread that ran or changed state.
 function logThreads(now: Activity): void {
   for (const line of now.threadLog) workerLog('[thread] ' + line);
   if (now.threadLogDropped > 0) {
@@ -397,8 +354,7 @@ function logFs(before: Activity, now: Activity): void {
   if (failures > 0) workerLog(`[fs] ${failures} requests failed`);
 }
 
-/** A frame count as time, at `rate`: what a person can compare with the
- *  second the report covers. */
+// A frame count as time at `rate`.
 function duration(frames: number, rate: number): string {
   if (!rate) return count(frames, 'frame');
   const ms = (frames / rate) * 1000;
@@ -409,11 +365,7 @@ function layout(channels: number): string {
   return channels === 1 ? 'mono' : channels === 2 ? 'stereo' : `${channels} channels`;
 }
 
-/* The audio: each device and renderer that opened, closed, changed state or
-   did anything, and the samples between the guest and the page. Silence has
-   a place it happens: no device, a device never started or never fed,
-   samples produced and never taken, or taken faster than they come; each of
-   those reads differently here. */
+// Audio devices and renderers that changed, and samples between guest and page.
 function logAudio(before: Audio, now: Audio): void {
   const outputsBefore = new Map(before.outputs.map((o) => [o.handle, o]));
   for (const o of now.outputs) {
@@ -476,7 +428,7 @@ function logAudio(before: Audio, now: Audio): void {
         `${r.voicesPlaying} of ${count(r.voices, 'voice')} playing`,
         sink,
       ]);
-      // Frames mixed into nothing: the guest's sound goes nowhere.
+      // Frames mixed into nothing.
       const silent = r.started && frames > 0 && !r.sinkChannels;
       workerLog(
         `[audio] ${name} ${r.started ? 'started' : 'stopped'}: ${line}`,
@@ -509,7 +461,6 @@ function logAudio(before: Audio, now: Audio): void {
   }
 }
 
-/** What each kind of unanswered request is, in the words a line uses. */
 const GAP_KIND: Record<ServiceGap['kind'], string> = {
   refused: 'refused',
   missing: 'no such service',
@@ -517,7 +468,7 @@ const GAP_KIND: Record<ServiceGap['kind'], string> = {
   ioctl: 'no handler',
 };
 
-/** nvdrv's error codes, as `nvdrv.rs` names them. */
+// nvdrv's error codes, as `nvdrv.rs` names them.
 const NV_ERROR: Record<number, string> = {
   1: 'not implemented',
   2: 'not supported',
@@ -532,8 +483,7 @@ function hex(n: number): string {
 }
 
 function logProblems(now: Activity): void {
-  // Stubs answer, so a title asking one every frame is ordinary; refusals
-  // and missing services are what a stalled title is waiting behind.
+  // Stubs answering every frame are ordinary; refusals are what stall a title.
   const asked = (kinds: ServiceGap['kind'][]) => now.gaps
     .filter((gap) => kinds.includes(gap.kind))
     .map((gap) => `${gap.name}${gap.command === null ? '' : ` cmd ${gap.command}`} `
@@ -560,7 +510,7 @@ function logProblems(now: Activity): void {
   }
 }
 
-/** Seconds of idleness a thread is named at: these, then every minute. */
+// Idle seconds a thread is named at, then every minute.
 const IDLE_WARNINGS_S = [5, 30];
 
 function nextIdleWarning(after: number): number {
@@ -568,9 +518,7 @@ function nextIdleWarning(after: number): number {
   return fixed ?? (Math.floor(after / 60) + 1) * 60;
 }
 
-/* A thread waiting on something for a long time without doing any work is
-   either a worker with nothing to do or the reason a title has stalled.
-   Which one is up to the reader; this names it and what it waits on. */
+// Name threads waiting a long time without work, and what they wait on.
 function logIdleThreads(now: Activity): void {
   for (const thread of now.threads) {
     const idle = Math.floor(thread.idleMs / 1000);
@@ -585,7 +533,7 @@ function logIdleThreads(now: Activity): void {
   }
 }
 
-/** `HidNpadStyleTag` bits, as a player would name the controller. */
+// `HidNpadStyleTag` bits, as a player would name the controller.
 const NPAD_STYLES: [number, string][] = [
   [1 << 0, 'Pro Controller'],
   [1 << 1, 'handheld'],
@@ -609,8 +557,7 @@ function styleNames(bits: number): string {
 function logInput(before: Activity['input'], now: Activity['input']): void {
   if (now.supported === before.supported && now.presented === before.presented) return;
   if (!now.supported) return;
-  // The handheld slot carries every button beside player 1, so a title that
-  // accepts it has full input whatever player 1 is presented as.
+  // The handheld slot carries every button, so accepting it means full input.
   const handheld = now.supported & (1 << 1) ? ', and the handheld slot has every button' : '';
   workerLog(
     `[input] the title accepts ${styleNames(now.supported)}; player 1 is presented as `
@@ -618,8 +565,7 @@ function logInput(before: Activity['input'], now: Activity['input']): void {
   );
 }
 
-/** Memory growth worth a line, and the point it becomes a warning: wasm32
- *  cannot address more than 4 GiB. */
+// Memory growth worth a line, and the warning point (wasm32 caps at 4 GiB).
 const MEMORY_STEP = 64 * 1024 * 1024;
 const WASM_WARN = 3.5 * 1024 * 1024 * 1024;
 
@@ -639,9 +585,7 @@ function logMemory(): void {
   );
 }
 
-/** Up to this much read from a file in a second, with nothing failing, is a
- *  header read: registering the system archives does that for about forty
- *  files at once, and a line each buried the files doing real work. */
+// Up to this much read per file per second, with no failures, is a header read.
 const SMALL_IO = 4 * 1024;
 
 function logHostFiles(files: HostIo[]): void {

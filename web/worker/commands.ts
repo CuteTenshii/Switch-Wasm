@@ -1,9 +1,4 @@
-/* Everything the page can ask the emulator to do.
-
-   One entry per command, each returning a plain value (number/string/
-   Uint8Array/object) or `{ error }`; the message loop in `index.ts` turns
-   those into replies. Staging buffers are allocated and released around every
-   call - the emulator's heap is the browser's memory too. */
+// Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
   CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, UserRecord,
@@ -28,36 +23,27 @@ import {
   withPath,
 } from './wasm';
 
-// wasm32-unknown-unknown has no OS clock, so the emulated RTC (time:u/time:s)
-// only knows what we push into it. The worker (unlike the wasm guest) has a
-// real Date, so it just samples it directly rather than round-tripping
-// through the main thread the way gamepad input has to.
+// wasm32-unknown-unknown has no clock; push the host time into the emulated RTC.
 function pushTime(): void {
   if (handle() < 0) return;
   api().switch_set_time(handle(), BigInt(Math.floor(Date.now() / 1000)));
 }
 
-// The Battery Status API is Window-only (not exposed to Workers), so unlike
-// time this arrives from the main thread rather than being sampled here.
-// Cached so a freshly created session picks up the last known reading
-// immediately instead of the wasm default (full, charging).
+// The Battery Status API is Window-only, so the main thread sends it. Cached for new sessions.
 let lastBattery = { percent: 100, charging: true };
 function pushBattery(): void {
   if (handle() < 0) return;
   api().switch_set_battery(handle(), lastBattery.percent, lastBattery.charging ? 1 : 0);
 }
 
-// Whether the console is docked. Cached for the same reason the battery is:
-// "reset" builds a fresh session, and a dock the user set before that is
-// still a dock afterwards.
+// Cached so a reset session keeps the dock state.
 let docked = false;
 function pushOperationMode(): void {
   if (handle() < 0) return;
   api().switch_set_operation_mode(handle(), docked ? 1 : 0);
 }
 
-/** A uid, 32 hex digits in memory order, as the two little-endian halves
- *  the core takes it in. */
+// A uid (32 hex digits in memory order) as two little-endian halves.
 export function uidHalves(hex: string): [bigint, bigint] {
   const half = (from: number) => {
     let value = 0n;
@@ -69,33 +55,24 @@ export function uidHalves(hex: string): [bigint, bigint] {
   return [half(0), half(16)];
 }
 
-/** A save as the core names it: the id as hex text, since it is a u64 and
- *  JSON has no such number, then `@` and the uid of the user it belongs to,
- *  absent for a save no user owns. */
+// `<hex save id>[@<user uid>]`; no uid means no owning user.
 function saveKey(id: string): [bigint, bigint, bigint] {
   const [save, user] = id.split('@');
   const [lo, hi] = user ? uidHalves(user) : [0n, 0n];
   return [BigInt('0x' + save), lo, hi];
 }
 
-// A path is capped at 0x301 bytes by the fs protocol, plus ~48 for the rest
-// of an entry; the JSON drains on the wasm side whether or not it fits, so
-// the buffer is sized from the pending count rather than guessed.
+// The wasm side drains whether or not the JSON fits, so size for 0x301-byte paths per entry.
 const changesCap = (pending: number) => 2 + pending * (0x301 * 2 + 64);
 
-// A save large enough to want reading in slices, rather than one allocation
-// twice its size.
 const READ_CHUNK = 1 << 20;
 
-// How a host file reads in the console: its name when the page picked it, and
-// its size either way. A Blob out of the NAND has no name to give.
 function describe(file: Blob): string {
   const name = file instanceof File ? `"${file.name}" ` : '';
   return name + '(' + fmtSize(file.size) + ')';
 }
 
-// Log a load the core answered with `result`, which is negative on failure
-// for every loader here.
+// `result` is negative on failure.
 function logLoad(what: string, result: number | bigint): void {
   if (Number(result) < 0) workerLog(`[io] ${what}: refused (${lastError()})`, 'warn');
   else workerLog(`[io] ${what}`);
@@ -115,8 +92,6 @@ export const CMD: CommandHandlers = {
     state.handle = -1;
     resetInput();
     resetActivity();
-    // Every host file the freed session was reading through went with it, and
-    // the page re-registers what the next one needs.
     resetHostFiles();
     return 0;
   },
@@ -172,24 +147,18 @@ export const CMD: CommandHandlers = {
     return result;
   },
 
-  // Open a container: the File is kept here and read range by range, so this
-  // costs nothing but its PFS0 header no matter how large the file is.
+  // The File is kept and read by range.
   open_nsp(file) {
     const result = api().switch_open_nsp(handle(), openHostFile(file));
     logLoad(`opened ${describe(file)} as the container`, result);
     return result;
   },
-  // Same, for a standalone .nca - the container is the NCA, with no file
-  // table in front of it.
   open_nca(file) {
     const result = api().switch_open_nca(handle(), openHostFile(file));
     logLoad(`opened ${describe(file)} as a standalone NCA`, result);
     return result;
   },
-  // Register a firmware NCA as a system data archive. Costs nothing but the
-  // reference and its header until a title mounts it - which is as true of a
-  // Blob out of the page's NAND as of a File the user just picked, so this is
-  // the one way in for both.
+  // Register a firmware NCA (picked File or NAND Blob) as a system data archive.
   add_archive(file) {
     const index = addHostFile(file);
     const result = api().switch_add_archive(handle(), index, BigInt(file.size));
@@ -198,11 +167,7 @@ export const CMD: CommandHandlers = {
     } else noteRegistered('system archives', file.size);
     return result;
   },
-  // Register an update container for the title in the open container. Like
-  // `add_archive` this keeps only the File reference, so an update costs its
-  // header and its ticket and nothing else. Returns the title id it patches -
-  // the base game's, which is what the page pairs the two containers by - or
-  // '' if the file is not an update.
+  // Returns the base title id the update patches, or '' if it is not an update.
   add_update(file) {
     const index = addHostFile(file);
     const id = api().switch_add_update(handle(), index, BigInt(file.size));
@@ -211,19 +176,14 @@ export const CMD: CommandHandlers = {
     else workerLog(`[io] ${describe(file)} is not an update`);
     return title;
   },
-  // The update's own version string, out of its Control NCA's NACP. Empty if
-  // it ships without one.
   update_version() {
     return readString(256, (buf, cap) => api().switch_update_version(handle(), buf, cap));
   },
-  // Register a container of add-on content. Like `add_archive` this keeps
-  // only the File reference; which title the content belongs to is settled at
-  // launch, against the id the title itself declares. Returns how many pieces
-  // the container holds.
+  // Returns how many pieces the add-on content container holds.
   add_dlc(file) {
     const index = addHostFile(file);
     const pieces = api().switch_add_dlc(handle(), index, BigInt(file.size));
-    // Zero, not a negative, is how this one refuses.
+    // Zero, not a negative, is a refusal.
     if (pieces === 0) {
       workerLog(`[io] add-on content ${describe(file)}: refused (${lastError()})`, 'warn');
     } else {
@@ -231,7 +191,6 @@ export const CMD: CommandHandlers = {
     }
     return pieces;
   },
-  // What the session holds: content id, base title id and index, per piece.
   dlc_json() {
     return readString(8192, (buf, cap) => api().switch_dlc_json(handle(), buf, cap));
   },
@@ -239,17 +198,11 @@ export const CMD: CommandHandlers = {
     api().switch_clear_dlc(handle());
     return 0;
   },
-  // Drop it again: the next launch is the plain title.
   clear_update() {
     api().switch_clear_update(handle());
     return 0;
   },
-  // What a firmware NCA is, without reading it: a header read through the
-  // File the page is still holding. Returns { id, kind } - kind 0 for a
-  // program, 1 for a data archive, 2 for anything else - or null if it is not
-  // an NCA this build can read. A firmware dump is mostly the third kind, and
-  // this is what keeps the page from pulling all of it through memory to find
-  // that out.
+  // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; null if unreadable.
   nand_identify(file) {
     const index = addHostFile(file);
     noteRegistered('NAND files to identify', file.size);
@@ -259,33 +212,22 @@ export const CMD: CommandHandlers = {
       return id ? { id: id.toString(16).padStart(16, '0'), kind } : null;
     });
   },
-  // Boot a program the host has the bytes of: a title installed on the NAND
-  // rather than one opened out of a container the user just picked. The
-  // emulator keeps its own copy, so the staging buffer goes back immediately.
   nand_launch(bytes) {
     const result =
       withBytes(bytes, (ptr, len) => Number(api().switch_nand_launch(handle(), ptr, len)));
     logLoad(`launched a program from the NAND (${fmtSize(bytes.length)})`, result);
     return result;
   },
-  // Decrypts NSP file `index` as a Program NCA (with whatever keys are
-  // loaded) and boots its ExeFS `main` executable, reading both out of the
-  // open container. Its RomFS is left where it is and decrypted on demand
-  // while the title runs.
   load_nca_from_nsp(index) {
     const result = Number(api().switch_load_nca_from_nsp(handle(), index));
     logLoad(`booted the program in container file ${index}`, result);
     return result;
   },
-  // Same, for a container that is itself a single standalone .nca.
   load_nca() {
     const result = Number(api().switch_load_nca(handle()));
     logLoad('booted the program in the standalone NCA', result);
     return result;
   },
-  // Which file in the open container holds the title's executable. Every file
-  // in an NSP is named after its own hash, so this is the only way to boot one
-  // without reading each header through the page to find out.
   program_nca_index() {
     return api().switch_program_nca_index(handle());
   },
@@ -306,34 +248,23 @@ export const CMD: CommandHandlers = {
   },
   read_file(index, offset, len) {
     return withBuffer(len, (buf) => {
-      // file_offset is a wasm u64 (needs a BigInt going in) and the return is
-      // an i64 (comes back as a BigInt too) - convert that back to a Number
-      // before using it as a length.
       const got = Number(api().switch_read_file(handle(), index, BigInt(offset), buf, len));
       if (got < 0) return { error: lastError() };
       return fromWasm(buf, got);
     });
   },
 
-  // The title's name, publisher, version and icon, out of the Control NCA in
-  // the open container. Cheap next to the container itself: a Control NCA is
-  // an icon and a metadata blob, not game data.
   load_control_from_nsp() {
     return api().switch_load_control_from_nsp(handle());
   },
-  // Same, for a container that is itself a single standalone Control NCA.
   load_control_from_nca() {
     return api().switch_load_control_from_nca(handle());
   },
   control_json() {
-    // Sized for the worst case rather than the usual one: the JSON carries a
-    // 0x200-byte name and a 0x100-byte publisher straight out of the NACP,
-    // and `switch_control_json` truncates silently rather than saying it
-    // overflowed - which would surface as a JSON parse error, not a clue.
+    // Worst case: the export truncates silently.
     return readString(16384, (buf, cap) => api().switch_control_json(handle(), buf, cap));
   },
-  // `size` comes from control_json's icon_size: the icon is a JPEG of
-  // unpredictable length, so JS is told how big a buffer to hand over.
+  // `size` is control_json's icon_size.
   control_icon(size) {
     if (!size) return new Uint8Array(0);
     return withBuffer(size, (buf) => {
@@ -391,8 +322,7 @@ export const CMD: CommandHandlers = {
       { unimplemented: [], stubbed: [] },
     );
   },
-  // Big, because the trace is in it and the trace is the point: a report
-  // truncated to a tidy size is one that leaves out the run-up to the fault.
+  // Large enough to keep the trace.
   crash_report() {
     return readJson<CrashReport>(
       1024 * 1024,
@@ -415,9 +345,6 @@ export const CMD: CommandHandlers = {
   get_reg(i) {
     return '0x' + api().switch_get_reg(handle(), i).toString(16).padStart(16, '0');
   },
-  // Guest RAM is what the emulated console has touched; wasm is what this
-  // worker's linear memory costs the browser (the page table, the loaded
-  // image and every staging buffer live there).
   ram() {
     return {
       guest: handle() < 0 ? 0 : Number(api().switch_guest_ram(handle())),
@@ -465,8 +392,7 @@ export const CMD: CommandHandlers = {
   audio_format() {
     return api().switch_audio_format(handle());
   },
-  // Interleaved 16-bit PCM, as raw bytes. The main thread reinterprets them
-  // as an Int16Array rather than paying for a second copy here.
+  // Interleaved 16-bit PCM as raw bytes.
   audio_pull(maxSamples) {
     return withBuffer(maxSamples * 2, (buf) => {
       const n = api().switch_audio_pull(handle(), buf, maxSamples);
@@ -474,13 +400,7 @@ export const CMD: CommandHandlers = {
     });
   },
 
-  // the emulated SD card
-  //
-  // `Vfs` lives in the session, so on its own nothing the guest writes
-  // survives a reload. The main thread mirrors it into IndexedDB using these:
-  // `sd_write_file`/`sd_create_dir` restore the card before a boot, and
-  // `sd_take_changes` reports what the guest touched so only that is written
-  // back.
+  // SD card, mirrored to IndexedDB by the main thread.
 
   sd_write_file(path, bytes) {
     return withPath(path, (pptr, plen) =>
@@ -493,8 +413,7 @@ export const CMD: CommandHandlers = {
   sd_remove(path) {
     return withPath(path, (ptr, len) => api().switch_sd_remove(handle(), ptr, len));
   },
-  // The whole file, or null when the path is not one. Read in slices so a
-  // large save does not need a single allocation twice its size.
+  // The whole file, read in slices, or null when the path is not one.
   sd_read_file(path) {
     return withPath(path, (pptr, plen) => {
       const size = Number(api().switch_sd_file_size(handle(), pptr, plen));
@@ -528,11 +447,7 @@ export const CMD: CommandHandlers = {
     );
   },
 
-  // save data
-  //
-  // The same calls as the SD card above with a save id in front, because a
-  // console keeps saves on its NAND rather than its card and one title's save
-  // is not something another title can see.
+  // Save data: the SD card calls keyed by save.
 
   save_ids() {
     if (handle() < 0) return [];
@@ -568,8 +483,7 @@ export const CMD: CommandHandlers = {
     return withPath(path, (ptr, len) =>
       api().switch_save_create_dir(handle(), ...saveKey(id), ptr, len));
   },
-  // The whole file, or null when the path is not one. Sliced, so a large save
-  // does not need one allocation twice its size.
+  // The whole file, read in slices, or null when the path is not one.
   save_read_file(id, path) {
     const save = saveKey(id);
     return withPath(path, (pptr, plen) => {
@@ -591,10 +505,7 @@ export const CMD: CommandHandlers = {
     });
   },
 
-  // users
-  //
-  // Staged one at a time and committed whole, before a title starts: see
-  // `switch_users_commit`.
+  // Users: staged one at a time, committed whole before a title starts.
 
   users_set(users, current) {
     if (handle() < 0) return 1;

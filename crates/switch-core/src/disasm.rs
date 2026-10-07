@@ -1,6 +1,4 @@
-//! A small disassembler for the A64 instruction subset the interpreter
-//! implements. Used by the debug trace so logs are human-readable rather than
-//! raw word dumps. Field layouts mirror the decoder in [`crate::cpu`].
+//! A small disassembler for the A64 subset the interpreter implements, for debug traces.
 
 use std::fmt::Write;
 
@@ -11,9 +9,7 @@ fn sext(v: u32, bits: u32) -> i64 {
     (if v & sign != 0 { v | !mask } else { v }) as i64
 }
 
-/// Format a signed value as hex with an explicit sign (Rust's `{:#x}`
-/// prints negative values as their two's-complement form, which is useless
-/// for immediates like `#-0x20`).
+/// Hex with an explicit sign, e.g. `#-0x20`.
 fn simm(v: i64) -> String {
     if v < 0 {
         format!("-0x{:x}", v.unsigned_abs())
@@ -269,11 +265,7 @@ fn disasm_system(insn: u32, s: &mut String) -> std::fmt::Result {
     }
 }
 
-/// The register a load/store moves, named for its access width. Integer forms
-/// use `w`/`x`; SIMD&FP forms name the register by width, `b`/`h`/`s`/`d`/`q`.
-/// `PRFM`'s "register" field is not a register at all: it encodes the
-/// prefetch hint as type:target:policy, so `prfm pldl1keep, [x1]` was reading
-/// as `prfm x0, [x1]`.
+/// `PRFM`'s Rt field encodes the prefetch hint as type:target:policy.
 fn prfetch_hint(rt: u32) -> String {
     let ty = match (rt >> 3) & 0b11 {
         0b00 => "pld",
@@ -297,10 +289,7 @@ fn ldst_reg(v: bool, width: u32, opc: u32, i: u32) -> String {
         if width == 3 && opc >= 0b10 {
             return prfetch_hint(i);
         }
-        // The sign-extending loads name their *source* width in the mnemonic
-        // and their destination in `opc`: 10 extends into a 64-bit register,
-        // 11 into a 32-bit one. Reading the destination off `size` instead
-        // called `ldrsw x10` an `ldrsw w10`, which is not a form that exists.
+        // Sign-extending loads take the destination width from `opc`: 10 is 64-bit, 11 is 32-bit.
         let is64 = if opc >= 0b10 { opc == 0b10 } else { width == 3 };
         return if is64 { zr64(i) } else { zr32(i) };
     }
@@ -314,9 +303,7 @@ fn ldst_reg(v: bool, width: u32, opc: u32, i: u32) -> String {
     format!("{c}{i}")
 }
 
-/// A SIMD&FP load/store's access width, which is `size` with `opc<1>` as an
-/// extra high bit -- that is what makes `size == 00` mean a 128-bit `q`
-/// access rather than a byte.
+/// A SIMD&FP load/store's access width: `size` with `opc<1>` as an extra high bit.
 fn simd_ldst_width(sz: u32, opc: u32) -> u32 {
     if opc & 0b10 != 0 {
         4
@@ -325,13 +312,8 @@ fn simd_ldst_width(sz: u32, opc: u32) -> u32 {
     }
 }
 
-/// Name a load/store. `infix` is what distinguishes the addressing forms that
-/// share an encoding group: "" for the scaled/indexed ones, "u" for the
-/// unscaled offset (`stur`/`ldur`) and "t" for the unprivileged (`sttr`).
-///
-/// The size suffix is the part this used to drop: every store was named `str`
-/// whatever its width, so `strb w8, [x0], #1` disassembled as `str w8, [x0],
-/// #1` -- a four-byte store where the encoding says one.
+/// Name a load/store. `infix` is "" for scaled/indexed, "u" for unscaled, "t" for
+/// unprivileged forms.
 fn ldst_name(v: bool, sz: u32, opc: u32, infix: &str) -> String {
     if v {
         return if opc & 1 == 1 {
@@ -340,8 +322,7 @@ fn ldst_name(v: bool, sz: u32, opc: u32, infix: &str) -> String {
             format!("st{infix}r")
         };
     }
-    // size == 11 with opc 1x is PRFM (prefetch hint), not a sign-extending
-    // load (e.g. `prfm pldl1keep, [x1]` = 0xF9800020).
+    // size == 11 with opc 1x is PRFM, not a sign-extending load.
     if sz == 3 && opc >= 0b10 {
         return if infix.is_empty() {
             "prfm".to_string()
@@ -357,8 +338,7 @@ fn ldst_name(v: bool, sz: u32, opc: u32, infix: &str) -> String {
     match opc {
         0b00 => format!("st{infix}r{suffix}"),
         0b01 => format!("ld{infix}r{suffix}"),
-        // Sign-extending loads: the suffix names the *source* width, and
-        // size == 10 is the 32-bit one (`ldrsw`).
+        // Sign-extending loads: the suffix names the source width (size 10 is `ldrsw`).
         _ => {
             let s = match sz {
                 0 => "sb",
@@ -381,9 +361,7 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
         let rt = insn & 0x1F;
         let rt2 = (insn >> 10) & 0x1F;
         let rs = (insn >> 16) & 0x1F;
-        // The access size again, and `o0` (bit 15): an exclusive access that
-        // also carries acquire/release ordering is `ldaxr`/`stlxr` rather
-        // than `ldxr`/`stxr`.
+        // `o0` (bit 15) selects the acquire/release forms (`ldaxr`/`stlxr`).
         let w = match sz {
             0 => "b",
             1 => "h",
@@ -420,10 +398,7 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
         });
     }
 
-    // register-offset form
-    // bits[29:27] select the group; bits[31:30] are the access *size*, so
-    // requiring them to be 11 here matched only the 64-bit forms and dropped
-    // every byte, halfword and 32-bit register-offset access on the floor.
+    // register-offset form; bits[31:30] are the access size.
     if ((insn >> 27) & 0b111) == 0b111 && ((insn >> 24) & 0b11) == 0b00 && ((insn >> 21) & 1) == 1 {
         let sz = (insn >> 30) & 0b11;
         let opc = (insn >> 22) & 0b11;
@@ -436,8 +411,7 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
         let width = if v { simd_ldst_width(sz, opc) } else { sz };
         let shift = if sbit == 1 { width } else { 0 };
         let name = ldst_name(v, sz, opc, "");
-        // The index register is 32-bit for the extending options (`uxtw`,
-        // `sxtw`) and 64-bit for `lsl`/`sxtx` -- option<0> says which.
+        // option<0>: 32-bit index for `uxtw`/`sxtw`, 64-bit for `lsl`/`sxtx`.
         let rm_s = if opt & 1 == 0 { zr32(rm) } else { zr64(rm) };
         write!(
             s,
@@ -481,12 +455,7 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
             return Ok(write!(s, "]").is_ok());
         }
         if mode == 0b00 && ((insn >> 21) & 1) == 0 {
-            // bits[11:10] pick the addressing form, and two of them are their
-            // own instructions rather than an index mode: 00 is the *unscaled*
-            // offset (`stur`/`ldur`, a signed 9-bit byte offset, where the
-            // scaled form takes an unsigned 12-bit one), and 10 is the
-            // unprivileged access (`sttr`/`ldtr`). Naming all four `str`/`ldr`
-            // said the offset was scaled when it is not.
+            // bits[11:10]: 00 unscaled (`stur`/`ldur`), 10 unprivileged (`sttr`/`ldtr`).
             let idx = (insn >> 10) & 0b11;
             let imm = sext((insn >> 12) & 0x1FF, 9);
             let base = reg64(rn);
@@ -514,11 +483,7 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
         let rn = (insn >> 5) & 0x1F;
         let rt = insn & 0x1F;
         let rt2 = (insn >> 10) & 0x1F;
-        // The SIMD&FP pair uses `opc` as a width of its own: 00 is `s`,
-        // 01 is `d`, 10 is `q`.
-        // opc 01 on the integer pair is LDPSW: two *signed* words loaded into
-        // 64-bit registers. It is not a 32-bit LDP, and its offset scales by 4
-        // rather than 8.
+        // SIMD&FP pairs: opc 00 is `s`, 01 `d`, 10 `q`. Integer opc 01 with L is LDPSW.
         let ldpsw = !v && opc == 0b01 && l == 1;
         let width = if v {
             opc + 2
@@ -535,8 +500,6 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
         } else {
             "stp"
         };
-        // The base register is always 64-bit; only the transferred pair
-        // changes width.
         let (rn_l, rt_l, rt2_l) = if v {
             (
                 reg64(rn),
@@ -632,11 +595,7 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 let opc = (insn >> 29) & 0b11;
                 let imm16 = (insn >> 5) & 0xFFFF;
                 let rd = insn & 0x1F;
-                // Bits[22:21] in both widths; a 32-bit form simply has no
-                // encoding above 1. Reading bit 22, the field's *high* half
-                //, printed every shifted 32-bit `movz`/`movk` as unshifted,
-                // so `movz w9, #7, lsl #16` read as `movz w9, #0x7`: the one
-                // thing a listing of a `Result` constant is read for.
+                // hw is bits[22:21] in both widths.
                 let hw = (insn >> 21) & 0b11;
                 let name = match opc {
                     0b00 => "movn",
@@ -659,9 +618,7 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 _ => "ands",
             };
             let mask = crate::cpu::decode_bit_mask(sf == 1, n, immr, imms).unwrap_or(0);
-            // Rd 31 is SP for and/orr/eor and the zero register for ands, so
-            // `and sp, x9, #~0x3f` -- LLVM's stack-frame alignment -- reads as
-            // a discarded result unless this says `sp`.
+            // Rd 31 is SP for and/orr/eor, XZR for ands.
             let d = if opc == 0b11 { zr(rd) } else { sp(rd) };
             Ok(write!(s, "{} {}, {}, #{:#x}", name, d, zr(rn), mask).is_ok())
         }
@@ -834,9 +791,7 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                     write!(s, " #{}", shift)?;
                 }
             } else {
-                // Shifted register: register 31 is XZR here, not SP. `neg x1,
-                // x0` is `sub x1, xzr, x0`, so printing it as `sp` misreads
-                // the instruction entirely.
+                // Shifted register: register 31 is XZR, not SP.
                 let st = (insn >> 22) & 0b11;
                 let sa = (insn >> 10) & 0x3F;
                 if compare {
@@ -859,9 +814,7 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                     let rm = (insn >> 16) & 0x1F;
                     if ((insn >> 29) & 0b11) == 0b00 {
                         if (opcode2 & 0b111000) == 0b010000 {
-                            // CRC32/CRC32C: accumulator and result are always
-                            // W registers, and only the doubleword form takes
-                            // an X for the data operand.
+                            // CRC32/CRC32C: W accumulator; only the doubleword form takes an X data operand.
                             let name = match opcode2 & 0b111 {
                                 0b000 => "crc32b",
                                 0b001 => "crc32h",
@@ -881,8 +834,6 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                                 write!(s, "{} {}, {}, {}", name, zr32(rd), zr32(rn), data).is_ok()
                             );
                         }
-                        // Naming the fallback `rorv` made every unimplemented
-                        // opcode in this group disassemble as a rotate.
                         let name = match opcode2 {
                             0b000010 => "udiv",
                             0b000011 => "sdiv",
@@ -908,9 +859,7 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                         let name = match opcode2 {
                             0b000000 => "rbit",
                             0b000001 => "rev16",
-                            // The 32-bit form reverses the whole register, so
-                            // it is REV; only the 64-bit form has a REV32 that
-                            // reverses within each word.
+                            // The 32-bit form is REV; only the 64-bit form has REV32.
                             0b000010 => {
                                 if sf {
                                     "rev32"
@@ -933,10 +882,7 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                     let c = (insn >> 12) & 0xF;
                     let nzcv = insn & 0xF;
                     let rn = (insn >> 5) & 0x1F;
-                    // op (bit 30) is 1 for CCMP and 0 for CCMN -- these are
-                    // not aliases of each other: one subtracts and one adds,
-                    // so naming them the wrong way round reports the opposite
-                    // carry. (The interpreter has always had it right.)
+                    // op (bit 30): 1 is CCMP, 0 is CCMN.
                     let name = if op == 1 { "ccmp" } else { "ccmn" };
                     if imm_flag == 1 {
                         Ok(write!(

@@ -1,47 +1,21 @@
-//! `am`: the applet framework, `appletOE`/`appletAE` and the proxies,
-//! functions and channels they hand out, plus the library applets a title can
-//! launch.
-//!
-//! This is the largest service on the console and the one a title talks to
-//! most: focus, operation mode, the applet message queue, save-data quotas and
-//! every `ILibraryAppletAccessor` go through here. Nothing here *runs* a
-//! library applet (see [`LibraryApplet`]) but a caller that launches one
-//! still has to see it start, finish and hand back its result.
+//! `am`: the applet framework (`appletOE`/`appletAE`), the proxies and channels
+//! they hand out, and the library applets a title can launch.
 
 use super::Cpu;
 use crate::trace::Level;
 use crate::Result;
 
-/// `am` 2, NoDataInChannel: the general channel has nothing queued.
+/// `am` 2, NoDataInChannel.
 const AM_NO_DATA_IN_CHANNEL: u32 = 128 | (2 << 9);
 
-/// `am`'s `LaunchParameterKind::PreselectedUser`: the user the launcher had
-/// already chosen when it started the application.
+/// `LaunchParameterKind::PreselectedUser`.
 pub(super) const LAUNCH_PARAMETER_PRESELECTED_USER: u32 = 2;
 
-/// The `PreselectedUser` launch parameter, as `nn::account` reads it: a magic,
-/// a version, then the uid, in a block of a fixed 0x88 bytes.
-///
-/// The HOME menu picks the user before it starts a title and leaves the choice
-/// here; `nn::account::Initialize` pops it and caches the uid, and
-/// `nn::account::OpenPreselectedUser` hands that cached uid back. There is no
-/// menu here, but the host chose who is playing before the title started
-/// ([`Cpu::set_users`](super::Cpu::set_users)), and that user is the one
-/// every other `acc` answer names, so it is also the one that was "selected".
-///
-/// `nn::account::detail::TryPopPreselectedUser` reads the block strictly: a
-/// storage shorter than 0x88 bytes is an assertion, and a magic or version it
-/// does not recognise means no preselected user at all, which it reports as a
-/// zero uid, and which `OpenPreselectedUser` then asserts on.
+/// The `PreselectedUser` launch parameter: magic, version, then the uid, in 0x88 bytes.
 pub(super) fn preselected_user_parameter(user: [u8; 16]) -> Vec<u8> {
-    /// What the block says it is. `nn::account` compares the first word
-    /// against this and ignores anything else.
     const MAGIC: u32 = 0xC794_97CA;
-    /// The only layout revision `nn::account` accepts.
     const VERSION: u8 = 1;
-    /// The size it insists on before it reads a byte.
     const LEN: usize = 0x88;
-    /// Where the uid sits, past the magic, the version and its padding.
     const UID_OFFSET: usize = 0x8;
     let mut data = Vec::with_capacity(LEN);
     data.extend_from_slice(&MAGIC.to_le_bytes());
@@ -52,21 +26,13 @@ pub(super) fn preselected_user_parameter(user: [u8; 16]) -> Vec<u8> {
     data
 }
 
-/// A library applet created through `ILibraryAppletCreator`, from the
-/// caller's side: what it asked for, and how far the applet got.
-///
-/// There is no process behind this. The applet exists only as the answers its
-/// accessor gives: it is created, started, and finished in that one moment,
-/// having produced nothing.
+/// A library applet created through `ILibraryAppletCreator`. No process runs behind it.
 #[derive(Debug, Default)]
 pub(crate) struct LibraryApplet {
-    /// `AppletId`, the firmware applet the caller asked to launch.
     id: u32,
-    /// `LibraryAppletMode`: whether it takes the whole screen or composes
-    /// into the caller's own display.
+    /// `LibraryAppletMode`.
     mode: u32,
     finished: bool,
-    /// The three events an accessor hands out, by the slot constants below.
     events: [Option<u64>; 3],
 }
 
@@ -88,8 +54,6 @@ impl LibraryApplet {
     }
 }
 
-/// `GetAppletStateChangedEvent`, `GetPopOutDataEvent` and
-/// `GetPopInteractiveOutDataEvent`, as slots in [`LibraryApplet::events`].
 const STATE_CHANGED_EVENT: usize = 0;
 
 const POP_OUT_DATA_EVENT: usize = 1;
@@ -102,8 +66,7 @@ const LIBRARY_APPLET_EVENT_NAMES: [&str; 3] = [
     "am:library-applet-interactive-out-data",
 ];
 
-/// The two queues a library applet pops storages from: what its caller pushed
-/// before starting it, and what that caller has answered it with since.
+/// The two queues a library applet pops storages from.
 #[derive(Clone, Copy)]
 enum AppletQueue {
     InData,
@@ -120,8 +83,6 @@ impl AppletQueue {
         }
     }
 
-    /// The event this queue's `GetPop...Event` hands out, which is also what
-    /// names the queue in a diagnostic.
     fn event_name(self) -> &'static str {
         match self {
             Self::InData => "am:applet-in-data",
@@ -129,7 +90,6 @@ impl AppletQueue {
         }
     }
 
-    /// What the log says the first time the applet pops this queue empty.
     fn empty_message(self) -> &'static str {
         match self {
             Self::InData => {
@@ -144,12 +104,10 @@ impl AppletQueue {
     }
 }
 
-/// How many of an applet's interactive messages are kept for the host. An
-/// inline keyboard pushes one per keystroke, so the oldest go.
+/// How many interactive messages are kept for the host; the oldest are dropped.
 const MAX_INTERACTIVE_MESSAGES: usize = 8;
 
-/// The firmware applet an `AppletId` names, the inverse of
-/// [`applet_id_for`], for saying out loud what a caller asked to launch.
+/// The firmware applet an `AppletId` names, the inverse of [`applet_id_for`].
 fn applet_name(applet_id: u32) -> &'static str {
     match applet_id {
         0x01 => "application",
@@ -177,65 +135,34 @@ fn applet_name(applet_id: u32) -> &'static str {
     }
 }
 
-/// Whether a title id is one of the firmware's library applets, the ones
-/// launched *by* another applet rather than from the menu.
+/// Whether a title id is one of the firmware's library applets.
 pub(crate) fn is_library_applet(program_id: u64) -> bool {
     matches!(applet_id_for(program_id), 0x0A..=0x1A)
 }
 
-/// The revision of its own launch interface an applet expects its caller to
-/// speak, as `LibAppletCommonArguments::LaVersion`.
+/// The `LibAppletCommonArguments::LaVersion` an applet expects.
 pub(crate) fn applet_interface_version(program_id: u64) -> u32 {
     match applet_id_for(program_id) {
         0x12 => 3, // miiEdit
-        // swkbd numbers its interface with the firmware it shipped in rather
-        // than from one upwards: 0x8000D is 6.0.0 and later, which is what an
-        // 18.0.1 keyboard understands. Claiming version 1 describes a 1.0.0
-        // caller, whose launch struct is a different shape and half the size.
+        // swkbd: 6.0.0+.
         APPLET_SWKBD => 0x8_000D,
-        // The controller applet picks the shape of its second storage by this
-        // number, and 0x8 is what an 11.0.0-and-later one speaks: the 0x430
-        // `ControllerSupportArg` with room for eight players, rather than the
-        // 0x21C one with room for four.
+        // Controller: 11.0.0+, the 0x430-byte `ControllerSupportArg`.
         APPLET_CONTROLLER => 8,
-        // myPage numbers its own the same way the keyboard does: 0x10000 is
-        // 9.0.0 and later, whose argument is 0x10A8 bytes against the 0xB0 a
-        // version 1 caller sends.
+        // myPage: 9.0.0+.
         APPLET_MY_PAGE => 0x1_0000,
-        // The browser numbers its own by firmware too. Funimation launches
-        // both the offline and the general web applet with 0x80000,
-        // `WebAppletVersion::Version524288`, 8.0.0 and later, which is the
-        // only version an 18.0.1 browser reads its argument under.
+        // Web: 8.0.0+.
         APPLET_WEB => 0x8_0000,
         _ => 1,
     }
 }
 
-/// `AppletId_LibraryAppletSwkbd`.
 const APPLET_SWKBD: u32 = 0x11;
-/// `AppletId_LibraryAppletController`.
 const APPLET_CONTROLLER: u32 = 0x0C;
-/// `AppletId_LibraryAppletMyPage`.
 const APPLET_MY_PAGE: u32 = 0x1A;
-/// `AppletId_LibraryAppletWeb`.
 const APPLET_WEB: u32 = 0x13;
 
-/// The launch storages a library applet's caller pushes after the common
-/// arguments: the ones only its caller could fill in.
-///
-/// An applet pops these in order and gets no further than the first one that
-/// is not there: `PopInData` answers `2128-0003` and `nnSdk` aborts on it.
-/// That is one storage for most applets, and **two** for the keyboard and the
-/// controller applet, which both take a private struct and then the argument
-/// it describes.
-///
-/// Zeroes are the ordinary entry point for the applets whose struct starts
-/// with a mode selector, so they stay the default. The two named here are the
-/// ones whose contents say something: the keyboard's configuration is what
-/// says how long the text may be and what the confirm button reads, and the
-/// controller applet's says which controllers this console can offer.
+/// The launch storages a library applet's caller pushes after the common arguments.
 pub(crate) fn applet_launch_storages(program_id: u64, user: [u8; 16]) -> Vec<Vec<u8>> {
-    /// Enough of any other applet's struct for it to read the prefix it knows.
     const GENERIC_SIZE: usize = 0x100;
     match applet_id_for(program_id) {
         APPLET_SWKBD => vec![swkbd_config(), vec![0u8; SWKBD_WORK_BUFFER_SIZE]],
@@ -246,15 +173,14 @@ pub(crate) fn applet_launch_storages(program_id: u64, user: [u8; 16]) -> Vec<Vec
     }
 }
 
-/// `nn::swkbd::KeyboardConfig`: `SwkbdConfigCommon` followed by
-/// `SwkbdConfigNew`, the 6.0.0+ shape [`applet_interface_version`] claims.
+/// `nn::swkbd::KeyboardConfig`: `SwkbdConfigCommon` then `SwkbdConfigNew`.
 fn swkbd_config() -> Vec<u8> {
     const CONFIG_SIZE: usize = 0x4C8;
     const OK_TEXT: usize = 0x004;
     const MAX_TEXT_LENGTH: usize = 0x3AC;
     const MIN_TEXT_LENGTH: usize = 0x3B0;
     let mut config = vec![0u8; CONFIG_SIZE];
-    // SwkbdType_Normal, the full alphanumeric keyboard.
+    // SwkbdType_Normal.
     config[0..4].copy_from_slice(&0u32.to_le_bytes());
     for (index, unit) in "OK".encode_utf16().enumerate() {
         let at = OK_TEXT + index * 2;
@@ -265,54 +191,30 @@ fn swkbd_config() -> Vec<u8> {
     config
 }
 
-/// The keyboard's third storage: the buffer its initial string and its user
-/// dictionary would live in, at the offsets the configuration names. That
-/// configuration names neither, so the applet reads nothing out of it, but
-/// the storage still has to be there, and 0x1000 is the size a caller passes.
+/// The keyboard's third storage: its initial-string and dictionary buffer.
 const SWKBD_WORK_BUFFER_SIZE: usize = 0x1000;
 
-/// The friend-list applet's argument: which of its pages to open on, and the
-/// user it is the page *of*. The fields past the uid belong to the types that
-/// name another account (a friend request, an invitation) and are cleared
-/// for the rest, which is every type this can be launched with here.
+/// The friend-list applet's argument: the page to open and the user it belongs to.
 fn my_page_arg(user: [u8; 16]) -> Vec<u8> {
-    /// The 9.0.0+ width, the one [`applet_interface_version`] claims.
     const ARG_SIZE: usize = 0x10A8;
     const USER_ID: usize = 0x8;
     let mut arg = vec![0u8; ARG_SIZE];
-    // Type ShowFriendList, which is where the applet opens with no caller to
-    // have asked for one of its other pages.
+    // ShowFriendList.
     arg[..4].copy_from_slice(&0u32.to_le_bytes());
     arg[USER_ID..USER_ID + 16].copy_from_slice(&user);
     arg
 }
 
-/// The browser's argument: a `WebArgHeader` naming which of the five browser
-/// applets this is, then a packed list of `{u16 type, u16 size, u32 pad}`
-/// entries and their data.
-///
-/// The shape is Funimation's, read off its own launches rather than guessed:
-/// it pushes 12 entries for the general web applet and 13 for the offline one,
-/// and pads every URL and path to [`WEB_URL_SIZE`] whatever the string's
-/// length. The entries past the URL are display and input settings the applet
-/// has defaults for; the two that decide anything are the shim kind and the
-/// page to open.
+/// The browser's argument: a `WebArgHeader`, then `{u16 type, u16 size, u32 pad}` entries.
 fn web_arg() -> Vec<u8> {
-    /// `ShimKind_Web`: the general browser, which is what `AppletId` 0x13 is.
+    /// `ShimKind_Web`.
     const SHIM_WEB: u32 = 5;
-    /// `WebArgInputTLVType_InitialURL`.
     const TLV_INITIAL_URL: u16 = 1;
-    /// The width a caller pads every URL to. Funimation spends all 0xC00 bytes
-    /// of it on a 51-character address.
     const WEB_URL_SIZE: usize = 0xC00;
-    /// `WebCommonTLVStorage`, the fixed storage the list travels in.
     const WEB_ARG_SIZE: usize = 0x2000;
     const HEADER_SIZE: usize = 8;
     const TLV_SIZE: usize = 8;
-    /// Where the applet is pointed with no caller to name a page. Nothing here
-    /// serves it and there is no network stack to reach anything else, so this
-    /// is a page that fails to load by construction rather than a real address
-    /// this emulator would quietly fetch.
+    /// A deliberately unreachable start page.
     const DEFAULT_URL: &str = "http://localhost/";
 
     let mut arg = vec![0u8; WEB_ARG_SIZE];
@@ -326,11 +228,7 @@ fn web_arg() -> Vec<u8> {
     arg
 }
 
-/// What a library applet's result storage says, in a line for the log.
-///
-/// Only the two applets whose result shape is known are read; anything else is
-/// reported by size, because a field read out of the wrong struct reads as
-/// fact.
+/// A library applet's result storage, summarised for the log.
 fn applet_result_summary(program_id: u64, data: &[u8]) -> String {
     let word = |at: usize| -> u32 {
         data.get(at..at + 4)
@@ -338,9 +236,7 @@ fn applet_result_summary(program_id: u64, data: &[u8]) -> String {
             .unwrap_or(0)
     };
     match applet_id_for(program_id) {
-        // `ControllerSupportResultInfo { s8 player_count, pad[3],
-        // u32 selected_id, u32 result }`: 0 is a selection the user
-        // confirmed, 2 is the user backing out of the applet.
+        // `ControllerSupportResultInfo { s8 player_count, pad[3], u32 selected_id, u32 result }`.
         APPLET_CONTROLLER if data.len() >= 0xC => {
             let outcome = match word(8) {
                 0 => "confirmed".to_owned(),
@@ -349,9 +245,7 @@ fn applet_result_summary(program_id: u64, data: &[u8]) -> String {
             };
             format!("{outcome}, {} player(s), npad {}", data[0] as i8, word(4))
         }
-        // `u32 SwkbdResult`, 0 for text the user submitted, 1 for a keyboard
-        // they closed: then the text, UTF-16 unless the configuration asked
-        // for UTF-8, which [`swkbd_config`] does not.
+        // `u32 SwkbdResult`, then the UTF-16 text.
         APPLET_SWKBD if data.len() >= 4 => {
             let text: Vec<u16> = data[4..]
                 .as_chunks::<2>()
@@ -371,10 +265,7 @@ fn applet_result_summary(program_id: u64, data: &[u8]) -> String {
     }
 }
 
-/// `AppletIdentityInfo { AppletId, pad, u64 title_id }` for the home menu,
-/// which is the answer to every question a library applet asks about who
-/// launched it: one is only ever launched by whatever is in the foreground,
-/// and the only thing that launches one from a standing start is the menu.
+/// `AppletIdentityInfo { AppletId, pad, u64 title_id }` for the home menu.
 fn home_menu_identity() -> [u8; 16] {
     const QLAUNCH_TITLE_ID: u64 = 0x0100_0000_0000_1000;
     const SYSTEM_APPLET_MENU: u32 = 3;
@@ -384,51 +275,35 @@ fn home_menu_identity() -> [u8; 16] {
     info
 }
 
-/// `nn::hid::system::ControllerSupportArgPrivate`: which of the controller
-/// applet's screens to show, and the controller state its caller had when it
-/// asked for one.
+/// `nn::hid::system::ControllerSupportArgPrivate`.
 fn controller_support_arg_private() -> Vec<u8> {
     const SIZE: u32 = 0x14;
     let mut arg = Vec::with_capacity(SIZE as usize);
     arg.extend_from_slice(&SIZE.to_le_bytes());
     arg.extend_from_slice(&(CONTROLLER_SUPPORT_ARG_SIZE as u32).to_le_bytes());
-    // Flag0 and Flag1, which sdknso leaves clear outside its *ForSystem
-    // entry points, then ControllerSupportMode::ShowControllerSupport and
-    // ControllerSupportCaller::Application.
+    // Flag0, Flag1, ShowControllerSupport, caller Application.
     arg.extend_from_slice(&[0, 0, 0, 0]);
-    // What `GetSupportedNpadStyleSet` answered the caller. Every style this
-    // console's one pad can be published in, so the applet offers exactly the
-    // controllers `hid` will then present. See `NPAD_PRESENTATIONS`.
+    // `GetSupportedNpadStyleSet`, see `NPAD_PRESENTATIONS`.
     arg.extend_from_slice(&super::supported_npad_style_set().to_le_bytes());
-    // `GetNpadJoyHoldType`, which is `hid`'s own default here: Vertical.
+    // `GetNpadJoyHoldType`: Vertical.
     arg.extend_from_slice(&0u32.to_le_bytes());
     arg
 }
 
-/// `nn::hid::ControllerSupportArg`, the 0x430-byte version 0x7-and-later
-/// shape: eight identification colours and eight explain-text entries.
+/// `nn::hid::ControllerSupportArg`, the 0x430-byte shape.
 const CONTROLLER_SUPPORT_ARG_SIZE: usize = 0x430;
 
 fn controller_support_arg() -> Vec<u8> {
     let mut arg = vec![0u8; CONTROLLER_SUPPORT_ARG_SIZE];
-    // sdknso's own default for the struct, which it writes as a word: no
-    // minimum player count, four of them at most, and take-over-connection
-    // and left-justify on. The byte after it permits a dual Joy-Con.
+    // sdknso's defaults; the next byte permits dual Joy-Con.
     arg[..4].copy_from_slice(&0x0101_0400u32.to_le_bytes());
     arg[4] = 1;
-    // enableSingleMode, which the default leaves clear. This console is in
-    // handheld mode with one pad, and handheld is not an allowed answer to
-    // the applet unless this says a single player will do.
+    // enableSingleMode, needed for handheld to be an allowed answer.
     arg[5] = 1;
     arg
 }
 
 /// The `AppletId` a system applet reports for itself, from its title id.
-///
-/// The firmware's own applets are `0100000000001000`..`0100000000001013`, and
-/// their ids run in the same order with two breaks in it: the menu and the
-/// overlay applet are not library applets at all and have their own ids.
-/// Anything else is an ordinary application.
 fn applet_id_for(program_id: u64) -> u32 {
     if program_id & !0xFFFF != 0x0100_0000_0000_0000 {
         return 0x01; // AppletId_Application
@@ -439,14 +314,8 @@ fn applet_id_for(program_id: u64) -> u32 {
         // auth, cabinet, controller, dataErase, error, netConnect,
         // playerSelect, swkbd, miiEdit, web, shop.
         low @ 0x1001..=0x100B => 0x0A + (low as u32 - 0x1001),
-        // photoViewer, set, offlineWeb, loginShare, wifiWebAuth.
         low @ 0x100D..=0x1011 => 0x15 + (low as u32 - 0x100D),
-        // `starter` breaks the run: it is a SystemApplication rather than a
-        // library applet, and it has a title id in the middle of the range
-        // rather than past it. Counting through it put myPage one id too far
-        // along: on `gift`, whose id is not a library applet's here at all,
-        // so nothing seeded myPage's launch storages and its first
-        // `PopInData` was refused.
+        // `starter` sits in the range but is not a library applet.
         0x1012 => 0x04, // starter -> SystemApplication
         0x1013 => 0x1A, // myPage
         _ => 0x01,
@@ -454,10 +323,7 @@ fn applet_id_for(program_id: u64) -> u32 {
 }
 
 impl Cpu {
-    /// The event an `ILibraryAppletAccessor` hands out for `slot`, allocated
-    /// on first ask and kept: a caller that asks twice has to be given the
-    /// same object, and one that waits on a handle it was handed a second
-    /// copy of would wait on the wrong one.
+    /// The event an `ILibraryAppletAccessor` hands out for `slot`, allocated once.
     fn library_applet_event(&mut self, key: u64, slot: usize) -> u64 {
         if let Some(event) = self
             .am_applets
@@ -466,20 +332,13 @@ impl Cpu {
         {
             return event;
         }
-        // Not auto-clearing. What these report is an applet that has ended,
-        // which does not un-end, and `libnx` waits on the state-changed one
-        // in a loop: an auto-clearing event would be consumed by the first
-        // wait and leave the second one hanging.
+        // Not auto-clearing: an ended applet stays ended.
         let event = self.alloc_event(LIBRARY_APPLET_EVENT_NAMES[slot], false);
         self.am_applets.entry(key).or_default().events[slot] = Some(event);
         event
     }
 
-    /// Hand the front of one of a library applet's pop queues over as an `am`
-    /// `IStorage`, or refuse with 2128-0003 when the queue is empty.
-    ///
-    /// `PopInData` and `PopInteractiveInData` differ only in which queue they
-    /// drain and what an empty one means, so they share this.
+    /// Pop the front of a library applet's queue as an `IStorage`, or 2128-0003 if empty.
     fn pop_applet_storage(&mut self, tls: u32, handle: u64, queue: AppletQueue) -> Result<()> {
         let data = match queue {
             AppletQueue::InData => self.am_in_data.pop_front(),
@@ -493,13 +352,7 @@ impl Cpu {
                 Ok(())
             }
             None => {
-                /// `am` description 3: the applet asked for a storage that was
-                /// never pushed.
                 const NO_DATA: u32 = 128 | (3 << 9);
-                // Named once, because `nnSdk` aborts on this and the fatal it
-                // raises carries the code and nothing about where it came from
-                //: 2128-0003 is also what an empty `ReceiveMessage` answers,
-                // which is routine.
                 if self
                     .unimplemented_ipc
                     .insert((queue.event_name().to_string(), None))
@@ -511,9 +364,7 @@ impl Cpu {
         }
     }
 
-    /// The event a pop queue hands out, allocated on the first ask. Not
-    /// auto-clearing: what it reports is whether the queue has anything in it,
-    /// which is a state rather than an edge.
+    /// The event a pop queue hands out, allocated once and not auto-clearing.
     fn applet_queue_event(&mut self, queue: AppletQueue) -> u64 {
         if let Some(event) = self.am_pop_events[queue.slot()] {
             return event;
@@ -523,9 +374,7 @@ impl Cpu {
         event
     }
 
-    /// Signal each pop event whose queue has something to pop, and darken the
-    /// rest. An applet waiting on a dark one waits, which is the honest answer
-    /// when only the host can fill that queue.
+    /// Signal each pop event whose queue is non-empty and clear the rest.
     pub(super) fn refresh_applet_pop_events(&mut self) {
         for queue in AppletQueue::ALL {
             let Some(event) = self.am_pop_events[queue.slot()] else {
@@ -543,8 +392,7 @@ impl Cpu {
         }
     }
 
-    /// Fire one of an applet's events, if the caller has taken it. Allocating
-    /// it here instead would make an event nothing is waiting on.
+    /// Fire one of an applet's events, if the caller has taken it.
     fn signal_library_applet_event(&mut self, key: u64, slot: usize) {
         if let Some(event) = self
             .am_applets
@@ -555,28 +403,14 @@ impl Cpu {
         }
     }
 
-    /// Whether the applet behind an accessor has ended. One that was never
-    /// created has not: an accessor with no applet is not an applet that ran.
+    /// Whether the applet behind an accessor has ended.
     fn library_applet_finished(&self, key: u64) -> bool {
         self.am_applets
             .get(&key)
             .is_some_and(LibraryApplet::is_finished)
     }
 
-    /// `IApplicationProxyService`/`IApplicationProxy`: the applet-lifecycle
-    /// chain homebrew opens as `appletOE` (or `appletAE`, for a non-application
-    /// applet). `appletMainLoop` polls `ICommonStateGetter` every frame, the
-    /// event handle, then `ReceiveMessage`/`GetOperationMode`/
-    /// `GetCurrentFocusState`: to decide whether to keep running; an earlier
-    /// generic stub answered every one of those the same way regardless of
-    /// which sub-interface actually made the call (and re-sent the initial
-    /// "focus changed" message on every single poll), which made at least one
-    /// real homebrew (JKSV) treat every frame as a fresh focus transition and
-    /// give up after a handful of them.
-    ///
-    /// Only the commands listed below are implemented. Everything else goes to
-    /// [`Cpu::unimplemented_command`] rather than a fabricated success. See there
-    /// for why.
+    /// `appletOE`/`appletAE` and the sub-interfaces they hand out.
     pub(super) fn applet_request(
         &mut self,
         tls: u32,
@@ -594,13 +428,7 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, "am:control", cmd_id),
             };
         }
-        // Which `am` sub-interface this request is actually for. A caller that
-        // converted the session to a domain (`libnx`) addresses each one by
-        // object id on the one `appletOE` handle; a caller that did not
-        // (`nnSdk`) got a separate session handle per interface out of
-        // [`Cpu::reply_with_interface`], and the name is recorded against the
-        // handle instead. Resolving only the domain case left every `nnSdk`
-        // request answered as `am:unknown`.
+        // Which `am` sub-interface this request is for: by domain object id, or by session handle.
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id)
@@ -608,70 +436,42 @@ impl Cpu {
                 .to_string()
         } else {
             match self.service_name(handle) {
-                // The root session before any ConvertToDomain *is*
-                // IApplicationProxyService.
                 Some("appletOE") | Some("appletAE") | None => "am:proxy-service".to_string(),
                 Some(name) => name.to_string(),
             }
         };
         match iface.as_str() {
-            // The root session, which is `IApplicationProxyService` on
-            // `appletOE` and `IAllSystemAppletProxiesService` on `appletAE`.
-            // Which proxy a process opens is how it declares what kind of
-            // applet it is: an application opens cmd 0, a library applet
-            // (`miiEdit`, `swkbd`, `playerSelect`, every one of the system's
-            // own applets) opens cmd 201.
             "am:proxy-service" => match cmd_id {
-                // IApplicationProxyService::OpenApplicationProxy.
                 Some(0) => {
                     self.set_applet_is_application(true);
                     self.reply_with_interface(tls, handle, "am:application-proxy")?;
                     Ok(())
                 }
-                // IAllSystemAppletProxiesService::OpenLibraryAppletProxy, and
-                // the pre-3.0.0 `OpenLibraryAppletProxyOld` that differs only
-                // in not taking the applet attribute buffer.
+                // OpenLibraryAppletProxy, and OpenLibraryAppletProxyOld.
                 Some(200) | Some(201) => {
                     self.set_applet_is_application(false);
                     self.reply_with_interface(tls, handle, "am:library-applet-proxy")?;
                     Ok(())
                 }
-                // IAllSystemAppletProxiesService::OpenSystemAppletProxy, and
-                // the `Ex` form at 110 that differs only in taking an applet
-                // attribute. This is what the *Home Menu* opens. qlaunch is
-                // neither an application nor a library applet: it is the one
-                // process that outlives every title and launches the rest,
-                // and it aborts on the spot if this is refused.
+                // OpenSystemAppletProxy (and Ex at 110), opened by the Home Menu.
                 Some(100) | Some(110) => {
                     self.set_applet_is_application(false);
                     self.reply_with_interface(tls, handle, "am:system-applet-proxy")?;
                     Ok(())
                 }
-                // OpenSystemApplicationProxy. A system application is still an
-                // application: it gets the same `IApplicationProxy` and the
-                // same focus message: it just ships with the firmware rather
-                // than being installed. `starter`, the applet that runs the
-                // first-boot sequence, opens this and nothing else: refused,
-                // it aborted with `nnSdk`'s unknown-command-id straight into
-                // `fatal:u`.
+                // OpenSystemApplicationProxy.
                 Some(350) => {
                     self.set_applet_is_application(true);
                     self.reply_with_interface(tls, handle, "am:application-proxy")?;
                     Ok(())
                 }
-                // OpenOverlayAppletProxy: `overlayDisp`, which draws over
-                // whatever is running. It has the same lifecycle and window
-                // controls as a library applet does.
+                // OpenOverlayAppletProxy.
                 Some(300) => {
                     self.set_applet_is_application(false);
                     self.reply_with_interface(tls, handle, "am:library-applet-proxy")?;
                     Ok(())
                 }
-                // GetSystemProcessCommonFunctions (19.0.0+) and
-                // GetAppletAlternativeFunctions (20.0.0+). Unlike every
-                // command above them these open no proxy, so they say nothing
-                // about which kind of applet the caller is and must leave that
-                // flag alone.
+                // GetSystemProcessCommonFunctions / GetAppletAlternativeFunctions: no proxy, so the applet kind is unchanged.
                 Some(450) => {
                     self.reply_with_interface(tls, handle, "am:system-process-common-functions")?;
                     Ok(())
@@ -682,13 +482,7 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // ISystemAppletProxy's Get* accessors. The first seven are the
-            // same ones `ILibraryAppletProxy` hands out; where a library applet
-            // has its self-accessor and common functions at 20/21, the system
-            // applet has the two interfaces it drives the console with, the
-            // Home Menu's own functions and the global power/sleep state, and
-            // an IApplicationCreator at 22, which is how the Home Menu starts
-            // a game.
+            // ISystemAppletProxy's Get* accessors.
             "am:system-applet-proxy" => {
                 let sub = match cmd_id {
                     Some(0) => Some("am:common-state-getter"),
@@ -701,8 +495,7 @@ impl Cpu {
                     Some(20) => Some("am:home-menu-functions"),
                     Some(21) => Some("am:global-state-controller"),
                     Some(22) => Some("am:application-creator"),
-                    // GetAppletCommonFunctions, added at 23 here in 10.0.0,
-                    // the same interface a library applet fetches at 21.
+                    // GetAppletCommonFunctions (10.0.0+).
                     Some(23) => Some("am:applet-common-functions"),
                     Some(1000) => Some("am:debug-functions"),
                     _ => None,
@@ -715,10 +508,7 @@ impl Cpu {
                     None => self.unimplemented_command(tls, &iface, cmd_id),
                 }
             }
-            // ILibraryAppletProxy's Get* accessors. The first five are the
-            // same interfaces `IApplicationProxy` hands out, a library applet
-            // has the same lifecycle, window and audio controls as an
-            // application does, and the rest are its own.
+            // ILibraryAppletProxy's Get* accessors.
             "am:library-applet-proxy" => {
                 let sub = match cmd_id {
                     Some(0) => Some("am:common-state-getter"),
@@ -730,10 +520,6 @@ impl Cpu {
                     Some(11) => Some("am:library-applet-creator"),
                     Some(20) => Some("am:library-applet-self-accessor"),
                     Some(21) => Some("am:applet-common-functions"),
-                    // A library applet fetches these two as well: the same
-                    // pair `ISystemAppletProxy` exposes at 20/21, at the ids
-                    // left over once the self-accessor and common functions
-                    // have taken 20 and 21 here.
                     Some(22) => Some("am:home-menu-functions"),
                     Some(23) => Some("am:global-state-controller"),
                     Some(1000) => Some("am:debug-functions"),
@@ -747,8 +533,7 @@ impl Cpu {
                     None => self.unimplemented_command(tls, &iface, cmd_id),
                 }
             }
-            // IApplicationProxy's Get* accessors, each handing back one of the
-            // sub-interfaces below.
+            // IApplicationProxy's Get* accessors.
             "am:application-proxy" => {
                 let sub = match cmd_id {
                     Some(0) => Some("am:common-state-getter"),
@@ -769,50 +554,18 @@ impl Cpu {
                     None => self.unimplemented_command(tls, &iface, cmd_id),
                 }
             }
-            // ICommonStateGetter: the state `appletMainLoop` polls every frame.
+            // ICommonStateGetter.
             "am:common-state-getter" => match cmd_id {
-                // GetSettingsPlatformRegion -> SetSysPlatformRegion. 1 is
-                // Global; 2 is the Chinese console, which has a different set
-                // of services and stores behind it.
+                // GetSettingsPlatformRegion: 1 is Global.
                 Some(300) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
-                // GetOperationModeSystemInfo -> u32. Zero is what a console
-                // with nothing unusual about its operation mode reports.
+                // GetOperationModeSystemInfo.
                 Some(200) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-                // GetHomeButtonReaderLockAccessor,
-                // GetReaderLockAccessorEx(u32 button_type) and
-                // GetWriterLockAccessorEx [7.0.0+] -> ILockAccessor: the HOME
-                // and capture button locks, the counterpart to
-                // `IHomeMenuFunctions` 30/31. The Home Menu takes one per
-                // button before it will run a transition.
-                //
-                // Reader and writer hand back the same object because nothing
-                // here contends for either -- see `am:lock-accessor` below,
-                // where TryLock always succeeds.
+                // GetHomeButtonReaderLockAccessor / GetReaderLockAccessorEx / GetWriterLockAccessorEx.
                 Some(30) | Some(31) | Some(32) => {
                     self.reply_with_interface(tls, handle, "am:lock-accessor")?;
                     Ok(())
                 }
-                // GetEventHandle: the copy handle the guest waits on before
-                // polling ReceiveMessage.
-                //
-                // It starts **signalled** exactly when a message is waiting,
-                // which at startup means once: AM queues one FocusStateChanged
-                // and ReceiveMessage below hands it out. The event is
-                // auto-clearing, so the first successful wait consumes it and
-                // every later poll times out, which is the whole protocol.
-                //
-                // An applet does not draw until it has been told it is in
-                // focus, and it asks by *polling this event with a zero
-                // timeout* rather than by calling ReceiveMessage. Leaving the
-                // event dark meant the message was there and nothing ever came
-                // to collect it: the Mii editor sat in `appletMainLoop`
-                // polling an event that would never fire, one dequeued buffer
-                // in hand and not a single draw behind it.
-                //
-                // (It used to be left dark on purpose, because firing it sent
-                // `nnSdk`'s system worker into a handler that did not exist.
-                // That was `WaitSynchronization` reporting index 1 for a
-                // one-handle wait, and it is fixed where it belongs.)
+                // GetEventHandle: signalled while a message is queued.
                 Some(0) => {
                     let h = match self.applet_event {
                         Some(h) => h,
@@ -827,10 +580,7 @@ impl Cpu {
                     }
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // ReceiveMessage: real AM enqueues one FocusStateChanged at
-                // startup and then reports "no message" until the state
-                // actually changes; answering every poll with a fresh message
-                // is what made JKSV think focus kept changing.
+                // ReceiveMessage.
                 Some(1) => {
                     const NO_MESSAGES: u32 = 128 | (3 << 9); // am, "no message"
                     match self.next_applet_message() {
@@ -840,19 +590,12 @@ impl Cpu {
                         None => self.write_ipc_response(tls, NO_MESSAGES, &[], &[], &[]),
                     }
                 }
-                // GetOperationMode -> AppletOperationMode. **Handheld is 0**
-                // and Console (docked) is 1; this answered 1 while its comment
-                // said Handheld, so NX-Fetch printed "Docked" beside a 720p
-                // handheld framebuffer, and a title that picks its resolution
-                // by operation mode was being told to render at 1080p. Both
-                // now come from the one switch, so they cannot disagree again:
-                // see [`super::OperationMode`].
+                // GetOperationMode: Handheld is 0, Console is 1.
                 Some(5) => {
                     let mode = self.operation_mode() as u32;
                     self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
                 }
-                // GetPerformanceMode -> ApmPerformanceMode: Normal handheld,
-                // Boost docked.
+                // GetPerformanceMode.
                 Some(6) => {
                     let mode = self.operation_mode().performance_mode();
                     self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
@@ -860,11 +603,7 @@ impl Cpu {
                 Some(9) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetCurrentFocusState: InFocus
                 // GetBootMode: Normal.
                 Some(8) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                // GetAcquiredSleepLockEvent / GetDefaultDisplayResolutionChangeEvent:
-                // handles the caller waits on. Nothing here ever sleeps or
-                // changes resolution, so they are handed out and never
-                // signalled. See the note on GetEventHandle above for why a
-                // wait on them still returns.
+                // GetAcquiredSleepLockEvent: never signalled.
                 Some(13) => {
                     let h = match self.sleep_lock_event {
                         Some(h) => h,
@@ -879,12 +618,7 @@ impl Cpu {
                     }
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // GetDefaultDisplayResolutionChangeEvent: fired when the
-                // console is docked or undocked, which is the only thing that
-                // changes the resolution. It used to be handed out dark on the
-                // grounds that the resolution never changed, true when there
-                // was one, and one object per caller, so nothing could have
-                // signalled the one being waited on anyway.
+                // GetDefaultDisplayResolutionChangeEvent: fired on dock or undock.
                 Some(61) => {
                     let h = match self.display_resolution_event {
                         Some(h) => h,
@@ -896,11 +630,7 @@ impl Cpu {
                     };
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // GetDefaultDisplayResolution: the display's, which is the
-                // dock's, 1280x720 handheld, 1920x1080 docked. Hard-coding
-                // 720p here is what put "1280x720 @ 60Hz [Docked]" on
-                // NX-Fetch's screen: the mode and the resolution beside it
-                // came from two different places.
+                // GetDefaultDisplayResolution.
                 Some(60) => {
                     let (width, height) = self.operation_mode().display_size();
                     let mut raw = Vec::with_capacity(8);
@@ -908,11 +638,7 @@ impl Cpu {
                     raw.extend_from_slice(&height.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
-                // RequestToAcquireSleepLock: nothing else here contends the
-                // lock, so it is granted at once, and the event that says so
-                // fires with it. Handing that event out dark left an applet
-                // waiting for permission to keep the console awake that was
-                // never going to come.
+                // RequestToAcquireSleepLock: granted at once.
                 Some(10) => {
                     self.sleep_lock_acquired = true;
                     if let Some(h) = self.sleep_lock_event {
@@ -933,18 +659,7 @@ impl Cpu {
                     self.warn_stub(&iface, cmd_id, "accepted; there is no clock to move");
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled:
-                // a title that is about to hand the console to another
-                // program (`nn::oe::ExecuteProgram`) asks AM to send it an
-                // Exit message when that happens, so it shuts down instead of
-                // sitting behind the program it launched.
-                //
-                // It is a latch with no argument and no reply: asking is
-                // setting it, and nothing is recorded because nothing here
-                // ever executes a next program, so the message it arms could
-                // never be sent. Tomodachi Life asks for it during startup,
-                // and refusing it aborted `nnSdk` before the title reached a
-                // service.
+                // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled.
                 Some(900) => {
                     self.warn_stub(&iface, cmd_id, "the exit-request latch is not recorded");
                     self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -952,20 +667,8 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             "am:application-functions" => match cmd_id {
-                // PopLaunchParameter(u32 kind) -> IStorage: what the launcher
-                // left for this program. It is a *pop*: `am` hands the
-                // storage over once and forgets it, so a second ask finds
-                // nothing, and `nn::account` relies on that to only ever cache
-                // the preselected user once.
-                //
-                // Only the kinds [`Cpu::seed_launch_parameters`] filled in are
-                // here. Everything else fails the way it does on hardware for
-                // a program nobody left anything for: an earlier stub's
-                // success-with-an-unrelated-object-id left callers treating
-                // that id as a launch-parameter storage that was never
-                // registered as one.
+                // PopLaunchParameter(u32 kind) -> IStorage, handed over once.
                 Some(1) => {
-                    /// `am` description 2: no launch parameter of that kind.
                     const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9);
                     let kind = self.mem.read_u32(self.ipc_request_data(tls))?;
                     match self.am_launch_parameters.remove(&kind) {
@@ -979,22 +682,12 @@ impl Cpu {
                         }
                     }
                 }
-                // EnsureSaveData -> the save data size it ensured.
+                // EnsureSaveData.
                 Some(20) => {
                     self.warn_stub(&iface, cmd_id, "0 bytes ensured; no save was created");
                     self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
                 }
-                // ExtendSaveData(u8 SaveDataType, u128 userId, s64 size,
-                // s64 journal) -> an s64 the caller discards. Same argument
-                // shape as GetSaveDataSize below with the two sizes appended,
-                // so they sit at 0x18 and 0x20.
-                //
-                // There is no NAND quota here to grant the extension out of,
-                // so it is granted as asked and *remembered*: a title that
-                // reads its size back must be told what it just set rather
-                // than the NACP figure it has already moved past. Refusing it
-                // is where Minecraft stopped, `nn::fs::ExtendSaveData` aborts
-                // on any error, and an unknown command id is one.
+                // ExtendSaveData(u8 type, u128 uid, s64 size, s64 journal): granted and remembered.
                 Some(25) => {
                     let data = self.ipc_request_data(tls);
                     self.save_data_quota.size = self.mem.read_u64(data.wrapping_add(0x18))? as i64;
@@ -1002,36 +695,12 @@ impl Cpu {
                         self.mem.read_u64(data.wrapping_add(0x20))? as i64;
                     self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
                 }
-                // GetSaveDataSize(u8 SaveDataType, u128 userId) -> two s64s,
-                // the save's size and its journal's. The request confirms that
-                // shape: its `CmifDomainInHeader` declares data_size=0x28, so
-                // 0x18 bytes follow the `CmifInHeader`, a type padded to
-                // eight, then the uid.
-                //
-                // Neither input changes the answer. Every user's save of a
-                // title is allotted the same, and the emulated NAND has no
-                // quota to divide between save data types, so what a title is told is
-                // simply what it was allotted, which is its own NACP's figure
-                // once anything has read it (see `Cpu::set_save_data_sizes`).
-                //
-                // Refusing this is where Tomodachi Life stopped once `am` 210
-                // let it through: `nnSdk` answers an unknown command id with an
-                // svcBreak, 452M steps in, with the title's RomFS mounted and
-                // its first assets already decompressing.
+                // GetSaveDataSize(u8 type, u128 uid) -> two s64s.
                 Some(26) => {
                     let quota = self.save_data_quota;
                     self.write_save_data_pair(tls, quota.size, quota.journal_size)
                 }
-                // GetSaveDataSizeMax / GetDeviceSaveDataSizeMax: the same two
-                // s64s, for how far each save may be *extended* rather than
-                // what it was created at. Both take no input.
-                //
-                // A NACP commonly declares a size and no ceiling, and that 0
-                // is reported as it stands: it is the title's own statement
-                // that it never grows this save. Inventing headroom would
-                // answer a question the title did not ask, and the failure it
-                // causes, a title extending a save the system never agreed to
-                //, surfaces nowhere near here.
+                // GetSaveDataSizeMax / GetDeviceSaveDataSizeMax.
                 Some(28) => {
                     let quota = self.save_data_quota;
                     self.write_save_data_pair(tls, quota.size_max, quota.journal_size_max)
@@ -1044,13 +713,7 @@ impl Cpu {
                         quota.device_journal_size_max,
                     )
                 }
-                // GetCacheStorageMax -> an s32 and an s64: how many cache
-                // storages the title may address, and the ceiling on one
-                // storage's data and journal together.
-                //
-                // The two are laid out the way `sf` marshals a pair of
-                // outputs, each aligned to its own width, so the s64 is at +8
-                // and +4 is padding, not the second half of a packed struct.
+                // GetCacheStorageMax -> s32, then s64 at +8.
                 Some(29) => {
                     let quota = self.save_data_quota;
                     let mut out = Vec::with_capacity(16);
@@ -1059,34 +722,15 @@ impl Cpu {
                     out.extend_from_slice(&quota.cache_storage_size_max.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &out, &[])
                 }
-                // CreateCacheStorage(u16 index, s64 size, s64 journal) -> the
-                // storage it was put on, and how much room that took.
-                //
-                // Cache storage is scratch: a title asks for some, the system
-                // may delete it again between runs, and a title that finds it
-                // gone rebuilds it. Here there is one storage and it has no
-                // quota, so the request is granted as asked and nothing is
-                // reserved: `fsp-srv` will create the save the first time the
-                // title mounts it, exactly as it does for any other.
-                //
-                // Unlike its neighbours this command's *output* shape is not
-                // documented on switchbrew; it is `libnx`'s (a u32 target
-                // followed by a u64 required size). The reply is a full 0x10
-                // either way, which is the shape that survives being wrong,
-                // a reply may be longer than a caller expects, never shorter.
+                // CreateCacheStorage(u16 index, s64 size, s64 journal).
                 Some(27) => {
                     let mut out = Vec::with_capacity(16);
-                    // The one storage this console has.
                     out.extend_from_slice(&1u32.to_le_bytes());
                     out.extend_from_slice(&[0u8; 4]);
                     out.extend_from_slice(&0u64.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &out, &[])
                 }
-                // GetDesiredLanguage -> an `nn::settings::LanguageCode`, the
-                // null-padded BCP-47 tag as eight raw bytes. A title picks
-                // which of its own language assets to load from this, so it
-                // is the language the console is set to rather than a
-                // constant beside it: `set:sys`'s SetLanguageCode moves it.
+                // GetDesiredLanguage -> `nn::settings::LanguageCode`.
                 Some(21) => {
                     let code = self.system_settings().language_code;
                     self.write_ipc_response(tls, 0, &[], &code.to_le_bytes(), &[])
@@ -1097,51 +741,24 @@ impl Cpu {
                     version[..5].copy_from_slice(b"1.0.0");
                     self.write_ipc_response(tls, 0, &[], &version, &[])
                 }
-                // BeginBlockingHomeButtonShortAndLongPressed(s64 timeout) and
-                // its End, then the same pair for the plain home button.
-                //
-                // A title asks for this before doing something it must not be
-                // interrupted in the middle of, JKSV blocks the home button
-                // while it writes a save. There is no home button here and no
-                // home menu to return to, so nothing *can* interrupt it: the
-                // request is granted because it is already true.
+                // BeginBlockingHomeButton{ShortAndLongPressed,} and End.
                 Some(30) | Some(31) | Some(32) | Some(33) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // NotifyRunning -> whether the notification was the first one.
+                // NotifyRunning.
                 Some(40) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
-                // GetPseudoDeviceId -> a 16-byte per-console, per-title id.
-                // Zero is a legitimate value and nothing here derives anything
-                // from it, but it must be the right *size*, a caller copies
-                // 16 bytes out of the reply either way.
+                // GetPseudoDeviceId -> 16 bytes.
                 Some(50) => {
                     self.warn_stub(&iface, cmd_id, "an all-zero device id");
                     self.write_ipc_response(tls, 0, &[], &[0u8; 16], &[])
                 }
-                // GetGpuErrorDetectedSystemEvent: the event `nn::oe::
-                // SetupGpuErrorHandler` registers with the SDK's system
-                // worker, so that a GPU fault wakes a handler instead of
-                // hanging the title. It is the first thing a retail `nnSdk`
-                // asks `am` for that it cannot start without, answering it
-                // with anything but a copy handle aborts `nn::oe::Initialize`.
-                // Nothing here ever faults the GPU, so the event is handed out
-                // and never signalled.
+                // GetGpuErrorDetectedSystemEvent: never signalled.
                 Some(130) => {
                     self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = self.alloc_event("am:gpu-error", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // SetTerminateResult(Result): why the title is about to
-                // stop. AM keeps it because the title will not be there to
-                // ask once it has: it outlives the process and is read back
-                // through GetLastApplicationExitReason below, and on hardware
-                // it is the code an error screen quotes.
-                //
-                // It is also the only statement a failing title makes about
-                // its own failure, so a non-zero one is said out loud rather
-                // than only stored. A title that gave up and a title that
-                // finished both stop, and nothing else in the log separates
-                // them.
+                // SetTerminateResult(Result).
                 Some(22) => {
                     let result = self.mem.read_u32(self.ipc_request_data(tls))?;
                     self.am_terminate_result = result;
@@ -1157,52 +774,22 @@ impl Cpu {
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // GetLastApplicationExitReason -> u32: what the application
-                // that stopped last stopped for. There has only ever been one
-                // program here and it is the one asking, so the answer is
-                // whatever it last told SetTerminateResult, zero until it
-                // tells us otherwise, which is what a console reports for an
-                // application that exited normally.
-                //
-                // switchbrew names the command and its one out word and not
-                // the encoding of that word; the shape is what a caller acts
-                // on, and refusing it is an svcBreak.
+                // GetLastApplicationExitReason -> u32.
                 Some(200) => {
                     let reason = self.am_terminate_result;
                     self.write_ipc_response(tls, 0, &[], &reason.to_le_bytes(), &[])
                 }
-                // InitializeGamePlayRecording / SetGamePlayRecordingState /
-                // SetDelayTimeToAbortOnGpuError: nothing to record, nothing
-                // to fault, nothing to report back.
+                // InitializeGamePlayRecording / SetGamePlayRecordingState / SetDelayTimeToAbortOnGpuError.
                 Some(66) | Some(67) | Some(131) => {
                     self.warn_stub(&iface, cmd_id, "accepted and not recorded");
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // InitializeApplicationCopyrightFrameBuffer /
-                // SetApplicationCopyrightImage /
-                // SetApplicationCopyrightVisibility: the notice the system
-                // draws over the title's screenshots and captures. Nothing
-                // here captures, so there is nothing to draw it on. Nintendo
-                // Switch Sports sets the buffer up as it boots and aborts on
-                // the unknown-command answer, 2010-0221.
+                // Copyright frame buffer, image and visibility.
                 Some(100) | Some(101) | Some(102) => {
                     self.warn_stub(&iface, cmd_id, "accepted, and no capture draws it");
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // Command 210, added in 20.0.0 and still unnamed on
-                // switchbrew: no input, one out **event**. It sits between
-                // GetLastApplicationExitReason (200) and SetAudioOutputPolicy
-                // (220), beside the exit-request flow the same firmware added
-                // at 310, so what fires it is the system asking a running
-                // title to quit. Nothing here can ask, so it is handed out and
-                // never signalled, which is a wait that genuinely never
-                // finishes rather than one answered wrongly.
-                //
-                // The name is unknown; the shape is not, and the shape is what
-                // a caller acts on. Tomodachi Life asks for this immediately
-                // after its account setup, and `nnSdk` answers an unknown
-                // command id with an svcBreak, so refusing it ended the boot
-                // there.
+                // 210 (20.0.0+, unnamed): one out event, never signalled.
                 Some(210) => {
                     self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = match self.application_functions_210_event {
@@ -1217,41 +804,14 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // ISelfController: the applet's own lifecycle knobs.
+            // ISelfController.
             "am:self-controller" => match cmd_id {
-                // Exit / LockExit / UnlockExit / EnterFatalSection /
-                // LeaveFatalSection / SetScreenShotPermission /
-                // Set{Operation,Performance}ModeChangedNotification /
-                // SetFocusHandlingMode / SetRestartMessageEnabled /
-                // SetScreenShotAppletIdentityInfo /
-                // SetOutOfFocusSuspendingEnabled /
-                // SetScreenShotImageOrientation / SetHandlesRequestToDisplay /
-                // OverrideAutoSleepTimeAndDimmingTime /
-                // SetInputDetectionSourceSet / ReportUserIsActive /
-                // SetInputDetectionPolicy /
-                // SetAlbumImageTakenNotificationEnabled /
-                // SetApplicationAlbumUserData / SetRecordVolumeMuted.
-                //
-                // Every one of these is a setter or a notifier whose whole
-                // reply is a Result. There is no suspend, screenshot, album,
-                // idle-detection or exit-lock behaviour behind them to change,
-                // so accepting the setting really is the complete
-                // implementation, unlike the commands below it, a bare
-                // success here is the truth.
+                // Setters and notifiers whose whole reply is a Result.
                 Some(0..=4) | Some(10..=16) | Some(19) | Some(51) | Some(60) | Some(64)
                 | Some(65) | Some(72) | Some(100) | Some(110) | Some(130) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // SetIdleTimeDetectionExtension(u32) /
-                // GetIdleTimeDetectionExtension -> u32, and
-                // SetAutoSleepDisabled(bool) / IsAutoSleepDisabled -> bool.
-                //
-                // Nothing here sleeps or dims the panel, so neither setting
-                // has an effect to implement -- but each has a getter beside
-                // it, and a setting that does not read back is a different
-                // bug from one that was never implemented. Both were on the
-                // accept-everything list above with no getter at all, so the
-                // read was a refusal `nnSdk` aborts on.
+                // Set/GetIdleTimeDetectionExtension, SetAutoSleepDisabled / IsAutoSleepDisabled.
                 Some(62) => {
                     let data = self.ipc_request_data(tls);
                     self.idle_time_detection_extension = self.mem.read_u32(data).unwrap_or(0);
@@ -1270,17 +830,7 @@ impl Cpu {
                     let disabled = u8::from(self.auto_sleep_disabled);
                     self.write_ipc_response(tls, 0, &[], &[disabled], &[])
                 }
-                // SetHandlesRequestToDisplay(bool): the applet is taking
-                // responsibility for when it appears. AM answers by queueing
-                // `RequestToDisplay`, and the applet draws its first frame
-                // only once it has read that message and called
-                // `ApproveToDisplay` (51, accepted above -- it used to reach
-                // `unimplemented_command`, which `nnSdk` aborts on).
-                //
-                // Without the message the Home Menu waits for permission that
-                // never comes: it finishes its layer, preallocates both
-                // swapchain buffers, and then runs its frame loop for thirty
-                // seconds of console time without ever dequeuing one.
+                // SetHandlesRequestToDisplay: queues `RequestToDisplay`.
                 Some(50) => {
                     let data = self.ipc_request_data(tls);
                     if self.mem.read_u8(data).unwrap_or(0) != 0 {
@@ -1288,43 +838,26 @@ impl Cpu {
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // GetLibraryAppletLaunchableEvent: real AM signals it as it
-                // hands it over, and nothing here contends for the right to
-                // launch one. Left dark, which it was, sharing the arm below
-                //: an applet that waits for permission never gets it.
+                // GetLibraryAppletLaunchableEvent: signalled.
                 Some(9) => {
                     let h = self.kept_event("am:library-applet-launchable", handle);
                     self.signal_event(h);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // GetAccumulatedSuspendedTickChangedEvent: fires when the
-                // count at 90 moves, and nothing here ever suspends. The
-                // handle still has to be real, `libnx`'s `appletInitialize`
-                // asks on 6.0.0+ and keeps whatever came back, so a reply with
-                // no handle left it holding 0.
+                // GetAccumulatedSuspendedTickChangedEvent.
                 Some(91) => {
                     self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = self.kept_event("am:accumulated-suspended-tick-changed", handle);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // Unknown230(u32) -> u16, meaning unknown. Data Erase asks at
-                // startup.
+                // Unknown230(u32) -> u16.
                 Some(230) => {
                     self.warn_stub(&iface, cmd_id, "an unknown command, answered 0");
                     self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
-                // GetAccumulatedSuspendedTickValue: nothing has ever been
-                // suspended.
+                // GetAccumulatedSuspendedTickValue.
                 Some(90) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
-                // IsSystemBufferSharingEnabled: whether this applet draws
-                // into a buffer the system shares between applets rather than
-                // a layer of its own.
-                //
-                // It does not, and saying so is what sends it down the
-                // CreateManagedDisplayLayer path below, the one `vi` here
-                // actually models. Reporting it enabled would commit the
-                // caller to asking for a shared buffer handle that nothing
-                // can produce.
+                // IsSystemBufferSharingEnabled: false.
                 Some(41) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // GetSystemSharedBufferHandle -> buffer id;
                 // GetSystemSharedLayerHandle -> buffer id + layer id.
@@ -1335,19 +868,11 @@ impl Cpu {
                     raw.extend_from_slice(&1u64.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
-                // CreateManagedDisplayLayer -> the layer id the caller then
-                // passes to `vi`'s OpenLayer. The display stub only models one
-                // layer and calls it 1 (see [`Cpu::vi_native_window`]), so this
-                // has to agree with it.
+                // CreateManagedDisplayLayer: `vi` models one layer, id 1.
                 Some(40) => self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[]),
-                // CreateManagedDisplaySeparableLayer -> the same layer plus a
-                // recording layer, which nothing here records from.
+                // CreateManagedDisplaySeparableLayer.
                 Some(44) => {
-                    // The recording layer is reported as 0, not as the layer
-                    // itself. `vi` here models one layer and calls it 1, and
-                    // handing the same id back twice invites the caller to
-                    // open it a second time and rebind the binder underneath
-                    // its own swapchain.
+                    // The recording layer is 0 so the caller does not open layer 1 twice.
                     let mut raw = Vec::with_capacity(16);
                     raw.extend_from_slice(&1u64.to_le_bytes());
                     raw.extend_from_slice(&0u64.to_le_bytes());
@@ -1355,35 +880,9 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // IWindowController: foreground rights and the applet resource id
-            // every other service tags this process's requests with.
-            // IDisplayController: the applet's view of the *capture* buffers,
-            // the screenshot of whatever was on screen before it, which an
-            // applet composites behind itself so the menu or the game shows
-            // through.
-            //
-            // There is nothing behind any applet here, so every acquire
-            // reports that no capture was written and names no layer. What it
-            // must not do is refuse: `miiEdit` asks for command 26 and
-            // `nnSdk` answers an unknown command id with an svcBreak, which
-            // killed it before it drew anything.
+            // IWindowController and IDisplayController.
             "am:display-controller" => match cmd_id {
-                // Acquire{LastApplication,LastForeground,CallerApplet}
-                // CaptureSharedBuffer -> bool written, s32 shared-buffer slot.
-                //
-                // The applet is asking for the screen of whatever was on
-                // display before it, the Album draws its gallery over a
-                // frozen shot of the Home Menu. Nothing was: an applet booted
-                // here is booted alone, so the honest capture is a black one.
-                //
-                // Answering "nothing written, slot -1" is not the way to say
-                // that. `nnSdk` treats it as *not ready yet* and asks again:
-                // the Album applet spent every frame of a 300M-instruction run
-                // in that retry loop and never got as far as a draw. So the
-                // reply names a real slot, and the slot named is the first one
-                // past the two `AcquireSharedFrameBuffer` hands out, which
-                // nothing renders into and nothing has written: its pages are
-                // soft-mapped and read as the zeros this claims they are.
+                // Acquire*CaptureSharedBuffer: a real, never-written slot past the two framebuffers.
                 Some(22) | Some(24) | Some(26) => {
                     let mut raw = Vec::with_capacity(8);
                     raw.extend_from_slice(&[1u8, 0, 0, 0]); // was_written = true
@@ -1392,31 +891,19 @@ impl Cpu {
                     );
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
-                // The matching releases, ClearCaptureBuffer,
-                // ClearAppletTransitionBuffer, and the two screenshot
-                // commands: nothing to release, clear or capture.
+                // Capture releases and clears.
                 Some(8) | Some(20) | Some(21) | Some(23) | Some(25) | Some(27) | Some(28) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // Update{LastForeground,CallerApplet}CaptureImage: the same,
-                // and they answer with a bare Result.
+                // Update{LastForeground,CallerApplet}CaptureImage.
                 Some(1) | Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // Get{LastForeground,LastApplication,CallerApplet}
-                // CaptureImageEx -> bool written, with the image itself going
-                // into a map-alias out buffer of 0x384000 bytes: 1280x720
-                // RGBA8888. The black capture the three `Acquire`s above hand
-                // out as a slot, handed over as pixels instead, so it is
-                // cleared here rather than left as whatever the caller's
-                // buffer held, which is what it would then have drawn.
+                // Get*CaptureImageEx: a black 1280x720 RGBA8888 image into the out buffer.
                 Some(5) | Some(6) | Some(7) => {
                     if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                         let page = crate::mem::PAGE_SIZE as u32;
                         let end = addr.saturating_add(size);
                         let mut at = addr;
                         while at < end {
-                            // `fill_le` looks the page up once for a run that
-                            // stays inside one, and writes a byte at a time
-                            // for a run that does not.
                             let run = (page - at % page).min(end - at);
                             if self.mem.fill_le(at, 1, 0, run).is_err() {
                                 break;
@@ -1430,16 +917,12 @@ impl Cpu {
             },
             "am:window-controller" => match cmd_id {
                 // GetAppletResourceUserId / GetAppletResourceUserIdOfCallerApplet.
-                // There is one process here, so it gets one id; the `vi` and
-                // `hid` stubs ignore which id a request carries.
                 Some(1) | Some(2) => self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[]),
-                // AcquireForegroundRights / ReleaseForegroundRights /
-                // RejectToChangeIntoBackground: nothing else is competing for
-                // the foreground.
+                // AcquireForegroundRights / ReleaseForegroundRights / RejectToChangeIntoBackground.
                 Some(10) | Some(11) | Some(12) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // IAudioController: the applet's volume relative to the system's.
+            // IAudioController.
             "am:audio-controller" => match cmd_id {
                 // SetExpectedMasterVolume / ChangeMainAppletMasterVolume /
                 // SetTransparentVolumeRate.
@@ -1450,14 +933,9 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // IAppletCommonFunctions: knobs an applet sets on itself that
-            // are not specific to being an application or a library applet.
+            // IAppletCommonFunctions.
             "am:applet-common-functions" => match cmd_id {
-                // SetHomeButtonDoubleClickEnabled(bool) /
-                // GetHomeButtonDoubleClickEnabled -> bool. Nothing here acts
-                // on a double press, but the getter has to read back what the
-                // setter was given -- and refusing it at all is a 2010-0221,
-                // which `nnSdk` turns into an svcBreak.
+                // Set/GetHomeButtonDoubleClickEnabled.
                 Some(50) => {
                     let data = self.ipc_request_data(tls);
                     self.home_button_double_click_enabled =
@@ -1468,24 +946,13 @@ impl Cpu {
                     let enabled = u8::from(self.home_button_double_click_enabled);
                     self.write_ipc_response(tls, 0, &[], &[enabled], &[])
                 }
-                // SetCpuBoostRequestPriority: where this applet sits in the
-                // queue when several ask the system to boost the CPU. There
-                // is one process here and no governor to ask.
+                // SetCpuBoostRequestPriority.
                 Some(70) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // 20.0.0+, and unnamed: switchbrew's table stops at 341. Eden's
-                // `am/service/applet_common_functions.cpp` reads it as one u16
-                // out and answers 0, which is the only account of its shape
-                // there is, and a scalar is the one kind of answer that cannot
-                // leave the caller holding an object that was never handed over.
+                // 20.0.0+, unnamed: one u16 out (per Eden).
                 Some(350) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // ISystemProcessCommonFunctions: one command, which hands back an
-            // IApplicationObserver, the interface a system process watches a
-            // running application through. The observer's own commands (1, 2,
-            // 10, 20, 30, 40) have no published names or signatures, so they
-            // stop at [`Cpu::unimplemented_command`] and name themselves there
-            // rather than being guessed at.
+            // ISystemProcessCommonFunctions: hands back an IApplicationObserver.
             "am:system-process-common-functions" => match cmd_id {
                 Some(1) => {
                     self.reply_with_interface(tls, handle, "am:application-observer")?;
@@ -1493,26 +960,13 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // IHomeMenuFunctions: what only the Home Menu can do. qlaunch
-            // opens this before it draws anything, so every one of these runs
-            // during boot rather than on a user action.
+            // IHomeMenuFunctions.
             "am:home-menu-functions" => match cmd_id {
-                // RequestToGetForeground / LockForeground / UnlockForeground:
-                // who owns the screen. There is one applet here and it always
-                // owns it.
+                // RequestToGetForeground / LockForeground / UnlockForeground.
                 Some(10) | Some(11) | Some(12) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // PopFromGeneralChannel -> IStorage. The channel is what
-                // another process pushes a message onto, an nfc tag scan, a
-                // Joy-Con pairing. Nothing here pushes one, and an empty
-                // channel is reported as `am` 2, NoDataInChannel: the Home
-                // Menu drains this until it gets that error, so a *refusal* to
-                // answer at all is what stops it (`nnSdk` aborts on an unknown
-                // command id rather than carrying on).
+                // PopFromGeneralChannel: always empty.
                 Some(20) => self.write_ipc_response(tls, AM_NO_DATA_IN_CHANNEL, &[], &[], &[]),
-                // GetPopFromGeneralChannelEvent: the event that fires when a
-                // message lands on that channel. Handed out and never
-                // signalled, because nothing here ever pushes one, but the
-                // same event each time, since the menu keeps a waiter on it.
+                // GetPopFromGeneralChannelEvent: never signalled.
                 Some(21) => {
                     let h = match self.general_channel_event {
                         Some(h) => h,
@@ -1524,31 +978,22 @@ impl Cpu {
                     };
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // GetHomeButtonWriterLockAccessor / GetWriterLockAccessorEx:
-                // the lock the menu takes to suppress the HOME button while a
-                // transition is running.
+                // GetHomeButtonWriterLockAccessor / GetWriterLockAccessorEx.
                 Some(30) | Some(31) => {
                     self.reply_with_interface(tls, handle, "am:lock-accessor")?;
                     Ok(())
                 }
-                // IsSleepEnabled / IsRebootEnabled -> bool. Both are what a
-                // retail console with no parental or demo restriction reports;
-                // neither actually happens here, but the menu greys the
-                // entries out when they are false.
+                // IsSleepEnabled / IsRebootEnabled.
                 Some(40) | Some(41) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
                 // IsForceTerminateApplicationDisabledForDebug -> bool.
                 Some(110) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-                // SetLastApplicationExitReason: recorded for the next crash
-                // report, which nothing here writes.
+                // SetLastApplicationExitReason.
                 Some(1000) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // ILockAccessor: one of those HOME-button locks. Only the Home
-            // Menu holds one, and nothing else here contends for it.
+            // ILockAccessor.
             "am:lock-accessor" => match cmd_id {
-                // TryLock(bool return_handle) -> (bool locked, event). Nothing
-                // else here holds the lock, so it is always taken; the handle
-                // only comes back when the caller asked for it.
+                // TryLock(bool return_handle) -> (bool locked, event).
                 Some(1) => {
                     let want_handle =
                         self.mem.read_u8(self.ipc_request_data(tls)).unwrap_or(0) != 0;
@@ -1570,101 +1015,52 @@ impl Cpu {
                 Some(4) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // IGlobalStateController: the console-wide power state, which the
-            // Home Menu owns rather than shares. The sequences at 0-4 (sleep,
-            // shutdown, reboot) are deliberately not implemented: they are
-            // user actions, and a console that answers "done" to a shutdown it
-            // did not perform is worse than one that refuses.
+            // IGlobalStateController. Sleep, shutdown and reboot (0-4) are not implemented.
             "am:global-state-controller" => match cmd_id {
-                // IsAutoPowerDownRequested -> bool. The idle timer has not
-                // fired, because there is no idle timer.
+                // IsAutoPowerDownRequested.
                 Some(9) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-                // LoadAndApplyIdlePolicySettings / NotifyCecSettingsChanged /
-                // SetDefaultHomeButtonLongPressTime /
-                // UpdateDefaultDisplayResolution: settings applied to hardware
-                // that is not here.
+                // Idle policy, CEC, HOME long press and display resolution settings.
                 Some(10) | Some(11) | Some(12) | Some(13) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // ShouldSleepOnBoot -> bool. A console that was put to sleep
-                // rather than shut down resumes straight back to sleep; this
-                // one always boots awake.
+                // ShouldSleepOnBoot.
                 Some(14) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-                // GetHdcpAuthenticationFailedEvent: fires when a dock refuses
-                // to authenticate. There is no dock.
+                // GetHdcpAuthenticationFailedEvent.
                 Some(15) => {
                     let h = self.alloc_event("am:hdcp-failed", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // IProcessWindingController: how an applet is resumed after
-            // "winding": being paused so another applet can run in front of
-            // it and then unwound back. Nothing here can wind anything: there
-            // is one process and nowhere for it to go.
+            // IProcessWindingController.
             "am:process-winding-controller" => match cmd_id {
-                // GetLaunchReason -> AppletProcessLaunchReason { u8 flag, u8
-                // pad[2], u8 unknown }. All-zero is "started normally", which
-                // is the only way anything starts here, the nonzero flags
-                // mean the process was resumed from a wind or restarted by the
-                // menu.
+                // GetLaunchReason: all zero is a normal start.
                 Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8; 4], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // ILibraryAppletSelfAccessor: what a library applet asks about
-            // *itself*, and how it is handed its caller's arguments.
+            // ILibraryAppletSelfAccessor.
             "am:library-applet-self-accessor" => match cmd_id {
-                // GetLibraryAppletInfo -> LibraryAppletInfo { AppletId,
-                // LibraryAppletMode }.
-                //
-                // AllForeground (0) is the mode: this applet owns the screen.
-                // There is no home menu behind it, nothing else drawing, and
-                // no indirect-display path to hand its frames to, so of the
-                // five modes it is the only one that is true here.
+                // GetLibraryAppletInfo: AllForeground.
                 Some(11) => {
                     let mut info = [0u8; 8];
                     info[..4].copy_from_slice(&applet_id_for(self.program_id()).to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &info, &[])
                 }
-                // ShouldSetGpuTimeSliceManually -> bool. An applet that owns
-                // the screen outright does not have to divide the GPU with a
-                // running application, so it has no time slice to set.
-                //
-                // Refusing it is what killed `swkbd`: it aborted into
-                // `fatal:u` two million instructions in, before any of the
-                // rendering the rest of this is about.
+                // ShouldSetGpuTimeSliceManually.
                 Some(150) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                // GetMainAppletIdentityInfo / GetCallerAppletIdentityInfo ->
-                // AppletIdentityInfo { AppletId, pad, u64 title_id }.
-                //
-                // Both are the home menu. A library applet is launched by
-                // whatever is in the foreground, and the only thing that ever
-                // launches one from a standing start is the menu, which is
-                // also the applet that would be behind it on the stack.
+                // GetMainAppletIdentityInfo / GetCallerAppletIdentityInfo: the home menu.
                 Some(12) | Some(14) => {
                     let info = home_menu_identity();
                     self.write_ipc_response(tls, 0, &[], &info, &[])
                 }
-                // CanUseApplicationCore -> bool: whether this applet may run
-                // on the core an application would hold. Real `am` answers
-                // from the applet's own NPDM core mask; nothing here schedules
-                // by core, and false is what Eden reports for every applet.
+                // CanUseApplicationCore.
                 Some(13) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-                // GetMainAppletApplicationDesiredLanguage -> an
-                // `nn::settings::LanguageCode`, the language the *caller's*
-                // title runs in rather than the console's. Both are the one
-                // `IApplicationFunctions::GetDesiredLanguage` reports.
+                // GetMainAppletApplicationDesiredLanguage.
                 Some(60) => {
                     let code = self.system_settings().language_code;
                     self.write_ipc_response(tls, 0, &[], &code.to_le_bytes(), &[])
                 }
-                // GetCallerAppletIdentityInfoStack -> s32 count, with the
-                // entries themselves in a map-alias out buffer: this applet's
-                // caller, then *its* caller, and so on up. The chain above
-                // this one is the menu and nothing else, so the stack is the
-                // single entry 12 and 14 already answer with, and a count
-                // that overruns the buffer the caller sized is worse than a
-                // short one, so it is what fits.
+                // GetCallerAppletIdentityInfoStack: the home menu as the single entry.
                 Some(17) => {
                     let info = home_menu_identity();
                     let (addr, size) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
@@ -1681,22 +1077,12 @@ impl Cpu {
                     }
                     self.write_ipc_response(tls, 0, &[], &(count as i32).to_le_bytes(), &[])
                 }
-                // GetDesirableKeyboardLayout -> nn::settings::KeyboardLayout,
-                // the layout the applet's caller asked it to open with.
-                // Hardware errors when no caller set one; there is no caller
-                // here, so this answers with the console's own layout,
-                // `set:sys`'s GetKeyboardLayout, which the settings applet
-                // is what moves.
+                // GetDesirableKeyboardLayout: the console's layout.
                 Some(19) => {
                     let layout = self.system_settings().keyboard_layout;
                     self.write_ipc_response(tls, 0, &[], &layout.to_le_bytes(), &[])
                 }
-                // PushOutData(IStorage): the applet handing back what it
-                // produced, the keyboard's text, the controller applet's
-                // player count. On a console the caller that launched it pops
-                // this; running one directly, the host that started it is the
-                // caller, so the bytes are kept for
-                // [`Cpu::library_applet_results`] and read out into the log.
+                // PushOutData(IStorage): kept for [`Cpu::library_applet_results`].
                 Some(1) => {
                     let data = self
                         .ipc_input_object_key(tls, handle, 0)
@@ -1716,12 +1102,7 @@ impl Cpu {
                     self.am_out_data.push(data.unwrap_or_default());
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // PushInteractiveOutData(IStorage): the applet's half of a
-                // conversation with its caller, the keyboard offering its
-                // text to be checked, an inline keyboard reporting a keypress.
-                // The message is kept for the host that started the applet,
-                // which is the only thing here that can answer it through
-                // [`Cpu::push_applet_interactive_in_data`].
+                // PushInteractiveOutData(IStorage): kept for the host.
                 Some(3) => {
                     let data = self
                         .ipc_input_object_key(tls, handle, 0)
@@ -1747,12 +1128,7 @@ impl Cpu {
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // GetPopInDataEvent / GetPopInteractiveInDataEvent -> event.
-                // What an applet waits on rather than polling the pop that
-                // refuses; a **copy** handle, like every other event a service
-                // hands out. Refusing these left an applet that waits before
-                // it pops with an unknown command id, which `nnSdk` treats as
-                // fatal.
+                // GetPopInDataEvent / GetPopInteractiveInDataEvent.
                 Some(5) | Some(6) => {
                     let queue = if cmd_id == Some(5) {
                         AppletQueue::InData
@@ -1763,54 +1139,22 @@ impl Cpu {
                     self.refresh_applet_pop_events();
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
-                // ExitProcessAndReturn: the applet is finished. `am`
-                // terminates the process here and the call does not return,
-                // so halting is the whole implementation, and it is how a
-                // run of a library applet ends normally rather than on a
-                // fault or a refused command.
+                // ExitProcessAndReturn.
                 Some(10) => {
                     self.halted = true;
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // A setter the applet calls during init, carrying 16 bytes
-                // of arguments and expecting nothing back but a Result.
-                // Whatever it is configuring has no equivalent here.
+                // An unnamed init-time setter taking 16 bytes.
                 Some(160) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // PopInData -> IStorage: the arguments the applet was
-                // launched with, which its caller pushed before starting it.
-                //
-                // There is no caller here: a library applet is being run
-                // directly, so the storage every caller pushes first is
-                // synthesized instead: `LibAppletCommonArguments`, the
-                // 0x20-byte block carrying the API version the two sides
-                // agreed on and the theme to draw in. What the applet pops
-                // after that is its own launch struct, which only its caller
-                // could know; there is no second storage to hand over.
+                // PopInData -> IStorage.
                 Some(0) => self.pop_applet_storage(tls, handle, AppletQueue::InData),
-                // PopInteractiveInData -> IStorage: the caller's answer to
-                // what the applet last pushed. Only the host can have left one
-                // here, so an applet that pops without one having been queued
-                // is refused the way an empty `PopInData` is.
+                // PopInteractiveInData -> IStorage.
                 Some(2) => self.pop_applet_storage(tls, handle, AppletQueue::InteractiveInData),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // ILibraryAppletCreator: how one applet launches another,
-            // a game asking for the keyboard, a homebrew handing the screen
-            // to the browser.
-            //
-            // The applet itself is a separate process, and this emulator
-            // hosts one. So the accessor handed back here drives an applet
-            // that starts and immediately gives up: see
-            // `am:library-applet-accessor` for why that is more useful than
-            // refusing the creation outright.
+            // ILibraryAppletCreator.
             "am:library-applet-creator" => match cmd_id {
-                // CreateLibraryApplet(u32 AppletId, u32 LibraryAppletMode)
-                // -> ILibraryAppletAccessor, and CreateLibraryAppletEx,
-                // which is the same call with the caller's thread id
-                // appended, real `am` attributes the launch to that thread,
-                // and nothing here runs the applet to attribute. Refusing it
-                // is what stopped the caller: `nnSdk` turns an unknown
-                // command id into 2010-0221 and aborts on it.
+                // CreateLibraryApplet / CreateLibraryAppletEx (adds a thread id).
                 Some(0) | Some(3) => {
                     let at = self.ipc_request_data(tls);
                     let id = self.mem.read_u32(at)?;
@@ -1828,21 +1172,13 @@ impl Cpu {
                     self.am_applets.insert(key, LibraryApplet::new(id, mode));
                     Ok(())
                 }
-                // TerminateAllLibraryApplets, and AreAnyLibraryAppletsLeft ->
-                // bool. Nothing was ever left running to terminate.
+                // TerminateAllLibraryApplets / AreAnyLibraryAppletsLeft.
                 Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 Some(2) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                // CreateStorage(s64 size) -> IStorage: the buffer a caller
-                // fills with an applet's launch arguments before pushing it.
-                // The bytes are the storage's own, so it starts as `size`
-                // zeroes and the caller writes through an IStorageAccessor.
+                // CreateStorage(s64 size) -> IStorage.
                 Some(10) => {
-                    /// Past this, the size is not a launch argument any
-                    /// caller actually sends, and allocating what it asks for
-                    /// is how a bad size becomes an abort.
                     const MAX_STORAGE: u64 = 64 * 1024 * 1024;
-                    /// `KERNELRESULT(OutOfMemory)`: what a console answers
-                    /// when it cannot allocate the storage.
+                    /// `KERNELRESULT(OutOfMemory)`.
                     const OUT_OF_MEMORY: u32 = 1 | (104 << 9);
                     let size = self.mem.read_u64(self.ipc_request_data(tls))?;
                     if size > MAX_STORAGE {
@@ -1852,37 +1188,14 @@ impl Cpu {
                     self.am_storages.insert(key, vec![0u8; size as usize]);
                     Ok(())
                 }
-                // CreateTransferMemoryStorage and CreateHandleStorage take
-                // the memory their bytes live in as a handle.
-                // `svcCreateTransferMemory` here hands back one fixed handle
-                // and records no address, so there is nothing to read the
-                // contents from: such a storage would be zeroes claiming to
-                // be the caller's data, which is worse than a refusal.
+                // CreateTransferMemoryStorage / CreateHandleStorage: no backing memory to read.
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // ILibraryAppletAccessor: the object a caller drives a launched
-            // applet through: start it, wait for it to finish, read back
-            // what it produced.
-            //
-            // Nothing runs, so the applet finishes the moment it is started
-            // and reports the one honest outcome available: cancelled, the
-            // result a console gives when the user backs out of an applet
-            // without it producing anything. `libnx` reads that as
-            // `LibAppletExitReason_Canceled` and fails the caller's
-            // `libappletStart`, which is a path callers are written to
-            // survive: unlike the alternatives, which are a success whose
-            // output storage is empty (the caller reads zeroes as though the
-            // user had typed them) or a refused command (`nnSdk` treats an
-            // unknown command id as fatal).
-            //
-            // The one thing that must not happen is silence: the caller waits
-            // on the state-changed event forever, so it is signalled here
-            // whether it was fetched before the start or after it.
+            // ILibraryAppletAccessor: the applet finishes, cancelled, as soon as it starts.
             "am:library-applet-accessor" => {
                 let key = self.ipc_object_key(tls, handle);
                 match cmd_id {
-                    // GetAppletStateChangedEvent -> event. A **copy** handle,
-                    // like every other event a service hands out.
+                    // GetAppletStateChangedEvent.
                     Some(0) => {
                         let event = self.library_applet_event(key, STATE_CHANGED_EVENT);
                         if self.library_applet_finished(key) {
@@ -1890,15 +1203,12 @@ impl Cpu {
                         }
                         self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                     }
-                    // IsCompleted -> bool. What the caller polls between
-                    // waits on the event above; an applet that has been
-                    // started here has already finished.
+                    // IsCompleted.
                     Some(1) => {
                         let done = u8::from(self.library_applet_finished(key));
                         self.write_ipc_response(tls, 0, &[], &done.to_le_bytes(), &[])
                     }
-                    // Start, RequestExit and Terminate: all three end the
-                    // applet, because it was over before it began.
+                    // Start / RequestExit / Terminate.
                     Some(10) | Some(20) | Some(25) => {
                         if let Some(applet) = self.am_applets.get_mut(&key) {
                             applet.finish();
@@ -1906,36 +1216,22 @@ impl Cpu {
                         self.signal_library_applet_event(key, STATE_CHANGED_EVENT);
                         self.write_ipc_response(tls, 0, &[], &[], &[])
                     }
-                    // GetResult: why the applet ended. See the note above the
-                    // interface for why this is a cancellation rather than a
-                    // success.
+                    // GetResult: cancelled.
                     Some(30) => {
-                        /// `am` description 22, which `libnx` maps to
-                        /// `LibAppletExitReason_Canceled`.
+                        /// `am` description 22, `LibAppletExitReason_Canceled`.
                         const CANCELLED: u32 = 128 | (22 << 9);
                         self.write_ipc_response(tls, CANCELLED, &[], &[], &[])
                     }
-                    // PushInData / PushExtraStorage / PushInteractiveInData:
-                    // the storages the caller hands the applet. Accepted and
-                    // dropped: there is no applet to read them, and the
-                    // caller keeps its own reference to each one.
+                    // PushInData / PushExtraStorage / PushInteractiveInData: dropped.
                     Some(100) | Some(102) | Some(103) => {
                         self.write_ipc_response(tls, 0, &[], &[], &[])
                     }
-                    // PopOutData / PopInteractiveOutData -> IStorage: what
-                    // the applet produced. An applet that never ran produced
-                    // nothing, which is a real answer rather than an empty
-                    // storage, a caller reading a zeroed reply struct
-                    // believes every field in it.
+                    // PopOutData / PopInteractiveOutData: nothing produced.
                     Some(101) | Some(104) => {
-                        /// `am` description 3: no storage to pop.
                         const NO_DATA: u32 = 128 | (3 << 9);
                         self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
                     }
-                    // GetPopOutDataEvent / GetPopInteractiveOutDataEvent:
-                    // fired when there is something to pop, which there never
-                    // is. Handed out and left dark, so a caller that waits on
-                    // one times out instead of reading a handle of 0.
+                    // GetPopOutDataEvent / GetPopInteractiveOutDataEvent: never signalled.
                     Some(105) => {
                         let event = self.library_applet_event(key, POP_OUT_DATA_EVENT);
                         self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
@@ -1944,11 +1240,9 @@ impl Cpu {
                         let event = self.library_applet_event(key, POP_INTERACTIVE_OUT_DATA_EVENT);
                         self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                     }
-                    // NeedsToExitProcess -> bool: whether the caller has to
-                    // exit for the applet to run. Nothing here does.
+                    // NeedsToExitProcess.
                     Some(110) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                    // GetLibraryAppletInfo -> LibraryAppletInfo { AppletId,
-                    // LibraryAppletMode }: what this accessor was created for.
+                    // GetLibraryAppletInfo.
                     Some(120) => {
                         let mut info = [0u8; 8];
                         if let Some(applet) = self.am_applets.get(&key) {
@@ -1957,22 +1251,15 @@ impl Cpu {
                         }
                         self.write_ipc_response(tls, 0, &[], &info, &[])
                     }
-                    // RequestForAppletToGetForeground: the caller offering
-                    // the screen to an applet that is not there.
+                    // RequestForAppletToGetForeground.
                     Some(150) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                    // GetIndirectLayerConsumerHandle, for the modes that
-                    // compose the applet's frames into the caller's own
-                    // display. There are no frames to compose.
+                    // GetIndirectLayerConsumerHandle.
                     _ => self.unimplemented_command(tls, &iface, cmd_id),
                 }
             }
-            // `am`'s IStorage: a byte buffer passed between applets. Distinct
-            // from `fsp-srv`'s IStorage (the process's RomFS): same name,
-            // different interface, and reached only through an accessor.
+            // `am`'s IStorage, distinct from `fsp-srv`'s.
             "am:storage" => match cmd_id {
-                // Open -> IStorageAccessor. Both objects address the same
-                // bytes, so the accessor records which storage it belongs to
-                // rather than taking a copy that could then diverge.
+                // Open -> IStorageAccessor.
                 Some(0) => {
                     let storage = self.ipc_object_key(tls, handle);
                     let accessor = self.reply_with_interface(tls, handle, "am:storage-accessor")?;
@@ -1993,9 +1280,7 @@ impl Cpu {
                         let size = self.am_storages.get(&storage).map_or(0, |d| d.len()) as u64;
                         self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
                     }
-                    // Write(s64 offset, buffer<in>) / Read(s64 offset,
-                    // buffer<out>). The offset is the request's only raw
-                    // argument; the bytes travel in a buffer.
+                    // Write(s64 offset, buffer<in>) / Read(s64 offset, buffer<out>).
                     Some(10) => {
                         let offset = self.mem.read_u64(self.ipc_request_data(tls))? as usize;
                         let Some((addr, len)) = self.ipc_input_buffer(tls, 0) else {
@@ -2031,24 +1316,12 @@ impl Cpu {
                     _ => self.unimplemented_command(tls, &iface, cmd_id),
                 }
             }
-            // IDisplayController (capture buffers), IDebugFunctions, and any
-            // session that never named itself. Nothing here can answer those
-            // honestly: a capture buffer has no contents.
+            // IDisplayController, IDebugFunctions, and unnamed sessions.
             _ => self.unimplemented_command(tls, &iface, cmd_id),
         }
     }
 
-    /// The event an `ILockAccessor` hands out, created **signalled** and
-    /// manual-reset.
-    ///
-    /// That is not a shortcut: hardware hands out a lock nobody is holding,
-    /// and the Home Menu takes the event as proof of that before it will run a
-    /// transition. It polls the event with `nn::os::TryWaitSystemEvent` and
-    /// **aborts** when it comes back clear, which is where qlaunch stopped,
-    /// one `ICommonStateGetter::GetReaderLockAccessorEx` and one `GetEvent`
-    /// after its first scene started.
-    ///
-    /// One object, because nothing here contends for a HOME button.
+    /// The `ILockAccessor` event, created signalled and manual-reset.
     fn am_lock_accessor_event(&mut self) -> u64 {
         match self.lock_accessor_event {
             Some(h) => h,
@@ -2067,20 +1340,13 @@ mod tests {
     use crate::cpu::ipc::testing::*;
     use crate::cpu::Cpu;
 
-    /// `AppletId_LibraryAppletWeb`, which is what lennytube asks for when it
-    /// hands the screen to the browser.
+    /// `AppletId_LibraryAppletWeb`.
     const APPLET_WEB: u32 = 0x13;
 
     #[test]
     fn the_system_process_common_functions_chain_hands_back_real_sessions() {
-        // `appletAE` 450 and the observer behind it both return an interface,
-        // and `nnSdk` reads one as a move handle: answering either with a bare
-        // success leaves the client constructing a null `SharedPointer` and
-        // faulting on its first virtual call, rather than failing here.
         let mut cpu = request(false, 450, &[]);
         cpu.register_service_handle(9, "appletAE");
-        // Set against the default, so a 450 that wrongly reached for
-        // `set_applet_is_application` could not pass by matching it.
         cpu.set_applet_is_application(false);
         cpu.applet_request(TLS, 9, Some(450)).unwrap();
         let functions = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
@@ -2099,8 +1365,6 @@ mod tests {
         assert_ne!(observer, 0, "cmd 1 moved no observer back");
         assert_eq!(cpu.service_name(observer), Some("am:application-observer"));
 
-        // GetAppletAlternativeFunctions, the command the same caller reaches
-        // next, has the same shape and the same failure when refused.
         marshal(&mut cpu, false, 460, &[]);
         cpu.applet_request(TLS, 9, Some(460)).unwrap();
         let alternative = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
@@ -2113,14 +1377,11 @@ mod tests {
             Some("am:applet-alternative-functions")
         );
 
-        // Neither opens a proxy, so the flag every Open*Proxy beside them sets
-        //, which decides whether the applet is told `FocusStateChanged` or
-        // `ChangeIntoForeground`: stays where it was.
+        // Neither opens a proxy, so the applet-kind flag is unchanged.
         assert!(!cpu.applet_is_application);
     }
 
-    /// Marshal a `PushOutData`-shaped request: a command taking one object,
-    /// which a plain session carries as a move handle behind a special header.
+    /// Marshal a `PushOutData`-shaped request carrying one object.
     fn push_storage(cpu: &mut Cpu, command_id: u32, storage: u64) {
         for i in (0..0x200u32).step_by(4) {
             cpu.mem.write_u32(TLS + i, 0).unwrap();
@@ -2135,18 +1396,12 @@ mod tests {
 
     #[test]
     fn the_applet_result_is_kept_rather_than_dropped() {
-        // The controller applet, run directly, ends by pushing a
-        // `ControllerSupportResultInfo` through `PushOutData` and exiting.
-        // Accepting the push and dropping the storage left the two endings it
-        // can have, a selection the user confirmed, and one they backed out
-        // of, looking exactly alike from outside.
         const CONTROLLER: u64 = 0x0100_0000_0000_1003;
         const PUSH_OUT_DATA: u32 = 1;
         // { s8 player_count = 1, pad[3], u32 selected_id = 0, u32 result = 0 }.
         let mut result = vec![0u8; 0xC];
         result[0] = 1;
 
-        // A plain session moves the storage's own session handle.
         const STORAGE: u64 = 0x21;
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
@@ -2160,8 +1415,6 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "push refused");
         assert_eq!(cpu.library_applet_results(), [result.clone()]);
 
-        // `nnSdk` converts the session to a domain, and then the storage is an
-        // object id in a table past the payload rather than a handle.
         const STORAGE_OBJECT: u32 = 5;
         let mut cpu = request(true, PUSH_OUT_DATA, &[]);
         cpu.set_program_id(CONTROLLER);
@@ -2169,8 +1422,7 @@ mod tests {
         cpu.record_domain_object(9, STORAGE_OBJECT, "am:storage");
         cpu.am_storages
             .insert(Cpu::object_key(9, STORAGE_OBJECT), result.clone());
-        // num_in_objects, then a `data_size` of just the `CmifInHeader`, this
-        // request has no payload, which is what the id table sits past.
+        // num_in_objects, then a `data_size` of just the `CmifInHeader`.
         cpu.mem.write_u8(TLS + 0x11, 1).unwrap();
         cpu.mem.write_u16(TLS + 0x12, 0x10).unwrap();
         cpu.mem.write_u32(TLS + 0x30, STORAGE_OBJECT).unwrap();
@@ -2178,8 +1430,6 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "push refused");
         assert_eq!(cpu.library_applet_results(), [result.clone()]);
 
-        // And what the log says about those bytes is the part a run is read
-        // from: the outcome, not just that something was pushed.
         assert_eq!(
             super::applet_result_summary(CONTROLLER, &result),
             "confirmed, 1 player(s), npad 0"
@@ -2193,15 +1443,10 @@ mod tests {
 
     #[test]
     fn the_applet_can_be_answered_by_the_host_that_started_it() {
-        // The interactive channel: the applet pushes a message and waits on
-        // `GetPopInteractiveInDataEvent` for its caller's answer. Nothing here
-        // launched it, so the host is the caller, and until it answers, the
-        // event has to stay dark rather than hand back a pop that refuses.
         const SWKBD: u64 = 0x0100_0000_0000_1008;
         const PUSH_INTERACTIVE_OUT_DATA: u32 = 3;
         const POP_INTERACTIVE_IN_DATA: u32 = 2;
         const GET_POP_INTERACTIVE_IN_DATA_EVENT: u32 = 6;
-        /// `am` description 3: nothing queued to pop.
         const NO_DATA: u32 = 128 | (3 << 9);
         const STORAGE: u64 = 0x21;
 
@@ -2210,7 +1455,7 @@ mod tests {
         cpu.set_program_id(SWKBD);
         cpu.register_service_handle(9, "am:library-applet-self-accessor");
         cpu.register_service_handle(STORAGE, "am:storage");
-        // What the keyboard offers for checking: `u64 size` then the text.
+        // `u64 size` then the text.
         let mut message = 4u64.to_le_bytes().to_vec();
         message.extend_from_slice(&[0x68, 0, 0x69, 0]);
         cpu.am_storages
@@ -2221,9 +1466,6 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "push refused");
         assert_eq!(cpu.library_applet_interactive_messages(), [message]);
 
-        // The event the applet then waits on exists and is dark: there is no
-        // answer yet, and a signalled event would send it to a pop that
-        // refuses, which `nnSdk` turns into a fatal.
         marshal(&mut cpu, false, GET_POP_INTERACTIVE_IN_DATA_EVENT, &[]);
         cpu.applet_request(TLS, 9, Some(GET_POP_INTERACTIVE_IN_DATA_EVENT))
             .unwrap();
@@ -2237,8 +1479,7 @@ mod tests {
             .unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), NO_DATA, "pop");
 
-        // The host answers as the caller would -- `SwkbdTextCheckResult`
-        // Success and an empty message -- and that is what the applet pops.
+        // `SwkbdTextCheckResult` Success and an empty message.
         let answer = vec![0u8; 0x8];
         cpu.push_applet_interactive_in_data(answer.clone());
         assert_eq!(cpu.event_signaled(event), Some(true), "answer unannounced");
@@ -2251,17 +1492,11 @@ mod tests {
         assert_eq!(cpu.service_name(storage), Some("am:storage"));
         assert_eq!(cpu.am_storages[&Cpu::object_key(storage, 0)], answer);
 
-        // And the event goes dark again with the queue, so the next wait is a
-        // wait rather than a spin on a pop that has nothing left.
         assert_eq!(cpu.event_signaled(event), Some(false), "still signalled");
     }
 
     #[test]
     fn the_in_data_event_is_signalled_while_there_is_something_to_pop() {
-        // GetPopInDataEvent, which an applet waits on before its first
-        // `PopInData`. Refusing it is an unknown command id, and `nnSdk`
-        // aborts on one -- but a *signalled* event with an empty queue behind
-        // it is no better, so it tracks what the launch seeding left.
         const SWKBD: u64 = 0x0100_0000_0000_1008;
         const GET_POP_IN_DATA_EVENT: u32 = 5;
         const POP_IN_DATA: u32 = 0;
@@ -2276,7 +1511,6 @@ mod tests {
         assert_eq!(cpu.event_name(event), Some("am:applet-in-data"));
         assert_eq!(cpu.event_signaled(event), Some(true), "storages waiting");
 
-        // The keyboard's three storages, and then the event is dark.
         for _ in 0..3 {
             marshal(&mut cpu, false, POP_IN_DATA, &[]);
             cpu.applet_request(TLS, 9, Some(POP_IN_DATA)).unwrap();
@@ -2287,11 +1521,6 @@ mod tests {
 
     #[test]
     fn the_idle_detection_setters_are_accepted_rather_than_refused() {
-        // ISelfController 60, 64, 65 and 72 -- the group an applet walks to
-        // configure when the console counts it as idle. Every one is a setter
-        // whose whole reply is a Result, and nothing here sleeps or dims, so
-        // accepting is the complete implementation. What is not survivable is
-        // the refusal: `nnSdk` aborts on an unknown command id.
         for (cmd, payload) in [
             (60u32, &[0u8; 0x10][..]),
             (64, &[0u8; 4][..]),
@@ -2311,11 +1540,6 @@ mod tests {
 
     #[test]
     fn the_auto_sleep_settings_read_back_what_was_set() {
-        // ISelfController 62/63 and 68/69 are Set/Get pairs. Both setters were
-        // on the accept-everything list with no getter beside them, so a title
-        // that set one and read it back got a refusal `nnSdk` aborts on.
-        // Nothing here sleeps or dims a panel; what these owe the caller is
-        // the value it just wrote.
         const EXTENSION: u32 = 3;
         let mut cpu = request(false, 62, &EXTENSION.to_le_bytes());
         cpu.register_service_handle(9, "am:self-controller");
@@ -2332,8 +1556,6 @@ mod tests {
         cpu.applet_request(TLS, 9, Some(69)).unwrap();
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1, "auto sleep off");
 
-        // And the other way, so neither getter is a constant that happens to
-        // match what the test set.
         marshal(&mut cpu, false, 68, &[0u8]);
         cpu.applet_request(TLS, 9, Some(68)).unwrap();
         marshal(&mut cpu, false, 69, &[]);
@@ -2343,10 +1565,6 @@ mod tests {
 
     #[test]
     fn the_home_button_double_click_setting_reads_back_what_was_set() {
-        // IAppletCommonFunctions 50/51, the same shape as the ISelfController
-        // pairs above: the setter had nothing behind it and the getter was a
-        // refusal, which `nnSdk` turns into an svcBreak. No HOME button here
-        // doubles anything, so the value it wrote is all the pair owes it.
         let mut cpu = request(false, 50, &[1u8]);
         cpu.register_service_handle(9, "am:applet-common-functions");
         cpu.applet_request(TLS, 9, Some(50)).unwrap();
@@ -2357,8 +1575,6 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "get refused");
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1, "double click on");
 
-        // And the other way, so the getter is not a constant that happens to
-        // match what the test set.
         marshal(&mut cpu, false, 50, &[0u8]);
         cpu.applet_request(TLS, 9, Some(50)).unwrap();
         marshal(&mut cpu, false, 51, &[]);
@@ -2368,12 +1584,6 @@ mod tests {
 
     #[test]
     fn every_button_lock_accessor_hands_back_a_lock() {
-        // ICommonStateGetter 30, 31 and 32 -- the HOME-button locks the menu
-        // takes before it runs a transition. `nnSdk` reads each as a move
-        // handle, so a refusal is a fatal and a bare success is a null
-        // `SharedPointer` that faults on its first virtual call. 32 is the
-        // writer side, added in 7.0.0; nothing here contends for either side,
-        // so all three hand back the same stateless accessor.
         const HOME_BUTTON: u32 = 0;
         for cmd in [30u32, 31, 32] {
             let mut cpu = request(false, cmd, &HOME_BUTTON.to_le_bytes());
@@ -2392,9 +1602,6 @@ mod tests {
 
     #[test]
     fn am_reports_the_handheld_operation_mode_it_always_claimed_to() {
-        // AppletOperationMode_Handheld is 0 and Console is 1. This answered 1
-        // under a comment saying Handheld, so NX-Fetch printed "Docked" beside
-        // a 720p framebuffer.
         let mut cpu = request(false, 5, &[]);
         cpu.register_service_handle(9, "am:common-state-getter");
         cpu.applet_request(TLS, 9, Some(5)).unwrap();
@@ -2414,15 +1621,6 @@ mod tests {
 
     #[test]
     fn each_applet_event_is_named_after_the_interface_that_hands_it_out() {
-        // These two names were swapped: `IApplicationFunctions`'s
-        // GetGpuErrorDetectedSystemEvent handed out an event called
-        // "am:self-controller", and `ISelfController`'s two events were called
-        // "am:gpu-error". Only `TRACE_WAIT` reads these names, which is
-        // exactly why it mattered -- a wait trace showing "A Short Hike"
-        // blocked on "am:self-controller" sent a debugging session looking for
-        // an applet focus event that was never involved. The event it was
-        // really waiting on is the GPU-error one, which nothing here ever
-        // fires because nothing here ever faults the GPU.
         let mut cpu = request(false, 130, &[]);
         cpu.register_service_handle(9, "am:application-functions");
         cpu.applet_request(TLS, 9, Some(130)).unwrap();
@@ -2433,8 +1631,6 @@ mod tests {
         );
         assert_eq!(cpu.event_name(event), Some("am:gpu-error"));
 
-        // ISelfController::GetAccumulatedSuspendedTickChangedEvent, which
-        // never fires because nothing here suspends.
         let mut cpu = request(false, 91, &[]);
         cpu.register_service_handle(9, "am:self-controller");
         cpu.applet_request(TLS, 9, Some(91)).unwrap();
@@ -2446,10 +1642,6 @@ mod tests {
         );
         assert_eq!(cpu.event_signaled(event), Some(false));
 
-        // ISelfController::GetLibraryAppletLaunchableEvent shared that arm and
-        // so went out dark. Real AM signals it as it hands it over, and the
-        // same object comes back on every ask -- an event allocated afresh per
-        // call is one nothing can ever signal.
         let mut cpu = request(false, 9, &[]);
         cpu.register_service_handle(9, "am:self-controller");
         cpu.applet_request(TLS, 9, Some(9)).unwrap();
@@ -2464,12 +1656,6 @@ mod tests {
 
     #[test]
     fn am_gives_back_the_terminate_result_the_title_set() {
-        // `SetTerminateResult` is everything a title says about why it is
-        // about to stop, and `GetLastApplicationExitReason` is where the
-        // system reads it back. Accepting the first without recording it left
-        // the second nothing to report, and refusing the second is an
-        // svcBreak, which is how `nnSdk` answers a command id nothing
-        // implements.
         const TERMINATE_RESULT: u32 = 202 | (30 << 9);
         let mut cpu = request(false, 22, &TERMINATE_RESULT.to_le_bytes());
         cpu.register_service_handle(9, "am:application-functions");
@@ -2485,13 +1671,6 @@ mod tests {
 
     #[test]
     fn the_preselected_user_is_handed_over_once_and_then_it_is_gone() {
-        // The HOME menu picks the user before it starts a title and leaves the
-        // choice as a `PreselectedUser` launch parameter.
-        // `nn::account::Initialize` pops it and caches the uid;
-        // `nn::account::OpenPreselectedUser` asserts when that cached uid is
-        // zero. Refusing every kind of launch parameter is what aborted Just
-        // Dance 2019 inside `nn::init::Start`, before it had asked `sm` for a
-        // single service.
         const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9);
         const SFCO: u32 = 0x4F43_4653;
 
@@ -2505,10 +1684,7 @@ mod tests {
         assert_ne!(storage, 0, "PopLaunchParameter moved no storage back");
         assert_eq!(cpu.service_name(storage), Some("am:storage"));
 
-        // What `nn::account::detail::TryPopPreselectedUser` reads: it refuses
-        // anything shorter than 0x88 bytes, checks the magic and the version,
-        // and copies the uid out of offset 8. A uid of zero is what it means
-        // by "nobody", so the one thing this must never hand over is zeroes.
+        // Magic, version, and a non-zero uid at offset 8.
         let data = cpu.am_storages[&Cpu::object_key(storage, 0)].clone();
         assert_eq!(data.len(), 0x88);
         assert_eq!(
@@ -2518,9 +1694,6 @@ mod tests {
         assert_eq!(data[4], 1, "layout version");
         assert_eq!(&data[8..0x18], &crate::cpu::acc::DEFAULT_USER_UID[..]);
 
-        // `am` hands each launch parameter over once and forgets it, which is
-        // what stops a second `nn::account::Initialize` caching a user the
-        // launcher never chose.
         marshal(&mut cpu, false, 1, &kind);
         cpu.applet_request(TLS, 9, Some(1)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x10).unwrap(), SFCO);
@@ -2532,10 +1705,6 @@ mod tests {
 
     #[test]
     fn a_launch_parameter_nobody_left_is_still_refused() {
-        // Only the kinds a launcher actually fills in are here. `UserChannel`
-        // (1) is application-to-application data that nothing here writes, and
-        // answering it with the preselected user's block, or with any
-        // success: would hand the caller bytes it would then parse as its own.
         const USER_CHANNEL: u32 = 1;
         const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9);
 
@@ -2551,11 +1720,6 @@ mod tests {
 
     #[test]
     fn application_functions_210_hands_out_one_event_and_keeps_handing_out_that_one() {
-        // Command 210 is unnamed on switchbrew, but its shape is documented:
-        // no input, one out event. An out-event is one of the two things a
-        // caller cannot invent for itself, so a bare success here is a caller
-        // waiting on handle 0 -- and `nnSdk` answers a *refusal* with an
-        // svcBreak, which is where Tomodachi Life stopped.
         let mut cpu = request(false, 210, &[]);
         cpu.register_service_handle(9, "am:application-functions");
         cpu.applet_request(TLS, 9, Some(210)).unwrap();
@@ -2563,12 +1727,8 @@ mod tests {
         assert_ne!(event, 0, "command 210 handed back no event handle");
         assert_eq!(cpu.event_name(event), Some("am:application-functions-210"));
 
-        // Nothing here can ask a title to exit, so the event never fires. A
-        // wait on it is a wait for something that genuinely never happens.
         assert_eq!(cpu.event_signaled(event), Some(false));
 
-        // Asking again has to give back the event the caller is already
-        // waiting on, not a fresh one nothing will ever signal either.
         marshal(&mut cpu, false, 210, &[]);
         cpu.applet_request(TLS, 9, Some(210)).unwrap();
         assert_eq!(u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap()), event);
@@ -2576,12 +1736,6 @@ mod tests {
 
     #[test]
     fn a_stubbed_answer_names_itself_once_and_still_succeeds() {
-        // InitializeGamePlayRecording is accepted and thrown away: the reply
-        // is a bare success, which is the right *shape* and an answer with
-        // nothing behind it. Neither existing warning covers that -- the
-        // command is neither missing nor refused -- so the guest believes it
-        // and the consequence surfaces somewhere else entirely. The marker is
-        // what makes the belief visible; it must not change the reply.
         let mut cpu = request(false, 66, &[]);
         cpu.register_service_handle(9, "am:application-functions");
         cpu.applet_request(TLS, 9, Some(66)).unwrap();
@@ -2592,9 +1746,7 @@ mod tests {
             "the stub went unreported: {trace:?}"
         );
 
-        // Once per (interface, command): a title that polls one every frame
-        // would otherwise bury every other line in the trace the browser
-        // drains.
+        // Once per (interface, command).
         marshal(&mut cpu, false, 66, &[]);
         cpu.applet_request(TLS, 9, Some(66)).unwrap();
         let repeated = String::from_utf8_lossy(&cpu.trace)
@@ -2605,17 +1757,11 @@ mod tests {
 
     #[test]
     fn get_save_data_size_reports_the_quota_the_title_was_actually_allotted() {
-        // GetSaveDataSize(u8 SaveDataType, u128 userId) -> two s64s. The
-        // payload is 0x18 bytes: the type padded out to eight, then the uid.
-        // Neither changes the answer -- the quota is the title's, whoever's
-        // save it is -- so the request is marshalled the way a title sends it
-        // and the reply is checked, not the parse.
         let mut payload = [0u8; 0x18];
         payload[0] = 1; // SaveDataType::Account
         payload[8..].copy_from_slice(&crate::cpu::acc::DEFAULT_USER_UID);
 
-        // Tomodachi Life's own NACP figures, which is what a console reads out
-        // of the Control NCA.
+        // Tomodachi Life's NACP figures.
         const SAVE: i64 = 56_623_104;
         const JOURNAL: i64 = 10_485_760;
 
@@ -2634,10 +1780,6 @@ mod tests {
 
     #[test]
     fn extending_a_save_grants_it_and_the_size_read_back_is_the_extended_one() {
-        // ExtendSaveData(u8 SaveDataType, u128 userId, s64 size, s64 journal):
-        // GetSaveDataSize's 0x18-byte payload with the two sizes appended.
-        // `nn::fs::ExtendSaveData` aborts on any error, so refusing this is an
-        // svcBreak, which is where Minecraft stopped, 259M steps in.
         const SIZE: i64 = 0x1200_0000;
         const JOURNAL: i64 = 0x0100_0000;
         let mut payload = [0u8; 0x28];
@@ -2651,8 +1793,6 @@ mod tests {
         cpu.applet_request(TLS, 9, Some(25)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
 
-        // And what 26 reports afterwards is what the title just set, not the
-        // NACP figure it has already moved past.
         marshal(&mut cpu, false, 26, &[0u8; 0x18]);
         cpu.applet_request(TLS, 9, Some(26)).unwrap();
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap() as i64, SIZE);
@@ -2661,10 +1801,6 @@ mod tests {
 
     #[test]
     fn the_save_data_ceilings_are_reported_apart_from_the_sizes() {
-        // 26 reports what the save was created at, 28 how far it may be
-        // extended, 35 the same for the console-wide save. Three commands
-        // reporting the same two s64s is exactly the shape where a mixed-up
-        // pair goes unnoticed, so each is checked against a distinct number.
         let quota = crate::cpu::fs::SaveDataQuota {
             size: 1,
             journal_size: 2,
@@ -2694,10 +1830,6 @@ mod tests {
 
     #[test]
     fn a_declared_ceiling_of_zero_is_reported_as_zero() {
-        // A NACP commonly gives a save a size and no ceiling. That 0 is the
-        // title's own statement that it never extends this save, so it is
-        // reported rather than quietly replaced with headroom the system never
-        // agreed to: the failure that would cause surfaces nowhere near here.
         let mut cpu = request(false, 28, &[]);
         cpu.set_save_data_quota(crate::cpu::fs::SaveDataQuota {
             size: 56_623_104,
@@ -2714,10 +1846,7 @@ mod tests {
 
     #[test]
     fn get_cache_storage_max_aligns_its_size_after_its_count() {
-        // An s32 then an s64, each aligned to its own width the way `sf`
-        // marshals a pair of outputs, so the size is at +8 and +4 is padding.
-        // Packing the two would put the size where the caller reads padding
-        // and report a ceiling of zero.
+        // s32 then s64 at +8; +4 is padding.
         let mut cpu = request(false, 29, &[]);
         cpu.set_save_data_quota(crate::cpu::fs::SaveDataQuota {
             cache_storage_index_max: 3,
@@ -2732,10 +1861,6 @@ mod tests {
 
     #[test]
     fn a_title_whose_nacp_nobody_read_still_gets_room_to_save() {
-        // Nothing has called `set_save_data_sizes` -- a bare Program NCA has no
-        // NACP to read one out of. The fallback has to be a *quota*, not zero:
-        // a title told it has nowhere to put its save is a title that does not
-        // write one, and that failure looks nothing like a missing command.
         let mut payload = [0u8; 0x18];
         payload[0] = 1;
         let mut cpu = request(false, 26, &payload);
@@ -2745,8 +1870,6 @@ mod tests {
         let journal = cpu.mem.read_u64(TLS + 0x28).unwrap() as i64;
         assert_eq!(size, crate::cpu::fs::DEFAULT_SAVE_DATA_SIZE);
         assert_eq!(journal, crate::cpu::fs::DEFAULT_SAVE_DATA_JOURNAL_SIZE);
-        // Above what a large retail title asks for: Tomodachi Life's NACP
-        // declares 54 MiB of save and 10 MiB of journal.
         assert!(
             size >= 56_623_104,
             "default quota is smaller than a real title's save"
@@ -2757,8 +1880,6 @@ mod tests {
         );
     }
 
-    /// Create a library applet on a non-domain session and return the `Cpu`
-    /// and the accessor handle the reply moved back.
     fn library_applet(applet_id: u32) -> (Cpu, u64) {
         let mut payload = [0u8; 8];
         payload[..4].copy_from_slice(&applet_id.to_le_bytes());
@@ -2776,14 +1897,8 @@ mod tests {
 
     #[test]
     fn the_keyboard_and_the_controller_applet_pop_three_storages() {
-        // Both pop the common arguments, then a private struct, then the
-        // argument that struct describes -- and stop dead on the pop that is
-        // not there, because `PopInData` answers 2128-0003 and `nnSdk`
-        // aborts on it rather than carry on. Seeding only the first two is
-        // what took both of them down.
         const SWKBD: u64 = 0x0100_0000_0000_1008;
         const CONTROLLER: u64 = 0x0100_0000_0000_1003;
-        /// `am` description 3, what a pop past the last storage answers.
         const NO_DATA: u32 = 128 | (3 << 9);
 
         for program_id in [SWKBD, CONTROLLER] {
@@ -2803,8 +1918,6 @@ mod tests {
                 );
                 let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
                 assert_eq!(cpu.service_name(storage), Some("am:storage"));
-                // The applet reads the size before the bytes, and a struct
-                // of the wrong width is one it will not read at all.
                 write_request(&mut cpu, 0, &[]);
                 cpu.applet_request(TLS, storage, Some(0)).unwrap();
                 let accessor = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
@@ -2813,8 +1926,6 @@ mod tests {
                 sizes.push(cpu.mem.read_u64(TLS + 0x20).unwrap());
             }
 
-            // LibAppletCommonArguments, then the pair the applet's own
-            // interface version describes.
             let expected: [u64; 3] = match program_id {
                 SWKBD => [0x20, 0x4C8, 0x1000],
                 _ => [0x20, 0x14, 0x430],
@@ -2833,11 +1944,6 @@ mod tests {
 
     #[test]
     fn every_applet_title_id_maps_to_the_id_switchbrew_gives_it() {
-        // `starter` sits in the middle of the library applets' title ids and
-        // is not one of them, so the run cannot be counted straight through:
-        // doing that put myPage on `gift`'s id, which is not a library applet
-        // here -- so nothing seeded its launch storages and its first
-        // `PopInData` was refused with 2128-0003.
         for (program_id, applet_id) in [
             (0x0100_0000_0000_1000u64, 0x03u32), // qlaunch
             (0x0100_0000_0000_1003, 0x0C),       // controller
@@ -2854,15 +1960,9 @@ mod tests {
                 "{program_id:#x}"
             );
         }
-        // And the two that are not library applets are not treated as ones:
-        // a library applet is handed launch storages and no preselected user,
-        // and `starter` is handed the opposite.
         assert!(super::is_library_applet(0x0100_0000_0000_1013));
         assert!(!super::is_library_applet(0x0100_0000_0000_1012));
 
-        // myPage's argument is the 9.0.0+ width its interface version claims,
-        // and it names the user who is playing -- a zero uid is "no user",
-        // which is not a page the applet can show.
         assert_eq!(
             super::applet_interface_version(0x0100_0000_0000_1013),
             0x1_0000
@@ -2877,10 +1977,6 @@ mod tests {
 
     #[test]
     fn an_applet_that_pushes_its_result_and_exits_stops_the_process() {
-        // The end of every library applet's run: it pushes what it produced
-        // and then calls ExitProcessAndReturn, which on hardware does not
-        // return -- `am` terminates the process. Refusing either is a fatal
-        // one command short of a clean finish.
         let mut cpu = request(false, 1, &[]);
         cpu.register_service_handle(9, "am:library-applet-self-accessor");
 
@@ -2900,11 +1996,6 @@ mod tests {
 
     #[test]
     fn the_controller_applet_is_told_what_it_may_offer() {
-        // `ControllerSupportArgPrivate` names its own size and the size of
-        // the argument behind it, and the applet picks the struct it reads by
-        // them -- so both have to match what is actually pushed, and the
-        // interface version the common arguments claim has to be the one
-        // whose argument shape that is.
         const CONTROLLER: u64 = 0x0100_0000_0000_1003;
         let storages = super::applet_launch_storages(CONTROLLER, crate::cpu::acc::DEFAULT_USER_UID);
         let private = &storages[0];
@@ -2918,10 +2009,6 @@ mod tests {
         );
         assert_eq!(super::applet_interface_version(CONTROLLER), 8);
 
-        // The styles it may offer are the ones `hid` can actually publish:
-        // an applet that offers a controller the console then never presents
-        // is one the user cannot get past. Handheld is the one that matters
-        // here, since that is the mode this console reports.
         let styles = u32::from_le_bytes(private[0x0C..0x10].try_into().unwrap());
         assert_ne!(
             styles & crate::cpu::hid_shmem::STYLE_HANDHELD,
@@ -2940,10 +2027,6 @@ mod tests {
 
     #[test]
     fn a_library_applet_ends_the_moment_it_is_started() {
-        // Nothing here can run the applet a caller asks for, so the useful
-        // answer is one that ends: the caller waits on the state-changed
-        // event before it does anything else, and an event that never fires
-        // is a hang rather than a failure it can report.
         let (mut cpu, accessor) = library_applet(APPLET_WEB);
 
         write_request(&mut cpu, 0, &[]);
@@ -2964,9 +2047,6 @@ mod tests {
         cpu.applet_request(TLS, accessor, Some(1)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap() & 0xff, 1);
 
-        // GetResult: `libnx` reads this one as LibAppletExitReason_Canceled,
-        // which is a path callers survive. A success here would instead have
-        // them read an empty output storage as real input.
         write_request(&mut cpu, 30, &[]);
         cpu.applet_request(TLS, accessor, Some(30)).unwrap();
         assert_eq!(
@@ -2978,9 +2058,6 @@ mod tests {
 
     #[test]
     fn the_applet_state_event_is_signalled_when_it_is_asked_for_after_the_start() {
-        // The caller usually takes the event before starting the applet, but
-        // it does not have to, and an applet that has already ended has to
-        // hand back an event that is already fired.
         let (mut cpu, accessor) = library_applet(APPLET_WEB);
         write_request(&mut cpu, 10, &[]);
         cpu.applet_request(TLS, accessor, Some(10)).unwrap();
@@ -2993,8 +2070,6 @@ mod tests {
 
     #[test]
     fn an_applet_that_never_ran_has_no_output_to_pop() {
-        // An empty storage would be worse than a refusal: a caller reads its
-        // reply struct field by field and believes the zeroes.
         let (mut cpu, accessor) = library_applet(APPLET_WEB);
         write_request(&mut cpu, 10, &[]);
         cpu.applet_request(TLS, accessor, Some(10)).unwrap();
@@ -3011,8 +2086,6 @@ mod tests {
 
     #[test]
     fn created_storage_is_as_long_as_the_caller_asked_for() {
-        // The caller writes its launch arguments into this through an
-        // IStorageAccessor, so the bytes have to be there to be written over.
         let mut cpu = request(false, 10, &0x1000u64.to_le_bytes());
         cpu.register_service_handle(9, "am:library-applet-creator");
         cpu.applet_request(TLS, 9, Some(10)).unwrap();
@@ -3020,7 +2093,6 @@ mod tests {
         assert_eq!(cpu.service_name(storage), Some("am:storage"));
         assert_eq!(cpu.am_storages[&Cpu::object_key(storage, 0)].len(), 0x1000);
 
-        // A size no caller sends is refused rather than allocated.
         write_request(&mut cpu, 10, &u64::MAX.to_le_bytes());
         cpu.applet_request(TLS, 9, Some(10)).unwrap();
         assert_eq!(
@@ -3032,9 +2104,6 @@ mod tests {
 
     #[test]
     fn the_ex_form_of_a_creation_is_the_same_creation() {
-        // CreateLibraryAppletEx appends the caller's thread id and is
-        // otherwise CreateLibraryApplet. Refusing it over that one argument
-        // was a 2010-0221, which `nnSdk` turns into an svcBreak.
         const CALLER_THREAD: u64 = 0x2a;
         const FOREGROUND: u32 = 1;
 

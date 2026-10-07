@@ -1,61 +1,38 @@
-//! `mii`: the console's Mii database.
-//!
-//! A console with no Miis on it is a console every Mii picker refuses to open,
-//! so the database ships with a small set of built-in characters rather than
-//! being empty.
+//! `mii`: the Mii database, empty but with the six built-in default Miis.
 
 use super::Cpu;
 use crate::Result;
 
-/// `nn::mii::CharInfo`: one Mii as everything that reads the database is
-/// handed it, a create id, a nickname, then one byte per feature.
+/// `nn::mii::CharInfo`: create id, nickname, then one byte per feature.
 const MII_CHAR_INFO_LEN: usize = 0x58;
 
-/// A Mii's `CreateId`: the UUID that names it wherever it is copied to, and
-/// the first thing in a `CharInfo`.
 const MII_CREATE_ID_LEN: usize = 0x10;
 
-/// The tags [`mii_create_id`] stamps the six Miis `nn::mii` carries with, and
-/// the ones `BuildRandom` invents. They differ so that a Mii a title made can
-/// never be handed the identity of a built-in one.
+/// Create id tags for default and `BuildRandom` Miis; distinct so they never collide.
 const MII_DEFAULT_CREATE_ID_TAG: &[u8; MII_CREATE_ID_LEN] = b"switch-wasm mii\0";
 const MII_RANDOM_CREATE_ID_TAG: &[u8; MII_CREATE_ID_LEN] = b"switch-wasm rnd\0";
 
-/// Where the nickname sits, past that id.
 const MII_CHAR_INFO_NICKNAME: usize = 0x10;
 
-/// Where the features start, past the nickname and its terminator.
+/// Features start past the nickname and its terminator.
 const MII_CHAR_INFO_FEATURES: usize = 0x26;
 
-/// How long a Mii's name may be, in UTF-16 code units. The field holds one
-/// more, for the terminator a name of the full length still carries.
+/// Nickname length in UTF-16 units, excluding the terminator.
 const MII_NICKNAME_LEN: usize = 10;
 
-/// The name `nn::mii` gives a Mii nobody has named. The default Miis all carry
-/// it: naming one is the first thing the editor asks whoever picks it.
 const MII_DEFAULT_NICKNAME: &str = "no name";
 
-/// mii's "that argument is out of range" (module 126, description 1), which is
-/// what `BuildDefault` answers an index past the Miis it has.
+/// Module 126, description 1: index out of range.
 const MII_INVALID_ARGUMENT: u32 = 126 | (1 << 9);
 
-/// `nn::mii::Gender::All`: `BuildRandom`'s default, and the value past the two
-/// real genders that narrows nothing.
 const MII_GENDER_ALL: u8 = 2;
 
-/// A Mii's colours are numbered in the palette the 3DS and Wii U used, which
-/// is the palette the default Miis are written in, and are widened on the way
-/// out to the Switch's larger one. Hair, eyebrows and beards share this table;
-/// eyes have [`MII_EYE_COLORS`]; a faceline colour is the same number in both.
+/// 3DS/Wii U hair, eyebrow and beard colours widened to the Switch palette.
 const MII_HAIR_COLORS: [u8; 8] = [8, 1, 2, 3, 4, 5, 6, 7];
 
-/// The same translation for eye colours.
 const MII_EYE_COLORS: [u8; 6] = [8, 9, 10, 11, 12, 13];
 
-/// What differs between the six Miis `nn::mii` carries in its own image. Every
-/// other feature is the same in all six and is written by
-/// [`default_mii_char_info`], which is also where the colours here are carried
-/// over into the palette a `CharInfo` is read in.
+/// Features that differ between the six default Miis.
 struct DefaultMii {
     faceline_color: u8,
     hair_type: u8,
@@ -65,12 +42,12 @@ struct DefaultMii {
     eye_rotate: u8,
     eyebrow_type: u8,
     eyebrow_color: u8,
-    /// 0 is a male Mii, 1 a female one; the first three of these are male.
+    /// 0 male, 1 female.
     gender: u8,
     favorite_color: u8,
 }
 
-/// The six default Miis, in the order `BuildDefault` indexes them.
+/// The six default Miis, in `BuildDefault` order.
 const DEFAULT_MIIS: [DefaultMii; 6] = [
     DefaultMii {
         faceline_color: 4,
@@ -146,14 +123,7 @@ const DEFAULT_MIIS: [DefaultMii; 6] = [
     },
 ];
 
-/// The `index`th default Mii as a `CharInfo`, or `None` when there is no such
-/// Mii, which is the only way `BuildDefault` can fail.
-///
-/// These are built, not looked up: they live in `nn::mii`'s own image rather
-/// than in the database, which is why a console with no Miis on it still has
-/// all six to offer. An editor asks for them to fill the row of faces it opens
-/// on, so answering the database's count with none and this with nothing are
-/// not the same answer.
+/// The `index`th default Mii as a `CharInfo`; built, not read from the database.
 fn default_mii_char_info(index: u32) -> Option<[u8; MII_CHAR_INFO_LEN]> {
     let mii = DEFAULT_MIIS.get(index as usize)?;
     let mut info = [0u8; MII_CHAR_INFO_LEN];
@@ -164,10 +134,10 @@ fn default_mii_char_info(index: u32) -> Option<[u8; MII_CHAR_INFO_LEN]> {
         info[at..at + 2].copy_from_slice(&unit.to_le_bytes());
     }
     info[MII_CHAR_INFO_FEATURES..].copy_from_slice(&[
-        0, // font_region: the standard set, not the Chinese, Korean or Taiwanese one
+        0, // font_region: standard
         mii.favorite_color,
         mii.gender,
-        64, // height: the middle of the range, as is the build below it
+        64, // height
         64, // build
         0,  // type: a Mii of this console's own, not a foreign one
         0,  // region_move: it may be copied anywhere
@@ -196,17 +166,17 @@ fn default_mii_char_info(index: u32) -> Option<[u8; MII_CHAR_INFO_LEN]> {
         4,                  // nose_scale
         9,                  // nose_y
         23,                 // mouth_type
-        0x13,               // mouth_color: the one the default Miis use, already translated
+        0x13,               // mouth_color, already translated
         4,                  // mouth_scale
         3,                  // mouth_aspect
         13,                 // mouth_y
         MII_HAIR_COLORS[0], // beard_color
-        0,                  // beard_type: none, so the colour above never shows
+        0,                  // beard_type: none
         0,                  // mustache_type: none either
         4,                  // mustache_scale
         10,                 // mustache_y
         0,                  // glass_type: none
-        8,                  // glass_color: the glasses palette's first, as unseen as the beard
+        8,                  // glass_color
         4,                  // glass_scale
         10,                 // glass_y
         0,                  // mole_type: none
@@ -218,36 +188,17 @@ fn default_mii_char_info(index: u32) -> Option<[u8; MII_CHAR_INFO_LEN]> {
     Some(info)
 }
 
-/// The create id a Mii is stamped with, built from a tag and a count.
-///
-/// A real one is an RFC 4122 version 4 UUID drawn at random when the Mii is
-/// built, and it is the Mii's identity: a database keyed on it treats two Miis
-/// sharing one as the same Mii. There is no database here to collide in, so
-/// these are counted rather than drawn: the same Mii gets the same id every
-/// run, which is what makes one boot's trace comparable with the next's.
-///
-/// The count occupies the tag's last byte, so a tag has 256 ids in it. That
-/// outlasts the hundred Miis a console's database holds, which is the only
-/// population these ever have to stay distinct across.
+/// Deterministic create id: `tag` with `sequence` in its last byte.
 fn mii_create_id(tag: &[u8; MII_CREATE_ID_LEN], sequence: u32) -> [u8; MII_CREATE_ID_LEN] {
     let mut id = *tag;
     id[MII_CREATE_ID_LEN - 1] = sequence as u8;
-    // The version (4, "random") and variant (RFC 4122) fields, which sit in
-    // the middle of the id rather than at either end of it.
+    // RFC 4122 version 4 and variant fields.
     id[6] = (id[6] & 0x0F) | 0x40;
     id[8] = (id[8] & 0x3F) | 0x80;
     id
 }
 
-/// Which built-in Mii `BuildRandom` answers with, given the gender asked for
-/// and how many random Miis have already been built.
-///
-/// Successive calls walk the matching Miis rather than repeating one, because
-/// an editor fills a row of faces by calling this once per face, answering
-/// them all with the same Mii offers a choice of one.
-///
-/// `None` means no built-in Mii has the requested gender, which cannot happen
-/// with the six below and is `MII_INVALID_ARGUMENT` if the table ever changes.
+/// Built-in Mii for the `sequence`th `BuildRandom` of `gender`, walking the matches.
 fn random_mii_index(gender: u8, sequence: u32) -> Option<u32> {
     let matching: Vec<u32> = (0..DEFAULT_MIIS.len() as u32)
         .filter(|&index| gender >= MII_GENDER_ALL || DEFAULT_MIIS[index as usize].gender == gender)
@@ -258,25 +209,11 @@ fn random_mii_index(gender: u8, sequence: u32) -> Option<u32> {
 }
 
 impl Cpu {
-    /// `mii:e`/`mii:u`: the console's Mii database.
-    ///
-    /// There are no Miis on this console and no NAND to keep them on, so the
-    /// database is real but empty. That is a truthful answer rather than a
-    /// convenient one: an editor asks how many exist before it decides
-    /// whether to open on the list or on "create a new one", and both are
-    /// valid states of a real console.
-    ///
-    /// Empty is not the same as having nothing to offer, though: the six
-    /// default Miis come out of `nn::mii`'s own image rather than the
-    /// database, and [`default_mii_char_info`] builds them.
+    /// `mii:e`/`mii:u`: an empty database.
     pub(super) fn mii_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
-                // QueryPointerBufferSize.
-                // ConvertCurrentObjectToDomain -> the id the session itself
-                // takes in its new domain. `nnSdk` converts this one before
-                // asking for the database, so answering without an object id
-                // leaves every later request addressed to nothing.
+                // ConvertCurrentObjectToDomain; `nnSdk` needs the object id back.
                 Some(0) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "mii:static");
@@ -294,7 +231,7 @@ impl Cpu {
             "mii:static".to_string()
         };
         match iface.as_str() {
-            // IStaticService::GetDatabaseService(u32 key) -> IDatabaseService.
+            // GetDatabaseService(u32 key) -> IDatabaseService.
             "mii:static" => match cmd_id {
                 Some(0) => {
                     self.reply_with_interface(tls, handle, "mii:database")?;
@@ -303,37 +240,17 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             "mii:database" => match cmd_id {
-                // IsUpdated(SourceFlag) -> bool. Nothing writes the database,
-                // so it has not changed since the caller last looked.
+                // IsUpdated(SourceFlag) -> bool.
                 Some(0) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                // IsFullDatabase -> bool: an empty one is not full.
+                // IsFullDatabase -> bool.
                 Some(1) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // GetCount(SourceFlag) -> u32.
                 Some(2) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-                // The list reads, Get through Get3: each fills a
-                // caller-provided buffer with as many Mii records as it holds
-                // and reports how many that was. An empty database writes
-                // nothing and reports none, which is a state a real console
-                // is in until someone makes their first Mii. Nintendo Switch
-                // Sports asks with Get, which is a list read like the others.
+                // Get through Get3: list reads, empty.
                 Some(3) | Some(4) | Some(8) | Some(9) => {
                     self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
                 }
-                // BuildRandom(Age, Gender, Race) -> CharInfo: a Mii nobody
-                // made, which is what an editor offers whoever has not made
-                // one yet. The three arguments are one byte each and narrow
-                // what may come back; only Gender narrows anything here,
-                // because gender is the only one of the three the six
-                // built-in Miis differ in. Filtering on an age or a race they
-                // all share would be choosing between faces on a property
-                // that is not in them.
-                //
-                // Random by hardware's definition, counted by this one: the
-                // Mii is picked in sequence and stamped with a create id of
-                // its own, which is what a database that keeps it tells it
-                // apart from every other Mii by. Reusing the built-in id
-                // would file each new Mii on top of the one it was built
-                // from.
+                // BuildRandom(Age, Gender, Race): only Gender narrows; each gets its own create id.
                 Some(6) => {
                     let data = self.ipc_request_data(tls);
                     let gender = self
@@ -353,11 +270,7 @@ impl Cpu {
                         None => self.write_ipc_response(tls, MII_INVALID_ARGUMENT, &[], &[], &[]),
                     }
                 }
-                // BuildDefault(u32 index) -> CharInfo: one of the six Miis
-                // `nn::mii` carries in its own image. This is the one read
-                // that does not go through the database, and the editor makes
-                // it before it has asked for anything else: it is where the
-                // faces it opens on come from when nobody has made a Mii yet.
+                // BuildDefault(u32 index) -> CharInfo.
                 Some(7) => {
                     let index = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
                     match default_mii_char_info(index) {
@@ -365,14 +278,9 @@ impl Cpu {
                         None => self.write_ipc_response(tls, MII_INVALID_ARGUMENT, &[], &[], &[]),
                     }
                 }
-                // IsBrokenDatabaseWithClearFlag -> bool, and clears the
-                // flag it reports. This database is synthesized rather than
-                // read off a filesystem, so it has never been corrupted and
-                // there is no flag behind the answer to clear.
+                // IsBrokenDatabaseWithClearFlag -> bool.
                 Some(20) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                // SetInterfaceVersion(u32): which revision of the Mii
-                // structures the caller speaks. Nothing here reads them, and
-                // an empty database is the same shape in every revision.
+                // SetInterfaceVersion(u32).
                 Some(22) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
@@ -380,15 +288,7 @@ impl Cpu {
         }
     }
 
-    /// `miiimg`: the database of *rendered* Mii images, kept alongside the Mii
-    /// data itself so the menu can show faces without rendering them.
-    ///
-    /// Empty, for the same reason [`Cpu::mii_request`]'s is. Answering its
-    /// count with a fabricated object id, which is what the generic
-    /// no-implementation reply did: left the editor reading a garbage count
-    /// and asking for the attributes of images that were never there, half a
-    /// million times over, which is what a "running but drawing nothing"
-    /// applet turned out to be.
+    /// `miiimg`: the rendered Mii image database, empty.
     pub(super) fn miiimg_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
@@ -441,7 +341,7 @@ mod tests {
                 .expect("a terminator");
             assert_eq!(String::from_utf16(&name[..end]).unwrap(), "no name");
 
-            // Three Miis with a male build, then three with a female one.
+            // Three male Miis, then three female.
             assert_eq!(u32::from(info[0x28]), u32::from(index >= 3), "gender");
         }
         assert!(
@@ -449,9 +349,7 @@ mod tests {
             "there is no seventh"
         );
 
-        // The table is written in the older colour palette, so a hair colour
-        // of 0 has to come out as the newer palette's 8. Handing the raw
-        // number over is the mistake this catches.
+        // Hair colour 0 in the old palette is 8 in the new one.
         let first = super::default_mii_char_info(0).unwrap();
         assert_eq!(first[0x32], super::MII_HAIR_COLORS[0], "hair_color");
         assert_eq!(first[0x35], super::MII_EYE_COLORS[0], "eye_color");
@@ -459,10 +357,6 @@ mod tests {
 
     #[test]
     fn mii_build_random_walks_the_faces_and_gives_each_its_own_identity() {
-        // BuildRandom takes Age, Gender and Race as a byte each. Gender is
-        // the only one of the three the six built-in Miis differ in, so it is
-        // the only one that narrows what comes back: Female here, which is
-        // the last three of them.
         let mut cpu = super::Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.record_domain_object(9, 7, "mii:database");
@@ -482,17 +376,13 @@ mod tests {
             faces.push(info[super::MII_CHAR_INFO_FEATURES..].to_vec());
         }
 
-        // Three Miis match, and four calls walk them and come back round. An
-        // editor fills its row of faces by calling this once per face, so a
-        // pick that does not move offers a choice of one.
+        // Three Miis match; four calls walk them and wrap.
         assert_ne!(faces[0], faces[1]);
         assert_ne!(faces[1], faces[2]);
         assert_ne!(faces[0], faces[2]);
         assert_eq!(faces[0], faces[3], "the fourth comes back round");
 
-        // Each is still its own Mii, the two built from one face included:
-        // a database keyed on create ids files two Miis sharing one on top of
-        // each other.
+        // Every built Mii has a distinct create id.
         for (position, id) in create_ids.iter().enumerate() {
             assert!(
                 !create_ids[..position].contains(id),
@@ -500,8 +390,7 @@ mod tests {
             );
         }
 
-        // And none of them may take a built-in Mii's identity, which is what
-        // the separate tag keeps apart.
+        // None takes a built-in Mii's create id.
         let built_in: Vec<Vec<u8>> = (0..super::DEFAULT_MIIS.len() as u32)
             .map(|index| {
                 super::default_mii_char_info(index).unwrap()[..super::MII_CREATE_ID_LEN].to_vec()
@@ -529,9 +418,7 @@ mod tests {
 
     #[test]
     fn mii_reports_a_database_that_is_intact_and_empty() {
-        // IsBrokenDatabaseWithClearFlag. Answered with nothing, the editor
-        // read its own stack for the flag; a nonzero read there is a database
-        // it will offer to wipe before it will show a face.
+        // Unanswered, the editor reads garbage and offers to wipe the database.
         let mut cpu = request(true, 20, &[]);
         cpu.record_domain_object(9, 7, "mii:database");
         cpu.mii_request(TLS, 9, Some(20)).unwrap();
@@ -541,15 +428,11 @@ mod tests {
 
     #[test]
     fn mii_build_default_answers_over_a_domain() {
-        // `nnSdk` converts the mii session to a domain before it asks for the
-        // database, so the index arrives (and the CharInfo goes back) 0x10
-        // further into the buffer than a plain request's payload would.
+        // The domain header shifts the payload 0x10 further.
         let mut cpu = request(true, 7, &3u32.to_le_bytes());
         cpu.record_domain_object(9, 7, "mii:database");
         cpu.mii_request(TLS, 9, Some(7)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
-        // The fourth default Mii, read out of the reply where the caller
-        // reads it rather than out of what built it.
         assert_eq!(cpu.mem.read_u8(TLS + 0x30 + 0x28).unwrap(), 1, "gender");
         let expected = super::default_mii_char_info(3).unwrap();
         for (offset, &byte) in expected.iter().enumerate() {
@@ -561,9 +444,6 @@ mod tests {
             );
         }
 
-        // An index past the six is the caller's mistake, and the one failure
-        // this command has. Answering it with a success leaves whoever asked
-        // reading a Mii out of a zeroed reply.
         let mut cpu = request(true, 7, &6u32.to_le_bytes());
         cpu.record_domain_object(9, 7, "mii:database");
         cpu.mii_request(TLS, 9, Some(7)).unwrap();

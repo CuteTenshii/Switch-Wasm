@@ -56,9 +56,8 @@ impl<'a> ParcelReader<'a> {
         self.pos += ((len + 1) * 2 + 3) & !3;
     }
 
-    /// Read a flattened object (`{ i32 length, i32 fd_count, bytes }`).
-    /// Returns `None` when it carries file descriptors, which the Switch's
-    /// binder never does.
+    /// Read a flattened object (`{ i32 length, i32 fd_count, bytes }`), or
+    /// `None` if it carries file descriptors.
     pub fn read_flattened(&mut self) -> Option<&'a [u8]> {
         let len = self.read_i32();
         let fd_count = self.read_i32();

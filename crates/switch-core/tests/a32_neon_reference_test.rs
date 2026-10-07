@@ -1,20 +1,13 @@
-//! NEON's two-register miscellaneous group (the reverses, the pairwise adds,
-//! the bit counts, the saturating abs and neg, the comparisons with zero, the
-//! permutes, the narrowing moves, the half-precision and integer conversions
-//! and the reciprocal estimates), the integer three-register forms, the AES
-//! and SHA steps, and every modified-immediate form.
-//!
-//! The expected values are what `qemu-arm` computed for the same instructions
-//! on the same registers, standard-FPSCR flushing and default NaNs included;
-//! `tools/a32_neon_reference.py` regenerates the table.
+//! NEON two-register miscellaneous, integer three-register, AES/SHA and
+//! modified-immediate forms against `qemu-arm` results. Regenerate the table
+//! with `tools/a32_neon_reference.py`.
 
 mod a32;
 
 use a32::{cpu, load, SCRATCH};
 
-/// Load q8, q9 and q10 from the scratch page and r2 with a known word, run
-/// the case, and store all four 0x100 further on. r0 is left pointing at
-/// q10's copy in memory, which the structure loads and stores address.
+/// Load q8, q9, q10 and r2, run the case, and store all four 0x100 further on.
+/// r0 is left pointing at q10's copy, for the structure loads and stores.
 const LOAD: [u32; 5] = [
     0xE308_0000, // movw    r0, #0x8000
     0xF460_028D, // vld1.32 {d16, d17, d18, d19}, [r0]!
@@ -29,8 +22,7 @@ const STORE: [u32; 4] = [
     0xE581_2000, // str     r2, [r1]
 ];
 
-/// Each case: the instructions, q8, q9 and q10 before, and q8, q9, q10 and
-/// r2 after.
+/// Each case: the instructions, q8-q10 before, and q8-q10 and r2 after.
 const CASES: &[(&[u32], [u32; 12], [u32; 13])] = &[
     // vrev64.8 q10, q8
     (
@@ -19260,8 +19252,7 @@ const CASES: &[(&[u32], [u32; 12], [u32; 13])] = &[
 
 #[test]
 fn the_neon_forms_agree_with_qemu() {
-    // Every disagreement at once: one wrong operation usually shows in all
-    // of its sizes, and the pattern across them says more than the first.
+    // Report every disagreement, not just the first.
     let mut wrong = Vec::new();
     for &(insn, before, after) in CASES {
         let mut cpu = cpu();

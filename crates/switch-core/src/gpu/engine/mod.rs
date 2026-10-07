@@ -1,10 +1,4 @@
-//! The GM20B engine classes.
-//!
-//! A channel binds a class to each of its eight subchannels with a write to
-//! method 0 (`SetObject`); every later method write on that subchannel lands
-//! in that class's register file. A class's registers *are* its interface,
-//! writing a register both stores a value and, for a handful of "trigger"
-//! registers, starts work.
+//! The GM20B engine classes, each bound to a subchannel by method 0 (`SetObject`).
 
 pub mod compute;
 pub mod copy;
@@ -12,7 +6,6 @@ pub mod inline;
 pub mod threed;
 pub mod twod;
 
-/// Class ids reported by `NVGPU_GPU_IOCTL_GET_CHARACTERISTICS`.
 pub const CLASS_2D: u32 = 0x902D; // FERMI_TWOD_A
 pub const CLASS_3D: u32 = 0xB197; // MAXWELL_B
 pub const CLASS_COMPUTE: u32 = 0xB1C0; // MAXWELL_COMPUTE_B
@@ -20,11 +13,9 @@ pub const CLASS_INLINE: u32 = 0xA140; // KEPLER_INLINE_TO_MEMORY_B
 pub const CLASS_COPY: u32 = 0xB0B5; // MAXWELL_DMA_COPY_A
 pub const CLASS_GPFIFO: u32 = 0xB06F; // MAXWELL_CHANNEL_GPFIFO_A
 
-/// Registers below this are real class state; at and above it, the 3D class
-/// interprets a write as a macro invocation.
+/// Registers at and above this are macro invocations on the 3D class.
 pub const REGISTER_COUNT: usize = 0xE00;
 
-/// A class's register file. Methods are dword indices into it.
 #[derive(Debug, Clone)]
 pub struct Registers {
     words: Vec<u32>,
@@ -55,8 +46,7 @@ impl Registers {
         }
     }
 
-    /// A 40-bit GPU address stored as a high/low register pair, in the order
-    /// the hardware (and deko3d's `Iova` helper) uses: high word first.
+    /// A 40-bit GPU address stored as a high/low register pair, high word first.
     #[inline]
     pub fn iova(&self, method: u32) -> u64 {
         ((self.get(method) as u64) << 32) | self.get(method + 1) as u64
@@ -67,7 +57,6 @@ impl Registers {
         f32::from_bits(self.get(method))
     }
 
-    /// Extract `[lo, hi]` (inclusive) bits of a register.
     #[inline]
     pub fn field(&self, method: u32, lo: u32, hi: u32) -> u32 {
         let width = hi - lo + 1;
@@ -85,7 +74,6 @@ impl Registers {
     }
 }
 
-/// Extract `[lo, hi]` (inclusive) bits of a raw method argument.
 #[inline]
 pub fn field(value: u32, lo: u32, hi: u32) -> u32 {
     let width = hi - lo + 1;

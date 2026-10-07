@@ -1,13 +1,6 @@
-//! A GPU channel: the unit of work submission.
-//!
-//! Userspace pushes 64-bit GPFIFO entries, each pointing at a pushbuffer in
-//! GPU memory. The channel's command processor (PFIFO) walks a pushbuffer,
-//! decodes its method headers, and routes each method write to whichever class
-//! is bound to that header's subchannel.
-//!
-//! The pushbuffers of a channel are one continuous stream, not a sequence of
-//! self-contained programs: a method group's data words may run past the end
-//! of the pushbuffer that declared them and be finished by the next.
+//! A GPU channel: PFIFO walks the pushbuffers that GPFIFO entries point at and routes
+//! each method to the class bound to its subchannel. A channel's pushbuffers form
+//! one continuous stream.
 
 use crate::gpu::engine::compute::EngineCompute;
 use crate::gpu::engine::copy::EngineCopy;
@@ -23,21 +16,15 @@ use crate::{Error, Result};
 /// Method 0 of every class binds that class to the header's subchannel.
 const SET_OBJECT: u32 = 0x000;
 
-/// Number of subchannels a channel has.
 pub const SUBCHANNEL_COUNT: usize = 8;
 
-/// Subchannel the channel's own `MAXWELL_CHANNEL_GPFIFO_A` class answers on.
-/// nvhost binds it when the channel is created, so userspace never issues a
-/// `SetObject` for it: deko3d writes its syncpoint increments and cache-flush
-/// operations straight to subchannel 6, and without the pre-binding those
-/// methods land on an unbound subchannel and the fence never signals.
+/// Subchannel of `MAXWELL_CHANNEL_GPFIFO_A`, pre-bound by nvhost at channel creation.
 pub const SUBCHANNEL_GPFIFO: usize = 6;
 
 /// Maximum pushbuffer length (in dwords) the GPFIFO entry can express.
 const MAX_PUSHBUFFER_WORDS: u32 = 0x1F_FFFF;
 
-/// Methods below this belong to the channel itself on *every* subchannel:
-/// PFIFO answers them, and no engine class defines a method under it.
+/// Methods below this are host methods on every subchannel.
 const HOST_METHOD_COUNT: u32 = 0x40;
 
 // Host methods (MAXWELL_CHANNEL_GPFIFO_A).
@@ -48,14 +35,12 @@ const GPFIFO_SEMAPHORE_ACQUIRE: u32 = 0x01A;
 const GPFIFO_SEMAPHORE_RELEASE: u32 = 0x01B;
 const GPFIFO_SYNCPOINT: u32 = 0x01D;
 
-/// A `SetObject` argument may carry the engine the class runs on above its
-/// class id; only the class id names the object to bind.
+/// A `SetObject` argument may carry the engine above the class id.
 const BIND_CLASS_MASK: u32 = 0xFFFF;
 const BIND_ENGINE_MASK: u32 = 0x1F_0000;
 
-/// What a header word tells PFIFO to do. `DMA_SEC_OP` (bits 29..31) picks the
-/// form; two of the forms pick again with `DMA_TERT_OP`, which sits in the low
-/// two bits of the count field and so leaves their groups eleven bits of count.
+/// A PFIFO header word's command. `DMA_SEC_OP` (bits 29..31) picks the form; two forms
+/// sub-select with `DMA_TERT_OP` in the low two bits of the count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Command {
     /// Start a method group: `count` data words follow the header.
@@ -72,8 +57,7 @@ enum Command {
         subchannel: u32,
         arg: u32,
     },
-    /// Sub-device mask bookkeeping: which GPUs of an SLI set run what follows.
-    /// There is exactly one GPU here, so every mask selects it.
+    /// Sub-device mask bookkeeping; the single GPU is always selected.
     SubDeviceMask,
     /// Nothing after this header belongs to the stream.
     EndSegment,
@@ -137,8 +121,7 @@ impl Command {
     }
 }
 
-/// The command processor's decode state. It lives on the channel because the
-/// stream outlives any one pushbuffer -- and any one submission.
+/// The command processor's decode state, which outlives any one pushbuffer.
 #[derive(Debug, Clone, Copy, Default)]
 struct Pfifo {
     method: u32,
@@ -154,7 +137,6 @@ pub struct Channel {
     pub id: u32,
     /// The address space bound with `NVGPU_AS_IOCTL_BIND_CHANNEL`.
     pub as_id: Option<u32>,
-    /// The channel's host1x syncpoint.
     pub syncpt: u32,
     /// Class bound to each subchannel, 0 when unbound.
     pub subchannel_class: [u32; SUBCHANNEL_COUNT],
@@ -164,7 +146,6 @@ pub struct Channel {
     pub compute: EngineCompute,
     /// MAXWELL_CHANNEL_GPFIFO_A's own register file.
     pub gpfifo_regs: Registers,
-    /// Size of the GPFIFO ring the guest allocated.
     pub gpfifo_entries: u32,
     pfifo: Pfifo,
 }
@@ -188,8 +169,7 @@ impl Channel {
         }
     }
 
-    /// Run every pushbuffer referenced by `entries`, then retire the channel's
-    /// syncpoint to `fence`.
+    /// Run every pushbuffer in `entries`, then retire the channel's syncpoint to `fence`.
     pub fn submit(&mut self, entries: &[u64], fence: NvFence, ctx: &mut ExecCtx) -> Result<()> {
         ctx.stats.submissions += 1;
         for &entry in entries {
@@ -215,11 +195,7 @@ impl Channel {
         self.run_pushbuffer(&pushbuffer, ctx)
     }
 
-    /// Decode and execute one pushbuffer.
-    ///
-    /// A group left unfinished here is finished by the next pushbuffer: the
-    /// guest is free to cut its command stream anywhere, and a 64-word texture
-    /// upload landing across two GPFIFO entries used to fault the channel.
+    /// Decode and execute one pushbuffer. An unfinished group continues in the next.
     pub fn run_pushbuffer(&mut self, bytes: &[u8], ctx: &mut ExecCtx) -> Result<()> {
         let words: Vec<u32> = bytes
             .as_chunks::<4>()
@@ -266,7 +242,6 @@ impl Channel {
         Ok(())
     }
 
-    /// Consume one data word of the group in flight.
     fn data_word(&mut self, word: u32, ctx: &mut ExecCtx) -> Result<()> {
         let method = self.pfifo.method;
         let subchannel = self.pfifo.subchannel;
@@ -280,7 +255,6 @@ impl Channel {
         self.method(subchannel, method, word, last_call, ctx)
     }
 
-    /// Route one method write to the class bound to `subchannel`.
     pub fn method(
         &mut self,
         subchannel: u32,
@@ -312,14 +286,9 @@ impl Channel {
         }
         match class {
             CLASS_3D => self.three_d.write(method, arg, last_call, ctx),
-            // The standalone class and the 3D class's own methods are one
-            // unit sharing one register file, so they share one instance.
+            // The standalone class shares the 3D class's register file.
             CLASS_INLINE => self.three_d.inline.write(method, arg, ctx),
-            // Both of these read guest memory, and the wgpu backend keeps a
-            // render target on the device until it is flushed, so a copy out
-            // of one reads whatever was in memory before it was drawn into.
-            // It is not a hypothetical: Just Dance 2019 resolves its
-            // multisampled colour target with a 2D blit, once a frame.
+            // Flush device-resident render targets before a blit reads guest memory.
             CLASS_2D => {
                 if method == crate::gpu::engine::twod::Engine2D::LAUNCHES_BLIT {
                     self.three_d.flush_renderer(ctx)?;
@@ -333,16 +302,12 @@ impl Channel {
                 self.copy.write(method, arg, ctx)
             }
             CLASS_COMPUTE => {
-                // A dispatch reads and writes guest memory, and the wgpu
-                // backend keeps a render target on the device until it is
-                // flushed, so a kernel reading one would read stale bytes.
+                // Flush device-resident render targets before a dispatch reads guest memory.
                 if method == crate::gpu::engine::compute::SEND_SIGNALING_PCAS_B {
                     self.three_d.flush_renderer(ctx)?;
                 }
                 self.compute.write(method, arg, ctx)
             }
-            // Only the host methods handled above exist on this class; a
-            // write past them is state with nothing reading it.
             CLASS_GPFIFO => {
                 self.gpfifo_regs.set(method, arg);
                 Ok(())
@@ -358,14 +323,11 @@ impl Channel {
         }
     }
 
-    /// The channel's own methods -- class binding, semaphores, syncpoints --
-    /// which PFIFO answers on whichever subchannel they arrive on.
+    /// The channel's host methods, answered on any subchannel.
     fn host_method(&mut self, slot: usize, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
         self.gpfifo_regs.set(method, arg);
         match method {
             SET_OBJECT => {
-                // The argument may name the engine above the class id, and it
-                // is the class id that names the object.
                 let class = if arg & !BIND_CLASS_MASK != 0
                     && arg & !(BIND_ENGINE_MASK | BIND_CLASS_MASK) == 0
                 {
@@ -383,8 +345,7 @@ impl Channel {
                 const OPERATION_RELEASE: u32 = 2;
                 const RELEASE_SIZE_4_BYTES: u32 = 1;
                 if field(arg, 0, 4) != OPERATION_RELEASE {
-                    // Acquires are already satisfied: a submission runs to
-                    // completion before the ioctl returns.
+                    // Acquires are satisfied: a submission completes before the ioctl returns.
                     return Ok(());
                 }
                 let addr = self.gpfifo_regs.iova(GPFIFO_SEMAPHORE_OFFSET);
@@ -397,8 +358,7 @@ impl Channel {
                 }
                 Ok(())
             }
-            // The long-form release of the same semaphore, payload in the
-            // argument rather than in a register.
+            // The long-form release, payload in the argument.
             GPFIFO_SEMAPHORE_RELEASE => {
                 let addr = self.gpfifo_regs.iova(GPFIFO_SEMAPHORE_OFFSET);
                 ctx.write_u32(addr, arg)
@@ -412,8 +372,7 @@ impl Channel {
                 }
                 Ok(())
             }
-            // Nop, cache maintenance and reference counts: the engines write
-            // guest memory as they go, so there is no cache to maintain.
+            // Nop, cache maintenance and reference counts.
             _ => Ok(()),
         }
     }
@@ -473,10 +432,7 @@ mod tests {
 
     #[test]
     fn the_gpfifo_subchannel_is_bound_without_a_set_object() {
-        // nvhost binds the channel's own class, so deko3d writes its syncpoint
-        // increments to subchannel 6 with no SetObject. Requiring one made the
-        // pushbuffer fault ("method 0xb on subchannel 6 before any class was
-        // bound") and hbmenu's frame fence never signalled.
+        // Subchannel 6 is pre-bound to the GPFIFO class.
         let chan = Channel::new(1, 8);
         assert_eq!(chan.subchannel_class[SUBCHANNEL_GPFIFO], CLASS_GPFIFO);
         for (index, &class) in chan.subchannel_class.iter().enumerate() {
@@ -575,9 +531,7 @@ mod tests {
 
     #[test]
     fn a_method_group_finishes_in_the_next_pushbuffer() {
-        // The stream is continuous. A 64-word LOAD_INLINE_DATA upload split
-        // across two GPFIFO entries used to fault the channel with
-        // "header 0x6040406d claims 64 words but only 0 remain".
+        // The stream is continuous across GPFIFO entries.
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
         let mut ctx = h.ctx();
@@ -609,8 +563,7 @@ mod tests {
 
     #[test]
     fn a_data_word_is_never_read_as_a_header() {
-        // A payload that happens to look like an end-of-segment header must
-        // still reach the method it belongs to.
+        // A payload that looks like an end-of-segment header still reaches its method.
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
         let pb = pushbuffer(&[
@@ -644,8 +597,7 @@ mod tests {
 
     #[test]
     fn the_old_method_forms_count_in_eleven_bits() {
-        // Modes 0 and 2 spend the low two bits of the count field on a second
-        // opcode, so their counts start two bits higher up.
+        // Modes 0 and 2 use the low two count bits for a second opcode.
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
         let old_increasing = 0x360 | (2 << 18);
@@ -693,8 +645,7 @@ mod tests {
 
     #[test]
     fn host_methods_are_answered_on_any_subchannel() {
-        // The low 0x40 of every class's method space belongs to the channel,
-        // so a syncpoint increment works on the 3D subchannel too.
+        // Host methods work on the 3D subchannel too.
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
         let pb = pushbuffer(&[

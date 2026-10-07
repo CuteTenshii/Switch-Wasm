@@ -1,43 +1,8 @@
-//! Which of a real frame's shader programs the WGSL translator cannot take:
+//! List which of a frame's shader programs the WGSL translator cannot take:
 //! `shader_coverage <container> <prod.keys> [title.keys] [frame]`.
 //!
-//! `BEFORE=<n>` also prints, for each program an instruction blocks, the `n`
-//! instructions leading up to it: what a blocker needs from the code around
-//! it, such as where a bindless texture's handle register was loaded from,
-//! is not in the blocker's own name.
-//!
-//! `FRAMES=<n>` records `n` frames from `frame` on rather than one, for a
-//! program that draws once somewhere in a stretch of the run.
-//!
-//! The fragment shader interpreter is about half of a frame in any title the
-//! software rasterizer draws, 49.9% of a Just Dance 2017 frame under `perf`,
-//! against 8.0% for the whole emulated CPU, and every one of those 921,600
-//! invocations re-runs a program the decoder already turned into a `Compiled`
-//! once. Running it on the device instead means `gpu/shader/wgsl.rs` being
-//! able to translate it, and the useful question is not how many opcodes that
-//! module has arms for but how many of the ones a frame *executes* it is
-//! still missing.
-//!
-//! This is `jit_coverage` for shaders, with one difference the two
-//! translators' shapes force. `cpu::translates` answers per instruction, so
-//! that tool can weigh every encoding a frame ran. WGSL translation is per
-//! program and stops at the first thing it cannot emit, so what comes back
-//! here is the *first* blocker in each program: fixing the top row can reveal
-//! another behind it, and the loop is to fix and re-run. What the headline
-//! counts do not depend on is that ordering, a program either translates
-//! whole or it does not.
-//!
-//! Reported twice, because a warp shuffle is a question about the device
-//! rather than about the translator: once for a device with no optional
-//! features, which is what a browser is, and once for one with WGSL's quad
-//! operations. The two now differ only outside a fragment shader, a
-//! fragment shader without them reads its neighbour through
-//! `wgsl::QUAD_SWAP`, so a gap between the passes is a vertex program
-//! shuffling, and nothing else.
-//!
-//! `SWITCH_FIRMWARE=<dir>` as everywhere else. A system applet is the subject
-//! to prefer here: qlaunch reaches a frame in 35 million instructions and is
-//! almost pure rasterizer, where Just Dance spends billions before it draws.
+//! Reports the first blocker per program. `BEFORE=<n>` prints the `n` instructions
+//! before each blocker; `FRAMES=<n>` records `n` frames instead of one.
 mod common;
 
 use std::collections::BTreeMap;
@@ -48,14 +13,10 @@ use switch_core::gpu::shader::{uses, Program};
 
 const USAGE: &str = "shader_coverage <container> <prod.keys> [title.keys] [frame]";
 
-/// How much of the boot to allow before giving up on reaching the frame.
 const BOOT_BUDGET: u64 = 20_000_000_000;
-/// How long to allow for the one frame being recorded.
 const FRAME_BUDGET: u64 = 2_000_000_000;
-/// How many distinct blockers to name.
 const ROWS: usize = 20;
 
-/// One program a frame bound, and how many draws used it.
 struct Used {
     stage: Stage,
     addr: u64,
@@ -63,12 +24,9 @@ struct Used {
     draws: u64,
 }
 
-/// A blocker's identity with the instruction index dropped, so that the same
-/// missing opcode in two programs is one row rather than two.
+/// A blocker with the instruction index dropped, so one opcode is one row.
 fn blocker(why: Unsupported) -> String {
     match why {
-        // `Op`'s `Debug` opens with the variant name and then its fields; the
-        // name alone is what names the gap.
         Unsupported::Op { op, .. } => {
             let text = format!("{op:?}");
             let name = text
@@ -86,10 +44,7 @@ fn blocker(why: Unsupported) -> String {
     }
 }
 
-/// Take one program all the way to a module, which is the whole test: a
-/// texture dimensionality is rejected when the bindings are laid out rather
-/// than when the instructions are emitted, so stopping at `translate` would
-/// call a program translatable that nothing can bind.
+/// Build the full module: some refusals only happen when bindings are laid out.
 fn compiles(program: &Program, stage: Stage, caps: Caps) -> Result<(), Unsupported> {
     let translated = wgsl::translate_for(&Compiled::new(program), caps)?;
     let layout = wgsl::Layout::of(&translated, stage);
@@ -97,12 +52,10 @@ fn compiles(program: &Program, stage: Stage, caps: Caps) -> Result<(), Unsupport
     Ok(())
 }
 
-/// `BEFORE=<n>`: how many instructions before a blocker to print, if any.
 fn show_before() -> Option<usize> {
     std::env::var("BEFORE").ok()?.parse().ok()
 }
 
-/// The instruction a refusal names, for every refusal that names one.
 fn blocked_at(why: &Unsupported) -> Option<usize> {
     match *why {
         Unsupported::Op { at, .. }
@@ -115,7 +68,6 @@ fn blocked_at(why: &Unsupported) -> Option<usize> {
     }
 }
 
-/// Translate everything `used` holds under `caps` and print what came back.
 fn report(label: &str, used: &[Used], caps: Caps) {
     let mut blocked: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut ok_programs = 0u64;
@@ -213,8 +165,6 @@ fn main() {
     common::register_firmware(&mut cpu, &title.keys);
     title.boot(&mut cpu);
 
-    // Nothing is sampled during the boot, so it runs through the block
-    // translator rather than the interpreter.
     let boot = common::run_to(&mut cpu, BOOT_BUDGET, |cpu| cpu.nv.gpu.frames >= want_frame);
     if cpu.nv.gpu.frames < want_frame {
         println!(
@@ -225,9 +175,6 @@ fn main() {
         return;
     }
 
-    // Every draw notes the programs it was about to run, decoded: reading
-    // them back afterwards would need the GPU address space the draw was
-    // using, and that has moved on by the time this returns.
     let frames: u64 = std::env::var("FRAMES")
         .ok()
         .and_then(|n| n.parse().ok())
@@ -239,10 +186,7 @@ fn main() {
     });
     let bound = uses::take();
 
-    // Two draws binding one address are one program. The decode folds the
-    // constant banks in, so the same address can decode differently under
-    // different bindings; the first is kept, which is the program that draw
-    // ran.
+    // Keyed by address; the first decode is kept.
     let mut used: Vec<Used> = Vec::new();
     let mut index: BTreeMap<(u64, bool), usize> = BTreeMap::new();
     for (stage, addr, program) in bound {
@@ -288,8 +232,6 @@ fn main() {
         },
     );
 
-    // Named so a blocker can be disassembled and read against the source: the
-    // addresses are the guest's, and `--example disasm_flat` takes them.
     println!();
     println!("--- programs, by draws ---");
     let mut ranked: Vec<&Used> = used.iter().collect();

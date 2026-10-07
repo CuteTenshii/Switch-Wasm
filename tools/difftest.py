@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-"""Differential-test the interpreter's SIMD/FP decode against real ARM semantics.
+"""Differential-test the interpreter's SIMD/FP decode against qemu-aarch64.
 
-Assembles a list of instructions into a static AArch64 binary that dumps all 32
-vector registers after each one, runs it under qemu-aarch64, runs the identical
-instruction bytes through `cargo run --example difftest`, and reports the first
-register whose value differs.
-
-This is the tool that caught TRN1/TRN2 taking the wrong lanes (which stalled
-hbmenu's NEON JPEG decoder) and the by-element multiplies' index decode.
-
-Needs `clang` (with lld), `qemu-aarch64` and a Rust toolchain. Instructions are
-listed in INSTRUCTIONS below; v0..v9 come pre-loaded with the mixed-sign inputs
-in `INPUT_VECTORS`, x0 points at those inputs and x3 at 1 KiB of scratch.
+Runs each instruction in INSTRUCTIONS under qemu and through
+`cargo run --example difftest`, and reports the first register that differs.
+v0..v9 hold INPUT_VECTORS, x0 points at them and x3 at 1 KiB of scratch.
+Needs `clang` (with lld), `qemu-aarch64` and a Rust toolchain.
 
     python3 tools/difftest.py            # run the whole list
     python3 tools/difftest.py --keep     # ... and leave the build in /tmp
@@ -123,17 +116,7 @@ INSTRUCTIONS = [
     "ld4 { v0.16b, v1.16b, v2.16b, v3.16b }, [x0]",
     "st3 { v5.16b, v6.16b, v7.16b }, [x3]",
     "ldr q30, [x3, #32]",
-    # Floating point, which a game is made of and this list had almost none of.
-    # Every form below is one Echoes of Wisdom executes: a census of the
-    # instructions that title actually runs found 8,035 distinct encodings the
-    # disassembler could not even name, and they are overwhelmingly these --
-    # 725 sites of scalar `fmul` alone, 432 of `tbl`, 427 of `fcmp`. A wrong
-    # result here does not fault; it flips a comparison somewhere in the
-    # engine and the consequence lands somewhere else entirely.
-    #
-    # The inputs come back first because the tests above clobber v10/v11, and
-    # the scalar values are spread out of them by lane, which tests the `mov`
-    # element forms on the way.
+    # Floating point. Inputs are reloaded first because the tests above clobber v10/v11.
     "ldr q10, [x4, #160]",
     "ldr q11, [x4, #176]",
     "mov s12, v10.s[1]",
@@ -152,9 +135,7 @@ INSTRUCTIONS = [
     "fmul d16, d11, d14",
     "fdiv d17, d11, d14",
     "fsqrt d18, d11",
-    # the fused multiply-adds, whose whole point is that they do not round in
-    # the middle -- a two-step implementation matches on these inputs and
-    # diverges on the ones a physics step actually produces
+    # fused multiply-adds, which must not round in the middle
     "fmadd s23, s10, s12, s13",
     "fmsub s24, s10, s12, s13",
     "fnmadd s25, s10, s12, s13",
@@ -187,8 +168,7 @@ INSTRUCTIONS = [
     "fmov s6, w13",
     "fcvtzs x13, d14",
     "fmov d7, x13",
-    # comparisons write NZCV and nothing else, so each is followed by the
-    # select that makes the flags visible in a register the dump carries
+    # comparisons, each followed by a select that exposes NZCV
     "fcmp s10, s12",
     "fcsel s8, s10, s12, mi",
     "fcmp s10, #0.0",
@@ -201,7 +181,6 @@ INSTRUCTIONS = [
     "fmin s26, s10, s12",
     "fmaxnm s27, s10, s12",
     "fminnm s28, s10, s12",
-    # the rounding modes, which differ only in the cases that matter
     "frinta s29, s12",
     "frintm s30, s12",
     "frintn s31, s12",
@@ -247,18 +226,16 @@ INSTRUCTIONS = [
     "scvtf v9.4s, v7.4s",
     "ucvtf v12.4s, v8.4s",
     "frintz v28.4s, v10.4s",
-    # the one across-vector reduction this title runs
     "uaddlv h29, v2.8b",
     "uaddlv s30, v2.4h",
-    # table lookup: the third most common form the title runs, and untested
+    # table lookup
     "tbl v30.8b, { v2.16b }, v3.8b",
     "tbl v31.16b, { v2.16b }, v3.16b",
     "tbl v1.8b, { v2.16b, v3.16b }, v4.8b",
     "tbl v2.8b, { v3.16b, v4.16b, v5.16b }, v6.8b",
     "tbl v3.8b, { v4.16b, v5.16b, v6.16b, v7.16b }, v8.8b",
     "tbx v4.8b, { v5.16b }, v6.8b",
-    # the element moves and the whole-register alias, all of which the title
-    # uses more than most of the arithmetic above
+    # element moves and the whole-register alias
     "mov v5.d[1], v10.d[0]",
     "mov v6.s[1], v10.s[0]",
     "mov v7.16b, v10.16b",
@@ -274,17 +251,13 @@ INSTRUCTIONS = [
     "mvni v18.4s, #0x1, lsl #16",
     "bic v19.16b, v10.16b, v13.16b",
     "rev64 v20.4s, v10.4s",
-    # the interleaved pair store, which the title uses for two-element vectors
     "st2 { v10.2s, v11.2s }, [x3]",
     "ldr q21, [x3]",
     "ld2 { v22.2s, v23.2s }, [x3]",
 ]
 
-# Scalar integer instructions. These run in a separate program that dumps
-# x0..x25 after each one, because the vector harness needs its own pointers.
-# 32-bit forms are included deliberately: every write to a W register zeroes
-# bits 63:32, and getting that wrong is invisible until something uses the X
-# form (it cost hbmenu's JPEG decode the sign of every DC difference).
+# Scalar integer instructions, run in a separate program that dumps x0..x25.
+# 32-bit forms check that W writes zero bits 63:32.
 SCALAR_INSTRUCTIONS = [
     # shifts by immediate (bitfield aliases) and by register
     "asr w0, w10, #31",
@@ -309,9 +282,7 @@ SCALAR_INSTRUCTIONS = [
     "sxtw x8, w10",
     "uxtb w9, w10",
     "uxth w0, w10",
-    # The same aliases over fields whose top bit is set (x16's low byte is
-    # 0xF0), which is the only input that shows where a sign bit is read from,
-    # and their 64-bit forms.
+    # Same aliases over fields with the top bit set (x16's low byte is 0xF0), and 64-bit forms.
     "sbfiz w1, w16, #4, #8",
     "sbfiz x2, x16, #12, #8",
     "sbfiz x3, x21, #40, #20",
@@ -379,9 +350,7 @@ SCALAR_INSTRUCTIONS = [
     "clz w8, w10",
     "cls w9, w10",
     "clz x0, x10",
-    # MOVK, whose 32-bit form merges into a register it must also narrow.
-    # x14 is all-ones, so a `movk w` that forgets to zero bits 63:32 leaves
-    # them set and the X form of the result reads wrong.
+    # MOVK w must zero bits 63:32; x14 is all-ones.
     "mov x0, x14",
     "movk w0, #0x1234",
     "movk w0, #0x5678, lsl #16",
@@ -394,10 +363,7 @@ SCALAR_INSTRUCTIONS = [
     "bics w4, w10, w11, lsl #2",
     "tst w10, w11",
     "ands w5, w10, w11",
-    # loads and stores, through the scratch x29 points at. An address mode
-    # decoded wrongly does not fault -- it reads the neighbouring bytes, or
-    # the right bytes with the wrong sign -- so it is exactly the kind of
-    # thing that only a differential run finds.
+    # loads and stores, through the scratch x29 points at
     "str x10, [x29]",
     "ldr x0, [x29]",
     "str w11, [x29, #8]",
@@ -413,15 +379,13 @@ SCALAR_INSTRUCTIONS = [
     "stp x10, x11, [x29, #32]",
     "ldp x8, x9, [x29, #32]",
     "ldpsw x0, x1, [x29, #32]",
-    # unaligned, which the Switch allows and a naive implementation splits
-    # differently from the hardware
+    # unaligned
     "stur x12, [x29, #41]",
     "ldur x2, [x29, #41]",
     "sturh w12, [x29, #51]",
     "ldurh w3, [x29, #51]",
     "ldursw x4, [x29, #41]",
     "ldursh w5, [x29, #51]",
-    # pre- and post-index, whose whole point is the write back to the base
     "mov x24, x29",
     "str x10, [x24, #8]!",
     "ldr x6, [x24]",
@@ -432,7 +396,6 @@ SCALAR_INSTRUCTIONS = [
     "ldp x9, x0, [x24], #16",
     "ldrb w1, [x24, #1]!",
     "strb w10, [x24], #2",
-    # register offsets, with every extend and scale the encoding allows
     "movz x25, #2",
     "ldr x2, [x29, x25, lsl #3]",
     "ldr w3, [x29, w25, uxtw #2]",
@@ -444,27 +407,22 @@ SCALAR_INSTRUCTIONS = [
     "movn x25, #1",
     "ldr x8, [x29, w25, sxtw #3]",
     "ldrsb w9, [x29, w25, sxtw]",
-    # The exclusives, which every lock word a title's threads share is built
-    # out of, and which neither harness tested. The status register is the
-    # whole point: a store that reports success where hardware reports failure
-    # is a lost update, and a lock that loses one is a lock nobody holds.
+    # exclusives; the status register result matters
     "add x23, x29, #16",
     "ldxr x0, [x29]",
     "stxr w1, x11, [x29]",
     "ldr x2, [x29]",
-    # The monitor is spent by the store above, so this one must fail and must
-    # leave memory alone.
+    # The monitor is spent by the store above, so this one must fail and leave memory alone.
     "stxr w3, x12, [x29]",
     "ldr x4, [x29]",
     "ldxr x5, [x29]",
     "clrex",
     "stxr w6, x13, [x29]",
     "ldr x7, [x29]",
-    # A reservation taken at one address is not a reservation at another.
     "ldxr x8, [x29]",
     "stxr w9, x14, [x23]",
     "ldr x0, [x23]",
-    # every width, and the acquire/release forms the SDK's mutexes use
+    # every width, and the acquire/release forms
     "ldxrb w1, [x29]",
     "stxrb w2, w11, [x29]",
     "ldrb w3, [x29]",
@@ -481,8 +439,7 @@ SCALAR_INSTRUCTIONS = [
     "ldar x4, [x29]",
     "stlr x14, [x29]",
     "ldr x5, [x29]",
-    # the pairs, both widths -- a 32-bit pair is two words four bytes apart,
-    # not two doublewords eight apart
+    # pairs, both widths (a 32-bit pair is two words four bytes apart)
     "ldxp x6, x7, [x29]",
     "stxp w8, x11, x12, [x29]",
     "ldp x9, x0, [x29]",
@@ -494,7 +451,6 @@ SCALAR_INSTRUCTIONS = [
     "ldp x9, x0, [x29]",
 ]
 
-# The values loaded into x10..x25 before the scalar tests run.
 SCALAR_INPUTS = [
     0xFFFF_FF00,
     0x0000_001F,
@@ -528,11 +484,7 @@ INPUT_VECTORS = [
     [0x8000, 0x8000, 0x7FFF, 0x7FFF, 0x0001, 0xFFFF, 0x0002, 0xFFFE],
     [0x0123, 0x4567, 0x89AB, 0xCDEF, 0xFEDC, 0xBA98, 0x7654, 0x3210],
     [0x0007, 0x0006, 0x0005, 0x0004, 0x0003, 0x0002, 0x0001, 0x0000],
-    # v10 and v11 are the floating-point inputs, written as the halfword pairs
-    # of their bit patterns: four f32 (1.5, -2.25, 3.0, 0.5) and two f64 (1.5,
-    # -0.75). The integer vectors above reinterpret as denormals and NaNs,
-    # which test only the edges -- a wrong exponent or a swapped operand shows
-    # up in ordinary numbers, and nowhere else.
+    # v10 and v11 as f32 (1.5, -2.25, 3.0, 0.5) and f64 (1.5, -0.75) bit patterns.
     [0x0000, 0x3FC0, 0x0000, 0xC010, 0x0000, 0x4040, 0x0000, 0x3F00],
     [0x0000, 0x0000, 0x0000, 0x3FF8, 0x0000, 0x0000, 0x0000, 0xBFE8],
 ]
@@ -541,12 +493,7 @@ DUMP_BYTES = 32 * 16
 
 
 def load_imm(reg, value):
-    """`mov reg, #value` for a value too wide for one MOV.
-
-    The dump is 512 bytes per instruction, so a list of more than 128 of them
-    needs a `write` length that no logical immediate can encode -- which is an
-    assembler error a hundred instructions away from the one that was added.
-    """
+    """`mov reg, #value` for a value too wide for one MOV."""
     lines = [f"    movz {reg}, #{value & 0xFFFF}"]
     for shift in (16, 32, 48):
         chunk = (value >> shift) & 0xFFFF
@@ -556,19 +503,13 @@ def load_imm(reg, value):
 
 
 def build_asm(instructions):
-    """A program that loads the inputs, then runs each instruction followed by a
-    full vector-register dump."""
+    """Load the inputs, then run each instruction followed by a vector-register dump."""
     body = [f"    ldr q{i}, [x0, #{i * 16}]" for i in range(len(INPUT_VECTORS))]
     body += [
         "    cmp x2, x2",  # a known flag state, for fcsel
         "    adrp x3, scratch",
         "    add  x3, x3, :lo12:scratch",
-        # A second pointer to the inputs, because x0 does not stay pointing at
-        # them: the post-indexed `ld1` forms below advance it, and a later test
-        # that reloads an input through x0 reads past the buffer instead --
-        # which the emulator answers with zeroes and qemu with whatever
-        # follows in .data, a mismatch that is the harness's fault and not the
-        # decoder's.
+        # Post-indexed `ld1` forms advance x0, so keep a second pointer to the inputs.
         "    mov  x4, x0",
     ]
     for insn in instructions:
@@ -614,19 +555,11 @@ outbuf:
 
 
 def build_scalar_asm(instructions):
-    """A program that dumps x0..x25 after each scalar instruction. x26..x30 are
-    reserved for the harness, so the tests only touch x0..x25."""
+    """Dump x0..x25 after each scalar instruction; x26..x30 belong to the harness."""
     body = [f"    ldr x{i}, [x27, #{(i - 10) * 8}]" for i in range(10, 26)]
     body.append("    cmp x10, x10")  # a known flag state to start from
-    # x29 addresses the scratch below. The loads and stores are most of what
-    # a title executes -- `ldr`, `str`, `stp` and `ldp` are four of the six
-    # commonest instructions in Echoes of Wisdom -- and this list had not one
-    # of them, because there was nowhere for them to write.
-    # Derived from x27 rather than from `adrp scratch`, because a test that
-    # writes its base back -- every pre- and post-index form -- dumps the
-    # address itself, and the emulator does not load this program where qemu
-    # does. x27 is seeded to the same number on both sides, and `scratch`
-    # below sits exactly one input block past it.
+    # Derived from x27 rather than `adrp scratch` so written-back bases match the
+    # emulator, which loads the program elsewhere; `scratch` is one input block past x27.
     body.append("    add  x29, x27, #128")
     for insn in instructions:
         body.append(f"    {insn}")
@@ -688,8 +621,7 @@ def sections(elf):
 
 
 def run(work, asm_text, instructions, dump_bytes, inputs_bytes, prologue_insns):
-    """Assemble, run under qemu, run the same bytes through the interpreter and
-    report the first register that differs for each instruction."""
+    """Run under qemu and the interpreter and report the first differing register."""
     asm = os.path.join(work, "test.s")
     elf = os.path.join(work, "test.elf")
     open(asm, "w").write(asm_text)
@@ -800,7 +732,6 @@ def main():
             failures += 1
             break
         previous = expected[(i - 1) * DUMP_BYTES:i * DUMP_BYTES] if i else bytes(DUMP_BYTES)
-        # Only the registers this instruction changed are interesting.
         for reg in range(32):
             lo, hi = reg * 16, (reg + 1) * 16
             if want[lo:hi] == previous[lo:hi]:

@@ -1,14 +1,6 @@
-//! The video engines: nvdec, which decodes compressed frames, and VIC, the
-//! video image compositor that converts and scales them. A title's movie
-//! player drives both through `/dev/nvhost-nvdec` and `/dev/nvhost-vic`.
-//!
-//! Neither is a GPU engine. Each sits behind host1x, which feeds it a command
-//! stream of register writes out of buffers the guest names by nvmap handle.
-//! An engine's own methods are reached through two registers of its host
-//! interface (THI): `METHOD0` selects a method and `METHOD1` writes it.
-//!
-//! Work is retired as the stream reaches each syncpoint increment, so a fence
-//! a submission returns has already passed by the time the guest waits on it.
+//! The video engines nvdec (decode) and VIC (compose/scale), behind host1x via
+//! `/dev/nvhost-nvdec` and `/dev/nvhost-vic`. Engine methods go through THI's
+//! `METHOD0`/`METHOD1`. Work retires as the stream reaches each syncpoint increment.
 
 use crate::gpu::nvmap::NvMap;
 use crate::gpu::syncpt::Host1x;
@@ -17,8 +9,7 @@ use crate::trace::{enabled, Trace};
 use crate::Result;
 use std::collections::HashMap;
 
-/// The host1x class of host1x itself, which a stream selects to wait on or
-/// load syncpoints rather than to reach an engine.
+/// host1x's own class, for syncpoint waits and loads.
 const CLASS_HOST1X: u32 = 0x01;
 
 /// THI registers every engine class shares, in words.
@@ -26,36 +17,28 @@ const THI_INCR_SYNCPT: u32 = 0x00;
 const THI_METHOD0: u32 = 0x10;
 const THI_METHOD1: u32 = 0x11;
 
-/// How many methods an engine's method file holds. VIC's reach furthest, to
-/// byte offset 0x1000 and below.
+/// VIC's methods reach byte offset 0x1000.
 const METHOD_FILE_WORDS: usize = 0x400;
 
-/// nvdec's `EXECUTE` method: everything written before it describes one
-/// frame, and this decodes it.
+/// nvdec `EXECUTE`: decode the frame described by the methods before it.
 const NVDEC_EXECUTE: u32 = 0xC0;
 
-/// The nvdec methods a frame is described by, as word offsets into its method
-/// file. Every buffer address among them is a device address shifted right
-/// by 8.
+/// nvdec frame methods, as word offsets; buffer addresses are device addresses >> 8.
 const NVDEC_SET_APPLICATION_ID: u32 = 0x80;
 const NVDEC_SET_DRV_PIC_SETUP_OFFSET: u32 = 0x101;
 const NVDEC_SET_IN_BUF_BASE_OFFSET: u32 = 0x102;
-/// Seventeen surfaces each: for VP9 the last, golden and alternate
-/// references, then the frame being decoded.
+/// Seventeen surfaces each: for VP9 last, golden, alternate, then the current frame.
 const NVDEC_SET_PICTURE_LUMA_OFFSET: u32 = 0x10C;
 const NVDEC_SET_PICTURE_CHROMA_OFFSET: u32 = 0x11D;
 const NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET: u32 = 0x170;
 const NVDEC_VP9_SET_CTX_COUNTER_BUF_OFFSET: u32 = 0x171;
 
-/// Where in a VP9 picture setup the size of the frame's bitstream is.
 const VP9_PICTURE_BITSTREAM_SIZE: u32 = 0x30;
-/// How much of a picture setup the trace shows: all of VP9's.
 const PICTURE_SETUP_TRACE_BYTES: u32 = 0x100;
 
-/// VIC's `EXECUTE` method.
 const VIC_EXECUTE: u32 = 0xC0;
 
-/// The sizes of the records `SUBMIT` carries after its header, in bytes.
+/// Sizes of the records after `SUBMIT`'s header, in bytes.
 const SUBMIT_HEADER: usize = 0x10;
 const SUBMIT_CMDBUF: usize = 12;
 const SUBMIT_RELOC: usize = 16;
@@ -63,11 +46,10 @@ const SUBMIT_RELOC_SHIFT: usize = 4;
 const SUBMIT_SYNCPT_INCR: usize = 8;
 const SUBMIT_FENCE: usize = 4;
 
-/// `MAP_BUFFER`'s header and each of its entries, in bytes.
+/// `MAP_BUFFER`'s header and entry sizes, in bytes.
 const MAP_HEADER: usize = 12;
 const MAP_ENTRY: usize = 8;
 
-/// Which engine a channel reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
     Nvdec,
@@ -75,8 +57,6 @@ pub enum Engine {
 }
 
 impl Engine {
-    /// The engine a device node opens, or `None` for a node that is not one
-    /// of these.
     pub fn from_node(path: &str) -> Option<Engine> {
         match path {
             "/dev/nvhost-nvdec" => Some(Engine::Nvdec),
@@ -99,7 +79,6 @@ impl Engine {
         }
     }
 
-    /// The engine's host1x class, which a stream's `SETCL` selects it by.
     fn class(self) -> u32 {
         match self {
             Engine::Nvdec => 0xF0,
@@ -115,15 +94,11 @@ impl Engine {
     }
 }
 
-/// One open `/dev/nvhost-nvdec` or `/dev/nvhost-vic`.
 #[derive(Debug)]
 pub struct MmChannel {
     pub engine: Engine,
-    /// The syncpoint `GET_SYNCPOINT` hands out and the stream increments.
     pub syncpt: u32,
-    /// The method `METHOD0` last selected.
     method: u32,
-    /// Every method's last value. What an `EXECUTE` does is read out of here.
     methods: Vec<u32>,
     pub submits: u64,
     pub executes: u64,
@@ -141,13 +116,11 @@ impl MmChannel {
         }
     }
 
-    /// A method's last value.
     pub fn method(&self, method: u32) -> u32 {
         self.methods.get(method as usize).copied().unwrap_or(0)
     }
 }
 
-/// A register write a command stream made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Write {
     class: u32,
@@ -155,12 +128,8 @@ struct Write {
     value: u32,
 }
 
-/// Every write a host1x command stream makes, in order, and the first opcode
-/// it could not follow, if any.
-///
-/// `GATHER` is the one opcode that reads from anywhere but the stream itself,
-/// and the one an engine's user-space driver has no reason to emit, so a
-/// stream that uses it is cut short and reported rather than guessed at.
+/// Every write a host1x stream makes and the first opcode it can't follow.
+/// `GATHER` is cut short and reported.
 fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
     let mut writes = Vec::new();
     let mut class = class;
@@ -173,7 +142,7 @@ fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
     while let Some(word) = next(&mut at) {
         let offset = (word >> 16) & 0xFFF;
         match word >> 28 {
-            // SETCL: select a class, then write the masked registers of it.
+            // SETCL
             0x0 => {
                 class = (word >> 6) & 0x3FF;
                 let mask = word & 0x3F;
@@ -188,8 +157,7 @@ fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
                     }
                 }
             }
-            // INCR and NONINCR: `count` words, to consecutive registers or
-            // all to the one.
+            // INCR / NONINCR
             0x1 | 0x2 => {
                 let incrementing = word >> 28 == 0x1;
                 for i in 0..word & 0xFFFF {
@@ -202,7 +170,7 @@ fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
                     });
                 }
             }
-            // MASK: one word for each set bit, to the register that far on.
+            // MASK
             0x3 => {
                 for bit in 0..16 {
                     if word & (1 << bit) != 0 {
@@ -215,17 +183,15 @@ fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
                     }
                 }
             }
-            // IMM: a 16-bit value carried in the opcode word itself.
+            // IMM
             0x4 => writes.push(Write {
                 class,
                 offset,
                 value: word & 0xFFFF,
             }),
-            // RESTART belongs to a ring the stream is read out of; one read
-            // out of a buffer has nothing to restart.
+            // RESTART: nothing to restart in a buffer.
             0x5 => {}
-            // EXTEND: acquiring and releasing an MLOCK, which serialises
-            // channels on hardware that runs several at once.
+            // EXTEND: MLOCK acquire/release.
             0xE => {}
             _ => return (writes, Some(word)),
         }
@@ -233,7 +199,6 @@ fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
     (writes, None)
 }
 
-/// The two video engines' state, one channel per open device node.
 #[derive(Debug, Default)]
 pub struct Video {
     channels: HashMap<u32, MmChannel>,
@@ -241,7 +206,6 @@ pub struct Video {
 }
 
 impl Video {
-    /// Open a channel to `engine`, with a syncpoint of its own.
     pub fn open(&mut self, engine: Engine, host1x: &mut Host1x) -> Result<u32> {
         let syncpt = host1x.allocate()?;
         let id = self.next_channel;
@@ -266,11 +230,8 @@ impl Video {
         self.channels.get(&id)
     }
 
-    /// `SUBMIT`: run the command buffers the arguments name and write each
-    /// syncpoint increment's fence threshold back over the arguments.
-    ///
-    /// `args` is the header and every record after it, which is why it is
-    /// longer than the size the ioctl number declares.
+    /// `SUBMIT`: run the command buffers and write each increment's fence threshold
+    /// back. `args` includes every record after the header.
     pub fn submit(
         &mut self,
         id: u32,
@@ -300,8 +261,7 @@ impl Video {
         }
         channel.submits += 1;
 
-        // Reserve every increment before running anything, so each fence
-        // reports the threshold the whole submission will reach.
+        // Reserve every increment first so each fence reports the final threshold.
         let mut thresholds = Vec::with_capacity(incrs);
         for i in 0..incrs {
             let at = incrs_at + i * SUBMIT_SYNCPT_INCR;
@@ -327,8 +287,6 @@ impl Video {
             for word in 0..words {
                 stream.push(mem.read_u32(base.wrapping_add(offset).wrapping_add(word * 4))?);
             }
-            // A relocation patches a word of this buffer with the address of
-            // another, which the driver could not know when it wrote it.
             for r in 0..relocs {
                 let at = relocs_at + r * SUBMIT_RELOC;
                 let (buffer, buffer_offset, target, target_offset) = (
@@ -349,10 +307,7 @@ impl Video {
             channel.run(&stream, mem, host1x)?;
         }
 
-        // An increment the stream makes under a condition this does not
-        // model would leave its fence unreachable, and the guest waiting on
-        // it forever. Every submission here has finished by now, so each
-        // threshold is where its syncpoint stands.
+        // Force each syncpoint to its threshold so no fence is left unreachable.
         for (i, &(syncpt, threshold)) in thresholds.iter().enumerate() {
             if !host1x.is_expired(syncpt, threshold)? {
                 if enabled(Trace::Video) {
@@ -372,7 +327,6 @@ impl Video {
 }
 
 impl MmChannel {
-    /// Carry out one command buffer's writes.
     fn run(&mut self, stream: &[u32], mem: &Memory, host1x: &mut Host1x) -> Result<()> {
         let (writes, stopped) = decode_stream(stream, self.engine.class());
         for write in writes {
@@ -431,13 +385,11 @@ impl MmChannel {
         }
     }
 
-    /// A buffer address a method holds.
     fn address(&self, method: u32) -> u32 {
         self.method(method) << 8
     }
 
-    /// Everything one nvdec `EXECUTE` was given: the codec, the buffers, the
-    /// picture setup and the start of the bitstream.
+    /// Trace one nvdec `EXECUTE`'s codec, buffers, picture setup and bitstream head.
     fn trace_decode(&self, mem: &Memory) {
         let setup = self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET);
         let bitstream = self.address(NVDEC_SET_IN_BUF_BASE_OFFSET);
@@ -482,9 +434,7 @@ impl MmChannel {
     }
 }
 
-/// `MAP_BUFFER`: the address each entry's nvmap handle can be reached at by
-/// the engine. Both engines address guest memory directly here, so that is
-/// the handle's own address.
+/// `MAP_BUFFER`: engines address guest memory directly, so each handle maps to its own address.
 pub fn map_buffer(args: &mut [u8], nvmap: &NvMap) -> bool {
     let entries = read_u32(args, 0) as usize;
     if MAP_HEADER + entries * MAP_ENTRY > args.len() {
@@ -498,9 +448,7 @@ pub fn map_buffer(args: &mut [u8], nvmap: &NvMap) -> bool {
     true
 }
 
-/// Where an nvmap handle's memory is. Command buffers and relocations name
-/// buffers by handle; a driver that has only the buffer's id passes that
-/// instead, and the two never collide.
+/// An nvmap handle's address. A driver may pass a buffer id instead; they never collide.
 fn handle_address(nvmap: &NvMap, handle: u32) -> Option<u32> {
     nvmap
         .get(handle)

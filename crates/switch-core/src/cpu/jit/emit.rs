@@ -1,127 +1,12 @@
 //! Turning a translated block into wasm.
 //!
-//! [`super::decode`] already resolved what each instruction *does*; this
-//! writes that out as wasm instead of interpreting it, so the per-instruction
-//! dispatch that [`super::exec`] pays disappears into straight-line code the
-//! browser compiles once.
-//!
-//! # What a block is handed
-//!
-//! One parameter: the address of the [`crate::cpu::Cpu`] in the emulator's own
-//! linear memory. Guest state is reached from it by baked-in field offsets
-//! ([`Layout`]), so an emitted `add x0, x1, x2` is two `i64.load`s, an add and
-//! an `i64.store` against the register file where it already lives. Nothing is
-//! copied in or out, and nothing has to move: the module imports the host's
-//! memory rather than defining one of its own.
-//!
-//! Taking the address as a *parameter* rather than baking it is what makes an
-//! emitted block independent of which `Cpu` runs it. A block belongs to a
-//! guest address, and guest threads share one `Cpu`, but the test suite builds
-//! many, and a baked pointer would silently address a freed one.
-//!
-//! # Everything the translator settled is a constant here
-//!
-//! The interpreter's helpers take the operand width, the shift type, the
-//! shift distance, the extension and the condition as arguments and branch on
-//! them; an op holds all five as fields the translator has already filled in.
-//! So a shifted-register `ADD` emits the one shift it is, an `ASR` emits its
-//! own distance, `extend_reg`'s eight-way match becomes the single mask or
-//! sign-extension that option selects, and a condition becomes its row of
-//! [`CONDITION_MASKS`] shifted by NZCV: two instructions where the interpreter
-//! runs a table lookup and a branch. None of those matches survives into the
-//! emitted code.
-//!
-//! # Coverage is a performance question, not a correctness one
-//!
-//! [`emit_block`] gives back a [`Refused`] for a block containing anything it
-//! cannot write, and that block keeps running on the interpreter. This is the
-//! same rule [`super::decode`]'s `Op::Interpret` follows: a form the emitter
-//! does not know is slower, never wrong. So the supported set can grow one op
-//! at a time, each addition backed by `emit_difftest`, rather than needing to
-//! be complete before any of it can run. [`Refused::Op`] carries the
-//! instruction word, which is what `examples/emit_difftest.rs` ranks to say
-//! which op is worth writing next.
-//!
-//! # Guest memory
-//!
-//! An access is written out as the page-table walk it is.
-//! [`crate::mem::Memory`] keeps one pointer per 4 KiB of the guest's address
-//! space and nulls the ones with no storage behind them, so an emitted access
-//! shifts the address down twelve, loads that pointer, and reads or writes at
-//! the offset into it. Four instructions and no call.
-//!
-//! What made this look impossible was the rest of `Memory`: soft regions,
-//! write-protected ranges, watchpoints, the reports a store owes anything
-//! caching guest memory. None of it is on this path, because the interpreter
-//! already splits the same way. [`crate::mem::Memory::peek`] and
-//! [`crate::mem::Memory::poke`] are the parts of an access the page table can
-//! answer on its own; they decline the rest, whereupon [`super::exec`] runs the
-//! whole instruction again out of line. An emitted access makes exactly their
-//! checks, in their order, and declines what they decline.
-//!
-//! A store has three more of those checks than a load, and one is a bitmap of
-//! the pages something has cached the contents of. That is the one thing here
-//! that guest memory had to be changed for: the bitmap was a `Vec`, and nothing
-//! promises where in one the pointer and the length sit, so there was nowhere
-//! for an emitted store to look. It is a fixed-size bitmap behind a single
-//! pointer now, which is what it always was.
-//!
-//! A pair is two accesses in one page with its own boundary test. The
-//! exclusives are not written: they carry a reservation this model lacks.
-//!
-//! # What a block reports
-//!
-//! `run` gives back the number of leading instructions it retired, and guest
-//! state is exactly what those instructions left: an access that declines does
-//! so before it has written a register, so the instruction it stopped at has
-//! not half happened. The interpreter picks up from there, which is the
-//! handover [`super::exec`] already makes when a step budget runs out inside a
-//! block, and it resumes by translating the block at the address it stopped on
-//! rather than by re-entering this one part-way.
-//!
-//! [`defers`] is which instructions can do that, and it matters outside this
-//! module because it is what the difftests need in order to know which answer
-//! from `run` is the right one.
-//!
-//! A count alone cannot say where control went, and a block that runs through
-//! a conditional branch has to. So the answer carries [`LEFT`] when the block
-//! was left at a taken branch, and the branch has put the target in the
-//! guest's `pc` on its way out. The bit is needed rather than implied by the
-//! count being short, because a branch sitting on the last instruction of the
-//! body retires all of it and still must not fall into the terminator.
-//!
-//! # Control flow
-//!
-//! The three conditional branches a block runs *through* are written:
-//! `B.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ`, and the `CMP`-and-`B.cond` pair the
-//! translator fuses (with the counter update ahead of it, when there is one),
-//! whose compare sets the flags whether or not the branch is then taken. Each is a test and an `if` that leaves; the not-taken path
-//! is the following instruction, which is the next thing emitted, so nothing
-//! here needs a label or a jump backwards.
-//!
-//! A `B` the translator followed, [`super::ir::Exit::Jump`], writes nothing:
-//! the ops after it are already the ones at its target. [`super::exec`] maps
-//! a retired count back to an address across those jumps. Terminators are not
-//! written: a block still ends by falling out of `run` and letting
-//! [`super::exec`] run the one it has.
-//!
-//! # Where wasm and A64 disagree
-//!
-//! Three places, each of which costs emitted instructions that the operation
-//! itself does not suggest.
-//!
-//! A shift takes its distance modulo the operand width in both, but wasm's
-//! width is the one it is operating on. A 32-bit A64 shift held in an `i64`
-//! wants its distance modulo 32 and would get it modulo 64, so the variable
-//! shifts mask the amount themselves.
-//!
-//! A division by zero traps in wasm and answers zero in A64, and `i64.div_s`
-//! traps again on `i64::MIN / -1` where A64 wraps. Both are guarded with real
-//! branches rather than [`Func::select`], which evaluates the arm it does not
-//! pick.
-//!
-//! There is no 128-bit integer, so `SMULH`/`UMULH` are not written at all and
-//! stay with the interpreter.
+//! A block function takes the address of the [`crate::cpu::Cpu`] in linear
+//! memory and reaches guest state through baked [`Layout`] offsets. Guest
+//! accesses walk the page table inline and make exactly the checks of
+//! [`crate::mem::Memory::peek`]/[`crate::mem::Memory::poke`], handing the
+//! instruction back to the interpreter when they decline. `run` returns how
+//! many instructions retired, with [`LEFT`] set when it left at a taken branch.
+//! A block with anything the emitter cannot write is [`Refused`].
 
 use super::decode::{decode, translate, Decoded};
 use super::ir::{Block, Exit, Op};
@@ -131,24 +16,10 @@ use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
 use crate::cpu::{Cpu, CONDITION_MASKS};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
-/// Whether the emitter has a way to write `insn` out as wasm, which is what
-/// [`super::translates`] asks of the translator.
-///
-/// Worth asking from outside because an emitted block is all or nothing: one
-/// instruction with no arm here takes its whole block back to the
-/// interpreter, so this is the predicate that says which blocks can be
-/// emitted at all. `examples/emit_selftest.rs` sweeps the encoding space with
-/// it to find instructions to exercise, rather than assembling them by hand
-/// and testing whatever it actually encoded.
-///
-/// An instruction that ends a block or branches out of one answers `false`:
-/// those are the translator's terminators and exits, which are not ops at
-/// all. A conditional branch is still emitted, by [`emit_block`] out of the
-/// [`Exit`] the translator recorded rather than out of an [`Op`] here.
+/// Whether the emitter has a way to write `insn` out as wasm. Block-ending and
+/// branching instructions answer `false`: those are exits, not ops.
 pub fn emits(insn: u32) -> bool {
-    // PC-relative forms decode against an address; which one makes no
-    // difference to whether there is an arm for the result, so any aligned
-    // address answers, exactly as in [`super::translates`].
+    // Any aligned address works for PC-relative forms.
     const REPRESENTATIVE_PC: u32 = 0x0800_0000;
     let Decoded::Op(op) = decode(insn, REPRESENTATIVE_PC) else {
         return false;
@@ -173,20 +44,9 @@ pub fn emits(insn: u32) -> bool {
     .op(&op, 0)
 }
 
-/// Whether the emitted form of `insn` can decline the instruction and hand it
-/// back to the interpreter, rather than always doing it itself.
-///
-/// Every guest access can: the page it names may have no storage, may not hold
-/// all of the access, or may be watched, and each of those is a case the
-/// emitted code leaves to the full path. Nothing else can, so a block of
-/// instructions that all answer `false` retires every one of them.
-///
-/// That distinction is what the difftests need in order to know which answer
-/// from `run` is the right one, so it is derived from the emitter rather than
-/// listed beside it: a declining op writes the count it would report into its
-/// body, so emitting the same instruction under two different counts and
-/// comparing the bodies asks the arms themselves, and cannot fall out of step
-/// with them the way a second list of ops would.
+/// Whether the emitted form of `insn` can decline and hand the instruction
+/// back to the interpreter (every guest access can). Derived by emitting the
+/// instruction under two retired counts and comparing the bodies.
 pub fn defers(insn: u32) -> bool {
     const REPRESENTATIVE_PC: u32 = 0x0800_0000;
     let Decoded::Op(op) = decode(insn, REPRESENTATIVE_PC) else {
@@ -222,28 +82,16 @@ fn scratch_func() -> Func {
 }
 
 /// Byte offsets of the guest state an emitted block touches, from the pointer
-/// it is handed.
-///
-/// Taken from `core::mem::offset_of!` at the call site rather than being
-/// spelled out here: `Cpu` is not `#[repr(C)]`, so the only offsets that are
-/// right are the ones the compiler actually chose for this build, and the
-/// emitter runs in that same build.
+/// it is handed. Taken from `offset_of!`, since `Cpu` is not `#[repr(C)]`.
 #[derive(Debug, Clone, Copy)]
 pub struct Layout {
     /// Start of the `[u64; REG_FILE]` register file.
     pub regs: u32,
     /// The packed NZCV word, in its architectural bit positions.
     pub nzcv: u32,
-    /// The guest program counter. Written by a taken branch on its way out of
-    /// the block, and by nothing else: everywhere else the interpreter
-    /// derives it from how much the block retired, which is why it is the one
-    /// piece of guest state emitted code writes that the instruction it is
-    /// emitting did not name.
+    /// The guest program counter, written only by a taken branch leaving the block.
     pub pc: u32,
-    /// Where the page table's own pointer is kept, not where the table is: an
-    /// emitted block loads it and indexes it, because
-    /// [`crate::mem::Memory`] holds the table behind a `Box` and the
-    /// allocation it points at is not known when the block is written.
+    /// Where the page table's pointer is kept (the table itself is boxed).
     pub pages: u32,
     /// The read watchpoint, as the two `u32`s of its `[start, end)`.
     pub read_watch_lo: u32,
@@ -254,24 +102,13 @@ pub struct Layout {
     /// The envelope of the write-protected ranges, likewise.
     pub readonly_lo: u32,
     pub readonly_hi: u32,
-    /// Where the pointer to the bitmap of pages something has cached the
-    /// contents of is kept; null until something watches one. A store landing
-    /// on a watched page owes a report that an emitted one cannot make.
+    /// Where the pointer to the cached-pages bitmap is kept; null until
+    /// something watches a page.
     pub watched: u32,
 }
 
 impl Layout {
-    /// Where that state sits inside a real [`Cpu`], which is what a block
-    /// emitted to run under this emulator is written against.
-    ///
-    /// `examples/emit_difftest.rs` passes a layout of its own because the
-    /// memory it hands a module is a bare buffer rather than a `Cpu`. This is
-    /// the one the emulator itself uses.
-    ///
-    /// Every offset comes from `offset_of!` rather than being written down:
-    /// neither `Cpu` nor [`crate::mem::Memory`] is `#[repr(C)]`, so the only
-    /// offsets that are right are the ones this build chose, and the emitter
-    /// runs in that build.
+    /// Where that state sits inside a real [`Cpu`].
     pub const fn of_cpu() -> Layout {
         let mem = std::mem::offset_of!(Cpu, mem) as u32;
         let m = crate::mem::Offsets::OF_MEMORY;
@@ -291,16 +128,8 @@ impl Layout {
     }
 }
 
-/// Bytes per page-table entry, and so the shift that turns a page number into
-/// an offset into the table.
-///
-/// One entry is one `Option<Box<[u8; PAGE_SIZE]>>`, which the language
-/// guarantees is laid out as the pointer alone with `None` written as null:
-/// that null *is* how [`crate::mem::Memory`] says a page has no storage, so an
-/// emitted access tests for it directly. Four bytes because the only target
-/// that ever runs emitted code is `wasm32`, which the second assertion is
-/// against; the first is the part that holds on the host too, where the
-/// pointer is wider but the niche is the same.
+/// Log2 bytes per page-table entry. An entry is an `Option<Box<_>>`, a bare
+/// pointer with `None` as null, and only `wasm32` runs emitted code.
 const PAGE_ENTRY_SHIFT: i32 = 2;
 const _: () = assert!(
     std::mem::size_of::<Option<Box<[u8; PAGE_SIZE]>>>() == std::mem::size_of::<*const u8>(),
@@ -312,18 +141,12 @@ const _: () = assert!(
     "emitted code indexes the page table by this shift, so it has to be the entry's size"
 );
 
-/// Alignment hints, as the log2 the format wants. Guest state is naturally
-/// aligned because this emulator laid it out; a guest address is aligned to
-/// nothing the emitter can promise, and A64 permits unaligned accesses.
+/// Alignment hints, as log2. Guest addresses promise no alignment.
 const ALIGN_4: u8 = 2;
 const ALIGN_8: u8 = 3;
 const UNALIGNED: u8 = 0;
 
 /// Why a block was not written out.
-///
-/// The interesting one is [`Refused::Op`]: it names an instruction real code
-/// runs that the emitter has no way to write, and a count of those across a
-/// title's blocks is the list of what to write next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
     /// An exit the walk over the body never reached.
@@ -334,50 +157,37 @@ pub enum Refused {
     TooLong,
 }
 
-/// Set in what `run` answers when the block was left at a taken branch rather
-/// than stopped at an instruction: the rest of the answer is still how many
-/// instructions retired, and the guest `pc` holds where control went.
-///
-/// A block cannot hold anything like enough instructions for this to collide
-/// with a count: a block never spans a page, so 1,024 is the ceiling.
+/// Set in `run`'s result when the block left at a taken branch; the guest `pc`
+/// holds the target. A block never spans a page, so counts stay below 1,024.
 pub const LEFT: u32 = 1 << 31;
 
 /// The parameter every block function takes.
 const STATE: u32 = 0;
 
-/// Scratch locals. Named rather than numbered at the use site because the
-/// stack discipline makes an off-by-one here validate and compute nonsense.
+/// Scratch locals.
 const L_A: u32 = 1;
 const L_B: u32 = 2;
 const L_T: u32 = 3;
 const L_R: u32 = 4;
-/// Held by the one operation that needs its operand twice and has it once: a
-/// 32-bit rotate, which wasm has no instruction for.
+/// The duplicate operand of a 32-bit rotate.
 const L_S: u32 = 5;
-/// The value an addressing mode with writeback leaves in its base register,
-/// computed before the access and written after it.
+/// The base register's writeback value, computed before the access.
 const L_W: u32 = 6;
 const L_C: u32 = 7;
-/// The guest address an access is at, narrowed to the 32 bits the guest
-/// address space has.
+/// The guest address of an access.
 const L_ADDR: u32 = 8;
 /// The host address of the guest page that address is on.
 const L_PAGE: u32 = 9;
-/// Which guest page that is, which both the page table and the bitmap of
-/// watched pages are indexed by.
+/// The guest page index, for the page table and the watched-pages bitmap.
 const L_IDX: u32 = 10;
-/// The bitmap of watched pages, held because the test against it is inside a
-/// check that there is one at all.
+/// The watched-pages bitmap.
 const L_WP: u32 = 11;
 
-/// A block bigger than this is not emitted. A translated block is bounded
-/// already, but the guard keeps one pathological block from dominating a
-/// module's compile time.
+/// A block bigger than this is not emitted, to bound module compile time.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// A subtraction's operand inverted at emit time, the way
-/// [`Emitter::invert_if`] does it at run time, for the one operand that is a
-/// constant: the immediate a fused `CMP` compares against.
+/// The immediate of a fused `CMP` inverted at emit time, as
+/// [`Emitter::invert_if`] does at run time.
 fn invert_if_const(v: u64, carry: u8) -> u64 {
     v ^ 0u64.wrapping_sub(u64::from(carry))
 }
@@ -415,10 +225,7 @@ struct Emitter<'a> {
 }
 
 impl Emitter<'_> {
-    /// Push `regs[slot]` as it is stored, all 64 bits of it.
-    ///
-    /// The right read for anything that shifts its operand's own bits out of
-    /// the way before using it, which is what `SBFM`/`UBFM` do.
+    /// Push `regs[slot]` unnarrowed, for ops that shift its high bits out.
     fn read_reg_raw(&mut self, slot: u8) {
         self.f.local_get(STATE);
         self.f
@@ -433,8 +240,7 @@ impl Emitter<'_> {
         }
     }
 
-    /// Sign-extend the value on the stack from the operation's width, which a
-    /// 64-bit operand already is.
+    /// Sign-extend the value on the stack from the operation's width.
     fn sext_to(&mut self, sf: bool) {
         if !sf {
             self.f.i64_extend32_s();
@@ -447,10 +253,7 @@ impl Emitter<'_> {
         self.mask_to(sf);
     }
 
-    /// Push the address a write to the register file needs. A store takes its
-    /// address *under* its value, so this comes first and the slot is named
-    /// again by [`Emitter::store_reg`], which carries it as the instruction's
-    /// static offset.
+    /// Push the address a register write needs; it goes under the value.
     fn addr_regs(&mut self) {
         self.f.local_get(STATE);
     }
@@ -467,9 +270,8 @@ impl Emitter<'_> {
         self.store_reg(slot);
     }
 
-    /// Invert the value on the stack when the operation subtracts, exactly as
-    /// [`super::exec`]'s `invert_if` does, and narrow it again because
-    /// inverting a 32-bit value sets the top half.
+    /// Invert the value on the stack when the operation subtracts, as
+    /// [`super::exec`]'s `invert_if` does, and narrow it again.
     fn invert_if(&mut self, carry: u8, sf: bool) {
         if carry != 0 {
             self.f.i64_const(-1);
@@ -478,11 +280,8 @@ impl Emitter<'_> {
         }
     }
 
-    /// Push 1 if `cond` holds under the current NZCV and 0 if it does not.
-    ///
-    /// [`crate::cpu::Cpu::condition_holds`] indexes [`CONDITION_MASKS`] with
-    /// the condition and shifts the row it finds by the flags. The row is a
-    /// constant here, so what is left is that shift.
+    /// Push 1 if `cond` holds under the current NZCV and 0 if it does not:
+    /// its [`CONDITION_MASKS`] row shifted by the flags.
     fn cond_holds(&mut self, cond: u8) {
         self.f
             .i32_const(i32::from(CONDITION_MASKS[(cond & 0xF) as usize]));
@@ -495,13 +294,8 @@ impl Emitter<'_> {
         self.f.i32_and();
     }
 
-    /// [`crate::cpu::bits::shift_reg`] applied to the value on the stack, with
-    /// the shift type and distance already known.
-    ///
-    /// An out-of-range distance is not reachable from an allocated encoding,
-    /// but the interpreter answers for one, so this does too: the logical
-    /// shifts give zero and the arithmetic one gives the sign, which is what
-    /// clamping its distance to the top bit produces.
+    /// [`crate::cpu::bits::shift_reg`] applied to the value on the stack. An
+    /// out-of-range distance answers as the interpreter does.
     fn shift_const(&mut self, st: u8, sa: u8, sf: bool) {
         let size = size_of(sf);
         let sa = u32::from(sa);
@@ -542,13 +336,8 @@ impl Emitter<'_> {
         }
     }
 
-    /// Rotate the value on the stack right by `sa`, which is in range and not
-    /// zero.
-    ///
-    /// wasm rotates 64-bit values and 32-bit ones, and a 32-bit guest value
-    /// here is held in an `i64`, so the narrow form is written out as the two
-    /// shifts it is. The operand is needed twice and arrives once, which is
-    /// what `L_S` is for.
+    /// Rotate the value on the stack right by `sa`, nonzero and in range. The
+    /// 32-bit form is written as two shifts, using `L_S`.
     fn rotate_right_const(&mut self, sa: u32, sf: bool) {
         if sf {
             self.f.i64_const(i64::from(sa));
@@ -565,8 +354,7 @@ impl Emitter<'_> {
         self.mask_to(false);
     }
 
-    /// [`crate::cpu::bits::extend_reg`] applied to the value on the stack,
-    /// with the option already known: one mask or one sign-extension.
+    /// [`crate::cpu::bits::extend_reg`] applied to the value on the stack.
     fn extend_const(&mut self, option: u8, sf: bool) {
         match option & 0b111 {
             0b000 => {
@@ -590,16 +378,9 @@ impl Emitter<'_> {
         self.mask_to(sf);
     }
 
-    /// `a + b + carry` from `L_A` and `L_B`, leaving the result narrowed to
-    /// the operation's width in `L_R` and, when the flags are wanted, the
-    /// carry out in `L_C`.
-    ///
-    /// The carry-in is a constant here, so the second half of the two-add
-    /// carry chain is only written when the operation is a subtraction, and
-    /// the chain itself only when the operation is 64 bits wide: a 32-bit
-    /// operation carries out of bit 31, and both operands were narrowed, so
-    /// the sum cannot have wrapped and the carry is simply there in the
-    /// untruncated word.
+    /// `a + b + carry` from `L_A` and `L_B` into `L_R`, narrowed, with the
+    /// carry out in `L_C` when flags are wanted. Only 64-bit operations need
+    /// the explicit carry chain.
     fn add_carry(&mut self, carry: u8, set_flags: bool, sf: bool) {
         let chain = set_flags && sf;
 
@@ -649,8 +430,7 @@ impl Emitter<'_> {
         }
     }
 
-    /// `ADD`/`SUB`/`ADDS`/`SUBS` once both operands are in `L_A` and `L_B`,
-    /// with the direction already folded into `L_B` and `carry` exactly as
+    /// `ADD`/`SUB`/`ADDS`/`SUBS` with operands in `L_A` and `L_B`, as
     /// [`crate::cpu::Cpu::add_sub_pre`] receives them.
     fn add_sub(&mut self, rd: u8, carry: u8, set_flags: bool, sf: bool) {
         self.add_carry(carry, set_flags, sf);
@@ -661,12 +441,8 @@ impl Emitter<'_> {
         self.write_reg_from_r(rd);
     }
 
-    /// Push NZCV as the packed word it is stored as, built from `L_R` and,
-    /// for an arithmetic operation, `L_A`, `L_B` and `L_C`.
-    ///
-    /// `arithmetic` says whether C and V are computed from the operands (an
-    /// add or a subtract) or carried over from what NZCV already held, which
-    /// is what `ANDS` does.
+    /// Push the packed NZCV word from `L_R` and, when `arithmetic`, C and V
+    /// from `L_A`, `L_B` and `L_C`; otherwise C and V are kept (`ANDS`).
     fn pack_nzcv(&mut self, sf: bool, arithmetic: bool) {
         let shift = if sf { 63 } else { 31 };
 
@@ -721,8 +497,7 @@ impl Emitter<'_> {
         }
     }
 
-    /// Store the packed word on the stack into NZCV, putting the address back
-    /// under it.
+    /// Store the packed word on the stack into NZCV.
     fn store_nzcv(&mut self) {
         self.f.local_set(L_C);
         self.f.local_get(STATE);
@@ -747,12 +522,8 @@ impl Emitter<'_> {
         self.write_reg_from_r(rd);
     }
 
-    /// `MADD`/`MSUB` and the widening `SMADDL`/`UMADDL` family, which differ
-    /// only in how the two multiplicands are read.
-    ///
-    /// The widening forms take the low 32 bits of each operand whatever the
-    /// destination width, and a 32x32 product fits in 64 bits, so neither
-    /// needs the 128-bit arithmetic wasm does not have.
+    /// `MADD`/`MSUB` and the widening `SMADDL`/`UMADDL` family. A 32x32
+    /// product fits in 64 bits.
     fn multiply_accumulate(
         &mut self,
         rd: u8,
@@ -774,16 +545,8 @@ impl Emitter<'_> {
         self.store_reg(rd);
     }
 
-    /// `UDIV`/`SDIV`, with `L_A` the dividend and `L_B` the divisor, both
-    /// already sign-extended for the signed forms.
-    ///
-    /// A64 answers zero for a division by zero and wraps `INT_MIN / -1`;
-    /// wasm traps on both. Neither guard can be a [`Func::select`], which
-    /// would run the division it did not pick, so both are real branches.
-    ///
-    /// Only the 64-bit signed form needs the second guard. A 32-bit one has
-    /// its operands sign-extended from 32 bits, so `INT_MIN / -1` is
-    /// `0x8000_0000` in an `i64` and nothing overflows.
+    /// `UDIV`/`SDIV`, `L_A` by `L_B`. Division by zero answers zero and
+    /// `i64::MIN / -1` wraps, guarded with real branches since wasm traps.
     fn divide(&mut self, signed: bool, sf: bool) {
         self.f.local_get(L_B);
         self.f.i64_eqz();
@@ -795,8 +558,7 @@ impl Emitter<'_> {
             self.f.i64_const(-1);
             self.f.i64_eq();
             self.f.if_result(I64);
-            // `x.wrapping_div(-1)` is `x.wrapping_neg()`, which is the answer
-            // for `i64::MIN` as well as for everything else.
+            // `x.wrapping_div(-1)` is `x.wrapping_neg()`.
             self.f.i64_const(0);
             self.f.local_get(L_A);
             self.f.i64_sub();
@@ -817,13 +579,8 @@ impl Emitter<'_> {
         self.f.end();
     }
 
-    /// Leave the block, reporting that `retired` of its instructions are done.
-    ///
-    /// The value on the stack decides: non-zero leaves. What is left behind is
-    /// guest state as it stood before the instruction being emitted, so the
-    /// interpreter picks that instruction up whole, which is the same handover
-    /// [`super::exec`] already makes when a step budget runs out inside a
-    /// block.
+    /// Leave the block if the value on the stack is nonzero, reporting
+    /// `retired` instructions done; the interpreter resumes there.
     fn deopt_if(&mut self, retired: usize) {
         self.f.if_void();
         self.f.i32_const(retired as i32);
@@ -831,13 +588,8 @@ impl Emitter<'_> {
         self.f.end();
     }
 
-    /// Leave the block at a taken branch, reporting `retired` instructions
-    /// done and `target` as where control went. The value on the stack
-    /// decides.
-    ///
-    /// The branch counts among the instructions retired, which is what makes
-    /// this progress however early in the block it sits: a block that left
-    /// having done nothing would be re-entered at the same address forever.
+    /// Leave the block at a taken branch, if the value on the stack is
+    /// nonzero, reporting `retired` (the branch included) and `target`.
     fn leave_if(&mut self, retired: usize, target: u32) {
         self.f.if_void();
         self.f.local_get(STATE);
@@ -848,33 +600,23 @@ impl Emitter<'_> {
         self.f.end();
     }
 
-    /// The flag-setting half of a fused compare-and-branch, with the operands
-    /// already in `L_A` and `L_B`.
-    ///
-    /// [`Emitter::add_sub`] without the register write: a `CMP` or `CMN`
-    /// names the zero register as its destination, which is the whole reason
-    /// [`super::decode`] was allowed to fold it into the branch.
+    /// The flag-setting half of a fused compare-and-branch, operands in `L_A`
+    /// and `L_B`.
     fn compare_flags(&mut self, carry: u8, sf: bool) {
         self.add_carry(carry, true, sf);
         self.pack_nzcv(sf, true);
         self.store_nzcv();
     }
 
-    /// Emit the conditional branch that sits `retired` instructions into the
-    /// block, having emitted everything before it, and say whether there was
-    /// a way to write it.
-    ///
-    /// The not-taken path needs nothing: it is the following instruction, and
-    /// that is what gets emitted next.
+    /// Emit the conditional branch `retired` instructions into the block, or
+    /// answer `false`. The not-taken path is whatever is emitted next.
     fn exit(&mut self, exit: &Exit, retired: usize) -> bool {
         let target = match *exit {
             Exit::Cond { cond, target } => {
                 self.cond_holds(cond);
                 target
             }
-            // The compare runs whether or not the branch it feeds is taken:
-            // it is an instruction in its own right, and the block carries on
-            // past it with the flags it set.
+            // The compare runs whether or not the branch is taken.
             Exit::CmpImm {
                 rn,
                 imm,
@@ -892,8 +634,7 @@ impl Emitter<'_> {
                 self.cond_holds(cond);
                 target
             }
-            // The update is an instruction of its own and, like the compare,
-            // runs whether or not the branch is taken.
+            // So does the update.
             Exit::UpdateCmpImm {
                 rd,
                 source,
@@ -938,8 +679,7 @@ impl Emitter<'_> {
                 self.cond_holds(cond);
                 target
             }
-            // `CBZ`/`CBNZ` and `TBZ`/`TBNZ` read register 31 as the zero
-            // register, so the encoding's own five bits are the slot.
+            // Register 31 reads as the zero register, so the field is the slot.
             Exit::Cbz { rt, sf, nz, target } => {
                 self.read_reg(rt & 0x1F, sf);
                 self.is_zero(!nz);
@@ -959,17 +699,15 @@ impl Emitter<'_> {
                 self.is_zero(!nz);
                 target
             }
-            // A `B` the translator followed, which is not a branch out of the
-            // block at all: the ops after it are the ones at its target, so
-            // there is nothing to write.
+            // A followed `B`: the following ops are already its target's.
             Exit::Jump { .. } => return true,
         };
         self.leave_if(retired, target);
         true
     }
 
-    /// Replace the value on the stack with whether it is zero, or, when
-    /// `want_zero` is false, whether it is not.
+    /// Replace the value on the stack with whether it is zero (or nonzero
+    /// when `want_zero` is false).
     fn is_zero(&mut self, want_zero: bool) {
         if want_zero {
             self.f.i64_eqz();
@@ -979,12 +717,8 @@ impl Emitter<'_> {
         }
     }
 
-    /// Leave the guest address of an access in `L_ADDR`, and the value its
-    /// addressing mode writes back, if it writes one, in `L_W`.
-    ///
-    /// The three modes are [`crate::cpu::Cpu::indexed`]: the access is at
-    /// `base + offset` except under post-indexing, where it is at `base` and
-    /// `base + offset` is only what the base register ends up holding.
+    /// Leave an access's guest address in `L_ADDR` and any writeback value in
+    /// `L_W`, per [`crate::cpu::Cpu::indexed`].
     fn address(&mut self, rn: u8, offset: i64, wb: Wb) {
         if matches!(wb, Wb::None) {
             self.read_reg_raw(rn);
@@ -1007,9 +741,8 @@ impl Emitter<'_> {
         self.f.local_set(L_ADDR);
     }
 
-    /// The same for the register-offset form, which has no writeback:
-    /// [`crate::cpu::Cpu::reg_offset`]'s extension and scale, both already
-    /// resolved.
+    /// The same for the register-offset form, per
+    /// [`crate::cpu::Cpu::reg_offset`].
     fn address_reg(&mut self, rn: u8, rm: u8, ext: Ext, shift: u8) {
         self.read_reg_raw(rn);
         self.read_reg_raw(rm);
@@ -1037,13 +770,8 @@ impl Emitter<'_> {
     }
 
     /// Leave the page `L_ADDR` is on in `L_PAGE`, or leave the block if
-    /// reading `n` bytes there takes more than the page table.
-    ///
-    /// The three conditions are [`crate::mem::Memory::peek`]'s, in its order:
-    /// the access crosses a page boundary, the read watchpoint covers part of
-    /// it, or the page has no storage. Each is something the full path has
-    /// more to do about, and each is rare, so the emitted access is the
-    /// straight-line case and the interpreter keeps the rest.
+    /// reading `n` bytes there needs more than the page table
+    /// ([`crate::mem::Memory::peek`]'s checks, in its order).
     fn page_for_read(&mut self, n: u32, retired: usize) {
         self.page_number();
         let crosses = n > 1;
@@ -1058,17 +786,13 @@ impl Emitter<'_> {
         self.page_or_defer(retired);
     }
 
-    /// The same for a store, whose conditions are
-    /// [`crate::mem::Memory::poke`]'s: the boundary again, a write-protected
-    /// address, the write watchpoint, and a page whose contents something has
-    /// cached, which a store owes a report to.
+    /// The same for a store, with [`crate::mem::Memory::poke`]'s checks.
     fn page_for_write(&mut self, n: u32, retired: usize) {
         self.page_for_write_halves(n, None, retired);
     }
 
-    /// [`Emitter::page_for_write`] for a pair, which
-    /// [`crate::mem::Memory::poke_pair`] also tests for write protection at
-    /// the second half, `second` bytes in.
+    /// [`Emitter::page_for_write`] for a pair, also testing write protection
+    /// `second` bytes in, as [`crate::mem::Memory::poke_pair`] does.
     fn page_for_write_halves(&mut self, n: u32, second: Option<u32>, retired: usize) {
         self.page_number();
         let crosses = n > 1;
@@ -1098,8 +822,7 @@ impl Emitter<'_> {
         self.f.local_set(L_IDX);
     }
 
-    /// Leave that page's storage in `L_PAGE`, or leave the block if it has
-    /// none. An unmapped page is a null entry, so this is the entry itself.
+    /// Leave that page's storage in `L_PAGE`, or leave the block if it is null.
     fn page_or_defer(&mut self, retired: usize) {
         self.f.local_get(STATE);
         self.f.i32_load(ALIGN_4, self.layout.pages);
@@ -1113,13 +836,8 @@ impl Emitter<'_> {
         self.deopt_if(retired);
     }
 
-    /// Push whether `L_ADDR` is inside `[lo, hi)`, which is the envelope test
-    /// [`crate::mem::Memory::is_readonly`] makes before it walks its list.
-    ///
-    /// The list is not walked here: a store inside the envelope hands back and
-    /// the full path decides whether that address really is protected. Every
-    /// protected range is a module's `.text`, so hardly a store a title makes
-    /// is in the envelope at all.
+    /// Push whether `L_ADDR` is inside the write-protected envelope `[lo, hi)`;
+    /// the full path decides the exact ranges.
     fn within(&mut self, lo: u32, hi: u32, at: u32) {
         let addr = |e: &mut Self| {
             e.f.local_get(L_ADDR);
@@ -1139,12 +857,8 @@ impl Emitter<'_> {
         self.f.i32_and();
     }
 
-    /// Leave the block if anything has cached page `L_IDX`'s contents, which
-    /// is [`crate::mem::Memory`]'s `watches_code`.
-    ///
-    /// Inside a check that the bitmap is there at all, because it is not
-    /// allocated until something watches a page and a run with no JIT and no
-    /// GPU backend never has one.
+    /// Leave the block if anything has cached page `L_IDX`'s contents, when
+    /// the bitmap exists.
     fn owes_a_report(&mut self, retired: usize) {
         self.f.local_get(STATE);
         self.f.i32_load(ALIGN_4, self.layout.watched);
@@ -1158,8 +872,7 @@ impl Emitter<'_> {
         self.f.i32_shl();
         self.f.i32_add();
         self.f.i64_load(ALIGN_8, 0);
-        // The shift is taken modulo 64, which is the masking the bit index
-        // would otherwise need.
+        // The shift is taken modulo 64, masking the bit index.
         self.f.i64_const(1);
         self.f.local_get(L_IDX);
         self.f.i64_extend_i32_u();
@@ -1180,9 +893,8 @@ impl Emitter<'_> {
         self.f.i32_gt_u();
     }
 
-    /// Push whether the watchpoint held at `lo`/`hi` covers any of the `n`
-    /// bytes at `L_ADDR`: `addr < end && addr + n > start`, which is the
-    /// overlap test [`crate::mem::Memory::peek`] makes, wrapping included.
+    /// Push whether the watchpoint at `lo`/`hi` overlaps the `n` bytes at
+    /// `L_ADDR`, wrapping included.
     fn covers(&mut self, n: u32, lo: u32, hi: u32) {
         self.f.local_get(L_ADDR);
         self.f.local_get(STATE);
@@ -1197,8 +909,7 @@ impl Emitter<'_> {
         self.f.i32_and();
     }
 
-    /// Push the host address the access is at: the page, plus the offset into
-    /// it, which the boundary check above has already proved leaves room.
+    /// Push the host address of the access: page plus offset.
     fn in_page(&mut self) {
         self.f.local_get(L_PAGE);
         self.f.local_get(L_ADDR);
@@ -1207,12 +918,8 @@ impl Emitter<'_> {
         self.f.i32_add();
     }
 
-    /// A load into `rt`, with the address already in `L_ADDR`.
-    ///
-    /// The widening is the load instruction's own: A64's zero- and
-    /// sign-extending loads are exactly wasm's `_u` and `_s` forms, so only
-    /// the two that sign-extend to 32 bits and then zero the top half need
-    /// anything after the access.
+    /// A load into `rt` from `L_ADDR`. Only the sign-extend-to-32 forms need
+    /// anything after the wasm load.
     fn load(&mut self, rt: u8, acc: Acc, retired: usize) {
         self.page_for_read(access_bytes(acc), retired);
         self.addr_regs();
@@ -1238,11 +945,7 @@ impl Emitter<'_> {
         self.store_reg(rt);
     }
 
-    /// A store of `rt`, with the address already in `L_ADDR`.
-    ///
-    /// The narrowing is the store instruction's own: A64 stores the low bytes
-    /// of the register whatever the width, which is what wasm's narrow stores
-    /// do, so nothing is masked first.
+    /// A store of `rt` to `L_ADDR`.
     fn store(&mut self, rt: u8, acc: Acc, retired: usize) {
         self.page_for_write(access_bytes(acc), retired);
         self.in_page();
@@ -1256,8 +959,7 @@ impl Emitter<'_> {
         }
     }
 
-    /// A load of two `n`-byte registers from `L_ADDR`, both halves checked at
-    /// once as [`crate::mem::Memory::peek`] checks a pair.
+    /// A load of two `n`-byte registers from `L_ADDR`, checked as one access.
     fn load_pair(&mut self, rt: u8, rt2: u8, n: u32, signed: bool, retired: usize) {
         self.page_for_read(2 * n, retired);
         for (slot, at) in [(rt, 0), (rt2, n)] {
@@ -1286,11 +988,7 @@ impl Emitter<'_> {
         }
     }
 
-    /// A single-register access, whatever addressed it.
-    ///
-    /// `PRFM` is an access with no memory in it, and its addressing mode still
-    /// writes back, so it is the one arm that emits no guard at all: there is
-    /// nothing for the page table to answer.
+    /// A single-register access. `PRFM` has no guard: it touches no memory.
     fn access(&mut self, rt: u8, acc: Acc, retired: usize) {
         match acc {
             Acc::Prefetch => {}
@@ -1326,8 +1024,7 @@ impl Emitter<'_> {
             }
 
             Op::MovK { rd, shift, val, sf } => {
-                // The field is replaced, not merged, and the whole result is
-                // narrowed after: a 32-bit MOVK zeroes the top half.
+                // Replace the field, then narrow: a 32-bit MOVK zeroes the top half.
                 let keep = !(0xFFFFu64 << shift) & (width_mask(sf) as u64);
                 self.addr_regs();
                 self.read_reg_raw(rd);
@@ -1457,8 +1154,7 @@ impl Emitter<'_> {
             } => {
                 self.read_reg(rm, sf);
                 self.shift_const(st, sa, sf);
-                // `BIC`/`ORN`/`EON` invert the *shifted* operand, not the
-                // register, which is the order the ARM ARM's pseudocode has.
+                // `BIC`/`ORN`/`EON` invert the shifted operand.
                 self.invert_if(u8::from(invert), sf);
                 self.f.local_set(L_B);
                 self.logical(rd, rn, opc, sf);
@@ -1473,8 +1169,7 @@ impl Emitter<'_> {
             } => {
                 let (left, right, up, signed) = extract.parts();
                 self.addr_regs();
-                // The operand's own high bits are shifted out by `left`, so
-                // this reads the register whole rather than narrowing first.
+                // `left` shifts the high bits out, so read the register whole.
                 self.read_reg_raw(rn);
                 if left != 0 {
                     self.f.i64_const(i64::from(left));
@@ -1505,9 +1200,7 @@ impl Emitter<'_> {
                 imms,
                 sf,
             } => {
-                // Only `BFM` reaches here with anything to do: the forms that
-                // discard the destination are `Op::Extract`, and the
-                // unallocated `opc` writes zero.
+                // Only `BFM` reaches here with anything to do.
                 if opc != 0b01 {
                     self.addr_regs();
                     self.f.i64_const(0);
@@ -1515,9 +1208,6 @@ impl Emitter<'_> {
                     return true;
                 }
                 let (lsb, msb) = (u32::from(immr), u32::from(imms));
-                // Both branches of `bitfield_insert` are the same merge of a
-                // placed field into the destination; they differ in where the
-                // field comes from and which bits it lands on.
                 let (field, right, left) = if msb >= lsb {
                     (mask_of_width(msb - lsb + 1, sf), lsb, 0)
                 } else {
@@ -1584,8 +1274,7 @@ impl Emitter<'_> {
                 self.f.local_set(L_A);
                 self.read_reg(rm, sf);
                 if !sf {
-                    // wasm would take this modulo 64; a 32-bit shift wants it
-                    // modulo 32.
+                    // Modulo 32 for a 32-bit shift, not wasm's 64.
                     self.f.i64_const(31);
                     self.f.i64_and();
                 }
@@ -1615,11 +1304,8 @@ impl Emitter<'_> {
                         self.f.local_get(L_B);
                         self.f.i64_rotr();
                     }
-                    // A 32-bit rotate by a variable amount, as the two shifts
-                    // it is. At an amount of zero the left shift is by 32 and
-                    // the narrowing at the end discards it, which is what
-                    // makes the no-rotation case come out right without a
-                    // branch of its own.
+                    // A 32-bit variable rotate as two shifts; at zero the left
+                    // shift by 32 is discarded by the final narrowing.
                     _ => {
                         self.f.local_get(L_A);
                         self.f.local_get(L_B);
@@ -1688,8 +1374,7 @@ impl Emitter<'_> {
                     for r in [rn, rm] {
                         e.read_reg_raw(r);
                         if signed {
-                            // Takes the low half and fills the rest with its
-                            // sign, so the narrowing is part of it.
+                            // Fills the top with the sign, so it narrows too.
                             e.f.i64_extend32_s();
                         } else {
                             e.mask_to(false);
@@ -1711,8 +1396,7 @@ impl Emitter<'_> {
                 self.addr_regs();
                 self.read_reg(rn, sf);
                 self.read_reg(rm, sf);
-                // The invert and the increment belong to the *else* value,
-                // not to whichever value the condition picks.
+                // The invert and increment apply to the else value only.
                 if else_inv {
                     self.f.i64_const(-1);
                     self.f.i64_xor();
@@ -1743,20 +1427,13 @@ impl Emitter<'_> {
                 if is_imm {
                     self.f.i64_const(i64::from(imm));
                 } else {
-                    // Narrowed, as [`crate::cpu::Cpu::add_carry_overflow`]
-                    // narrows both its operands. Read raw, a 32-bit `CCMN`
-                    // carried the top half of Rm into a sum whose carry is
-                    // taken from bit 32, and reported C from bits the
-                    // operation does not have. `CCMP` hid it: inverting the
-                    // operand masks it again on the way past.
+                    // Narrowed, as [`crate::cpu::Cpu::add_carry_overflow`] does.
                     self.read_reg(rm, sf);
                 }
                 self.invert_if(u8::from(sub), sf);
                 self.f.local_set(L_B);
                 self.add_carry(u8::from(sub), true, sf);
-                // Both answers are values, so the condition picks between the
-                // flags the compare produced and the ones the instruction
-                // carries rather than branching around the compare.
+                // Select between the compare's flags and the immediate ones.
                 self.f.local_get(STATE);
                 self.pack_nzcv(sf, true);
                 self.f.i32_const((u32::from(nzcv) << 28) as i32);
@@ -1881,8 +1558,7 @@ impl Emitter<'_> {
     }
 }
 
-/// How many bytes an access touches, which is what its page and its
-/// watchpoint are tested against.
+/// How many bytes an access touches.
 fn access_bytes(acc: Acc) -> u32 {
     match acc {
         Acc::Load8 | Acc::LoadS8 | Acc::LoadS8To32 | Acc::Store8 => 1,
@@ -1895,19 +1571,13 @@ fn access_bytes(acc: Acc) -> u32 {
 }
 
 /// Emit `block`'s body as a module exporting `run`.
-///
-/// `run` takes the address of the guest state and returns how many
-/// instructions it retired, with [`LEFT`] set when it stopped because a
-/// branch in it was taken rather than because it ran out of body.
 pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refused> {
     let mut f = scratch_func();
     let mut e = Emitter { f: &mut f, layout };
     let mut next_exit = 0usize;
     let mut i = 0usize;
     while i < block.ops.len() {
-        // The same walk [`super::exec`] makes: straight through the ops,
-        // except where a branch sits, whose slots carry filler and whose span
-        // it speaks for.
+        // The same walk [`super::exec`] makes over ops and branch spans.
         match block.exits.get(next_exit) {
             Some(branch) if branch.at as usize == i => {
                 let retired = i + branch.span as usize;
@@ -1928,10 +1598,7 @@ pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refus
             return Err(Refused::TooLong);
         }
     }
-    // Every exit sits inside the body and they are in ascending order, so the
-    // walk lands on each in turn. One left over would be a branch the emitted
-    // block does not make, and the instructions it guards would run as though
-    // it had never been there, so that block is not emitted at all.
+    // An exit the walk did not reach would be silently dropped; refuse.
     if next_exit != block.exits.len() {
         return Err(Refused::ControlFlow);
     }
@@ -1946,14 +1613,9 @@ pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refus
 }
 
 impl Cpu {
-    /// Translate the block at `pc` and emit it, for `examples/emit_difftest.rs`.
-    ///
-    /// `layout` is where the harness has put guest state in the memory it
-    /// hands the module, which for a test is a bare buffer rather than a
-    /// `Cpu`. Reports the address of each instruction the block covers, and
-    /// then of the one after them, so the harness can step the interpreter
-    /// over exactly the same ones: they are not consecutive across a `B` the
-    /// translator followed.
+    /// Translate the block at `pc` and emit it against `layout`, for
+    /// `examples/emit_difftest.rs`. Also reports the address of each covered
+    /// instruction and the one after.
     pub fn emit_block_at(&self, pc: u32, layout: Layout) -> Result<(Vec<u8>, Vec<u32>), Refused> {
         let block = translate(&self.mem, pc);
         let bytes = emit_block(&block, layout)?;
@@ -1975,12 +1637,7 @@ impl Cpu {
         Ok((bytes, path))
     }
 
-    /// The register file by *slot*, which is what an emitted block addresses.
-    ///
-    /// [`Cpu::read_reg`] takes an encoding's five-bit field and so cannot
-    /// reach the three slots register 31 resolves to; a difference in `SP` or
-    /// in the discard slot is exactly the kind an emitter gets wrong, so the
-    /// harness compares all of them.
+    /// The register file by slot, including the three register 31 resolves to.
     pub fn reg_slots(&self) -> [u64; crate::cpu::REG_SLOTS] {
         let mut out = [0u64; crate::cpu::REG_SLOTS];
         out.copy_from_slice(&self.regs[..crate::cpu::REG_SLOTS]);
@@ -2012,10 +1669,6 @@ mod tests {
         watched: 2080,
     };
 
-    /// An op with no emitter has to take the whole block out of the emitted
-    /// path rather than being skipped, or the block would run with an
-    /// instruction missing. The refusal names the instruction, which is what
-    /// the coverage report ranks.
     #[test]
     fn an_unwritable_op_refuses_the_whole_block() {
         let good = block_of(vec![Op::MovConst { rd: 0, val: 7 }]);
@@ -2030,21 +1683,11 @@ mod tests {
         assert_eq!(emit_block(&bad, LAYOUT), Err(Refused::Op(0xD503201F)));
     }
 
-    /// Every offset in [`Layout::of_cpu`] is baked into emitted code as a
-    /// static operand and checked by nothing at run time: name the wrong field
-    /// and a block reads or writes it perfectly happily. Neither `Cpu` nor
-    /// `Memory` is `#[repr(C)]`, so nothing but this says the offsets still
-    /// point where they are supposed to.
-    ///
-    /// So this walks guest state the way an emitted block does: from the
-    /// address of the `Cpu` by offset alone, never through a field.
+    /// Walks guest state from the `Cpu`'s address by [`Layout::of_cpu`]
+    /// offsets alone, as emitted code does.
     #[test]
     fn emitted_code_finds_guest_state_through_the_layout() {
-        /// One page-table entry, which on `wasm32` is
-        /// [`PAGE_ENTRY_SHIFT`]'s four bytes and on the host a wider pointer.
-        /// The shift itself is asserted against this at compile time for the
-        /// only target that runs emitted code; what is under test here is that
-        /// an entry is a bare pointer at all, and where the table is.
+        /// One page-table entry.
         const ENTRY: usize = std::mem::size_of::<Option<Box<[u8; PAGE_SIZE]>>>();
 
         const SLOT: u8 = 5;
@@ -2063,10 +1706,8 @@ mod tests {
 
         let layout = Layout::of_cpu();
         let base = &cpu as *const Cpu as usize;
-        // SAFETY: every read below is at an offset from a live `Cpu`, of the
-        // type the field at that offset holds. That is the claim the test
-        // exists to make, and a wrong offset is a wrong answer rather than an
-        // out-of-bounds read: the offsets are all inside the `Cpu`.
+        // SAFETY: every read is at an in-bounds offset from a live `Cpu`, of
+        // the type the field there holds.
         unsafe {
             let u32_at = |off: u32| *((base + off as usize) as *const u32);
 
@@ -2093,9 +1734,7 @@ mod tests {
                 "the write-protected envelope moved"
             );
 
-            // The bitmap of pages something has cached, and the bit in it that
-            // makes an emitted store hand back. Null until the first mark,
-            // which is why one was made above.
+            // Marking a page allocates the bitmap and sets the bit stores test.
             let watched = *((base + layout.watched as usize) as *const *const u64);
             assert!(!watched.is_null(), "the watched-page bitmap is not there");
             let page = (ADDR >> PAGE_BITS) as usize;
@@ -2105,9 +1744,7 @@ mod tests {
                 "the marked page's bit is not where an emitted store looks"
             );
 
-            // The page-table walk itself: the table's pointer, the entry for
-            // this address, and the byte at the offset into it. An unmapped
-            // page is a null entry, which is what an emitted access tests.
+            // The page-table walk: table pointer, entry, byte at the offset.
             let table = *((base + layout.pages as usize) as *const *const u8);
             let entry = *(table.add(page * ENTRY) as *const *const u8);
             assert!(!entry.is_null(), "a written page has no storage");
@@ -2132,10 +1769,6 @@ mod tests {
         assert!(emit_block(&b, LAYOUT).is_ok());
     }
 
-    /// An exit the walk never reaches would leave the instructions it guards
-    /// running as though the branch were not there, which is wrong in a way
-    /// no later check could catch. It has to take the block out of the
-    /// emitted path instead.
     #[test]
     fn an_exit_past_the_body_refuses_rather_than_being_dropped() {
         use crate::cpu::jit::ir::{Branch, Exit};
@@ -2146,11 +1779,6 @@ mod tests {
         assert_eq!(emit_block(&b, LAYOUT), Err(Refused::ControlFlow));
     }
 
-    /// The four conditional branches are all written, each as a test and a
-    /// leave. What they compute is `emit_difftest`'s and
-    /// `tools/jit_wasm_check.mjs`'s to check; what this holds is that no arm
-    /// quietly went missing, which would show up as a whole class of block
-    /// dropping out of the emitted path and nowhere else.
     #[test]
     fn every_conditional_branch_is_written() {
         use crate::cpu::jit::ir::{Branch, Exit};
@@ -2190,9 +1818,7 @@ mod tests {
             },
         ];
         for exit in branches {
-            // The branch sits between two ops, so the block covers the three
-            // places a body meets one: before it, the branch itself, and the
-            // not-taken path carrying on after it.
+            // Ops before and after the branch.
             let ops = vec![Op::MovConst { rd: 0, val: 7 }, Op::Nop, Op::Nop];
             let exits = vec![Branch::new(1, exit)];
             let b = Block::new(0x1000, ops, vec![0; 3], exits, None, vec![1]);
@@ -2203,10 +1829,7 @@ mod tests {
         }
     }
 
-    /// A fused compare covers two instructions, so the branch after it
-    /// reports both as retired. Getting that wrong would leave the
-    /// interpreter re-running the compare, which sets flags a second time
-    /// from operands the block has since moved on from.
+    /// A fused compare retires two instructions with the branch.
     #[test]
     fn a_fused_compare_retires_the_pair() {
         use crate::cpu::jit::ir::{Branch, Exit};
@@ -2232,8 +1855,7 @@ mod tests {
             vec![1],
         );
         let bytes = emit_block(&b, LAYOUT).expect("a fused compare is written");
-        // The count it leaves with, `2 | LEFT`, as the signed LEB128 the
-        // encoder writes for `i32.const`.
+        // `2 | LEFT` as the signed LEB128 `i32.const` operand.
         let mut want = Vec::new();
         super::super::wasm::sleb(&mut want, i64::from((2u32 | LEFT) as i32));
         assert!(

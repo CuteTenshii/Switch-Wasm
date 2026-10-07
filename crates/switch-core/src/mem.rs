@@ -1,115 +1,62 @@
-//! Sparse 4 GiB address space for the emulated Switch.
-//!
-//! Backed by fixed 4 KiB pages allocated on demand, so an idle system costs
-//! almost nothing in the browser while still permitting the full 32-bit
-//! address range the CPU can reach. Reads/writes to unmapped addresses fault
-//! with [`Error::Cpu`], except inside an optional "soft" region (see
-//! [`Memory::soft_map_zero`]) whose unmapped pages read as zero and allocate
-//! a real page on first write, used to present homebrew with its expected
-//! address space without reserving it up front.
+//! Sparse 4 GiB guest address space of lazily allocated 4 KiB pages.
+//! Unmapped accesses fault, except in an optional soft region that reads as zero.
 
 use crate::{Error, Result};
 
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_BITS: u32 = 12;
 pub const ADDRESS_SPACE_SIZE: u64 = 0x1_0000_0000; // 4 GiB
-/// Number of 4 KiB pages in the 4 GiB space. Computed in u64 first so it
-/// survives the wasm32 (32-bit usize) truncation of the 4 GiB constant.
+/// Computed in u64 so the 4 GiB constant survives a 32-bit usize.
 const PAGE_COUNT: usize = (ADDRESS_SPACE_SIZE >> PAGE_BITS) as usize;
-/// [`Memory::page_index`] masks with `PAGE_COUNT - 1`, which only covers the
-/// whole space if that is a power of two.
+/// [`Memory::page_index`] masks with `PAGE_COUNT - 1`.
 const _: () = assert!(PAGE_COUNT.is_power_of_two());
-/// Pages per entry in the block summary [`Memory`] keeps beside the page
-/// table. 512 pages is 2 MiB: small enough that the summary is a few
-/// kilobytes, large enough that walking a multi-gigabyte untouched region
-/// costs thousands of steps instead of millions. See [`Memory::state_run`].
+/// Pages per block-summary entry (2 MiB). See [`Memory::state_run`].
 const BLOCK_PAGES: usize = 512;
 const BLOCK_COUNT: usize = PAGE_COUNT / BLOCK_PAGES;
-/// Words in a bitmap holding one bit per page of the whole address space.
 const WATCH_WORDS: usize = PAGE_COUNT / 64;
-/// The default ceiling on real, host-backed guest RAM: see
-/// [`Memory::set_max_mapped_bytes`] to choose another.
-///
-/// It exists to bound a runaway guest write (e.g. a stray pointer walking up
-/// from a null base, one soft-mapped page at a time) to a fast, cheap failure
-/// instead of ballooning the host process (a browser tab included) for
-/// seconds before anything faults.
-///
-/// **It may not be smaller than what `svcGetInfo` advertises as
-/// `TotalMemorySize`**, because a title believes that figure and sizes its
-/// pools from it. 512 MiB held here while `GUEST_TOTAL_MEMORY_SIZE` said
-/// 2.5 GiB, and a title took the emulator at its word: it reserved a 1.5 GiB
-/// pool and died part way through `memset`ting it, in a `stp q0, q0` loop with
-/// no allocation in sight. A cap under the advertised total does not limit a
-/// title, it makes the emulator lie to one.
-///
-/// Backing is lazy (a page costs nothing until the guest touches it) so this
-/// only decides when a run fails, never what an idle title reserves. The
-/// console being emulated has 4 GiB, of which an application gets about 3.2,
-/// so this is still short of hardware rather than generous.
+/// Default ceiling on host-backed guest RAM, bounding runaway writes. Must not
+/// be below the `TotalMemorySize` that `svcGetInfo` advertises.
 pub const MAX_MAPPED_BYTES: u64 = 0xC800_0000; // 3.125 GiB, `GUEST_TOTAL_MEMORY_SIZE`
 const MAX_MAPPED_PAGES: usize = (MAX_MAPPED_BYTES / PAGE_SIZE as u64) as usize;
 
-/// Horizon's `MemoryState`, as `svcQueryMemory` reports it in the first word
-/// past a region's bounds. Only the states this emulator can tell regions
-/// apart by are here.
-///
-/// A module is **two** states, not one: the kernel maps its static half
-/// (`.text` + `.rodata`) and its mutable half (`.data` + `.bss`) separately,
-/// and SDK code walks from one into the other. See [`Memory::mark_module`].
+/// Horizon's `MemoryState` as `svcQueryMemory` reports it, for the states
+/// distinguished here. See [`Memory::mark_module`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum MemoryState {
     Unmapped = 0,
-    /// The process image's static half.
     Code = 3,
-    /// The process image's mutable half.
     CodeData = 4,
-    /// The same two for a module `ldr:ro` mapped after the process started.
+    /// The same two for an `ldr:ro` module.
     AliasCode = 8,
     AliasCodeData = 9,
 }
 
-/// One region as `svcQueryMemory` describes it: the bounds of a run of pages
-/// that share a state, and the state itself. See [`Memory::state_run`].
+/// A run of pages sharing a state, as `svcQueryMemory` describes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateRun {
     pub start: u32,
-    /// End-exclusive, and clamped to the limit the run was asked for.
+    /// End-exclusive, clamped to the requested limit.
     pub end: u32,
-    /// Whether the pages hold real storage, as opposed to being untouched
-    /// soft-mapped ones an address-space walk should see as free.
+    /// Real storage, as opposed to untouched soft-mapped pages.
     pub mapped: bool,
-    /// Whether they are write-protected, in practice a module's `.text`.
+    /// Write-protected, in practice a module's `.text`.
     pub readonly: bool,
-    /// What the guest is told the run is.
     pub state: MemoryState,
 }
 
-/// One loaded module's image, split the way the kernel maps it.
 #[derive(Debug, Clone, Copy)]
 struct ModuleImage {
     /// `.text` + `.rodata`, end-exclusive and page-aligned.
     static_range: (u32, u32),
     /// `.data` + `.bss`, likewise.
     mutable_range: (u32, u32),
-    /// Whether this is an `ldr:ro` module rather than part of the process
-    /// image, which decides between the `Alias*` states and the plain ones.
+    /// An `ldr:ro` module, reported with the `Alias*` states.
     alias: bool,
 }
 
-/// Where inside a [`Memory`] each piece of state an emitted guest access
-/// reads sits, in bytes from the start of the `Memory`.
-///
-/// Emitted code makes [`Memory::peek`]'s and [`Memory::poke`]'s checks itself
-/// rather than calling them, so it has to reach the fields those checks read.
-/// This is the only way it can: `Memory`'s fields are private, and
-/// `offset_of!` needs them visible where it is written, so the offsets are
-/// taken here, beside the declarations they are about, and nowhere else.
-///
-/// Not `#[repr(C)]`, so these are whatever the compiler chose for this build.
-/// That is exactly what emitted code needs, because it is written by that same
-/// build.
+/// Byte offsets of the fields emitted guest accesses read, taken here because
+/// the fields are private. Not `#[repr(C)]`: valid for the build that emits the code.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Offsets {
     pub(crate) pages: u32,
@@ -137,135 +84,45 @@ impl Offsets {
 
 #[derive(Debug)]
 pub struct Memory {
-    /// One slot per page. `None` means the page is not mapped.
-    /// One slot per 4 KiB of the guest space, `None` until something writes
-    /// there. A boxed array rather than a `Vec` for one reason: the length is
-    /// then a compile-time constant, so indexing it with a page number the
-    /// compiler can see is in range carries no bounds check. Every guest load
-    /// and store goes through here, and loads and stores are 31% of a retail
-    /// frame's instructions.
+    /// One slot per page, `None` until written. A fixed-size array so indexing has no bounds check.
     pages: Box<[Option<Box<[u8; PAGE_SIZE]>>; PAGE_COUNT]>,
-    /// Soft region as `(start, end)` (end-exclusive); `start > end` disables
-    /// it. Unmapped pages in `[start, end)` read as zero from [`Memory::zero`]
-    /// and allocate a private page on first write.
+    /// Soft region `(start, end)`, end-exclusive; `start > end` disables it.
     soft: (u32, u32),
-    /// Read-only regions, each `(start, end)` (end-exclusive). Sits over each
-    /// loaded module's `.text` once the loader has finished patching it, so
-    /// a guest write through a wild pointer faults instead of silently
-    /// corrupting running code, and so `svcQueryMemory` can report the
-    /// real-world R-X permission code on it (retail `rtld` scans process
-    /// memory for other modules by filtering on exactly that permission,
-    /// see [`Memory::mark_readonly`]). A retail process loads several
-    /// modules (`rtld`/`main`/`subsdk*`/`sdk`), so this is a list, not a
-    /// single range.
+    /// Read-only ranges, end-exclusive: each loaded module's `.text`, once patched.
     readonly: Vec<(u32, u32)>,
-    /// The envelope of every range in `readonly`, as `(lowest start, highest
-    /// end)`; `start >= end` when there are none.
-    ///
-    /// [`Memory::is_readonly`] runs on **every** guest store and walks that
-    /// list linearly, so a process with four modules loaded paid four
-    /// comparisons per store: against a clear that writes eleven million
-    /// texels a frame, and a heap that writes far more. Every protected range
-    /// is a module's `.text` down in the image, so almost every store a
-    /// running title makes is outside the envelope and answers in two
-    /// comparisons without touching the list at all.
+    /// Envelope of `readonly`; `start >= end` when empty. Lets most stores skip the list.
     readonly_span: (u32, u32),
-    /// Every module image currently mapped, in load order. Small, a retail
-    /// process is four modules plus whatever `ldr:ro` has open.
+    /// Every mapped module image, in load order.
     modules: Vec<ModuleImage>,
-    /// The envelope of every range in `modules`, as `(lowest start, highest
-    /// end)`; `start >= end` when there are none. Same trick as
-    /// `readonly_span`: a page outside it is classified in two comparisons.
+    /// Envelope of `modules`, like `readonly_span`.
     module_span: (u32, u32),
-    /// Shared zero page served for reads inside the soft region.
+    /// Shared zero page for soft-region reads.
     zero: Box<[u8; PAGE_SIZE]>,
-    /// How many pages currently hold real storage. Counted as they are
-    /// allocated so reporting guest RAM use never walks the million-entry
-    /// page table.
+    /// Pages holding real storage.
     mapped_pages: usize,
-    /// The ceiling `mapped_pages` may reach, from [`MAX_MAPPED_BYTES`] unless
-    /// a caller lowered it. A field rather than a constant so that a host with
-    /// less to give, or a test that wants to reach the cap without allocating
-    /// gigabytes to do it: can say so.
+    /// Ceiling for `mapped_pages`, from [`MAX_MAPPED_BYTES`] unless lowered.
     max_mapped_pages: usize,
-    /// How many pages of each 2 MiB block hold real storage. Maintained
-    /// alongside `pages` so a scan can skip a block that is entirely
-    /// untouched without looking at its pages; that is the case that grows
-    /// with the address space, and the only one that ever got expensive.
+    /// Backed pages per 2 MiB block, so scans skip untouched blocks.
     block_mapped: Vec<u16>,
-    /// Watchpoint `[start, end)` and the address of the most recent guest
-    /// write that landed in it. `start >= end` disables it. A host-side
-    /// debugger arms the range and reads [`Memory::take_watch_hit`] after each
-    /// step, which is the only way to attribute a buffer's contents to the
-    /// code that produced them: polling the buffer cannot see a write that
-    /// stores the value already there, and cannot name the writer at all.
+    /// Write watchpoint `[start, end)` and the last write hit; `start >= end` disables it.
     watch: (u32, u32),
     watch_hit: Option<u32>,
-    /// The same, for reads. Separate because the read path takes `&self`, so
-    /// the hit is recorded through a `Cell`.
+    /// The same for reads, recorded through a `Cell`.
     read_watch: (u32, u32),
     read_hit: std::cell::Cell<Option<u32>>,
-    /// Pages something has cached the contents of, one bit each. A store that
-    /// lands on one of them is reported, so no cache of guest memory can go
-    /// stale behind its back: the JIT's translations, and the GPU backend's
-    /// deswizzled textures.
-    ///
-    /// One bitmap and not one per consumer, because the test is
-    /// `#[inline(always)]` in every guest write path, the hottest code here,
-    /// and a second bounds-checked load and bit test on it would be paid by
-    /// every store the emulator ever runs. The price is that a write reports
-    /// the page to *both* drains, so each sees pages it has nothing cached
-    /// for. Both treat that the same way they treat a real one: the JIT finds
-    /// no blocks to throw away, the backend finds no texture to evict, and a
-    /// spurious invalidation is only ever wasted work rather than a wrong
-    /// answer. Textures and code do not share pages in practice anyway.
-    ///
-    /// One bit per 4 KiB page is 128 KiB for the whole address space, but a
-    /// program's stores cluster, so the handful of cache lines under them is
-    /// all a run ever touches. It is allocated on the first mark, so a run
-    /// with the JIT off and no GPU backend does not carry it and every
-    /// store's test misses on the null check alone.
-    ///
-    /// A fixed-size bitmap behind one pointer rather than a `Vec`, which is
-    /// what it was and what it never needed: the address space it covers is a
-    /// constant, so it is allocated once, at full size, and never resized.
-    /// Writing it that way removes the length from every test and gives
-    /// emitted code somewhere to look, which a `Vec` cannot: nothing promises
-    /// where in one the pointer and the length sit, and an emitted store has
-    /// to make this exact test before it can write anything.
-    ///
-    /// `copy_watch` and `fill_watch` below are still `Vec`s. They are only
-    /// ever reached from [`Memory::report_written`], which no emitted code
-    /// runs and no store reaches without having already missed here.
+    /// One bit per page something has cached (JIT code, GPU textures); stores there
+    /// are reported to both drains. Allocated on first mark; fixed-size for emitted code.
     watched_pages: Option<Box<[u64; WATCH_WORDS]>>,
-    /// Watched pages written since the JIT last drained this. A page is
-    /// recorded once (marking it clears its bit) and stays out of the
-    /// bitmap until something is cached from it again.
+    /// Watched pages written since the JIT last drained; marking clears the bit.
     code_dirty: Vec<u32>,
-    /// The same list, for the GPU backend. Separate because the two drain
-    /// independently: whichever asks first must not take the notification the
-    /// other has not seen yet.
+    /// The same for the GPU backend, drained independently.
     gpu_dirty: Vec<u32>,
-    /// Whether the GPU backend has watched a page yet. Until it has, there is
-    /// nobody to drain `gpu_dirty`, and without a backend there never is: the
-    /// software renderer runs without one, and every report queued for it was
-    /// kept for the rest of the run.
+    /// Whether the GPU backend has watched a page, so reports are not queued for nobody.
     gpu_watching: bool,
-    /// Pages a copy of guest memory held on the host was taken from, one bit
-    /// each, allocated on the first mark, and whether a store has landed on
-    /// one since [`Memory::take_copy_written`] last asked. A flag rather than
-    /// a list: its one reader only wants to know whether its copy still
-    /// stands, and a flag cannot grow while nobody asks.
+    /// Pages a host copy came from, and whether a store landed since [`Memory::take_copy_written`].
     copy_watch: Vec<u64>,
     copy_written: bool,
-    /// The same pair again, for a second host-side claim about guest memory
-    /// watched independently of the first. A staged blit uses `copy_watch` for
-    /// the texels it read; the depth clear uses this one for the bytes it
-    /// wrote. They cannot share a flag: each writes memory the other watches,
-    /// so one would keep reporting the other's own stores. Tested only from
-    /// [`Memory::report_written`], which a store reaches only once it has
-    /// already hit `watched_pages`, so the second channel costs the hot store
-    /// path nothing.
+    /// A second independent channel: bytes a host operation wrote (depth clears).
     fill_watch: Vec<u64>,
     fill_written: bool,
 }
@@ -307,18 +164,13 @@ impl Memory {
         }
     }
 
-    /// Record that the page holding `addr` has had code translated out of it,
-    /// so a later store there is reported by [`Memory::dirty_code_pages`].
+    /// Mark `addr`'s page as translated, so stores there are reported.
     pub fn mark_code_page(&mut self, addr: u32) {
         let idx = Self::page_index(addr);
         self.watch_words()[idx >> 6] |= 1u64 << (idx & 63);
     }
 
-    /// The page bitmap, allocated if this is the first thing to watch
-    /// anything. One shape for all four kinds of watcher; see `watched_pages`.
-    ///
-    /// Built through a `Vec` rather than `Box::new([0; _])`, which puts 128 KiB
-    /// on the stack before moving it to the heap.
+    /// The page bitmap, allocated on first use (via a `Vec`, to keep 128 KiB off the stack).
     fn watch_words(&mut self) -> &mut [u64; WATCH_WORDS] {
         self.watched_pages.get_or_insert_with(|| {
             vec![0u64; WATCH_WORDS]
@@ -328,11 +180,7 @@ impl Memory {
         })
     }
 
-    /// Note a guest store, invalidating the page's translations if it holds
-    /// any. Inlined into every write path, so it has to answer "no" in a
-    /// couple of instructions: one null test on the bitmap (which is not there
-    /// at all while nothing has been translated), one load from it and one bit
-    /// test. Only the recording is out of line.
+    /// Note a guest store; the miss path must stay a few instructions.
     #[inline(always)]
     fn note_code_write(&mut self, addr: u32) {
         let idx = Self::page_index(addr);
@@ -346,8 +194,7 @@ impl Memory {
         }
     }
 
-    /// Record that a page's translations are stale. Rare: it happens once per
-    /// page until something is translated out of it again.
+    /// Record a stale page; rare.
     #[cold]
     #[inline(never)]
     fn mark_code_dirty(&mut self, idx: usize, bit: u64) {
@@ -355,8 +202,7 @@ impl Memory {
         self.report_written(idx);
     }
 
-    /// Tell everything watching page `idx` that it has been written. Its bit
-    /// in `watched_pages` is already clear.
+    /// Report page `idx` as written; its `watched_pages` bit is already clear.
     fn report_written(&mut self, idx: usize) {
         self.code_dirty.push(idx as u32);
         if self.gpu_watching {
@@ -377,10 +223,7 @@ impl Memory {
         }
     }
 
-    /// Mark every code page overlapping `[addr, addr + size)` dirty. Used by
-    /// the loader-side paths ([`Memory::map`], [`Memory::map_zero`],
-    /// [`Memory::unmap`]), which move whole segments at a time and do not go
-    /// through the per-store write paths.
+    /// Mark code pages in a range dirty, for whole-segment loader paths.
     fn dirty_code_range(&mut self, addr: u32, size: usize) {
         if self.watched_pages.is_none() || size == 0 {
             return;
@@ -399,47 +242,35 @@ impl Memory {
         }
     }
 
-    /// Whether any translated page has been written since it was last
-    /// drained. Checked before every block the JIT enters, so it is a plain
-    /// emptiness test rather than the drain itself.
+    /// Whether any translated page was written since the last drain.
     #[inline(always)]
     pub fn has_dirty_code(&self) -> bool {
         !self.code_dirty.is_empty()
     }
 
-    /// Take the pages whose translations are stale, clearing the list. Returns
-    /// an empty (unallocated) vector in the overwhelmingly common case that
-    /// nothing has written to code.
+    /// Take the stale code pages, clearing the list.
     pub fn dirty_code_pages(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.code_dirty)
     }
 
-    /// Watch `addr`'s page on the GPU backend's behalf, so a later store there
-    /// is reported by [`Memory::dirty_gpu_pages`]. The same bitmap the JIT
-    /// marks: a store reports the page to both drains.
+    /// Watch `addr`'s page for the GPU backend.
     pub fn mark_gpu_page(&mut self, addr: u32) {
         self.gpu_watching = true;
         let idx = Self::page_index(addr);
         self.watch_words()[idx >> 6] |= 1u64 << (idx & 63);
     }
 
-    /// Whether any watched page has been written since the GPU backend last
-    /// drained this.
+    /// Whether any GPU-watched page was written since the last drain.
     #[inline(always)]
     pub fn has_dirty_gpu(&self) -> bool {
         !self.gpu_dirty.is_empty()
     }
 
-    /// Take the pages whose cached contents are stale, clearing the list.
     pub fn dirty_gpu_pages(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.gpu_dirty)
     }
 
-    /// Watch every page of `[addr, addr + len)` on behalf of a copy of it
-    /// held on the host, so that a later store to any of them sets the flag
-    /// [`Memory::take_copy_written`] reports. Through the same bitmap every
-    /// store already tests, so watching costs the stores nothing until one
-    /// lands on a watched page.
+    /// Watch a range for a host copy; see [`Memory::take_copy_written`].
     pub fn mark_copy_range(&mut self, addr: u32, len: u32) {
         if len == 0 {
             return;
@@ -456,15 +287,12 @@ impl Memory {
         }
     }
 
-    /// Whether a store has landed on a page [`Memory::mark_copy_range`]
-    /// watched since this was last asked, clearing the answer.
+    /// Whether a copy-watched page was written since last asked, clearing it.
     pub fn take_copy_written(&mut self) -> bool {
         std::mem::take(&mut self.copy_written)
     }
 
-    /// [`Memory::mark_copy_range`] for the second channel: the bytes a host
-    /// operation last *wrote*, so it can tell whether they are still the ones
-    /// it put there.
+    /// [`Memory::mark_copy_range`] for the second channel: bytes a host operation wrote.
     pub fn mark_fill_range(&mut self, addr: u32, len: u32) {
         if len == 0 {
             return;
@@ -481,33 +309,22 @@ impl Memory {
         }
     }
 
-    /// [`Memory::take_copy_written`] for that second channel.
     pub fn take_fill_written(&mut self) -> bool {
         std::mem::take(&mut self.fill_written)
     }
 
-    /// Mark `[start, end)` as softly mapped: reads return zeros (served from
-    /// a single shared page) and writes allocate a real page on first touch.
-    /// This lets homebrew read its uninitialized address space without the
-    /// host reserving the whole region up front.
+    /// Soft-map `[start, end)`: reads return zeros, writes allocate a page.
     pub fn soft_map_zero(&mut self, start: u32, end: u32) {
         self.soft = (start, end);
     }
 
-    /// Mark `[start, end)` as read-only to the guest: a CPU store into it
-    /// faults instead of writing through. Adds to the existing set of
-    /// read-only ranges (a retail process has one per loaded module) rather
-    /// than replacing it. Loader-only writes (`map`/`map_zero`/`copy_range`)
-    /// are unaffected: call this once a segment's relocations have been
-    /// patched in, not before.
+    /// Write-protect `[start, end)` against guest stores, adding to the existing
+    /// ranges. Loader writes are unaffected; call after relocation.
     pub fn mark_readonly(&mut self, start: u32, end: u32) {
         self.readonly.push((start, end));
         self.refresh_readonly_span();
     }
 
-    /// Recompute the envelope `is_readonly` tests before it walks the list.
-    /// Called by everything that changes the list, which is the only way the
-    /// envelope can be wrong.
     fn refresh_readonly_span(&mut self) {
         self.readonly_span = self
             .readonly
@@ -517,11 +334,7 @@ impl Memory {
             });
     }
 
-    /// Forget every loaded module, both its protection and the memory
-    /// states it is reported under, so a fresh boot in a reused [`Memory`]
-    /// doesn't inherit either from a previous title/homebrew. The two are one
-    /// call because a module image that outlived its protection, or the other
-    /// way round, is a state no boot can produce.
+    /// Forget every module's protection and memory states, for a fresh boot.
     pub fn clear_modules(&mut self) {
         self.readonly.clear();
         self.refresh_readonly_span();
@@ -529,23 +342,14 @@ impl Memory {
         self.refresh_module_span();
     }
 
-    /// Drop every read-only range that lies inside `[start, end)`.
-    ///
-    /// This is the other half of [`Memory::mark_readonly`], and it exists
-    /// because a module can go away while the process keeps running:
-    /// `ldr:ro`'s `UnloadModule` frees the address space a loaded NRO
-    /// occupied, and leaving its `.text` protected would fault the next thing
-    /// to be mapped over it. Ranges that merely overlap are left alone,
-    /// nothing here splits a protected range, and a partial unmap of somebody
-    /// else's module is not something to guess at.
+    /// Drop read-only ranges inside `[start, end)`, for `ldr:ro` unloads.
+    /// Overlapping ranges are left alone.
     pub fn unmark_readonly(&mut self, start: u32, end: u32) {
         self.readonly.retain(|&(s, e)| !(s >= start && e <= end));
         self.refresh_readonly_span();
     }
 
-    /// Whether `addr` falls in a range marked by [`Memory::mark_readonly`],
-    /// in practice, always a loaded module's `.text`. Used by `svcQueryMemory`
-    /// to report the real R-X permission code on it instead of a blanket RWX.
+    /// Whether `addr` is in a read-only range, reported as R-X by `svcQueryMemory`.
     #[inline(always)]
     pub fn is_readonly(&self, addr: u32) -> bool {
         addr >= self.readonly_span.0
@@ -553,22 +357,8 @@ impl Memory {
             && self.readonly.iter().any(|&(s, e)| addr >= s && addr < e)
     }
 
-    /// Record a loaded module's image so `svcQueryMemory` can report the two
-    /// memory states the kernel maps it under. Both ranges are end-exclusive
-    /// and rounded out to whole pages, because a state is a property of a
-    /// page.
-    ///
-    /// A module is not one region to Horizon. Its static half (`.text` +
-    /// `.rodata`) is `Code` and its mutable half (`.data` + `.bss`) is
-    /// `CodeData`, and `nn::ro::detail::GetExceptionInfo`, which every
-    /// `nn::diag` log line and every abort goes through to name the module an
-    /// address belongs to: reads the boundary between them as the module's
-    /// shape: it walks `Code` up from the queried address, then *requires*
-    /// the region immediately above that run to be `CodeData` and walks that
-    /// to find the image's end. Reporting one state for the whole image left
-    /// nothing above the run to be `CodeData`, and it aborted, which is how
-    /// Asphalt 9 died on its first `puts`, 377M steps in, with an assertion
-    /// whose text the release SDK had compiled out.
+    /// Record a module image as `Code` (static half) and `CodeData` (mutable half)
+    /// pages, as the kernel maps it. Ranges are end-exclusive and rounded to pages.
     pub fn mark_module(
         &mut self,
         static_range: (u32, u32),
@@ -590,25 +380,19 @@ impl Memory {
         self.refresh_module_span();
     }
 
-    /// Drop every module image that lies inside `[start, end)`, the other
-    /// half of [`Memory::mark_module`], for `ldr:ro`'s `UnloadModule`. Same
-    /// rule as [`Memory::unmark_readonly`]: an image that merely overlaps is
-    /// left alone rather than split.
+    /// Drop module images inside `[start, end)`; overlapping ones are left alone.
     pub fn unmark_module(&mut self, start: u32, end: u32) {
         self.modules
             .retain(|m| !(m.static_range.0 >= start && m.mutable_range.1 <= end));
         self.refresh_module_span();
     }
 
-    /// Recompute the envelope [`Memory::module_state`] tests before it walks
-    /// the list. Called by everything that changes the list.
     fn refresh_module_span(&mut self) {
         self.module_span = self.modules.iter().fold((u32::MAX, 0), |(lo, hi), m| {
             (lo.min(m.static_range.0), hi.max(m.mutable_range.1))
         });
     }
 
-    /// Which half of which module image `addr` falls in, if any.
     fn module_state(&self, addr: u32) -> Option<MemoryState> {
         if addr < self.module_span.0 || addr >= self.module_span.1 {
             return None;
@@ -632,7 +416,6 @@ impl Memory {
         })
     }
 
-    /// Whether any module image overlaps `[start, end)`.
     fn module_intersects(&self, start: u32, end: u32) -> bool {
         start < self.module_span.1
             && self.module_span.0 < end
@@ -654,12 +437,7 @@ impl Memory {
         }
     }
 
-    /// The page a guest address falls in.
-    ///
-    /// Masked rather than merely shifted: the shift alone already cannot
-    /// exceed `PAGE_COUNT - 1` for a `u32` address, but saying so explicitly
-    /// is what lets the indexing below compile without a bounds check even
-    /// where the address arrived through several layers of inlining.
+    /// The page a guest address falls in, masked so indexing skips the bounds check.
     #[inline]
     fn page_index(addr: u32) -> usize {
         ((addr as usize) >> PAGE_BITS) & (PAGE_COUNT - 1)
@@ -678,8 +456,7 @@ impl Memory {
         Ok(self.pages[idx].as_mut().unwrap())
     }
 
-    /// First touch of a page. Out of line so the common "already mapped" store
-    /// path does not carry the allocation code with it.
+    /// First touch of a page, out of line.
     #[cold]
     #[inline(never)]
     fn allocate_page(&mut self, idx: usize) -> Result<()> {
@@ -695,28 +472,20 @@ impl Memory {
         Ok(())
     }
 
-    /// Pages backed by real storage.
     pub fn mapped_pages(&self) -> usize {
         self.mapped_pages
     }
 
-    /// Guest memory actually backed by host storage, in bytes. This is what the
-    /// emulated console "uses": the image, stack, heap and every page the guest
-    /// has touched inside a soft-mapped region.
+    /// Guest memory backed by host storage, in bytes.
     pub fn mapped_bytes(&self) -> u64 {
         self.mapped_pages as u64 * PAGE_SIZE as u64
     }
 
-    /// The ceiling [`Memory::mapped_bytes`] may reach.
     pub fn max_mapped_bytes(&self) -> u64 {
         self.max_mapped_pages as u64 * PAGE_SIZE as u64
     }
 
     /// Choose a different ceiling, rounded down to whole pages.
-    ///
-    /// Lower it where the host has less to give than [`MAX_MAPPED_BYTES`]
-    /// assumes. Raising it above what `svcGetInfo` advertises buys nothing:
-    /// a title sizes itself from the advertised figure, not from this.
     pub fn set_max_mapped_bytes(&mut self, bytes: u64) {
         self.max_mapped_pages = (bytes / PAGE_SIZE as u64) as usize;
     }
@@ -729,10 +498,7 @@ impl Memory {
         }
     }
 
-    /// An access to a page with no storage behind it: zeros inside a soft-mapped
-    /// region, a fault anywhere else. Kept out of line so the mapped case stays
-    /// small enough to inline into its callers: it is on the path of every
-    /// instruction fetch.
+    /// Access to an unbacked page: zeros in the soft region, else a fault.
     #[cold]
     #[inline(never)]
     fn page_ref_unmapped(&self, idx: usize) -> Result<&[u8; PAGE_SIZE]> {
@@ -746,59 +512,35 @@ impl Memory {
         )))
     }
 
-    /// Whether a real page has been allocated at `addr` (as opposed to a
-    /// soft-mapped page that has never been touched). Used by `svcQueryMemory`
-    /// so address-space walks see genuinely free pages as unmapped.
+    /// Whether a real page backs `addr`, so `svcQueryMemory` walks see free pages.
     pub fn page_mapped(&self, addr: u32) -> bool {
         self.pages[Self::page_index(addr)].is_some()
     }
 
-    /// Whether any range marked by [`Memory::mark_readonly`] overlaps
-    /// `[start, end)`.
     fn readonly_intersects(&self, start: u32, end: u32) -> bool {
         self.readonly.iter().any(|&(s, e)| start < e && s < end)
     }
 
-    /// Whether reading `len` bytes at `addr` one access at a time would do
-    /// nothing but load them: the read watchpoint does not reach into the
-    /// range. [`Memory::read_into`] does not report to the watchpoint, so
-    /// this is where it stands in for the accesses it replaces.
+    /// Whether [`Memory::read_into`] matches per-access reads: no read watchpoint in range.
     pub fn plainly_readable(&self, addr: u32, len: u32) -> bool {
         let (start, end) = (u64::from(addr), u64::from(addr) + u64::from(len));
         !(start < u64::from(self.read_watch.1) && u64::from(self.read_watch.0) < end)
     }
 
-    /// Whether writing `len` bytes at `addr` one access at a time would do
-    /// nothing but store them and report the pages to the caches that watch
-    /// them: no protected range and no write watchpoint reaches into it.
-    /// [`Memory::write_from`] tests protection only where it starts and does
-    /// not report to the watchpoint, so where this holds it is exactly the
-    /// accesses it replaces.
+    /// Whether [`Memory::write_from`] matches per-access writes: no protection or
+    /// write watchpoint in range.
     pub fn plainly_writable(&self, addr: u32, len: u32) -> bool {
         let (start, end) = (u64::from(addr), u64::from(addr) + u64::from(len));
         let overlaps = |(s, e): (u32, u32)| start < u64::from(e) && u64::from(s) < end;
         !overlaps(self.watch) && !self.readonly.iter().any(|&range| overlaps(range))
     }
 
-    /// The run of pages around `addr` that share its state, backed or not,
-    /// read-only or not: clamped to `[0, limit)`. This is the region
-    /// `svcQueryMemory` reports, and the two facts it reports about it.
-    ///
-    /// Finding the run means finding where the state changes, which the
-    /// syscall used to do one 4 KiB page at a time. That is O(address space),
-    /// and it consulted the read-only list for every page: a guest whose heap
-    /// region is measured in gigabytes made each query walk hundreds of
-    /// thousands of untouched pages, and a title that queries as it allocates
-    /// spent more time inside `svcQueryMemory` than in its own code. Blocks
-    /// with no backed page in them are skipped whole, so the answer is the
-    /// same and the cost follows the number of *regions* rather than the size
-    /// of the address space.
+    /// The run of pages around `addr` sharing its state, clamped to `[0, limit)`,
+    /// as `svcQueryMemory` reports. Untouched blocks are skipped whole.
     pub fn state_run(&self, addr: u32, limit: u32) -> StateRun {
         const PAGE: u32 = PAGE_SIZE as u32;
         const BLOCK: u32 = (BLOCK_PAGES * PAGE_SIZE) as u32;
-        // A run is bounded by any of the three facts changing, not just by
-        // backing: a module's `.rodata` and its `.data` are both mapped and
-        // both writable here, and they are still two regions to the guest.
+        // A run ends when backing, protection, or reported state changes.
         let state = |a: u32| {
             let mapped = self.page_mapped(a);
             let reported = self.module_state(a).unwrap_or(if mapped {
@@ -811,10 +553,7 @@ impl Memory {
         let page = addr & !(PAGE - 1);
         let (mapped, readonly, reported) = state(page);
         let limit = limit & !(PAGE - 1);
-        // A query past the end of the address space this emulator presents
-        // describes the page it named and nothing around it. Guests probe up
-        // there deliberately (hbmenu reads the failure to size the address
-        // space), so it is an answer rather than an error.
+        // Past the limit, describe only the named page; hbmenu probes there.
         if page >= limit {
             return StateRun {
                 start: page,
@@ -824,10 +563,7 @@ impl Memory {
                 state: reported,
             };
         }
-        // Only a run of *untouched, unprotected, unclaimed* pages can be
-        // skipped a block at a time: that is what the summary knows about.
-        // Every other run is bounded by something the page table has to be
-        // asked about.
+        // Only untouched, unprotected, unclaimed runs can skip whole blocks.
         let skippable = !mapped && !readonly && reported == MemoryState::Unmapped;
         let empty = |block_start: u32| {
             self.block_mapped[(block_start >> PAGE_BITS) as usize / BLOCK_PAGES] == 0
@@ -866,8 +602,7 @@ impl Memory {
         }
     }
 
-    /// Map `data` at `addr`, allocating pages as needed and zero-filling any
-    /// gap between existing mappings. Wraps around page boundaries.
+    /// Map `data` at `addr`, allocating pages and zero-filling gaps.
     pub fn map(&mut self, addr: u32, data: &[u8]) -> Result<()> {
         self.dirty_code_range(addr, data.len());
         let mut pos = addr as usize;
@@ -882,18 +617,7 @@ impl Memory {
         Ok(())
     }
 
-    /// Map `size` zero-filled bytes at `addr`.
-    ///
-    /// Zero-filled including where a page was already backed. This used to
-    /// allocate the pages and stop, which is the same thing only while every
-    /// page is fresh, and the callers that most need the zeros are the ones
-    /// where it is not. `.bss` shares its first page with `.data`, a recycled
-    /// thread's TLS slot is a page some earlier thread already wrote, and
-    /// `MapSharedMemory` promises the guest a cleared buffer. Each of those
-    /// handed back whatever the last user left.
-    ///
-    /// Exactly `[addr, addr + size)`, never the whole of the end pages: the
-    /// byte before `.bss` is `.data`'s, and it has already been loaded.
+    /// Zero exactly `[addr, addr + size)`, including already backed pages.
     pub fn map_zero(&mut self, addr: u32, size: usize) -> Result<()> {
         self.dirty_code_range(addr, size);
         let mut pos = addr as usize;
@@ -902,8 +626,7 @@ impl Memory {
             let idx = pos >> PAGE_BITS;
             let off = pos & (PAGE_SIZE - 1);
             let n = (PAGE_SIZE - off).min(end - pos);
-            // A page allocated here is already zero; only one that survived
-            // from an earlier use has to be cleared.
+            // Only a reused page needs clearing.
             let backed = self.pages[idx].is_some();
             let page = self.page_mut(idx)?;
             if backed {
@@ -920,16 +643,8 @@ impl Memory {
         Ok(page[Self::in_page_offset(addr)])
     }
 
-    /// The `N` bytes at `addr`, if reading them takes nothing but the page
-    /// table: one page holds all of them, it has storage, and no watchpoint
-    /// covers them. `None` means the full read has something more to do, and
-    /// says nothing about whether it would fault.
-    ///
-    /// For the block translator's loads, which try this first and otherwise
-    /// run the whole instruction again out of line. Nothing on this path calls
-    /// anything, and under V8 that matters beyond the calls themselves: a
-    /// value still needed after a call is stored to the stack where it is
-    /// computed, on the path that never makes the call as well.
+    /// The `N` bytes at `addr` if only the page table is needed, for JIT loads.
+    /// `None` means the full read has more to do. Calls nothing.
     #[inline(always)]
     pub fn peek<const N: usize>(&self, addr: u32) -> Option<[u8; N]> {
         let off = Self::in_page_offset(addr);
@@ -942,11 +657,7 @@ impl Memory {
         Some(page[off..off + N].try_into().unwrap())
     }
 
-    /// Write `val` at `addr` if that takes nothing but the page table, and say
-    /// whether it did. The store [`Memory::peek`] is the load for: it declines
-    /// a page with no storage yet, a write-protected address, one the
-    /// watchpoint covers and a page with translated code on it, all of which
-    /// the full write has more to do for, and changes nothing when it does.
+    /// Write `val` if only the page table is needed, returning whether it did.
     #[inline(always)]
     pub fn poke<const N: usize>(&mut self, addr: u32, val: [u8; N]) -> bool {
         let off = Self::in_page_offset(addr);
@@ -967,8 +678,7 @@ impl Memory {
         }
     }
 
-    /// [`Memory::poke`] for a pair: both halves in one page, and each checked
-    /// against the protected ranges, as [`Memory::write_u64_pair`] checks them.
+    /// [`Memory::poke`] for a pair in one page.
     #[inline(always)]
     pub fn poke_pair<const N: usize>(
         &mut self,
@@ -996,8 +706,7 @@ impl Memory {
         }
     }
 
-    /// Whether code has been translated out of page `idx` since a store to it
-    /// was last reported.
+    /// Whether page `idx` has had code translated since its last reported store.
     #[inline(always)]
     fn watches_code(&self, idx: usize) -> bool {
         self.watched_pages
@@ -1005,10 +714,7 @@ impl Memory {
             .is_some_and(|words| words[idx >> 6] & (1u64 << (idx & 63)) != 0)
     }
 
-    /// The `N` bytes at `addr` when they all live in one page. Multi-byte
-    /// accesses go through this so they cost a single page lookup instead of one
-    /// per byte: the interpreter reads four bytes for every instruction it
-    /// fetches, so this is the hottest path in the emulator.
+    /// The `N` bytes at `addr` when they live in one page.
     #[inline(always)]
     fn read_bytes_in_page<const N: usize>(&self, addr: u32) -> Option<[u8; N]> {
         let off = Self::in_page_offset(addr);
@@ -1022,8 +728,7 @@ impl Memory {
         Some(page[off..off + N].try_into().unwrap())
     }
 
-    /// Same, for writing. `None` means the access straddles a page boundary and
-    /// the caller has to fall back to going byte by byte.
+    /// Same, for writing. `None` if the access straddles a page.
     #[inline(always)]
     fn write_bytes_in_page<const N: usize>(&mut self, addr: u32, val: [u8; N]) -> Option<()> {
         let off = Self::in_page_offset(addr);
@@ -1040,9 +745,7 @@ impl Memory {
         Some(())
     }
 
-    /// The two `N`-byte halves of a pair access at `addr`, when the pair lies
-    /// in one page. Leaves the read watchpoint exactly as two single reads
-    /// would: the later half is the one reported when both are watched.
+    /// Both halves of a pair in one page; the later half is the watch hit.
     #[inline(always)]
     fn read_pair_in_page<const N: usize>(&self, addr: u32) -> Option<([u8; N], [u8; N])> {
         let off = Self::in_page_offset(addr);
@@ -1060,10 +763,7 @@ impl Memory {
         ))
     }
 
-    /// [`Memory::read_pair_in_page`] for writing. Both halves are checked
-    /// before either is written, and a pair that one of them cannot complete
-    /// is `None`, so the caller's half-at-a-time fallback reproduces the
-    /// partial write and the fault exactly.
+    /// [`Memory::read_pair_in_page`] for writing. `None` unless both halves can complete.
     #[inline(always)]
     fn write_pair_in_page<const N: usize>(
         &mut self,
@@ -1087,9 +787,7 @@ impl Memory {
         Some(())
     }
 
-    /// Which half of a pair a watchpoint over `range` reports, given that the
-    /// pair as a whole overlaps it: the second when it overlaps, since two
-    /// single accesses would have reported that one last.
+    /// The half a watchpoint reports for a pair: the second when it overlaps.
     #[cold]
     #[inline(never)]
     fn later_half_hit(addr: u32, half: u32, range: (u32, u32)) -> u32 {
@@ -1101,9 +799,7 @@ impl Memory {
         }
     }
 
-    /// The two consecutive `u64`s an `LDP` of X registers reads, with one page
-    /// lookup rather than two whenever they share a page. Pairs are about a
-    /// tenth of a retail frame's instructions.
+    /// The two `u64`s an `LDP` of X registers reads.
     #[inline(always)]
     pub fn read_u64_pair(&self, addr: u32) -> Result<(u64, u64)> {
         match self.read_pair_in_page::<8>(addr) {
@@ -1121,8 +817,7 @@ impl Memory {
         }
     }
 
-    /// Write two consecutive `u64`s, an `STP` of X registers: the first at
-    /// `addr`, exactly as two [`Memory::write_u64`] calls in that order would.
+    /// Write two `u64`s, an `STP` of X registers, in order.
     #[inline(always)]
     pub fn write_u64_pair(&mut self, addr: u32, first: u64, second: u64) -> Result<()> {
         if self
@@ -1194,15 +889,7 @@ impl Memory {
         Ok((self.read_u32(addr)? as u64) | ((self.read_u32(addr.wrapping_add(4))? as u64) << 32))
     }
 
-    /// Read `len` little-endian bytes as one value: one page lookup per
-    /// machine word rather than one per byte.
-    ///
-    /// This is the shape every pixel walk in the GPU wants. `read_u8` costs a
-    /// page lookup each, so assembling a 4-byte pixel a byte at a time is four
-    /// of them, and the walks that do it run over every pixel of a surface,
-    /// a blit, a scan-out, a blend. Both `ExecCtx::read_pixel` and
-    /// `Gpu::present` used to carry their own copy of this; only one of them
-    /// had been fixed.
+    /// Read `len` little-endian bytes as one value, a word per page lookup.
     #[inline(always)]
     pub fn read_le(&self, addr: u32, len: u32) -> Result<u128> {
         Ok(match len {
@@ -1218,8 +905,7 @@ impl Memory {
         })
     }
 
-    /// The byte-at-a-time fallback for a width no accessor covers, 3-byte
-    /// formats, and nothing else in practice.
+    /// Byte-at-a-time fallback, in practice 3-byte formats.
     #[cold]
     #[inline(never)]
     fn read_le_odd(&self, addr: u32, len: u32) -> Result<u128> {
@@ -1230,9 +916,7 @@ impl Memory {
         Ok(value)
     }
 
-    /// Write `len` little-endian bytes of `value`: the counterpart of
-    /// [`Memory::read_le`], and worth more, since `write_u8` re-scans the
-    /// read-only ranges on every call and a byte loop pays for that per byte.
+    /// Write `len` little-endian bytes of `value`.
     #[inline(always)]
     pub fn write_le(&mut self, addr: u32, len: u32, value: u128) -> Result<()> {
         match len {
@@ -1257,20 +941,8 @@ impl Memory {
         Ok(())
     }
 
-    /// Write `count` copies of a `unit`-byte little-endian value to
-    /// consecutive addresses, looking the page up **once** for the whole run.
-    ///
-    /// A clear is what wants this: it writes one value across a whole surface,
-    /// and going through [`Memory::write_le`] per unit paid a page lookup and
-    /// a read-only scan for each of the eleven million texels a 720p 2x2 MSAA
-    /// target costs per frame. The GPU hands runs of at most a GOB's linear
-    /// stretch, which never crosses a page: anything that would falls back to
-    /// writing them one at a time.
-    ///
-    /// The watchpoint and the JIT's code-page bookkeeping are kept exactly as
-    /// the per-unit path would leave them: a run that lands in the watched
-    /// range reports its first address, and a run that touches translated code
-    /// invalidates it.
+    /// Write `count` copies of a `unit`-byte value with one page lookup, keeping
+    /// watchpoint and code-page bookkeeping as the per-unit path would.
     pub fn fill_le(&mut self, addr: u32, unit: u32, value: u128, count: u32) -> Result<()> {
         let span = (unit as usize) * (count as usize);
         let off = Self::in_page_offset(addr);
@@ -1284,27 +956,12 @@ impl Memory {
             return Ok(());
         }
         let end = addr.wrapping_add(span as u32);
-        // The whole run shares a page, so it shares its protection too.
         self.check_writable(addr)?;
         let unit = unit as usize;
         let bytes = value.to_le_bytes();
         let page = self.page_mut(Self::page_index(addr))?;
         let run = &mut page[off..off + span];
-        // A unit at a time in its own width, the shape [`Memory::merge_le`]
-        // below already writes a run in.
-        //
-        // This used to stamp the value across a 512-byte pattern and copy that
-        // over the run, to turn 128 four-byte writes into one `memcpy`. On a
-        // host that is what it does. In wasm the length of the little copy is
-        // `unit`, a value the compiler cannot see, so each one lowers to a
-        // `memory.copy` that V8 services with an out-of-line call into its
-        // runtime: a GOB-sized clear made 129 of those plus a `memory.fill` to
-        // zero a pattern it was about to overwrite in full. Just Dance 2019's
-        // colour clear reaches here 7,200 times a frame, which was 920,000
-        // four-byte calls a frame and 1.5% of one in the wrapper alone.
-        //
-        // `span` is `unit * count`, so the chunks cover the run exactly, and
-        // the guard above has already left only the five widths with an arm.
+        // A unit at a time: a variable-length copy is a slow `memory.copy` in wasm.
         match unit {
             4 => {
                 let v: [u8; 4] = bytes[..4].try_into().unwrap();
@@ -1338,14 +995,7 @@ impl Memory {
         Ok(())
     }
 
-    /// [`Memory::fill_le`] for a write that only owns some of each unit's
-    /// bits: every unit keeps whatever `mask` does not select.
-    ///
-    /// A depth clear against a packed format is this. `Z24S8` clearing depth
-    /// alone may not touch the stencil byte beside it, so the run cannot be
-    /// filled, but the mask and the value are the same for every unit, so it
-    /// is still one page lookup and a linear walk rather than a translation
-    /// and a swizzle per texel.
+    /// [`Memory::fill_le`] keeping the bits `mask` does not select, as a `Z24S8` depth clear.
     pub fn merge_le(
         &mut self,
         addr: u32,
@@ -1374,10 +1024,7 @@ impl Memory {
         let unit = unit as usize;
         let page = self.page_mut(Self::page_index(addr))?;
         let run = &mut page[off..off + span];
-        // A unit at a time in its own width, rather than a byte at a time: a
-        // depth clear merges four bytes per texel and 921,600 texels per
-        // attachment, and doing that bytewise is four masks, four loads and
-        // four stores where the hardware has one of each.
+        // A unit at a time in its own width, not bytewise.
         match unit {
             4 => {
                 let keep = u32::from_le_bytes([keep[0], keep[1], keep[2], keep[3]]);
@@ -1415,14 +1062,12 @@ impl Memory {
         Ok(())
     }
 
-    /// Fetch the next instruction (little-endian AArch64 word).
     #[inline(always)]
     pub fn fetch(&self, pc: u32) -> Result<u32> {
         self.read_u32(pc)
     }
 
-    /// Arm the write watchpoint over `[start, start + size)`; a zero `size`
-    /// disarms it.
+    /// Arm the write watchpoint over `[start, start + size)`; zero disarms it.
     pub fn watch_writes(&mut self, start: u32, size: u32) {
         self.watch = if size == 0 {
             (1, 0)
@@ -1432,9 +1077,7 @@ impl Memory {
         self.watch_hit = None;
     }
 
-    /// Arm the read watchpoint over `[start, start + size)`; a zero `size`
-    /// disarms it. Finding every piece of code that *examines* a flag is how
-    /// the one that would clear it gets named, when nothing ever does.
+    /// Arm the read watchpoint over `[start, start + size)`; zero disarms it.
     pub fn watch_reads(&mut self, start: u32, size: u32) {
         self.read_watch = if size == 0 {
             (1, 0)
@@ -1444,14 +1087,12 @@ impl Memory {
         self.read_hit.set(None);
     }
 
-    /// The address of the most recent read inside the watched range, clearing
-    /// it so the next call reports only new reads.
+    /// The last read hit, cleared.
     pub fn take_read_hit(&self) -> Option<u32> {
         self.read_hit.replace(None)
     }
 
-    /// The address of the most recent write inside the watched range, clearing
-    /// it so the next call reports only new writes.
+    /// The last write hit, cleared.
     pub fn take_watch_hit(&mut self) -> Option<u32> {
         self.watch_hit.take()
     }
@@ -1520,7 +1161,6 @@ impl Memory {
         self.write_u32(addr.wrapping_add(4), (val >> 32) as u32)
     }
 
-    /// Read `len` bytes into `buf` starting at `addr`.
     pub fn read_into(&self, addr: u32, buf: &mut [u8]) -> Result<()> {
         let mut pos = addr as usize;
         let end = pos.saturating_add(buf.len());
@@ -1537,16 +1177,7 @@ impl Memory {
         Ok(())
     }
 
-    /// Write `buf` at `addr` with exactly the effect of a [`Memory::write_u8`]
-    /// per byte, in order, but a page at a time.
-    ///
-    /// Where a service hands a guest a buffer of data. A `fsp-srv` read of a
-    /// RomFS file is tens of kilobytes, and byte by byte each byte paid a page
-    /// lookup, a protection test, a watchpoint test and a code-page test;
-    /// loading Just Dance 2019's JSON spent as long in that loop as in
-    /// decrypting the data. Unlike [`Memory::write_from`], a write-protected
-    /// byte stops the write at that byte with every one before it written,
-    /// and the watchpoint reports the last byte to land in it.
+    /// Write `buf` with exactly the effect of a [`Memory::write_u8`] per byte, a page at a time.
     pub fn write_bytes(&mut self, addr: u32, buf: &[u8]) -> Result<()> {
         let mut done = 0usize;
         while done < buf.len() {
@@ -1576,13 +1207,7 @@ impl Memory {
         Ok(())
     }
 
-    /// Copy `buf` into guest memory at `addr`: [`Memory::read_into`] run
-    /// backwards, one page at a time rather than one word at a time.
-    ///
-    /// What a render target's write-back needs. A 720p surface at 2x2 samples
-    /// is 3.7 million texels, and putting one back through `write_le` is 3.7
-    /// million bounds checks and page lookups for what is a handful of
-    /// `copy_from_slice` calls.
+    /// Copy `buf` into guest memory a page at a time.
     pub fn write_from(&mut self, addr: u32, buf: &[u8]) -> Result<()> {
         self.check_writable(addr)?;
         let mut pos = addr as usize;
@@ -1597,20 +1222,13 @@ impl Memory {
             pos += n;
             at += n;
         }
-        // A surface is not code, but nothing here knows that, and the
-        // translator has to be told about any write it did not see.
+        // The translator must hear about writes it did not see.
         self.dirty_code_range(addr, buf.len());
         Ok(())
     }
 
-    /// Copy `size` bytes from `src` to `dst`, backing the destination with real
-    /// pages. Horizon's `svcMapMemory` aliases two ranges; page storage here is
-    /// not shareable, so the bytes are copied instead and copied back when the
-    /// alias is torn down. The guest only uses one side of such an alias at a
-    /// time, libnx maps a thread's stack into the stack region and from then on
-    /// touches only the mirror, so a copy behaves like an alias to it.
-    /// Source pages that were never touched contribute zeros, the same
-    /// zero-filled memory the guest would have seen through the alias.
+    /// Copy `size` bytes from `src` to `dst` in place of `svcMapMemory` aliasing,
+    /// which page storage here cannot share. Untouched source pages give zeros.
     pub fn copy_range(&mut self, dst: u32, src: u32, size: usize) -> Result<()> {
         let mut buf = vec![0u8; size];
         let mut pos = 0usize;
@@ -1626,13 +1244,10 @@ impl Memory {
         self.map(dst, &buf)
     }
 
-    /// Drop the real pages backing `size` bytes at `addr`, so address-space
-    /// walks see the range as free again. Partial pages at either end are kept,
-    /// since something else may still live in them.
+    /// Drop whole backed pages in a range; partial end pages are kept.
     pub fn unmap(&mut self, addr: u32, size: usize) {
         self.dirty_code_range(addr, size);
-        // Whole pages only, and in page indices: the address space is 4 GiB, so
-        // byte counts do not fit a 32-bit usize on wasm.
+        // In page indices: byte counts overflow a 32-bit usize.
         let first = (addr as u64 + PAGE_SIZE as u64 - 1) >> PAGE_BITS;
         let last = (addr as u64 + size as u64) >> PAGE_BITS;
         for idx in first..last.min(PAGE_COUNT as u64) {
@@ -1643,7 +1258,6 @@ impl Memory {
         }
     }
 
-    /// Dump a contiguous region for debugging.
     pub fn dump(&self, addr: u32, len: usize) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(len);
         for i in 0..len {
@@ -1663,10 +1277,8 @@ mod tests {
         assert_eq!(m.mapped_bytes(), 0);
         m.map_zero(0x1000, PAGE_SIZE).unwrap();
         assert_eq!(m.mapped_bytes(), PAGE_SIZE as u64);
-        // Writing inside an already-backed page doesn't count again.
         m.write_u8(0x1FFF, 1).unwrap();
         assert_eq!(m.mapped_bytes(), PAGE_SIZE as u64);
-        // A soft-mapped page only costs storage once the guest writes to it.
         m.soft_map_zero(0x2000, 0x4000);
         assert_eq!(m.read_u8(0x2000).unwrap(), 0);
         assert_eq!(m.mapped_bytes(), PAGE_SIZE as u64);
@@ -1675,9 +1287,7 @@ mod tests {
         assert_eq!(m.mapped_pages(), 2);
     }
 
-    /// `map_zero` over ground somebody has already used has to hand back
-    /// zeros, and has to stop at the range it was given, the page holding the
-    /// first byte of `.bss` holds the last bytes of `.data` too.
+    /// `map_zero` clears reused pages and stops at its range.
     #[test]
     fn map_zero_clears_a_page_that_was_already_backed() {
         let mut m = Memory::new();
@@ -1686,8 +1296,6 @@ mod tests {
             m.write_u8(0x1000 + i, 0xAB).unwrap();
         }
 
-        // A range starting part way into a live page, and running into the
-        // next one.
         m.map_zero(0x1000 + 0x40, PAGE_SIZE).unwrap();
         assert_eq!(m.read_u8(0x1000 + 0x3F).unwrap(), 0xAB, "before the range");
         assert_eq!(m.read_u8(0x1000 + 0x40).unwrap(), 0, "the first byte of it");
@@ -1701,7 +1309,7 @@ mod tests {
             0xAB,
             "after the range"
         );
-        // And it is still the same two pages: clearing is not unmapping.
+        // Clearing is not unmapping.
         assert_eq!(m.mapped_pages(), 2);
     }
 
@@ -1713,15 +1321,9 @@ mod tests {
 
     #[test]
     fn runaway_soft_writes_fail_fast_at_the_ram_cap() {
-        // A wild pointer walking up through a wide-open soft region (the
-        // scenario a null buffer pointer plus a growing byte offset hits)
-        // must not be allowed to fabricate pages forever: it should fail as
-        // soon as it has touched the RAM cap's worth of pages, not after
-        // exhausting the whole soft region.
+        // A wild walk through a soft region stops at the RAM cap.
         let mut m = Memory::new();
-        // Against its own small cap rather than the default: what is being
-        // tested is that the walk stops at the ceiling, and reaching the real
-        // one would mean allocating gigabytes inside a unit test.
+        // A small cap, to avoid allocating gigabytes.
         const CAP: u64 = 4 * 1024 * 1024;
         m.set_max_mapped_bytes(CAP);
         m.soft_map_zero(0, 0x8000_0000);
@@ -1737,12 +1339,7 @@ mod tests {
 
     #[test]
     fn a_region_scan_reports_exact_bounds_over_an_empty_address_space() {
-        // The bounds are what `svcQueryMemory` hands the guest, and they have
-        // to be right whether the run is four pages or three gigabytes. What
-        // the block summary changes is the cost: this walks a 3.75 GiB space
-        // whose untouched blocks are skipped whole, and every assertion below
-        // is a boundary the old page-at-a-time scan would have found by
-        // looking at each of a million pages.
+        // Bounds must be right for runs of any size.
         const LIMIT: u32 = 0xF000_0000;
         let mut m = Memory::new();
         m.soft_map_zero(0, LIMIT);
@@ -1760,13 +1357,10 @@ mod tests {
         assert_eq!((run.start, run.end), (0x1000_4000, LIMIT));
         assert!(!run.mapped);
 
-        // A page above the limit describes itself and stops. Guests read the
-        // top of the address space on purpose.
+        // A page above the limit describes itself.
         let run = m.state_run(LIMIT + 0x5000, LIMIT);
         assert_eq!((run.start, run.end), (LIMIT + 0x5000, LIMIT + 0x6000));
 
-        // Freeing the pages puts the run back together, so the summary has to
-        // come back down with them.
         m.unmap(0x1000_0000, PAGE_SIZE * 4);
         let run = m.state_run(0x1000_2000, LIMIT);
         assert_eq!((run.start, run.end), (0, LIMIT));
@@ -1774,11 +1368,7 @@ mod tests {
 
     #[test]
     fn a_read_only_range_is_a_region_boundary() {
-        // `.text` is mapped like the pages around it and only differs in being
-        // write-protected, which `svcQueryMemory` reports as R-X. A scan that
-        // skipped it along with the rest of a mapped run would tell `rtld`
-        // that a module's code and its data are one region, and `rtld` finds
-        // modules by looking for executable ones.
+        // Write-protected `.text` is its own region, as `rtld` relies on.
         const LIMIT: u32 = 0xF000_0000;
         let mut m = Memory::new();
         m.map_zero(0x0800_0000, PAGE_SIZE * 8).unwrap();
@@ -1795,12 +1385,7 @@ mod tests {
 
     #[test]
     fn a_module_is_two_memory_states_and_the_boundary_between_them_is_a_region() {
-        // `nn::ro::detail::GetExceptionInfo` walks a module by its states: it
-        // runs `Code` up from an address it was given, then requires the very
-        // next region to be `CodeData` and runs that to find the image's end.
-        // Reporting one state for the whole image leaves nothing above the
-        // run to be `CodeData`, and it aborts, which is exactly what stopped
-        // Asphalt 9 on its first `puts`.
+        // `Code` must be followed directly by `CodeData`.
         const LIMIT: u32 = 0xF000_0000;
         let mut m = Memory::new();
         // .text 2 pages, .rodata 2, .data + .bss 4.
@@ -1821,8 +1406,6 @@ mod tests {
         assert_eq!((run.start, run.end), (0x0800_2000, 0x0800_4000), ".rodata");
         assert_eq!(run.state, MemoryState::Code);
 
-        // The static half ends where the mutable half begins, even though
-        // both are mapped and both are writable here.
         let run = m.state_run(0x0800_4000, LIMIT);
         assert_eq!(
             (run.start, run.end),
@@ -1831,8 +1414,7 @@ mod tests {
         );
         assert_eq!(run.state, MemoryState::CodeData);
 
-        // An `ldr:ro` module carries the alias states instead, and gives them
-        // back when it is unloaded.
+        // `ldr:ro` modules use the alias states and drop them on unload.
         m.map_zero(0x2900_0000, PAGE_SIZE * 4).unwrap();
         m.mark_module((0x2900_0000, 0x2900_2000), (0x2900_2000, 0x2900_4000), true);
         assert_eq!(
@@ -1845,7 +1427,6 @@ mod tests {
         );
         m.unmark_module(0x2900_0000, 0x2900_4000);
         assert_eq!(m.state_run(0x2900_0000, LIMIT).state, MemoryState::Code);
-        // ...and the process image is untouched by that.
         assert_eq!(m.state_run(0x0800_4000, LIMIT).state, MemoryState::CodeData);
     }
 
@@ -1855,11 +1436,8 @@ mod tests {
         m.map_zero(0x1000, PAGE_SIZE).unwrap();
         m.write_u32(0x1000, 0x1111_1111).unwrap();
         m.mark_readonly(0x1000, 0x2000);
-        // A wild write into the now-locked-down page faults instead of
-        // silently corrupting it...
         assert!(m.write_u32(0x1000, 0x2222_2222).is_err());
         assert!(m.write_u8(0x1FFF, 1).is_err());
-        // ...but reads, and writes just outside the range, are unaffected.
         assert_eq!(m.read_u32(0x1000).unwrap(), 0x1111_1111);
         m.map_zero(0x2000, PAGE_SIZE).unwrap();
         m.write_u32(0x2000, 3).unwrap();
@@ -1884,7 +1462,6 @@ mod tests {
         m.map_zero(0x0000_3000, PAGE_SIZE).unwrap();
         assert_eq!(m.read_u8(0x0000_0000).unwrap(), 0);
         assert_eq!(m.read_u8(0x0000_3000).unwrap(), 0);
-        // Unmapped pages still fault.
         assert!(m.read_u8(0x0000_1000).is_err());
     }
 
@@ -1898,8 +1475,7 @@ mod tests {
         assert_eq!(m.read_u64(8).unwrap(), 0x1234_5678_9ABC_DEF0);
     }
 
-    /// A pair in one page takes the single-lookup path and one across a page
-    /// boundary takes the half-at-a-time one, and the two must agree.
+    /// Single-lookup and split pair paths must agree.
     #[test]
     fn pair_accesses_match_two_single_accesses() {
         let mut m = Memory::new();
@@ -1919,13 +1495,11 @@ mod tests {
             assert_eq!(m.read_u32(addr + 4).unwrap(), 0xBBBB_CCCC);
             assert_eq!(m.read_u32_pair(addr).unwrap(), (0x9999_AAAA, 0xBBBB_CCCC));
         }
-        // A pair reading off the end of mapped memory faults like its halves.
         assert!(m.read_u64_pair(0x2FF8).is_err());
         assert!(m.read_u32_pair(0x2FFC).is_err());
     }
 
-    /// Two stores in a row leave the first one done when the second faults,
-    /// and a pair is architecturally two stores.
+    /// A pair is two stores: the first lands when the second faults.
     #[test]
     fn a_pair_whose_second_half_is_read_only_still_writes_the_first() {
         let mut m = Memory::new();
@@ -1936,8 +1510,7 @@ mod tests {
         assert_eq!(m.read_u64(0x1108).unwrap(), 0);
     }
 
-    /// The watchpoints name the later of two single accesses that hit, so a
-    /// pair has to name the half that would have come second.
+    /// A pair's watch hit is the half that would come second.
     #[test]
     fn a_watched_pair_reports_the_half_two_accesses_would() {
         let mut m = Memory::new();
@@ -1959,9 +1532,7 @@ mod tests {
         assert_eq!(m.take_watch_hit(), None);
     }
 
-    /// `write_bytes` is a `write_u8` per byte done a page at a time, so it has
-    /// to leave memory, the fault and the watch hit exactly where a loop of
-    /// those would.
+    /// `write_bytes` matches a `write_u8` loop in memory, fault, and watch hit.
     #[test]
     fn a_bulk_write_stops_and_reports_where_bytewise_writes_would() {
         let data: Vec<u8> = (1..=0x40u8).collect();
@@ -1971,7 +1542,6 @@ mod tests {
             }
             Ok(())
         };
-        // Across a page boundary, watching a range the write runs through.
         let setup = || {
             let mut m = Memory::new();
             m.map_zero(0x1000, 2 * PAGE_SIZE).unwrap();
@@ -1988,7 +1558,6 @@ mod tests {
         assert_eq!(bulk.take_watch_hit(), single.take_watch_hit());
         assert_eq!(bulk.take_watch_hit(), None);
 
-        // Into a protected range part-way through a page.
         let setup = || {
             let mut m = Memory::new();
             m.map_zero(0x1000, PAGE_SIZE).unwrap();
@@ -2011,10 +1580,7 @@ mod tests {
         assert_eq!(m.dump(0x0001_0000, 128).unwrap(), data);
     }
 
-    /// The JIT and the GPU backend share one bitmap and drain separately, so
-    /// the store that tells one of them has to still be there for the other.
-    /// Draining in either order used to be the obvious way to lose a texture
-    /// invalidation to a block invalidation that happened to run first.
+    /// The JIT and GPU drains are independent.
     #[test]
     fn a_write_reaches_both_drains_whichever_asks_first() {
         let mut mem = Memory::new();
@@ -2023,13 +1589,11 @@ mod tests {
         mem.write_u32(0x1000, 1).unwrap();
         assert!(mem.has_dirty_gpu());
         assert!(mem.has_dirty_code());
-        // One drain does not empty the other.
         assert_eq!(mem.dirty_gpu_pages().len(), 1);
         assert!(!mem.has_dirty_gpu());
         assert_eq!(mem.dirty_code_pages().len(), 1);
 
-        // A page is reported once: the store clears its bit, and it stays out
-        // until something caches from it again.
+        // A page is reported once until cached again.
         mem.write_u32(0x1000, 2).unwrap();
         assert!(!mem.has_dirty_gpu());
         mem.mark_gpu_page(0x1000);

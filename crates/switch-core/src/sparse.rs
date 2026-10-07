@@ -1,28 +1,8 @@
-//! Reading an NCA section that is not all in the file.
-//!
-//! A sparse section stores only the ranges that hold anything. A
-//! [`crate::bucket`] tree says which range came from where: storage 0 is the
-//! bytes that were kept, storage 1 is a hole. What the section is *declared*
-//! to be (the size in the NCA's section table) is the size after the holes
-//! are put back.
-//!
-//! `SparseInfo` (FS header 0x148) carries the table, then two fields nothing
-//! else in an FS header has:
-//!
-//! ```text
-//! 0x20  physical offset: where the stored body really is in the NCA,
-//!       which is not where the section table says the section is
-//! 0x28  generation (u16): replaces the counter's generation word for the
-//!       table's own bytes, and for those bytes only
-//! ```
-//!
-//! **The layer sits underneath decryption**, which is the part that reads
-//! backwards: `nn::fssystem` builds the sparse storage over the raw NCA body
-//! and puts the AES-CTR layer on top of *that*, counting from the section's
-//! ordinary offset. So the stored bytes were encrypted at the position they
-//! occupy in the reassembled section, not the one they are stored at, and a
-//! hole decrypts to the keystream rather than to zeroes. That is what real
-//! `fs` produces; a hole is a range no reader is expected to look at.
+//! Sparse NCA sections: a [`crate::bucket`] tree maps ranges to kept bytes
+//! (storage 0) or holes (storage 1). `SparseInfo` (FS header 0x148) adds the body's
+//! physical offset (0x20) and the table's own counter generation (0x28). The layer
+//! sits under AES-CTR, which counts from the reassembled offset, so holes decrypt
+//! to keystream.
 
 use crate::bucket;
 use crate::nca::{BktrTable, BKTR_MAGIC};
@@ -34,7 +14,6 @@ pub(crate) const STORAGE_DATA: u32 = 0;
 /// The range is a hole.
 pub(crate) const STORAGE_HOLE: u32 = 1;
 
-/// One range of the reassembled section, and where its bytes are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Entry {
     virt: u64,
@@ -44,7 +23,7 @@ struct Entry {
 
 impl bucket::Entry for Entry {
     const NODE_SIZE: u64 = 0x4000;
-    /// `s64 virt, s64 phys, s32 storage index`, 0x14, not padded to 0x18.
+    /// `s64 virt, s64 phys, s32 storage index`, unpadded.
     const SIZE: u64 = 0x14;
 
     fn parse(raw: &[u8]) -> Entry {
@@ -60,22 +39,16 @@ impl bucket::Entry for Entry {
     }
 }
 
-/// Where a section's stored body lives, and how to put the holes back.
 #[derive(Debug, Clone)]
 pub struct SparseTable {
     entries: Vec<Entry>,
-    /// Size of the stored body, which every entry has to point inside.
+    /// Size of the stored body, which every entry must point inside.
     body_len: u64,
 }
 
 impl SparseTable {
-    /// Read the table out of the stored body.
-    ///
-    /// `body` is the NCA at [`FsHeader::sparse_physical_offset`], `table` the
-    /// `SparseInfo` bucket header, and `meta` the already-decrypted table
-    /// bytes: the caller decrypts them because they use a counter of their
-    /// own ([`crate::nca::FsHeader::sparse_counter`]) that nothing else in
-    /// the section does.
+    /// Parse the table. `meta` is already decrypted by the caller, since it uses its
+    /// own counter ([`crate::nca::FsHeader::sparse_counter`]).
     pub fn parse(meta: &[u8], table: BktrTable, body_len: u64) -> Result<SparseTable, Error> {
         if table.magic != BKTR_MAGIC {
             return Err(Error::Nca(format!(
@@ -89,7 +62,7 @@ impl SparseTable {
         Ok(sparse)
     }
 
-    /// Check every entry once, so a read never has to.
+    /// Check every entry once, so reads don't have to.
     fn validate(&self) -> Result<(), Error> {
         for (i, entry) in self.entries.iter().enumerate() {
             match entry.storage {
@@ -113,12 +86,8 @@ impl SparseTable {
         Ok(())
     }
 
-    /// Read `out` bytes of the reassembled section at `offset`, still
-    /// encrypted: the caller decrypts, because the counter is numbered from
-    /// this offset and not from where the bytes were stored.
-    ///
-    /// `len` is the section's declared size, which is what the last entry
-    /// runs to; the table's own end offset covers only the stored body.
+    /// Read still-encrypted bytes of the reassembled section at `offset`. `len` is
+    /// the declared section size.
     pub fn read_raw<S: ByteSource>(
         &self,
         body: &S,
@@ -160,8 +129,7 @@ pub(crate) mod testing {
     use super::*;
     use crate::bucket::Entry as _;
 
-    /// Lay out a sparse table over `(virtual offset, physical offset,
-    /// storage)` triples, for a fixture that places the body itself.
+    /// Lay out a sparse table over `(virtual, physical, storage)` triples.
     pub(crate) fn write_table(entries: &[(u64, u64, u32)], end: u64) -> Vec<u8> {
         let rows: Vec<Vec<u8>> = entries
             .iter()
@@ -176,16 +144,13 @@ pub(crate) mod testing {
         crate::bucket::testing::write_table::<Entry>(&rows, end)
     }
 
-    /// What one entry of the fixture describes: bytes that were kept, or a
-    /// hole of that many bytes.
     pub(crate) enum Range {
         Data(Vec<u8>),
         Hole(usize),
     }
 
-    /// Build a stored body: the kept bytes, then the table describing them.
-    /// Returns the body, the section it reassembles to, and the `SparseInfo`
-    /// bucket header.
+    /// Build a stored body (kept bytes then table); returns the body, the
+    /// reassembled section and the `SparseInfo` header.
     pub(crate) fn build(ranges: &[Range]) -> (Vec<u8>, Vec<u8>, BktrTable) {
         let mut body = Vec::new();
         let mut whole = Vec::new();
@@ -206,8 +171,7 @@ pub(crate) mod testing {
             };
             entries.push((virt, phys, storage));
         }
-        // The table follows the kept bytes, which is what `GetPhysicalSize`
-        // means by "bucket offset plus bucket size".
+        // The table follows the kept bytes (`GetPhysicalSize`).
         let table_offset = body.len() as u64;
         let meta = write_table(&entries, whole.len() as u64);
         body.extend_from_slice(&meta);
@@ -251,7 +215,6 @@ mod tests {
         );
         assert_eq!(all, whole);
 
-        // Ranges inside each kind of range and across every boundary.
         for &(offset, size) in &[
             (0u64, 1usize),
             (0x3f, 2),    // the last kept byte and the first of the hole
@@ -275,8 +238,7 @@ mod tests {
         }
     }
 
-    /// The section is longer than what was stored: that is the whole point,
-    /// so a read is bounded by the declared size, not by the body.
+    /// Reads are bounded by the declared size, not the body.
     #[test]
     fn the_section_is_longer_than_the_body_that_stores_it() {
         let (body, whole, table, sparse) = sample();
@@ -304,7 +266,6 @@ mod tests {
             Err(Error::Nca(_))
         ));
 
-        // A storage index that is neither the body nor a hole.
         let mut bad = meta.clone();
         let set = bucket::node_storage_size::<Entry>(table.entries) as usize;
         bad[set + bucket::NODE_HEADER_SIZE as usize + 0x10] = 2;
@@ -313,7 +274,6 @@ mod tests {
             Err(Error::Nca(_))
         ));
 
-        // An entry pointing past the stored body.
         let mut past = meta.clone();
         let at = set + bucket::NODE_HEADER_SIZE as usize;
         past[at + 8..at + 16].copy_from_slice(&u64::MAX.to_le_bytes());

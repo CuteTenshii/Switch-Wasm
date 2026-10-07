@@ -9,35 +9,9 @@
 //     --firmware=<dir>    register every .nca in it as a system data archive
 //     --kind=<k>          override the header sniff: nsp, nca, nro or elf
 //
-// Reports what one steady-state frame costs, which is the number the
-// frontend's frame rate is made of. Every other measurement in this repo is
-// taken from a host binary — rustc's x86-64 backend, 64-bit pointers, an
-// unbounded address space — and none of that ships. What ships is wasm32,
-// recompiled by the browser with its own register allocator and a bounds check
-// on every guest load. The two are not related by a constant, so a host
-// measurement is not a scaled version of this one: removing a libcall only
-// wasm pays for was ~1.15x natively and ~1.44x in the browser.
-//
-// This is the only tool here whose milliseconds mean anything. The host
-// examples count work instead — `frame_work` reports the instructions, block
-// entries, methods and draws a frame asks for, and those are the same numbers
-// under V8. Fix what the counts name, then confirm it here.
-//
-// Any container the page accepts is accepted here, by the same calls in the
-// same order: an `.nsp` or a cartridge image through `switch_open_nsp` (both,
-// because their partitions flatten into one table), a bare Program `.nca`
-// through `switch_open_nca`, and homebrew through `switch_load_nro` or
-// `switch_load_elf`. A retail container is never staged in memory — it stays
-// on disk and is read a range at a time through `host_read`, which is the one
-// thing wasm32 leaves no choice about.
-//
-// Needs `make wasm-release` to have been run: this loads that artefact rather than
-// building its own, because a second build would need its own copy of the
-// feature flags and the wasm-bindgen step and would then be measuring a
-// module the site does not ship.
-//
-// With --cpu-prof node writes a .cpuprofile whose samples name the wasm
-// functions, which is the only profiler available for the wasm build:
+// Reports steady-state frame time of the release wasm build (run
+// `make wasm-release` first). Host timings do not transfer to wasm; use this
+// for performance claims. For a wasm CPU profile:
 //   node --cpu-prof --cpu-prof-name=w.cpuprofile tools/wasm_bench.mjs prog.nro
 import { openSync, readSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -59,24 +33,12 @@ if (!containerPath) {
 const release = join(root, 'target/wasm32-unknown-unknown/release');
 const wasmPath = positional[1] || join(release, 'switch_wasm_bg.wasm');
 
-// Frames to present before the clock starts. They cover the program's loader
-// and its first upload, and they also let V8 tier the hot code from Liftoff up
-// to TurboFan — timing a baseline-compiled frame is timing the compiler.
+// Untimed frames cover loading and let V8 tier up from Liftoff to TurboFan.
 const WARMUP_FRAMES = Number(flag('warmup')) || 2;
 const FRAMES = Number(flag('frames')) || 8;
 
-// The core is a wasm-bindgen module — wgpu reaches WebGPU through its glue —
-// so it cannot be instantiated by hand any more: its imports are
-// wasm-bindgen's own, and doing it the old way died on
-// `__wbindgen_placeholder__`. Load it the way the worker does, through the
-// generated glue.
-//
-// The glue's one bare specifier is `@host/files`, which the frontend build
-// aliases to `web/worker/hostfiles.ts` and node cannot resolve. It is pointed
-// at a shim that forwards to this file's own reader, because a retail
-// container is read through `host_read` rather than handed over. The rewritten
-// glue is written beside the original so that its own relative paths still
-// resolve.
+// Load through the wasm-bindgen glue like the worker does, with `@host/files`
+// rewritten to a shim over this file's reader.
 const shim =
   'data:text/javascript,'
   + encodeURIComponent(
@@ -92,9 +54,7 @@ writeFileSync(
 const init = (await import(pathToFileURL(benchGlue).href)).default;
 const api = await init({ module_or_path: readFileSync(wasmPath) });
 
-// File 0 is the container being run; the rest are system data archives, which
-// a title mounts by data id. Same shape as the worker's table, so the indices
-// the wasm side is given mean the same thing on both.
+// File 0 is the container; the rest are system data archives, as in the worker.
 const hostFiles = [];
 
 function addHostFile(path) {
@@ -102,13 +62,7 @@ function addHostFile(path) {
   return hostFiles.push({ fd, size: statSync(path).size }) - 1;
 }
 
-// The browser reads through a 1 MiB LRU because `FileReaderSync` is expensive
-// per call and the guest asks for a few hundred bytes at a time as it walks
-// its RomFS tables. `readSync` is cheaper than that, but the point of this
-// tool is what the site serves, so the access pattern the wasm side sees is
-// kept identical to `web/worker/hostfiles.ts` — same chunk size, same depth,
-// same bypass for reads too large to cache — rather than made faster than
-// anything that ships.
+// Mirrors `web/worker/hostfiles.ts`'s LRU so the wasm side sees the same access pattern.
 const HOST_CHUNK = 1 << 20;
 const HOST_CACHE_CHUNKS = 16;
 const hostChunks = new Map();
@@ -134,9 +88,7 @@ function hostChunk(file, fileIndex, index) {
   return chunk;
 }
 
-// Fill `len` bytes at `ptr` from `offset` of host file `fileIndex`, and return
-// how many were filled. `offset` arrives as a BigInt (it is an i64) and
-// `ptr`/`len` as signed i32s, hence the `>>> 0`.
+// Fill `len` bytes at `ptr` from `offset` of host file `fileIndex`; return the count.
 globalThis.__benchHostRead = (fileIndex, offset, ptr, len) => {
   ptr >>>= 0;
   len >>>= 0;
@@ -146,11 +98,9 @@ globalThis.__benchHostRead = (fileIndex, offset, ptr, len) => {
   let at = Number(offset);
   const end = Math.min(at + len, file.size);
   if (at >= end) return 0;
-  // The view has to be built here, not cached: growing the heap detaches it.
+  // Build the view here: heap growth detaches cached views.
   const out = new Uint8Array(api.memory.buffer, ptr, end - at);
-  // A read bigger than a chunk is the ExeFS being pulled in one go. Serve it
-  // straight from the file: it would evict the whole cache on its way through
-  // and never be asked for again.
+  // Reads larger than a chunk bypass the cache.
   if (end - at > HOST_CHUNK) return readSync(file.fd, out, 0, end - at, at);
   let written = 0;
   while (at < end) {
@@ -190,13 +140,8 @@ function die(what) {
   process.exit(1);
 }
 
-// Which loader a file wants, by the same evidence the core uses. A PFS0 magic
-// at 0 settles it; a cartridge's "HEAD" sits 0x100 in, where an `.nsp`'s
-// string table can spell anything a repacker put in a file name, so it is only
-// consulted once PFS0 has been ruled out. An NRO's magic may sit behind a boot
-// stub (hbmenu prepends one), so the first 0x100 bytes are scanned for it.
-// A bare NCA cannot be sniffed at all — its header is encrypted — so it is
-// what is left when nothing else matches.
+// Pick the loader as the core does: PFS0, then NRO (possibly behind a boot
+// stub), then cartridge "HEAD" at 0x100; a bare NCA is the fallback.
 function sniff(head) {
   const u32 = (at) => head.length >= at + 4 && head.readUInt32LE(at);
   if (u32(0) === 0x464c457f) return 'elf'; // "\x7fELF"
@@ -216,9 +161,6 @@ const headBytes = Buffer.alloc(0x200);
 const kind = flag('kind') || sniff(headBytes);
 if (!['nsp', 'nca', 'nro', 'elf'].includes(kind)) die(`unknown --kind=${kind}`);
 
-// Keys before the container: opening one needs none, but finding the Program
-// NCA inside it decrypts a header per file, and a data archive is parsed as it
-// is registered.
 const prod = flag('keys');
 const titleKeys = flag('title-keys');
 if (prod || titleKeys) {
@@ -238,20 +180,14 @@ try {
   const font = readFileSync(join(root, 'web/font.ttf'));
   api.switch_load_font(handle, toWasm(font), font.length);
 } catch {
-  // Not cosmetic: a guest with no font renders no text, which is a quarter
-  // less work per frame in a menu, and a run without one looks like a faster
-  // emulator rather than a smaller frame.
+  // Without a font a guest renders no text, which skews the frame cost.
   console.log('no web/font.ttf: the guest will render no text, and this frame is not that frame');
 }
 
-// Slot 0 is the container whichever way it is loaded, so that a homebrew run
-// and a retail one number their archives the same.
+// Slot 0 is the container however it is loaded.
 const containerIndex = addHostFile(containerPath);
 const containerSize = hostFiles[containerIndex].size;
 
-// A system applet needs these far more than a game does — its fonts, icons and
-// settings all live in firmware — and nothing is read until a title asks for
-// one, so registering a directory costs a header parse per file.
 const firmware = flag('firmware');
 if (firmware) {
   let added = 0;
@@ -279,20 +215,17 @@ if (kind === 'nro' || kind === 'elf') {
   if (api.switch_open_nca(handle, BigInt(containerSize)) !== 0) die('could not open the NCA');
   entry = api.switch_load_nca(handle);
 }
-// An entry of 0 is legitimate for some NSO layouts, so -1 is the only failure.
+// An entry of 0 is valid for some NSO layouts; only -1 is failure.
 if (entry < 0n) die('load failed');
 console.log(
   `${kind}: ${containerPath} (${(containerSize / (1024 * 1024)).toFixed(1)} MiB),`
   + ` entry ${'0x' + entry.toString(16)}`,
 );
 
-// The same slice size the frontend runs (`web/main/runloop.ts`).
 const SLICE = 1_000_000n;
-// A retail title spends billions of instructions before its first frame, and a
-// silent tool is indistinguishable from a hung one for the minutes that takes.
+// Progress output during long boots.
 const REPORT_EVERY = 500_000_000n;
 
-// Run until `want` frames have been presented, timing nothing.
 function reach(want) {
   let steps = 0n;
   let said = 0n;
@@ -322,19 +255,14 @@ if (api.switch_frame_count(handle) < WARMUP_FRAMES) {
 }
 console.log(`warmup: ${boot} instructions to frame ${WARMUP_FRAMES}, not timed`);
 
-// The frame counter is sampled between slices of one run rather than around
-// two whole runs. A program spends most of a run booting — a retail title
-// presents its first frame around step 900,000,000 — and that boot swings by
-// seconds between runs, which is larger than the frames being measured, so
-// subtracting two runs measures the swing. Sampling inside one has no such
-// term.
+// Sample the frame counter between slices of one run; boot time varies too much
+// to subtract two runs.
 const deltas = [];
 let seen = api.switch_frame_count(handle);
 let last = performance.now();
 let steps = 0n;
 const started = performance.now();
-// One more than asked for: the first frame after the window opens is charged
-// the tail of whatever the warmup was in the middle of.
+// One extra frame: the first absorbs the tail of the warmup.
 while (deltas.length <= FRAMES && !api.switch_halted(handle)) {
   const ran = api.switch_run(handle, SLICE);
   if (ran < 0n) {
@@ -345,8 +273,7 @@ while (deltas.length <= FRAMES && !api.switch_halted(handle)) {
   steps += ran;
   const now = api.switch_frame_count(handle);
   if (now === seen) continue;
-  // A slice can carry more than one present; share its time out evenly rather
-  // than charge the whole slice to the last of them.
+  // Split a multi-present slice's time evenly.
   const at = performance.now();
   const each = (at - last) / (now - seen);
   for (let i = 0; i < now - seen; i++) deltas.push(each);
@@ -369,18 +296,14 @@ console.log(
   + `  median ${sorted[sorted.length >> 1].toFixed(1)} ms  -> ${(1000 / mean).toFixed(2)} fps`,
 );
 console.log(`  cpu:   ${(Number(steps) / secs / 1e6).toFixed(1)} M instructions/s over ${secs.toFixed(2)}s`);
-// The count `examples/frame_work.rs` reports for the same program. It should
-// match: the two builds run the same emulator over the same guest and differ
-// only in what compiled them. Where it does not, one of the two is not running
-// what you think it is.
+// Should match `examples/frame_work.rs` for the same program.
 console.log(
   `  work:  ${(Number(steps) / deltas.length).toFixed(0)} instructions/frame,`
   + ` ${(Number(api.switch_guest_ram(handle)) / (1024 * 1024)).toFixed(1)} MiB guest RAM`,
 );
 console.log(`  jit:   ${text((ptr, cap) => api.switch_jit_stats_json(handle, ptr, cap))}`);
 
-// Capture outside the timed window, using the same RGBA snapshot as the
-// browser worker. A faster run must still produce the same pixels.
+// Capture outside the timed window.
 const shot = flag('shot');
 if (shot) {
   const width = api.switch_fb_width(handle);

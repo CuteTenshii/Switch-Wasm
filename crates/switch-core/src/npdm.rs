@@ -1,14 +1,7 @@
-//! NPDM (`main.npdm`): the process manifest an ExeFS carries beside its
-//! executables.
+//! NPDM (`main.npdm`): the process manifest beside an ExeFS's executables.
 //!
-//! Horizon reads this before it creates the process, and one field in it
-//! decides how the address space is laid out: `system_resource_size`, the
-//! slice of the application's memory pool the kernel keeps for its own
-//! per-process bookkeeping. A title that declares one gets virtual address
-//! memory and runs its heap through `nn::os::detail::VammManager`; a title
-//! that declares zero gets the plain heap and never touches the manager. The
-//! two want quite different things from the address space, which is why
-//! [`crate::cpu::MemoryLayout`] is chosen from this rather than fixed.
+//! `system_resource_size` selects [`crate::cpu::MemoryLayout`]: non-zero means
+//! virtual address memory via `nn::os::detail::VammManager`, zero the plain heap.
 //!
 //! META header (offsets from the start of the file):
 //!
@@ -27,9 +20,8 @@
 //! 0x70  ACI0 offset (u32), 0x74 ACI0 size (u32)
 //! ```
 //!
-//! The ACI0 section's kernel capabilities (offset and size at ACI0+0x30 and
-//! +0x34) hold the `ThreadInfo` descriptor, which names the cores the process
-//! may run threads on.
+//! The ACI0 kernel capabilities (offset and size at ACI0+0x30 and +0x34) hold
+//! the `ThreadInfo` descriptor naming the allowed cores.
 
 use crate::Error;
 
@@ -37,42 +29,29 @@ pub const NPDM_MAGIC: u32 = 0x4154_454d; // "META", little-endian
 /// Bytes needed to read every field parsed here.
 pub const NPDM_HEADER_SIZE: usize = 0x30;
 const ACI0_MAGIC: u32 = 0x3049_4341; // "ACI0", little-endian
-/// What a manifest with no readable `ThreadInfo` gets: cores 0, 1 and 2, the
-/// grant of every retail application. Core 3 is the system's.
+/// The fallback core mask: cores 0 to 2, as retail applications get. Core 3 is the system's.
 pub const APPLICATION_CORE_MASK: u64 = 0b0111;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Npdm {
-    /// Whether the process runs in AArch64. Mario Kart 8 Deluxe
-    /// (`0100152000022000`) is the counter-example: it declares zero here, and
-    /// its `rtld` opens with the 32-bit module prologue `b #+8`, a valid
-    /// `ANDS x0, x0, x0` to the A64 decoder, which then executes the `MOD0`
-    /// offset word after it as if it were an instruction.
+    /// Whether the process runs in AArch64 (Mario Kart 8 Deluxe does not).
     pub is_64_bit: bool,
-    /// The kernel's per-process bookkeeping reservation, carved out of the
-    /// application pool. Non-zero means this title expects virtual address
-    /// memory; `nnSdk` decides that by asking `svcGetInfo` for the same
-    /// figure, so reporting anything else is telling the title something its
-    /// own manifest contradicts.
+    /// The kernel's per-process reservation; non-zero means virtual address
+    /// memory, and `svcGetInfo` must report the same figure.
     pub system_resource_size: u32,
-    /// The priority the main thread is created at, 0 (most urgent) to 63.
+    /// 0 (most urgent) to 63.
     pub main_thread_priority: u8,
-    /// The core the main thread runs on, which is also the one a thread
-    /// created with the process's default core (-2) is put on.
+    /// Also where threads created with the default core (-2) go.
     pub main_thread_core: u8,
-    /// The stack the main thread is created with.
     pub main_thread_stack_size: u32,
-    /// The manifest's name field, for diagnostics, "Application" on a retail
-    /// game.
+    /// For diagnostics; "Application" on a retail game.
     pub name: String,
-    /// The cores the process may run threads on, from the `ThreadInfo`
-    /// kernel capability. Applications get 0..=2; a system applet such as
-    /// Data Erase gets core 3 alone, and refusing it that core is a panic.
+    /// From the `ThreadInfo` capability. Applications get 0..=2; some system
+    /// applets get core 3 alone.
     pub core_mask: u64,
 }
 
 impl Npdm {
-    /// Parse a `main.npdm`.
     pub fn parse(data: &[u8]) -> Result<Npdm, Error> {
         if data.len() < NPDM_HEADER_SIZE {
             return Err(Error::Truncated {
@@ -104,17 +83,11 @@ impl Npdm {
         })
     }
 
-    /// Whether an ExeFS's `main.npdm` declares an AArch64 process.
-    ///
-    /// A container with no manifest, or one that cannot be read, is treated as
-    /// 64-bit: that is what every title but a handful is, and it keeps a
-    /// homebrew NRO (which has no NPDM at all) on the path it has always
-    /// taken.
+    /// Whether an ExeFS's `main.npdm` declares AArch64; missing or unreadable means yes.
     pub fn is_64_bit_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> bool {
         Npdm::of(exefs, data).map(|n| n.is_64_bit).unwrap_or(true)
     }
 
-    /// Parse an ExeFS's `main.npdm`, if it has one that parses.
     pub fn of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> Option<Npdm> {
         let file = exefs.find("main.npdm")?;
         let start = file.offset as usize;
@@ -125,31 +98,22 @@ impl Npdm {
         Npdm::parse(&data[start..end]).ok()
     }
 
-    /// The main thread's priority from an ExeFS's `main.npdm`, or `None`
-    /// when there is no manifest that parses, which leaves the emulator's
-    /// default in place.
+    /// `None` when there is no parseable manifest.
     pub fn main_thread_priority_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> Option<u8> {
         Npdm::of(exefs, data).map(|n| n.main_thread_priority)
     }
 
-    /// The main thread's core from an ExeFS's `main.npdm`, or `None` when
-    /// there is no manifest that parses.
+    /// `None` when there is no parseable manifest.
     pub fn main_thread_core_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> Option<u8> {
         Npdm::of(exefs, data).map(|n| n.main_thread_core)
     }
 
-    /// The process core mask from an ExeFS's `main.npdm`, or `None` when
-    /// there is no manifest that parses.
+    /// `None` when there is no parseable manifest.
     pub fn core_mask_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> Option<u64> {
         Npdm::of(exefs, data).map(|n| n.core_mask)
     }
 
-    /// The `system_resource_size` of an ExeFS's `main.npdm`, or 0 when the
-    /// container has no manifest or one that cannot be read.
-    ///
-    /// Zero is the right answer for both of those: it is what a title without
-    /// a manifest gets on hardware, and it selects the plain heap, which is
-    /// the layout that works without knowing anything about the title.
+    /// 0 (the plain heap, as on hardware) when there is no readable manifest.
     pub fn system_resource_size_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> u32 {
         Npdm::of(exefs, data)
             .map(|n| n.system_resource_size)
@@ -157,11 +121,8 @@ impl Npdm {
     }
 }
 
-/// The core mask the ACI0 `ThreadInfo` capability grants, or `None` when the
-/// manifest has no ACI0 or no such descriptor.
-///
-/// A capability's type is the number of trailing one bits; `ThreadInfo` has
-/// three, and carries the lowest and highest core at bits 16..24 and 24..32.
+/// The core mask from the ACI0 `ThreadInfo` capability (type = three trailing
+/// one bits; lowest and highest core at bits 16..24 and 24..32).
 fn thread_info_core_mask(data: &[u8]) -> Option<u64> {
     let read = |at: usize| -> Option<u32> {
         Some(u32::from_le_bytes(
@@ -216,8 +177,7 @@ mod tests {
         data
     }
 
-    /// `ThreadInfo` with priorities 28..=59 on cores `min..=max`, as the real
-    /// manifests write it.
+    /// `ThreadInfo` with priorities 28..=59 on cores `min..=max`.
     fn thread_info(min: u32, max: u32) -> u32 {
         0b0111 | 59 << 4 | 28 << 10 | min << 16 | max << 24
     }
@@ -255,18 +215,13 @@ mod tests {
         assert_eq!(parsed.name, "Application");
     }
 
-    /// Just Dance 2019 declares zero here and Just Dance 2023 declares 16 MiB,
-    /// and that difference is the whole of what decides which address space
-    /// each one gets, so a zero has to survive parsing as a real answer
-    /// rather than being confused with a missing one.
+    /// A declared zero must parse as a real value (Just Dance 2019 vs 2023's 16 MiB).
     #[test]
     fn zero_is_a_real_answer() {
         assert_eq!(Npdm::parse(&npdm(0)).unwrap().system_resource_size, 0);
     }
 
-    /// Mario Kart 8 Deluxe's own flags byte. Bit 0 clear is the whole of what
-    /// says a title is AArch32, and reading it as anything else feeds 32-bit
-    /// code to the A64 decoder.
+    /// Mario Kart 8 Deluxe's flags byte: bit 0 clear means AArch32.
     #[test]
     fn a_thirty_two_bit_title_says_so_in_bit_zero() {
         let mut data = npdm(0);

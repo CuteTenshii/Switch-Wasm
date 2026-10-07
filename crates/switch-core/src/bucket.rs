@@ -1,11 +1,6 @@
-//! The bucket tree an NCA writes its storage tables as.
+//! The bucket tree an NCA uses for its storage tables (compression, sparse, BKTR).
 //!
-//! A section that is not simply "these bytes, in this order" carries a table
-//! saying what is where: which LZ4 block covers which range
-//! ([`crate::compressed`]), which ranges are stored at all
-//! ([`crate::sparse`]), which ranges an update replaced ([`crate::bktr`]).
-//! All of them are the same structure, differing only in node size and in
-//! what one entry holds.
+//! Only the entry sets are read, into one sorted list searched per read.
 //!
 //! ```text
 //! + 0x0000   L1 node: u32 index, u32 count, u64 end offset, then `count`
@@ -13,12 +8,6 @@
 //!            are more entry sets than a node has room for offsets
 //! then       one node per entry set: the same header, then `count` entries
 //! ```
-//!
-//! Only the entry sets are read. The index nodes exist to find one entry set
-//! without holding the whole table, which is exactly what holding the whole
-//! table makes unnecessary: a retail table is a couple of megabytes against
-//! a container of gigabytes, and a binary search over it costs less than
-//! walking a tree per read.
 
 use crate::source::ByteSource;
 use crate::Error;
@@ -26,27 +15,19 @@ use crate::Error;
 /// `u32 index, u32 count, u64 end offset`, at the head of every node.
 pub(crate) const NODE_HEADER_SIZE: u64 = 0x10;
 
-/// The most table any of this will read in. Echoes of Wisdom's compression
-/// table (the largest in any container to hand) is 2.3 MiB over 98,846
-/// entries; this only exists so a corrupt header cannot ask the browser for
-/// an allocation it has no way to make.
+/// Upper bound on a table's size, so a corrupt header cannot request a huge allocation.
 pub(crate) const MAX_TABLE: u64 = 64 << 20;
 
-/// One kind of table entry: how big it is, how they are paged, and how to
-/// read one.
 pub(crate) trait Entry: Sized {
-    /// Node size, which the format fixes per table rather than storing.
+    /// Node size, fixed per table by the format.
     const NODE_SIZE: u64;
     /// On-disk size of one entry, padding included.
     const SIZE: u64;
     fn parse(raw: &[u8]) -> Self;
-    /// Where in the virtual image this entry's range starts. Entries are
-    /// sorted by it, and it is what a lookup searches on.
+    /// Start of this entry's range in the virtual image; entries are sorted by it.
     fn virt(&self) -> u64;
 }
 
-/// Entries per entry-set node, and offsets per index node: both are however
-/// many fit in a node once its header is out.
 pub(crate) fn entries_per_node<E: Entry>() -> u64 {
     (E::NODE_SIZE - NODE_HEADER_SIZE) / E::SIZE
 }
@@ -59,8 +40,7 @@ pub(crate) fn entry_set_count<E: Entry>(entries: u32) -> u64 {
     u64::from(entries).div_ceil(entries_per_node::<E>())
 }
 
-/// The index nodes ahead of the entries: one L1 node, plus a row of L2 nodes
-/// when there are more entry sets than L1 can hold offsets for.
+/// Index nodes ahead of the entries: one L1 node, plus L2 nodes when L1 is full.
 pub(crate) fn node_storage_size<E: Entry>(entries: u32) -> u64 {
     let sets = entry_set_count::<E>(entries);
     let per_node = offsets_per_node::<E>();
@@ -77,9 +57,7 @@ pub(crate) fn entry_storage_size<E: Entry>(entries: u32) -> u64 {
     entry_set_count::<E>(entries) * E::NODE_SIZE
 }
 
-/// Read a table's entries into one sorted list, and the virtual offset it
-/// ends at.
-///
+/// Read a table's entries into one sorted list, and the virtual offset it ends at.
 /// `src` must cover exactly the table: the index nodes, then the entry sets.
 pub(crate) fn read<E: Entry, S: ByteSource>(
     src: &S,
@@ -153,8 +131,7 @@ pub(crate) fn read<E: Entry, S: ByteSource>(
             out[0].virt()
         )));
     }
-    // The end offset the last entry set carries is the size of the image the
-    // whole table describes.
+    // The last entry set's end offset is the image size.
     let last = ((entry_set_count::<E>(entries) - 1) * E::NODE_SIZE) as usize;
     let end = crate::nsp::read_u64(&raw, last + 8);
     if end == 0 {
@@ -163,8 +140,7 @@ pub(crate) fn read<E: Entry, S: ByteSource>(
     Ok((out, end))
 }
 
-/// The entry covering `at`, given a list [`read`] produced. Every list starts
-/// at virtual offset 0, so there is always one.
+/// The entry covering `at`; every list starts at virtual offset 0.
 pub(crate) fn index_of<E: Entry>(entries: &[E], at: u64) -> usize {
     entries.partition_point(|e| e.virt() <= at) - 1
 }
@@ -173,9 +149,7 @@ pub(crate) fn index_of<E: Entry>(entries: &[E], at: u64) -> usize {
 pub(crate) mod testing {
     use super::*;
 
-    /// Lay out `entries` as one entry set, preceded by the index nodes the
-    /// format requires but this reader never looks at. Returns the table
-    /// bytes; `end` is the virtual offset the image runs to.
+    /// Lay out `entries` as one entry set behind the index nodes; returns the table bytes.
     pub(crate) fn write_table<E: Entry>(entries: &[Vec<u8>], end: u64) -> Vec<u8> {
         let count = entries.len() as u32;
         let mut out = vec![0u8; node_storage_size::<E>(count) as usize];
@@ -221,9 +195,7 @@ mod tests {
         e
     }
 
-    /// The figures `nn::fssystem` derives for a real title's table: Echoes of
-    /// Wisdom's is 98,846 entries in 0x268000 bytes, of which 0x4000 is the
-    /// one index node and 0x244000 the 145 entry sets.
+    /// Geometry `nn::fssystem` derives for a 98,846-entry retail table.
     #[test]
     fn sizes_a_table_the_way_the_sdk_does() {
         assert_eq!(entries_per_node::<Fake>(), 682);
@@ -231,7 +203,6 @@ mod tests {
         assert_eq!(entry_set_count::<Fake>(98_846), 145);
         assert_eq!(node_storage_size::<Fake>(98_846), 0x4000);
         assert_eq!(entry_storage_size::<Fake>(98_846), 0x244000);
-        // Past one node of offsets, a row of L2 nodes appears.
         assert_eq!(node_storage_size::<Fake>(2047 * 682), 0x8000);
     }
 

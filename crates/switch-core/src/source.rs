@@ -1,32 +1,13 @@
 //! Random-access byte sources: how a container larger than memory is read.
-//!
-//! A retail `.nsp` does not fit in memory on the target this emulator was
-//! built for. wasm32 linear memory tops out at 4 GiB, Rust's allocator on
-//! that target rejects any single request above `isize::MAX` (2 GiB), and a
-//! modern title's container is bigger than both, so nothing that reads a
-//! container may assume it can hold one.
-//!
-//! Everything that reads container bytes therefore goes through
-//! [`ByteSource`]: a `u64`-addressed window that yields ranges on demand. The
-//! browser leaves the file on disk and serves ranges out of it; the host
-//! test suite and the native examples wrap a slice they already have. The
-//! composable pieces below ([`Window`], plus [`crate::nca::SectionSource`])
-//! stack into "the RomFS inside the section inside the NCA inside the NSP"
-//! without a single copy of anything but the bytes actually asked for.
+//! Everything that reads container bytes goes through [`ByteSource`], which
+//! yields `u64`-addressed ranges on demand; [`Window`] stacks sub-ranges without copying.
 
 use crate::Error;
 
-/// The largest buffer this target can allocate at once, `isize::MAX`, which
-/// is what `Layout` (and therefore every allocation) is limited to. On wasm32
-/// that is 2 GiB, so it is a real ceiling and not a theoretical one: a
-/// request past it used to reach `Layout::from_size_align(..).unwrap()` and
-/// trap the whole module with `unreachable`.
+/// The largest single allocation (`isize::MAX`, 2 GiB on wasm32).
 pub const MAX_ALLOC: u64 = isize::MAX as u64;
 
-/// Turn a `u64` length into one this target can actually allocate, or say why
-/// it can't. Callers that are about to build a `Vec` of guest-controlled size
-/// go through here so an oversized container is an error message rather than
-/// a trap.
+/// Check that a `u64` length can be allocated, so oversized input errors instead of trapping.
 pub fn alloc_len(len: u64, what: &str) -> Result<usize, Error> {
     if len > MAX_ALLOC {
         return Err(Error::TooLarge {
@@ -39,27 +20,18 @@ pub fn alloc_len(len: u64, what: &str) -> Result<usize, Error> {
 }
 
 /// A `u64`-addressed, read-only, random-access byte range.
-///
-/// `Debug` is a supertrait because [`crate::cpu::Cpu`] stores one and derives
-/// `Debug` itself.
 pub trait ByteSource: std::fmt::Debug {
-    /// Total number of readable bytes.
     fn len(&self) -> u64;
 
     /// Read into `out`, returning how many bytes were filled.
-    ///
-    /// A short fill means end-of-source and nothing else: implementations
-    /// that can fail (a host file that moved out from under us) report that
-    /// as an error rather than as a short read, so a caller can tell "there
-    /// is no more data" from "the data could not be read".
+    /// A short fill means end-of-source; read failures are errors, not short reads.
     fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error>;
 
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Fill `out` completely, or fail. Used for headers and structures whose
-    /// declared size is the whole point.
+    /// Fill `out` completely, or fail.
     fn read_exact_at(&self, offset: u64, out: &mut [u8]) -> Result<(), Error> {
         let want = out.len();
         let got = self.read_at(offset, out)?;
@@ -73,12 +45,7 @@ pub trait ByteSource: std::fmt::Debug {
         Ok(())
     }
 
-    /// Copy `len` bytes out into a fresh buffer.
-    ///
-    /// Reserves before filling so a length this target cannot allocate is an
-    /// `Err`, not an abort: the global allocator's out-of-memory path is
-    /// `handle_alloc_error`, which on wasm is an `unreachable` trap that
-    /// takes the module down with no message.
+    /// Copy `len` bytes into a fresh buffer; an unallocatable length is an `Err`, not a trap.
     fn read_vec(&self, offset: u64, len: u64) -> Result<Vec<u8>, Error> {
         let n = alloc_len(len, "buffer")?;
         let mut buf = Vec::new();
@@ -111,8 +78,7 @@ impl<T: ByteSource + ?Sized> ByteSource for Box<T> {
     }
 }
 
-/// A source over bytes already in memory. The native examples and the test
-/// suite read whole files this way; the browser never does.
+/// A source over bytes already in memory (native examples and tests only).
 #[derive(Debug, Clone, Copy)]
 pub struct SliceSource<'a>(pub &'a [u8]);
 
@@ -122,8 +88,7 @@ impl ByteSource for SliceSource<'_> {
     }
 
     fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
-        // `offset` is u64 and this target's usize may be 32-bit: compare
-        // before narrowing, or a 4 GiB offset wraps to a valid index.
+        // Compare before narrowing, or an offset above 4 GiB wraps on wasm32.
         if offset >= self.len() {
             return Ok(0);
         }
@@ -134,9 +99,7 @@ impl ByteSource for SliceSource<'_> {
     }
 }
 
-/// An owned in-memory source, for the same cases as [`SliceSource`] where the
-/// bytes have to outlive the caller's frame (the RomFS a native loader
-/// decrypted up front, say).
+/// An owned in-memory source.
 #[derive(Debug, Clone)]
 pub struct MemSource(pub Vec<u8>);
 
@@ -150,11 +113,7 @@ impl ByteSource for MemSource {
     }
 }
 
-/// A source over a file on disk, for hosts that have one, the native
-/// counterpart of the browser's `host_read`.
-///
-/// Reads the range asked for and nothing else, so a multi-gigabyte container
-/// costs a few seeks rather than its own size in memory.
+/// A source over a file on disk, reading only the requested ranges.
 #[derive(Debug)]
 pub struct FileSource {
     file: std::cell::RefCell<std::fs::File>,
@@ -197,10 +156,6 @@ impl ByteSource for FileSource {
 }
 
 /// A sub-range of another source, addressed from 0.
-///
-/// This is what turns "the whole NSP" into "the NCA at entry 3" and "the
-/// decrypted section" into "the RomFS image inside it", without either step
-/// copying or bounding-checking the layer below it again.
 #[derive(Debug, Clone)]
 pub struct Window<S> {
     inner: S,
@@ -223,12 +178,10 @@ impl<S: ByteSource> Window<S> {
         Ok(Window { inner, base, len })
     }
 
-    /// The window's start within the source it was cut from.
     pub fn base(&self) -> u64 {
         self.base
     }
 
-    /// Give the wrapped source back.
     pub fn into_inner(self) -> S {
         self.inner
     }
@@ -260,7 +213,6 @@ mod tests {
         let mut out = [0u8; 16];
         assert_eq!(src.read_at(8, &mut out).unwrap(), 16);
         assert_eq!(out[0], 8);
-        // A read straddling the end fills what exists and says how much.
         assert_eq!(src.read_at(56, &mut out).unwrap(), 8);
         assert_eq!(src.read_at(64, &mut out).unwrap(), 0);
         assert_eq!(src.read_at(1 << 40, &mut out).unwrap(), 0);
@@ -272,8 +224,6 @@ mod tests {
         let w = Window::new(SliceSource(&data), 32, 16, "test").unwrap();
         assert_eq!(w.len(), 16);
         let mut out = [0u8; 32];
-        // Asking for more than the window holds stops at its end, even though
-        // the source below it has more.
         assert_eq!(w.read_at(0, &mut out).unwrap(), 16);
         assert_eq!(out[0], 32);
         assert_eq!(out[15], 47);
@@ -288,8 +238,6 @@ mod tests {
     fn an_unallocatable_length_is_an_error_not_a_trap() {
         let data = vec![0u8; 16];
         let src = SliceSource(&data);
-        // The failure this whole module exists to prevent: a container-sized
-        // length reaching the allocator.
         assert!(matches!(
             src.read_vec(0, MAX_ALLOC + 1),
             Err(Error::TooLarge { .. })

@@ -1,37 +1,5 @@
-//! A title's control data: the name, publisher and icon a console's home menu
-//! shows for it, and the rest of what its NACP declares.
-//!
-//! Every application ships a Control NCA alongside its Program NCA. Its RomFS
-//! holds `control.nacp` (a fixed-layout 0x4000-byte metadata blob) and one
-//! `icon_<language>.dat` JPEG per language the title was localized for.
-//!
-//! Homebrew has the same data in a different place: an NRO carries one icon
-//! and the same `control.nacp` in the asset section appended after its image
-//! (see [`crate::nro`]), which [`Control::from_nro`] reads.
-//!
-//! The NACP begins with 16 title entries, one per language slot (see
-//! [`LANGUAGES`]), each 0x300 bytes: a 0x200-byte name followed by a
-//! 0x100-byte publisher, both NUL-padded UTF-8. A title is not localized into
-//! every slot, so the entries for languages it doesn't support are blank,
-//! [`Nacp::preferred`] picks the first slot that isn't.
-//!
-//! Fixed fields follow at 0x3000. The ones read here:
-//!
-//! ```text
-//! 0x3000  ISBN (0x25 bytes)
-//! 0x3025  startup user account (u8)
-//! 0x3028  attribute flags (u32)
-//! 0x3034  screenshot (u8)
-//! 0x3035  video capture (u8)
-//! 0x3040  age rating per rating organisation (32 x i8, -1 = unrated)
-//! 0x3060  display version (0x10 bytes)
-//! 0x3070  add-on content base id (u64)
-//! 0x3078  save data owner id (u64)
-//! 0x3080  user account save data size / journal size (2 x i64)
-//! 0x3090  device save data size / journal size (2 x i64)
-//! 0x30A0  BCAT delivery cache storage size (i64)
-//! 0x30A8  application error code category (8 bytes)
-//! ```
+//! A title's control data: the NACP (name, publisher, metadata) and icon, read
+//! from a Control NCA or a homebrew NRO's asset section.
 
 use crate::keys::KeySet;
 use crate::nca::{ContentType, Nca};
@@ -60,9 +28,7 @@ pub const LANGUAGES: [&str; 16] = [
     "BrazilianPortuguese",
 ];
 
-/// Names the SDK's own tooling used for the last two slots before they were
-/// renamed, and which repack tools still emit for the icon files. Indexed
-/// alongside [`LANGUAGES`], empty where the name never differed.
+/// Legacy names still used for the last two slots' icon files, indexed with [`LANGUAGES`].
 const LEGACY_LANGUAGE_NAMES: [&str; 16] = [
     "",
     "",
@@ -123,23 +89,14 @@ const DEVICE_SAVE_DATA_JOURNAL_SIZE_OFFSET: usize = 0x3098;
 const BCAT_STORAGE_SIZE_OFFSET: usize = 0x30A0;
 const ERROR_CODE_CATEGORY_OFFSET: usize = 0x30A8;
 const ERROR_CODE_CATEGORY_SIZE: usize = 8;
-/// A real `control.nacp` is 0x4000 bytes, but nothing past the last field
-/// *required* here is needed, so that, not the full size, is what's checked.
-///
-/// The ceiling fields below sit past this, and are read only if the NACP
-/// actually extends that far. Raising the minimum to cover them would make a
-/// truncated NACP that parses today stop parsing, and a title's name and icon
-/// do not depend on what its save data is allowed to grow to.
+/// Last field required; fields past this are optional (a real NACP is 0x4000 bytes).
 const NACP_MIN_SIZE: usize = ERROR_CODE_CATEGORY_OFFSET + ERROR_CODE_CATEGORY_SIZE;
-/// How large each save may be *extended* to, as against the sizes above,
-/// which are what it is created at.
+/// Ceilings each save may be extended to.
 const USER_ACCOUNT_SAVE_DATA_SIZE_MAX_OFFSET: usize = 0x3148;
 const USER_ACCOUNT_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET: usize = 0x3150;
 const DEVICE_SAVE_DATA_SIZE_MAX_OFFSET: usize = 0x3158;
 const DEVICE_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET: usize = 0x3160;
-/// Cache storage: scratch space a title may create and the system may delete
-/// again, unlike save data. It is addressed by index, so it has a count as
-/// well as a size.
+/// Cache storage: deletable scratch space, addressed by index.
 const CACHE_STORAGE_SIZE_OFFSET: usize = 0x3170;
 const CACHE_STORAGE_JOURNAL_SIZE_OFFSET: usize = 0x3178;
 const CACHE_STORAGE_DATA_AND_JOURNAL_SIZE_MAX_OFFSET: usize = 0x3180;
@@ -150,27 +107,19 @@ const ATTRIBUTE_DEMO: u32 = 1 << 0;
 /// An age-rating slot the title wasn't submitted to.
 const RATING_UNRATED: i8 = -1;
 
-/// One language's name and publisher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Title {
-    /// The slot's name from [`LANGUAGES`].
     pub language: &'static str,
-    /// The title as the home menu shows it.
     pub name: String,
-    /// The publisher line under it.
     pub publisher: String,
 }
 
-/// One rating board's verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rating {
-    /// The board's name from [`RATING_ORGANISATIONS`].
     pub organisation: &'static str,
-    /// Minimum age the board passed the title at.
     pub age: u8,
 }
 
-/// Whether a user profile has to be chosen before the title starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupUserAccount {
     None,
@@ -204,9 +153,7 @@ impl StartupUserAccount {
 /// Whether the console's capture button works in this title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureSupport {
-    /// Screenshots: 0 allows the capture button, 1 blocks it. Video: 0 is no
-    /// recording at all, 1 is the long-press recording every title gets, 2 is
-    /// recording the title itself can start.
+    /// Screenshot: 0 allowed, 1 blocked. Video: 0 disabled, 1 manual, 2 enabled.
     Screenshot(u8),
     Video(u8),
 }
@@ -224,59 +171,44 @@ impl CaptureSupport {
     }
 }
 
-/// A parsed `control.nacp`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nacp {
-    /// Only the slots the title is actually localized into.
+    /// Only the slots the title is localized into.
     pub titles: Vec<Title>,
-    /// The version string the title displays (`1.0.2`), not its NCA version.
+    /// Display version string (`1.0.2`), not the NCA version.
     pub display_version: String,
-    /// Set by a handful of titles with a physical release.
     pub isbn: String,
-    /// Whether this is a demo build, from the attribute flags.
     pub is_demo: bool,
     pub startup_user_account: StartupUserAccount,
     pub screenshot: CaptureSupport,
     pub video_capture: CaptureSupport,
-    /// Only the boards that actually rated the title.
+    /// Only the boards that rated the title.
     pub ratings: Vec<Rating>,
-    /// Base id of the title's DLC, 0 when it has none.
+    /// 0 when the title has no DLC.
     pub add_on_content_base_id: u64,
-    /// Which title's save data this one shares, 0 when it owns its own.
+    /// Title whose save data this one shares, 0 when it owns its own.
     pub save_data_owner_id: u64,
-    /// Save data the title reserves, in bytes. The journal is the write-ahead
-    /// area on top of it; either can be 0 for a title that saves nothing.
     pub user_account_save_data_size: i64,
     pub user_account_save_data_journal_size: i64,
-    /// Console-wide (not per-profile) save data, same shape.
     pub device_save_data_size: i64,
     pub device_save_data_journal_size: i64,
-    /// Space reserved for BCAT, the background data-delivery cache.
     pub bcat_delivery_cache_storage_size: i64,
-    /// How far each save may be extended past the size it was created at.
-    /// A title that never grows its save leaves these 0, and so does a NACP
-    /// too short to hold them: they are past [`NACP_MIN_SIZE`].
+    /// 0 when unset or past the end of a short NACP.
     pub user_account_save_data_size_max: i64,
     pub user_account_save_data_journal_size_max: i64,
     pub device_save_data_size_max: i64,
     pub device_save_data_journal_size_max: i64,
-    /// Cache storage: the size one is created at, and the ceiling on data and
-    /// journal together, which is what a title is told it may ask for.
     pub cache_storage_size: i64,
     pub cache_storage_journal_size: i64,
     pub cache_storage_data_and_journal_size_max: i64,
-    /// How many cache storages the title may address, by index.
     pub cache_storage_index_max: u16,
-    /// The prefix of the error codes the title reports (`2181` in
-    /// `2181-0002`), empty when it uses the system's.
+    /// Error code prefix (`2181` in `2181-0002`), empty for the system's.
     pub application_error_code_category: String,
 }
 
 impl Nacp {
-    /// The file's name in a Control NCA's RomFS root.
     pub const PATH: &'static str = "/control.nacp";
 
-    /// Parse a `control.nacp`.
     pub fn parse(data: &[u8]) -> Result<Nacp, Error> {
         if data.len() < NACP_MIN_SIZE {
             return Err(Error::Truncated {
@@ -304,8 +236,7 @@ impl Nacp {
 
         let mut ratings = Vec::new();
         for (slot, organisation) in RATING_ORGANISATIONS.iter().enumerate() {
-            // The array has 32 slots for 13 named boards; the rest are
-            // reserved and always unrated.
+            // 32 slots for 13 named boards; the rest are always unrated.
             debug_assert!(slot < RATING_AGE_SLOTS);
             let age = data[RATING_AGE_OFFSET + slot] as i8;
             if age != RATING_UNRATED {
@@ -373,9 +304,7 @@ impl Nacp {
         })
     }
 
-    /// What a program that ships no NACP at all declares, homebrew built
-    /// without one. Every figure is 0, which is what the fields a title never
-    /// sets already read as.
+    /// What a program with no NACP declares: every figure 0.
     pub fn empty() -> Nacp {
         Nacp {
             titles: Vec::new(),
@@ -405,8 +334,7 @@ impl Nacp {
         }
     }
 
-    /// The entry to show: American English when the title has it, otherwise
-    /// whichever language slot comes first.
+    /// American English if present, else the first localized slot.
     pub fn preferred(&self) -> Option<&Title> {
         self.titles
             .iter()
@@ -415,31 +343,20 @@ impl Nacp {
     }
 }
 
-/// What a Control NCA says about its title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Control {
-    /// The Control NCA's own title id.
     pub title_id: u64,
-    /// Which [`LANGUAGES`] slot [`Control::name`] and [`Control::publisher`]
-    /// came from.
     pub language: &'static str,
     pub name: String,
     pub publisher: String,
-    /// The icon as stored, a JPEG on every retail title seen so far, but
-    /// served with a sniffed type rather than an assumed one. Empty when the
-    /// Control NCA carries no icon at all.
+    /// The icon as stored (JPEG on retail), empty when absent.
     pub icon: Vec<u8>,
-    /// Everything else the title's NACP declares.
     pub nacp: Nacp,
 }
 
 impl Control {
-    /// Read the control data out of a Control NCA.
-    ///
-    /// `nca` is a source over the whole NCA; `keys` needs the header key and
-    /// whatever unlocks the section (a key area key, or the title key for a
-    /// title-key crypto NCA, resolve that from the container's ticket
-    /// first).
+    /// Read the control data out of a Control NCA. `keys` must resolve the
+    /// section key (the title key for title-key crypto, from the ticket).
     pub fn from_source<S: ByteSource>(nca: S, keys: &KeySet) -> Result<Control, Error> {
         let header = Nca::parse_source(&nca, Some(keys))?;
         if header.content_type != ContentType::Control {
@@ -453,11 +370,7 @@ impl Control {
             .ok_or_else(|| Error::Nca("Control NCA has no RomFS section".into()))?;
         let romfs_source = header.romfs_source(nca, keys, index)?;
 
-        // Unlike a Program NCA's RomFS, the game's data, and the reason
-        // `romfs_source` streams at all: a Control NCA's is a handful of
-        // icons and a 0x4000-byte NACP, so it is read whole and walked in
-        // memory. The bound is what keeps that true: an NCA claiming a
-        // game-sized RomFS here is an error, not an allocation.
+        // A Control RomFS is small and read whole; reject one claiming game size.
         const MAX_CONTROL_ROMFS: u64 = 64 * 1024 * 1024;
         if romfs_source.len() > MAX_CONTROL_ROMFS {
             return Err(Error::Nca(format!(
@@ -477,9 +390,6 @@ impl Control {
             .preferred()
             .ok_or_else(|| Error::RomFs("control.nacp has no title in any language".into()))?;
 
-        // Prefer the icon for the language the name came from, so the two
-        // agree; a title localized into a language it has no icon for falls
-        // back to whichever icon the image does carry.
         let icon = icon_for(&romfs, title.language)
             .or_else(|| any_icon(&romfs))
             .unwrap_or_default()
@@ -497,25 +407,17 @@ impl Control {
         })
     }
 
-    /// Read the control data out of a Control NCA already in memory.
     pub fn from_nca(raw: &[u8], keys: &KeySet) -> Result<Control, Error> {
         Control::from_source(SliceSource(raw), keys)
     }
 
-    /// Read the control data a homebrew NRO carries in the asset section
-    /// appended after its image, the same `control.nacp` a Control NCA
-    /// holds, and a single icon rather than one per language.
-    ///
-    /// `None` when the NRO has no asset section, or one with neither an icon
-    /// nor a NACP in it. Homebrew has no title id, so [`Control::title_id`]
-    /// is 0 and no language slot is named unless the NACP names one.
+    /// Read the `control.nacp` and icon from a homebrew NRO's asset section.
     pub fn from_nro(data: &[u8]) -> Option<Control> {
         let assets = crate::nro::assets(data)?;
         if assets.icon.is_empty() && assets.nacp.is_empty() {
             return None;
         }
-        // A NACP that doesn't parse still leaves a usable icon, and homebrew
-        // ships without one often enough for that to matter.
+        // A NACP that fails to parse still leaves a usable icon.
         let nacp = Nacp::parse(assets.nacp).unwrap_or_else(|_| Nacp::empty());
         let title = nacp.preferred();
         Some(Control {
@@ -528,8 +430,6 @@ impl Control {
         })
     }
 
-    /// The icon's media type, sniffed from its magic. Empty when there is no
-    /// icon.
     pub fn icon_mime(&self) -> &'static str {
         match self.icon.get(..4) {
             Some([0xFF, 0xD8, 0xFF, _]) => "image/jpeg",
@@ -540,9 +440,6 @@ impl Control {
     }
 }
 
-/// Find the Control NCA in a PFS0 container's file table, returning its index
-/// and parsed header. See [`crate::nca::find_nca_by_type`] for why every
-/// `.nca` in the container has to be opened to answer.
 pub fn find_control_nca<S: ByteSource>(
     files: &[Pfs0File],
     src: &S,
@@ -551,7 +448,6 @@ pub fn find_control_nca<S: ByteSource>(
     crate::nca::find_nca_by_type(files, src, keys, ContentType::Control)
 }
 
-/// Read the control data of the title in a PFS0 container.
 pub fn from_pfs0<S: ByteSource>(
     files: &[Pfs0File],
     src: &S,
@@ -563,8 +459,6 @@ pub fn from_pfs0<S: ByteSource>(
     Control::from_source(Window::new(src, f.offset, f.size, &f.name)?, keys)
 }
 
-/// The icon file for one language, under either the current or the legacy
-/// spelling of its name.
 fn icon_for<'a>(romfs: &RomFs<'a>, language: &str) -> Option<&'a [u8]> {
     let slot = LANGUAGES.iter().position(|l| *l == language)?;
     let legacy = LEGACY_LANGUAGE_NAMES[slot];
@@ -588,23 +482,18 @@ fn any_icon<'a>(romfs: &RomFs<'a>) -> Option<&'a [u8]> {
     romfs.read(file)
 }
 
-/// A fixed-width NACP string: UTF-8 up to the first NUL, with anything
-/// undecodable dropped rather than failing the whole read.
+/// UTF-8 up to the first NUL, undecodable bytes replaced.
 fn nul_terminated(field: &[u8]) -> String {
     let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
     String::from_utf8_lossy(&field[..end]).trim().to_owned()
 }
 
-/// The NACP's sizes are signed: an unset one is 0, and a few titles ship a
-/// negative value that would read as an implausible size unsigned.
+/// NACP sizes are signed; some titles ship negative values.
 fn read_i64(data: &[u8], at: usize) -> i64 {
     crate::nsp::read_u64(data, at) as i64
 }
 
-/// The same, for a field past [`NACP_MIN_SIZE`]: 0 when the NACP does not
-/// reach it. A NACP that stops short has not declared the field, and a title
-/// that declares no ceiling is one that never grows the save, which is what
-/// 0 means to every caller of these anyway.
+/// 0 when the NACP is too short to hold the field.
 fn read_i64_if_present(data: &[u8], at: usize) -> i64 {
     match data.len() >= at + 8 {
         true => read_i64(data, at),
@@ -660,10 +549,7 @@ mod tests {
             self
         }
 
-        /// A NACP the full 0x4000 bytes a real one is. [`NacpBuilder::new`]
-        /// stops at [`NACP_MIN_SIZE`], which is short of the ceiling and cache
-        /// storage fields: the point being that a NACP may legitimately stop
-        /// there, so the two cases are built differently on purpose.
+        /// A full 0x4000-byte NACP, unlike [`NacpBuilder::new`].
         fn full() -> NacpBuilder {
             NacpBuilder {
                 data: vec![0u8; 0x4000],
@@ -822,8 +708,7 @@ mod tests {
         assert_eq!(control.icon_mime(), "");
     }
 
-    /// A NACP declaring every save-data figure, each a distinct number so a
-    /// pair read out of the wrong offset cannot pass.
+    /// Distinct values so a field read from the wrong offset fails.
     fn nacp_with_save_data() -> Vec<u8> {
         NacpBuilder::full()
             .title(0, "Game", "Studio")
@@ -843,10 +728,6 @@ mod tests {
 
     #[test]
     fn every_save_data_figure_a_nacp_declares_reaches_the_cpu() {
-        // `SaveDataQuota::from` is the one call site both loaders use, and a
-        // quota assembled field by field is a quota with a field missing. The
-        // command that reports the missing one answers 0 *with a success*,
-        // which is the failure that does not look like one.
         let nacp = Nacp::parse(&nacp_with_save_data()).unwrap();
         let quota = crate::cpu::SaveDataQuota::from(&nacp);
         assert_eq!(quota.size, 0x100_0000);
@@ -859,8 +740,7 @@ mod tests {
         assert_eq!(quota.cache_storage_index_max, 3);
     }
 
-    /// A minimal NRO (a bare header, no segments) with an asset section
-    /// appended the way `elf2nro` appends one.
+    /// A minimal NRO with an asset section appended.
     fn nro_with_assets(icon: &[u8], nacp: &[u8]) -> Vec<u8> {
         const HEADER_SIZE: u32 = 0x50;
         let mut out = vec![0u8; HEADER_SIZE as usize];
@@ -894,7 +774,6 @@ mod tests {
         assert_eq!(control.nacp.display_version, "4.0.2");
         assert_eq!(control.icon, b"\xFF\xD8\xFF\xE0jpeg");
         assert_eq!(control.icon_mime(), "image/jpeg");
-        // Homebrew is not a title: it has no id to report.
         assert_eq!(control.title_id, 0);
     }
 
@@ -914,10 +793,7 @@ mod tests {
 
     #[test]
     fn a_nacp_that_stops_before_the_ceilings_still_parses() {
-        // The ceiling and cache-storage fields sit past `NACP_MIN_SIZE`.
-        // Requiring them would make a NACP that parses today stop parsing, and
-        // a title's name and icon do not depend on what its save may grow to,
-        // so a short one reports 0 for them and everything else as before.
+        // A short NACP reports 0 for the optional fields.
         let short = NacpBuilder::new()
             .title(0, "Game", "Studio")
             .unrated()

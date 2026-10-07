@@ -1,6 +1,6 @@
 //! PFS0 container format, the on-disk layout behind `.nsp` files.
 //!
-//! A PFS0 image begins with a header:
+//! Header layout:
 //!
 //! ```text
 //! offset  size  field
@@ -13,16 +13,8 @@
 //! -       -     file data
 //! ```
 //!
-//! Each `FileEntry` is 24 bytes: `u64 offset`, `u64 size`, `u32 name_offset`,
-//! `u32 padding`. `offset`/`size` reference the file payload and are counted
-//! from the end of the string table, where the payload area begins;
-//! `name_offset` references a NUL-terminated string in the string table.
-//!
-//! An XCI's partitions ([`crate::xci`]) are the same table under the magic
-//! "HFS0", with a 64-byte entry that adds a hash of the file's first bytes
-//! after the four fields above. Both are read by [`Pfs0::read_partition_at`],
-//! so a cartridge partition and an `.nsp` present the rest of the stack the
-//! same file table.
+//! Entry offsets are counted from the end of the string table. XCI partitions
+//! ([`crate::xci`]) use the same table under the magic "HFS0" with 64-byte entries.
 
 use crate::source::{ByteSource, SliceSource};
 use crate::Error;
@@ -31,16 +23,10 @@ pub const PFS0_MAGIC: u32 = 0x3053_4650; // "PFS0"
 /// Each entry: u64 offset, u64 size, u32 name_offset, u32 padding.
 pub const FILE_ENTRY_SIZE: usize = 24;
 pub const HFS0_MAGIC: u32 = 0x3053_4648; // "HFS0"
-/// An HFS0 entry adds `u32 hashed_region_size`, 8 reserved bytes and a
-/// SHA-256 of that region to the four fields a PFS0 entry has.
+/// PFS0 entry fields plus `u32 hashed_region_size`, 8 reserved bytes and a SHA-256.
 pub const HFS0_ENTRY_SIZE: usize = 0x40;
 
-/// The two spellings of one partition table: `PFS0` in an `.nsp` and in an
-/// NCA's ExeFS, `HFS0` in the root and partitions of an XCI.
-///
-/// Nothing but the magic and the entry stride separates them, the header and
-/// the first four fields of an entry are laid out identically, so they are
-/// read by one parser rather than two.
+/// `PFS0` (`.nsp`, ExeFS) or `HFS0` (XCI); only the magic and entry stride differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartitionKind {
     Pfs0,
@@ -72,52 +58,31 @@ impl PartitionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pfs0File {
-    /// Byte offset of the file payload from the start of the image, the
-    /// entry's own offset already resolved against the payload area, so it
-    /// can be read without knowing how long the header was.
+    /// Offset of the payload from the start of the image.
     pub offset: u64,
-    /// Payload size in bytes.
     pub size: u64,
-    /// File name (without the trailing NUL).
+    /// Without the trailing NUL.
     pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pfs0 {
     pub files: Vec<Pfs0File>,
-    /// Total size of the image in bytes (used for bounds checks). `u64`, not
-    /// `usize`: a retail `.nsp` is routinely larger than a wasm32 address
-    /// space, and truncating its size here let entries past the 4 GiB mark
-    /// pass a bounds check they should have failed.
+    /// `u64`: a retail `.nsp` can exceed the wasm32 address space.
     pub image_size: u64,
 }
 
 impl Pfs0 {
-    /// Parse a PFS0 image from raw bytes.
-    ///
-    /// Returns an error if the magic does not match, the image is too small
-    /// for the declared header, or any file entry falls outside the image.
     pub fn parse(data: &[u8]) -> Result<Pfs0, Error> {
         Pfs0::read_from(&SliceSource(data))
     }
 
-    /// Parse a PFS0 image out of a [`ByteSource`], reading only its header.
-    ///
-    /// This is the form a multi-gigabyte `.nsp` is read with: the header
-    /// (magic, entry table and string table) is a few kilobytes at the front
-    /// of the file, and nothing else has to be in memory to know what the
-    /// container holds or where each file starts.
+    /// Reads only the header.
     pub fn read_from<S: ByteSource>(src: &S) -> Result<Pfs0, Error> {
         Pfs0::read_partition_at(src, 0, PartitionKind::Pfs0)
     }
 
-    /// Parse the partition table that starts at `at`, in either spelling.
-    ///
-    /// An XCI keeps its partitions at offsets of their own inside the image
-    /// and writes them as HFS0; that offset and the entry stride are the
-    /// whole of the difference. File offsets come out absolute within `src`
-    /// either way, so what a cartridge partition hands the rest of the stack
-    /// is a file table indistinguishable from an `.nsp`'s.
+    /// Parse the partition table at `at`; file offsets come out absolute within `src`.
     pub fn read_partition_at<S: ByteSource>(
         src: &S,
         at: u64,
@@ -144,14 +109,10 @@ impl Pfs0 {
         let file_count = read_u32(&head, 0x04) as u64;
         let string_table_size = read_u32(&head, 0x08) as u64;
 
-        // Header + entries + string table must fit within the image. Every
-        // term comes from a `u32`, so the `u64` arithmetic cannot overflow,
-        // which is the point of doing it in `u64` on a 32-bit target, where
-        // `file_count * FILE_ENTRY_SIZE` alone can exceed `usize`.
+        // `u64` so the sum cannot overflow `usize` on wasm32.
         let strings_start = HEADER_SIZE as u64 + file_count * entry_size as u64;
         let header_len = strings_start + string_table_size;
-        // The payload area starts where the header, entry table and string
-        // table: ends, and that is what an entry's offset is counted from.
+        // Entry offsets are counted from the payload area.
         let payload_base = at.checked_add(header_len).ok_or(Error::Overflow)?;
         if payload_base > src.len() {
             return Err(Error::Truncated {
@@ -160,23 +121,18 @@ impl Pfs0 {
                 got: usize::try_from(src.len()).unwrap_or(usize::MAX),
             });
         }
-        // Only the header region: for a retail container the rest is
-        // gigabytes, and none of it is needed to build the file table.
+        // Only the header region; the rest can be gigabytes.
         let header = src.read_vec(at, header_len)?;
         let strings_start = strings_start as usize;
 
-        // Not `with_capacity(file_count)`: the count is whatever the file
-        // says, and reserving for a corrupt one is an allocation the target
-        // aborts on rather than an error anyone can read.
+        // No `with_capacity`: the count is untrusted.
         let mut files = Vec::new();
         for i in 0..file_count as usize {
             let entry = HEADER_SIZE + i * entry_size;
             let offset = read_u64(&header, entry);
             let size = read_u64(&header, entry + 8);
             let name_off = read_u32(&header, entry + 16) as usize;
-            // The name has to be NUL-terminated inside the string table,
-            // `header` ends where the table does, so a name offset pointing
-            // past it fails here instead of running into the payload.
+            // `header` ends with the string table, so out-of-range names fail here.
             let name = read_cstr(&header, strings_start.saturating_add(name_off))
                 .ok_or(Error::BadStringTable {
                     index: i,
@@ -185,33 +141,12 @@ impl Pfs0 {
                 .to_string();
             files.push(Pfs0File { offset, size, name });
         }
-        // Some repack tools emit offsets already counted from the start of
-        // the image instead. Both readings are tried, the format's own
-        // first, and the entries are taken as absolute only when rebasing
-        // them would run a file past the end of the image while leaving them
-        // alone would not.
-        //
-        // This is decided from the extents rather than from "does any entry
-        // point inside the header", which is what it used to ask. A repack
-        // that pads its payload area, aligning the first file to 0x8000,
-        // say: has no entry at offset 0 to give the relative reading away,
-        // so every offset was left short by the header length and every NCA
-        // in it was read from the wrong place. A 7 GiB Just Dance 2022 `.nsp`
-        // whose first entry starts at 0x7e30 (0x8000 once rebased) is one.
-        //
-        // Only for a table that starts the image. A partition nested inside
-        // one is written by the cartridge master, not by a repacker, and
-        // "absolute" there would mean an offset into the image rather than
-        // into the partition, a reading no producer intends and one that
-        // happens to fit often enough to be dangerous.
+        // Some repacks write absolute offsets; take them as such only for a top-level table
+        // where the relative reading overruns the image and the absolute one does not.
         let relative_fits = extents_fit(&files, payload_base, src.len());
-        // An absolute offset cannot point into the header its own entry
-        // lives in, so a reading that puts one there is not one.
         let past_the_header = files.iter().all(|f| f.offset >= payload_base);
         let absolute_fits = at == 0 && past_the_header && extents_fit(&files, 0, src.len());
-        // A container neither reading fits is malformed, and rebasing it
-        // anyway is what reports the out-of-bounds below against the format's
-        // own reading rather than against the fallback.
+        // If neither fits, report the error against the relative reading.
         let base = if absolute_fits && !relative_fits {
             0
         } else {
@@ -239,10 +174,7 @@ impl Pfs0 {
         })
     }
 
-    /// A [`ByteSource`] over file `index`'s payload, addressed from 0.
-    ///
-    /// This is how an NCA inside a container is read without extracting it:
-    /// the window is a view of the container source, not a copy.
+    /// A view of file `index` within the container, addressed from 0.
     pub fn file_source<S: ByteSource>(
         &self,
         src: S,
@@ -255,12 +187,11 @@ impl Pfs0 {
         crate::source::Window::new(src, f.offset, f.size, &f.name)
     }
 
-    /// Find a file by exact name.
     pub fn find(&self, name: &str) -> Option<&Pfs0File> {
         self.files.iter().find(|f| f.name == name)
     }
 
-    /// Find a file whose name ends with `suffix` (case-insensitive).
+    /// Case-insensitive.
     pub fn find_with_suffix(&self, suffix: &str) -> Option<&Pfs0File> {
         let suffix = suffix.to_ascii_lowercase();
         self.files
@@ -269,8 +200,7 @@ impl Pfs0 {
     }
 }
 
-/// Whether every file still lies inside an `image_size`-byte image once its
-/// entry offset is counted from `base`.
+/// Whether every file fits in the image once its offset is counted from `base`.
 fn extents_fit(files: &[Pfs0File], base: u64, image_size: u64) -> bool {
     files.iter().all(|f| {
         let Some(start) = f.offset.checked_add(base) else {
@@ -300,8 +230,7 @@ pub(crate) fn read_u64(data: &[u8], at: usize) -> u64 {
     ])
 }
 
-/// Read a NUL-terminated string, returning `None` if no NUL is found within
-/// the remaining buffer.
+/// `None` if no NUL is found.
 pub(crate) fn read_cstr(data: &[u8], at: usize) -> Option<&str> {
     if at >= data.len() {
         return None;
@@ -310,18 +239,11 @@ pub(crate) fn read_cstr(data: &[u8], at: usize) -> Option<&str> {
     std::str::from_utf8(&data[at..end]).ok()
 }
 
-/// Fixtures that write the on-disk form this module reads.
-///
-/// Not `#[cfg(test)]`: `switch-wasm` is a separate crate and cannot reach a
-/// test module in this one, and the container path it exports is worth
-/// testing against a real image, the same reason [`crate::gpu::testing`]
-/// exists.
+/// Container fixtures; not `#[cfg(test)]` so `switch-wasm` can use them.
 pub mod testing {
     use super::*;
 
-    /// A partition table in either spelling, laid out the way a producer
-    /// writes one: header, entry table, string table, then the payloads, with
-    /// each entry's offset counted from the payload area.
+    /// Header, entries, string table, then payloads, with offsets relative to the payload area.
     pub fn partition_fs(kind: PartitionKind, files: &[(&str, &[u8])]) -> Vec<u8> {
         let entry_size = kind.entry_size();
         let mut names = Vec::new();
@@ -358,9 +280,7 @@ pub mod testing {
 mod tests {
     use super::*;
 
-    /// Entry offsets here are written from the start of the image, not from
-    /// the payload area, so every test built on this one is also what keeps
-    /// the absolute-offset fallback honest.
+    /// Writes absolute offsets, which exercises the absolute-offset fallback.
     fn build_pfs0(files: &[(&str, &[u8])]) -> Vec<u8> {
         // Layout: header (0x10) + entries + string table, then payloads.
         let file_count = files.len();
@@ -452,9 +372,7 @@ mod tests {
 
     #[test]
     fn rebases_offsets_relative_to_payload() {
-        // The ordinary case, and what the format says: an entry counts from
-        // the payload area, so the one claiming offset 0 means the first byte
-        // after the header + string table, not the first byte of the image.
+        // Offset 0 means the first byte after the string table.
         let mut image = Vec::new();
         image.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
         image.extend_from_slice(&1u32.to_le_bytes()); // file count
@@ -475,11 +393,7 @@ mod tests {
 
     #[test]
     fn a_padded_payload_area_is_still_read_relative_to_the_header() {
-        // The shape a retail repack has: relative offsets, but the payload
-        // area padded so the first file lands on an alignment boundary. No
-        // entry sits at offset 0, which is what the old "does any entry point
-        // inside the header" test needed to notice the offsets were relative
-        // at all, so every file in one was read a header-length short.
+        // Relative offsets with a padded payload area, as retail repacks write.
         const PAYLOAD_AT: usize = 0x80;
         let mut image = Vec::new();
         image.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
@@ -501,10 +415,7 @@ mod tests {
         assert_eq!(&image[pfs0.files[0].offset as usize..][..4], b"DATA");
     }
 
-    /// An XCI keeps its partitions at offsets of their own, so the table has
-    /// to be readable somewhere other than the front of the image, and what
-    /// comes out has to be addressed against the image, not against the
-    /// partition, or every layer above would need to know it was nested.
+    /// A nested partition's offsets come out against the whole image.
     #[test]
     fn a_partition_is_read_where_the_image_keeps_it() {
         const AT: usize = 0x1000;
@@ -530,18 +441,13 @@ mod tests {
         ));
     }
 
-    /// The absolute-offset fallback is for a repacked `.nsp` and stops there.
-    /// Inside an image, an offset that "fits" measured from byte 0 is a
-    /// coincidence, the entry belongs to a partition, and reading it that way
-    /// would hand back a range from somewhere else entirely.
+    /// The absolute-offset fallback does not apply to nested partitions.
     #[test]
     fn a_nested_partition_is_never_reread_as_absolute_offsets() {
         const AT: u64 = 0x1000;
         let mut partition = testing::partition_fs(PartitionKind::Hfs0, &[("a.nca", b"first")]);
         let payload_base = AT + (0x10 + HFS0_ENTRY_SIZE + 6) as u64;
-        // Past this partition's header, and inside the image measured from
-        // byte 0, but past the end of it once counted from the payload area,
-        // which is the only reading a cartridge ever means.
+        // Fits measured from byte 0, but not from the payload area.
         partition[0x10..0x18].copy_from_slice(&0x1100u64.to_le_bytes());
         partition[0x18..0x20].copy_from_slice(&0x100u64.to_le_bytes());
         assert!(0x1100 > payload_base);
@@ -555,9 +461,7 @@ mod tests {
         ));
     }
 
-    /// A container far larger than a wasm32 address space, without needing
-    /// one: it answers `len()` with 5 GiB and serves the header from a real
-    /// buffer, so the entry table can point past the 4 GiB mark.
+    /// Reports a 5 GiB length while serving the header from a real buffer.
     #[derive(Debug)]
     struct HugeSource {
         header: Vec<u8>,
@@ -573,8 +477,7 @@ mod tests {
         }
     }
 
-    /// The container, and where its payload area starts, which is what the
-    /// entry offset in it is counted from.
+    /// Returns the container and its payload area offset.
     fn huge_container(entry_offset: u64, entry_size: u64, len: u64) -> (HugeSource, u64) {
         let mut header = Vec::new();
         header.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
@@ -592,10 +495,7 @@ mod tests {
 
     #[test]
     fn entries_past_the_four_gib_mark_keep_their_offsets() {
-        // The offset a retail container's program NCA actually lives at. Held
-        // in a `usize` (as this parser used to), it truncates to 0x1000 and
-        // every read lands on the wrong bytes; the bounds check below passes
-        // for the same reason, so nothing catches it.
+        // Truncated to `usize` on wasm32, this would read from 0x1000.
         const PAST_4GIB: u64 = 0x1_0000_1000;
         let (src, payload_base) = huge_container(PAST_4GIB, 0x2000, 5 << 30);
         let pfs0 = Pfs0::read_from(&src).unwrap();
@@ -607,9 +507,7 @@ mod tests {
 
     #[test]
     fn an_entry_running_past_the_end_is_still_caught_past_four_gib() {
-        // Same shape, but the extent ends one byte past the container. The
-        // truncating version of this check compared wrapped values and let it
-        // through.
+        // The extent ends one byte past the container.
         let len = 5u64 << 30;
         let (src, _) = huge_container(len - 0x1000, 0x1001, len);
         assert!(matches!(

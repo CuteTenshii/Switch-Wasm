@@ -1,42 +1,19 @@
-//! The block translator against the interpreter, in lockstep, on a retail
-//! title: find the first slice of instructions after which the two machines
-//! disagree.
+//! Run a retail title with the JIT on and off in lockstep and report the first
+//! slice after which the two machines disagree. The interpreter is the
+//! reference.
 //!
 //! Usage: jit_bisect <container> <prod.keys> [title.keys] [max_steps] [window]
 //!
-//! `jit_difftest` compares the two engines once, at the end, on homebrew.
-//! That is the wrong shape for a retail title, where a translation bug shows
-//! up a billion instructions later as something else entirely: a thread
-//! branching into the process-exit stub, a title that quits by itself. This
-//! boots the same container twice, the translator on in one and off in the
-//! other, runs both in the same 4096-instruction slices `boot_nsp` runs in,
-//! and compares them every `window` instructions (a million by default). At
-//! the first window that disagrees it boots both again, runs them to the
-//! start of that window, and compares after every slice, which names the
-//! slice the translator got wrong and prints where each machine stood.
-//!
-//! What is compared is the running thread's registers, its pc, which thread
-//! is running, the clock, and every thread's saved state: a wrong memory
-//! write is not compared directly, and is found when something reads it back.
-//! The interpreter is the reference.
-//!
-//! **Exact only until the first thread switch.** The interpreter can be
-//! preempted between any two instructions and the translator only between
-//! blocks, so once a title has several runnable threads the two machines
-//! interleave them differently, and both are correct. A disagreement past
-//! that point says the interleavings differ and nothing more; it is the tool
-//! for a single-threaded stretch, or for proving a divergence starts before
-//! the threads do.
+//! Exact only until the first thread switch: the two engines can interleave
+//! threads differently and both be correct.
 mod common;
 
 use switch_core::cpu::Cpu;
 
 const USAGE: &str = "jit_bisect <container> <prod.keys> [title.keys] [max_steps] [window]";
 
-/// The slice both machines run in, the one `boot_nsp` uses.
 const SLICE: u64 = 4096;
 
-/// One machine, booted the way `boot_nsp` boots it.
 fn boot(title: &common::Title, jit: bool) -> Cpu {
     let mut cpu = Cpu::new();
     cpu.bootstrap();
@@ -52,8 +29,7 @@ fn boot(title: &common::Title, jit: bool) -> Cpu {
     cpu
 }
 
-/// Run `steps` instructions in [`SLICE`]s. Returns false if the machine
-/// stopped first, by halting or faulting.
+/// Returns false if the machine halted or faulted first.
 fn advance(cpu: &mut Cpu, steps: u64) -> bool {
     let mut done = 0;
     while done < steps && !cpu.halted {
@@ -69,8 +45,7 @@ fn advance(cpu: &mut Cpu, steps: u64) -> bool {
     !cpu.halted
 }
 
-/// Everything compared between the two machines, one fact per line so that
-/// a disagreement prints as the lines that differ.
+/// One fact per line, so a disagreement prints as the differing lines.
 fn state(cpu: &Cpu) -> Vec<String> {
     let mut lines = vec![
         format!(
@@ -90,7 +65,6 @@ fn state(cpu: &Cpu) -> Vec<String> {
     lines
 }
 
-/// The lines on which the two machines disagree, or none.
 fn differences(reference: &[String], translated: &[String]) -> Vec<String> {
     let longest = reference.len().max(translated.len());
     (0..longest)

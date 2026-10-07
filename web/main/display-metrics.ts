@@ -1,4 +1,4 @@
-/** Timing accumulated by one repeated stage of the browser display path. */
+// Timing accumulated by one repeated stage of the browser display path.
 export interface DisplayTiming {
   count: number;
   last: number;

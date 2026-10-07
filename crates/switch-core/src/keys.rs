@@ -1,18 +1,10 @@
-//! Nintendo key-file parsing (`prod.keys` / `title.keys`) and derivation of
-//! the NCA header key.
-//!
-//! Key files are `name = hex` lines (the format used by lockpick/hactool).
-//! To decrypt an NCA header we only need the global `header_key`: use it
-//! directly if the file provides it, otherwise derive it from the sources via
-//! the master-key chain (hactool `pki.c`).
+//! Key-file parsing (`prod.keys` / `title.keys`) and NCA header key derivation.
 
 use crate::crypto::aes128_ecb_decrypt;
 
-/// Number of key generations (`_00`.._1f`) prod.keys dumps carry per key kind.
 pub const KEY_GENERATION_COUNT: usize = 0x20;
 
-/// Which of the three "key area" key families decrypts an NCA's embedded key
-/// area, selected by the NCA header's key index byte.
+/// Key area key family, selected by the NCA header's key index byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAreaKind {
     Application,
@@ -31,22 +23,10 @@ impl KeyAreaKind {
     }
 }
 
-/// Parsed keysets with everything needed to decrypt NCA headers and bodies.
 #[derive(Debug, Default, Clone)]
 pub struct KeySet {
-    /// 32-byte NCA header key (directly, if provided).
     pub header_key: Option<[u8; 32]>,
-    /// Title keys by rights id (16 bytes each) exactly as `title.keys`
-    /// stores them: each one is still wrapped, AES-128-ECB, under the
-    /// `titlekek_XX` for its title's key generation. Lockpick_RCM copies a
-    /// ticket's key block into that file verbatim, so an entry here is the
-    /// ciphertext, not a usable NCA section key, [`KeySet::title_key`]
-    /// unwraps it.
-    ///
-    /// A ticket bundled in a container lands here too, in the same wrapped
-    /// form (see [`crate::ticket::load_bundled_title_key`]): this is the only
-    /// representation of a title key the keyset holds, so the generation that
-    /// unwraps one is always the NCA's, never a ticket field's.
+    /// `titlekek`-wrapped title keys by rights id.
     pub title_keys: Vec<([u8; 16], [u8; 16])>,
     // Sources for deriving the header key (prod.keys).
     pub header_key_source: Option<[u8; 32]>,
@@ -54,45 +34,28 @@ pub struct KeySet {
     pub master_key_00: Option<[u8; 16]>,
     pub aes_kek_generation_source: Option<[u8; 16]>,
     pub aes_key_generation_source: Option<[u8; 16]>,
-    /// `key_area_key_application_XX` / `_ocean_XX` / `_system_XX`, indexed by
-    /// key generation. Like `header_key`, these are stored directly rather
-    /// than derived, that's what prod.keys dumps (Lockpick_RCM) provide, and
-    /// deriving them would need Nintendo's secret seed constants, which this
-    /// project does not embed.
     pub key_area_key_application: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
     pub key_area_key_ocean: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
     pub key_area_key_system: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
-    /// `titlekek_XX`, indexed by key generation, decrypts a "Common"-crypto
-    /// ticket's title-key block (see `ticket.rs`). Stored directly, like the
-    /// key-area keys above.
     pub titlekek: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
 }
 
 impl KeySet {
-    /// Look up a still-`titlekek`-wrapped title key by rights id, as
-    /// `title.keys` and a bundled ticket both store it.
     pub fn wrapped_title_key(&self, rights_id: &[u8; 16]) -> Option<[u8; 16]> {
         find_key(&self.title_keys, rights_id)
     }
 
-    /// Whether this keyset carries a title key for `rights_id` at all,
-    /// wrapped or not, which is a different question from whether the
-    /// `titlekek` that unwraps it is present.
     pub fn has_title_key(&self, rights_id: &[u8; 16]) -> bool {
         self.wrapped_title_key(rights_id).is_some()
     }
 
-    /// The usable AES-128 title key for `rights_id`: the stored key block
-    /// unwrapped with `titlekek_<generation>`, where `generation` is the
-    /// NCA's key generation.
+    /// Title key for `rights_id`, unwrapped with the NCA generation's `titlekek`.
     pub fn title_key(&self, rights_id: &[u8; 16], generation: u8) -> Option<[u8; 16]> {
         let wrapped = self.wrapped_title_key(rights_id)?;
         let kek = self.titlekek(generation)?;
         Some(crate::crypto::aes128_decrypt_block(&kek, &wrapped))
     }
 
-    /// Record a title key in its stored, `titlekek`-wrapped form, replacing
-    /// any entry this keyset already had for the same title.
     pub fn add_title_key(&mut self, rights_id: [u8; 16], wrapped: [u8; 16]) {
         match self.title_keys.iter_mut().find(|(id, _)| *id == rights_id) {
             Some(slot) => slot.1 = wrapped,
@@ -100,8 +63,6 @@ impl KeySet {
         }
     }
 
-    /// Look up a key-area key by kind and generation (the NCA header's key
-    /// index and key generation byte).
     pub fn key_area_key(&self, kind: KeyAreaKind, generation: u8) -> Option<[u8; 16]> {
         let table = match kind {
             KeyAreaKind::Application => &self.key_area_key_application,
@@ -111,15 +72,10 @@ impl KeySet {
         table.get(generation as usize).copied().flatten()
     }
 
-    /// Look up `titlekek_<generation>`.
     pub fn titlekek(&self, generation: u8) -> Option<[u8; 16]> {
         self.titlekek.get(generation as usize).copied().flatten()
     }
 
-    /// The 32-byte header key, either provided directly or derived from the
-    /// prod.keys sources (hactool `pki.c`):
-    /// `header_key = AESECBDecrypt(header_key_source, header_kek)` where
-    /// `header_kek` is derived from `header_kek_source` via the master key.
     pub fn effective_header_key(&self) -> Option<[u8; 32]> {
         if let Some(k) = self.header_key {
             return Some(k);
@@ -136,10 +92,6 @@ impl KeySet {
         let kek_seed = self.aes_kek_generation_source?;
         let key_seed = self.aes_key_generation_source?;
         let header_kek_source = self.header_kek_source?;
-        // generate_kek (hactool pki.c):
-        //   kek = AESECBDecrypt(master, kek_seed)
-        //   src_kek = AESECBDecrypt(kek, header_kek_source)
-        //   header_kek = AESECBDecrypt(src_kek, key_seed)
         let mut kek = [0u8; 16];
         kek.copy_from_slice(&aes128_ecb_decrypt(&master, &kek_seed)[..16]);
         let mut src_kek = [0u8; 16];
@@ -157,8 +109,7 @@ fn find_key(table: &[([u8; 16], [u8; 16])], rights_id: &[u8; 16]) -> Option<[u8;
         .map(|(_, k)| *k)
 }
 
-/// Parse a `prod.keys` / `title.keys` file: `name = hexdigits` lines, `#`
-/// comments, blank lines ignored. Duplicate keys overwrite.
+/// Parse `name = hex` lines; `#` comments and blank lines are ignored.
 pub fn parse_keys_file(text: &str) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -169,7 +120,6 @@ pub fn parse_keys_file(text: &str) -> Vec<(String, Vec<u8>)> {
         let Some(eq) = line.find('=') else { continue };
         let name = line[..eq].trim();
         let value = line[eq + 1..].trim();
-        // Allow "0x" prefixes and inline comments.
         let value = value.split(['#', ';']).next().unwrap_or("").trim();
         let value = value.strip_prefix("0x").unwrap_or(value);
         let value = value.replace([' ', '_', '-'], "");
@@ -194,7 +144,6 @@ pub fn parse_keys_file(text: &str) -> Vec<(String, Vec<u8>)> {
     out
 }
 
-/// Build a [`KeySet`] from parsed `prod.keys` entries.
 pub fn keyset_from_prod(entries: &[(String, Vec<u8>)]) -> KeySet {
     let mut ks = KeySet::default();
     for (name, val) in entries {
@@ -243,9 +192,6 @@ pub fn keyset_from_prod(entries: &[(String, Vec<u8>)]) -> KeySet {
     ks
 }
 
-/// Match `key_area_key_<application|ocean|system>_<XX>` or `titlekek_<XX>`
-/// and return the matching table slot and generation index, if `name` fits
-/// one of those shapes.
 fn key_area_table_and_generation<'a>(
     ks: &'a mut KeySet,
     name: &str,
@@ -270,11 +216,7 @@ fn key_area_table_and_generation<'a>(
     Some((table, gen))
 }
 
-/// Build a [`KeySet`] title-key list from parsed `title.keys` entries. Keys
-/// are either `titlekey_<rights_id> = hex` or `rights_id = hex` (16-byte),
-/// and each value is still `titlekek`-wrapped, the file stores a ticket's
-/// key block as-is. Assign the result to [`KeySet::title_keys`], which is
-/// where that wrapping is accounted for.
+/// Parse `title.keys` entries into (rights id, wrapped key) pairs.
 pub fn keyset_from_title(entries: &[(String, Vec<u8>)]) -> Vec<([u8; 16], [u8; 16])> {
     let mut out = Vec::new();
     for (name, val) in entries {
@@ -350,10 +292,8 @@ mod tests {
             Some([0x22u8; 16])
         );
         assert_eq!(ks.key_area_key(KeyAreaKind::System, 5), Some([0x33u8; 16]));
-        // Unset generations and the wrong kind both miss.
         assert_eq!(ks.key_area_key(KeyAreaKind::Application, 2), None);
         assert_eq!(ks.key_area_key(KeyAreaKind::System, 0), None);
-        // Out-of-range generation index doesn't panic.
         assert_eq!(ks.key_area_key(KeyAreaKind::Application, 0xff), None);
     }
 
@@ -366,7 +306,6 @@ mod tests {
         }
         ks.header_key = Some(direct);
         assert_eq!(ks.effective_header_key(), Some(direct));
-        // Without a direct key and without sources → None.
         let ks2 = KeySet::default();
         assert_eq!(ks2.effective_header_key(), None);
     }
@@ -384,9 +323,6 @@ mod tests {
         assert_eq!(tks, vec![(rights_id, key)]);
     }
 
-    /// A `title.keys` entry is the ticket's key block, still wrapped: using
-    /// it as-is is what made a real title fail its section hash check with a
-    /// perfectly good key file.
     #[test]
     fn unwraps_a_title_keys_entry_with_the_titlekek() {
         let rights_id = [0xaau8; 16];
@@ -396,15 +332,11 @@ mod tests {
         ks.titlekek[0x0d] = Some(kek);
         ks.title_keys = vec![(rights_id, crate::crypto::aes128_encrypt_block(&kek, &plain))];
         assert_eq!(ks.title_key(&rights_id, 0x0d), Some(plain));
-        // The stored form is not the usable key, and a generation with no
-        // titlekek can't produce one rather than producing the wrong one.
         assert_ne!(ks.wrapped_title_key(&rights_id), Some(plain));
         assert_eq!(ks.title_key(&rights_id, 0x0c), None);
         assert_eq!(ks.title_key(&[0xbbu8; 16], 0x0d), None);
     }
 
-    /// The ticket shipped with the content describes that content; a
-    /// `title.keys` entry for the same title is a guess from elsewhere.
     #[test]
     fn a_ticket_key_replaces_a_title_keys_entry() {
         let rights_id = [0xaau8; 16];
@@ -418,8 +350,6 @@ mod tests {
             crate::crypto::aes128_encrypt_block(&kek, &from_ticket),
         );
         assert_eq!(ks.title_key(&rights_id, 0x0d), Some(from_ticket));
-        // Recording the same title twice replaces it instead of stacking a
-        // second entry the first would shadow forever.
         ks.add_title_key(rights_id, [0x55u8; 16]);
         assert_eq!(ks.title_keys.len(), 1);
         assert_eq!(ks.wrapped_title_key(&rights_id), Some([0x55u8; 16]));

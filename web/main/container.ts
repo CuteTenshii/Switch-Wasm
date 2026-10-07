@@ -1,7 +1,4 @@
-/* NSP / NCA containers
-
-   Inspecting what a container holds, showing the title it describes, and
-   launching the program inside it. */
+// NSP / NCA / XCI containers: inspecting, showing the title, launching.
 
 import type { Bytes, ControlInfo, DlcEntry, NcaInfo, NspFile } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
@@ -15,21 +12,15 @@ import { noteBooted, recycleSession } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
 import { setRunning } from './title';
 
-/** What a launch puts on the loading screen. A title picked out of a container
- *  has its own name and icon; one launched from the NAND is a bare NCA with
- *  nothing but a file name to go on. */
+// What a launch puts on the loading screen.
 export interface LaunchIdentity {
   name: string;
-  /** Empty where the NACP names none. */
   publisher: string;
-  /** Sixteen hex digits, as the NACP-bearing Control NCA gives it. */
   titleId: string;
   iconUrl: string | null;
-  /** The icon behind that URL. The top bar outlives the URL - opening another
-   *  container revokes it - so it makes one of its own from these bytes. */
+  // Kept so the top bar can make its own URL after this one is revoked.
   icon: Blob | null;
-  /** What the NACP calls this version - "1.0.1", not "v65536". Empty where the
-   *  title left it unset, which plenty do. */
+  // The NACP display version ("1.0.1"); may be empty.
   version: string;
 }
 
@@ -51,13 +42,10 @@ $('nsp-file').addEventListener('change', (e) => {
   if (file) void handleContainerFile(file);
 });
 
-// A `.nca` is one piece of content rather than a container of them, so it is
-// opened as itself; a PFS0 or a cartridge image is looked inside.
 async function handleContainerFile(file: File): Promise<void> {
   const verdict = await classify(file, ['pfs0', 'xci', 'nca'], 'Drop it on the screen to boot it.');
   if (!verdict.ok) {
-    // Shown where an inspection result goes, and without clearing: an open
-    // container and its Launch buttons should not vanish over a bad drop.
+    // Without clearing: an open container should not vanish over a bad drop.
     $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
     $('nsp-result').appendChild(el('div', 'nca-info nca-inspect', verdict.why));
     log(verdict.why, 'err');
@@ -67,17 +55,12 @@ async function handleContainerFile(file: File): Promise<void> {
     await handleStandaloneNca(file);
     return;
   }
-  // An update NSP is not a container to open: it holds no game. Asking the
-  // session what it is costs its header and its ticket, and answers with the
-  // title it patches, so this is also how the page knows which game to pair
-  // it with.
+  // An update holds no game; inspecting it also names the title it patches.
   const patches = await call('add_update', file).catch(() => '');
   if (patches) {
     await handleUpdateFile(file, patches);
     return;
   }
-  // Add-on content is the other container that holds no game: data archives
-  // numbered against a title, with no program in them at all.
   const packs = await call('add_dlc', file).catch(() => 0);
   if (packs > 0) {
     await handleDlcFile(file, packs);
@@ -86,48 +69,27 @@ async function handleContainerFile(file: File): Promise<void> {
   await handleNspFile(file);
 }
 
-/* updates
-
-   An update holds only what it changed. Its Program NCA carries the patched
-   modules in full, and its RomFS is a set of ranges indexed against the base
-   game's, readable over that container and nowhere else. So an update is not
-   opened, it is *paired*: dropped before the game or after, it waits until
-   the title it belongs to is open and is then applied at Launch.
-
-   The pairing lives here rather than in the session because the session
-   refuses to launch a container whose update is for another title, and a
-   page holding one for a game that is not open must not make the game that
-   is open unlaunchable. */
-
-/** An update the page is holding for a title, whether or not it is open. */
+// Updates and add-on content are paired with their title rather than opened.
 interface HeldUpdate {
   file: File;
   titleId: string;
-  /** The update's own version, from its NACP - "1.0.1", not "v65536". */
   version: string;
 }
 
 let heldUpdate: HeldUpdate | null = null;
 
-/** One container of add-on content the page is holding. */
 interface HeldDlc {
   file: File;
-  /** The base title its content is numbered against. */
   titleId: string;
-  /** The indices the title will know its pieces by. */
   indices: number[];
 }
 
 let heldDlc: HeldDlc[] = [];
 
-// The title the open container describes, which is what an update is paired
-// against. Empty until its Control NCA has been read.
+// Empty until the open container's Control NCA has been read.
 let openTitleId = '';
 
-// What each title was last launched patched with. A browser will not hand a
-// page a file it was not asked for, so the update itself is gone on reload -
-// but which one it was is worth keeping, so a title that has been patched
-// before says so instead of quietly launching unpatched.
+// What each title was last launched with; the files themselves do not survive a reload.
 const UPDATE_MEMORY = 'switch-wasm:updates';
 const DLC_MEMORY = 'switch-wasm:dlc';
 
@@ -147,7 +109,7 @@ function rememberUpdate(u: HeldUpdate): void {
   try {
     localStorage.setItem(UPDATE_MEMORY, JSON.stringify(all));
   } catch {
-    // A full or blocked store costs the page nothing it needs this session.
+    // A full or blocked store only loses the reminder.
   }
 }
 
@@ -167,16 +129,13 @@ function rememberDlc(titleId: string, name: string): void {
   try {
     localStorage.setItem(DLC_MEMORY, JSON.stringify(all));
   } catch {
-    // A full or blocked store costs the page nothing it needs this session.
+    // A full or blocked store only loses the reminder.
   }
 }
 
 async function handleDlcFile(file: File, packs: number): Promise<void> {
   const entries = JSON.parse(await call('dlc_json').catch(() => '[]')) as DlcEntry[];
-  // The session holds every piece ever added; this container's are the ones
-  // that were not there before, which is what `add_dlc` just returned a count
-  // of. Taking them from the tail keeps the page's list and the session's in
-  // step without a second identifier.
+  // This container's pieces are the newest ones the session holds.
   const mine = entries.slice(-packs);
   const titleId = mine[0]?.title_id ?? '';
   heldDlc = heldDlc.filter((held) => held.file.name !== file.name);
@@ -210,15 +169,8 @@ function describeUpdate(u: HeldUpdate | RememberedUpdate & { file?: File }): str
   return version || name;
 }
 
-/* Hand the paired content to the session only while it belongs to the title
-   that is open. Re-run whenever either half changes: a new container, a new
-   update or DLC, or a session reset that lost all of it.
-
-   The update is gated here because the session refuses to launch a container
-   whose update is for another title. Add-on content is not: a title mounts
-   what is numbered against it and reports the rest, so handing it over early
-   costs nothing and means a piece added before its game is there when the
-   game arrives. */
+// The session refuses an update for another title, so it is handed over only
+// while its title is open. Add-on content is always handed over.
 async function syncPaired(): Promise<void> {
   if (heldUpdate && heldUpdate.titleId === openTitleId) {
     await call('add_update', heldUpdate.file).catch(() => '');
@@ -232,10 +184,7 @@ async function syncPaired(): Promise<void> {
   showPairedNotes();
 }
 
-/* What is paired with the open title, as lines under its card: an update, its
-   add-on content, and whatever the page remembers it last ran with. Rendered
-   under the card rather than inside it, so that opening another container -
-   which rebuilds the card - cannot leave a stale one behind. */
+// Rendered under the card, not inside it, so rebuilding the card clears them.
 function showPairedNotes(): void {
   $('nsp-result').querySelectorAll('.paired-note').forEach((node) => node.remove());
   let after: Element | null = $('nsp-result').querySelector('.title-card');
@@ -283,19 +232,7 @@ function pairedNotes(): string[] {
   return lines;
 }
 
-/* booting a container from the stage
-
-   The panel's flow is "look inside this, and maybe launch something out of
-   it"; the stage's is "play this". Both open the container the same way and
-   fill the same panel - what this adds is finding the title's own Program
-   NCA, which someone would otherwise do by clicking down the file list
-   looking for the one whose content type says Program. Every file in an NSP
-   is named after its own hash, so the content type is the only thing that
-   distinguishes it.
-
-   A cartridge image goes through here as an NSP does: the wasm side flattens
-   its partitions into one file table, so nothing on this side has to know
-   which of the two it opened. */
+// Boot from the stage: open the container and launch its Program NCA.
 export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'): Promise<void> {
   setState('loading');
   beginLoad(file.name, 'opening the container (' + fmtSize(file.size) + ')');
@@ -304,16 +241,10 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     if (!info) {
       setState('fault');
       failLoad('Could not read ' + file.name + '. The Files panel has its header.');
-      // The reason is a line of the panel's own output - an encrypted header
-      // with no prod.keys loaded, most often - so open it on the way past
-      // rather than describing where to go and looking.
+      // The reason is in the panel's output, so open it.
       openPanel('files');
       return;
     }
-    // A Control or Meta NCA is a perfectly readable file with nothing
-    // executable in it, and the panel has just shown what it does hold - so
-    // say what is missing rather than letting the launch fail on an absent
-    // ExeFS.
     if (info.content_type !== 'Program') {
       const why = file.name + ' is a ' + info.content_type
         + ' NCA - only a Program NCA holds an executable.';
@@ -325,9 +256,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     await launchStandaloneNca(file);
     return;
   }
-  // Dropped on the stage, an update or a pack of add-on content means the
-  // same thing it means in the panel: pair it with the game and launch that.
-  // There is nothing in either to boot on its own.
+  // An update or add-on content means: pair it with the game and launch that.
   const patches = await call('add_update', file).catch(() => '');
   if (patches) {
     await handleUpdateFile(file, patches);
@@ -352,9 +281,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     return;
   }
   await handleNspFile(file);
-  // If the open failed, the panel and the log have already said why, and
-  // `openContainer` is still whatever was open before this - so identity, not
-  // nullness, is what tells the two apart.
+  // A failed open leaves `openContainer` unchanged, so compare by identity.
   if (openContainer?.file !== file) {
     setState('fault');
     failLoad('Could not open ' + file.name + '. The Files panel has the details.');
@@ -373,19 +300,11 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
   await launchNca(nspFiles[index], index);
 }
 
-// The container the wasm side has open, kept so a new session can be handed
-// the same one. Only the File is held here; nothing is read from it.
 let openContainer: { file: File; kind: 'nsp' | 'nca' } | null = null;
 
-// The open container's file table, so booting one can name the NCA it picked
-// without asking for the table a second time.
 let nspFiles: NspFile[] = [];
 
-// Give a fresh session the container the page is still showing. Reset means
-// "run this again from the top", not "throw away the file I just picked" --
-// the NSP/NCA card and its Launch button survive a reset either way, and a
-// Launch that then reports "no container is open" is the page lying about its
-// own state.
+// Give a fresh session the container the page is still showing.
 export async function reopenContainer(): Promise<void> {
   if (!openContainer) return;
   const { file, kind } = openContainer;
@@ -396,19 +315,12 @@ export async function reopenContainer(): Promise<void> {
     clearNsp();
     return;
   }
-  // A fresh session has none of this either, and the page is still showing it.
   await syncPaired();
 }
 
-// The File itself is handed to the worker, not its bytes: a retail container
-// is larger than anything the emulator can hold - larger, for a modern title,
-// than a wasm32 module can address at all - so it stays on disk and is read a
-// range at a time. Only its PFS0 header is touched here.
+// The File goes to the worker, which reads ranges from it; only its header is read.
 async function handleNspFile(file: File): Promise<void> {
   clearNsp();
-  // Opening a container is the panel's work, not the stage's, so it reports
-  // itself here rather than behind a loading screen over a screen that may
-  // still be running something.
   setNote('container-badge', 'opening ' + file.name, false);
   const status = el('div', 'nca-info', 'Reading the container header \u2026');
   $('nsp-result').appendChild(status);
@@ -439,8 +351,6 @@ async function handleNspFile(file: File): Promise<void> {
     const li = el('li');
     li.appendChild(el('span', 'name', f.name));
     li.appendChild(el('span', 'size', fmtSize(f.size)));
-    // Only an NCA has a header worth reading, so only those rows say - by
-    // lighting up under the pointer - that clicking them does anything.
     if (/\.nca$/i.test(f.name)) {
       li.classList.add('clickable');
       li.addEventListener('click', () => inspectNca(f, index));
@@ -448,9 +358,6 @@ async function handleNspFile(file: File): Promise<void> {
     ul.appendChild(li);
   });
   $('nsp-result').appendChild(ul);
-  // Reading the Control NCA means decrypting a section and mounting its RomFS
-  // to pull an icon out of it, which is the slowest part of opening a
-  // container and the one that used to pass in silence.
   setNote('container-badge', 'reading title details\u2026', false);
   await showTitleCard(() => call('load_control_from_nsp'));
   setNote('container-badge', file.name, true);
@@ -460,17 +367,12 @@ export function clearNsp(): void {
   $('nsp-result').textContent = '';
   setNote('container-badge', 'none open', false);
   nspFiles = [];
-  // The held update outlives the container: dropping a game while holding its
-  // update is the normal way round. What does not outlive it is the pairing,
-  // which the next title card re-establishes.
+  // The held update outlives the container; the pairing does not.
   openTitleId = '';
   holdTitle(null, null);
 }
 
-/* The title the open container describes, kept so that launching it can show
-   its own name and icon rather than an NCA file name. Exactly one icon URL is
-   alive at a time: replacing the identity revokes the last one, which is what
-   the card's revoke-on-load did before the URL had a second reader. */
+// Exactly one icon URL is alive at a time; replacing the identity revokes it.
 let heldTitle: LaunchIdentity | null = null;
 
 function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity | null {
@@ -491,17 +393,8 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
   return heldTitle;
 }
 
-/* title details
-
-   What a console's home menu shows for a title - its icon, name and publisher
-   - plus the rest of what its NACP declares, read from the Control NCA that
-   ships alongside the Program NCA in every container.
-
-   Needs prod.keys, and not just for the RomFS: an NCA's content type lives in
-   its encrypted header, so without the header key the Control NCA can't even
-   be picked out of the container. A container that has none is unremarkable
-   (an update or DLC package may ship without one), so this is a dim note
-   rather than an error. */
+// Title card: icon, name, publisher and NACP details from the Control NCA.
+// Needs prod.keys, since the content type is in the encrypted header.
 async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo | null> {
   let info: ControlInfo;
   try {
@@ -519,8 +412,6 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
   const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);
   log('Title: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'ok');
-  // Which title is open is what an update is paired against, and the Control
-  // NCA is where the page learns it.
   openTitleId = info.title_id;
   await syncPaired();
   return info;
@@ -531,8 +422,7 @@ function renderTitleCard(info: ControlInfo, iconUrl: string | null): HTMLElement
   if (iconUrl) {
     const img = el('img', 'title-icon');
     img.alt = info.name;
-    // The URL belongs to `heldTitle`, which the loading screen reads too and
-    // which revokes it when the next container replaces it.
+    // The URL belongs to `heldTitle`, which revokes it.
     img.src = iconUrl;
     card.appendChild(img);
   }
@@ -552,8 +442,6 @@ function renderTitleCard(info: ControlInfo, iconUrl: string | null): HTMLElement
   return card;
 }
 
-/* The NACP fields worth showing, skipping the ones this title left unset -
-   most titles set only a handful, and a column of zeroes says nothing. */
 function titleRows(info: ControlInfo): [string, string][] {
   const rows: [string, string][] = [];
   const push = (k: string, v: string | undefined) => {
@@ -578,9 +466,6 @@ function titleRows(info: ControlInfo): [string, string][] {
   return rows;
 }
 
-/* The three save-data areas a title can reserve, each with a journal on top
-   of it. Written as "user 16 MiB (+2 MiB journal)" so the journal doesn't
-   read as a fourth, separate allocation. */
 function saveDataSummary(info: ControlInfo): string {
   const part = (label: string, size = 0, journal = 0) => {
     if (!size && !journal) return null;
@@ -604,17 +489,12 @@ function appendRows(out: HTMLElement, rows: [string, string][]): void {
 }
 
 async function inspectNca(f: NspFile, index: number): Promise<void> {
-  // Replace any previous inspection result instead of stacking them up. Matched
-  // on `.nca-inspect`, not on `.nca-info`: the title card renders its NACP rows
-  // in an `.nca-info` block of its own, and clearing by that class took the
-  // card's details down with the inspection above it.
+  // Matched on `.nca-inspect`: the title card has an `.nca-info` block too.
   $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
   const out = el('div', 'nca-info nca-inspect', 'Parsing ' + f.name + ' ...');
   $('nsp-result').appendChild(out);
 
-  // 0xC00 covers the base header plus all 4 per-section FS headers (needed
-  // for an accurate fs_type in the display below) - still tiny next to the
-  // (possibly hundreds-of-MB) payload, so no need to copy the whole file.
+  // 0xC00 covers the base header and all four FS headers.
   const headerLen = Math.min(f.size, 0xC00);
   let header: Bytes;
   try {
@@ -626,10 +506,7 @@ async function inspectNca(f: NspFile, index: number): Promise<void> {
   await parseAndRenderNca(out, header, () => launchNca(f, index));
 }
 
-// Drop/browse a standalone .nca (not inside an NSP): same inspect-then-Launch
-// flow, with the NCA itself as the open container instead of a file inside
-// one. Opening it is what lets Launch - and the Control NCA card below - read
-// from it later.
+// Drop/browse a standalone .nca, which becomes the open container.
 async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   clearNsp();
   setNote('container-badge', 'opening ' + file.name, false);
@@ -647,8 +524,6 @@ async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   const headerLen = Math.min(file.size, 0xC00);
   const header = new Uint8Array(await file.slice(0, headerLen).arrayBuffer());
   const info = await parseAndRenderNca(out, header, () => launchStandaloneNca(file));
-  // A standalone Control NCA is nothing but the title's icon and metadata, so
-  // the same card the container path shows is the whole point of opening one.
   if (info && info.content_type === 'Control') {
     setNote('container-badge', 'reading title details\u2026', false);
     await showTitleCard(() => call('load_control_from_nca'));
@@ -670,9 +545,7 @@ async function parseAndRenderNca(
     return null;
   }
   if (info.error) {
-    // A CDN NCA stores its header encrypted with the header key, so the NCA3
-    // magic at 0x200 is invisible until it's decrypted - surface that clearly
-    // instead of a bare "bad magic", and point at the keys files.
+    // A CDN NCA's header is encrypted, so the magic is hidden without keys.
     out.textContent = /bad magic/.test(info.error)
       ? 'NCA header is encrypted - load prod.keys to decrypt and inspect. (' + info.error + ')'
       : 'NCA: ' + info.error;
@@ -690,8 +563,6 @@ async function parseAndRenderNca(
   ];
   appendRows(out, rows);
   if (info.content_type === 'Program') {
-    // Below a rule rather than trailing the last field: launching is an action
-    // taken on the header above it, not one more line of it.
     const actions = el('div', 'nca-actions');
     const btn = el('button', 'btn small primary', 'Launch');
     btn.addEventListener('click', onLaunch);
@@ -701,20 +572,15 @@ async function parseAndRenderNca(
   return info;
 }
 
-// Decrypts NSP file `index` as a Program NCA and boots its ExeFS `main`
-// executable.
+// Boot NSP file `index` as a Program NCA.
 function launchNca(f: NspFile, index: number): Promise<void> {
-  // Said by the page rather than left to the core's own diagnostics: booting
-  // clears the trace buffer those go to, and which version is about to run is
-  // the one thing a launch should not be silent about.
+  // The core's trace buffer is cleared by booting, so the page reports the version.
   const notes = [];
   let identity = heldTitle;
   if (heldUpdate && heldUpdate.titleId === openTitleId) {
     notes.push('Update ' + describeUpdate(heldUpdate)
       + ' applied: its modules, over the base game\'s data.');
-    // What runs is the update's build, so that is the version to report - the
-    // base game's own is what the container said, and it is about to be
-    // patched out from under it.
+    // The update's version is what runs.
     if (identity && heldUpdate.version) identity = { ...identity, version: heldUpdate.version };
   }
   const packs = heldDlc
@@ -725,14 +591,12 @@ function launchNca(f: NspFile, index: number): Promise<void> {
     notes.join(' '));
 }
 
-// Same as `launchNca`, but for a standalone .nca file: it is already the open
-// container, so there is nothing to read here that booting won't read itself.
+// Same as `launchNca`, for a standalone .nca that is already the open container.
 function launchStandaloneNca(file: File): Promise<void> {
   return doLaunchNca(file.name, () => call('load_nca'), heldTitle);
 }
 
-/** What a launch is of, as the log's first line: the title and who made it,
- *  its id and version where the container named them, and the file. */
+// The log's first line: title, publisher, id, version and file.
 function describeLaunch(file: string, identity?: LaunchIdentity | null): string {
   if (!identity) return 'Launching ' + file;
   const parts = [identity.name + (identity.publisher ? ' by ' + identity.publisher : '')];
@@ -750,24 +614,14 @@ export async function doLaunchNca(
   note?: string,
 ): Promise<void> {
   clearConsole();
-  // After the clear, or the launch would wipe the lines that say what it is.
-  // A log gets passed around on its own, so it opens by naming the game,
-  // which was otherwise only said when the container was opened, and the
-  // clear took that with it.
+  // After the clear, so the log opens by naming the game.
   log(describeLaunch(name, identity), 'ok');
   if (note) log(note, 'ok');
   setState('loading');
-  // The session below is about to be thrown away, so the bar stops naming what
-  // was in it now rather than when the replacement succeeds.
   setRunning(null);
-  // A title the container named puts that name and its own icon on the screen;
-  // a bare NCA off the NAND has only the file name to show.
   beginLoad(identity?.name || name, 'decrypting the program and reading its ExeFS',
     identity?.iconUrl);
-  // A launch replaces whatever is running, so it gets a console of its own,
-  // and unlike a boot from the stage it needs the container back, since that
-  // is what it is about to read the title out of. A no-op when the boot that
-  // reached here rebuilt the session already.
+  // Rebuild the session with the container still open; a no-op if the boot already did.
   try {
     await recycleSession({ reopen: reopenContainer });
   } catch (err) {

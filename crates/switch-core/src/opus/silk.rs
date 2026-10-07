@@ -1,23 +1,7 @@
-//! The SILK layer: the linear-prediction half of Opus, and all of a
-//! speech-rate packet.
-//!
-//! SILK models the signal the way a vocal tract makes it. A short-term LPC
-//! filter stands for the resonances of the mouth, a long-term predictor
-//! stands for the pitch, and what is left (the excitation) is what actually
-//! gets coded, as pulses. Synthesis runs that backwards: pulses, through the
-//! pitch predictor, through the LPC filter, scaled by a per-subframe gain.
-//!
-//! **This layer is integer arithmetic throughout, and that is not an
-//! optimisation.** SILK's decoder is specified in fixed point: the filter
-//! coefficients come out of a codebook through a chain of Q-format
-//! multiplications, and a decoder that used floats would produce a slightly
-//! different filter, which the next frame then predicts from. So every
-//! multiply here is the reference's multiply, in its Q domain, rounding the
-//! way it rounds.
-//!
-//! Internally SILK runs at 8, 12 or 16 kHz and is resampled to whatever the
-//! caller asked for on the way out; in hybrid mode CELT carries everything
-//! above 8 kHz and the two are summed.
+//! The SILK layer of Opus: LPC and long-term pitch prediction driven by coded
+//! pulses, at an internal 8, 12 or 16 kHz resampled to the output rate.
+//! Integer arithmetic throughout, matching the reference's fixed-point
+//! rounding bit for bit, since each frame predicts from the last.
 
 use super::range::RangeDecoder;
 use super::tables_silk::*;
@@ -58,8 +42,7 @@ const MAX_PITCH_LAG_MS: i32 = 18;
 const LOG2_INV_LPC_GAIN_HIGH_THRES: i32 = 3;
 const LOG2_INV_LPC_GAIN_LOW_THRES: i32 = 8;
 const PITCH_DRIFT_FAC_Q16: i32 = 655;
-/// `0.99` in Q16, the bandwidth expansion concealment applies to the last
-/// good filter, so a repeated frame loses resonance rather than ringing.
+/// `0.99` in Q16, the bandwidth expansion concealment applies to the last good filter.
 const BWE_COEF_Q16: i32 = 64881;
 const PE_MAX_LAG_MS: i32 = 18;
 const PE_MIN_LAG_MS: i32 = 2;
@@ -67,8 +50,8 @@ const PE_MIN_LAG_MS: i32 = 2;
 const TYPE_NO_VOICE_ACTIVITY: i32 = 0;
 const TYPE_VOICED: i32 = 2;
 
-/// How the first gain and the LTP scaling of a frame are coded, which depends
-/// on whether the frame before it is available to predict from.
+/// How a frame's first gain and LTP scaling are coded, depending on whether
+/// the previous frame is available to predict from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CondCoding {
     Independently,
@@ -85,9 +68,7 @@ enum LostFlag {
     DecodeLbrr,
 }
 
-// The fixed-point primitives. Each is the reference macro of the same name;
-// the Q domain of every intermediate below depends on these rounding exactly
-// as written.
+// Fixed-point primitives, each the reference macro of the same name.
 /// `(a * (i16)b) >> 16`.
 fn smulwb(a: i32, b: i32) -> i32 {
     ((i64::from(a) * i64::from(b as i16)) >> 16) as i32
@@ -170,8 +151,7 @@ fn clz32(x: i32) -> i32 {
     }
 }
 
-/// The linear congruential generator SILK seeds its excitation sign and its
-/// concealment noise from. Its exact sequence is part of the bitstream.
+/// SILK's LCG for excitation signs and concealment noise; part of the bitstream.
 fn silk_rand(seed: i32) -> i32 {
     907633515i32.wrapping_add(seed.wrapping_mul(196314165))
 }
@@ -179,9 +159,7 @@ fn silk_rand(seed: i32) -> i32 {
 /// Leading zeros, and the seven bits just below the leading one.
 fn clz_frac(x: i32) -> (i32, i32) {
     let lzeros = clz32(x);
-    // A rotate, not a shift: the reference's `silk_ROR32` takes a negative
-    // count as a rotate the other way, which is what happens for a value
-    // with more than 24 leading zeros.
+    // A rotate, as `silk_ROR32` does for more than 24 leading zeros.
     let rot = ((24 - lzeros) as u32) & 31;
     (lzeros, ((x as u32).rotate_right(rot) as i32) & 0x7f)
 }
@@ -205,8 +183,7 @@ fn div32_varq(a32: i32, b32: i32, qres: u32) -> i32 {
     let b32_nrm = b32 << b_headrm;
     let b32_inv = (i32::MAX >> 2) / (b32_nrm >> 16);
     let mut result = smulwb(a32_nrm, b32_inv);
-    // The residual is deliberately allowed to wrap: what is left of it after
-    // the refinement is always small.
+    // The residual may wrap; it is small after refinement.
     a32_nrm = a32_nrm.wrapping_sub(((smmul(b32_nrm, result) as u32) << 3) as i32);
     result = smlawb(result, a32_nrm, b32_inv);
     let lshift = 29 + a_headrm - b_headrm - qres as i32;
@@ -255,8 +232,7 @@ fn log2lin(in_log_q7: i32) -> i32 {
     out
 }
 
-/// Sum of squares, shifted right just far enough to keep two bits of
-/// headroom, with the shift reported alongside.
+/// Sum of squares, shifted right to keep two bits of headroom; returns the shift too.
 fn sum_sqr_shift(x: &[i16]) -> (i32, u32) {
     let len = x.len() as i32;
     let mut shft = (31 - clz32(len)) as u32;
@@ -280,9 +256,7 @@ fn sum_sqr_shift(x: &[i16]) -> (i32, u32) {
     (nrg, shft)
 }
 
-/// One of the two NLSF codebooks, narrow/medium band at order 10, wideband
-/// at order 16: gathered so the decoder can hold a reference to whichever
-/// the current bandwidth selects.
+/// One of the two NLSF codebooks: order 10 (narrow/medium band) or 16 (wideband).
 struct NlsfCodebook {
     n_vectors: usize,
     order: usize,
@@ -339,8 +313,7 @@ fn ltp_gain_icdf(index: usize) -> &'static [u8] {
     }
 }
 
-/// Everything the entropy decoder reads out of one frame's side information,
-/// before any of it is turned into filters.
+/// One frame's side information as read from the entropy decoder.
 #[derive(Clone, Copy)]
 struct Indices {
     gains: [i8; MAX_NB_SUBFR],
@@ -374,11 +347,10 @@ impl Default for Indices {
     }
 }
 
-/// What one frame's side information becomes: the filters and gains the
-/// synthesis actually runs.
+/// The filters and gains synthesis runs for one frame.
 struct FrameControl {
-    /// Two LPC filters: the first half of the frame may interpolate towards
-    /// the second, which is what `nlsf_interp_coef_q2` selects.
+    /// Two LPC filters; `nlsf_interp_coef_q2` selects how the first half
+    /// interpolates towards the second.
     pred_coef_q12: [[i16; MAX_LPC_ORDER]; 2],
     ltp_coef_q14: [i16; LTP_ORDER * MAX_NB_SUBFR],
     ltp_scale_q14: i32,
@@ -398,11 +370,8 @@ impl Default for FrameControl {
     }
 }
 
-/// Comfort noise: what a decoder plays where the encoder sent nothing.
-///
-/// Digital silence between talk spurts is heard as the line going dead, so
-/// the decoder keeps a smoothed spectrum and gain of the background and
-/// synthesises noise with it.
+/// Comfort noise: a smoothed background spectrum and gain to synthesise
+/// noise from where the encoder sent nothing.
 struct CngState {
     exc_buf_q14: [i32; MAX_FRAME_LENGTH],
     smth_nlsf_q15: [i16; MAX_LPC_ORDER],
@@ -443,8 +412,7 @@ struct PlcState {
     pitch_l_q8: i32,
 }
 
-/// Which entropy table and which backward predictor each NLSF coefficient
-/// uses, both packed into one byte per pair by the first-stage index.
+/// Entropy table and backward predictor per NLSF coefficient, packed per pair.
 fn nlsf_unpack(
     cb: &NlsfCodebook,
     cb1_index: usize,
@@ -462,8 +430,8 @@ fn nlsf_unpack(
     (ec_ix, pred_q8)
 }
 
-/// The second-stage residual, dequantised backwards so each coefficient's
-/// predictor sees the one above it.
+/// The second-stage residual, dequantised backwards so each predictor sees
+/// the coefficient above it.
 fn nlsf_residual_dequant(
     x_q10: &mut [i16],
     indices: &[i8],
@@ -487,9 +455,7 @@ fn nlsf_residual_dequant(
 }
 
 /// Pull the NLSFs apart until every pair is at least its minimum distance
-/// apart. Two line spectral frequencies that cross produce an unstable
-/// filter, and the coded values are only guaranteed to be ordered before
-/// quantisation.
+/// apart; crossing frequencies give an unstable filter.
 fn nlsf_stabilize(nlsf_q15: &mut [i16], ndelta_min_q15: &[i16], l: usize) {
     const MAX_LOOPS: usize = 20;
     let mut loops = 0;
@@ -517,8 +483,7 @@ fn nlsf_stabilize(nlsf_q15: &mut [i16], ndelta_min_q15: &[i16], l: usize) {
         } else if idx == l {
             nlsf_q15[l - 1] = ((1 << 15) - i32::from(ndelta_min_q15[l])) as i16;
         } else {
-            // Move the offending pair apart, keeping the centre frequency
-            // where it was and inside the room the neighbours leave.
+            // Move the pair apart around its centre, within the neighbours' room.
             let mut min_center_q15 = 0i32;
             for k in 0..idx {
                 min_center_q15 += i32::from(ndelta_min_q15[k]);
@@ -536,8 +501,7 @@ fn nlsf_stabilize(nlsf_q15: &mut [i16], ndelta_min_q15: &[i16], l: usize) {
         }
         loops += 1;
     }
-    // A stream corrupt enough to defeat the loop above gets the blunt fix:
-    // sort, then force the minimum spacing from both ends.
+    // Fallback for corrupt streams: sort, then force the spacing from both ends.
     nlsf_q15[..l].sort_unstable();
     nlsf_q15[0] = nlsf_q15[0].max(ndelta_min_q15[0]);
     for i in 1..l {
@@ -549,8 +513,7 @@ fn nlsf_stabilize(nlsf_q15: &mut [i16], ndelta_min_q15: &[i16], l: usize) {
     }
 }
 
-/// Turn the coded codebook path back into a normalised line spectral
-/// frequency vector.
+/// Turn the coded codebook path back into a normalised NLSF vector.
 fn nlsf_decode(nlsf_q15: &mut [i16], indices: &[i8], cb: &NlsfCodebook) {
     let cb1 = indices[0] as usize;
     let (_, pred_q8) = nlsf_unpack(cb, cb1);
@@ -566,8 +529,7 @@ fn nlsf_decode(nlsf_q15: &mut [i16], indices: &[i8], cb: &NlsfCodebook) {
     let element = &cb.cb1_nlsf_q8[cb1 * cb.order..];
     let wght = &cb.cb1_wght_q9[cb1 * cb.order..];
     for i in 0..cb.order {
-        // The first-stage weights are inverse square-rooted, so the residual
-        // is divided by them rather than multiplied.
+        // The first-stage weights are inverse square roots, so divide.
         let tmp =
             ((i32::from(res_q10[i]) << 14) / i32::from(wght[i])) + (i32::from(element[i]) << 7);
         nlsf_q15[i] = tmp.clamp(0, 32767) as i16;
@@ -578,8 +540,8 @@ fn nlsf_decode(nlsf_q15: &mut [i16], indices: &[i8], cb: &NlsfCodebook) {
 /// The Q domain the NLSF-to-LPC conversion works in.
 const NLSF2A_QA: u32 = 16;
 
-/// Build one of the two symmetric polynomials whose roots are the line
-/// spectral frequencies, by convolving in one root pair at a time.
+/// Build one of the two symmetric polynomials whose roots are the LSFs, one
+/// root pair at a time.
 fn nlsf2a_find_poly(out: &mut [i64], c_lsf_qa: &[i32], dd: usize) {
     out[0] = 1i64 << NLSF2A_QA;
     out[1] = -i64::from(c_lsf_qa[0]);
@@ -593,8 +555,7 @@ fn nlsf2a_find_poly(out: &mut [i64], c_lsf_qa: &[i32], dd: usize) {
     }
 }
 
-/// Clamp a set of LPC coefficients into 16 bits, applying bandwidth
-/// expansion rather than clipping while any of them is too large.
+/// Clamp LPC coefficients into 16 bits, by bandwidth expansion rather than clipping.
 fn lpc_fit(a_qout: &mut [i16], a_qin: &mut [i32], qout: u32, qin: u32, d: usize) {
     let mut i = 0;
     while i < 10 {
@@ -633,8 +594,7 @@ fn lpc_fit(a_qout: &mut [i16], a_qin: &mut [i32], qout: u32, qin: u32, d: usize)
 fn bwexpander(ar: &mut [i16], d: usize, mut chirp_q16: i32) {
     let chirp_minus_one_q16 = chirp_q16 - 65536;
     for i in 0..d - 1 {
-        // Not `smulwb` here: its bias would accumulate into an unstable
-        // filter over the repeated expansions concealment does.
+        // Not `smulwb`: its bias accumulates into instability over repeated expansions.
         ar[i] = rshift_round(chirp_q16.wrapping_mul(i32::from(ar[i])), 16) as i16;
         chirp_q16 += rshift_round(chirp_q16.wrapping_mul(chirp_minus_one_q16), 16);
     }
@@ -653,11 +613,8 @@ fn bwexpander_32(ar: &mut [i32], d: usize, mut chirp_q16: i32) {
 /// The Q domain the stability check works in.
 const INV_GAIN_QA: u32 = 24;
 
-/// One over the prediction gain, in Q30, or zero if the filter is unstable.
-///
-/// This is a Levinson recursion run backwards: it recovers the reflection
-/// coefficients, and a filter is stable exactly when all of them are inside
-/// the unit circle.
+/// One over the prediction gain, in Q30, or zero if the filter is unstable
+/// (a backwards Levinson recursion checking every reflection coefficient).
 fn lpc_inverse_pred_gain_qa(a_qa: &mut [i32], order: usize) -> i32 {
     const A_LIMIT_QA: i32 = 16773022; // 0.99975 in Q24
     let mut inv_gain_q30 = 1i32 << 30;
@@ -669,8 +626,7 @@ fn lpc_inverse_pred_gain_qa(a_qa: &mut [i32], order: usize) -> i32 {
         let rc_q31 = -(a_qa[k] << (31 - INV_GAIN_QA));
         let rc_mult1_q30 = (1i32 << 30).wrapping_sub(smmul(rc_q31, rc_q31));
         inv_gain_q30 = smmul(inv_gain_q30, rc_mult1_q30) << 2;
-        // 40 dB of prediction gain is past anything a real filter needs, and
-        // a stream claiming more is corrupt.
+        // More than 40 dB of prediction gain means a corrupt stream.
         if inv_gain_q30 < 107374 {
             return 0;
         }
@@ -723,20 +679,16 @@ fn lpc_inverse_pred_gain(a_q12: &[i16], order: usize) -> i32 {
         dc_resp += i32::from(a_q12[k]);
         atmp_qa[k] = i32::from(a_q12[k]) << (INV_GAIN_QA - 12);
     }
-    // A filter whose DC response says it has a pole at zero frequency cannot
-    // be stable, and the full recursion need not be run to find out.
+    // A pole at DC means unstable, without running the full recursion.
     if dc_resp >= 4096 {
         return 0;
     }
     lpc_inverse_pred_gain_qa(&mut atmp_qa, order)
 }
 
-/// Convert normalised line spectral frequencies into the LPC filter they
-/// describe.
+/// Convert normalised LSFs into the LPC filter they describe.
 fn nlsf2a(a_q12: &mut [i16], nlsf: &[i16], d: usize) {
-    // This ordering is not cosmetic: it keeps the intermediate polynomial
-    // coefficients small, which is what makes the fixed-point convolution
-    // above accurate enough.
+    // This ordering keeps intermediate coefficients small enough for fixed point.
     const ORDERING16: [usize; 16] = [0, 15, 8, 7, 4, 11, 12, 3, 2, 13, 10, 5, 6, 9, 14, 1];
     const ORDERING10: [usize; 10] = [0, 9, 6, 3, 4, 5, 8, 1, 2, 7];
     let ordering: &[usize] = if d == 16 { &ORDERING16 } else { &ORDERING10 };
@@ -767,8 +719,7 @@ fn nlsf2a(a_q12: &mut [i16], nlsf: &[i16], d: usize) {
 
     lpc_fit(a_q12, &mut a32_qa1, 12, NLSF2A_QA + 1, d);
 
-    // If the result is unstable, expand its bandwidth until it is not. A
-    // stable filter is a hard requirement: the synthesis below is an IIR.
+    // Expand the bandwidth until stable: the synthesis is an IIR.
     let mut i = 0;
     while lpc_inverse_pred_gain(a_q12, d) == 0 && i < 16 {
         bwexpander_32(&mut a32_qa1, d, 65536 - (2 << i));
@@ -779,11 +730,8 @@ fn nlsf2a(a_q12: &mut [i16], nlsf: &[i16], d: usize) {
     }
 }
 
-/// Turn the coded gain indices back into linear per-subframe gains.
-///
-/// The first gain of a frame is either absolute or a delta from the previous
-/// frame's last; the rest are always deltas, with a coarser step once they
-/// run past the top of the table.
+/// Turn the coded gain indices back into linear per-subframe gains. The first
+/// is absolute or a delta from the previous frame; the rest are deltas.
 fn gains_dequant(
     gain_q16: &mut [i32],
     ind: &[i8],
@@ -793,8 +741,7 @@ fn gains_dequant(
 ) {
     for k in 0..nb_subfr {
         if k == 0 && !conditional {
-            // A gain may not fall more than 16 steps, about 21.8 dB, in one
-            // jump: that would be a click, not a fade.
+            // A gain may not fall more than 16 steps (about 21.8 dB) at once.
             *prev_ind = i8::max(ind[k], prev_ind.saturating_sub(16));
         } else {
             let ind_tmp = i32::from(ind[k]) + MIN_DELTA_GAIN_QUANT;
@@ -852,8 +799,7 @@ fn decode_split(dec: &mut RangeDecoder, p: i32, table: &[u8]) -> (i32, i32) {
     }
 }
 
-/// Distribute one block's pulse count over its sixteen positions, splitting
-/// in half four times.
+/// Distribute one block's pulse count over its sixteen positions by halving four times.
 fn shell_decoder(pulses0: &mut [i16], dec: &mut RangeDecoder, pulses4: i32) {
     let mut pulses3 = [0i32; 2];
     let mut pulses2 = [0i32; 4];
@@ -879,9 +825,8 @@ fn shell_decoder(pulses0: &mut [i16], dec: &mut RangeDecoder, pulses4: i32) {
     }
 }
 
-/// Attach a sign to every non-zero pulse. The sign's probability depends on
-/// how many pulses the block holds, because a dense block is more likely to
-/// be noise than a sparse one.
+/// Attach a sign to every non-zero pulse; the probability depends on the
+/// block's pulse count.
 fn decode_signs(
     dec: &mut RangeDecoder,
     pulses: &mut [i16],
@@ -906,8 +851,8 @@ fn decode_signs(
     }
 }
 
-/// Decode the whole excitation: a rate level, a pulse count per 16-sample
-/// block, the shell code that places them, any extra low bits, and signs.
+/// Decode the excitation: rate level, pulse counts per 16-sample block, shell
+/// code, extra low bits, and signs.
 fn decode_pulses(
     dec: &mut RangeDecoder,
     pulses: &mut [i16],
@@ -919,8 +864,7 @@ fn decode_pulses(
 
     let mut iter = frame_length >> LOG2_SHELL_CODEC_FRAME_LENGTH;
     if iter * SHELL_CODEC_FRAME_LENGTH < frame_length {
-        // Only 10 ms at 12 kHz, whose 120 samples are not a whole number of
-        // shell blocks.
+        // 10 ms at 12 kHz: 120 samples is not a whole number of shell blocks.
         iter += 1;
     }
 
@@ -928,8 +872,7 @@ fn decode_pulses(
     let mut n_lshifts = [0i32; MAX_NB_SHELL_BLOCKS];
     for i in 0..iter {
         sum_pulses[i] = dec.decode_icdf(&PULSES_PER_BLOCK_ICDF[rate_level * 18..], 8) as i32;
-        // A block too loud for the table codes its low bits separately, one
-        // shift at a time.
+        // A block too loud for the table codes its low bits separately.
         while sum_pulses[i] == SILK_MAX_PULSES + 1 {
             n_lshifts[i] += 1;
             let table = &PULSES_PER_BLOCK_ICDF
@@ -963,8 +906,7 @@ fn decode_pulses(
                 }
                 pulses[at + k] = abs_q as i16;
             }
-            // Mark the block as non-empty for the sign decoder, which keys
-            // off the same count.
+            // Mark the block non-empty for the sign decoder.
             sum_pulses[i] |= n_ls << 5;
         }
     }
@@ -979,26 +921,22 @@ fn decode_pulses(
     );
 }
 
-/// The LPC analysis filter: run the signal through `1 - A(z)` to recover the
-/// excitation that produced it. Concealment and re-whitening both need the
-/// history in the excitation domain rather than the signal domain.
+/// The LPC analysis filter `1 - A(z)`: recovers the excitation from the signal.
 fn lpc_analysis_filter(out: &mut [i16], input: &[i16], b_q12: &[i16], len: usize, d: usize) {
     for ix in d..len {
         let mut acc = 0i32;
         for j in 0..d {
             acc = smlabb(acc, i32::from(input[ix - 1 - j]), i32::from(b_q12[j]));
         }
-        // Allowed to wrap: two wraps cancel, and only an invalid stream can
-        // get here at all.
+        // Allowed to wrap; only an invalid stream gets here.
         let residual = (i32::from(input[ix]) << 12).wrapping_sub(acc);
         out[ix] = sat16(rshift_round(residual, 12));
     }
     out[..d].fill(0);
 }
 
-/// One coded channel's decoder. A stereo stream has two of these; the second
-/// carries the side signal, and may be absent for frames the encoder decided
-/// were effectively mono.
+/// One coded channel's decoder. In stereo the second carries the side signal
+/// and may be absent for effectively mono frames.
 struct ChannelState {
     fs_khz: i32,
     fs_api_hz: u32,
@@ -1096,8 +1034,7 @@ impl ChannelState {
     }
 
     /// Re-derive everything that depends on the internal or output rate. A
-    /// change of either resets the filter history: the old state describes a
-    /// signal at a different rate and would be read as a discontinuity.
+    /// change of either resets the filter history.
     fn set_fs(&mut self, fs_khz: i32, fs_api_hz: u32) {
         self.subfr_length = SUB_FRAME_LENGTH_MS * fs_khz as usize;
         let frame_length = self.nb_subfr * self.subfr_length;
@@ -1164,8 +1101,7 @@ impl ChannelState {
         if cond_coding == CondCoding::Conditionally {
             self.indices.gains[0] = dec.decode_icdf(&DELTA_GAIN_ICDF, 8) as i8;
         } else {
-            // Independent coding: three MSBs against a signal-type-dependent
-            // model, then three raw LSBs.
+            // Independent coding: three MSBs against a signal-type model, three raw LSBs.
             let msb =
                 dec.decode_icdf(&GAIN_ICDF[self.indices.signal_type as usize * 8..], 8) as i32;
             let lsb = dec.decode_icdf(&UNIFORM8_ICDF, 8) as i32;
@@ -1183,8 +1119,7 @@ impl ChannelState {
         let (ec_ix, _) = nlsf_unpack(cb, self.indices.nlsf[0] as usize);
         for i in 0..cb.order {
             let mut value = dec.decode_icdf(&cb.ec_icdf[ec_ix[i]..], 8) as i32;
-            // The ends of the residual alphabet are escapes into a
-            // geometric tail, so a large deviation stays codeable.
+            // The alphabet's ends escape into a geometric tail.
             if value == 0 {
                 value -= dec.decode_icdf(&NLSF_EXT_ICDF, 8) as i32;
             } else if value == 2 * NLSF_QUANT_MAX_AMPLITUDE {
@@ -1245,8 +1180,7 @@ impl ChannelState {
         nlsf_decode(&mut nlsf_q15, &self.indices.nlsf, self.nlsf_cb);
         nlsf2a(&mut ctrl.pred_coef_q12[1], &nlsf_q15, self.lpc_order);
 
-        // A decoder that has just reset has no previous NLSFs to interpolate
-        // from, and using the zeroed ones would ring.
+        // No interpolation right after a reset; the zeroed NLSFs would ring.
         if self.first_frame_after_reset {
             self.indices.nlsf_interp_coef_q2 = 4;
         }
@@ -1264,8 +1198,7 @@ impl ChannelState {
         }
         self.prev_nlsf_q15[..self.lpc_order].copy_from_slice(&nlsf_q15[..self.lpc_order]);
 
-        // After a loss the filter is a guess; widening it keeps the guess
-        // from ringing when the real signal comes back.
+        // Widen the guessed filter after a loss so it does not ring.
         if self.loss_cnt != 0 {
             bwexpander(
                 &mut ctrl.pred_coef_q12[0],
@@ -1305,9 +1238,8 @@ impl ChannelState {
 }
 
 impl ChannelState {
-    /// Synthesis: pulses become excitation, excitation goes through the pitch
-    /// predictor and then the LPC filter, and the result is scaled by the
-    /// subframe gain.
+    /// Synthesis: excitation through the pitch predictor and LPC filter,
+    /// scaled by the subframe gain.
     fn decode_core(&mut self, ctrl: &mut FrameControl, xq: &mut [i16], pulses: &[i16]) {
         let offset_q10 = i32::from(
             QUANTIZATION_OFFSETS_Q10[(self.indices.signal_type >> 1) as usize * 2
@@ -1315,9 +1247,8 @@ impl ChannelState {
         );
         let nlsf_interpolation_flag = self.indices.nlsf_interp_coef_q2 < 4;
 
-        // The excitation. Each pulse is pulled towards zero by the dead zone
-        // the quantiser left, pushed away by the frame's offset, and given a
-        // pseudo-random sign: the sign is not coded, only its seed.
+        // Excitation: pulses with the dead zone removed, the frame's offset
+        // added, and a pseudo-random sign (only its seed is coded).
         let mut rand_seed = self.indices.seed;
         for i in 0..self.frame_length {
             rand_seed = silk_rand(rand_seed);
@@ -1352,8 +1283,7 @@ impl ChannelState {
             let gain_q10 = ctrl.gains_q16[k] >> 6;
             let mut inv_gain_q31 = inverse32_varq(ctrl.gains_q16[k], 47);
 
-            // A gain change rescales the filter state rather than being
-            // applied to the output, so the filter itself never sees a step.
+            // A gain change rescales the filter state, so the filter never sees a step.
             let gain_adj_q16 = if ctrl.gains_q16[k] != self.prev_gain_q16 {
                 let adj = div32_varq(self.prev_gain_q16, ctrl.gains_q16[k], 16);
                 for v in s_lpc_q14[..MAX_LPC_ORDER].iter_mut() {
@@ -1365,8 +1295,7 @@ impl ChannelState {
             };
             self.prev_gain_q16 = ctrl.gains_q16[k];
 
-            // Going straight from concealed voiced audio to real unvoiced
-            // audio drops the pitch abruptly, which is heard as a click.
+            // Concealed voiced to real unvoiced drops the pitch abruptly (a click).
             if self.loss_cnt != 0
                 && self.prev_signal_type == TYPE_VOICED
                 && self.indices.signal_type != TYPE_VOICED
@@ -1381,8 +1310,7 @@ impl ChannelState {
             if signal_type == TYPE_VOICED {
                 lag = ctrl.pitch_l[k] as usize;
                 if k == 0 || (k == 2 && nlsf_interpolation_flag) {
-                    // The LPC filter just changed, so the pitch history has
-                    // to be re-whitened through the new one.
+                    // The LPC filter changed: re-whiten the pitch history.
                     let start_idx = self.ltp_mem_length - lag - self.lpc_order - LTP_ORDER / 2;
                     if k == 2 {
                         self.out_buf
@@ -1401,9 +1329,7 @@ impl ChannelState {
                     s_ltp[start_idx..self.ltp_mem_length].copy_from_slice(&whitened);
 
                     if k == 0 {
-                        // Scale the pitch history down so this frame depends
-                        // less on the last one, which is what makes a lost
-                        // packet recoverable rather than permanent.
+                        // Scale the pitch history down so a lost packet is recoverable.
                         inv_gain_q31 = smulwb(inv_gain_q31, ctrl.ltp_scale_q14) << 2;
                     }
                     for i in 0..lag + LTP_ORDER / 2 {
@@ -1422,9 +1348,7 @@ impl ChannelState {
             if signal_type == TYPE_VOICED {
                 let mut pred_lag = s_ltp_buf_idx - lag + LTP_ORDER / 2;
                 for i in 0..self.subfr_length {
-                    // The 2 is a rounding offset: `smlawb` truncates towards
-                    // negative infinity, and five of them would bias the
-                    // prediction down.
+                    // Rounding offset: five truncating `smlawb`s would bias downward.
                     let mut ltp_pred_q13 = 2i32;
                     for j in 0..LTP_ORDER {
                         ltp_pred_q13 =
@@ -1470,8 +1394,7 @@ impl ChannelState {
         self.prev_signal_type = self.indices.signal_type;
         let mut ltp_gain_q14 = 0i32;
         if self.indices.signal_type == TYPE_VOICED {
-            // Use the last subframe that actually contains a pitch pulse:
-            // one that does not has no gain worth carrying forward.
+            // The last subframe that contains a pitch pulse.
             let mut j = 0usize;
             while j * self.subfr_length < ctrl.pitch_l[self.nb_subfr - 1] as usize {
                 if j == self.nb_subfr {
@@ -1494,8 +1417,6 @@ impl ChannelState {
             self.plc.ltp_coef_q14 = [0; LTP_ORDER];
             self.plc.ltp_coef_q14[LTP_ORDER / 2] = ltp_gain_q14 as i16;
 
-            // Hold the concealment's pitch gain in a range that neither dies
-            // out immediately nor rings forever.
             if ltp_gain_q14 < V_PITCH_GAIN_START_MIN_Q14 {
                 let scale_q10 = (V_PITCH_GAIN_START_MIN_Q14 << 10) / ltp_gain_q14.max(1);
                 for v in self.plc.ltp_coef_q14.iter_mut() {
@@ -1521,9 +1442,8 @@ impl ChannelState {
         self.plc.nb_subfr = self.nb_subfr;
     }
 
-    /// Extrapolate one lost frame: keep running the pitch predictor and the
-    /// LPC filter, driven by noise taken from the last frame's own
-    /// excitation, and fade everything down.
+    /// Extrapolate one lost frame: run the pitch predictor and LPC filter on
+    /// noise from the last frame's excitation, fading down.
     fn plc_conceal(&mut self, ctrl: &mut FrameControl, frame: &mut [i16]) {
         let prev_gain_q10 = [
             self.plc.prev_gain_q16[0] >> 6,
@@ -1533,8 +1453,7 @@ impl ChannelState {
             self.plc.prev_lpc_q12 = [0; MAX_LPC_ORDER];
         }
 
-        // Drive the concealment from whichever of the last two subframes was
-        // quieter, so a decaying signal is not held up by its own onset.
+        // Use the quieter of the last two subframes, so an onset doesn't hold up a decay.
         let mut exc_buf = vec![0i16; 2 * self.subfr_length];
         for k in 0..2 {
             for i in 0..self.subfr_length {
@@ -1579,8 +1498,7 @@ impl ChannelState {
                 rand_scale_q14 = rand_scale_q14.max(3277);
                 rand_scale_q14 = smulbb(rand_scale_q14, self.plc.prev_ltp_scale_q14) >> 14;
             } else {
-                // An unvoiced frame under a resonant filter needs less noise
-                // driving it, or the concealment rings.
+                // Less noise under a resonant filter, or the concealment rings.
                 let inv_gain_q30 = lpc_inverse_pred_gain(&self.plc.prev_lpc_q12, self.lpc_order);
                 let mut down_scale_q30 =
                     ((1i32 << 30) >> LOG2_INV_LPC_GAIN_HIGH_THRES).min(inv_gain_q30);
@@ -1632,8 +1550,7 @@ impl ChannelState {
                 ) << 2;
                 s_ltp_buf_idx += 1;
             }
-            // Fade the pitch and the noise, and let the lag drift, so a long
-            // loss ends in noise rather than in a held tone.
+            // Fade pitch and noise and let the lag drift, so long losses end in noise.
             for v in b_q14.iter_mut() {
                 *v = (smulbb(harm_gain_q15, i32::from(*v)) >> 15) as i16;
             }
@@ -1686,8 +1603,7 @@ impl ChannelState {
         }
     }
 
-    /// Fade a good frame in after a concealed one, so the energy does not
-    /// step back up.
+    /// Fade a good frame in after a concealed one.
     fn plc_glue_frames(&mut self, frame: &mut [i16], length: usize) {
         if self.loss_cnt != 0 {
             let (energy, shift) = sum_sqr_shift(&frame[..length]);
@@ -1709,8 +1625,7 @@ impl ChannelState {
                 energy >>= 0.max(24 - lz);
                 let frac_q24 = self.plc.conc_energy / energy.max(1);
                 let mut gain_q16 = sqrt_approx(frac_q24) << 4;
-                // Four times as steep as a plain ramp, so an onset right
-                // after a loss is not swallowed by the fade.
+                // Four times steeper than a plain ramp, so an onset is not swallowed.
                 let slope_q16 = (((1i32 << 16) - gain_q16) / length as i32) << 2;
                 for v in frame[..length].iter_mut() {
                     *v = smulwb(gain_q16, i32::from(*v)) as i16;
@@ -1724,8 +1639,7 @@ impl ChannelState {
         self.plc.last_frame_lost = false;
     }
 
-    /// Comfort noise: track the background while the signal is silent, and
-    /// play it back over concealed frames.
+    /// Comfort noise: track the background while silent, play it over concealed frames.
     fn cng(&mut self, ctrl: &FrameControl, frame: &mut [i16], length: usize) {
         if self.fs_khz != self.cng.fs_khz {
             self.cng_reset();
@@ -1758,8 +1672,7 @@ impl ChannelState {
                     ctrl.gains_q16[i] - self.cng.smth_gain_q16,
                     CNG_GAIN_SMTH_Q16,
                 );
-                // Track a fall faster than a rise: noise that stays too loud
-                // is more audible than noise that stays too quiet.
+                // Track falls faster than rises.
                 if smulww(self.cng.smth_gain_q16, CNG_GAIN_SMTH_THRESHOLD_Q16) > ctrl.gains_q16[i] {
                     self.cng.smth_gain_q16 = ctrl.gains_q16[i];
                 }
@@ -1837,12 +1750,8 @@ enum ResampleMode {
     DownFir,
 }
 
-/// SILK's own resampler, between its internal 8/12/16 kHz and whatever rate
-/// the caller asked for.
-///
-/// Each path is padded to the same total delay (`input_delay`), so a stream
-/// that changes bandwidth mid-call does not jump forward or backward in time
-/// at the switch.
+/// SILK's resampler between its internal rate and the output rate. Every path
+/// is padded to the same delay so bandwidth switches do not shift time.
 #[derive(Clone)]
 struct Resampler {
     fs_in_khz: usize,
@@ -1924,16 +1833,14 @@ impl Resampler {
         }
 
         s.inv_ratio_q16 = (((fs_in << (14 + up2x)) / fs_out) << 2) as i32;
-        // Round the ratio up, so the last output sample of a batch never
-        // reads past the input it was given.
+        // Round up so the last output sample never reads past the input.
         while smulww(s.inv_ratio_q16, fs_out as i32) < (fs_in << up2x) as i32 {
             s.inv_ratio_q16 += 1;
         }
         s
     }
 
-    /// Interpolating 2x upsampler: two all-pass chains, one per output
-    /// phase, which is cheaper than a symmetric FIR for the same stopband.
+    /// Interpolating 2x upsampler: two all-pass chains, one per output phase.
     fn up2_hq(&mut self, out: &mut [i16], input: &[i16]) {
         for (k, &sample) in input.iter().enumerate() {
             let in32 = i32::from(sample) << 10;
@@ -1970,8 +1877,7 @@ impl Resampler {
         }
     }
 
-    /// 2x upsample, then interpolate between the doubled samples with a
-    /// 12-phase fractional FIR, the general upsampling path.
+    /// 2x upsample, then a 12-phase fractional FIR: the general upsampling path.
     fn iir_fir(&mut self, out: &mut [i16], input: &[i16]) {
         let mut buf = vec![0i16; 2 * self.batch_size + 8];
         buf[..8].copy_from_slice(&self.s_fir_i16);
@@ -2016,8 +1922,7 @@ impl Resampler {
             .copy_from_slice(&buf[n_samples_in << 1..(n_samples_in << 1) + 8]);
     }
 
-    /// Anti-alias with a second-order AR filter, then decimate with a
-    /// polyphase FIR, the general downsampling path.
+    /// Second-order AR anti-alias, then a polyphase FIR: the general downsampling path.
     fn down_fir(&mut self, out: &mut [i16], input: &[i16]) {
         let mut buf = vec![0i32; self.batch_size + self.fir_order];
         buf[..self.fir_order].copy_from_slice(&self.s_fir_i32[..self.fir_order]);
@@ -2092,8 +1997,7 @@ impl Resampler {
         }
     }
 
-    /// Resample `input` into `out`, holding back `input_delay` samples for
-    /// the next call.
+    /// Resample `input` into `out`, holding back `input_delay` samples for the next call.
     fn resample(&mut self, out: &mut [i16], input: &[i16]) {
         let in_len = input.len();
         let n_samples = self.fs_in_khz - self.input_delay;
@@ -2101,9 +2005,7 @@ impl Resampler {
             .copy_from_slice(&input[..n_samples]);
         let head: Vec<i16> = self.delay_buf[..self.fs_in_khz].to_vec();
         self.process(out, &head);
-        // The tail starts where the delay buffer's copy ended but stops a
-        // whole millisecond short: those last `input_delay` samples are what
-        // the next call will start from.
+        // Stop `input_delay` samples short: the next call starts from them.
         let (_, tail) = out.split_at_mut(self.fs_out_khz);
         self.process(tail, &input[n_samples..n_samples + in_len - self.fs_in_khz]);
         self.delay_buf[..self.input_delay].copy_from_slice(&input[in_len - self.input_delay..]);
@@ -2138,15 +2040,13 @@ fn stereo_decode_pred(dec: &mut RangeDecoder) -> [i32; 2] {
         );
         pred_q13[n] = smlabb(low_q13, step_q13, 2 * ix[n][1] + 1);
     }
-    // The first weight is stored relative to the second, which is the form
-    // the synthesis below wants.
+    // The first weight is stored relative to the second.
     pred_q13[0] -= pred_q13[1];
     pred_q13
 }
 
 /// Turn a decoded mid/side pair back into left and right, ramping the
-/// prediction weights over the first 8 ms so a change between frames is not
-/// heard as a step in the stereo image.
+/// prediction weights over the first 8 ms.
 fn stereo_ms_to_lr(
     state: &mut StereoState,
     x1: &mut [i16],
@@ -2180,8 +2080,7 @@ fn stereo_ms_to_lr(
             pred0_q13 = pred_q13[0];
             pred1_q13 = pred_q13[1];
         }
-        // A three-tap smoothing of mid feeds the first predictor; mid itself
-        // feeds the second.
+        // Smoothed mid feeds the first predictor; mid itself the second.
         let mut sum = (i32::from(x1[n]) + i32::from(x1[n + 2]) + (i32::from(x1[n + 1]) << 1)) << 9;
         sum = smlawb(i32::from(x2[n + 1]) << 8, sum, pred0_q13);
         sum = smlawb(sum, i32::from(x1[n + 1]) << 11, pred1_q13);
@@ -2210,8 +2109,7 @@ pub(super) struct Control {
 #[derive(Debug)]
 pub(super) struct SilkError;
 
-/// One SILK stream's decoder: up to two coded channels plus the mid/side
-/// state that joins them.
+/// One SILK stream's decoder: up to two coded channels and their mid/side state.
 pub(super) struct SilkDecoder {
     channels: [ChannelState; 2],
     n_channels_api: usize,
@@ -2232,11 +2130,7 @@ impl SilkDecoder {
     }
 
     /// Decode one SILK frame into `pcm`, interleaved at the API rate, and
-    /// report how many samples per channel it produced.
-    ///
-    /// A packet may hold several SILK frames; this is called once per frame,
-    /// with `first_frame` set on the first, which is where the per-packet
-    /// flags are read.
+    /// report samples per channel. `first_frame` reads the per-packet flags.
     pub(super) fn decode(
         &mut self,
         control: &Control,
@@ -2257,8 +2151,7 @@ impl SilkDecoder {
                 ch.n_frames_decoded = 0;
             }
         }
-        // A stream that turns stereo mid-call starts its side channel from
-        // nothing rather than from whatever the last stereo stream left.
+        // A stream turning stereo starts its side channel fresh.
         if internal > self.n_channels_internal {
             self.channels[1] = ChannelState::new();
         }
@@ -2302,8 +2195,7 @@ impl SilkDecoder {
 
         if let Some(dec) = dec.as_deref_mut() {
             if lost_flag != LostFlag::PacketLost && self.channels[0].n_frames_decoded == 0 {
-                // The per-packet header: a voice-activity flag per frame and
-                // one low-bitrate-redundancy flag, for each coded channel.
+                // Per-packet header: VAD flags per frame and an LBRR flag, per channel.
                 for n in 0..internal {
                     for i in 0..self.channels[n].n_frames_per_packet {
                         self.channels[n].vad_flags[i] = dec.decode_bit_logp(1);
@@ -2328,8 +2220,7 @@ impl SilkDecoder {
                         }
                     }
                 }
-                // The redundant copies are not played here, but they are in
-                // the bitstream and have to be stepped over exactly.
+                // Redundant copies are not played, but must be stepped over.
                 for i in 0..self.channels[0].n_frames_per_packet {
                     for n in 0..internal {
                         if self.channels[n].lbrr_flags[i] {
@@ -2371,8 +2262,7 @@ impl SilkDecoder {
             ms_pred_q13 = self.stereo.pred_prev_q13;
         }
 
-        // The side channel's own prediction memory describes a signal that
-        // was not coded last time, so it has to start again.
+        // The side channel's prediction memory is stale; restart it.
         if internal == 2 && !decode_only_middle && self.prev_decode_only_middle {
             self.channels[1].out_buf.fill(0);
             self.channels[1].s_lpc_q14_buf.fill(0);
@@ -2397,8 +2287,7 @@ impl SilkDecoder {
                 let cond = if frame_index == 0 {
                     CondCoding::Independently
                 } else if n > 0 && self.prev_decode_only_middle {
-                    // A skipped side frame leaves the LTP state well defined,
-                    // so it needs no scaling to recover from.
+                    // A skipped side frame leaves the LTP state well defined.
                     CondCoding::IndependentlyNoLtpScaling
                 } else {
                     CondCoding::Conditionally
@@ -2448,9 +2337,7 @@ impl SilkDecoder {
 
         if control.channels_api == 2 && internal == 1 {
             if stereo_to_mono {
-                // The right channel's resampler has been idle; run it over
-                // the same signal so it is warm if the stream goes back to
-                // stereo.
+                // Keep the idle right resampler warm for a return to stereo.
                 self.channels[1]
                     .resampler
                     .resample(&mut resampled, &tmp[0][1..1 + frame_length]);
@@ -2465,8 +2352,7 @@ impl SilkDecoder {
         }
 
         if lost_flag == LostFlag::PacketLost {
-            // Drop the gain clamp: with the energy already falling, holding
-            // it would make it bounce back when the stream resumes.
+            // Drop the gain clamp so the energy does not bounce back on resume.
             for ch in self.channels.iter_mut() {
                 ch.last_gain_index = 10;
             }

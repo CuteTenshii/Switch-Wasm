@@ -1,23 +1,10 @@
-//! Which diagnostics are on, what severity they carry, and where they go.
-//!
-//! Every trace in this emulator used to be gated by an environment variable
-//! read through [`crate::env_flag`], and every one of them wrote to stderr.
-//! Neither exists in a browser: `wasm32-unknown-unknown` has no WASI, so
-//! `std::env::var` always fails and `eprintln!` goes nowhere. That left the
-//! twenty-odd `TRACE_*` switches: the most detailed account this emulator can
-//! give of itself, reachable only from the command line, on a project whose
-//! target is the browser.
-//!
-//! So the switches live in a mask that can be set at run time, and what they
-//! print goes to a sink the host drains as well as to stderr. The environment
-//! still seeds the mask, so a CLI run behaves exactly as it did.
+//! Diagnostic channels: a runtime mask seeded from the environment, severity
+//! levels, and a sink the host drains alongside stderr.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// One diagnostic channel. The name is the environment variable that seeds it
-/// and the string the host enables it by, so there is one spelling of each
-/// switch rather than two that can drift apart.
+/// One diagnostic channel, named by the environment variable that seeds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trace {
     /// Guest syscalls, minus the three that fire every scheduling round.
@@ -36,10 +23,7 @@ pub enum Trace {
     GpuTex,
     /// Texture decode: formats, swizzles and the surfaces they produce.
     Tex,
-    /// Draws and clears as the 3D engine issues them, whichever backend
-    /// carries them out: the render target each lands in, the draws a backend
-    /// refused, and from the software rasterizer, where a draw's fragments
-    /// went.
+    /// Draws and clears: render targets, refused draws, rasterizer coverage.
     Draw,
     /// The graphics pipeline state a draw was issued with.
     Pipeline,
@@ -61,23 +45,18 @@ pub enum Trace {
     Erpt,
     /// Shared-font requests.
     Font,
-    /// The guest's filesystem traffic: what `fsp-srv` was asked to open, every
-    /// path operation and its result, and the file, directory and storage
-    /// reads and writes behind them.
+    /// Guest filesystem traffic through `fsp-srv`.
     Fs,
-    /// Range reads out of the host's files: the open container and the system
-    /// data archives beside it.
+    /// Range reads out of the host's files.
     Io,
     /// Copy-engine transfers, inline uploads and 2D-engine blits.
     Copy,
     /// Frames handed to the display: which surface was scanned out, and how.
     Present,
-    /// The video engines: nvdec and VIC channels, their command streams and
-    /// the methods those write.
+    /// The video engines: nvdec and VIC channels and their methods.
     Video,
 }
 
-/// Every channel, in the order the host is offered them.
 pub const ALL: [Trace; 24] = [
     Trace::Svc,
     Trace::Ipc,
@@ -106,15 +85,13 @@ pub const ALL: [Trace; 24] = [
 ];
 
 impl Trace {
-    /// The channel's bit in the mask. Its position is [`ALL`]'s order, so a
-    /// mask is only meaningful against the build that produced it.
+    /// The channel's bit in the mask, in [`ALL`] order.
     #[inline]
     pub const fn bit(self) -> u32 {
         1 << self as u32
     }
 
-    /// The environment variable that seeds this channel, which is also the
-    /// name the host turns it on by.
+    /// The environment variable that seeds this channel, also its host-facing name.
     pub const fn name(self) -> &'static str {
         match self {
             Trace::Svc => "TRACE_SVC",
@@ -144,21 +121,17 @@ impl Trace {
         }
     }
 
-    /// The channel a name spells, if any.
     pub fn from_name(name: &str) -> Option<Trace> {
         ALL.iter().copied().find(|t| t.name() == name)
     }
 }
 
-/// How much a diagnostic matters. The host colours by this and can filter on
-/// it; without it a title's fatal abort and a stubbed-out command arrive
-/// looking identical, which is how the interesting one gets scrolled past.
+/// How much a diagnostic matters; the host colours and filters by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     /// The emulator or the guest has failed at something it was asked to do.
     Error,
-    /// Something was answered wrongly or not at all, and a later failure is
-    /// likely to be this one's fault.
+    /// Something was answered wrongly or not at all; likely a later failure's cause.
     Warn,
     /// A milestone worth seeing on every run.
     Info,
@@ -167,17 +140,8 @@ pub enum Level {
 }
 
 impl Level {
-    /// The byte that carries this level through the trace buffer.
-    ///
-    /// The buffer is a stream of text the host splits into lines, so the
-    /// level has to travel *in* the text. A leading control byte is the one
-    /// marker that cannot be confused with a line's content: `[fatal]` and
-    /// `0x01` are both things a disassembly line can start with, and a
-    /// register dump contains every printable character there is.
-    ///
-    /// Lines with no marker inherit the level of the line before them, so a
-    /// fault's register dump and instruction trail stay with the fault rather
-    /// than reverting to the default.
+    /// Control byte that marks this level in the trace text.
+    /// Unmarked lines inherit the previous line's level.
     #[inline]
     pub const fn marker(self) -> u8 {
         match self {
@@ -189,17 +153,12 @@ impl Level {
     }
 }
 
-/// The bit pattern a mask has before the environment has been read. All ones
-/// is safe to reserve: [`ALL`] is twenty-four channels, so the top bits are not
-/// reachable by any real mask.
+/// Mask value before the environment has been read; unreachable by real masks.
 const UNSEEDED: u32 = u32::MAX;
 
 static MASK: AtomicU32 = AtomicU32::new(UNSEEDED);
 
 /// Read the environment once and record what it asked for.
-///
-/// Cold because it runs at most once per process: the mask it stores is never
-/// [`UNSEEDED`] again, even when the environment named nothing.
 #[cold]
 fn seed() -> u32 {
     let mut mask = 0;
@@ -212,7 +171,6 @@ fn seed() -> u32 {
     mask
 }
 
-/// The channels currently on.
 #[inline]
 pub fn mask() -> u32 {
     let mask = MASK.load(Ordering::Relaxed);
@@ -222,47 +180,28 @@ pub fn mask() -> u32 {
     mask
 }
 
-/// Turn every channel on or off. The browser has no environment to seed the
-/// mask from, so its log level decides instead.
+/// Turn every channel on or off.
 pub fn set_all(on: bool) {
     let all = ALL.iter().fold(0, |mask, channel| mask | channel.bit());
     MASK.store(if on { all } else { 0 }, Ordering::Relaxed);
 }
 
-/// Whether `what` is on.
 #[inline]
 pub fn enabled(what: Trace) -> bool {
     mask() & what.bit() != 0
 }
 
-/// Text traced by code that has no [`crate::cpu::Cpu`] in reach, the
-/// rasterizer, the shader translator, the texture decoder: waiting to be
-/// folded into the trace buffer the host drains.
-///
-/// The alternative was threading a sink through every free function in
-/// `gpu/`, which is a signature change to code whose whole job is to be
-/// called from a hot loop.
+/// Trace text from code with no [`crate::cpu::Cpu`] in reach, awaiting the host.
 static PENDING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
-/// `PENDING`'s length, so the common case: nothing traced, because nothing is
-/// on: costs a relaxed load rather than a lock.
+/// `PENDING`'s length, so an empty sink costs a relaxed load, not a lock.
 static PENDING_LEN: AtomicUsize = AtomicUsize::new(0);
 
-/// How much untaken trace text the sink holds before it starts dropping.
-///
-/// It has to have a cap: a native run never takes from it at all, since stderr
-/// is where its traces go. Dropping is from the front, for the same reason
-/// the trace buffer drops from the front: what happened most recently is what
-/// is being asked about.
+/// Cap on untaken sink text; the oldest is dropped first.
 const PENDING_CAP: usize = 256 * 1024;
 
-/// Emit one line, to stderr and to the sink the host drains.
-///
-/// Callers gate on [`enabled`] first: this does no checking of its own, so
-/// that a channel that is off costs one load and a branch at the call site.
+/// Emit one line to stderr and the host sink. Callers gate on [`enabled`].
 pub fn emit(line: &str) {
-    // Natively this is the channel: a CLI run traces to stderr exactly as it
-    // did when these were environment switches.
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("{line}");
     let Ok(mut pending) = PENDING.lock() else {
@@ -278,7 +217,6 @@ pub fn emit(line: &str) {
     PENDING_LEN.store(pending.len(), Ordering::Relaxed);
 }
 
-/// Take everything the sink holds, leaving it empty.
 pub fn take_pending() -> Vec<u8> {
     if PENDING_LEN.load(Ordering::Relaxed) == 0 {
         return Vec::new();
@@ -290,12 +228,7 @@ pub fn take_pending() -> Vec<u8> {
     std::mem::take(&mut pending)
 }
 
-/// Write one already-decided-on line to both channels.
-///
-/// Spelled like `eprintln!` because it replaces one at roughly a hundred
-/// sites that were already gated by a switch of their own, `ctx.trace`, a
-/// tally's `enabled`, an inverted early return, and rewriting each of those
-/// guards into a [`trace!`] would have changed what they mean.
+/// Write one already-gated line to both channels.
 #[macro_export]
 macro_rules! traceln {
     ($($arg:tt)*) => {
@@ -303,12 +236,7 @@ macro_rules! traceln {
     };
 }
 
-/// Trace one formatted line on a channel, evaluating the format arguments
-/// only when the channel is on.
-///
-/// The guard is the point: `trace!(Trace::Ipc, "{}", expensive())` costs a
-/// load and a branch when `TRACE_IPC` is off, which is what lets these sit in
-/// per-syscall and per-draw paths.
+/// Trace one line on a channel, formatting only when it is on.
 #[macro_export]
 macro_rules! trace {
     ($channel:expr, $($arg:tt)*) => {{

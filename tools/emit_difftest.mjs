@@ -1,36 +1,14 @@
-// The other half of `examples/emit_difftest.rs` and `examples/emit_selftest.rs`:
-// run each emitted block under V8 and check it left the guest state the
-// interpreter left.
+// Runs each block emitted by `examples/emit_difftest.rs` or `emit_selftest.rs`
+// under V8 and checks it left the guest state the interpreter left.
 //
 //   cargo run --release --example emit_difftest -- <target>
 //   node tools/emit_difftest.mjs [outdir]
-//
-// The Rust half cannot do this itself. `switch-core` has no dependencies and
-// on the host there is no wasm engine, so the emitter's output can only be
-// checked by something that can instantiate a module. That is the whole reason
-// this is two programs: the interpreter is the reference, and it lives in the
-// other one.
-//
-// A case is a module exporting `run(state) -> i32`, plus the register file and
-// NZCV going in and coming out. Guest state goes into a bare
-// `WebAssembly.Memory` at the offsets the manifest names, so nothing here has
-// to know what a `Cpu` looks like.
-//
-// Guest *memory* is named the same way: a page table of four-byte entries, one
-// per 4 KiB of the guest's address space, holding where in this memory a page
-// lives and zero where it is not mapped. That is the shape `crate::mem::Memory`
-// has, and an emitted access walks it directly. A manifest that names no
-// window leaves every entry zero, which is a legitimate state: every access
-// then hands its instruction back, and `run` reports how far it got.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const dir = process.argv[2] || 'target/emit-difftest';
-// A check that has never been seen to fail says nothing. `INJECT=1` corrupts
-// one expected register and one expected NZCV, and the run is supposed to
-// report exactly those two: it proves the modules really are instantiated and
-// the comparison really is reading what came back, rather than comparing two
-// copies of the same thing.
+// `INJECT=1` corrupts one expected register and one NZCV; exactly two failures
+// must be reported.
 const inject = process.env.INJECT === '1';
 const manifest = readFileSync(join(dir, 'manifest.txt')).toString('utf8').trim().split('\n');
 
@@ -41,11 +19,7 @@ const HEADER_KEYS = new Set([
   'readonly', 'watched_page', 'wasm_pages', 'pc_at', 'discard_slot',
 ]);
 const header = {};
-// `(guest address, where in this memory it lives)` per mapped page, in guest
-// order, which is the order `guest.bin` holds their contents in. They are
-// deliberately not in that order in memory: a real page is its own allocation,
-// and an access that runs off the end of one must not find its guest neighbour
-// sitting behind it.
+// `(guest address, wasm offset)` per mapped page, in `guest.bin` order.
 const pages = [];
 let first = 0;
 for (const line of manifest) {
@@ -78,22 +52,12 @@ const READONLY_LO_AT = need('readonly_lo_at');
 const READONLY_HI_AT = need('readonly_hi_at');
 const WATCHED_AT = need('watched_at');
 const PAGES_AT = need('pages_at');
-// Where the guest pc is. Only a block that runs through a conditional branch
-// writes it, so a manifest whose cases cannot contain one need not name it.
+// Only manifests with conditional-branch cases name it.
 const PC_AT = header.pc_at ? header.pc_at[0] : -1;
-// Set in what `run` answers when the block was left at a branch it took. An
-// i32 with its top bit set comes back from wasm negative, and `|` here makes
-// the expected value negative the same way.
+// Set in `run`'s result when the block left at a taken branch.
 const LEFT = 1 << 31;
-// What the pc is set to before a case, so that a block which was supposed to
-// write it and did not is caught rather than reading whatever the last case
-// left behind.
 const NO_PC = 0xdead0000;
-// The slot a write to `XZR` goes into. Left out of the comparison: nothing
-// reads it, so what is in it is not guest state, and the two engines differ
-// there on purpose -- a `CMP` folded into the branch that reads its flags is
-// emitted as the flag write it is, without the register write the
-// architecture discards.
+// The `XZR` write slot; not compared, since a fused `CMP` skips that write.
 const DISCARD = header.discard_slot ? header.discard_slot[0] : -1;
 const TABLE_AT = need('table_at');
 const PAGE_BYTES = 4096;
@@ -102,13 +66,8 @@ const memory = new WebAssembly.Memory({ initial: need('wasm_pages') });
 const view = new DataView(memory.buffer);
 const bytes = new Uint8Array(memory.buffer);
 
-// Where the page table is, and the watchpoint bounds. Both are fields of the
-// `Memory` an emitted block reads through, so the harness writes them where the
-// manifest says that `Memory`'s would be.
 view.setUint32(PAGES_AT, TABLE_AT, true);
-// `(1, 0)` is how a disarmed watchpoint is written: nothing is below zero, so
-// the overlap test can never hold. An empty set of protected ranges is
-// `(0xffffffff, 0)`, which fails the same way from the other end.
+// `(1, 0)` disarms a watchpoint; `(0xffffffff, 0)` is an empty protected range.
 const [readLo, readHi] = header.read_watch ?? [1, 0];
 view.setUint32(RW_LO_AT, readLo, true);
 view.setUint32(RW_HI_AT, readHi, true);
@@ -119,10 +78,7 @@ const [roLo, roHi] = header.readonly ?? [0xffffffff, 0];
 view.setUint32(READONLY_LO_AT, roLo, true);
 view.setUint32(READONLY_HI_AT, roHi, true);
 
-// The bitmap of pages whose contents something has cached, which a store tests
-// before it can be written inline. Left null when the manifest watches no
-// page: that is how a `Memory` with nothing watching it is written, and the
-// emitted test has to cope with it.
+// Pages whose contents something has cached; null when none are watched.
 if (header.watched_page) {
   const bitmap = need('bitmap_at');
   view.setUint32(WATCHED_AT, bitmap, true);
@@ -133,8 +89,6 @@ if (header.watched_page) {
   }
 }
 
-// The mapped pages, if there are any: a page-table entry each, and their
-// contents as the interpreter had them.
 const codeAt = header.code_at ? header.code_at[0] : -1;
 let pristine = null;
 if (pages.length) {
@@ -148,12 +102,9 @@ if (pages.length) {
   }
 }
 
-// The code page's contents belong to the case rather than to the window every
-// case shares, so the manifest carries them and they go back over it before
-// each one.
+// The code page's contents, carried per case by the manifest.
 let code = null;
-// The window as a case starts from it, in guest order: what `resetGuest` puts
-// back, and what an expected delta is applied to.
+// The window a case starts from, which an expected delta is applied to.
 const start = pristine ? new Uint8Array(pristine.length) : null;
 function resetGuest() {
   if (!pristine) return;
@@ -164,11 +115,6 @@ function resetGuest() {
   }
 }
 
-// Whether the window still holds `want`, which is the case's starting bytes
-// with whatever the interpreter changed laid over them. Checked for every case
-// that can reach guest memory at all, so a store that lands in the right place
-// with the wrong bytes, or in the wrong place entirely, is caught rather than
-// only a store that leaves a register wrong.
 function windowDiffers(want) {
   for (let i = 0; i < pages.length; i++) {
     const at = pages[i][1];
@@ -222,18 +168,9 @@ for (const line of manifest.slice(first)) {
 
   const retired = exports.run(0);
   const bad = [];
-  // An emitted block reports how much of itself it did, and the manifest says
-  // which answers are allowed. `exact` is a block with no access in it, so all
-  // of it. `maybe` is one whose single access the page table may or may not be
-  // able to answer for, so all or none. `none` is one the interpreter's
-  // watchpoint saw: reading it takes more than the page table, so the emitted
-  // block has to have handed it back, and a block that went ahead anyway would
-  // be leaving the watchpoint blind.
-  // `left:<target>` is a block that ran through a conditional branch and took
-  // it: it reports the instructions it retired with `LEFT` set, and has put
-  // the target in the pc. Nothing else about the case changes -- the
-  // registers and NZCV still have to be what the interpreter left after
-  // exactly those instructions.
+  // Allowed retired counts: `exact` all, `maybe` all or none, `none` none (the
+  // interpreter's watchpoint fired). `left:<target>` retired all with `LEFT`
+  // set and the target in the pc.
   const leftTo = mode.startsWith('left:') ? Number(mode.slice(5)) : null;
   const allowed = leftTo !== null
     ? [Number(ops) | LEFT]
@@ -278,9 +215,7 @@ for (const line of manifest.slice(first)) {
       const bits = (v) => 'NZCV'.split('').map((c, i) => ((v >>> (31 - i)) & 1) ? c : '-').join('');
       bad.push(`nzcv: emitted ${bits(gotNzcv)}, interpreted ${bits(Number(BigInt(wantNzcv)) >>> 0)}`);
     }
-    // Only for a block that can reach memory. An `exact` block has no access
-    // in it, so the only stores its body contains are to the register file and
-    // to NZCV, and both are compared above.
+    // `exact` blocks have no memory access.
     if (pristine && mode !== 'exact') {
       if (want === after) for (const [at, run] of delta) start.set(run, at);
       const off = windowDiffers(start);

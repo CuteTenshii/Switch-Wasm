@@ -1,9 +1,5 @@
-//! Minimal AArch64 ELF loader.
-//!
-//! Supports the common case for a bare-metal homebrew ELF: 64-bit,
-//! little-endian, `EM_AARCH64`, `ET_EXEC` or `ET_DYN`, with `PT_LOAD`
-//! segments mapped at their `p_vaddr` and `p_memsz > p_filesz` regions
-//! zero-filled. Entry point is `e_entry`.
+//! Minimal AArch64 ELF loader: 64-bit little-endian `ET_EXEC`/`ET_DYN`, with
+//! `PT_LOAD` segments mapped at `p_vaddr` and their BSS tails zero-filled.
 
 use crate::mem::Memory;
 use crate::{Error, Result};

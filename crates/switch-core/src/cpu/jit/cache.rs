@@ -1,48 +1,23 @@
-//! The translation cache: which blocks exist, how one is found, and when a
-//! guest store takes one away again.
+//! Translation cache: block lookup, generations, and store invalidation.
 
 use super::ir::Block;
 use crate::IdMap;
 use std::rc::Rc;
 
-/// How many blocks a generation holds before the cache rotates. Two are live
-/// at once, so the ceiling is twice this: the cap is only there so a program
-/// that walks endlessly over fresh code cannot grow the cache without bound.
-///
-/// A retail title's *hot* code is a few thousand blocks, but the set it has
-/// ever entered is much larger and keeps growing: Just Dance 2019 reaches the
-/// cap partway through its boot. Before there were two generations that
-/// emptied the cache, and the counters said so exactly — 105,340 blocks
-/// translated for 39,804 still held, which is the cap plus everything
-/// retranslated after it. Every block came back the hard way and every link
-/// between them was cold again.
+/// Blocks per generation; two are live, bounding the cache at twice this.
 const MAX_BLOCKS: usize = 32 * 1024;
 
-/// How many entries the direct-mapped lookup in front of the block map holds.
-/// A hash of the entry address is a large share of what entering a short
-/// block costs, and guest code is dense enough that indexing by the address
-/// itself nearly always hits.
+/// Direct-mapped lookup slots, indexed by entry address.
 const LOOKUP_SLOTS: usize = 4096;
 
-/// The translation cache.
 #[derive(Debug)]
 pub(in crate::cpu) struct Jit {
-    /// The most recent block to land in each slot, or `None`. Only a hint:
-    /// the entry address is checked against the block's own, and `blocks` is
-    /// what actually owns the cache.
+    /// Last block per slot; a hint checked against the block's entry address.
     pub(super) lookup: Vec<Option<Rc<Block>>>,
     pub(super) blocks: IdMap<u32, Rc<Block>>,
-    /// The generation before `blocks`. Filling the cache then costs the half
-    /// of it nothing has asked for since the last rotation, rather than all of
-    /// it: a block still being entered is promoted back out of here by
-    /// [`Jit::get`] before the rotation that would have dropped it.
+    /// The previous generation; entering a block here promotes it back.
     pub(super) older: IdMap<u32, Rc<Block>>,
-    /// Entry addresses translated out of each page, so a store to that page
-    /// drops exactly the blocks that read it. A block that read several pages
-    /// is listed under each. When a store drops it through one of them, the
-    /// others keep a stale entry, and a later block at the same address is
-    /// dropped by a store to one of those: a spurious retranslation, never a
-    /// stale block.
+    /// Entry addresses per page read, so a store drops the blocks that read it.
     pub(super) by_page: IdMap<u32, Vec<u32>>,
     pub(super) translated: u64,
     pub(super) executed: u64,
@@ -57,41 +32,19 @@ pub(in crate::cpu) struct Jit {
 /// What the translator has been doing, for host-side diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitStats {
-    /// Blocks currently held in the cache.
     pub blocks: usize,
-    /// Blocks translated since the cache was created.
     pub translated: u64,
-    /// Blocks entered.
     pub executed: u64,
-    /// Of those, the ones reached through the previous block's own link rather
-    /// than through a lookup.
-    ///
-    /// Against `executed` this is the link cache's hit rate, the one number
-    /// that says whether chaining is doing anything, and the same number on
-    /// any target.
+    /// Entries reached through the previous block's link rather than a lookup.
     pub linked: u64,
-    /// Blocks dropped because the memory they came from was written.
     pub invalidated: u64,
-    /// Instructions that reached the interpreter's dispatcher anyway, because
-    /// the translator had no op for them.
-    ///
-    /// Against `Cpu::run`'s step count this is the share of a run the
-    /// translator did not actually translate: the one number here that says
-    /// where the next block of speed is, and the same number on any target.
+    /// Instructions the translator had no op for, run by the interpreter.
     pub interpreted: u64,
-    /// One in every 1024 of `interpreted`, by the encoding group in bits
-    /// 28:25 of the instruction.
+    /// One in 1024 of `interpreted`, by encoding group (bits 28:25).
     pub interpreted_groups: [u64; 16],
-    /// Blocks written out as wasm and compiled by the host. Zero on a build
-    /// with nowhere to put them, which is every host build.
+    /// Blocks compiled to wasm by the host; always zero on host builds.
     pub emitted: u64,
-    /// Entries that ran that compiled code rather than the op walk.
-    ///
-    /// Against `executed` this is the share of block entries that reach
-    /// emitted code at all, which is the number that says what the emitter's
-    /// coverage is worth. It counts an entry that handed straight back, so
-    /// against `emitted` and `executed` together it also says whether blocks
-    /// are being compiled and then not run.
+    /// Entries that ran compiled code rather than the op walk.
     pub entered_emitted: u64,
 }
 
@@ -120,7 +73,6 @@ impl Jit {
         (pc >> 2) as usize & (LOOKUP_SLOTS - 1)
     }
 
-    /// Count an instruction the interpreter's dispatcher ran for a block.
     #[inline(always)]
     pub(super) fn note_interpreted(&mut self, insn: u32) {
         self.interpreted += 1;
@@ -129,7 +81,6 @@ impl Jit {
         }
     }
 
-    /// The block entered at `pc`, if it is already translated.
     #[inline(always)]
     pub(super) fn get(&mut self, pc: u32) -> Option<Rc<Block>> {
         let slot = Self::slot(pc);
@@ -140,10 +91,7 @@ impl Jit {
         }
         let block = match self.blocks.get(&pc) {
             Some(block) => block.clone(),
-            // Reaching a block in the older generation is what says it is
-            // still in use, so it moves up instead of waiting for the
-            // rotation that would drop it. Moving rather than copying leaves
-            // the two generations disjoint, so the ceiling still holds.
+            // Promote out of `older`; moving keeps the generations disjoint.
             None => {
                 let block = self.older.remove(&pc)?;
                 self.blocks.insert(pc, block.clone());
@@ -163,22 +111,13 @@ impl Jit {
         self.blocks.insert(block.start, block);
     }
 
-    /// Start a new generation when the newest one is full, dropping the one
-    /// before it.
-    ///
-    /// What that drops is the blocks nothing has entered since the last
-    /// rotation, because entering one promotes it back into `blocks`. A block
-    /// still being run therefore survives any number of rotations, which is
-    /// the whole difference from emptying the cache.
+    /// Rotate when full, dropping blocks not entered since the last rotation.
     fn rotate_if_full(&mut self) {
         if self.blocks.len() < MAX_BLOCKS {
             return;
         }
         self.older = std::mem::take(&mut self.blocks);
-        // `by_page` has to go on covering everything still held, or a store to
-        // a surviving block's page would not drop it and the guest would run
-        // instructions it has overwritten. Rebuilding it from the generation
-        // that survived is also what takes the dropped one's entries out.
+        // Rebuild `by_page` from the surviving generations.
         self.by_page.clear();
         for block in self.older.values() {
             for &page in &block.pages {
@@ -188,8 +127,7 @@ impl Jit {
         self.drop_lookup();
     }
 
-    /// Forget every lookup hint. Called whenever a block is dropped: a hint
-    /// outliving the block it points at would keep running stale code.
+    /// Called whenever a block is dropped, so no hint outlives its block.
     fn drop_lookup(&mut self) {
         for slot in &mut self.lookup {
             *slot = None;
@@ -201,10 +139,7 @@ impl Jit {
         for &page in pages {
             if let Some(starts) = self.by_page.remove(&page) {
                 for start in starts {
-                    // Both generations, and neither test may be skipped: a
-                    // block that has sunk into `older` is still reachable
-                    // through `get`, so leaving it there would hand back code
-                    // the guest has just overwritten.
+                    // Check both generations: `get` still reaches blocks in `older`.
                     let newer = self.blocks.remove(&start).is_some();
                     let older = self.older.remove(&start).is_some();
                     if newer || older {

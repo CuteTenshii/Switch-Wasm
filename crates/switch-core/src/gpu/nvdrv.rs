@@ -1,14 +1,6 @@
-//! nvdrv: the Horizon service in front of the GPU.
-//!
-//! The guest opens device nodes (`/dev/nvmap`, `/dev/nvhost-as-gpu`,
-//! `/dev/nvhost-gpu`, …) and drives them with Linux-style ioctls whose numbers
-//! encode direction, type, command and argument size. The argument is a single
-//! in/out struct, so each handler here decodes the struct the guest sent,
-//! performs the operation on the [`Gpu`], and writes the results back into the
-//! same buffer.
-//!
-//! Struct layouts and ioctl numbers match libnx's `nvidia/ioctl` sources,
-//! which is what real homebrew is compiled against.
+//! nvdrv: the Horizon service in front of the GPU. Device nodes are driven by
+//! Linux-style ioctls with one in/out argument struct, laid out as in libnx's
+//! `nvidia/ioctl` sources.
 
 use crate::gpu::multimedia::{self, Engine, Video};
 use crate::gpu::syncpt::NvFence;
@@ -30,28 +22,22 @@ pub const NV_INSUFFICIENT_MEMORY: u32 = 6;
 pub const NV_INVALID_STATE: u32 = 8;
 pub const NV_CONFIG_VAR_NOT_FOUND: u32 = 0x30006;
 
-/// `NVGPU_ZBC_TYPE_*`: which of the two zero-bandwidth-clear tables an entry
-/// belongs to. `INVALID` is not an error: a query passes it to ask for the
-/// table size and nothing else.
+/// `NVGPU_ZBC_TYPE_*`. `INVALID` asks a query for the table size only.
 const ZBC_TYPE_INVALID: u32 = 0;
 const ZBC_TYPE_COLOR: u32 = 1;
 const ZBC_TYPE_DEPTH: u32 = 2;
 
-/// The GM20B's shader units, as `GetCharacteristics` reports them. The TPC
-/// mask and the virtual-SM map are derived from these rather than written out
-/// again: a driver told two different chips reconciles them by indexing one
-/// with the other's count.
+/// The GM20B's shader units, as `GetCharacteristics` reports them.
 const GPU_NUM_GPC: u32 = 1;
 const GPU_TPC_PER_GPC: u32 = 2;
 
-/// ioctl type ("magic") bytes.
+/// ioctl type bytes.
 const TYPE_NVHOST: u32 = 0x00;
 const TYPE_NVMAP: u32 = 0x01;
 const TYPE_AS_GPU: u32 = 0x41;
 const TYPE_CTRL_GPU: u32 = 0x47;
 const TYPE_CHANNEL: u32 = 0x48;
 
-/// What an open file descriptor refers to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NvFile {
     NvMap,
@@ -65,45 +51,32 @@ pub enum NvFile {
     Channel {
         channel_id: u32,
     },
-    /// `/dev/nvhost-nvdec` or `/dev/nvhost-vic`, owning one channel to that
-    /// video engine.
+    /// `/dev/nvhost-nvdec` or `/dev/nvhost-vic`.
     Multimedia {
         engine: Engine,
         channel_id: u32,
     },
-    /// A node we recognise but do not model (nvjpg, …).
     Unsupported {
         path: String,
     },
 }
 
-/// Slots in each of the driver's two zero-bandwidth-clear tables
-/// (`GK20A_ZBC_TABLE_SIZE`).
+/// Slots per zero-bandwidth-clear table (`GK20A_ZBC_TABLE_SIZE`).
 pub const ZBC_TABLE_SIZE: usize = 16;
 
-/// One zero-bandwidth-clear table entry: a colour (in both the depth-stencil
-/// and the L2 encoding) or a depth value that the hardware can encode into a
-/// surface's compression bits instead of writing out pixels.
-///
-/// Nothing here clears that way (the rasterizer writes the pixels) so the
-/// table changes no rendering. It is kept because it is *readable*:
-/// `ZbcQueryTable` hands back what `ZbcSetTable` put in, and a driver that
-/// asks which clear values it already registered and is told "none, ever"
-/// registers them again until the table it cannot see fills up.
+/// One zero-bandwidth-clear table entry. Rendering ignores it; it is kept so
+/// `ZbcQueryTable` can read it back.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ZbcEntry {
     pub color_ds: [u32; 4],
     pub color_l2: [u32; 4],
     pub depth: u32,
-    /// How many times this value has been registered. `ZbcQueryTable` reports
-    /// it, which is how a driver tells a slot it owns from one it shares.
+    /// Registration count, reported by `ZbcQueryTable`.
     pub ref_cnt: u32,
     pub format: u32,
 }
 
-/// One of the two tables, filled from the bottom. An entry is never dropped:
-/// the driver interface has no way to remove one, only to add a value it may
-/// already hold.
+/// One ZBC table, filled from the bottom; entries are never removed.
 #[derive(Debug, Default)]
 pub struct ZbcTable {
     entries: [ZbcEntry; ZBC_TABLE_SIZE],
@@ -111,8 +84,7 @@ pub struct ZbcTable {
 }
 
 impl ZbcTable {
-    /// Register `entry`, or take another reference to the slot that already
-    /// holds this value. False when the table is full.
+    /// Register `entry`, or reference the slot already holding it. False when full.
     fn add(&mut self, entry: ZbcEntry) -> bool {
         let same = |a: &ZbcEntry| {
             a.color_ds == entry.color_ds
@@ -149,17 +121,13 @@ pub struct NvDrv {
     pub gpu: Gpu,
     files: HashMap<u32, NvFile>,
     next_fd: u32,
-    /// Transfer-memory size the guest handed us in `Initialize`.
     pub transfer_mem_size: u32,
-    /// The applet the session belongs to, from `SetAruid`. There is one
-    /// applet here, so it is recorded and never consulted.
+    /// The applet from `SetAruid`; recorded only.
     pub applet_resource_user_id: u64,
     pub initialized: bool,
-    /// The two zero-bandwidth-clear tables `/dev/nvhost-ctrl-gpu` keeps,
-    /// addressed by `NVGPU_ZBC_TYPE_COLOR` and `..._DEPTH`.
+    /// The color and depth ZBC tables of `/dev/nvhost-ctrl-gpu`.
     pub zbc_color: ZbcTable,
     pub zbc_depth: ZbcTable,
-    /// The video engines behind `/dev/nvhost-nvdec` and `/dev/nvhost-vic`.
     pub video: Video,
 }
 
@@ -188,9 +156,7 @@ impl NvDrv {
         self.files.get(&fd)
     }
 
-    /// The device node `fd` was opened on, for diagnostics. An ioctl number
-    /// means nothing on its own: the same number is a different command on
-    /// every node, so anything reporting one has to say which node it was.
+    /// The device node `fd` was opened on, for diagnostics.
     pub fn device_name(&self, fd: u32) -> &str {
         match self.files.get(&fd) {
             Some(NvFile::NvMap) => "/dev/nvmap",
@@ -263,21 +229,9 @@ impl NvDrv {
         }
     }
 
-    /// `nvIoctl` / `nvIoctl2` / `nvIoctl3`. `data` is the in/out argument
-    /// struct, at least the ioctl's declared size and longer when the guest
-    /// sent records after it, as a video engine's `SUBMIT` does; `inline_in`
-    /// carries `nvIoctl2`'s extra input buffer and `inline_out` receives
-    /// `nvIoctl3`'s extra *output* buffer. Returns the `NvError` the guest
-    /// sees, or a hard [`Error`] when the GPU model itself faults.
-    ///
-    /// The inline output is not decoration. An ioctl whose argument struct
-    /// carries a `{ buf_size, buf_addr }` pair returns its payload *through*
-    /// that pair, and `nvIoctl3` is how a caller asks for it to come back in a
-    /// second buffer rather than inline. `libnx` uses `nvIoctl` and reads the
-    /// payload from `data`; `nnSdk` uses `nvIoctl3` and reads it from here, so
-    /// leaving this empty handed a retail title a **zeroed** GPU
-    /// characteristics struct, it closed `/dev/nvhost-ctrl-gpu` and returned
-    /// a null device, which its caller then dereferenced.
+    /// `nvIoctl` / `nvIoctl2` / `nvIoctl3`. `data` is the argument struct (plus trailing
+    /// records for video `SUBMIT`), `inline_in` is `nvIoctl2`'s extra input and
+    /// `inline_out` receives `nvIoctl3`'s extra output, which `nnSdk` reads payloads from.
     pub fn ioctl(
         &mut self,
         mem: &mut Memory,
@@ -318,15 +272,7 @@ impl NvDrv {
             (NvFile::Unsupported { .. }, _) => Ok(NV_NOT_SUPPORTED),
             _ => Ok(NV_NOT_IMPLEMENTED),
         };
-        // An ioctl that fails is traced whether or not tracing is on. The
-        // successes are noise and the failures are not: every driver call here
-        // is one the guest believes cannot fail, and the ones that do are
-        // invisible otherwise -- they leave no line at all, because the traces
-        // that would carry them run *after* the work they describe.
-        //
-        // "No handler for this one" is left out: `Cpu::nvdrv_request` reports
-        // that once per command through the diagnostic channel the browser
-        // drains, where this `eprintln!` goes nowhere at all.
+        // Failed ioctls are always traced; missing handlers are reported by `Cpu::nvdrv_request`.
         match &outcome {
             Ok(code)
                 if !matches!(
@@ -346,8 +292,7 @@ impl NvDrv {
         outcome
     }
 
-    /// `nvQueryEvent`: the guest wants a kernel event it can wait on. Work is
-    /// retired synchronously here, so the event is always already signalled.
+    /// `nvQueryEvent`. Work retires synchronously, so the event is always signalled.
     pub fn query_event(&mut self, fd: u32, event_id: u32) -> u32 {
         if self.files.contains_key(&fd) {
             let _ = self.gpu.host1x.register_event(event_id.min(63));
@@ -391,11 +336,6 @@ impl NvDrv {
                     )));
                 }
                 if crate::trace::enabled(crate::trace::Trace::Nv) {
-                    // With whatever the handle was bound to before. A second
-                    // alloc on a handle that is already mapped would leave the
-                    // GPU address space pointing at the old memory, which is
-                    // the kind of thing that shows up as a buffer full of
-                    // zeroes and nothing else to explain it.
                     let was = self
                         .gpu
                         .nvmap
@@ -466,16 +406,14 @@ impl NvDrv {
                 self.gpu.host1x.increment(read_u32(data, 0))?;
                 Ok(NV_OK)
             }
-            // SyncptWait / SyncptWaitEx: submissions retire inside their
-            // ioctl, so a wait is only ever asked about work already done.
+            // SyncptWait / SyncptWaitEx: submissions retire inside their ioctl.
             0x16 | 0x19 => {
                 let id = read_u32(data, 0);
                 let threshold = read_u32(data, 4);
                 if self.gpu.host1x.is_expired(id, threshold)? {
                     Ok(NV_OK)
                 } else {
-                    // Nothing else can advance it, so report the timeout the
-                    // guest would eventually see rather than hanging.
+                    // Nothing else can advance it, so report the timeout.
                     Ok(NV_INVALID_STATE)
                 }
             }
@@ -485,11 +423,7 @@ impl NvDrv {
                 write_u32(data, 4, value);
                 Ok(NV_OK)
             }
-            // EventSignal { in u32 event_id }: force a slot signalled without
-            // a fence reaching its threshold, which is how a driver releases
-            // a thread parked on an event it is about to tear down. Answering
-            // a bare success left that thread waiting on a slot nothing would
-            // ever set.
+            // EventSignal { in u32 event_id }: force a slot signalled.
             0x1C => {
                 let slot = read_u32(data, 0) as usize;
                 match self.gpu.host1x.events.get_mut(slot) {
@@ -526,28 +460,8 @@ impl NvDrv {
                 write_u32(data, 0x0C, slot);
                 Ok(NV_OK)
             }
-            // GetConfig { in char domain[0x41], key[0x41]; out char value[0x101] }
-            //
-            // The driver's settings lookup, and in practice its debug
-            // overrides: `nv!NVRM_GPU_NVGPU_NO_SYNCPOINTS`,
-            // `nv!NVRM_GPU_PREVENT_USE`, `nv!NVN_THROUGH_OPENGL` and some
-            // ninety more, which a retail title asks for one at a time while
-            // it starts. Switchbrew records the ioctl as "not available in
-            // production mode", and a console that boots normally is in
-            // production mode: there is no setting to find, whatever is
-            // asked for.
-            //
-            // Refused rather than answered empty, because the guest *can*
-            // tell those apart: `NvOsGetConfigString` maps a successful
-            // ioctl to "this key is set" without ever reading the value it
-            // got back. An empty success therefore enables every override
-            // the driver has, `NVWSI_FILL` included -- which makes the WSI
-            // layer fill each dequeued buffer a pixel at a time, and was 45%
-            // of a Just Dance 2017 frame.
-            //
-            // The refusal is Eden's `ConfigVarNotFound`, the answer for a
-            // name with nothing set, rather than "not implemented", which the
-            // diagnostic channel reports as a gap in the driver.
+            // GetConfig { in char domain[0x41], key[0x41]; out char value[0x101] }.
+            // Always `ConfigVarNotFound`: any success is read as "this override is set".
             0x1B => {
                 if crate::trace::enabled(crate::trace::Trace::Nv) {
                     crate::traceln!(
@@ -558,12 +472,8 @@ impl NvDrv {
                 }
                 Ok(NV_CONFIG_VAR_NOT_FOUND)
             }
-            // EventWaitAsync { in syncpt_id, threshold, timeout, event_id }:
-            // the same wait, arming a slot instead of blocking. Submissions
-            // retire inside their own ioctl, so by the time anyone asks the
-            // fence has already passed and the slot is signalled on arrival,
-            // which is the one thing the bare success it used to answer did
-            // not do.
+            // EventWaitAsync { in syncpt_id, threshold, timeout, event_id }: the fence has
+            // already passed, so the slot is signalled on arrival.
             0x1E => {
                 let id = read_u32(data, 0);
                 let threshold = read_u32(data, 4);
@@ -610,10 +520,7 @@ impl NvDrv {
                 }
                 Ok(NV_OK)
             }
-            // ZbcSetTable { in u32 color_ds[4], color_l2[4], depth, format,
-            //               type }. Registering the same value twice takes a
-            // second reference to the slot that already holds it rather than
-            // spending another, which is what makes a table this small last.
+            // ZbcSetTable { in u32 color_ds[4], color_l2[4], depth, format, type }.
             0x03 => {
                 let entry = ZbcEntry {
                     color_ds: [0, 1, 2, 3].map(|i| read_u32(data, i * 4)),
@@ -627,18 +534,14 @@ impl NvDrv {
                     ZBC_TYPE_DEPTH => &mut self.zbc_depth,
                     _ => return Ok(NV_BAD_PARAMETER),
                 };
-                // A full table is what a driver finds out about here; there
-                // is no eviction, on hardware either.
                 if table.add(entry) {
                     Ok(NV_OK)
                 } else {
                     Ok(NV_INSUFFICIENT_MEMORY)
                 }
             }
-            // ZbcQueryTable { inout nvioctl_zbc_entry }, whose `type` selects
-            // a table and whose trailing `index_size` field carries the index
-            // in and the table size back out. Type 0 (`INVALID`) asks for
-            // nothing but that size, which is what `libnx`'s wrapper does.
+            // ZbcQueryTable { inout nvioctl_zbc_entry }: `type` selects a table, the trailing
+            // field carries the index in and the size out. Type 0 asks for the size only.
             0x04 => {
                 let index = read_u32(data, 0x30) as usize;
                 let table = match read_u32(data, 0x2C) {
@@ -665,9 +568,8 @@ impl NvDrv {
                 write_u32(data, 0x30, ZBC_TABLE_SIZE as u32);
                 Ok(NV_OK)
             }
-            // GetCharacteristics { in u64 buf_size, buf_addr; out gc }.
-            // The payload goes both inline (where `nvIoctl` callers read it)
-            // and into the inline-output buffer (where `nvIoctl3` callers do).
+            // GetCharacteristics { in u64 buf_size, buf_addr; out gc }, written both inline
+            // and to the inline output.
             0x05 => {
                 write_u64(data, 0, GPU_CHARACTERISTICS.len() as u64);
                 for (i, byte) in GPU_CHARACTERISTICS.iter().enumerate() {
@@ -679,8 +581,7 @@ impl NvDrv {
                 inline_out.extend_from_slice(&GPU_CHARACTERISTICS);
                 Ok(NV_OK)
             }
-            // GetTpcMasks { in bufsize, pad, bufaddr; out u8[8] }, the same
-            // shape and so the same two destinations.
+            // GetTpcMasks { in bufsize, pad, bufaddr; out u8[8] }, same two destinations.
             0x06 => {
                 let mask = (1u32 << GPU_TPC_PER_GPC) - 1; // the TPCs present in GPC 0
                 write_u32(data, 0x10, mask);
@@ -702,22 +603,8 @@ impl NvDrv {
                 write_u64(data, 8, 0);
                 Ok(NV_OK)
             }
-            // VsmsMapping { in u64 vsms_map_buf_addr }: which (GPC, TPC) each
-            // of the chip's "virtual SMs" sits on, one
-            // `{ u8 gpc_index, u8 tpc_index }` entry per TPC.
-            //
-            // This is in no libnx header and no other emulator implements it,
-            // so it was identified from its caller rather than from a table.
-            // `nnSdk`'s bundled `nvrm_gpu` builds the request inline (`movz
-            // w23, #0x4713` / `movk w23, #0xc008`, at `sdk!0xd740950` in
-            // Tomodachi Life) and hands the driver two buffer descriptors:
-            // the 8-byte argument, and an array of `num_tpc_per_gpc` **u16**
-            // entries. That is upstream's `nvgpu_gpu_vsms_mapping_args`
-            // exactly: the argument is a bare buffer address, zero here
-            // because the Switch passes the buffer out-of-line rather than as
-            // a pointer, and the entries are `nvgpu_gpu_vsms_mapping_entry`.
-            // GM20B's one GPC and two TPCs are the four bytes the guest
-            // actually offers.
+            // VsmsMapping { in u64 vsms_map_buf_addr }: upstream's `nvgpu_gpu_vsms_mapping_args`,
+            // one `{ u8 gpc_index, u8 tpc_index }` entry per TPC in the out-of-line buffer.
             0x13 => {
                 inline_out.clear();
                 for gpc in 0..GPU_NUM_GPC {
@@ -788,11 +675,7 @@ impl NvDrv {
                 let mapping_size = read_u64(data, 0x18);
                 let requested = read_u64(data, 0x20);
 
-                // The remap form maps nothing new: `offset` names a mapping
-                // that already exists and `nvmap_handle` is unused (0 here),
-                // so it has to be split off before the handle lookup below,
-                // which is what rejected it with `BadParameter`, and what
-                // aborted `deko3d`'s image setup before it drew a frame.
+                // The remap form names an existing mapping with handle 0; handle it before the lookup.
                 if flags & FLAG_REMAP_SUB_RANGE != 0 {
                     let gpu_va = requested.wrapping_add(buffer_offset);
                     let kind = (kind != u32::MAX).then_some(kind as u8);
@@ -891,13 +774,8 @@ impl NvDrv {
                 }
                 Ok(NV_OK)
             }
-            // Remap { u16 flags, kind; u32 nvmap_handle, map_offset,
-            //         gpu_offset, pages }[], every offset and length in big
-            // pages. Unlike `MapBufferEx` this is a batch, and it names the
-            // GPU VA outright rather than asking for one: it is how a driver
-            // fills in a range it reserved as sparse, and how a title gives
-            // one buffer several block-linear kinds by mapping it repeatedly.
-            // A zero handle means "leave this range unmapped".
+            // Remap { u16 flags, kind; u32 nvmap_handle, map_offset, gpu_offset, pages }[],
+            // in big pages, at explicit GPU VAs. A zero handle leaves the range unmapped.
             0x14 => {
                 const OP_SIZE: usize = 0x14;
                 if data.len() < OP_SIZE || !data.len().is_multiple_of(OP_SIZE) {
@@ -948,8 +826,7 @@ impl NvDrv {
         }
     }
 
-    /// `/dev/nvhost-nvdec` and `/dev/nvhost-vic`: the channel ioctls of a
-    /// host1x client, which both engines share.
+    /// `/dev/nvhost-nvdec` and `/dev/nvhost-vic`: shared host1x client channel ioctls.
     fn multimedia_ioctl(
         &mut self,
         mem: &Memory,
@@ -970,8 +847,7 @@ impl NvDrv {
             );
         }
         match (ioc_type, nr) {
-            // SetNvmapFd, and SetSubmitTimeout: there is one nvmap and no
-            // submission that can time out.
+            // SetNvmapFd, and SetSubmitTimeout.
             (TYPE_CHANNEL, 0x01) | (TYPE_NVHOST, 0x07) => Ok(NV_OK),
             // Submit { cmdbufs, relocs, syncpt_incrs, fences; records... }
             (TYPE_NVHOST, 0x01) => {
@@ -989,8 +865,7 @@ impl NvDrv {
                 write_u32(data, 4, syncpt);
                 Ok(NV_OK)
             }
-            // GetWaitbase { in param; out value }: host1x's wait bases are
-            // gone from the hardware the Switch has, and nothing reads one.
+            // GetWaitbase { in param; out value }: unused on this hardware.
             (TYPE_NVHOST, 0x03) => {
                 write_u32(data, 4, 0);
                 Ok(NV_OK)
@@ -1018,16 +893,8 @@ impl NvDrv {
         inline_in: &[u8],
     ) -> Result<u32> {
         match (ioc_type, nr) {
-            // SetNvmapFd / SetTimeout / ZCullBind / SetErrorNotifier /
-            // SetPriority / SetUserData: bookkeeping with no visible effect on
-            // the model.
-            // SetTimeslice (0x1D) joins them: how long the channel holds the
-            // GPU before the host1x scheduler moves on is a real knob on
-            // hardware and nothing at all on a command processor that runs
-            // each submission to completion inside its own ioctl. Refusing it
-            // is the one answer that is definitely wrong -- nnSdk's nvn driver
-            // checks, and a channel it failed to configure is one it has no
-            // reason to trust.
+            // SetNvmapFd / SetTimeout / ZCullBind / SetErrorNotifier / SetPriority /
+            // SetUserData / SetTimeslice: accepted with no effect.
             (TYPE_CHANNEL, 0x01)
             | (TYPE_CHANNEL, 0x03)
             | (TYPE_CHANNEL, 0x0B)
@@ -1107,8 +974,7 @@ impl NvDrv {
                 Ok(NV_OK)
             }
 
-            // MapCommandBuffer / UnmapCommandBuffer: host1x-class submission,
-            // which the GPU channel path does not use.
+            // MapCommandBuffer / UnmapCommandBuffer: unused by the GPU channel path.
             (TYPE_NVHOST, 0x09) | (TYPE_NVHOST, 0x0A) => Ok(NV_OK),
 
             _ => Ok(NV_NOT_IMPLEMENTED),
@@ -1119,8 +985,7 @@ impl NvDrv {
 /// `nvioctl_gpu_characteristics` for the GM20B, as the Switch reports it.
 static GPU_CHARACTERISTICS: [u8; 0xA0] = {
     let mut out = [0u8; 0xA0];
-    // Written as a const fn would be, but `const` loops over a table are
-    // clearer here: each entry is (byte offset, value, width in bytes).
+    // Each entry is (byte offset, value, width in bytes).
     macro_rules! put {
         ($out:ident, $off:expr, $value:expr, 4) => {{
             let v: u32 = $value;
@@ -1184,8 +1049,7 @@ fn read_u32(data: &[u8], at: usize) -> u32 {
     v
 }
 
-/// A fixed-width NUL-padded ASCII field, the way the nvhost config ioctls
-/// carry their strings.
+/// A fixed-width NUL-padded ASCII field.
 fn ascii_field(data: &[u8], at: usize, len: usize) -> String {
     let bytes = data.get(at..at + len).unwrap_or(&[]);
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
@@ -1217,18 +1081,16 @@ fn write_u64(data: &mut [u8], at: usize, value: u64) {
     write_u32(data, at + 4, (value >> 32) as u32);
 }
 
-/// Build the ioctl number the way libnx's `_NV_IOC` macros do, for tests and
-/// for callers that need to synthesize a request.
+/// Build an ioctl number as libnx's `_NV_IOC` macros do.
 pub fn make_ioctl(dir: u32, ioc_type: u32, nr: u32, size: u32) -> u32 {
     (dir << 30) | ((size & 0x3FFF) << 16) | ((ioc_type & 0xFF) << 8) | (nr & 0xFF)
 }
 
-/// Size in bytes of an ioctl's argument struct.
 pub fn ioctl_size(request: u32) -> u32 {
     (request >> 16) & 0x3FFF
 }
 
-/// Direction bits: 1 = write (guest → driver), 2 = read (driver → guest).
+/// Direction bits: 1 = write (guest to driver), 2 = read (driver to guest).
 pub fn ioctl_direction(request: u32) -> u32 {
     (request >> 30) & 3
 }
@@ -1306,8 +1168,7 @@ mod tests {
         assert_eq!(read_u32(&param, 8), 0x3000_0000);
     }
 
-    /// The same, keeping the out-of-line reply an `nvIoctl3` caller reads its
-    /// payload from.
+    /// [`ioctl`], also returning the out-of-line reply.
     fn ioctl_out(
         drv: &mut NvDrv,
         mem: &mut Memory,
@@ -1326,10 +1187,7 @@ mod tests {
 
     #[test]
     fn the_virtual_sm_map_names_a_gpc_and_a_tpc_for_every_shader_unit() {
-        // `VsmsMapping` is asked for once during `nvrm_gpu`'s device probe,
-        // and the buffer the guest offers is sized from the TPC count it was
-        // given moments earlier by `GetCharacteristics`, so the two have to
-        // agree or the driver indexes one chip with the other's count.
+        // The VsmsMapping buffer is sized from `GetCharacteristics`' TPC count.
         let mut drv = NvDrv::new();
         let mut mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
@@ -1343,8 +1201,6 @@ mod tests {
             "the map is sized by the counts GetCharacteristics reports"
         );
 
-        // And those counts are the ones the characteristics and the TPC mask
-        // are built from, so nothing here can drift apart.
         let mut chars = [0u8; 0xB0];
         let (code, gc) = ioctl_out(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x05, &mut chars);
         assert_eq!(code, NV_OK);
@@ -1379,9 +1235,7 @@ mod tests {
             ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
             NV_OK
         );
-        // The same value again takes a second reference rather than a second
-        // slot: a table of sixteen does not survive a driver that re-registers
-        // its clear colour every frame.
+        // The same value again takes a second reference, not a second slot.
         assert_eq!(
             ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
             NV_OK
@@ -1393,8 +1247,6 @@ mod tests {
             "a colour entry landed in the depth table"
         );
 
-        // ZbcQueryTable { inout nvioctl_zbc_entry }: type selects the table,
-        // the trailing field carries the index in and the table size out.
         let mut query = [0u8; 0x34];
         write_u32(&mut query, 0x2C, ZBC_TYPE_COLOR);
         write_u32(&mut query, 0x30, 0);
@@ -1410,8 +1262,7 @@ mod tests {
         assert_eq!(read_u32(&query, 0x28), 0x0A, "format");
         assert_eq!(read_u32(&query, 0x30), ZBC_TABLE_SIZE as u32, "table size");
 
-        // Type 0 asks for the size and nothing else, which is the only form
-        // libnx's own wrapper sends.
+        // Type 0 asks for the size only, as libnx's wrapper sends.
         let mut size_only = [0u8; 0x34];
         assert_eq!(
             ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut size_only),
@@ -1450,10 +1301,7 @@ mod tests {
         assert_eq!(drv.zbc_depth.used(), ZBC_TABLE_SIZE);
     }
 
-    /// A success here is read as "this key is set" no matter what value came
-    /// back with it, so an unset key has to be refused rather than answered
-    /// empty. Answering `NV_OK` enabled `NVWSI_FILL`, and the WSI layer then
-    /// filled every dequeued buffer a pixel at a time.
+    /// Any success is read as "this key is set", so every key is refused.
     #[test]
     fn get_config_refuses_every_key() {
         let mut drv = NvDrv::new();
@@ -1488,10 +1336,7 @@ mod tests {
         );
         assert!(!drv.gpu.host1x.events[3].signalled);
 
-        // EventWaitAsync { syncpt_id, threshold, timeout, event_id }: the work
-        // it names retired inside its own submission, so the slot comes back
-        // already signalled instead of waiting for something that will not
-        // happen again.
+        // EventWaitAsync returns the slot already signalled.
         write_u32(&mut arg, 0, 9); // syncpt
         write_u32(&mut arg, 4, 5); // threshold
         write_u32(&mut arg, 0x0C, 3); // slot
@@ -1502,8 +1347,7 @@ mod tests {
         assert!(drv.gpu.host1x.events[3].signalled);
         assert_eq!(drv.gpu.host1x.events[3].fence, NvFence { id: 9, value: 5 });
 
-        // EventSignal on a slot that does not exist is refused rather than
-        // reported as a success nothing acted on.
+        // EventSignal on a nonexistent slot is refused.
         let mut signal = [0u8; 4];
         write_u32(&mut signal, 0, 64);
         assert_eq!(
@@ -1520,10 +1364,7 @@ mod tests {
 
     #[test]
     fn remap_fills_a_reserved_range_and_a_zero_handle_clears_it() {
-        // `REMAP` is how a title backs address space it reserved as sparse,
-        // and how it gives one buffer several block-linear kinds. It names
-        // the GPU VA outright and counts everything in big pages, so the
-        // request carries neither a page size nor a "fixed offset" flag.
+        // `REMAP` names the GPU VA outright and counts in big pages.
         let mut drv = NvDrv::new();
         let mut mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x2_0000).unwrap();
@@ -1539,8 +1380,7 @@ mod tests {
         write_u64(&mut alloc, 0x18, 0x3000_0000);
         ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
 
-        // One op: the second big page of the handle, at GPU VA 0x8_0000,
-        // with kind 0xFE.
+        // One op: the handle's second big page at GPU VA 0x8_0000, kind 0xFE.
         let mut op = [0u8; 0x14];
         write_u32(&mut op, 0, 0x00FE_0000); // flags 0, kind 0xFE
         write_u32(&mut op, 4, handle);
@@ -1576,12 +1416,7 @@ mod tests {
 
     #[test]
     fn map_buffer_ex_remaps_a_sub_range_without_an_nvmap_handle() {
-        // `deko3d` maps a memory block once and then re-maps the ranges
-        // holding block-linear images over the top with the kind that
-        // describes their swizzle. That second call sets
-        // `NVGPU_AS_MAP_BUFFER_FLAGS_MODIFY`, names the existing mapping in
-        // `offset`, and leaves the nvmap handle **0**, which the ordinary
-        // map path rejected as `BadParameter`, aborting before the first frame.
+        // deko3d re-maps block-linear ranges with `MODIFY`, the existing offset and handle 0.
         let mut drv = NvDrv::new();
         let mut mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x4000).unwrap();
@@ -1606,8 +1441,7 @@ mod tests {
         );
         let gpu_va = read_u64(&map, 0x20);
 
-        // Re-map the middle 0x1000 bytes with kind 0xdb (a block-linear
-        // kind), the way the driver is asked to.
+        // Re-map the middle 0x1000 bytes with block-linear kind 0xdb.
         let mut remap = [0u8; 0x28];
         write_u32(&mut remap, 0, 1 << 8); // MODIFY
         write_u32(&mut remap, 4, 0xdb);
@@ -1624,9 +1458,7 @@ mod tests {
             panic!("expected an address-space fd");
         };
         let space = &drv.gpu.address_spaces[&as_id];
-        // The backing memory does not move: every byte of the original
-        // mapping still resolves to the CPU address it did before, across
-        // both of the boundaries the split introduced.
+        // The backing memory does not move across the split boundaries.
         for offset in [0u64, 0xFFF, 0x1000, 0x1FFF, 0x2000, 0x3FFF] {
             assert_eq!(
                 space.translate(gpu_va + offset).map(|(cpu, _)| cpu),
@@ -1642,7 +1474,7 @@ mod tests {
         );
         assert_eq!(space.mapping_at(gpu_va + 0x2000).map(|m| m.kind), Some(0));
 
-        // A range no mapping covers is the one thing this really cannot do.
+        // A range no mapping covers is refused.
         let mut orphan = [0u8; 0x28];
         write_u32(&mut orphan, 0, 1 << 8);
         write_u64(&mut orphan, 0x18, 0x1000);
@@ -1818,8 +1650,7 @@ mod tests {
 
     #[test]
     fn ioctl_numbers_match_libnx() {
-        // NVMAP_IOC_CREATE, NVMAP_IOC_ALLOC, NVHOST_IOCTL_CTRL_SYNCPT_READ and
-        // NVHOST_IOCTL_CTRL_SYNCPT_INCR as libnx and switchbrew spell them.
+        // Ioctl numbers as libnx and switchbrew spell them.
         assert_eq!(make_ioctl(IOWR, TYPE_NVMAP, 0x01, 8), 0xC008_0101);
         assert_eq!(make_ioctl(IOWR, TYPE_NVMAP, 0x04, 0x20), 0xC020_0104);
         assert_eq!(make_ioctl(IOWR, TYPE_NVHOST, 0x14, 8), 0xC008_0014);

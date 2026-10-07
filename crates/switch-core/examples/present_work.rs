@@ -1,69 +1,31 @@
-//! What scan-out costs, in work rather than in milliseconds:
+//! Scan-out cost measured in work (bytes read, runs, pixels), not milliseconds:
 //! `present_work [width] [height]`.
 //!
-//! [`switch_core::gpu::Gpu::present`] is the one piece of per-frame work that
-//! runs whichever renderer produced the surface, the software rasterizer and
-//! the wgpu backend both hand it a block-linear image in guest memory, and it
-//! walks that image into the `Vec<u32>` the canvas wants. So it is the floor
-//! under the frame rate, and enabling a GPU cannot move it. Just Dance 2019 is
-//! the case that makes the point: it issues **no draws at all**, and still
-//! costs a full 1280x720 scan-out every frame.
-//!
-//! This used to report ms/frame and an "fps ceiling", measured on the host.
-//! Neither is a fact about this project: the browser runs the same loop
-//! through its own compiler, over a bounds-checked 32-bit linear memory, and
-//! the ratio between the two is not a constant you can divide out. What *is*
-//! the same on both is how much work the loop is asked to do, bytes lifted
-//! out of guest memory, deswizzle lookups, pixels converted, and every
-//! optimisation worth making moves one of those numbers. A change that leaves
-//! all three alone did not make scan-out cheaper; it made this host faster at
-//! it.
-//!
-//! The counts are derived here rather than measured inside `present`, because
-//! the only place to count a pixel is the per-pixel loop and a counter there
-//! is a cost paid 921,600 times a frame to learn something arithmetic already
-//! knows. They mirror the loop in `Gpu::present`, a `run_at` per contiguous
-//! run, `count` pixels from each, so a change to that loop's shape belongs
-//! here too.
-//!
-//! Every case also presents for real and prints a checksum. The pixels are a
-//! gradient rather than a constant: a constant surface is exactly the input
-//! that would let a wrong fast path look right.
+//! The counts mirror the loop in `Gpu::present`; keep them in sync.
 mod common;
 
 use switch_core::gpu::surface::Layout;
 use switch_core::gpu::{Crop, DisplayBuffer, Gpu, NV_LAYOUT_BLOCK_LINEAR, NV_LAYOUT_PITCH};
 use switch_core::mem::Memory;
 
-/// Where the surface is mapped. Clear of every region a process is given, as
-/// the demo framebuffer is.
+/// Surface address, clear of every region a process is given.
 const BASE: u32 = 0xF400_0000;
-/// `NvColorFormat` for A8B8G8R8, which is what a title's swapchain uses and
-/// what `present` decodes to `RGBA8Unorm` (surface format `0xD5`, the one the
-/// `[gpu]` traces show Just Dance presenting).
+/// `NvColorFormat` for A8B8G8R8.
 const COLOR_FORMAT: u64 = 0x01_0053_2120;
-/// Bytes per pixel of that format, which is what `present` walks the surface in.
 const BPP: u32 = 4;
-/// Gobs per block in the vertical direction, as `block_height_log2`.
 const BLOCK_HEIGHT_LOG2: u32 = 4;
 
-/// The work one `present` of this configuration is asked to do.
 struct Work {
-    /// Bytes lifted out of guest memory, which is the whole surface however
-    /// small the crop is.
     surface_bytes: u32,
-    /// Bytes of that surface no output pixel ever reads.
+    /// Bytes of the surface no output pixel reads.
     unsampled_bytes: u32,
-    /// Calls to [`Layout::run_at`], one per contiguous run of pixels.
+    /// Calls to `Layout::run_at`.
     lookups: u64,
-    /// Pixels written to the framebuffer.
     pixels: u64,
-    /// Sum of the presented pixels, so a cheaper path that changes the image
-    /// cannot pass as an improvement.
+    /// Sum of the presented pixels.
     checksum: u64,
 }
 
-/// Count what `present` will do to this buffer, then do it.
 fn measure(layout: Layout, buffer: &DisplayBuffer, mem: &Memory, gpu: &mut Gpu) -> Work {
     let width_bytes = match layout {
         Layout::Pitch { pitch } => pitch,
@@ -98,11 +60,6 @@ fn measure(layout: Layout, buffer: &DisplayBuffer, mem: &Memory, gpu: &mut Gpu) 
     }
 }
 
-/// Build the surface, present it, and report what that took.
-///
-/// A fresh [`Memory`] and [`Gpu`] per case: `present` keeps its scan-out
-/// buffer between frames, and a case that inherited the last one's would be
-/// reporting the previous surface's allocation rather than its own.
 fn case(name: &str, width: u32, height: u32, pitch_linear: bool, crop: Crop) {
     let mut mem = Memory::new();
     let mut gpu = Gpu::new();
@@ -116,8 +73,6 @@ fn case(name: &str, width: u32, height: u32, pitch_linear: bool, crop: Crop) {
     let width_bytes = width * BPP;
     let size = layout.layer_stride(width_bytes, height);
     mem.map_zero(BASE, size as usize).expect("map the surface");
-    // Filled through `Layout::offset`, which is what decides where a texel
-    // lives, so every byte lands exactly where `present` will look for it.
     for y in 0..height {
         for x in 0..width {
             let texel =
@@ -185,8 +140,7 @@ fn main() {
         true,
         Crop::ALL,
     );
-    // The shape a title that allocates 1080p and queues 720p presents every
-    // frame: the crop bounds the pixel loop, and nothing bounds the read.
+    // A 1080p allocation presented as a 720p crop.
     case(
         "block-linear 1920x1080, cropped to 1280x720",
         1920,

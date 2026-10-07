@@ -1,9 +1,5 @@
-/* The wasm module and the session it holds, plus the buffer plumbing every
-   command goes through.
-
-   The ABI is C: pointers and lengths into the module's linear memory, u64
-   arguments and returns as BigInt. Nothing here knows what a command means -
-   `commands.ts` does. */
+// The wasm module, its session, and the buffer plumbing commands go through.
+// C ABI: pointers and lengths into linear memory, u64 as BigInt.
 
 import type { Bytes } from '../shared/protocol';
 
@@ -115,8 +111,7 @@ export interface WasmExports {
   switch_users_json(handle: number, buf: number, maxlen: number): number;
   switch_user_picture(
     handle: number, uidLo: bigint, uidHi: bigint, buf: number, maxlen: number): number;
-  // A save is its id and its user's uid, in two halves: see `saveKey` in
-  // `commands.ts`.
+  // A save is keyed by its id and its user's uid in two halves.
   switch_save_create(handle: number, saveId: bigint, userLo: bigint, userHi: bigint): number;
   switch_save_pending_changes(
     handle: number, saveId: bigint, userLo: bigint, userHi: bigint): number;
@@ -137,17 +132,12 @@ export interface WasmExports {
     pathPtr: number, pathLen: number, offset: bigint, buf: number, maxlen: number): bigint;
 }
 
-/** The instance and the session it is running. One object rather than two
- *  exported `let`s, so a module that imports this sees the current session
- *  rather than a copy of whatever it was at import time. */
+// One object rather than exported `let`s so importers see the live session.
 export const state: { exports: WasmExports | null; handle: number } = {
   exports: null,
   handle: -1,
 };
 
-/** The wasm exports, or a clear error if the module never instantiated -
- *  which otherwise surfaces as a `null is not an object` from whichever
- *  command the page happened to send first. */
 export function api(): WasmExports {
   if (!state.exports) throw new Error('the emulator core did not load');
   return state.exports;
@@ -157,15 +147,7 @@ export function handle(): number {
   return state.handle;
 }
 
-// Every buffer that crosses into wasm goes through here. A refused request
-// comes back as null (switch_alloc will not trap on one), and writing at
-// address 0 would corrupt the module's own data rather than fail, so this is
-// where an impossible size has to stop.
-//
-// `>>> 0` for the same reason `hostRead` applies it to the pointer it is
-// handed: the export returns a wasm i32, which JS reads signed, so every
-// allocation past 2 GiB arrives negative - and a negative byteOffset is what
-// the views below refuse rather than address.
+// A refused allocation returns 0. `>>> 0` because the i32 reads signed past 2 GiB.
 export function alloc(len: number): number {
   const ptr = api().switch_alloc(len) >>> 0;
   if (!ptr) throw new Error('cannot allocate ' + len + ' bytes in the emulator');
@@ -185,10 +167,7 @@ export function fromWasm(ptr: number, len: number): Bytes {
   return new Uint8Array(api().memory.buffer, ptr, len).slice();
 }
 
-/** Hand `bytes` to `body` as a wasm buffer and give the buffer back however
- *  `body` ends: the staging copy is the emulator's own heap, and leaking one
- *  per load is memory the browser never gets back. A zero-length buffer is
- *  still allocated, because `alloc` refuses address 0. */
+// Stage `bytes` in wasm for `body`, always freeing it. Empty still allocates one byte.
 export function withBytes<T>(bytes: Bytes, body: (ptr: number, len: number) => T): T {
   const len = bytes.length;
   const ptr = alloc(len || 1);
@@ -200,7 +179,7 @@ export function withBytes<T>(bytes: Bytes, body: (ptr: number, len: number) => T
   }
 }
 
-/** The same for an out-parameter: a scratch buffer of `cap` bytes. */
+// A scratch out-buffer of `cap` bytes, always freed.
 export function withBuffer<T>(cap: number, body: (ptr: number) => T): T {
   const ptr = alloc(cap);
   try {
@@ -217,27 +196,18 @@ export function decode(bytes: Bytes): string {
   return decoder.decode(bytes);
 }
 
-/** A guest path as the fs protocol carries it: UTF-8, no terminator. */
+// A guest path as UTF-8 with no terminator.
 export function withPath<T>(path: string, body: (ptr: number, len: number) => T): T {
   return withBytes(encoder.encode(path), body);
 }
 
-/** Read a string out of a buffer the module fills. */
 export function readString(cap: number, fill: (ptr: number, cap: number) => number): string {
   return withBuffer(cap, (ptr) => decode(fromWasm(ptr, fill(ptr, cap))));
 }
 
-/** The most a whole answer is read into: well past any report the module
- *  writes, and short of letting one bad answer allocate without bound. */
 const WHOLE_ANSWER_MAX = 1 << 20;
 
-/** Read an answer the module can be asked for twice, whole, however long.
- *
- *  The module copies what fits and says nothing about the rest, so an answer
- *  that filled the buffer may have been cut short, and it is asked again with
- *  twice the room. Only for answers that do not change by being read: the
- *  activity report hands over what it reports, and a second reading would
- *  lose it. */
+// Retry with a doubled buffer while the answer fills it. Only for idempotent reads.
 export function readWholeString(cap: number, fill: (ptr: number, cap: number) => number): string {
   for (let size = cap; ; size *= 2) {
     const [written, text] = withBuffer(size, (ptr): [number, string] => {
@@ -248,8 +218,7 @@ export function readWholeString(cap: number, fill: (ptr: number, cap: number) =>
   }
 }
 
-/** A read answer, parsed - falling back rather than throwing when the module
- *  wrote nothing, which is what an empty list looks like. */
+// An empty answer is an empty list, so fall back instead of throwing.
 function parseOr<T>(text: string, fallback: T): T {
   try {
     return JSON.parse(text) as T;
@@ -258,9 +227,6 @@ function parseOr<T>(text: string, fallback: T): T {
   }
 }
 
-/** [`readWholeString`], parsed. A report cut off mid-string does not parse,
- *  and the GPU report falling back to empty for that reason is how a page
- *  whose device had rejected one long shader said it had no device at all. */
 export function readWholeJson<T>(
   cap: number,
   fill: (ptr: number, cap: number) => number,
@@ -269,8 +235,6 @@ export function readWholeJson<T>(
   return parseOr(readWholeString(cap, fill), fallback);
 }
 
-/** The same, parsed - falling back rather than throwing when the module wrote
- *  nothing, which is what an empty list looks like. */
 export function readJson<T>(
   cap: number,
   fill: (ptr: number, cap: number) => number,

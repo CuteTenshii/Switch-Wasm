@@ -1,30 +1,7 @@
-//! What one frame costs, counted rather than timed:
+//! Count the work one steady-state frame asks for (instructions, blocks,
+//! interpreter fallbacks, methods, draws, pixels) instead of timing it:
 //! `frame_work <target> [prod.keys] [title.keys] [frames] [font.ttf]`.
-//!
-//! A frame's cost is how much work it asks for multiplied by what that work
-//! costs on the machine running it. Only the first half is a fact about this
-//! emulator: the second is a fact about a compiler and a CPU, and this project
-//! ships to a browser, where both are different and the ratio between them is
-//! not a constant anyone can divide out. So this reports the first half.
-//! Instructions retired, blocks entered, ops handed back to the interpreter,
-//! methods dispatched, draws, clears, copies, pixels scanned out. Every one of
-//! those is the same number under rustc's x86-64 backend and under V8, and
-//! every optimisation worth making moves one of them.
-//!
-//! Read it against `tools/wasm_bench.mjs`, which times the artefact the
-//! browser actually runs. Work counts say what to fix and prove a fix landed;
-//! the wasm timing says what it was worth. A change that moves no count here
-//! but looks faster on the host made this host faster, which is not the
-//! project.
-//!
-//! Startup is skipped: the first frames of a program are its loader, its
-//! allocator and its first upload, and averaging those into a steady frame
-//! describes neither.
-//!
-//! The target is a homebrew `.nro` or a retail container, an `.nsp`, an
-//! `.xci` or a bare Program `.nca`, which needs its keys after it. An NRO is
-//! not the workload a retail title is, so a ranking taken from one does not
-//! transfer.
+//! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
 mod common;
 
 const USAGE: &str = "frame_work <target> [prod.keys] [title.keys] [frames] [font.ttf]";
@@ -32,12 +9,9 @@ const USAGE: &str = "frame_work <target> [prod.keys] [title.keys] [frames] [font
 use switch_core::cpu::Cpu;
 use switch_core::gpu::exec::GpuStats;
 
-/// Frames of startup to run through before the window opens.
 const WARMUP_FRAMES: u64 = 2;
-/// How long to allow for reaching a frame before giving up.
 const FRAME_BUDGET: u64 = 2_000_000_000;
 
-/// Every counter this reports, at one instant.
 struct Snapshot {
     steps: u64,
     entered: u64,
@@ -66,7 +40,6 @@ impl Snapshot {
     }
 }
 
-/// What happened between two snapshots.
 struct Delta {
     steps: u64,
     entered: u64,
@@ -108,8 +81,7 @@ impl Delta {
             macros: after.gpu.macros - before.gpu.macros,
             dispatches: after.gpu.dispatches - before.gpu.dispatches,
             dispatches_skipped: after.gpu.dispatches_skipped - before.gpu.dispatches_skipped,
-            // The frame that was just presented, not a difference: scan-out
-            // walks the whole surface every time whatever the last one held.
+            // Scan-out walks the whole surface each frame, so this is not a difference.
             pixels: after.pixels,
         }
     }
@@ -159,7 +131,6 @@ impl Delta {
     }
 }
 
-/// Run until one more frame is presented, and report the counters it moved.
 fn frame(cpu: &mut Cpu, total_steps: &mut u64) -> Option<Delta> {
     let before = Snapshot::of(cpu, *total_steps);
     let target = cpu.nv.gpu.frames + 1;
@@ -249,9 +220,6 @@ fn main() {
         mean(total.linked),
         share(total.linked, total.entered),
     );
-    // The share the translator did not translate. It is the same share in the
-    // browser, and it is the largest CPU-side number here that a change can
-    // actually move.
     println!(
         "  cpu:    {:.0} instructions fell back to the interpreter ({:.2}% of the frame)",
         mean(total.interpreted),
@@ -274,8 +242,6 @@ fn main() {
         mean(total.dispatches),
         mean(total.dispatches_skipped),
     );
-    // Scan-out runs whatever the frame drew, so a title issuing no draws at
-    // all still pays this one in full. See `examples/present_work.rs`.
     println!("  scan-out: {:.0} pixels", mean(total.pixels));
 
     let used = cpu.mem.mapped_bytes();

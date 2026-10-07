@@ -13,28 +13,13 @@ crate-type = ["cdylib"]
 
 [features]
 default = []
-# A GPU backend in the browser. A feature rather than a plain dependency
-# because turning it on changes what the module *is*: `wgpu` reaches the
-# WebGPU JS API through `wasm-bindgen`, so the artefact stops being a bare
-# `cdylib` the worker can hand to `WebAssembly.instantiateStreaming` and
-# becomes a wasm-bindgen module with generated glue beside it.
-#
-# Off by default so that a build which does not want that shape does not get
-# it. `make wasm` turns it on, because the site does — see the Makefile for
-# why one shape of core beats two. A machine with no WebGPU still runs: the
-# backend says it could not open a device and the rasterizer takes the frame.
+# WebGPU backend; makes the artifact a wasm-bindgen module.
 gpu = ["dep:switch-gpu", "dep:wasm-bindgen-futures", "jit"]
 
-# Run the core's emitted wasm, rather than only writing it. Compiling a
-# module needs `WebAssembly.Module`, so this is what pulls in the JS bindings;
-# without it the translator still runs, it just interprets what it translated.
-#
-# `gpu` turns it on because the shipped build has both, and because the
-# bindings are already there for `wgpu`.
+# Compile and run the core's emitted wasm instead of interpreting it.
 jit = ["dep:wasm-bindgen", "dep:js-sys"]
 
-# std's own allocator on this target, used directly so that it can be told to
-# grow memory in larger steps; see `src/heap.rs`.
+# Used directly so it can grow memory in larger steps (see `src/heap.rs`).
 [target.'cfg(target_arch = "wasm32")'.dependencies.dlmalloc]
 version = "0.2"
 

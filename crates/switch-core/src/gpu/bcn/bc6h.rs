@@ -1,19 +1,7 @@
 //! BC6H (`BPTC_FLOAT`): 16 bytes of HDR RGB in one of fourteen modes.
 //!
-//! Two things make this the most intricate of the family. Its endpoints are
-//! half-floats reached through a quantise/delta/unquantise chain rather than
-//! stored directly, and its header fields are *scattered*, a single endpoint
-//! channel is assembled from up to six runs of bits that are nowhere near each
-//! other in the block, in an order that differs per mode.
-//!
-//! [`MODES`] is that scatter, one entry per run: which endpoint field the run
-//! belongs to, which bit of it the run starts at, how long it is, and whether
-//! it arrives most-significant-bit first. Writing it as data rather than as
-//! fourteen hand-written bit-twiddling routines is what makes it checkable,
-//! every mode has to account for exactly 128 bits, and the test below adds
-//! them up.
-//!
-//! There is no alpha: BC6H is an RGB format, and the decoder reports 1.0.
+//! Endpoints are half-floats via a quantise/delta/unquantise chain, and header
+//! fields are scattered in per-mode runs described by [`MODES`]. Alpha is 1.0.
 
 use super::{anchor, BitReader, Block, PARTITIONS_2, WEIGHTS_3, WEIGHTS_4};
 use crate::gpu::surface::f16_to_f32;
@@ -47,8 +35,7 @@ struct F {
     /// The bit of the target field this run starts at.
     shift: u8,
     count: u8,
-    /// The run arrives most-significant bit first, which only the modes with
-    /// 16-bit endpoints use.
+    /// Most-significant bit first; only the 16-bit endpoint modes use it.
     reversed: bool,
 }
 
@@ -82,8 +69,7 @@ impl F {
 }
 
 struct Mode {
-    /// The mode's prefix, two bits for the first two modes and five for the
-    /// rest.
+    /// Two bits for the first two modes, five for the rest.
     raw: u8,
     raw_bits: u32,
     fields: &'static [F],
@@ -431,8 +417,7 @@ const PRECISION: [[u32; 14]; 4] = [
     [5, 6, 4, 4, 5, 5, 5, 5, 6, 6, 10, 9, 8, 4],
 ];
 
-/// The modes whose deltas are as wide as their base endpoint, which is the
-/// same as saying they store both endpoints outright and skip the transform.
+/// Modes whose deltas are as wide as the base, i.e. endpoints stored outright.
 fn stores_endpoints_directly(mode: usize) -> bool {
     mode == 9 || mode == 10
 }
@@ -442,8 +427,7 @@ fn extend_sign(value: i32, bits: u32) -> i32 {
     (value << shift) >> shift
 }
 
-/// Undo the delta encoding: a non-base endpoint is stored as its difference
-/// from the base, wrapped to the base's precision.
+/// A non-base endpoint is stored as a delta from the base, wrapped to its precision.
 fn transform_inverse(value: i32, base: i32, bits: u32, signed: bool) -> i32 {
     let wrapped = (value.wrapping_add(base)) & ((1 << bits) - 1);
     if signed {
@@ -485,8 +469,7 @@ fn unquantize(value: i32, bits: u32, signed: bool) -> i32 {
     }
 }
 
-/// The last step, applied after interpolation: scale the magnitude into the
-/// range a half-float's bit pattern expects, and reattach the sign.
+/// After interpolation: scale into half-float range and reattach the sign.
 fn finish_unquantize(value: i32, signed: bool) -> u16 {
     if !signed {
         ((value * 31) >> 6) as u16
@@ -517,13 +500,11 @@ pub fn decode_bc6h(block: &[u8], signed: bool) -> Block {
         .iter()
         .position(|m| m.raw_bits == raw_bits && m.raw as u32 == raw)
     else {
-        // Four of the five-bit prefixes are reserved. The specification says a
-        // block using one decodes to zero rather than to anything diagnostic.
+        // Reserved prefixes decode to zero, per the specification.
         return [[0.0, 0.0, 0.0, 1.0]; 16];
     };
     let mode = &MODES[mode_index];
 
-    // Assemble the endpoints out of the mode's scattered runs.
     let mut endpoint = [[0i32; 4]; 3];
     let mut partition = 0usize;
     for field in mode.fields {
@@ -552,8 +533,7 @@ pub fn decode_bc6h(block: &[u8], signed: bool) -> Block {
             channel[0] = extend_sign(channel[0], base_bits);
         }
     }
-    // A delta is signed whatever the format is; an outright endpoint is only
-    // signed when the format is.
+    // Deltas are always signed; outright endpoints only in the signed format.
     if !stores_endpoints_directly(mode_index) || signed {
         for (c, channel) in endpoint.iter_mut().enumerate() {
             for slot in channel.iter_mut().take(endpoints).skip(1) {
@@ -605,9 +585,7 @@ pub fn decode_bc6h(block: &[u8], signed: bool) -> Block {
 mod tests {
     use super::*;
 
-    /// Every mode spends the block's 128 bits exactly: its prefix, its
-    /// scattered header runs, and one index per texel less the anchor's high
-    /// bit. A mistyped run length in the table shows up here and nowhere else.
+    /// Every mode spends exactly 128 bits: prefix, header runs and indices.
     #[test]
     fn every_mode_accounts_for_all_128_bits() {
         for (index, mode) in MODES.iter().enumerate() {
@@ -618,16 +596,13 @@ mod tests {
         }
     }
 
-    /// A two-subset mode reads a partition and a one-subset mode does not, and
-    /// that split has to line up with the precision table's own split.
+    /// The partition split must match the precision table's.
     #[test]
     fn only_two_subset_modes_read_a_partition() {
         for (index, mode) in MODES.iter().enumerate() {
             let reads_partition = mode.fields.iter().any(|f| f.target == PARTITION);
             assert_eq!(reads_partition, index < 10, "mode {index}");
         }
-        // The direct-endpoint modes are exactly those whose deltas are as wide
-        // as their base.
         for (mode, &base) in PRECISION[0].iter().enumerate() {
             let direct = PRECISION[1..].iter().all(|deltas| deltas[mode] == base);
             assert_eq!(direct, stores_endpoints_directly(mode), "mode {mode}");

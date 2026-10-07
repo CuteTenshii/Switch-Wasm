@@ -1,28 +1,16 @@
 //! host1x syncpoints and the `/dev/nvhost-ctrl` event slots.
 //!
-//! A syncpoint is a monotonically increasing 32-bit counter the GPU bumps when
-//! it retires work. Userspace submits a job, gets back a fence
-//! `(syncpoint id, threshold)`, and blocks until the counter reaches the
-//! threshold. Tegra X1's host1x has 192 of them.
-//!
-//! The command processor here runs a submission to completion inside the
-//! submitting ioctl, so by the time the guest waits, the counter has already
-//! passed the threshold, but the counters are still real, because the guest
-//! reads them directly (deko3d polls fences out of a mapped syncpoint page)
-//! and compares with wrapping arithmetic.
+//! Submissions complete inside the submitting ioctl, but the counters are
+//! still tracked because guests read them directly.
 
 use crate::{Error, Result};
 
-/// Number of host1x syncpoints on Tegra X1.
 pub const SYNCPT_COUNT: usize = 192;
-/// Number of `/dev/nvhost-ctrl` event slots.
 pub const EVENT_COUNT: usize = 64;
 
-/// The GPU channel syncpoint the driver hands out first. Real nvhost reserves
-/// the low ids for VI/ISP/display engines.
+/// Lower ids are reserved for VI/ISP/display engines.
 const FIRST_ALLOCATABLE: u32 = 8;
 
-/// A fence as the nv driver marshals it: `(syncpoint id, threshold value)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NvFence {
     pub id: u32,
@@ -47,9 +35,8 @@ impl NvFence {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Syncpoint {
-    /// Value the hardware has actually reached.
     value: u32,
-    /// Highest value any submitted-but-unretired job will raise it to.
+    /// Highest value any outstanding job will raise it to.
     max: u32,
     allocated: bool,
 }
@@ -94,7 +81,6 @@ impl Host1x {
             .ok_or_else(|| Error::Gpu(format!("host1x: syncpoint {} out of range", id)))
     }
 
-    /// Reserve a free syncpoint for a channel.
     pub fn allocate(&mut self) -> Result<u32> {
         for id in FIRST_ALLOCATABLE as usize..SYNCPT_COUNT {
             if !self.points[id].allocated {
@@ -111,27 +97,21 @@ impl Host1x {
         }
     }
 
-    /// Current counter value (`NVHOST_IOCTL_CTRL_SYNCPT_READ`).
     pub fn read(&self, id: u32) -> Result<u32> {
         Ok(self.slot(id)?.value)
     }
 
-    /// Highest value any outstanding job will reach
-    /// (`NVHOST_IOCTL_CTRL_SYNCPT_READ_MAX`).
     pub fn read_max(&self, id: u32) -> Result<u32> {
         Ok(self.slot(id)?.max)
     }
 
-    /// Reserve `count` future increments and return the resulting threshold,
-    /// what a submission's fence reports back to the guest.
+    /// Reserve `count` future increments and return the resulting threshold.
     pub fn incr_max(&mut self, id: u32, count: u32) -> Result<u32> {
         let p = self.slot_mut(id)?;
         p.max = p.max.wrapping_add(count);
         Ok(p.max)
     }
 
-    /// Retire one increment (`NVHOST_IOCTL_CTRL_SYNCPT_INCR`, and what the
-    /// command processor does for a pushbuffer's syncpoint operation).
     pub fn increment(&mut self, id: u32) -> Result<u32> {
         let p = self.slot_mut(id)?;
         p.value = p.value.wrapping_add(1);
@@ -141,10 +121,7 @@ impl Host1x {
         Ok(p.value)
     }
 
-    /// Retire the counter up to `value` (used when a submission completes in
-    /// one go and the counter must land on the fence threshold). The counter
-    /// never moves backwards, so a pushbuffer that already incremented past
-    /// the threshold keeps its higher value.
+    /// Raise the counter to `value`; it never moves backwards.
     pub fn set(&mut self, id: u32, value: u32) -> Result<()> {
         let p = self.slot_mut(id)?;
         if value.wrapping_sub(p.value) as i32 > 0 {
@@ -156,14 +133,12 @@ impl Host1x {
         Ok(())
     }
 
-    /// Whether the counter has reached `threshold`, compared the way the
-    /// hardware does (wrapping, so a counter that has lapped still passes).
+    /// Wrapping comparison, as the hardware does it.
     pub fn is_expired(&self, id: u32, threshold: u32) -> Result<bool> {
         let p = self.slot(id)?;
         Ok(p.value.wrapping_sub(threshold) as i32 >= 0)
     }
 
-    /// Register an event slot (`NVHOST_IOCTL_CTRL_EVENT_REGISTER`).
     pub fn register_event(&mut self, slot: u32) -> Result<()> {
         let e = self
             .events

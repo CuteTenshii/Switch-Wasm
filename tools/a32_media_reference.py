@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Print the expected-value table of `crates/switch-core/tests/a32_media_test.rs`.
 
-Each instruction runs on real ARM semantics under `qemu-arm`, on the same
-operands the test gives the interpreter, so a table entry is what the
-architecture does rather than what someone read in the manual. Needs
-`llvm-mc`, `clang` with `lld`, and `qemu-arm` (user-mode) on the PATH.
+Runs each case under `qemu-arm`; needs `llvm-mc`, `clang` with `lld`, and `qemu-arm`.
 
     python3 tools/a32_media_reference.py > table.rs
 
-To cover another instruction, add it to OPS: a case is one or more lines of
-assembly that leave their result in r0 (or r3/r4), reading r1..r4.
+A case in OPS is assembly that reads r1..r4 and leaves its result in r0 (or r3/r4).
 """
 
 import re

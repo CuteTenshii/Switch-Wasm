@@ -1,26 +1,10 @@
-//! Reading a title's RomFS through the update that replaced parts of it.
+//! Reading a title's RomFS through an update's BKTR patch section.
 //!
-//! An update NSP does not contain the game. Its Program NCA carries a full
-//! ExeFS, the patched executables, which replace the base title's outright,
-//! but its RomFS section holds only the ranges the update changed, together
-//! with two tables that say how to put the two halves back together:
+//! The relocation table maps each range of the patched RomFS to the patch or
+//! the base section; the subsection table gives each patch range its AES-CTR
+//! counter. Both are read lazily from the two NCAs through [`ByteSource`].
 //!
-//! * the **relocation table**, which maps each range of the patched RomFS to
-//!   either this section or the base title's, and
-//! * the **subsection table**, which says which AES-CTR counter each range of
-//!   this section's own bytes was encrypted with (this is what makes a patch
-//!   section `AesCtrEx` rather than plain `AesCtr`: the counter's top word
-//!   changes from region to region instead of being the section's throughout).
-//!
-//! So reading an update's data is a two-container operation, and neither
-//! container is ever held in memory: [`patched_romfs_source`] returns a
-//! [`ByteSource`] that resolves each read to a range of one file or the other
-//! and decrypts only that range. The browser hands it two `File`s it never
-//! reads through; the guest asks for a few hundred bytes at a time through
-//! `IStorage` either way.
-//!
-//! Table layout (hactool's `bktr_relocation_block_t`/`bktr_subsection_block_t`,
-//! both of them a page of header followed by a page per bucket):
+//! Table layout (hactool's `bktr_relocation_block_t`/`bktr_subsection_block_t`):
 //!
 //! ```text
 //! 0x0000  u32 _, u32 bucket count, u64 total size, u64 first key per bucket
@@ -28,52 +12,38 @@
 //! 0x8000  bucket 1: the same
 //! ```
 //!
-//! A relocation entry is `u64 virtual offset, u64 physical offset, u32 from
-//! the patch`; a subsection entry is `u64 offset, u32 _, u32 counter`. Both
-//! are sorted, and both tables are flattened into one list here, the bucket
-//! split is a paging detail of the on-disk form, not something a lookup needs.
+//! Relocation entry: `u64 virt, u64 phys, u32 from_patch`; subsection entry:
+//! `u64 offset, u32 _, u32 counter`.
 
 use crate::keys::KeySet;
 use crate::nca::{BktrTable, Nca, RomFsImage, SectionSource, BKTR_MAGIC, ENCRYPTION_AES_CTR_EX};
 use crate::source::{ByteSource, Window};
 use crate::Error;
 
-/// Both tables are paged: one page of header, then one page per bucket.
 const BUCKET_SIZE: u64 = 0x4000;
 
-/// Where a bucket's entries start, past its own count and end key.
 const BUCKET_HEADER: usize = 0x10;
 
-/// The most table this will read in. Both tables together are a fraction of a
-/// per-cent of an update (a few hundred KiB against JD2017's 28 MB), so a
-/// figure this far above the real ones only exists to keep a corrupt header
-/// from asking for an allocation the browser cannot make.
+/// Guards against a corrupt header requesting a huge allocation.
 const MAX_TABLE: u64 = 64 << 20;
 
-/// One range of the patched RomFS, and where its bytes actually are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Relocation {
-    /// Where the range starts in the patched (virtual) section.
+    /// Offset in the patched (virtual) section.
     virt: u64,
-    /// Where it starts in whichever section holds it.
+    /// Offset in whichever section holds it.
     phys: u64,
     from_patch: bool,
 }
 
-/// One range of the patch section's own bytes, and the counter it was
-/// encrypted with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Subsection {
     phys: u64,
     ctr_val: u32,
 }
 
-/// The base title's RomFS section with an update's patch section over it,
-/// addressed as the one section the two describe together.
-///
-/// This is the whole section: IVFC hash levels and all, since that is what
-/// the relocation table's offsets are in terms of. [`patched_romfs_source`]
-/// windows it down to the RomFS image the guest actually mounts.
+/// The base RomFS section with an update's patch section over it, including
+/// the IVFC levels the relocation offsets refer to.
 #[derive(Debug)]
 pub struct PatchedSection<P: ByteSource, B: ByteSource> {
     patch: SectionSource<P>,
@@ -84,8 +54,7 @@ pub struct PatchedSection<P: ByteSource, B: ByteSource> {
 }
 
 impl<P: ByteSource, B: ByteSource> PatchedSection<P, B> {
-    /// Read a range of the patch section's own bytes, splitting it at every
-    /// subsection boundary so each piece is decrypted with its own counter.
+    /// Splits at subsection boundaries so each piece uses its own counter.
     fn read_patch(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
         let mut done = 0;
         while done < out.len() {
@@ -124,9 +93,6 @@ impl<P: ByteSource, B: ByteSource> ByteSource for PatchedSection<P, B> {
         }
         let want = ((out.len() as u64).min(self.len - offset)) as usize;
         let mut done = 0;
-        // One read can span any number of relocation entries, a guest asking
-        // for a file that the update rewrote the middle of gets base bytes,
-        // patch bytes and base bytes again out of a single call.
         while done < want {
             let at = offset + done as u64;
             let i = index_before(&self.relocations, at, |r| r.virt);
@@ -152,24 +118,15 @@ impl<P: ByteSource, B: ByteSource> ByteSource for PatchedSection<P, B> {
     }
 }
 
-/// The index of the last entry starting at or before `at`.
-///
-/// Both tables start at 0 and cover their whole section, so there is always
-/// one; a table that did not is rejected when it is read.
+/// Index of the last entry starting at or before `at`; tables are checked to start at 0.
 fn index_before<T: Copy>(entries: &[T], at: u64, key: impl Fn(&T) -> u64) -> usize {
     entries.partition_point(|e| key(e) <= at).saturating_sub(1)
 }
 
-/// A [`ByteSource`] over the RomFS image an update and its base title
-/// describe together: the base's, with everything the update changed in place
-/// of the original.
+/// A [`ByteSource`] over the RomFS image an update and its base title describe together.
 ///
-/// `patch` is the update container's Program NCA and `base` the base game's.
-/// Both sources are the whole (still-encrypted) NCA, since a section's
-/// counter is numbered from its position in the file.
-///
-/// Nothing is decrypted up front beyond the two tables, which are a fraction
-/// of a per-cent of the update.
+/// `patch` and `base` are the whole encrypted Program NCAs, since a section's
+/// counter depends on its position in the file.
 pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
     patch: &Nca,
     patch_src: P,
@@ -211,9 +168,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
 
     let (relocations, virtual_size) = read_relocations(&patch_section, fs.relocation)?;
     let (subsections, subsection_total) = read_subsections(&patch_section, fs.subsection)?;
-    // hactool's own consistency check, and the one that catches a table read
-    // with the wrong key before any of it is believed: the subsection table
-    // covers the section's data, and starts where that data ends.
+    // hactool's check: the subsection table starts where the section's data ends.
     if subsection_total != fs.subsection.offset {
         return Err(Error::Nca(format!(
             "patch subsection table covers {:#x} bytes but starts at {:#x} — wrong keys or a corrupt update",
@@ -239,15 +194,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
         virtual_size - fs.romfs_data_offset,
         "patched RomFS image",
     )?;
-    // The update's own header says how the patched image is stored, the same
-    // way it does for a title that ships without one. Either half being
-    // sparse needed nothing here: `section_source` reassembles a sparse
-    // section before the relocation table ever sees it.
     let romfs = RomFsImage::open(stored, fs.compression)?;
-    // The same header check [`Nca::romfs_source`] makes, and it means more
-    // here: it is the one place where the base game and the update are read
-    // through together, so a mismatched pair shows up as a bad header rather
-    // than as a title that boots and then cannot find its files.
     let mut header_size = [0u8; 8];
     romfs.read_exact_at(0, &mut header_size)?;
     const ROMFS_HEADER_SIZE: u64 = 0x50;
@@ -261,11 +208,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
     Ok(romfs)
 }
 
-/// Read a table's pages out of the patch section, returning the bucket pages
-/// and the total size the header claims.
-///
-/// The two tables differ only in what their entries hold, so everything up to
-/// the entries is read here once.
+/// Read a table's bucket pages and the total size its header claims.
 fn read_table<S: ByteSource>(
     section: &SectionSource<S>,
     table: BktrTable,
@@ -302,7 +245,6 @@ fn read_table<S: ByteSource>(
     Ok((bytes, total))
 }
 
-/// Walk a table's buckets, handing each entry's bytes to `parse`.
 fn each_entry(
     bytes: &[u8],
     entry_size: usize,
@@ -327,8 +269,7 @@ fn each_entry(
     Ok(())
 }
 
-/// The relocation table, flattened and in virtual-offset order, plus the size
-/// of the patched section it describes.
+/// Flattened in virtual-offset order, plus the patched section's size.
 fn read_relocations<S: ByteSource>(
     section: &SectionSource<S>,
     table: BktrTable,
@@ -346,8 +287,7 @@ fn read_relocations<S: ByteSource>(
     Ok((out, total))
 }
 
-/// The subsection table, flattened and in offset order, plus the size of the
-/// patch section's data region.
+/// Flattened in offset order, plus the size of the patch data region.
 fn read_subsections<S: ByteSource>(
     section: &SectionSource<S>,
     table: BktrTable,
@@ -364,8 +304,6 @@ fn read_subsections<S: ByteSource>(
     Ok((out, total))
 }
 
-/// Both lookups take "the last entry at or before this offset" and index the
-/// result, so both tables have to be non-empty and start at 0.
 fn check_covers(first: Option<u64>, count: usize, what: &str) -> Result<(), Error> {
     match first {
         Some(0) => Ok(()),
@@ -381,9 +319,6 @@ mod tests {
     use super::*;
     use crate::nca::FsHeader;
 
-    /// A lookup lands on the entry that covers the offset, not the one after
-    /// it, and an offset inside the first entry finds the first entry rather
-    /// than underflowing.
     #[test]
     fn a_lookup_finds_the_entry_that_covers_an_offset() {
         let keys = [0u64, 0x100, 0x180, 0x400];
@@ -396,10 +331,7 @@ mod tests {
         assert_eq!(at(0x9999), 3);
     }
 
-    /// A patch section's counter differs from its section's in exactly one
-    /// word, the generation. The secure value above it identifies the
-    /// section and the block index below it is the position, so a region
-    /// counter that disturbs either is a different keystream entirely.
+    /// A patch counter differs from its section's only in the generation word.
     #[test]
     fn a_patch_counter_replaces_only_the_generation() {
         let fs = FsHeader::parse(&{
@@ -413,9 +345,6 @@ mod tests {
         assert_eq!(&patched[4..8], &0x0BAD_F00Du32.to_be_bytes());
         assert_eq!(&patched[0..4], &plain[0..4]);
         assert_eq!(&patched[8..16], &plain[8..16]);
-        // A region carrying the section's own generation is the section's own
-        // counter, which is what makes the tables readable before any of this
-        // is known.
         assert_eq!(fs.patch_counter(0x1_0000, fs.generation), plain);
     }
 
@@ -440,8 +369,6 @@ mod tests {
         e
     }
 
-    /// The buckets are a paging detail of the on-disk table: what a lookup
-    /// sees is one flat list, in order.
     #[test]
     fn a_tables_buckets_flatten_into_one_list() {
         let bytes = table(
@@ -467,19 +394,12 @@ mod tests {
         );
     }
 
-    /// The two containers a patched RomFS is made of, built small enough to
-    /// check byte by byte: a base section of `(i)` and a patch section of
-    /// `(0x80 | i)`, with the tables a real patch section carries.
-    ///
-    /// Both are left unencrypted, which is a legal `encryption_type` and
-    /// keeps the test about the composition rather than about AES.
+    /// A base section of `(i)` and a patch section of `(0x80 | i)` with real tables.
     struct Pair {
         base_nca: Nca,
         base_bytes: Vec<u8>,
         patch_nca: Nca,
-        /// The patch section as it is stored: encrypted.
         patch_bytes: Vec<u8>,
-        /// The same bytes in the clear, to assert a composed read against.
         patch_plain: Vec<u8>,
     }
 
@@ -487,20 +407,15 @@ mod tests {
     const PATCH_DATA: u64 = 0x100;
     const VIRTUAL_LEN: u64 = 0x200;
     const ROMFS_AT: u64 = 0x40;
-    /// The patch section's key, handed to the keyset as a ticket's would be.
     const PATCH_KEY: [u8; 16] = *b"a patch aes key!";
     const RIGHTS_ID: [u8; 16] = [0x11; 16];
-    /// Deliberately not the section's own generation (0): a region counter
-    /// that happened to match would let the data decrypt with either, and the
-    /// point of the test is that each half is read with its own.
+    /// Not the section's generation (0), so each half must use its own counter.
     const CTR_VAL: u32 = 7;
 
     fn fs_header(encryption: u8, tables: Option<(u64, u64)>) -> crate::nca::FsHeader {
         fs_header_with(encryption, tables, None)
     }
 
-    /// The same, for a patch section whose composed image is stored
-    /// compressed: the update's own header is what says so.
     fn fs_header_with(
         encryption: u8,
         tables: Option<(u64, u64)>,
@@ -510,7 +425,7 @@ mod tests {
         raw[2] = 0; // RomFs partition
         raw[3] = 3; // HierarchicalIntegrity
         raw[4] = encryption;
-        // IVFC level 5's logical offset, which is where the RomFS image starts.
+        // IVFC level 5's logical offset, where the RomFS image starts.
         raw[0x90..0x98].copy_from_slice(&ROMFS_AT.to_le_bytes());
         if let Some((relocation, subsection)) = tables {
             for (at, offset) in [(0x100usize, relocation), (0x120, subsection)] {
@@ -555,7 +470,6 @@ mod tests {
         }
     }
 
-    /// A table page pair (header page then one bucket) holding `entries`.
     fn table_pages(total: u64, entry_size: usize, entries: &[Vec<u8>], end_key: u64) -> Vec<u8> {
         let mut bytes = vec![0u8; (BUCKET_SIZE * 2) as usize];
         bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -573,8 +487,7 @@ mod tests {
     fn pair() -> Pair {
         let base_bytes: Vec<u8> = (0..BASE_LEN).map(|i| i as u8).collect();
         let mut patch_bytes: Vec<u8> = (0..PATCH_DATA).map(|i| 0x80 | i as u8).collect();
-        // The RomFS header the composed image has to start with, planted where
-        // the relocation table sends the image's first bytes.
+        // The RomFS header the relocation table maps to the image start.
         patch_bytes[0x40..0x48].copy_from_slice(&0x50u64.to_le_bytes());
 
         let relocations = [
@@ -599,9 +512,7 @@ mod tests {
             patch_len,
             fs_header(ENCRYPTION_AES_CTR_EX, Some((PATCH_DATA, subsection_end))),
         );
-        // Encrypt the patch section the way a real one is: its data under the
-        // subsection's counter, its tables under the section's own. Reading it
-        // back is the assertion that each half is read with the right one.
+        // Data under the subsection's counter, tables under the section's own.
         let patch_plain = patch_bytes.clone();
         let fs = patch_nca.fs_headers[0].unwrap();
         crate::crypto::aes128_ctr_xor_in_place(
@@ -623,9 +534,7 @@ mod tests {
         }
     }
 
-    /// A keyset holding the patch section's key, the way a container's own
-    /// ticket supplies it: wrapped under the `titlekek` for the synthetic
-    /// NCA's key generation, which is 0.
+    /// The patch key wrapped under `titlekek` for key generation 0, as a ticket supplies it.
     fn patch_keys() -> KeySet {
         const TITLEKEK: [u8; 16] = [0x5a; 16];
         let mut keys = KeySet::default();
@@ -637,9 +546,6 @@ mod tests {
         keys
     }
 
-    /// Every byte of the composed image comes from the container the
-    /// relocation table names, including a read that crosses from one to the
-    /// other in the middle.
     #[test]
     fn a_patched_image_reads_from_both_containers() {
         let p = pair();
@@ -652,20 +558,16 @@ mod tests {
             &keys,
         )
         .expect("compose the patched romfs");
-        // The window starts at the IVFC data offset, so virtual `ROMFS_AT + w`
-        // is image offset `w`.
+        // Virtual `ROMFS_AT + w` is image offset `w`.
         assert_eq!(romfs.len(), VIRTUAL_LEN - ROMFS_AT);
         assert_eq!(romfs.read_vec(0, 8).unwrap(), 0x50u64.to_le_bytes());
-        // 0x70..0x90 spans the patch's range and the base's: eight bytes of
-        // `0x80 | i` and then eight of `i`.
+        // Crosses from the patch range into the base range.
         let across = romfs.read_vec(0x70 - ROMFS_AT, 0x20).unwrap();
         assert_eq!(&across[..0x10], &p.patch_plain[0x70..0x80]);
         assert_eq!(&across[0x10..], &p.base_bytes[0x80..0x90]);
-        // The last entry sends the image back into the patch, at a different
-        // offset from the one it is mapped to.
+        // The last entry maps back into the patch at a different offset.
         let moved = romfs.read_vec(0x100 - ROMFS_AT, 0x10).unwrap();
         assert_eq!(moved, p.patch_plain[0x20..0x30]);
-        // And the image ends where the relocation table says it does.
         assert_eq!(
             romfs
                 .read_at(VIRTUAL_LEN - ROMFS_AT, &mut [0u8; 16])
@@ -674,13 +576,10 @@ mod tests {
         );
     }
 
-    /// A container that is not an update, and an update that is not this
-    /// title's, are both refused before anything is read through them.
     #[test]
     fn only_this_titles_update_composes() {
         let p = pair();
         let keys = patch_keys();
-        // The base in the patch's place: its RomFS is its own, not a patch.
         assert!(matches!(
             patched_romfs_source(
                 &p.base_nca,
@@ -705,8 +604,6 @@ mod tests {
         ));
     }
 
-    /// An entry count that would run off the end of its page is a corrupt
-    /// table, not a page-and-a-half of entries.
     #[test]
     fn a_bucket_cannot_claim_more_entries_than_a_page_holds() {
         let mut bytes = table(0x14, &[relocation(0, 0, false)]);
@@ -718,20 +615,12 @@ mod tests {
         ));
     }
 
-    /// An update whose composed image is compressed: the relocation table
-    /// puts the stored image back together out of both containers, and the
-    /// compression layer over that is what the guest actually mounts.
-    ///
-    /// The split is deliberately in two places, so the LZ4 data crosses from
-    /// the update into the base game and the table describing it crosses
-    /// back.
+    /// The LZ4 data crosses from the update into the base, and its table crosses back.
     #[test]
     fn a_patched_image_that_is_compressed_is_composed_and_then_decompressed() {
         use crate::compressed::testing::{build, Block};
 
-        // The composed image has to start with a RomFS header, the same as an
-        // unpatched one, and here that byte pattern only exists once the LZ4
-        // block it is inside has been decompressed.
+        // The RomFS header only appears once the LZ4 block is decompressed.
         let mut first = 0x50u64.to_le_bytes().to_vec();
         first.extend((8..0x100u32).map(|i| i as u8));
         let (stored, plain, table) = build(&[
@@ -741,7 +630,6 @@ mod tests {
         ]);
         assert!(stored.len() > 0x4000, "the table alone is bigger than that");
 
-        // Where the composed image changes container, in its own coordinates.
         const TO_BASE: usize = 0x80;
         const BACK_TO_PATCH: usize = 0x4000;
         const BASE_AT: u64 = 0x80;

@@ -3,23 +3,9 @@
 //!
 //! Usage: `cargo run --release -p switch-core --example opus_testvectors -- <dir> [out dir]`
 //!
-//! `<dir>` is an unpacked `opus_testvectors` from opus-codec.org. Each
-//! `testvectorNN.bit` is the `opus_demo` container: per packet, a 32-bit
-//! big-endian length, the 32-bit big-endian range coder state the encoder
-//! ended that packet with, and the packet itself. The matching `.dec` is the
-//! reference decode at 48 kHz stereo.
-//!
-//! Each vector is decoded twice, once to stereo and once to mono, the
-//! second exercises the downmix a stereo stream takes on its way to a mono
-//! output, which nothing else does.
-//!
-//! Two results come out of this. The **final range** must match on every
-//! packet: that is the format's own proof that a decoder read the same
-//! symbols the encoder wrote, and RFC 6716 makes it normative. The decoded
-//! samples are written to `<out dir>/testvectorNN.rs.dec` and
-//! `…NNm.rs.dec`, which is what `opus_compare` scores; a floating-point
-//! decoder is not expected to be bit identical, only close enough that
-//! `opus_compare` passes.
+//! Each vector is decoded to stereo and to mono. The final range must match on
+//! every packet; the samples go to `<out dir>/testvectorNN.rs.dec` and
+//! `…NNm.rs.dec` for `opus_compare` to score.
 
 use std::env;
 use std::fs;
@@ -120,8 +106,6 @@ fn main() {
         }
     }
 
-    // What this costs, against the audio it produced. A decoder that cannot
-    // stay ahead of its own output is one the emulator cannot use.
     let audio = decoded_samples as f64 / 48000.0;
     let elapsed = decode_time.as_secs_f64();
     println!(

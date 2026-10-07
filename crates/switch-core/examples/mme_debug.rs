@@ -1,6 +1,5 @@
-//! Boot an NRO and run until the first fault, printing it, which, for an MME
-//! timeout, includes the macro disassembly:
-//! `mme_debug <path.nro> [max_steps]`.
+//! Boot an NRO and print its first fault (MME timeouts include the macro
+//! disassembly): `mme_debug <path.nro> [max_steps]`.
 mod common;
 
 use common::{Flow, Pace};

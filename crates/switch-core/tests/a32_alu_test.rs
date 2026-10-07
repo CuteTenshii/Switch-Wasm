@@ -5,9 +5,7 @@ mod a32;
 
 use a32::{r, run, BASE, HALT};
 
-/// The shifter's carry out *is* `C` for a logical operation, and `ADC` reads
-/// it back. `lsls r1, r0, #1` on 0x00008001 shifts a zero out, so the `adc`
-/// adds nothing.
+/// The shifter's carry is `C` for a logical operation, and `ADC` reads it.
 #[test]
 fn a_logical_operation_takes_its_carry_from_the_shifter() {
     let cpu = run(&[
@@ -28,8 +26,7 @@ fn a_logical_operation_takes_its_carry_from_the_shifter() {
     assert_eq!(r(&cpu, 2), 1);
 }
 
-/// `RRX` is `ROR` with an immediate amount of zero: one place right through
-/// the carry, which is not a rotate at all.
+/// `RRX` shifts one place right through the carry.
 #[test]
 fn rrx_shifts_through_the_carry_rather_than_rotating() {
     let cpu = run(&[
@@ -37,14 +34,11 @@ fn rrx_shifts_through_the_carry_rather_than_rotating() {
         0xE1B0_1060, // movs r1, r0, rrx
         0xE1B0_2061, // movs r2, r1, rrx
     ]);
-    // C started clear, so the first RRX brings in a zero and shifts the 1 out.
     assert_eq!(r(&cpu, 1), 0);
-    // That 1 is now the carry, and comes back as bit 31.
     assert_eq!(r(&cpu, 2), 0x8000_0000);
 }
 
-/// ARM's `C` after a subtraction is *not* a borrow: it is the adder's carry
-/// out, so a subtraction that does not borrow sets it.
+/// ARM's `C` after a subtraction is the adder's carry out, not a borrow.
 #[test]
 fn subtraction_sets_carry_when_it_does_not_borrow() {
     let cpu = run(&[
@@ -76,8 +70,7 @@ fn a_condition_that_fails_costs_only_the_advance() {
     assert_eq!(r(&cpu, 2), 0);
 }
 
-/// Reading r15 yields the instruction's own address plus 8, the pipeline
-/// offset the architecture made visible.
+/// Reading r15 yields the instruction address plus 8.
 #[test]
 fn r15_reads_as_the_instruction_address_plus_eight() {
     let cpu = run(&[
@@ -88,8 +81,7 @@ fn r15_reads_as_the_instruction_address_plus_eight() {
     assert_eq!(r(&cpu, 1), BASE + 4 + 8);
 }
 
-/// The register-shifted form takes its amount from the bottom byte only, and
-/// an amount of zero leaves both the value and the carry alone.
+/// A register shift uses only the bottom byte; zero changes neither value nor carry.
 #[test]
 fn a_register_shift_of_zero_changes_nothing() {
     let cpu = run(&[
@@ -167,8 +159,7 @@ fn the_extends_and_the_reverses() {
     assert_eq!(r(&cpu, 10), 0x22CC_4488, "rbit reverses the bits");
 }
 
-/// The two-lane extends: bytes 0 and 2, each widened to a halfword, and the
-/// addend forms adding lane by lane, with the low lane's carry dropped.
+/// The two-lane byte extends, and their addend forms.
 #[test]
 fn the_dual_byte_extends() {
     let cpu = run(&[
@@ -214,9 +205,7 @@ fn the_bitfield_instructions() {
     assert_eq!(r(&cpu, 6), 0xFFFF_F0FF, "bfc clears bits 11:8");
 }
 
-/// `SSAT` shares its `op1` with the extends and is told apart by bit 5 of
-/// `op2`, so a decoder that keys on the opcode field alone runs one as the
-/// other.
+/// `SSAT` shares `op1` with the extends and is told apart by bit 5 of `op2`.
 #[test]
 fn saturating_arithmetic_clamps_to_the_edge_it_overflowed_towards() {
     let cpu = run(&[

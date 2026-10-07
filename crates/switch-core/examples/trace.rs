@@ -6,7 +6,6 @@ use common::{Flow, Pace};
 use std::collections::{HashMap, HashSet};
 use switch_core::cpu::Cpu;
 
-/// How often to sample the PC when profiling.
 const SAMPLE_EVERY: u64 = 64;
 
 fn main() {
@@ -24,7 +23,6 @@ fn main() {
     let mut hot: HashMap<u32, u64> = HashMap::new();
     let run = common::drive(
         &mut cpu,
-        // Both modes below look at the PC of the instruction about to run.
         Pace::Instructions,
         common::env_u64("STEPS", 60_000_000),
         |cpu, steps| {

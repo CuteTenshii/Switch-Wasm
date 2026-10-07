@@ -1,8 +1,4 @@
-/* User profiles and the picker the top bar opens.
-
-   A title asks which user is playing once, at startup, so a change here
-   applies from the next title on. Profiles are stored in the NAND database
-   next to the saves they own. */
+// User profiles and the picker the top bar opens.
 
 import type { Bytes, UserRecord } from '../shared/protocol';
 import { NAND_SAVES, NAND_USERS, nandIdb } from './db';
@@ -11,24 +7,20 @@ import { log } from './log';
 import { call, hasSession } from './rpc';
 import { titleBooted } from './session';
 
-/** `created` orders the list. */
 interface Profile extends UserRecord {
   created: number;
 }
 
-/** The console's limit. */
 const MAX_PROFILES = 8;
 
-/** The console's limit; titles lay names out for ten characters. */
 const NICKNAME_MAX = 10;
 
 const PICTURE_SIZE = 256;
 
-/** Holds the playing profile's uid, in the same store as the profiles. */
+// Holds the playing profile's uid, in the same store as the profiles.
 const CURRENT_KEY = '@current';
 
-/** Must match `PROFILE_IMAGE_COLORS` and `profile_image` in `acc.rs`, so a
- *  profile without a picture looks the same here as in a title. */
+// Must match `PROFILE_IMAGE_COLORS` in `acc.rs`.
 const PICTURE_COLORS = [
   '#4b505a', '#2f6fb5', '#c04a3c', '#3e8e5a', '#b07a1e', '#7a4fa8', '#1f8a8c', '#b44c86',
 ];
@@ -44,14 +36,13 @@ function pictureColor(uid: string): string {
 let profiles: Profile[] = [];
 let current = '';
 
-/** Kept so re-renders reuse the URL and replaced pictures get revoked. */
 const pictureUrls = new Map<string, { picture: Bytes; url: string }>();
 
 function playing(): Profile {
   return profiles.find((p) => p.uid === current) ?? profiles[0];
 }
 
-/** Never all zero: titles read that as "nobody". */
+// Never all zero: titles read that as "nobody".
 function newUid(): string {
   const bytes = new Uint8Array(16);
   do crypto.getRandomValues(bytes); while (bytes.every((b) => b === 0));
@@ -84,7 +75,6 @@ function firstProfile(): Profile {
   return { uid: newUid(), nickname: 'Player', editedAt: 0, picture: null, created: Date.now() };
 }
 
-/** Creates the first profile when there are none. */
 export async function loadProfiles(): Promise<void> {
   try {
     const db = await nandIdb();
@@ -116,20 +106,18 @@ export async function loadProfiles(): Promise<void> {
   renderProfiles();
 }
 
-/** Every new session needs this before a title starts. */
 export async function stageUsers(): Promise<void> {
   if (!hasSession()) return;
   const refused = await call('users_set', profiles.map(toRecord), current);
   if (refused) log(`Profiles: the core refused the list (code ${refused}).`, 'err');
 }
 
-/** A session with nothing booted is where the next title starts, so it
- *  gets changes now. A running title keeps the user it started with. */
+// A running title keeps the user it started with; an idle session gets changes now.
 async function stageIfIdle(): Promise<void> {
   if (!titleBooted()) await stageUsers();
 }
 
-/** Stores profile edits made by system software through `acc`. */
+// Stores profile edits made by system software through `acc`.
 export async function pullProfileEdits(): Promise<void> {
   if (!hasSession() || !(await call('users_take_edits'))) return;
   for (const edited of await call('users_read')) {
@@ -143,7 +131,7 @@ export async function pullProfileEdits(): Promise<void> {
   renderProfiles();
 }
 
-/** Deletes keys of the form "<save id>@<uid>/<path>". */
+// Deletes keys of the form "<save id>@<uid>/<path>".
 async function deleteSavesOf(uid: string): Promise<number> {
   const db = await nandIdb();
   return new Promise<number>((resolve, reject) => {
@@ -168,7 +156,7 @@ async function deleteSavesOf(uid: string): Promise<number> {
   });
 }
 
-/** Center-crops to a 256x256 JPEG, the size and format titles expect. */
+// Center-crops to the 256x256 JPEG titles expect.
 async function toPicture(file: File): Promise<Bytes> {
   const bitmap = await createImageBitmap(file);
   const side = Math.min(bitmap.width, bitmap.height);
@@ -200,7 +188,6 @@ const addName = $<HTMLInputElement>('profile-add-name');
 const addNote = $('profile-add-note');
 const runningNote = $('profile-running-note');
 
-/** Rows showing the delete confirmation or the rename field. */
 let confirming: string | null = null;
 let renaming: string | null = null;
 
@@ -309,8 +296,7 @@ function renderRow(profile: Profile): HTMLElement {
       clear.addEventListener('click', () => void clearPicture(profile));
       actions.append(clear);
     }
-    // The last profile can't go: no title starts without a user. The one a
-    // running title uses can't go either, or its saves would be orphaned.
+    // The last profile and the one a running title uses can't be deleted.
     const locked = isPlaying && titleBooted();
     if (profiles.length > 1) {
       const del = el('button', 'btn small ghost danger', 'Delete');
@@ -350,7 +336,6 @@ function renameForm(profile: Profile): HTMLFormElement {
   });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      // Cancel the rename without closing the dialog.
       e.preventDefault();
       e.stopPropagation();
       renaming = null;

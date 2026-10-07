@@ -1,11 +1,4 @@
-//! The ARMv6 media instructions a compiler reaches for in packed-pixel and
-//! fixed-point code: the parallel adds and subtracts, `SEL`, the halfword
-//! packs, the two-lane saturations, the dual multiply-accumulates into 64
-//! bits and the sums of absolute differences.
-//!
-//! The expected values are not worked out by hand. They are what `qemu-arm`
-//! computed for the same instructions on the same operands, so a misreading
-//! of the ARM ARM here would have to be made twice, once by qemu.
+//! The ARMv6 media instructions, against values computed by `qemu-arm`.
 //! `tools/a32_media_reference.py` regenerates the table.
 
 mod a32;
@@ -17,8 +10,7 @@ const MOV_R7_0: u32 = 0xE3A0_7000;
 const MOV_R0_0: u32 = 0xE3A0_0000;
 /// `usub8 r9, r7, r7`: nothing borrows, so every GE flag starts set.
 const USUB8_R9_R7_R7: u32 = 0xE657_9FF7;
-/// `sel r6, r8, r7`: 0xff in each byte whose GE flag is set, which is how
-/// the flags are read back without reading the status register.
+/// `sel r6, r8, r7`: 0xff in each byte whose GE flag is set.
 const SEL_R6_R8_R7: u32 = 0xE688_6FB7;
 
 fn movw(rd: u32, imm: u32) -> u32 {

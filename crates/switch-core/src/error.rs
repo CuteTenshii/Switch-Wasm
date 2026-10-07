@@ -22,22 +22,16 @@ pub enum Error {
         size: u64,
         image_size: u64,
     },
-    /// A range fell outside the source it was cut from. Unlike `Truncated`,
-    /// both ends are `u64`: this is the error a multi-gigabyte container
-    /// produces, and its offsets do not fit in a wasm32 `usize`.
+    /// Like `Truncated`, but with `u64` offsets for containers past 4 GiB.
     OutOfRange {
         what: String,
         start: u64,
         end: u64,
         available: u64,
     },
-    /// A buffer this target cannot allocate was asked for, on wasm32 no
-    /// single allocation may exceed `isize::MAX` (2 GiB), which is smaller
-    /// than a retail container. Reported instead of letting the request reach
-    /// the allocator, whose failure path traps the module.
+    /// An allocation larger than this target allows (`isize::MAX` on wasm32).
     TooLarge { what: String, len: u64, max: u64 },
-    /// A backing store (the host's copy of a container file) could not be
-    /// read.
+    /// The host's copy of a container file could not be read.
     Io(String),
     /// Arithmetic overflow while computing an address or extent.
     Overflow,
@@ -45,24 +39,20 @@ pub enum Error {
     Elf(String),
     /// The file is not an NRO we can load.
     Nro(String),
-    /// An NCA body couldn't be decrypted or extracted (missing/wrong keys,
-    /// an unsupported section encryption type, or a hash mismatch).
+    /// An NCA body couldn't be decrypted or extracted.
     Nca(String),
     /// The file is not an NSO we can load.
     Nso(String),
-    /// A RomFS image couldn't be walked: a bad header, or a metadata entry
-    /// pointing outside its table.
+    /// A RomFS image couldn't be walked.
     RomFs(String),
-    /// An ES ticket couldn't be parsed or its title key couldn't be
-    /// decrypted (unknown signature type, personalized crypto, missing
-    /// titlekek).
+    /// An ES ticket couldn't be parsed or its title key decrypted.
     Ticket(String),
     /// A cartridge image's partitions could not be walked.
     Xci(String),
     /// A CPU fault (bad memory access, invalid state, unreachable).
     Cpu(String),
-    /// A GPU fault: an unmapped GPU address, a malformed command stream, or a
-    /// class/format the engine model does not implement.
+    /// A GPU fault: an unmapped address, a malformed command stream, or an
+    /// unimplemented class or format.
     Gpu(String),
 }
 

@@ -1,14 +1,5 @@
-//! AArch64 (A64) interpreter core.
-//!
-//! A from-scratch decode + execute loop: the integer core here and in
-//! `alu`/`bits`/`loadstore`, floating point in `fp`, the SIMD register file in
-//! `simd`, the AES and SHA instructions in `crypto`, and the system registers
-//! in `system`. `SVC` enters Horizon's syscall ABI in `svc`, which is where
-//! the services the rest of this directory implements are reached from. A32 is
-//! interpreted in `a32`, and hot blocks are compiled by `jit`.
-//!
-//! Encoding references are taken from the ARMv8 architecture and cross-checked
-//! against QEMU's `target/arm/tcg/a64.decode`.
+//! AArch64 (A64) interpreter core: decode and execute, with instruction groups,
+//! services (reached through `svc`), A32 in `a32`, and the block JIT in `jit`.
 
 use crate::mem::Memory;
 use crate::trace::Level;
@@ -17,7 +8,6 @@ use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
-// The processor.
 mod a32;
 mod alu;
 mod bits;
@@ -29,8 +19,7 @@ mod simd;
 mod svc;
 mod system;
 
-// Horizon's services. `ipc` is the marshalling every one of them is built on;
-// the rest are one module per domain, reached through `svc.rs`'s dispatch.
+// Horizon's services: `ipc` marshalling plus one module per domain, dispatched from `svc.rs`.
 mod acc;
 mod am;
 mod audout;
@@ -67,11 +56,10 @@ use acc::{DEFAULT_NICKNAME, DEFAULT_USER_UID};
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
 
-/// What [`Cpu::audio_activity`] reports. Sample counts are interleaved
-/// samples since the session began; `backlog` is what is queued now.
+/// What [`Cpu::audio_activity`] reports; sample counts are interleaved samples since session start.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AudioActivity {
-    /// The format the host is playing in, 0 before anything has played.
+    /// 0 before anything has played.
     pub sample_rate: u32,
     pub channels: u32,
     pub produced: u64,
@@ -82,7 +70,7 @@ pub struct AudioActivity {
     pub renderers: Vec<AudioRendererActivity>,
 }
 
-/// One open `audout` device. The counts run from when it was opened.
+/// One open `audout` device; counts run from when it was opened.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioOutActivity {
     pub handle: u64,
@@ -95,13 +83,13 @@ pub struct AudioOutActivity {
     pub released_buffers: u64,
     /// Appended and not yet handed back.
     pub pending_buffers: u64,
-    /// Frames appended while the device was stopped, which never play.
+    /// Frames appended while stopped, which never play.
     pub discarded_frames: u64,
     /// Buffers whose descriptor pointed outside itself; see `audio_out_append`.
     pub unplayable_buffers: u64,
 }
 
-/// One open audio renderer. The counts run from when it was opened.
+/// One open audio renderer; counts run from when it was opened.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioRendererActivity {
     pub handle: u64,
@@ -111,18 +99,11 @@ pub struct AudioRendererActivity {
     pub rendered_frames: u64,
     pub voices: u32,
     pub voices_playing: u32,
-    /// The playing sink's channel count, 0 when no sink the renderer can
-    /// play has been configured.
+    /// 0 when no playable sink is configured.
     pub sink_channels: u32,
 }
 
-/// Which save a piece of save data is: the id it is filed under, and the user
-/// it belongs to.
-///
-/// An application's save is one per user: two people playing the same title
-/// on one console each have their own. The id alone names the title, so the
-/// user is part of the key. A save that belongs to nobody in particular, the
-/// system's own and a title's device save, carries the zero uid.
+/// A save's id plus owning user; the zero uid marks shared (system and device) saves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SaveKey {
     pub id: u64,
@@ -130,13 +111,11 @@ pub struct SaveKey {
 }
 
 impl SaveKey {
-    /// A save that belongs to no user.
     pub const fn shared(id: u64) -> SaveKey {
         SaveKey { id, user: [0; 16] }
     }
 
-    /// The save `id` of `user`, from the uid's two halves as the host passes
-    /// them: its first eight bytes, then its last eight, each little-endian.
+    /// From the uid's two little-endian halves as the host passes them.
     pub fn from_halves(id: u64, user_lo: u64, user_hi: u64) -> SaveKey {
         let mut user = [0u8; 16];
         user[..8].copy_from_slice(&user_lo.to_le_bytes());
@@ -146,9 +125,7 @@ impl SaveKey {
 }
 
 impl std::fmt::Display for SaveKey {
-    /// `0100000000001000` for a shared save, and the uid after an `@` for a
-    /// user's, as 32 hex digits in the order its bytes sit in memory. This
-    /// is the form a host stores a save under.
+    /// `0100000000001000` for a shared save, `id@uid` (32 hex digits, memory order) for a user's.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:016x}", self.id)?;
         if self.user != [0; 16] {
@@ -164,19 +141,17 @@ impl std::fmt::Display for SaveKey {
 /// How a guest request went unanswered, for [`Cpu::take_service_gaps`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GapKind {
-    /// A command id the service does not know, refused with an error.
+    /// Unknown command id, refused with an error.
     Refused,
-    /// A service with no implementation at all, answered with a fabricated
-    /// success.
+    /// Unimplemented service, answered with a fabricated success.
     Missing,
-    /// A command answered, but with nothing behind the answer.
+    /// Answered, with nothing behind the answer.
     Stub,
-    /// An `nvdrv` ioctl the driver model has no handler for.
+    /// `nvdrv` ioctl with no handler.
     Ioctl,
 }
 
 impl GapKind {
-    /// The name the host sees.
     pub const fn name(self) -> &'static str {
         match self {
             GapKind::Refused => "refused",
@@ -187,169 +162,86 @@ impl GapKind {
     }
 }
 
-/// One unanswered request, and how many times the guest made it since the
-/// last [`Cpu::take_service_gaps`].
+/// One unanswered request and its count since the last [`Cpu::take_service_gaps`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceGap {
     pub kind: GapKind,
-    /// The interface, service or device node.
+    /// Interface, service or device node.
     pub name: String,
-    /// The command id or ioctl number, when the request had one.
     pub command: Option<u32>,
     pub calls: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunReport {
-    /// Number of instructions executed this run.
     pub steps: u64,
-    /// True if the machine reached a halt trap rather than exhausting the
-    /// step budget.
+    /// True if the machine halted rather than exhausting the step budget.
     pub halted: bool,
 }
 
-/// Host-provided stack for [`Cpu::bootstrap`]: 1 MiB full-descending, top at
-/// `STACK_TOP`. Clear of the NRO image (0x08000000+), the ASLR region homebrew's
-/// own allocators search (`AslrRegionAddress`/`Size`: [0x08000000, 0x27000000)
-///. See `svcGetInfo` types 12/13) and the real heap `svcSetHeapSize` hands
-/// out (0x30000000).
-///
-/// Used to sit at 0x10000000, inside that ASLR region, fine for hbmenu's own
-/// small deko3d memblocks, but Mesa/Nouveau's GPU buffer-object pool (JKSV
-/// pulls in a full `nvc0` Gallium driver) keeps growing as more
-/// textures/icons get created and doesn't re-verify each new allocation
-/// against `svcQueryMemory`, so a big enough one blew straight through the
-/// stack's mapped pages, `memset`-zeroing saved return addresses on it.
-/// Past the ASLR region and before the heap is address space nothing else
-/// claims.
+/// Host-provided stack for [`Cpu::bootstrap`]: 1 MiB full-descending, top at `STACK_TOP`,
+/// between the ASLR region and the heap.
 pub const STACK_SIZE: u64 = 0x0010_0000;
 pub const STACK_TOP: u64 = 0x2810_0000;
 
-/// The range `svcGetInfo` reports as the ASLR region (`AslrRegionAddress`
-/// and `AslrRegionSize`): where the image is laid out, and the region the
-/// stack region is carved from, as it is on a console.
+/// The ASLR region `svcGetInfo` reports; the stack region is carved from it.
 pub const GUEST_ASLR_REGION_ADDR: u32 = 0x0800_0000;
 pub const GUEST_ASLR_REGION_SIZE: u32 = 0x1F00_0000;
 
-/// Address of the return-address trampoline for direct-entered homebrew.
-///
-/// This and everything after it up to the main stack sit **just past the
-/// ASLR region**, which the stack region runs to the end of. They used to sit
-/// inside the stack region, which meant the emulator's own furniture was
-/// standing in the range `svcGetInfo` 14/15 tells the guest is free for
-/// thread stacks. See [`GUEST_STACK_REGION_SIZE`].
+/// Return-address trampoline for direct-entered homebrew, just past the ASLR region.
 pub const SELF_RETURN_TRAMPOLINE: u32 = GUEST_ASLR_REGION_ADDR + GUEST_ASLR_REGION_SIZE;
 
-/// Where a guest thread's entry point returns to: a stub that calls
-/// `svcExitThread` (svc 0x0A), the way libnx's thread entry does.
+/// Thread entry return stub that calls `svcExitThread` (svc 0x0A).
 pub const THREAD_EXIT_TRAMPOLINE: u32 = SELF_RETURN_TRAMPOLINE + 0x100;
 
-/// The handle the main thread is known by (the environment block advertises the
-/// same value as `EntryType_MainThreadHandle`).
+/// Also advertised as `EntryType_MainThreadHandle`.
 pub const MAIN_THREAD_HANDLE: u64 = 1;
 
-/// Horizon's `CUR_THREAD` pseudo-handle: in a thread syscall, the calling
-/// thread, whatever its real handle is.
+/// Horizon's `CUR_THREAD` pseudo-handle.
 pub const CURRENT_THREAD_PSEUDO_HANDLE: u64 = 0xFFFF_8000;
 
-/// The main thread's TLS block, which `Cpu::bootstrap` puts in `tpidr`.
+/// Placed in `tpidr` by `Cpu::bootstrap`.
 pub const MAIN_THREAD_TLS_BASE: u32 = SELF_RETURN_TRAMPOLINE + 0x10_0000;
 
-/// Base of the per-thread TLS blocks handed to threads the guest creates. The
-/// main thread keeps [`MAIN_THREAD_TLS_BASE`]; children get a page each above
-/// it, up to the main stack: room for 3,824 of them.
+/// Per-thread TLS blocks for guest-created threads, a page each up to the main stack.
 pub const THREAD_TLS_BASE: u32 = MAIN_THREAD_TLS_BASE + 0x1_0000;
-/// Distance between two threads' TLS blocks. Horizon's are 0x200 bytes; a page
-/// each keeps the newlib reentrancy struct that follows out of the way too.
+/// A page per thread (Horizon uses 0x200), leaving room for newlib's reent struct.
 pub const THREAD_TLS_STRIDE: u32 = 0x1000;
 
-/// The system shared buffer: the surface the Home Menu and the system's own
-/// applets actually draw into. It is not a layer of their own: AM hands out
-/// one buffer the whole system shares, an applet asks `vi` for a slot in it,
-/// renders there and presents the slot back.
-///
-/// Seven slots, each a block-linear RGBA8888 image. See
-/// [`OperationMode::shared_buffer_size`] and the rest of that family for how
-/// one is measured, and [`SHARED_BUFFER_GEOMETRY`] for which geometry it is
-/// measured at.
+/// The system shared buffer the Home Menu and system applets draw into: seven
+/// block-linear RGBA8888 slots handed out by AM and presented through `vi`.
 pub const SHARED_BUFFER_ADDR: u32 = 0xFA00_0000;
 pub const SHARED_BUFFER_SLOTS: u32 = 7;
-/// The geometry the pool is laid out at: the shared *layer's* size, which is
-/// not the display's and does not follow the dock.
-///
-/// It is tempting to size the pool by the display, on the reasoning that the
-/// Home Menu draws into this buffer and nowhere else, so a 720p buffer is a
-/// 720p Home Menu however the console is docked. The Home Menu is a 720p Home
-/// Menu either way: qlaunch lays its UI out at 1280x720 whatever it is told.
-/// It never asks `am` for the resolution at all, and `vi` answering 1920x1080
-/// to `ListDisplays`, `ListDisplayModes`, `GetDisplayMode` and the pool layout
-/// itself changes nothing it draws.
-///
-/// So a display-sized pool does not buy a 1080p menu, it costs a working one:
-/// docked, the presented frame was the undocked frame at the origin, to the
-/// pixel, 0 of 921600 different, and pure black across the remaining two
-/// thirds of the screen. Scaling the layer onto the display is the composer's
-/// job, and giving the layer the display's dimensions is not how it is asked
-/// for.
-///
-/// A pool that does not move also cannot move underneath a guest. The layout
-/// goes out once, at `GetSharedBufferMemoryHandleId`, and the applet maps it
-/// and renders to it for as long as it holds it; a slot size that changed
-/// with the dock relocated every slot in the pool while the applet was still
-/// drawing into the old ones, and the present that followed read from the
-/// wrong offset at the wrong pitch, a black screen, thirteen frames after a
-/// dock, with the guest drawing perfectly well.
+/// The pool is laid out at the shared layer's size (720p), not the display's; it must not move with the dock.
 pub const SHARED_BUFFER_GEOMETRY: OperationMode = OperationMode::Handheld;
-/// Address space set aside for it: the larger of the two geometries, whatever
-/// [`SHARED_BUFFER_GEOMETRY`] is laid out at today.
-///
-/// Headroom rather than a size. Reserving costs nothing but address space,
-/// the pages behind it are soft-mapped, and only the two slots
-/// [`SHARED_BUFFER_USABLE_SLOTS`] hands out are ever written, and an applet
-/// that does honour the pool layout it is given is the one case where the
-/// pool would have to grow, with nowhere to grow into if this were sized to
-/// what is used.
+/// Reserved address space: the larger geometry, as headroom.
 pub const SHARED_BUFFER_RESERVED_SIZE: u32 = OperationMode::Docked.shared_buffer_size();
-/// Only the first two slots are ever handed out, which is what the console
-/// reports too: `AcquireSharedFrameBuffer` answers `{0, 1, -1, -1}`.
+/// Matches `AcquireSharedFrameBuffer` answering `{0, 1, -1, -1}`.
 pub const SHARED_BUFFER_USABLE_SLOTS: u32 = 2;
 
-/// The AM messages this emulator queues for the running applet. Horizon has
-/// many more; these are the two an applet's own boot turns on.
+/// The AM messages queued for the running applet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppletMessage {
-    /// The applet's focus changed. AM queues one at startup and then nothing
-    /// until the state really changes.
+    /// Queued once at startup, then only on a real change.
     FocusStateChanged = 15,
-    /// AM asking an applet that took charge of its own display
-    /// (`SetHandlesRequestToDisplay`) to show itself.
+    /// For an applet that called `SetHandlesRequestToDisplay`.
     RequestToDisplay = 41,
-    /// The same transition told to an *applet* rather than an application.
+    /// The same transition told to an applet rather than an application.
     ChangeIntoForeground = 1,
-    /// The console was docked or undocked. A title re-reads
-    /// `GetOperationMode` when it sees this and re-lays out for the new
-    /// screen; without it a mode change is a number nobody looks at again.
+    /// Docked or undocked; titles re-read `GetOperationMode` on this.
     OperationModeChanged = 30,
-    /// The clock profile changed with it. AM sends both, and a title that
-    /// scales its workload by performance mode watches this one.
+    /// Sent alongside `OperationModeChanged`.
     PerformanceModeChanged = 31,
 }
 
-/// Whether the console is on its own screen or in a dock, Horizon's
-/// `AppletOperationMode`, and the single switch behind the resolution `vi`
-/// reports, the performance mode `am` and `apm` report, the GPU clock
-/// `clkrst` reports, and whether the touchscreen exists at all.
-///
-/// All of those have to agree. Reporting Docked beside a 720p framebuffer is
-/// how NX-Fetch came to print "Docked" next to a handheld resolution, and a
-/// title that picks its render target from one answer and scans out through
-/// another draws at the wrong scale.
+/// Horizon's `AppletOperationMode`: drives the reported resolution, performance
+/// mode, GPU clock and touchscreen, which must all agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OperationMode {
-    /// On the console's own 720p screen, with a touchscreen.
+    /// 720p handheld screen, with a touchscreen.
     #[default]
     Handheld = 0,
-    /// In the dock, driving a 1080p display. `AppletOperationMode_Console`.
+    /// 1080p dock. `AppletOperationMode_Console`.
     Docked = 1,
 }
 
@@ -367,8 +259,7 @@ impl OperationMode {
         self as u32
     }
 
-    /// The GPU clock, in Hz. The CPU and memory clocks do not change with the
-    /// dock on an original console; the GPU doubles.
+    /// GPU clock in Hz; only the GPU clock changes with the dock.
     pub const fn gpu_clock_hz(self) -> u32 {
         match self {
             OperationMode::Handheld => 384_000_000,
@@ -376,21 +267,16 @@ impl OperationMode {
         }
     }
 
-    /// Bytes per row of a system shared buffer slot.
     pub const fn shared_buffer_stride(self) -> u32 {
         self.display_size().0 * 4
     }
 
-    /// Rows actually allocated per slot: the display height rounded up to the
-    /// 128 rows of a block-linear block (eight-row gobs, `block_height_log2`
-    /// 4). 720 becomes 768 and 1080 becomes 1152, and the extra rows are
-    /// padding rather than picture.
+    /// Display height rounded up to a 128-row block-linear block (720 to 768, 1080 to 1152).
     pub const fn shared_buffer_rows(self) -> u32 {
         const BLOCK_ROWS: u32 = 128;
         self.display_size().1.div_ceil(BLOCK_ROWS) * BLOCK_ROWS
     }
 
-    /// One slot, and the whole seven-slot pool.
     pub const fn shared_buffer_slot_size(self) -> u32 {
         self.shared_buffer_stride() * self.shared_buffer_rows()
     }
@@ -400,338 +286,128 @@ impl OperationMode {
     }
 }
 
-/// What a guest thread is doing. Threads only switch at the blocking
-/// syscalls, so a critical section that does not block is effectively atomic.
+/// A guest thread's state. Threads only switch at blocking syscalls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadState {
     /// Created but not yet started with `svcStartThread`.
     Created,
-    /// Eligible to run.
     Runnable,
     /// Returned from its entry point or called `svcExitThread`.
     Finished,
     /// Blocked in `svcArbitrateLock` on the mutex word at this address.
     WaitMutex(u32),
-    /// Blocked in `svcWaitProcessWideKeyAtomic` on a condition variable, to
-    /// re-acquire `mutex` when woken.
-    /// Blocked on a condition variable. `deadline` is the cycle count the
-    /// wait expires at, for the timed form: `None` is a wait with no timeout.
+    /// Blocked in `svcWaitProcessWideKeyAtomic`; re-acquires `mutex` when woken.
+    /// `deadline` is the expiry cycle for timed waits.
     WaitKey {
         key: u32,
         mutex: u32,
         deadline: Option<u64>,
     },
-    /// Blocked in `svcWaitForAddress` on the arbiter word at this address,
-    /// until `svcSignalToAddress` names it or `deadline` passes.
-    WaitAddress { addr: u32, deadline: Option<u64> },
-    /// Asleep until `deadline`, with its PC left on the `svc` that parked it
-    /// so the syscall is reissued when it wakes. This is the state for a wait
-    /// on something that runs off the emulator's own clock rather than off
-    /// another thread, an `audout` buffer finishing, today.
-    ///
-    /// Spinning instead is what the vsync wait did, and for a wait of a few
-    /// hundred thousand cycles that would be fine. An audio buffer is tens of
-    /// millions, and re-entering the syscall handler for each of them costs
-    /// the host far more than the guest: it took Just Dance from 20M emulated
-    /// instructions per second to 1.7M.
-    Sleeping { deadline: u64 },
-    /// Blocked in `svcWaitSynchronization` on events none of which has fired,
-    /// with its PC left on the `svc` so the wait is reissued, and its handles
-    /// rechecked, when the thread wakes. [`Cpu::signal_event`] wakes it, and
-    /// `deadline` is the display tick, which bounds how long a park can last
-    /// whatever happens.
-    ///
-    /// The alternative is to re-ask on every scheduler slice, which is what
-    /// this used to do. Nothing but a signal can change the answer, so the
-    /// re-asking learns nothing and is not free: `am:gpu-error` is a wait no
-    /// console ever satisfies, and the two threads sitting in one took **70%
-    /// of every instruction Just Dance 2023 retired**, enough to hide the
-    /// fact that the title had stopped making progress at all.
-    WaitEvent { deadline: u64 },
+    /// Blocked in `svcWaitForAddress` until signalled or `deadline` passes.
+    WaitAddress {
+        addr: u32,
+        deadline: Option<u64>,
+    },
+    /// Asleep until `deadline` with the PC on the `svc`, which is reissued on wake.
+    Sleeping {
+        deadline: u64,
+    },
+    /// Blocked in `svcWaitSynchronization` with the PC on the `svc`; reissued when
+    /// [`Cpu::signal_event`] wakes it or at `deadline` (the display tick).
+    WaitEvent {
+        deadline: u64,
+    },
 }
 
-/// How an `svcWaitForAddress` resolved, which the syscall layer turns into a
-/// kernel result code.
+/// How an `svcWaitForAddress` resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArbiterWait {
     /// The predicate held and the caller is now blocked.
     Blocked,
-    /// The word did not hold what the caller expected, so there was nothing to
-    /// wait for. Horizon reports this rather than waiting, and `nn::os` reads
-    /// it as "the thing you were waiting for already happened".
+    /// The word did not hold the expected value; nothing to wait for.
     Mismatch,
-    /// The predicate held but the caller passed a zero timeout, so it was
-    /// asking whether it *would* block rather than to block.
+    /// The predicate held but the timeout was zero.
     TimedOut,
 }
 
 /// A kernel event a service handed the guest a handle to.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Event {
-    /// What the event is for. Diagnostics only, but a wait trace is unreadable
-    /// without it.
+    /// Diagnostics only.
     name: &'static str,
-    /// Whether it is currently signalled. Events start **unsignalled**: an
-    /// event nothing has fired is the ordinary case, and reporting the
-    /// opposite is what made `nn::os::TryWaitSystemEvent` tell
-    /// `nn::oe::GpuErrorHandler` that the GPU had faulted.
+    /// Events start unsignalled.
     signaled: bool,
-    /// Whether a successful wait consumes the signal. Horizon calls this an
-    /// auto-clear event; the alternative stays signalled until the guest
-    /// clears it by hand.
+    /// Whether a successful wait consumes the signal (auto-clear).
     auto_clear: bool,
 }
 
-/// Bit Horizon's mutex words set to mean "someone is blocked on me, so the
-/// unlock has to go through `svcArbitrateUnlock`".
+/// Mutex word bit meaning unlock must go through `svcArbitrateUnlock`.
 const MUTEX_HAS_LISTENERS: u32 = 0x4000_0000;
 
-/// Value Horizon writes into a condition variable's own word while a thread is
-/// queued on it. `nn::os::SignalConditionVariable` reads the word first and
-/// makes no syscall at all when it is zero, so the kernel (not the guest) is
-/// what makes a signal reach a waiter.
+/// Written into a condvar's word while a thread waits; `nn::os` skips the signal syscall when it is zero.
 const CONDVAR_HAS_WAITERS: u32 = 1;
 
-/// The address-space range `svcGetInfo` reports as the stack region: where
-/// libnx mirrors the stacks of the threads the guest creates. It sits inside the
-/// ASLR region and clear of the image, the main stack and the heap.
-///
-/// **Everything in it has to be free**, which is not a formality: `nn::os::
-/// CreateThread` maps a thread's stack here at an address it picks itself,
-/// checking only that `svcQueryMemory` calls the range free. It has no idea
-/// this emulator keeps anything of its own. The return trampolines and every
-/// thread's TLS block used to sit in the top 16 MiB of it, Just Dance 2023
-/// was already mapping stacks at 0x1fdc8000, one page short of the main
-/// thread's TLS, and a stack that landed there would have overwritten the
-/// thread pointer every `SdkMutex` reads.
-///
-/// **It is 240 MiB, and it has to be large, because the placement is
-/// random.** `nn::os::detail::AddressSpaceAllocatorBase::AllocateSpace` picks
-/// a page at random, 512 times, and takes the first whose range and guard
-/// pages `svcQueryMemory` reports free. The stacks it has already placed are
-/// scattered over the whole region, so what limits the next one is the
-/// longest gap between them, not the space left. At 128 MiB, Just Dance 2023's
-/// 39th thread asked for an 8 MiB stack with 93 MiB free, the longest free
-/// run was 8244 KiB, every attempt failed, and `MapAliasStack` aborted the
-/// title. Shrinking the region by 16 MiB once moved one title off that abort
-/// and another onto it, which is the same failure one size down. A console's
-/// region is 2 GiB; this is everything from the end of the image space to the
-/// end of the ASLR region.
+/// The stack region `svcGetInfo` reports, where `nn::os` places thread stacks at
+/// random; it must be entirely free and large.
 pub const GUEST_STACK_REGION_ADDR: u32 = 0x1800_0000;
 pub const GUEST_STACK_REGION_SIZE: u32 = SELF_RETURN_TRAMPOLINE - GUEST_STACK_REGION_ADDR;
 
-/// The end of the address space this emulator presents to the guest:
-/// everything below is soft-mapped by [`Cpu::bootstrap`] (reads see zeros, a
-/// write allocates a page), everything above faults. It is also where
-/// `svcQueryMemory` stops looking for the end of a region.
-///
-/// Guest memory is addressed with a `u32`, so the whole space is 4 GiB and
-/// every region below has to be carved out of it. The top is left unmapped on
-/// purpose: a guest that walks off the end of a region should fault rather
-/// than find more zeros, and hbmenu reads the failure at the very top of the
-/// 64-bit range to work out how wide the address space is. How much of the
-/// top is left is a free choice, 16 MiB faults the same way 176 MiB did, and
-/// the rest is heap [`GUEST_HEAP_REGION_SIZE`] needs.
+/// End of the guest address space: below is soft-mapped by [`Cpu::bootstrap`],
+/// above faults (hbmenu probes the top to size the space).
 pub const GUEST_SPACE_END: u32 = 0xFF00_0000;
 
-/// The heap region `svcSetHeapSize` grows, and the alias region
-/// `svcMapPhysicalMemory` backs: the two ways a process gets its memory.
-///
-/// `nn::init` asks for the whole of what `svcGetInfo` reports as total
-/// memory, so a region smaller than that figure is a region the guest
-/// overruns, which is what used to happen: `svcSetHeapSize` granted the
-/// 480 MiB it asked for at 0x3000_0000 and the heap ran straight through a
-/// 240 MiB region, over the framebuffer, and into the alias region. On a
-/// console these regions are gigabytes apart in a 39-bit space and neither
-/// the sizes nor the collision arise; here they have to share 4 GiB with the
-/// image, the stacks and the system shared buffer.
-///
-/// **The two routes are not both live in one process**, which is what decides
-/// the split. `nnSdk` picks one at init from the same manifest figure that
-/// picks the layout: a title with virtual address memory grows its heap by
-/// reserving alias-region address space, and one without, every title on
-/// this layout, plus `libnx` homebrew: calls `svcSetHeapSize` and never
-/// issues `svcMapPhysicalMemory` at all. So the region the layout's own
-/// titles do not use is the one to charge for the other, and each layout
-/// spends its share of the address space on the route its titles take: this
-/// one on the heap, [`MemoryLayout::VIRTUAL_ADDRESS`] on the alias region.
-/// Splitting it evenly instead cost a title 1.25 GiB of the heap it asks for
-/// to reserve a region it will never touch, and Tomodachi Life's own
-/// allocator ran dry 800M instructions in: 30-odd threads later it asked
-/// `nn::os::CreateThread` to start a `ThreadType` that was the null its
-/// allocator had just handed back, and the thread entered at whatever
-/// `[null + 0x68]` happened to hold.
-///
-/// Horizon's own alias region starts at 0x10_0000_0000, and reporting *that*
-/// through `svcGetInfo` had `nnSdk` asking to map memory at an address the
-/// emulator cannot represent at all, which `svcMapPhysicalMemory` would
-/// silently truncate to 0.
-///
-/// **The alias region is 32 MiB because the heap wants everything else.**
-/// Persona 5 Royal builds three memory pools whose sizes, 1.73 GiB,
-/// 704 MiB and 650 MiB: are constants in its own `.data`, 2.98 GiB in
-/// total. It asked for the third out of a 2.5 GiB heap, was handed a null,
-/// and asserted `condition(bresult)` in `RsdxDevice11CoreCommonUtil.cpp`
-/// 100.9M steps in. Nothing under a 3 GiB heap runs that title, so the
-/// unused-under-this-layout region keeps only enough to be a region.
+/// Heap region (`svcSetHeapSize`) and alias region (`svcMapPhysicalMemory`). A process
+/// uses only one route, so this layout gives the heap nearly everything.
 pub const GUEST_HEAP_REGION_ADDR: u32 = 0x3000_0000;
 pub const GUEST_HEAP_REGION_SIZE: u32 = 0xC800_0000;
 pub const GUEST_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(GUEST_HEAP_REGION_SIZE);
 pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x0200_0000;
 
-/// Where `ldr:ro` maps the modules a title loads at run time.
-///
-/// A dynamically loaded NRO cannot go where the image went, that address
-/// space belongs to the modules the loader laid out at boot, and it must not
-/// go anywhere the guest's own allocators might claim, which rules out the
-/// ASLR region `svcGetInfo` reports ([0x08000000, 0x27000000)), the stack
-/// region, the heap and the alias region. What is left is the run between the
-/// host-provided stack ([`STACK_TOP`]) and the base of the heap, and this is
-/// that run less a margin above the stack: 112 MiB, far more than the handful
-/// of plugin NROs a title loads.
-///
-/// Nothing else maps here, so a module mapped in this region is the only
-/// thing `svcQueryMemory` reports there, which is what a guest that walks
-/// the address space looking for its own modules needs to see.
+/// Where `ldr:ro` maps run-time loaded modules: between [`STACK_TOP`] and the heap,
+/// clear of every region the guest's allocators use.
 pub const RO_MODULE_REGION_ADDR: u32 = 0x2900_0000;
 pub const RO_MODULE_REGION_SIZE: u32 = GUEST_HEAP_REGION_ADDR.wrapping_sub(RO_MODULE_REGION_ADDR);
 
-/// What `svcGetInfo` reports as the memory the process may use, and so the
-/// size `nn::init` asks for as its heap: exactly one region's worth.
-///
-/// A real console hands an application several gigabytes of a 4 GiB machine.
-/// This used to report 0x1E00_0000 (480 MiB) and a title believes it: Just
-/// Dance 2019 sized its heap from this figure and then asked that heap for a
-/// 699 MiB graphics pool, a number baked into its own code rather than derived
-/// from what the console said. The allocation could not succeed, and the title
-/// used the null it got back. 3.125 GiB is what is left of the address space
-/// once the image, the stacks, the shared buffer and an alias region are out
-/// of it: within 80 MiB of what a console gives an application, and enough
-/// for Persona 5 Royal's 2.98 GiB of pools.
+/// `svcGetInfo`'s total memory, which `nn::init` asks for as its heap: one region's worth.
 pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
 
-/// The arena `nn::os::detail::VammManagerImplByHorizon` claims at the base of
-/// the alias region before a title reserves anything of its own, `movz w9,
-/// #0x3fe0, lsl #16`, a constant compiled into the SDK rather than a figure
-/// derived from anything a kernel says. It costs the same whatever this
-/// emulator reports, which is what makes it a layout constraint.
+/// The arena `VammManagerImplByHorizon` claims at the alias region base; an SDK constant.
 pub const VAMM_ARENA_SIZE: u32 = 0x3FE0_0000;
 
-/// The regions and figures for a title that *does* use virtual address
-/// memory: nearly the whole address space is the alias region, because under
-/// this layout the alias region is where everything a title reserves lives.
-///
-/// **The heap region is not one of the two the title uses.** A title on this
-/// layout never issues `svcSetHeapSize` at all: Just Dance 2023 makes zero
-/// of them in the first four billion instructions, so the only thing the
-/// heap region does here is be reported by `svcGetInfo` as
-/// `HeapRegionSize`. Address space spent on it is address space nothing
-/// grows into, which is why it is 128 MiB rather than a share of the machine.
-///
-/// [`VAMM_TOTAL_MEMORY_SIZE`] is a separate figure from that region for the
-/// same reason. It is not how much heap region there is; it is what `nn::init`
-/// asks `nn::mem::StandardAllocator` to reserve, and under this layout that
-/// reservation is made **in the alias region**. So the alias region has to be
-/// able to hold [`VAMM_ARENA_SIZE`], plus the total, plus everything the title
-/// then allocates on top:
-///
-/// ```text
-/// VAMM_ALIAS_REGION_SIZE >= VAMM_ARENA_SIZE + VAMM_TOTAL_MEMORY_SIZE + the title's own
-/// ```
-///
-/// That inequality used to leave 274 MiB for the last term, and Just Dance
-/// 2023 needs more. Its block allocator walked the alias region handing out
-/// ~20 MiB segments until the last one ended at 0xEFF0_0000, one megabyte
-/// short of the region's end, and refused the next request for 4.2 MiB.
-/// **Nothing checked the null it returned**: the dlmalloc behind it took the
-/// failure as a segment at address 0, `init_top`'d a 4 MiB arena there, and
-/// ran on it for 30M instructions. Every pointer it handed out was a bare
-/// offset (0x5d6e0, 0x5d810) and every write to one landed on a page this
-/// emulator soft-maps rather than faulting on, so nothing said a word until a
-/// `Reallocate` asked the allocator registry which arena owned 0x5d6e0, was
-/// told none of them, and called a virtual method on the null. The visible
-/// failure was `pc=0` 30M instructions and one whole subsystem away from the
-/// allocation that failed.
+/// Layout for titles using virtual address memory: nearly everything is alias region.
+/// The heap region is unused here, so it is small.
 pub const VAMM_HEAP_REGION_SIZE: u32 = 0x0800_0000;
 pub const VAMM_ALIAS_REGION_ADDR: u32 = GUEST_HEAP_REGION_ADDR.wrapping_add(VAMM_HEAP_REGION_SIZE);
-/// Everything from there to the system shared buffer, which is the first
-/// thing above the alias region that is not the title's to use.
+/// Up to the system shared buffer.
 pub const VAMM_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR.wrapping_sub(VAMM_ALIAS_REGION_ADDR);
-/// What `svcGetInfo` reports as `TotalMemorySize`, and, through
-/// `TotalNonSystemMemorySize`, the size of the reservation above. Unchanged
-/// at 896 MiB: it is a figure a title believes and sizes itself against, and
-/// the address space it costs is now the alias region's to give.
+/// `TotalMemorySize`, and the size of the alias-region reservation `nn::init` makes.
 pub const VAMM_TOTAL_MEMORY_SIZE: u32 = 0x3800_0000;
-/// What `svcGetInfo` reports for `SystemResourceSizeTotal` under that layout:
-/// the 16 MiB an application's NPDM declares.
+/// `SystemResourceSizeTotal` for this layout.
 pub const VAMM_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
 
-/// The regions for a firmware **library applet**, which takes both routes at
-/// once and so fits neither layout above.
-///
-/// `LibAppletWeb` claims a Vamm arena and *then* asks `svcSetHeapSize` for
-/// 0x1480_0000, 328 MiB, a constant of its own rather than anything
-/// `svcGetInfo` reports it. [`VAMM_HEAP_REGION_SIZE`] is 128 MiB because a
-/// Vamm *title* grows through the alias region and leaves the heap unused, so
-/// the applet's ask was refused forty times over and it took a fatal 566k
-/// steps in, before it had asked `am` for anything.
-///
-/// An applet never makes the 880 MiB alias reservation that region was shrunk
-/// for, so it can be given a real heap without charging Just Dance 2023 for
-/// it: 512 MiB here still leaves 2.66 GiB of alias region against the
-/// 1022 MiB [`VAMM_ARENA_SIZE`] an applet's own SDK claims.
+/// Layout for firmware library applets, which use both a Vamm arena and `svcSetHeapSize`.
 pub const APPLET_HEAP_REGION_SIZE: u32 = 0x2000_0000;
 pub const APPLET_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(APPLET_HEAP_REGION_SIZE);
 pub const APPLET_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR.wrapping_sub(APPLET_ALIAS_REGION_ADDR);
 
-/// The address space a process is given, which is not the same for every
-/// process.
-///
-/// `nnSdk` decides whether it has virtual address memory by asking
-/// `svcGetInfo` for `SystemResourceSizeTotal`:
-/// `VammManager::IsVirtualAddressMemoryEnabled` is that query succeeding and
-/// returning non-zero, and nothing else. A title that declares a system
-/// resource in its NPDM runs its heap through the manager; one that declares
-/// zero never touches it. Both kinds are real, Just Dance 2023 declares
-/// 16 MiB, Just Dance 2019 declares 0, so the emulator reports each title
-/// what its own manifest says rather than picking one answer for everybody.
-///
-/// The two want different address spaces, and there is not enough of one to
-/// satisfy both at once. `VammManagerImplByHorizon` opens by claiming
-/// [`VAMM_ARENA_SIZE`] at the base of the alias region, and everything the
-/// title reserves afterwards (its heap included) has to fit above it. An
-/// alias region merely as large as the heap therefore cannot work at all:
-/// Just Dance 2023 asked for a heap of `total - system resource` and
-/// `nn::os::AllocateAddressRegion` refused it with os result 3-12, 1022 MiB
-/// of the region already spoken for. Paying for that arena inside 4 GiB means
-/// taking it from the heap region and from the total, which drops to 896 MiB.
-///
-/// Charging that to a title which never uses the manager is not free either,
-/// and it is worse than it looks because it fails *quietly*: Just Dance 2019
-/// sizes a 699 MiB pool from the reported total, and told 896 MiB rather than
-/// the whole heap it aborts 378.8M steps in, having reached exactly the same
-/// place with the same GPU work as a run that was told the truth. Nothing in
-/// that failure names memory. So the layout follows the manifest, and each
-/// kind of title spends the address space on the region it actually grows
-/// into: the alias region here, the heap on [`MemoryLayout::PLAIN`].
+/// The address space a process is given, selected by its NPDM system resource size:
+/// `nnSdk` uses the Vamm manager exactly when `SystemResourceSizeTotal` is nonzero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryLayout {
     pub heap_addr: u32,
     pub heap_size: u32,
     pub alias_addr: u32,
     pub alias_size: u32,
-    /// What `svcGetInfo` reports as `TotalMemorySize`.
+    /// `TotalMemorySize`.
     pub total_memory: u32,
-    /// What it reports as `SystemResourceSizeTotal`, zero on [`Self::PLAIN`],
-    /// which is the whole of what keeps `nnSdk` off the manager.
+    /// `SystemResourceSizeTotal`; zero keeps `nnSdk` off the Vamm manager.
     pub system_resource: u32,
 }
 
 impl MemoryLayout {
-    /// The layout for a title with no system resource: `libnx` homebrew and
-    /// any `nnSdk` title whose NPDM declares zero.
+    /// No system resource: `libnx` homebrew and `nnSdk` titles declaring zero.
     pub const PLAIN: MemoryLayout = MemoryLayout {
         heap_addr: GUEST_HEAP_REGION_ADDR,
         heap_size: GUEST_HEAP_REGION_SIZE,
@@ -741,9 +417,7 @@ impl MemoryLayout {
         system_resource: 0,
     };
 
-    /// The layout for a title that declares a system resource, sized so that
-    /// [`VAMM_ARENA_SIZE`], a full heap reservation and headroom for the
-    /// title's own reservations all fit the alias region.
+    /// Titles declaring a system resource.
     pub const VIRTUAL_ADDRESS: MemoryLayout = MemoryLayout {
         heap_addr: GUEST_HEAP_REGION_ADDR,
         heap_size: VAMM_HEAP_REGION_SIZE,
@@ -753,9 +427,7 @@ impl MemoryLayout {
         system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
     };
 
-    /// The layout for a firmware library applet: a heap it can actually grow,
-    /// paid for out of an alias region it reserves nothing in. See
-    /// [`APPLET_HEAP_REGION_SIZE`] for why an applet needs its own.
+    /// Firmware library applets; see [`APPLET_HEAP_REGION_SIZE`].
     pub const APPLET: MemoryLayout = MemoryLayout {
         heap_addr: GUEST_HEAP_REGION_ADDR,
         heap_size: APPLET_HEAP_REGION_SIZE,
@@ -765,9 +437,7 @@ impl MemoryLayout {
         system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
     };
 
-    /// The layout a title's declared `system_resource_size` selects. Zero,
-    /// which is also what a container with no readable manifest yields,
-    /// means the plain heap.
+    /// Zero (or no readable manifest) selects the plain layout.
     pub fn for_system_resource(size: u32) -> MemoryLayout {
         if size == 0 {
             MemoryLayout::PLAIN
@@ -776,10 +446,7 @@ impl MemoryLayout {
         }
     }
 
-    /// The layout for a process, which is [`Self::for_system_resource`] unless
-    /// the program is one of the firmware's library applets, those declare a
-    /// system resource but spend their memory the way a plain title does, and
-    /// [`Self::APPLET`] is the only layout that serves both.
+    /// [`Self::for_system_resource`], except library applets get [`Self::APPLET`].
     pub fn for_program(program_id: u64, size: u32) -> MemoryLayout {
         if size != 0 && crate::cpu::am::is_library_applet(program_id) {
             return MemoryLayout::APPLET;
@@ -788,33 +455,21 @@ impl MemoryLayout {
     }
 }
 
-/// Size of hid's shared memory, the value libnx passes to `svcMapSharedMemory`.
-/// Used to tell that mapping apart from any other shared memory the guest maps.
+/// hid's shared memory size, used to recognise that mapping.
 pub const HID_SHMEM_SIZE: u32 = 0x4_0000;
 
-/// Size of `pl:u`'s shared memory, the region the system fonts live in
-/// (`SHAREDMEMFONT_SIZE` in libnx). Recognised the same way as hid's.
+/// `pl:u`'s shared memory size (`SHAREDMEMFONT_SIZE`), recognised the same way.
 pub const PL_SHMEM_SIZE: u32 = 0x110_0000;
 
-/// One shared font as `pl:u` reports it: where its TrueType data begins in
-/// pl's shared memory, and how many bytes of it there are.
-///
-/// The offset points *past* the eight-byte header the font is stored behind,
-/// so what the guest is handed is a plain TrueType file, hbmenu passes it
-/// straight to `FT_New_Memory_Face`.
+/// One shared font in pl's shared memory; `offset` points past the 8-byte header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontRegion {
     pub offset: u32,
     pub size: u32,
 }
 
-/// The shared fonts, in `PlSharedFontType` order: the system data archive
-/// each lives in, and its name inside that archive.
-///
-/// The seventh has no `PlSharedFontType` of its own: `nintendo_ext2_003` is
-/// a second extension face, and a console reports it after the six the enum
-/// names. Matched against Eden's `SHARED_FONTS`, which is the layout nnSdk
-/// accepts.
+/// Shared fonts in `PlSharedFontType` order (archive id, file name), plus
+/// `nintendo_ext2_003` seventh, matching Eden's `SHARED_FONTS`.
 const SHARED_FONTS: [(u64, &str); 7] = [
     (0x0100_0000_0000_0811, "/nintendo_udsg-r_std_003.bfttf"),
     (
@@ -831,26 +486,13 @@ const SHARED_FONTS: [(u64, &str); 7] = [
     (0x0100_0000_0000_0810, "/nintendo_ext2_003.bfttf"),
 ];
 
-/// A `.bfttf`'s first four bytes, and the repeating key the rest of the file
-/// is xored with.
-///
-/// The key is not a secret and does not have to be derived: a `.bfttf` starts
-/// with a known plaintext (`7f 9a 02 18`) stored xored, so the first four
-/// bytes of every one of these files are the same and the key falls straight
-/// out of them.
+/// A `.bfttf`'s first four bytes; the xor key is derived from them.
 const BFTTF_MAGIC: [u8; 4] = [0x36, 0xf8, 0x1a, 0x1e];
 const BFTTF_KEY: [u8; 4] = [0x49, 0x62, 0x18, 0x06];
 
-/// The eight-byte header a shared font sits behind in pl's shared memory.
 const BFTTF_HEADER: usize = 8;
 
-/// Decode one `.bfttf` into what pl's shared memory holds for it: the header,
-/// then the TrueType file itself.
-///
-/// The size field in the header is left in the form the file carried it,
-/// byte-reversed rather than decoded, which is what a console leaves there
-/// and what Eden reproduces ("re-encrypt the size"). Nothing here reads it;
-/// it is the guest's to interpret.
+/// Decode a `.bfttf` into header plus TrueType file. The size field stays byte-reversed, as on a console.
 pub fn decode_bfttf(file: &[u8]) -> Option<Vec<u8>> {
     let len = file.len() / 4 * 4;
     if len < BFTTF_HEADER || file[..4] != BFTTF_MAGIC {
@@ -865,15 +507,7 @@ pub fn decode_bfttf(file: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Wrap a plain TrueType file the way a console's `.bfttf` wraps one.
-///
-/// The host-supplied fallback font goes through this and back out through
-/// [`decode_bfttf`], so it lands in shared memory in exactly the layout the
-/// firmware fonts do rather than in one this file would have to special-case.
-///
-/// A `.bfttf` is a whole number of words, so a font whose length is not is
-/// padded rather than trimmed: the trailing zeros are past every table the
-/// font's directory points at, whereas trimming would cut into the last one.
+/// Wrap a TrueType file as a `.bfttf`, padding (not trimming) to whole words.
 pub fn encode_bfttf(ttf: &[u8]) -> Vec<u8> {
     let len = ttf.len().next_multiple_of(4);
     let mut out = Vec::with_capacity(len + BFTTF_HEADER);
@@ -887,9 +521,7 @@ pub fn encode_bfttf(ttf: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Offsets into libnx's `HidSharedMemory` (`switch/services/hid.h`): the npad
-/// section, the per-controller stride, and the fields of `HidNpadInternalState`
-/// that `padUpdate` reads.
+/// Offsets into libnx's `HidSharedMemory` (`switch/services/hid.h`).
 mod hid_shmem {
     /// `offsetof(HidSharedMemory, npad)`.
     pub const NPAD: u32 = 0x9A00;
@@ -902,40 +534,27 @@ mod hid_shmem {
     pub const JOY_ASSIGNMENT_MODE: u32 = 0x04;
     pub const FULL_KEY_LIFO: u32 = 0x28;
     pub const HANDHELD_LIFO: u32 = 0x378;
-    /// The rest of `HidNpadInternalState`'s per-style LIFOs, which follow
-    /// those two at a fixed 0x350 stride: a pair of Joy-Cons driving one npad,
-    /// then each held alone, then the system style past Palma's.
-    ///
-    /// A style's states are only ever read out of its own LIFO, so publishing
-    /// into the wrong one is publishing into none.
+    /// The remaining per-style LIFOs at a 0x350 stride: Joy-Con pair, left, right, system.
     pub const JOY_DUAL_LIFO: u32 = 0x6C8;
     pub const JOY_LEFT_LIFO: u32 = 0xA18;
     pub const JOY_RIGHT_LIFO: u32 = 0xD68;
     pub const SYSTEM_EXT_LIFO: u32 = 0x1408;
     pub const DEVICE_TYPE: u32 = 0x4188;
-    /// `HidNpadSystemProperties`, and the three `HidPowerInfo` battery levels
-    /// straight after `system_button_properties`. `hidGetNpadPowerInfo*` reads
-    /// one of the three and the two `system_properties` bits that go with it,
-    /// so an entry left at zero is a controller reporting an empty battery.
+    /// `HidNpadSystemProperties`, then the three `HidPowerInfo` battery levels.
     pub const SYSTEM_PROPERTIES: u32 = 0x4190;
     pub const BATTERY_LEVEL: u32 = 0x4198;
-    /// How many `HidPowerInfo`s one npad has: the pad as a whole, then its
-    /// left and right halves.
+    /// Power infos per npad: the whole pad, then its left and right halves.
     pub const POWER_INFO_COUNT: u32 = 3;
 
-    /// `HidNpadCommonLifo`: a 0x20-byte header then 17 storage entries. The
-    /// header's fields are unused/buffer_count/tail/count; a reader takes
-    /// `count` entries ending at `tail`.
+    /// `HidNpadCommonLifo`: a 0x20-byte header (unused/buffer_count/tail/count) and 17 entries.
     pub const LIFO_BUFFER_COUNT: u32 = 0x08;
     pub const LIFO_TAIL: u32 = 0x10;
     pub const LIFO_COUNT: u32 = 0x18;
     pub const LIFO_STORAGE: u32 = 0x20;
     pub const LIFO_CAPACITY: u64 = 17;
 
-    /// `HidNpadCommonStateAtomicStorage`: a sampling number the reader uses to
-    /// detect a torn read, then the `HidNpadCommonState` itself. The storage's
-    /// number is the state's *doubled*: bit 0 is the seqlock's "being written"
-    /// flag, and a reader spins on the entry until it clears.
+    /// `HidNpadCommonStateAtomicStorage`: sampling number (doubled; bit 0 is the seqlock flag),
+    /// then the `HidNpadCommonState`.
     pub const STORAGE_SAMPLING_NUMBER: u32 = 0x00;
     pub const STATE_SAMPLING_NUMBER: u32 = 0x08;
     pub const STATE_BUTTONS: u32 = 0x10;
@@ -943,9 +562,7 @@ mod hid_shmem {
     pub const STATE_STICK_R: u32 = 0x20;
     pub const STATE_ATTRIBUTES: u32 = 0x28;
 
-    /// `HidNpadStyleTag`, the bits a title names in
-    /// `SetSupportedNpadStyleSet` and the same bits an npad's `style_set`
-    /// reports back.
+    /// `HidNpadStyleTag` bits.
     pub const STYLE_FULL_KEY: u32 = 1 << 0;
     pub const STYLE_HANDHELD: u32 = 1 << 1;
     pub const STYLE_JOY_DUAL: u32 = 1 << 2;
@@ -958,21 +575,16 @@ mod hid_shmem {
     pub const DEVICE_JOY_LEFT: u32 = 1 << 4;
     pub const DEVICE_JOY_RIGHT: u32 = 1 << 5;
 
-    /// `HidNpadJoyAssignmentMode`: whether the npad is driven by a pair of
-    /// Joy-Cons or by one on its own.
+    /// `HidNpadJoyAssignmentMode`.
     pub const JOY_ASSIGNMENT_DUAL: u32 = 0;
     pub const JOY_ASSIGNMENT_SINGLE: u32 = 1;
 
-    /// `HidPowerInfo::battery_level` is a quarter-full step, 0 to 4.
+    /// `HidPowerInfo::battery_level`, 0 to 4.
     pub const BATTERY_FULL: u32 = 4;
 
-    /// The `PowerInfo{0,1,2}PowerConnected` bits of `system_properties`. Their
-    /// `Charging` counterparts are bits 0-2 and stay clear: a battery that is
-    /// already full is not taking a charge.
+    /// `PowerInfo{0,1,2}PowerConnected` bits of `system_properties`; `Charging` stays clear.
     pub const SYSTEM_PROP_POWER_CONNECTED: u32 = (1 << 3) | (1 << 4) | (1 << 5);
-    /// The button capabilities in the same word. Both pads published here have
-    /// a full face: ABXY the way a Switch prints them, a plus and a minus, and
-    /// a directional pad.
+    /// Button capabilities: ABXY, plus/minus, d-pad.
     pub const SYSTEM_PROP_FULL_BUTTONS: u32 = (1 << 11) | (1 << 13) | (1 << 14) | (1 << 15);
 
     pub const ATTR_CONNECTED: u32 = 1 << 0;
@@ -982,34 +594,20 @@ mod hid_shmem {
     pub const ATTR_RIGHT_CONNECTED: u32 = 1 << 4;
     pub const ATTR_RIGHT_WIRED: u32 = 1 << 5;
 
-    /// `offsetof(HidSharedMemory, npad_condition)`, `nn::hid::NpadCondition`,
-    /// the console-wide controller condition that sits past the ten npads, the
-    /// gesture block and the console six-axis sensor.
-    ///
-    /// **`nn::hid::GetNpadJoyHoldType` reads it directly and aborts on it.**
-    /// It is not fetched over IPC at all: the client reads `hold_type` here
-    /// and refuses it unless `is_valid` is set, so a region left at its mapped
-    /// zeroes is a *hold type that was never published* rather than a default
-    /// one. `nnSdk` answers that with `nn::diag::detail::AbortImpl` and
-    /// `2202-0710`, which is where the 21.2.0 Home Menu stopped, with no
-    /// service request anywhere near the fault to say so.
+    /// `offsetof(HidSharedMemory, npad_condition)`. `nn::hid::GetNpadJoyHoldType` reads it
+    /// directly and aborts (`2202-0710`) unless `is_valid` is set.
     pub const NPAD_CONDITION: u32 = 0x3E200;
-    /// Its four words: a reserved one, then the two flags a reader checks and
-    /// the hold type between them.
+    /// Its four words: reserved, initialized flag, hold type, valid flag.
     pub const NPAD_CONDITION_INITIALIZED: u32 = 0x04;
     pub const NPAD_CONDITION_HOLD_TYPE: u32 = 0x08;
     pub const NPAD_CONDITION_VALID: u32 = 0x0C;
 
-    /// `offsetof(HidSharedMemory, touch_screen)` - straight after the debug
-    /// pad's 0x400. Its `HidTouchScreenLifo` sits at the start of the region,
-    /// with the same 0x20-byte header the npad LIFOs use.
+    /// `offsetof(HidSharedMemory, touch_screen)`; its LIFO uses the npad LIFO header.
     pub const TOUCH_SCREEN: u32 = 0x400;
-    /// The storage entry is `{u64 sampling_number, HidTouchScreenState}`, so
-    /// the state itself begins one `u64` into it.
+    /// The state begins one `u64` into each storage entry.
     pub const TOUCH_STATE: u32 = 0x08;
 
-    /// Fields of `HidTouchScreenState`: its own sampling number, how many of
-    /// the sixteen touch slots are live, then the slots.
+    /// `HidTouchScreenState` fields: sampling number, live count, then the slots.
     pub const TOUCH_SAMPLING_NUMBER: u32 = 0x00;
     pub const TOUCH_COUNT: u32 = 0x08;
     pub const TOUCH_TOUCHES: u32 = 0x10;
@@ -1018,8 +616,7 @@ mod hid_shmem {
     pub const TOUCH_SIZE: u32 = 0x28;
     pub const TOUCH_DELTA_TIME: u32 = 0x00;
     pub const TOUCH_ATTRIBUTES: u32 = 0x08;
-    /// `nn::hid::TouchAttribute`: the frame a contact went down, and the frame
-    /// it came up. A UI taps on these rather than on a finger being present.
+    /// `nn::hid::TouchAttribute` start and end bits.
     pub const TOUCH_ATTR_START: u32 = 1 << 0;
     pub const TOUCH_ATTR_END: u32 = 1 << 1;
     pub const TOUCH_FINGER_ID: u32 = 0x0C;
@@ -1030,42 +627,23 @@ mod hid_shmem {
     pub const TOUCH_ROTATION_ANGLE: u32 = 0x20;
 }
 
-/// One way this console's single pad can present itself in hid's shared
-/// memory: the style a title asks for, and everything that has to agree with
-/// it once it does.
+/// One style the pad can present in hid's shared memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NpadPresentation {
-    /// The `HidNpadStyleTag` bit, which is both what a title names in
-    /// `SetSupportedNpadStyleSet` and what the npad's `style_set` reports.
+    /// `HidNpadStyleTag` bit.
     style: u32,
-    /// `HidDeviceTypeBits`, which says which physical halves are there.
+    /// `HidDeviceTypeBits`.
     device_type: u32,
-    /// The per-style LIFO the states go in.
+    /// The per-style LIFO.
     lifo: u32,
-    /// `HidNpadAttribute`: which halves are attached, and how.
+    /// `HidNpadAttribute`.
     attributes: u32,
     /// `HidNpadJoyAssignmentMode`.
     joy_assignment: u32,
 }
 
-/// The styles this console's pad can honestly be published as, best first.
-///
-/// **A style nobody supports is the same to `nn::hid` as no pad at all.** This
-/// used to publish a Pro Controller and a handheld and nothing else, whatever
-/// the title had asked for, and `SetSupportedNpadStyleSet` was stored only to
-/// be read back by its own getter. A title that accepts a pair of Joy-Cons and
-/// not a Pro Controller (which is an ordinary thing to accept) therefore
-/// found every slot in a style it had not asked for, and `nnSdk` aborted in
-/// the npad layer with `2202-0710`, one description along from the
-/// out-of-range npad id it sits beside.
-///
-/// The order is how much of a dual-stick pad survives the presentation. The
-/// first two carry every button and both sticks; a single Joy-Con is last
-/// because half the pad has nowhere to go in it.
-///
-/// `SystemExt` is deliberately not here. It is not a style a pad is published
-/// *instead of* another. See [`Cpu::write_npad_slot`], which publishes it
-/// alongside whichever of these the title asked for.
+/// Styles the pad can be published as, best first. A style the title does not
+/// support is no pad at all to `nn::hid`. `SystemExt` is published alongside, not here.
 const NPAD_PRESENTATIONS: [NpadPresentation; 4] = [
     NpadPresentation {
         style: hid_shmem::STYLE_FULL_KEY,
@@ -1108,9 +686,7 @@ const NPAD_PRESENTATIONS: [NpadPresentation; 4] = [
     },
 ];
 
-/// The handheld pad, which is its own npad slot rather than one of player 1's
-/// styles: on hardware `HidNpadIdType_Handheld` is a different id, not a
-/// different way of holding the same controller.
+/// The handheld pad: its own npad id, not one of player 1's styles.
 const NPAD_HANDHELD: NpadPresentation = NpadPresentation {
     style: hid_shmem::STYLE_HANDHELD,
     device_type: hid_shmem::DEVICE_HANDHELD,
@@ -1123,16 +699,7 @@ const NPAD_HANDHELD: NpadPresentation = NpadPresentation {
     joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
 };
 
-/// Every style this console's pad can be published in: the ones
-/// [`NPAD_PRESENTATIONS`] can present, plus the handheld slot published beside
-/// player 1 whatever a title asked for, plus `SystemExt`, which every slot
-/// carries in addition to its own style.
-///
-/// This is the console's own capability, not a title's choice, what a title
-/// *asked* for is `npad_style_set`, and it has to be the same answer wherever
-/// it is given. The controller applet is handed it in its launch struct and
-/// then asks `hid:sys` for it again, and an applet offering a controller that
-/// never appears afterwards is one the user cannot get past.
+/// Every style the pad can be published in, as reported to the controller applet and `hid:sys`.
 fn supported_npad_style_set() -> u32 {
     NPAD_PRESENTATIONS.iter().fold(
         NPAD_HANDHELD.style | hid_shmem::STYLE_SYSTEM_EXT,
@@ -1140,13 +707,7 @@ fn supported_npad_style_set() -> u32 {
     )
 }
 
-/// Which presentation player 1 gets, given the styles the title said it takes.
-///
-/// A `style_set` of zero is a title that has not called
-/// `SetSupportedNpadStyleSet` at all: `libnx` homebrew leaves it to the
-/// defaults, and one that names nothing this console can be has to be given
-/// something regardless. Both get the Pro Controller, which is what was
-/// published unconditionally before.
+/// Player 1's presentation for the title's style set; Pro Controller when none match.
 fn npad_presentation_for(style_set: u32) -> NpadPresentation {
     NPAD_PRESENTATIONS
         .into_iter()
@@ -1154,31 +715,19 @@ fn npad_presentation_for(style_set: u32) -> NpadPresentation {
         .unwrap_or(NPAD_PRESENTATIONS[0])
 }
 
-/// Deflection past which hid reports the `HidNpadButton_StickL*`/`StickR*`
-/// pseudo-buttons, which is what `HidNpadButton_AnyLeft` and friends look at.
+/// Deflection past which the stick pseudo-buttons are reported.
 const HID_STICK_THRESHOLD: i32 = 0x4000;
 
-/// The console's touchscreen digitizer resolution. This is *not* the resolution
-/// the guest is presenting at - hid reports touches in this space whatever the
-/// title renders in, so the frontend scales its canvas onto it rather than the
-/// other way round.
+/// The touchscreen digitizer resolution; touches use this space whatever the guest renders at.
 pub const TOUCH_SCREEN_WIDTH: u32 = 1280;
 pub const TOUCH_SCREEN_HEIGHT: u32 = 720;
 
-/// `HidTouchScreenState.touches` is a fixed sixteen slots.
 pub const TOUCH_MAX: usize = 16;
 
-/// Contact size reported for every touch. Real hid measures the contact patch;
-/// nothing that runs here does more than check it is non-zero, and a mouse or a
-/// trackpad has no width to report anyway.
+/// Contact size reported for every touch; only checked to be non-zero.
 const TOUCH_DIAMETER: u32 = 10;
 
-/// One finger on the touchscreen, in [`TOUCH_SCREEN_WIDTH`] x
-/// [`TOUCH_SCREEN_HEIGHT`] coordinates.
-///
-/// `finger_id` identifies a contact for as long as it stays down, so a title
-/// tracking a drag can follow it; the frontend keeps one id per pointer for the
-/// life of that pointer.
+/// One finger in digitizer coordinates; `finger_id` is stable while it stays down.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TouchPoint {
     pub finger_id: u32,
@@ -1186,9 +735,7 @@ pub struct TouchPoint {
     pub y: u32,
 }
 
-/// SIMD register file. Register numbers are decoded from five-bit fields, so
-/// every access is already in range. Keeping that invariant here removes a
-/// bounds-check from the very hot NEON/FP paths while retaining debug checks.
+/// SIMD register file; indices come from 5-bit fields, so accesses are in range.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct VRegs([u128; 32]);
 
@@ -1232,16 +779,12 @@ impl IndexMut<usize> for VRegs {
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
     pub handle: u64,
-    /// Its kernel thread id, what `svcGetThreadId` answers: unique to the
-    /// thread and not its handle. See [`Cpu::next_thread_id`].
+    /// Kernel thread id (`svcGetThreadId`), distinct from the handle.
     id: u64,
     pub state: ThreadState,
-    /// Suspended by `svcSetThreadActivity`. Kept apart from `state` because
-    /// suspension does not replace what the thread was doing, a paused thread
-    /// blocked on a mutex is still blocked on it when it resumes; it is only
-    /// taken out of the scheduler's rotation meanwhile.
+    /// Suspended by `svcSetThreadActivity`; independent of `state`.
     paused: bool,
-    /// The saved register file, stack pointer included. See [`REG_SLOTS`].
+    /// Saved register file, SP included; see [`REG_SLOTS`].
     regs: [u64; REG_FILE],
     pc: u32,
     nzcv: u32,
@@ -1254,718 +797,362 @@ pub struct ThreadContext {
     fpsr: u32,
     tpidr: u64,
     tpidr_rw: u64,
-    /// Its priority, 0 (most urgent) to 63: see [`Cpu::pick_next`].
+    /// 0 (most urgent) to 63; see [`Cpu::pick_next`].
     priority: u8,
-    /// The core it is on, its ideal core (-1 for none) and the cores it
-    /// may run on, which the guest sets and reads back. Every thread runs on
-    /// the one host thread there is, so none of this is scheduled on; `core`
-    /// is what `GetCurrentProcessorNumber` answers, and a title that keeps
-    /// per-core state picks it by that.
+    /// Current core, ideal core (-1 for none) and affinity mask. Not scheduled on;
+    /// `core` is what `GetCurrentProcessorNumber` answers.
     core: u8,
     ideal_core: i32,
     affinity: u64,
-    /// Scheduling decisions it has been runnable for and not chosen, since
-    /// it last ran: see [`STARVE_DECISIONS`].
+    /// Decisions passed over while runnable; see [`STARVE_DECISIONS`].
     passed_over: u32,
-    /// Where it started, and the argument it started with, for the thread
-    /// report: an `nn::os` thread's argument is its `ThreadType`, which is
-    /// where its name is.
+    /// Entry point and argument (an `nn::os` thread's `ThreadType`), for the thread report.
     entry: u32,
     arg: u64,
-    /// Instructions it retired, and times it was given the CPU, since the
-    /// host last took a [`ThreadReport`].
+    /// Instructions retired and times scheduled since the last [`ThreadReport`].
     ran: u64,
     switches: u64,
-    /// The clock when a report last saw it do real work. See
-    /// [`ThreadReport::idle_ms`].
+    /// Clock when it last did real work; see [`ThreadReport::idle_ms`].
     busy_at: u64,
 }
 
 #[derive(Debug)]
 pub struct Cpu {
     pub mem: Memory,
-    /// X0..=X30 and the three slots register 31 can mean; see [`REG_SLOTS`].
+    /// X0..=X30 and the three meanings of register 31; see [`REG_SLOTS`].
     regs: [u64; REG_FILE],
     pc: u32,
-    /// NZCV, packed as ARM PSTATE does: N=31, Z=30, C=29, V=28. Shared with
-    /// AArch32, whose CPSR puts the same four flags in the same places.
+    /// NZCV as PSTATE packs it (N=31, Z=30, C=29, V=28); shared with AArch32's CPSR.
     nzcv: u32,
-    /// Which instruction set this thread runs. See [`a32`].
     mode: ExecMode,
-    /// CPSR's sticky saturation flag, which only AArch32 has. Set by the
-    /// saturating arithmetic and never cleared except by a write to APSR.
+    /// AArch32 CPSR.Q, sticky until an APSR write.
     cpsr_q: bool,
-    /// CPSR's four GE bits, written by the parallel adds and read by `SEL`.
+    /// CPSR.GE, written by parallel adds and read by `SEL`.
     cpsr_ge: u8,
-    /// FPSCR's own N/Z/C/V. AArch32's `VCMP` writes these rather than the
-    /// condition flags: a separate `VMRS APSR_nzcv` is what moves them
-    /// across, so they cannot share [`Cpu::nzcv`] the way A64's `FCMP` does.
+    /// AArch32 FPSCR N/Z/C/V, separate from [`Cpu::nzcv`] (moved by `VMRS APSR_nzcv`).
     pub(super) fpscr_nzcv: u32,
-    /// SIMD vector registers Q0..=Q31 (128-bit). Only the handful of
-    /// instructions libnx's `memset`/`memcpy` rely on are implemented;
-    /// full NEON is out of scope for Phase 1.
+    /// Q0..=Q31.
     vregs: VRegs,
-    /// FPCR: the guest's rounding mode, flush-to-zero and default-NaN
-    /// controls. Held per thread, since it is part of the FP context.
+    /// Per-thread FPCR: rounding mode, flush-to-zero, default NaN.
     fpcr: u32,
-    /// FPSR: the cumulative exception flags a guest reads with
-    /// `fetestexcept`. Sticky: set by an operation, cleared only by a write.
+    /// FPSR cumulative exception flags, sticky until written.
     fpsr: u32,
-    /// Console output accumulated by the UART syscall mode.
+    /// Console output from the UART syscall mode.
     pub out: Vec<u8>,
-    /// Debug trace: per-instruction disassembly (when enabled) plus fault
-    /// context with a register snapshot.
+    /// Debug trace: per-instruction disassembly (when enabled) and fault context.
     pub trace: Vec<u8>,
-    /// When true, each executed instruction is appended to `trace`.
     pub trace_enabled: bool,
-    /// Safety cap on the trace buffer. Past it the oldest text goes, not the
-    /// newest. See [`Cpu::trim_trace`].
+    /// Trace buffer cap; the oldest text is dropped first.
     trace_cap: usize,
-    /// Text was dropped to stay under `trace_cap` and the host has not been
-    /// told yet. See [`Cpu::note_dropped_trace`].
+    /// Text was dropped and the host has not been told; see [`Cpu::note_dropped_trace`].
     trace_dropped: bool,
     pub halted: bool,
-    /// The last `fatal:u` report from this guest. Kept separately from the
-    /// trace because the browser drains diagnostics while the title runs and
-    /// still needs to classify the later `ExitProcess` as a crash.
+    /// The last `fatal:u` report, kept to classify a later `ExitProcess` as a crash.
     guest_fatal: Option<String>,
-    /// The clock, in cycles of the 1.02 GHz CPU `svcGetSystemTick` is scaled
-    /// from. One retired instruction is one cycle, but it is **not** an
-    /// instruction count, because [`Cpu::reschedule`] idles it forward to the
-    /// earliest sleeper when nothing can run, which is the console's own idle
-    /// and covers instructions nobody executed.
+    /// Clock in 1.02 GHz cycles (`svcGetSystemTick`). One instruction is one cycle, but
+    /// [`Cpu::reschedule`] also idles it forward, so it is not an instruction count.
     pub cycles: u64,
-    /// Instructions actually retired, which the idle never touches.
-    ///
-    /// The two were one counter, and the browser's "Steps" readout showed it:
-    /// the Home Menu parks with every thread blocked, the clock leaps to the
-    /// earliest sleep deadline, and 24M became 313M with nothing run in
-    /// between. A figure that moves while the guest is stopped is worse than
-    /// no figure: it is the loading screen's only sign that a title working
-    /// towards its first frame is working at all.
+    /// Instructions actually retired; idling does not advance it.
     pub steps: u64,
-    /// Ring buffer of the most recent `RECENT_LEN` runs of straight-line
-    /// execution, each `(first pc, instruction count)`, dumped on fault so the
-    /// path into a crash is visible without full tracing. See
-    /// [`Cpu::record_run`] for why it holds runs and not instructions.
+    /// Ring buffer of the last `RECENT_LEN` straight-line runs `(first pc, count)`, dumped on fault.
     recent: [(u32, u32); RECENT_LEN],
-    /// Total runs recorded into [`Cpu::recent`].
     recent_len: usize,
-    /// Base of the kernel-fixed Thread Local Region (TPIDRRO_EL0): where the
-    /// IPC message buffer lives and where `create_thread` points each
-    /// thread's own TLS block. Real hardware makes this read-only at EL0,
-    /// only the kernel sets it, unlike [`Cpu::tpidr_rw`] below.
+    /// TPIDRRO_EL0: kernel-set TLS base, where the IPC buffer lives.
     tpidr: u64,
-    /// TPIDR_EL0: freely readable *and writable* by guest code, unlike
-    /// `tpidr` above. Nintendo's SDK uses it for its own per-thread pointer
-    /// bookkeeping, entirely separate from the kernel-provided TLS region.
-    /// Real hardware backs these with two distinct registers; aliasing them
-    /// to the same storage let a guest `msr tpidr_el0, x0` silently stomp
-    /// the kernel-fixed TLS pointer IPC dispatch and thread setup depend on
-    ///, confirmed by tracing a real title's `nnSdk` init, which does
-    /// exactly that write and then found its own IPC/TLS-relative reads
-    /// pointing at low, unmapped-feeling addresses afterward.
+    /// TPIDR_EL0: guest-writable, separate from `tpidr` (the SDK writes it).
     tpidr_rw: u64,
-    /// Monotonic id handed out for domain IPC out-objects, so each synthesized
-    /// subservice gets a distinct non-zero object id.
+    /// Next domain IPC out-object id.
     next_object_id: u32,
-    /// Maps fake handles returned by `ConnectToNamedPort` or sm:`GetService`
-    /// to the named port / service they represent, so `SendSyncRequest` can
-    /// dispatch IPC commands to the right stub.
+    /// Fake handles from `ConnectToNamedPort`/`GetService` to their service name.
     service_handles: IdMap<u64, String>,
-    /// Monotonic fake-handle allocator. 0 is invalid, so we start above the
-    /// earlier hard-coded `FAKE_HANDLE`.
+    /// Next fake handle; 0 is invalid.
     next_handle: u32,
-    /// Monotonic domain object id allocator for services that use IPC domains
-    /// (e.g. `vi:m`).
     next_domain_object_id: u32,
-    /// Maps (session handle, domain object id) to the interface name used for
-    /// dispatching domain commands.
+    /// (session handle, domain object id) to interface name.
     domain_objects: HashMap<(u64, u32), String>,
-    /// Maps non-domain vi session handles to their sub-interface (vi:iads,
-    /// vi:ihosbd, ...) so the display stub can dispatch binder vs. display
-    /// commands on the right session.
+    /// Non-domain vi session handles to their sub-interface.
     vi_ifaces: IdMap<u64, String>,
-    /// AM's message queue for the running applet, and the event that says it
-    /// is not empty.
-    ///
-    /// Real AM enqueues each state change once and then reports "no message"
-    /// until the next one; answering every poll with a fresh message made
-    /// `appletMainLoop` re-process a focus change on every call. The queue is
-    /// what lets there be more than one such message -- an applet that took
-    /// responsibility for its own display waits for a second one before it
-    /// draws anything at all.
+    /// AM's message queue for the running applet; each state change is queued once.
     applet_messages: VecDeque<u32>,
-    /// The handle handed out by `ICommonStateGetter::GetEventHandle`, kept so
-    /// every caller gets the same event and queueing a message can signal the
-    /// one that is actually being waited on.
+    /// Shared `GetEventHandle` event, signalled when a message is queued.
     applet_event: Option<u64>,
-    /// Whether the startup focus transition has been handed out yet. AM has it
-    /// waiting before the process's first poll, and reports "no message" ever
-    /// after unless the state really changes.
+    /// Whether the startup focus message has been handed out.
     applet_focus_announced: bool,
-    /// The applet's sleep-lock event, and whether the lock is held. There is
-    /// one of each per applet: handing out a fresh event per call would
-    /// signal an object nobody is waiting on.
+    /// The applet's sleep-lock event and whether the lock is held.
     sleep_lock_event: Option<u64>,
     sleep_lock_acquired: bool,
-    /// The event `IApplicationFunctions` command 210 hands out, and the one
-    /// `aoc`'s add-on-content list changes are reported through. Kept for the
-    /// same reason the sleep lock's is: a caller that asks twice has to be
-    /// given the event it is already waiting on.
+    /// Events for `IApplicationFunctions` 210 and `aoc` list changes.
     application_functions_210_event: Option<u64>,
     aoc_list_changed_event: Option<u64>,
-    /// The event `ICommonStateGetter::GetDefaultDisplayResolutionChangeEvent`
-    /// hands out, fired when the console is docked or undocked. One per
-    /// process, for the usual reason: a caller that asks twice has to be given
-    /// the object it is already waiting on, or the dock signals one nobody
-    /// holds.
+    /// `GetDefaultDisplayResolutionChangeEvent`, fired on dock changes.
     display_resolution_event: Option<u64>,
-    /// The event `IApplicationManagerInterface::GetApplicationRecordUpdateSystemEvent`
-    /// hands out. It goes out **signalled**, as it does on hardware: the Home
-    /// Menu waits on it before it will read the installed-title list at all.
+    /// `GetApplicationRecordUpdateSystemEvent`; starts signalled, as the Home Menu waits on it.
     application_record_event: Option<u64>,
-    /// `IApplicationManagerInterface`'s other events, by command id: the SD
-    /// card and game card ones, which report media arriving and leaving. None
-    /// of them ever fires here, but each caller has to be handed back the same
-    /// object it is already waiting on.
+    /// `IApplicationManagerInterface`'s SD and game card events, by command id; never fired.
     ns_manager_events: BTreeMap<u32, u64>,
-    /// The event `IHomeMenuFunctions::GetPopFromGeneralChannelEvent` hands
-    /// out. Nothing pushes onto that channel here, so it never fires, but the
-    /// Home Menu keeps one waiter on it, and a fresh handle per call would
-    /// leave that waiter holding an object nobody can signal.
+    /// `GetPopFromGeneralChannelEvent`; never fired.
     general_channel_event: Option<u64>,
-    /// The event every `ILockAccessor` hands out. It is created signalled and
-    /// never cleared: nothing here contends for the HOME or capture button, so
-    /// the lock is always free. See `Cpu::am_lock_accessor_event`.
+    /// The `ILockAccessor` event: always signalled. See `Cpu::am_lock_accessor_event`.
     lock_accessor_event: Option<u64>,
-    /// The buffer queue's event, handed out by `IHOSBinderDriver::GetNativeHandle`
-    /// and always signalled. See `Cpu::vi_binder_event`.
+    /// `IHOSBinderDriver::GetNativeHandle`'s event, always signalled.
     binder_event: Option<u64>,
-    /// What the running title was allotted to store, as its own NACP declares
-    /// it, the figures the `IApplicationFunctions` save-data commands report.
-    ///
-    /// A console reads them out of the title's NACP, which lives in the
-    /// **Control** NCA rather than the Program one, so they arrive through
-    /// [`Cpu::set_save_data_quota`] once whoever opened the container has read
-    /// it, and stay at the default when nothing has (a bare Program NCA has no
-    /// NACP to read). Nothing here enforces any of them: the emulated NAND
-    /// grows with whatever a title writes into it.
+    /// The title's NACP save quota, reported by `IApplicationFunctions`; set through
+    /// [`Cpu::set_save_data_quota`] and not enforced.
     save_data_quota: fs::SaveDataQuota,
-    /// The address space this process was given, chosen from its NPDM's
-    /// declared system resource size and its program id. Defaults to
-    /// [`MemoryLayout::PLAIN`], which is what homebrew and a container with no
-    /// readable manifest get.
+    /// Chosen from the NPDM system resource size and program id.
     memory_layout: MemoryLayout,
-    /// The `system_resource_size` the NPDM declared, kept because the layout
-    /// depends on the program id as well and the two arrive in either order.
+    /// Kept because the layout also depends on the program id, which may arrive later.
     system_resource_size: u32,
-    /// The system shared buffer's nvmap `(handle, id)` once an applet has
-    /// asked for it, and the slot the next acquire hands out.
+    /// The system shared buffer's nvmap `(handle, id)` and the next slot to acquire.
     shared_buffer: Option<(u32, u32)>,
     shared_buffer_slot: u32,
-    /// Handheld or docked. Changeable while a title runs: see
-    /// [`Cpu::set_operation_mode`].
+    /// See [`Cpu::set_operation_mode`].
     operation_mode: OperationMode,
-    /// Whether the process opened an *application* proxy. It decides which
-    /// message that transition is: an application is told `FocusStateChanged`,
-    /// while an applet, every one of the system's own, the Home Menu included
-    ///: is told `ChangeIntoForeground`. Sending an applet the application's
-    /// message is sending it one it does not act on.
+    /// Application proxy (told `FocusStateChanged`) vs applet (told `ChangeIntoForeground`).
     applet_is_application: bool,
-    /// What `ISelfController`'s two auto-sleep settings were last set to.
-    ///
-    /// Nothing here sleeps or dims, so neither reaches a panel. They are kept
-    /// because each has a getter beside it: a title that sets one and reads it
-    /// back has to see what it set, and that is a different failure from a
-    /// setting that was never implemented.
+    /// `ISelfController` auto-sleep settings, stored so getters read them back.
     idle_time_detection_extension: u32,
     auto_sleep_disabled: bool,
-    /// What `IAppletCommonFunctions`'s HOME-button double-click setting was
-    /// last set to. There is no HOME button here to press twice; it is kept
-    /// for the reason the two above are, so the getter beside the setter
-    /// reads back what was written.
+    /// Stored so the getter reads it back.
     home_button_double_click_enabled: bool,
-    /// The `Result` the title last handed `IApplicationFunctions`'
-    /// `SetTerminateResult`, which is the only thing it says about why it is
-    /// about to stop. `GetLastApplicationExitReason` reads it back.
+    /// Last `SetTerminateResult`, read back by `GetLastApplicationExitReason`.
     am_terminate_result: u32,
-    /// How many Miis `mii`'s `BuildRandom` has built. It picks which face to
-    /// answer with and stamps the create id that tells one from the next, so
-    /// it counts rather than being drawn. See `mii_create_id`.
+    /// Count of `BuildRandom` Miis; picks the face and stamps the create id.
     mii_random_sequence: u32,
-    /// Every `(interface, command)` pair already reported as having no
-    /// implementation behind it, so the warning naming it prints once instead
-    /// of once per call (`appletMainLoop` polls `am` every frame).
+    /// Unimplemented `(interface, command)` pairs already warned about.
     unimplemented_ipc: HashSet<(String, Option<u32>)>,
-    /// Every `(interface, command)` pair already reported as *answered with
-    /// nothing behind it*. See [`Cpu::warn_stub`]. Separate from
-    /// `unimplemented_ipc` because the two are different claims about the same
-    /// pair, and a guest that gets a stubbed answer may later be refused a
-    /// neighbouring command on the same interface.
+    /// Stubbed `(interface, command)` pairs already warned about; see [`Cpu::warn_stub`].
     stubbed_ipc: HashSet<(String, Option<u32>)>,
-    /// Every call to one of the gaps above since the host last asked, by
-    /// kind, interface and command. The warnings print once per pair, which
-    /// hides the difference between a title that asked once and moved on and
-    /// one that asks every frame because it is waiting for a different
-    /// answer. See [`Cpu::take_service_gaps`].
+    /// Calls to service gaps since the host last asked; see [`Cpu::take_service_gaps`].
     gap_calls: BTreeMap<(GapKind, String, Option<u32>), u64>,
-    /// nvdrv ioctls that failed since the host last asked, by device node,
-    /// request and error. See [`Cpu::take_nv_errors`].
+    /// Failed nvdrv ioctls since the host last asked; see [`Cpu::take_nv_errors`].
     nv_errors: BTreeMap<(String, u32, u32), u64>,
-    /// What [`Cpu::reply_with_fabricated_object`] hands back for a command
-    /// nothing implements, keyed by `(session handle, command id)`: the domain
-    /// object id, the plain sub-session handle, and the event, one for each
-    /// shape of out parameter a caller cannot invent for itself. Allocated
-    /// once and reused, so a guest polling such a command is not handed a
-    /// fresh handle on every call.
+    /// Reused objects for [`Cpu::reply_with_fabricated_object`], by `(session, command)`:
+    /// domain object id, sub-session handle, event.
     fabricated_objects: HashMap<(u64, u32), (u32, u64, u64)>,
-    /// The NROs `ldr:ro` has mapped into the process, keyed by the address it
-    /// mapped each one to, which is the address the guest was handed and the
-    /// one it names again to unload. See [`Cpu::ldr_ro_request`].
+    /// NROs mapped by `ldr:ro`, by mapped address; see [`Cpu::ldr_ro_request`].
     ro_modules: BTreeMap<u32, ldr::RoModule>,
-    /// The NRRs the guest has registered, by the address it registered each
-    /// at. Nothing here can check an NRR's signature chain, so a registration
-    /// authorizes nothing: the set exists so that unregistering one is not a
-    /// blind success, and so a title that never registers anything is visible.
+    /// Registered NRRs, by address. Signatures are not checked.
     ro_registrations: BTreeMap<u32, u32>,
-    /// Handles that name a kernel **event**, and whether each has been
-    /// signalled yet. A handle that is not in here is not modelled as an
-    /// event, and [`Cpu::horizon_syscall`]'s `WaitSynchronization` keeps
-    /// treating it as immediately signalled, thread handles, and every
-    /// service handle a guest happens to wait on.
+    /// Handles modelled as kernel events. Other handles are treated as always signalled
+    /// by `WaitSynchronization`.
     events: IdMap<u64, Event>,
-    /// The display's vsync event, once `vi` has handed it out. Signalled every
-    /// time the guest presents a frame, which is the only periodic tick this
-    /// emulator has: a render loop that waits on it has to be woken by
-    /// something, and there is no real clock behind the display.
+    /// The vsync event, fired on present and at each display refresh.
     vsync_event: Option<u64>,
-    /// Frame count the vsync event was last fired for.
     last_vsync_frame: u64,
-    /// Cycle count the vsync event was last fired at, for the refresh that
-    /// happens whether or not the guest presented anything.
+    /// For the refresh that fires without a present.
     last_vsync_cycles: u64,
-    /// Synthetic SD-card directory state for the fsp-srv stub: maps an open
-    /// directory handle to the entries it has not yielded yet
-    /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
-    /// `fsDirRead` hand NX-Shell's `FS::GetDirList` a real listing.
+    /// Open SD directory handles to the entries not yet yielded.
     fs_dirs: IdMap<u64, Vec<crate::vfs::DirEntry>>,
-    /// Open `IFile` objects: domain object id to the path it was opened on.
+    /// Open `IFile` objects: domain object id to path.
     fs_files: IdMap<u64, String>,
-    /// `am` `IStorage` contents, keyed by object. A library applet is handed
-    /// its launch arguments as one of these and returns its result in
-    /// another, so the bytes have to outlive the request that made it.
+    /// `am` `IStorage` contents, by object.
     am_storages: IdMap<u64, Vec<u8>>,
-    /// The console's system data archives, by data id: the read-only content
-    /// a title mounts that is not its own, an applet's shared assets, the
-    /// system's Mii and amiibo resources. Each is another NCA's RomFS, so
-    /// they are sources rather than buffers, exactly like the running title's.
+    /// System data archives by data id, as sources.
     data_archives: IdMap<u64, Box<dyn crate::source::ByteSource>>,
-    /// The add-on content indices `aoc:u` reports, one per DLC container the
-    /// host registered for this title. The content itself is in
-    /// `data_archives` under its own id: a title mounts DLC exactly the way it
-    /// mounts a system data archive, by data id, and the only thing `aoc` adds
-    /// is knowing that it is there to be asked for.
+    /// DLC indices `aoc:u` reports; the content is in `data_archives`.
     add_on_content: std::collections::BTreeSet<u32>,
-    /// The id a title's DLC is numbered upwards from, as its NACP declares it.
-    /// Zero means the NACP set none (or none was read), and the id is derived
-    /// from the program id instead. See [`Cpu::add_on_content_base_id`].
+    /// Base DLC id from the NACP; zero means derive it from the program id.
     add_on_content_base_id: u64,
-    /// Save data, by the save it was opened as. A console keeps these on its
-    /// NAND -- one per application and user for a title's saves, one per
-    /// system save id for the system's -- and they are the only writable
-    /// storage a title has that is not the SD card.
+    /// Save data, by save key.
     saves: HashMap<SaveKey, crate::vfs::Vfs>,
-    /// Which storage an `fsp-srv` object addresses: a save, or absent for the
-    /// SD card. Files and directories inherit it from the filesystem they
-    /// were opened through, so a path means nothing without it.
+    /// The save an `fsp-srv` object addresses; absent for the SD card.
     fs_mount: IdMap<u64, SaveKey>,
-    /// Which data archive an open `IStorage` is serving. Absent means the
-    /// storage is the process's own RomFS.
+    /// The data archive an open `IStorage` serves; absent for the process's own RomFS.
     fs_storage_archive: IdMap<u64, u64>,
-    /// The global filesystem access-log mode `fsp-srv` reports, as
-    /// `SetGlobalAccessLogMode` last set it. `fs` keeps this per process and
-    /// hands it straight back, and `nnSdk` reads it once at startup to decide
-    /// whether to build an access log at all -- so it has to round-trip
-    /// rather than be acknowledged and dropped, or a title that turns logging
-    /// on is told it is still off.
+    /// `SetGlobalAccessLogMode`'s value; round-trips because `nnSdk` reads it at startup.
     fs_access_log_mode: u32,
-    /// The speed emulation `IDeviceOperator` reports, as
-    /// `SetSpeedEmulationMode` last set it. Nothing here slows a read to
-    /// match; the mode round-trips so that a caller reading its own setting
-    /// back is not told it was refused.
+    /// `SetSpeedEmulationMode`'s value; round-trips, no effect.
     fs_speed_emulation_mode: u32,
-    /// The `Result` the most recent IPC reply carried, or `None` when nothing
-    /// has replied since it was last cleared. Kept so that `TRACE_FS` can
-    /// report how a request ended from one place, rather than from each of
-    /// the dozens of arms that write a reply.
+    /// Result of the most recent IPC reply, for `TRACE_FS`.
     last_ipc_result: Option<u32>,
-    /// What the guest's filesystem has been doing: see [`FsActivity`].
     pub fs_activity: FsActivity,
-    /// Which RomFS file each byte of a storage belongs to, by the archive
-    /// the storage serves (`None` for the process's own RomFS), built on its
-    /// first read. `None` inside is a storage whose tables could not be
-    /// read, remembered so a bad one is not re-read on every request.
+    /// RomFS file index per storage (`None` key for the process's own RomFS);
+    /// `None` value for unreadable tables.
     romfs_indexes: BTreeMap<Option<u64>, Option<crate::romfs::RomFsIndex>>,
-    /// The event each card slot's `IEventNotifier` hands out, by the `fsp-srv`
-    /// command that opened it. One per slot rather than one per caller: a
-    /// guest that asks twice has to be given the event it is already waiting
-    /// on, not a second one that will never fire either.
+    /// Each card slot's `IEventNotifier` event, by opening command.
     fs_detection_events: BTreeMap<u32, u64>,
-    /// Storages queued for `ILibraryAppletSelfAccessor::PopInData`, what the
-    /// applet's caller would have pushed before starting it.
+    /// Storages queued for `PopInData`.
     am_in_data: VecDeque<Vec<u8>>,
-    /// What a library applet pushed back through
-    /// `ILibraryAppletSelfAccessor::PushOutData`, its result, in the order it
-    /// produced it. A console's `am` hands each one to the caller that
-    /// launched the applet; running one directly there is no caller to pop
-    /// them, so they are kept for the host that started it.
+    /// What a directly run library applet pushed through `PushOutData`, for the host.
     am_out_data: Vec<Vec<u8>>,
-    /// Storages queued for `ILibraryAppletSelfAccessor::PopInteractiveInData`
-    ///, the caller's side of a conversation the applet started. Only
-    /// [`Cpu::push_applet_interactive_in_data`] fills this: there is no caller
-    /// process here to answer on its own.
+    /// Storages queued for `PopInteractiveInData`, filled by [`Cpu::push_applet_interactive_in_data`].
     am_interactive_in: VecDeque<Vec<u8>>,
-    /// The applet's side of that conversation, most recent last, capped so an
-    /// inline keyboard pushing one per keystroke cannot grow it without end.
+    /// The applet's interactive output, capped.
     am_interactive_out: Vec<Vec<u8>>,
-    /// The events `GetPopInDataEvent` and `GetPopInteractiveInDataEvent` hand
-    /// out, by [`am::AppletQueue`] slot. Each is signalled while its queue has
-    /// something to pop.
+    /// `GetPopInDataEvent`/`GetPopInteractiveInDataEvent` events, by [`am::AppletQueue`] slot.
     am_pop_events: [Option<u64>; 2],
-    /// `am`'s launch-parameter table, by `LaunchParameterKind`: what the
-    /// launcher left for the program it started, for `PopLaunchParameter` to
-    /// hand over. Filled by [`Cpu::seed_launch_parameters`], and emptied by
-    /// the pops: each parameter is delivered once, as on a console.
+    /// Launch parameters by `LaunchParameterKind`, each delivered once.
     am_launch_parameters: IdMap<u32, Vec<u8>>,
-    /// Which storage an `IStorageAccessor` reads and writes. The accessor is
-    /// a separate object from the storage it was opened on, and both ends
-    /// have to see the same bytes.
+    /// The storage an `IStorageAccessor` addresses.
     am_storage_of: IdMap<u64, u64>,
-    /// Library applets created through `ILibraryAppletCreator`, by accessor
-    /// object. Nothing here runs one (see [`am::LibraryApplet`]) but the
-    /// caller drives it across several requests, so what it was asked for and
-    /// how far it got have to outlive each one.
+    /// Library applets created through `ILibraryAppletCreator`, by accessor object.
     am_applets: IdMap<u64, am::LibraryApplet>,
-    /// The current process's own RomFS, what
-    /// `OpenDataStorageByCurrentProcess` hands back as an `IStorage`. `None`
-    /// until the loader calls [`Cpu::set_romfs`] or
-    /// [`Cpu::set_romfs_source`] (homebrew has no NCA and never sets this; it
-    /// reads its RomFS off the SD card by path instead, through the regular
-    /// `IFileSystem`/`IFile` path).
-    ///
-    /// A source rather than a buffer: a retail title's RomFS is the bulk of a
-    /// container that does not fit in memory, so it stays where it is and is
-    /// decrypted range by range as the guest reads it.
+    /// The process's own RomFS (`OpenDataStorageByCurrentProcess`), read by range.
+    /// `None` for homebrew, which reads RomFS from the SD card.
     romfs: Option<Box<dyn crate::source::ByteSource>>,
-    /// Address the guest mapped its hid shared memory to (via `MapSharedMemory`
-    /// on the handle hid's IPC returned). The host writes gamepad state into
-    /// the libnx `HidSharedMemory` layout there so `padUpdate` sees it; 0 means
-    /// hid hasn't been initialized yet.
+    /// Guest address of hid shared memory; 0 until mapped.
     hid_shmem_addr: u32,
-    /// The handle `hid`'s `IAppletResource::GetSharedMemoryHandle` handed out,
-    /// so `svcMapSharedMemory` can recognise the region by **handle** rather
-    /// than by guessing from its size.
+    /// Handle used to recognise hid's shared memory in `svcMapSharedMemory`.
     hid_shmem_handle: Option<u64>,
-    /// The controller styles the guest said it supports
-    /// (`SetSupportedNpadStyleSet`), and how it wants joy-cons held
-    /// (`SetNpadJoyHoldType`). Both are read back by their `Get*` pairs, and a
-    /// caller that reads back something it did not set decides the controller
-    /// it wanted is not there.
+    /// Supported npad styles and joy-con hold type, read back by their getters.
     npad_style_set: u32,
-    /// The handle handed out by `AcquireNpadStyleSetUpdateEventHandle`, kept
-    /// for the reason [`Cpu::applet_event`] is: a caller handed a second copy
-    /// waits on an event nothing signals. Auto-clearing, so the wait that
-    /// collects a style change consumes it and the next one blocks again.
+    /// `AcquireNpadStyleSetUpdateEventHandle`'s auto-clearing event.
     npad_style_update_event: Option<u64>,
     npad_joy_hold_type: u64,
-    /// The amplitudes of the two rumble bands the guest last asked for, low
-    /// then high. Switch rumble is two linear resonant actuators driven
-    /// independently; the browser's Gamepad API exposes the same shape as
-    /// `dual-rumble`'s strong and weak magnitudes.
+    /// Rumble amplitudes (low band, high band).
     vibration: (f32, f32),
-    /// `ssl` state: the interface revision the guest declared, how many TLS
-    /// contexts it holds, and each context's options keyed by
-    /// `(object_key, option)`. Options are read back, so they are stored
-    /// rather than acknowledged and forgotten.
+    /// `ssl` state: interface revision, context count, and per-context options.
     ssl_interface_version: u32,
     ssl_contexts: u32,
     ssl_options: HashMap<(u64, u32), u32>,
-    /// The built-in CA certificates, parsed from the firmware's certificate
-    /// store the first time something asks and kept. `None` until then; an
-    /// empty list means the store was looked for and is not there.
+    /// Built-in CA certificates, loaded on first use; empty if the store is missing.
     ssl_certificates: Option<Vec<net::SslCertificate>>,
-    /// The next `ServerPkiId`/`ClientPkiId` an import hands back. Ids are
-    /// distinct so that a caller holding two can remove the right one; they
-    /// start at 1 because 0 is the id a caller reads as "nothing imported".
+    /// Next imported PKI id; 0 means "nothing imported".
     ssl_next_pki_id: u64,
-    /// Events a service handed out, keyed by what the event is for and which
-    /// object handed it out. A caller that asks for the same event twice has
-    /// to be given the same handle back, or it waits on a copy nothing would
-    /// signal. See [`Cpu::kept_event`].
+    /// Service events by (purpose, object), so repeat requests get the same handle.
+    /// See [`Cpu::kept_event`].
     service_events: HashMap<(&'static str, u64), u64>,
-    /// `lbl`'s backlight settings: brightness, dimming, VR mode. Settings
-    /// rather than facts about a panel, so they are stored and read back.
+    /// `lbl` backlight settings.
     backlight: settings::Backlight,
-    /// The system settings `set:sys` serves, once something has asked for
-    /// them. `None` until then because they are read out of save data
-    /// ([`settings::SYSTEM_SETTINGS_SAVE`]) that the host restores after the
-    /// session is built. See [`Cpu::system_settings`].
+    /// `set:sys` settings, read from save data on first use; see [`Cpu::system_settings`].
     system_settings: Option<settings::SystemSettings>,
-    /// The `category!name` of every settings item that was asked for and is
-    /// not in the firmware's table, so each is reported once. What a title
-    /// asked for is the only way to find out what to add.
+    /// Settings items requested but missing, reported once each.
     missing_settings_items: HashSet<String>,
-    /// `audctl`'s system-wide audio settings, for the same reason.
+    /// `audctl`'s system-wide audio settings.
     audio_control: audout::AudioControl,
-    /// `nfc:sys`: whether the interface has been initialized. Whether NFC is
-    /// switched *on* is a system setting rather than a fact about this
-    /// service, so it lives with the rest of them; there is no reader
-    /// attached either way. See [`Cpu::nfc_request`].
+    /// `nfc:sys` initialized flag; see [`Cpu::nfc_request`].
     nfc_initialized: bool,
-    /// `btm:sys`: whether a controller pairing is running. The radio's own
-    /// switch is a system setting, for the same reason; nothing ever pairs.
+    /// `btm:sys`: whether controller pairing is running.
     bt_gamepad_pairing: bool,
-    /// The alarms `notif` is holding, and the id the next one is given. An
-    /// alarm id is the server's to assign and the caller's to address it by,
-    /// so it has to outlive the request that registered one.
+    /// `notif` alarms and the next alarm id.
     notif_alarms: Vec<settings::AlarmSetting>,
     notif_next_alarm_id: u16,
-    /// `erpt`'s journal: one context record per category, the reports written
-    /// out of it, the attachments those reports own, and where each open
-    /// `IReport`/`IAttachment` object has read to. None of it is persisted,
-    /// a console keeps this on the SYSTEM partition, and there is nothing here
-    /// to transfer it to, so the journal lives exactly as long as the session.
+    /// `erpt` journal state, kept only for the session.
     erpt_contexts: Vec<erpt::ErrorContext>,
     erpt_reports: Vec<erpt::ErrorReport>,
     erpt_attachments: Vec<erpt::ErrorReportAttachment>,
     erpt_readers: IdMap<u64, erpt::ErrorReportReader>,
-    /// The journal's own id, made on the first ask and kept: it tells whoever
-    /// reads reports out of the journal which journal they came from.
+    /// The journal id, created on first request.
     erpt_journal_id: Option<[u8; erpt::ERPT_UUID_SIZE]>,
-    /// Monotonic sampling number for the hid shared-memory LIFO entries.
+    /// Sampling number for hid npad LIFO entries.
     sample_counter: u64,
-    /// The host's last pad and contacts, and when they were last published.
-    /// [`Cpu::hid_tick`] republishes them on `hid`'s own clock.
+    /// Last pad and contacts, republished by [`Cpu::hid_tick`].
     last_gamepad: (u64, i32, i32, i32, i32),
     last_touches: Vec<TouchPoint>,
     last_hid_cycles: u64,
-    /// The touchscreen LIFO's own sampling number. Separate from the npad one
-    /// because a reader compares it against the last value *it* saw from this
-    /// LIFO, and pad and touch are published on independent schedules.
+    /// Touch LIFO sampling number, separate from npad's.
     touch_sample_counter: u64,
-    /// How many touch slots the last publish filled, so the ones a shrinking
-    /// contact count leaves behind can be cleared instead of lingering.
+    /// Touch slots filled at the last publish, so stale ones are cleared.
     touch_published: usize,
-    /// The contacts down at the last publish, so the next one can tell a new
-    /// finger from a held one and a lifted finger from a finger that was never
-    /// there. See [`Cpu::set_touch_state`].
+    /// Contacts down at the last publish; see [`Cpu::set_touch_state`].
     touch_down: Vec<TouchPoint>,
-    /// The font `pl:u` serves as every shared font type, as a TrueType/OpenType
-    /// file. Homebrew reads it out of pl's shared memory and hands it to
-    /// FreeType, so an empty vector means no text renders at all.
+    /// The TrueType font `pl:u` serves for every shared font type; empty means no text.
     shared_font: Vec<u8>,
-    /// pl's shared memory as the guest will see it: every shared font, each
-    /// behind its eight-byte header. Assembled once, on first use, by
-    /// [`Cpu::build_shared_fonts`].
+    /// pl's shared memory image, built by [`Cpu::build_shared_fonts`].
     pl_shmem_image: Vec<u8>,
-    /// Where each font landed in [`Cpu::pl_shmem_image`], in
-    /// `PlSharedFontType` order.
+    /// Each font's place in [`Cpu::pl_shmem_image`], in `PlSharedFontType` order.
     shared_font_regions: Vec<FontRegion>,
-    /// Address the guest mapped pl's shared memory to, where the font was
-    /// written; 0 until the guest calls `plInitialize`.
+    /// Guest address of pl's shared memory; 0 until mapped.
     pl_shmem_addr: u32,
-    /// Per-`IAudioRenderer` session state (voice/sink/effect counts, revision)
-    /// from its `OpenAudioRenderer` call, kept so `RequestUpdateAudioRenderer`
-    /// can size its reply the same way the guest sized the buffer it passed
-    /// in, `audrvUpdate` rejects a reply whose `mempools_sz`/`voices_sz`
-    /// fields don't match what it computed from those same counts.
+    /// Per-`IAudioRenderer` state from `OpenAudioRenderer`, used to size update replies.
     audren_renderers: IdMap<u64, audren::AudioRenderer>,
-    /// Every open `IAudioOut`, by session handle.
+    /// Open `IAudioOut`s, by session handle.
     audio_outs: IdMap<u64, audout::AudioOut>,
-    /// Every open `IHardwareOpusDecoder`, by object key. The work buffer the
-    /// guest allocated for each one is never touched: the decode happens
-    /// here, not in guest memory.
+    /// Open `IHardwareOpusDecoder`s; the guest work buffer is unused.
     opus_decoders: IdMap<u64, hwopus::HwOpus>,
-    /// Interleaved 16-bit PCM the guest has handed to `audout` and the host
-    /// has not played yet. Bounded: a host that never drains it (a headless
-    /// test, a paused tab) must not be able to grow it without limit.
+    /// Bounded queue of interleaved 16-bit PCM not yet taken by the host.
     audio_pcm: VecDeque<i16>,
-    /// Samples through [`Cpu::queue_audio`] and [`Cpu::take_audio`] since the
-    /// session began: produced, taken by the host, and dropped because the
-    /// host fell a second behind. See [`Cpu::audio_activity`].
+    /// Samples produced, taken and dropped; see [`Cpu::audio_activity`].
     audio_produced: u64,
     audio_taken: u64,
     audio_dropped: u64,
-    /// The rate and channel count the samples in `audio_pcm` are in, from the
-    /// most recently opened device. `(0, 0)` until one is opened.
+    /// Rate and channel count of `audio_pcm`; `(0, 0)` until a device opens.
     audio_format: (u32, u32),
-    /// The wall-clock time `time:u`/`time:s` reports, as POSIX seconds (UTC).
-    /// `wasm32-unknown-unknown` has no OS clock, so this stays at the Unix
-    /// epoch until the host calls [`Cpu::set_unix_time`].
+    /// POSIX seconds for `time:u`/`time:s`; the epoch until [`Cpu::set_unix_time`].
     unix_time: i64,
-    /// The console's user accounts, in the order `acc` lists them, as the
-    /// host set them with [`Cpu::set_users`]. Never empty: a console with
-    /// nobody on it is one no title will start on.
+    /// User accounts in `acc` order; never empty.
     users: Vec<UserAccount>,
-    /// Which of them is playing, as an index into `users`: the user every
-    /// "who is this" question in `acc` and `am` is answered with.
+    /// Index of the playing user in `users`.
     current_user: usize,
-    /// Which user each `IProfile` or `IProfileEditor` object was opened for,
-    /// by the object's key.
+    /// The user each `IProfile`/`IProfileEditor` object was opened for.
     acc_profiles: IdMap<u64, [u8; 16]>,
-    /// Whether the guest has stored a profile through `IProfileEditor` since
-    /// the host last asked. See [`Cpu::take_profile_edits`].
+    /// See [`Cpu::take_profile_edits`].
     profiles_edited: bool,
-    /// The program (title) id `pm:info` reports for this process. Defaults to
-    /// the Album applet's, which is what homebrew launched from hbmenu runs
-    /// as on real hardware; a loader that knows the real title id sets it with
-    /// [`Cpu::set_program_id`].
+    /// Program id for `pm:info`; defaults to the Album applet's, as hbmenu homebrew runs as.
     program_id: u64,
-    /// The clock rate each module was last *set* to, by module index. A module
-    /// with no entry runs at its default in `CLOCK_RATES_HZ`.
+    /// Clock rate last set per module; default in `CLOCK_RATES_HZ`.
     clock_rates: IdMap<u32, u32>,
-    /// `mm:u`'s clock requests, by request id: the module each is for and the
-    /// floor `SetAndWait` last asked for it, 0 until it has asked.
+    /// `mm:u` requests by id: (module, floor).
     mm_requests: IdMap<u32, (u32, u32)>,
-    /// State for the pseudo-random generator behind `csrng`, seeded lazily
-    /// from the emulated clock. Zero means "not seeded yet".
+    /// `csrng` state, seeded lazily from the clock; zero means unseeded.
     rng_state: u64,
-    /// Every open `bsd` socket, by descriptor, and the socket options set on
-    /// them keyed by `(descriptor, level, option)`: options are read back, so
-    /// they are stored rather than acknowledged and forgotten.
+    /// Open `bsd` sockets and their options.
     bsd_sockets: HashMap<i32, net::BsdSocket>,
     bsd_socket_options: HashMap<(i32, u32, u32), u32>,
-    /// Monotonic descriptor allocator. Starts at 3, past the standard streams
-    /// a guest's C library already holds.
+    /// Next descriptor; starts at 3, past the standard streams.
     next_bsd_fd: i32,
-    /// Monotonic port allocator for a `bind` that asked for port 0. Starts at
-    /// the bottom of IANA's ephemeral range, which is where FreeBSD's own
-    /// allocator starts.
+    /// Next ephemeral port, from the bottom of IANA's range.
     next_bsd_port: u16,
-    /// The `ApmPerformanceConfiguration` set for each performance mode
-    /// (Normal, then Boost). Read back by `GetPerformanceConfiguration`, so
-    /// they are stored rather than acknowledged and forgotten.
+    /// `ApmPerformanceConfiguration` for Normal and Boost.
     apm_configuration: [u32; 2],
-    /// The battery level `psm` reports, 0-100. There is no host battery API
-    /// reachable from `wasm32-unknown-unknown` either, so this defaults to a
-    /// full, charging battery until [`Cpu::set_battery`] says otherwise.
+    /// Battery level for `psm`, 0-100; full until [`Cpu::set_battery`].
     battery_percent: u8,
-    /// Whether `psm` reports a charger connected.
     battery_charging: bool,
-    /// The emulated SD card `fsp-srv` serves.
+    /// The emulated SD card.
     pub fs: crate::vfs::Vfs,
-    /// The nvdrv driver and the GPU behind it.
     pub nv: crate::gpu::nvdrv::NvDrv,
-    /// The app's window buffer queue: where rendered frames are handed to the
-    /// display.
+    /// The window buffer queue frames are presented through.
     pub display: crate::display::BufferQueue,
-    /// Guest threads. Index 0 is the main thread; entries are appended by
-    /// `svcCreateThread`. The running thread's registers are the `Cpu` fields,
-    /// so its slot here is only up to date while another thread runs.
+    /// Guest threads; index 0 is main. The running thread's slot is stale while it runs.
     threads: Vec<ThreadContext>,
-    /// Which entry of `threads` is running.
     current_thread: usize,
-    /// The address of an outstanding exclusive load (`LDXR`/`LDXP`), or
-    /// `None` when the local monitor is clear.
-    ///
-    /// A `STXR` succeeds only against a monitor its own `LDXR` set, and a
-    /// context switch clears it, which is what a real core does, and what
-    /// makes an interrupted read-modify-write fail and be retried instead of
-    /// silently losing the other thread's update.
+    /// Address of the outstanding exclusive load, or `None`. Cleared on context switch.
     pub(crate) exclusive: Option<u32>,
-    /// Instructions the running thread has executed since the scheduler last
-    /// took the CPU away from it, against [`TIME_SLICE`].
+    /// Instructions since the running thread was scheduled, against [`TIME_SLICE`].
     slice_used: u64,
-    /// The cycle count [`Cpu::sweep_timed_waits`] next looks at deadlines on.
+    /// Next cycle at which [`Cpu::sweep_timed_waits`] checks deadlines.
     next_expiry: u64,
-    /// Guest code translated into pre-decoded blocks. See [`jit`].
     jit: jit::Jit,
-    /// Whether [`Cpu::run`] executes through the translator. On by default;
-    /// `SWITCH_NO_JIT` in the environment turns it off, which is how the host
-    /// tools compare a translated run against an interpreted one. There is no
-    /// environment to read in the browser, so a wasm build is always
-    /// translated unless the host calls [`Cpu::set_jit_enabled`].
+    /// Whether [`Cpu::run`] uses the JIT. `SWITCH_NO_JIT` disables it on the host;
+    /// see [`Cpu::set_jit_enabled`].
     jit_enabled: bool,
-    /// Set by a service call that answered "nothing is ready yet" and would
-    /// have blocked on hardware. The reschedule cannot happen inside the
-    /// handler, switching threads swaps the register file, and the syscall
-    /// still has to write its result into the *caller's* X0, so
-    /// `svcSendSyncRequest` acts on this once the reply is in place.
+    /// Set by a service call that would block; acted on after the reply is written to the caller's X0.
     pub(crate) pending_yield: bool,
-    /// A thread that asked to be parked until a deadline once its reply is in
-    /// place, the timed sibling of [`Cpu::pending_yield`], and applied at the
-    /// same point for the same reason.
+    /// A park deadline applied at the same point as [`Cpu::pending_yield`].
     pub(crate) pending_sleep: Option<u64>,
-    /// Cycle count the display last accepted a frame at. See
-    /// [`Cpu::pace_present`].
+    /// See [`Cpu::pace_present`].
     pub(crate) last_present_cycles: u64,
-    /// A frame the display was handed whose surface has not come back from
-    /// the GPU backend yet. See [`Cpu::complete_pending_present`].
+    /// A presented frame awaiting the GPU backend; see [`Cpu::complete_pending_present`].
     pub(crate) pending_present: Option<crate::gpu::DisplayBuffer>,
-    /// `steps` when the running thread was last given the CPU, which is what
-    /// its share of the instructions is measured from.
+    /// `steps` when the running thread was last scheduled.
     switched_in_at: u64,
-    /// Threads created, started, paused and ended since the host last asked:
-    /// see [`ThreadReport`].
+    /// Thread lifecycle events since the host last asked; see [`ThreadReport`].
     thread_log: Vec<String>,
     thread_log_dropped: u64,
-    /// Every loaded module's `(start, end, name)`, so an address can be named
-    /// as an offset into its module.
+    /// Every loaded module's `(start, end, name)`.
     module_names: Vec<(u32, u32, String)>,
-    /// The priority the main thread runs at: see
-    /// [`Cpu::set_main_thread_priority`].
+    /// See [`Cpu::set_main_thread_priority`].
     main_thread_priority: u8,
-    /// The core the main thread runs on, and the one "the process's default
-    /// core" means: see [`Cpu::set_main_thread_core`].
+    /// See [`Cpu::set_main_thread_core`].
     main_thread_core: u8,
-    /// The cores the process may run threads on: see
-    /// [`Cpu::set_process_core_mask`].
+    /// See [`Cpu::set_process_core_mask`].
     process_core_mask: u64,
-    /// The id the next thread created gets. The main thread is 1, and every
-    /// thread after it the next number, so no two share one: a title that
-    /// tells threads apart by id sees them as the kernel's ids make them.
+    /// Next thread id; the main thread is 1.
     next_thread_id: u64,
 }
 
-/// How many recently-executed instructions the fault trace shows.
 pub const RECENT_LEN: usize = 64;
 
-/// How many slots of [`Cpu::regs`] mean anything: X0..=X30, then three more.
-///
-/// A64 spells three different registers `31`, and which one it means is a
-/// property of the instruction, not of the value: the zero register reads as
-/// zero, discards its writes, and *is* the stack pointer in the immediate and
-/// extended-register forms. Both engines used to test for it on every operand
-/// access, 12% of a translated frame. Instead the zero slot is simply never
-/// written, writes to it go to a bit-bucket, and the stack pointer lives in
-/// the file too, so choosing between the three is an index the translator
-/// bakes in ([`super::jit`]) rather than a branch at run time.
+/// Meaningful register slots: X0..=X30, then the zero register's discard slot and SP,
+/// so register 31's meaning is an index chosen at decode time.
 const REG_SLOTS: usize = 34;
 
-/// How many slots the array actually holds: every value a `u8` slot can take.
-///
-/// A register access is the single most frequent thing either engine does, so
-/// what it costs is decided here. A 34-entry array cannot be indexed by a `u8`
-/// without a bounds check, because the compiler has to allow for the 222
-/// values that would be out of range; 14% of a retail frame sat on those two
-/// lines, more than the whole interpreter fallback and the whole GPU put
-/// together. Rounding up to 64 and masking removed the check, and giving the
-/// array the whole range removes the mask as well: the index is the byte the
-/// op already carries, with nothing done to it. An out-of-range slot then also
-/// lands on an unused entry rather than aliasing a real register, which is
-/// what a mask would have done with it.
-///
-/// The cost is 1,776 bytes per saved register file, and there are as many of
-/// those as the guest has threads.
+/// Slots allocated: the full `u8` range, so indexing by a slot byte needs no bounds check.
 const REG_FILE: usize = 256;
 const _: () = assert!(REG_FILE == u8::MAX as usize + 1 && REG_FILE >= REG_SLOTS);
 
 /// A slot as an index into the register file.
-///
-/// Every caller has already resolved a real slot; `debug_assert` catches one
-/// that is not in a test build, where it would otherwise read a permanent
-/// zero instead of the register it meant.
 #[inline(always)]
 fn reg_slot(slot: u8) -> usize {
     debug_assert!(
@@ -1974,42 +1161,21 @@ fn reg_slot(slot: u8) -> usize {
     );
     slot as usize
 }
-/// Reads of `XZR`. Nothing ever writes it, so it is permanently zero.
+/// Reads of `XZR`; never written.
 const ZR_SLOT: usize = 31;
-/// [`Cpu::read_zr`] and the translator's read operands index the file with the
-/// encoding's own five-bit field, so the zero slot has to *be* 31.
+/// The read path indexes with the encoding's 5-bit field, so this must be 31.
 const _: () = assert!(ZR_SLOT == 31);
-/// Writes to `XZR`, which the architecture discards.
+/// Writes to `XZR` land here.
 const ZR_DISCARD: usize = 32;
 
-/// That same slot, for the difftest harnesses, which compare the register
-/// file slot by slot and have to leave this one out.
-///
-/// Nothing reads it: it exists so that a write to `XZR` has somewhere to go
-/// without a test for register 31 on every operand. So what is in it is not
-/// guest state, and two engines with different rubbish in the bin are not
-/// disagreeing about anything. They do differ, and legitimately: a `CMP`
-/// folded into the branch that reads its flags ([`jit::translates`]) is
-/// emitted as the flag write it is, and drops a register write the
-/// architecture was going to discard anyway.
+/// Exposed for difftest harnesses, which must skip it: its contents are not guest state.
 pub const DISCARD_SLOT: usize = ZR_DISCARD;
-/// The stack pointer, `SP`.
 const SP_SLOT: usize = 33;
 
-/// Which flag settings satisfy each condition code: one 16-bit mask per code,
-/// bit `nzcv` set when the code holds for that nibble (N at bit 3 down to V at
-/// bit 0, the order [`Cpu::nzcv`] already stores them in).
-///
-/// The ARM ARM writes conditions as a table, and transcribing it as a `match`
-/// compiles to a fourteen-way jump table on a value that changes every time a
-/// loop turns over, so the indirect branch mispredicts. Evaluating the same
-/// table as a shift and a mask is branchless, and `B.cond` is 12% of an hbmenu
-/// frame.
+/// Per condition code, a 16-bit mask with bit `nzcv` set when the code holds.
+/// Branchless evaluation of `B.cond`.
 const CONDITION_MASKS: [u16; 16] = condition_masks();
 
-/// [`CONDITION_MASKS`], evaluated at compile time from the conditions
-/// themselves so the rules are still written once and still read like the
-/// architecture's table.
 const fn condition_masks() -> [u16; 16] {
     let mut table = [0u16; 16];
     let mut cond = 0usize;
@@ -2047,69 +1213,26 @@ const fn condition_masks() -> [u16; 16] {
     table
 }
 
-/// Instructions between display refreshes: the panel's 60 Hz against the
-/// 1.02 GHz CPU one emulated instruction stands for.
-///
-/// A display refreshes whether or not anything drew, and until this was here
-/// the only thing that fired the vsync event was the guest's own present,
-/// which is a circle a title never gets into, because it waits for vsync
-/// before it renders the frame that would have fired it. A present still
-/// fires it too, so a guest that draws faster than the panel is not held to
-/// this.
+/// Instructions per 60 Hz display refresh at 1.02 GHz; vsync fires even without a present.
 pub const VSYNC_PERIOD_CYCLES: u64 = 1_020_000_000 / 60;
 
-/// Instructions between `hid` samples: the sysmodule's 200 Hz against the same
-/// core.
-///
-/// `hid` writes a fresh entry into every LIFO on a timer whether or not
-/// anything moved, so the sampling number a title polls keeps advancing with
-/// the pad untouched. Publishing only when the host sends input froze it, and
-/// Tomodachi Life, which waits for a sample newer than the one it last read,
-/// waited for one that never came.
+/// Instructions per 200 Hz `hid` sample; LIFOs advance even with no input.
 pub const HID_SAMPLE_PERIOD_CYCLES: u64 = 1_020_000_000 / 200;
 
-/// How many instructions a thread runs before the scheduler takes the CPU
-/// away from it.
-///
-/// Without this the only reschedule points were the blocking syscalls, so a
-/// thread that runs a long stretch of arithmetic between two of them kept the
-/// CPU for all of it. That is not a fairness nicety: an applet's audio thread
-/// renders a whole buffer of samples per `AppendAudioOutBuffer`, and measured
-/// at **99.9% of every instruction executed**, the Mii editor's own main loop
-/// got the other 0.1%, which is why three system applets could boot, open a
-/// layer, play their music and never reach a frame.
-///
-/// The number is a compromise against the cost of a switch, which copies the
-/// whole register file including the 32 vector registers. Horizon's own tick
-/// is 1 ms, and at the 1 µs-per-instruction scale `GetSystemTick` reports that
-/// would be 1000 instructions: far more switching than the saving is worth
-/// here, where a guest instruction is hundreds of host ones.
+/// Instructions a thread runs before preemption.
 const TIME_SLICE: u64 = 20_000;
 
-/// The priority a thread gets when nothing says otherwise: the main thread
-/// of a title with no manifest, which is also what most retail manifests
-/// declare. Horizon priorities run from 0, the most urgent, to 63.
+/// Default thread priority (also what most retail manifests declare); 0 is most urgent, 63 least.
 pub const DEFAULT_THREAD_PRIORITY: u8 = 44;
 
-/// The main thread's kernel id; every thread created after it counts up.
 const MAIN_THREAD_ID: u64 = 1;
 
-/// The least urgent priority a thread can be given.
 const LOWEST_PRIORITY: u8 = 63;
-/// The highest core number: the console has four, 0 to 3.
+/// The console has four cores, 0 to 3.
 const LAST_CORE: u8 = 3;
 
-/// How many scheduling decisions in a row a runnable thread may be passed
-/// over for a more urgent one before it runs regardless.
-///
-/// Horizon's rule is strict, the most urgent runnable thread runs, and on a
-/// console that is safe because a title's threads are spread over three
-/// cores: a busy high-priority thread leaves the others theirs. Here every
-/// thread shares one, and a strict rule would let a high-priority thread
-/// that spins waiting on a lower one, fine on hardware where the other runs
-/// beside it, wait for ever. So priority decides, and this bounds it: two
-/// busy threads split the CPU roughly this many to one, and a thread that
-/// yields in a loop hands over within this many yields rather than never.
+/// Decisions a runnable thread may be passed over before it runs regardless, since
+/// all threads share one host core.
 const STARVE_DECISIONS: u32 = 8;
 
 impl Default for Cpu {
@@ -2233,9 +1356,7 @@ impl Cpu {
             nfc_initialized: false,
             bt_gamepad_pairing: false,
             notif_alarms: Vec::new(),
-            // Zero is a valid AlarmSettingId, but handing it out first makes
-            // "no alarm" and "the first alarm" the same value in a caller
-            // that zero-initializes the id it is about to fill in.
+            // Starts at 1 so a zero-initialized id never names a real alarm.
             notif_next_alarm_id: 1,
             erpt_contexts: Vec::new(),
             erpt_reports: Vec::new(),
@@ -2297,9 +1418,7 @@ impl Cpu {
             process_core_mask: crate::npdm::APPLICATION_CORE_MASK,
             next_thread_id: MAIN_THREAD_ID + 1,
         };
-        // The framebuffer and input registers are fixed hardware-mapped
-        // regions: pre-map them so reads never fault and programs (or the
-        // host) can touch them before writing.
+        // Pre-map the fixed framebuffer and input regions.
         let _ = cpu.mem.map_zero(
             crate::FB_BASE,
             (crate::FB_WIDTH * crate::FB_HEIGHT * 4) as usize,
@@ -2308,57 +1427,24 @@ impl Cpu {
         cpu
     }
 
-    /// Map a host-provided runtime environment and point SP at a stack, the
-    /// way the real loader does before jumping to a program's entry point.
-    ///
-    /// Without this, libnx-style crt0 writes to low memory (applet/env
-    /// metadata, null-relative globals) fault on the unmapped zeropage and
-    /// there is no stack to push to. The demo never touches the stack, so the
-    /// unit tests keep SP at 0; only hosts that want to boot real homebrew
-    /// should call this.
+    /// Map a runtime environment and point SP at a stack, as the loader does before
+    /// jumping to a program's entry point. Only hosts booting real homebrew call this.
     pub fn bootstrap(&mut self) {
-        // Present the whole guest address space (see [`GUEST_SPACE_END`]) as
-        // lazily mapped: reads return zeros, writes allocate a page on first
-        // touch, so nothing is reserved up front. This lets libnx-style code
-        // read heap/init globals without faulting even when a baked-in
-        // pointer is stale, and it is what makes a heap region measured in
-        // gigabytes cost nothing until a title writes to it.
+        // The whole guest space is lazily mapped: reads see zeros, writes allocate on first touch.
         self.mem.soft_map_zero(0, GUEST_SPACE_END);
-        // 1 MiB full-descending stack; SP starts at the top.
         let _ = self
             .mem
             .map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
         self.regs[SP_SLOT] = STACK_TOP;
-        // libnx reads TPIDR_EL0 expecting the loader (HBL/kernel) to have set
-        // the thread-local-storage base. Point it at a writable region clear of
-        // both the heap (`svcSetHeapSize` hands out 0x30000000) and the stack
-        // (`STACK_TOP`, now 0x28100000), if TPIDR overlaps either, the app's
-        // IPC code writes its CMIF request over the heap's first chunk header
-        // (and malloc stomps the TLS), corrupting the allocator.
-        //
-        // 0x0FF00000 used to work here, sitting just under where the stack
-        // used to be. But a big enough Mesa/Nouveau GPU-buffer allocation,
-        // nouveau reserves its own address range by scanning for free space
-        // with `svcQueryMemory` rather than going through the regular heap,
-        // and its search isn't guaranteed to stop at a single mapped page in
-        // the middle of an otherwise-huge free run, grew past it and
-        // `memset()`-zeroed straight over the `ThreadVars` magic, so the next
-        // `malloc()` on that thread failed `__syscall_getreent`'s `BadReent`
-        // check and the app aborted. Up here, past the stack and well clear of
-        // everything the guest's own allocators have been observed to reach,
-        // is safe.
+        // TLS base, clear of the heap, the stack and the GPU driver's own allocations.
         self.tpidr = u64::from(MAIN_THREAD_TLS_BASE);
-        // A return-address trampoline: the loader enters homebrew's `main`
-        // directly, so LR is 0 and any early return would branch to NULL.
-        // Point LR at a stub that calls ExitProcess (svc 0x07), so main's
-        // return surfaces as a clean exit code instead of a NULL jump.
+        // LR points at a stub that calls ExitProcess (svc 0x07), so returning from main exits cleanly.
         let _ = self.mem.map_zero(SELF_RETURN_TRAMPOLINE, 0x10);
         self.mem.write_u32(SELF_RETURN_TRAMPOLINE, 0xD400_00E1).ok(); // svc #7
         self.mem
             .write_u32(SELF_RETURN_TRAMPOLINE + 4, 0x1400_0000)
             .ok(); // b .
-                   // The same for a thread's entry point: returning from it is
-                   // `svcExitThread` (svc 0x0A), not a process exit.
+                   // Returning from a thread entry point is `svcExitThread` (svc 0x0A).
         let _ = self.mem.map_zero(THREAD_EXIT_TRAMPOLINE, 0x10);
         self.mem.write_u32(THREAD_EXIT_TRAMPOLINE, 0xD400_0141).ok(); // svc #0xa
         self.mem
@@ -2367,16 +1453,8 @@ impl Cpu {
     }
 
     // ---- guest threads ----
-    //
-    // Cooperative: a thread runs until it makes a blocking syscall (sleep, wait,
-    // lock, condvar) or exits, and only then does another get the CPU. Real
-    // Horizon preempts, but every libnx synchronization primitive re-checks its
-    // predicate in a loop, so co-operative switching makes the same handshakes
-    // complete, which is all a stub scheduler needs to let `thrd_create`'s
-    // "has the child started?" wait finish.
 
-    /// The main thread's slot, created on demand so a single-threaded program
-    /// costs nothing.
+    /// Created on demand so a single-threaded program costs nothing.
     fn ensure_main_thread(&mut self) {
         if self.threads.is_empty() {
             self.threads.push(ThreadContext {
@@ -2411,9 +1489,8 @@ impl Cpu {
         }
     }
 
-    /// Create a thread the way `svcCreateThread` does: its own TLS block (with
-    /// the libnx `ThreadVars` the guest reads through TPIDRRO_EL0), the given
-    /// stack and entry point, and the argument in x0. Returns its handle.
+    /// Create a thread as `svcCreateThread` does (TLS with libnx `ThreadVars`, stack,
+    /// entry, argument in x0). Returns its handle.
     pub(super) fn create_thread(
         &mut self,
         entry: u32,
@@ -2427,8 +1504,7 @@ impl Cpu {
         let index = self.threads.len() as u32;
         let tls = THREAD_TLS_BASE + index * THREAD_TLS_STRIDE;
         let _ = self.mem.map_zero(tls, THREAD_TLS_STRIDE as usize);
-        // ThreadVars at TLS+0x1E0, same layout the main thread gets in
-        // `boot_homebrew`: magic, handle, thread pointer, reent, tls_tp.
+        // ThreadVars at TLS+0x1E0: magic, handle, thread pointer, reent, tls_tp.
         const TV_MAGIC: u32 = 0x2154_5624; // "!TV$"
         let reent = tls + 0x400;
         let _ = self.mem.write_u32(tls + 0x1E0, TV_MAGIC);
@@ -2439,8 +1515,7 @@ impl Cpu {
 
         let mut regs = [0u64; REG_FILE];
         regs[0] = arg;
-        // A thread inherits its creator's execution state, and the link
-        // register and stack pointer are different slots in each.
+        // Inherit the creator's execution state; LR and SP slots differ per mode.
         if self.mode == ExecMode::A32 {
             regs[14] = THREAD_EXIT_TRAMPOLINE as u64;
             regs[13] = stack_top;
@@ -2506,10 +1581,7 @@ impl Cpu {
         false
     }
 
-    /// `svcSetThreadActivity`: take a thread out of the scheduler's rotation,
-    /// or put it back. `Ok(())` on a real change; `Err(())` when the thread is
-    /// already in the requested state, which Horizon reports rather than
-    /// treating as a no-op.
+    /// `svcSetThreadActivity`. `Err(())` when already in the requested state, as Horizon reports.
     pub(super) fn set_thread_paused(&mut self, handle: u64, paused: bool) -> Option<bool> {
         let thread = self.threads.iter_mut().find(|t| t.handle == handle)?;
         if thread.paused == paused {
@@ -2526,12 +1598,7 @@ impl Cpu {
         Some(true)
     }
 
-    /// Fill the 0x320-byte `ThreadContext` `svcGetThreadContext3` hands back:
-    /// x0..x28, fp, lr, sp, pc, pstate, the vector registers, fpcr/fpsr and
-    /// the thread pointer. IL2CPP's garbage collector suspends every thread
-    /// and reads this to find the roots living in their registers, so the
-    /// register file has to be the real one: the running thread's live, a
-    /// switched-out thread's as saved when it last gave up the CPU.
+    /// Fill the 0x320-byte `ThreadContext` for `svcGetThreadContext3` from the live or saved registers.
     pub(super) fn write_thread_context(&mut self, out: u32, handle: u64) -> bool {
         self.ensure_main_thread();
         let Some(index) = self.threads.iter().position(|t| t.handle == handle) else {
@@ -2569,7 +1636,6 @@ impl Cpu {
         true
     }
 
-    /// Whether any thread other than the running one could run.
     pub(super) fn has_other_runnable(&self) -> bool {
         self.threads
             .iter()
@@ -2577,9 +1643,7 @@ impl Cpu {
             .any(|(i, t)| i != self.current_thread && t.state == ThreadState::Runnable && !t.paused)
     }
 
-    /// End the running thread (`svcExitThread`, or a return through the exit
-    /// trampoline) and switch away. The process only ends when the main thread
-    /// exits, matching Horizon.
+    /// End the running thread and switch away; the process ends only when the main thread exits.
     pub(super) fn exit_thread(&mut self) {
         self.ensure_main_thread();
         let line = format!(
@@ -2593,22 +1657,16 @@ impl Cpu {
             return;
         }
         self.threads[self.current_thread].state = ThreadState::Finished;
-        // Anyone joining this thread is parked on its handle; the handle has
-        // just become signalled.
+        // Joiners are parked on this thread's handle, now signalled.
         self.wake_event_waiters();
         if !self.switch_to_next_runnable() {
-            // Nothing else can run: fall back to the main thread, which is
-            // presumably waiting on this one.
+            // Nothing else can run: fall back to the main thread.
             self.threads[0].state = ThreadState::Runnable;
             self.switch_to_next_runnable();
         }
     }
 
-    /// Give up the CPU, at a yielding syscall or at the end of a time slice,
-    /// to whichever thread [`Cpu::pick_next`] chooses. Does nothing when this
-    /// is the only runnable thread, so single-threaded programs behave exactly
-    /// as before, or when the running thread is still the one that should run:
-    /// more urgent than every other runnable thread, and none of them starved.
+    /// Give the CPU to [`Cpu::pick_next`]'s choice, unless the running thread should keep it.
     pub(super) fn yield_thread(&mut self) {
         if self.threads.len() < 2 || !self.has_other_runnable() {
             return;
@@ -2630,11 +1688,7 @@ impl Cpu {
         self.switch_to_next_runnable();
     }
 
-    /// The thread that should run next, other than the running one: a
-    /// starved thread first (see [`STARVE_DECISIONS`]), then the most urgent
-    /// priority, and among equals the next in round-robin order, which is
-    /// Horizon's rule for threads of one priority. `None` when no other
-    /// thread can run.
+    /// Next thread to run: a starved one first, then by priority, round-robin among equals.
     fn pick_next(&self) -> Option<usize> {
         let count = self.threads.len();
         let start = self.current_thread;
@@ -2655,8 +1709,7 @@ impl Cpu {
         best
     }
 
-    /// Count a scheduling decision against every runnable thread except
-    /// `chosen`, which runs and starts its count again.
+    /// Count a passed-over decision against every runnable thread except `chosen`.
     fn pass_over_all_but(&mut self, chosen: usize) {
         for (index, thread) in self.threads.iter_mut().enumerate() {
             if index == chosen {
@@ -2667,21 +1720,18 @@ impl Cpu {
         }
     }
 
-    /// `svcGetThreadPriority`: the priority of the thread `handle` names,
-    /// `CURRENT_THREAD` included, or `None` for a handle that is not one.
+    /// `svcGetThreadPriority`; `None` for a non-thread handle.
     pub(super) fn thread_priority(&self, handle: u64) -> Option<u8> {
         let handle = self.resolve_thread_handle(handle);
         match self.threads.iter().find(|t| t.handle == handle) {
             Some(thread) => Some(thread.priority),
-            // A process that never created a thread has no slot for its main
-            // one yet, and its priority is still the manifest's.
+            // No main thread slot yet; use the manifest priority.
             None if handle == MAIN_THREAD_HANDLE => Some(self.main_thread_priority),
             None => None,
         }
     }
 
-    /// `svcSetThreadPriority`: `false` for a handle that is not a thread. The
-    /// new priority takes effect at the next scheduling decision.
+    /// `svcSetThreadPriority`; `false` for a non-thread handle.
     pub(super) fn set_thread_priority(&mut self, handle: u64, priority: u8) -> bool {
         let handle = self.resolve_thread_handle(handle);
         self.ensure_main_thread();
@@ -2694,8 +1744,7 @@ impl Cpu {
         }
     }
 
-    /// The handle a thread syscall means: `CURRENT_THREAD` is the running
-    /// thread's.
+    /// Resolve `CURRENT_THREAD` to the running thread's handle.
     fn resolve_thread_handle(&self, handle: u64) -> u64 {
         if handle == CURRENT_THREAD_PSEUDO_HANDLE {
             self.current_thread_handle()
@@ -2704,8 +1753,7 @@ impl Cpu {
         }
     }
 
-    /// The main thread's priority, from the title's `main.npdm`. Applies to
-    /// the main thread whether or not it already has a slot.
+    /// The main thread's priority from `main.npdm`.
     pub fn set_main_thread_priority(&mut self, priority: u8) {
         self.main_thread_priority = priority.min(LOWEST_PRIORITY);
         if let Some(main) = self
@@ -2717,16 +1765,12 @@ impl Cpu {
         }
     }
 
-    /// The cores the process may run threads on, from the title's
-    /// `main.npdm`: what `svcGetInfo` CoreMask reports and what thread
-    /// creation and `svcSetThreadCoreMask` are checked against.
+    /// The process core mask from `main.npdm`, for `svcGetInfo` and thread core checks.
     pub fn set_process_core_mask(&mut self, mask: u64) {
         self.process_core_mask = mask;
     }
 
-    /// The main thread's core, from the title's `main.npdm`. Applies to the
-    /// main thread whether or not it already has a slot, and is the core a
-    /// thread created on the process's default core is put on.
+    /// The main thread's core from `main.npdm`, also the process's default core.
     pub fn set_main_thread_core(&mut self, core: u8) {
         self.main_thread_core = core.min(LAST_CORE);
         if let Some(main) = self
@@ -2740,7 +1784,6 @@ impl Cpu {
         }
     }
 
-    /// A thread's kernel id, `None` for a handle that names no thread.
     pub(super) fn thread_id(&mut self, handle: u64) -> Option<u64> {
         let handle = self.resolve_thread_handle(handle);
         self.ensure_main_thread();
@@ -2750,15 +1793,13 @@ impl Cpu {
             .map(|t| t.id)
     }
 
-    /// The core the running thread is on.
     pub(super) fn current_core(&self) -> u8 {
         self.threads
             .get(self.current_thread)
             .map_or(self.main_thread_core, |t| t.core)
     }
 
-    /// A thread's ideal core (-1 for none) and affinity mask, `None` for an
-    /// unknown handle.
+    /// A thread's ideal core (-1 for none) and affinity mask.
     pub(super) fn thread_core_mask(&mut self, handle: u64) -> Option<(i32, u64)> {
         let handle = self.resolve_thread_handle(handle);
         self.ensure_main_thread();
@@ -2768,11 +1809,8 @@ impl Cpu {
             .map(|t| (t.ideal_core, t.affinity))
     }
 
-    /// Set a thread's ideal core (-1 for none) and affinity mask, already
-    /// checked against each other, and move it to a core the mask allows the
-    /// way the kernel does: onto its ideal core when it has one, and
-    /// otherwise onto the lowest allowed core only when the one it is on is
-    /// no longer allowed. `false` for an unknown handle.
+    /// Set a thread's ideal core and affinity mask and migrate it as the kernel does.
+    /// `false` for an unknown handle.
     pub(super) fn set_thread_core_mask(
         &mut self,
         handle: u64,
@@ -2798,15 +1836,10 @@ impl Cpu {
 
     // ---- mutexes and condition variables ----
     //
-    // Horizon keeps the lock word in guest memory and only asks the kernel to
-    // arbitrate when a thread has to block: the word holds the owning thread's
-    // handle, plus MUTEX_HAS_LISTENERS when someone is queued. libnx re-reads
-    // that word after every arbitration, so ownership has to actually move,
-    // returning success from the stubs left hbmenu's worker spinning on a lock
-    // its main thread held.
+    // The lock word holds the owner's handle plus MUTEX_HAS_LISTENERS when contended;
+    // libnx re-reads it, so ownership must really move.
 
-    /// `svcArbitrateLock(owner, mutex_addr, self)`: block until the owner
-    /// releases, unless the word has already changed under us.
+    /// `svcArbitrateLock`: block until the owner releases, unless the word already changed.
     pub(super) fn arbitrate_lock(&mut self, owner: u32, addr: u32, _self_handle: u32) {
         self.ensure_main_thread();
         let word = self.mem.read_u32(addr).unwrap_or(0);
@@ -2817,8 +1850,7 @@ impl Cpu {
         self.reschedule();
     }
 
-    /// `svcArbitrateUnlock(mutex_addr)`: hand the mutex to a waiter, or clear
-    /// it when there is none.
+    /// `svcArbitrateUnlock`: hand the mutex to a waiter, or clear it.
     pub(super) fn arbitrate_unlock(&mut self, addr: u32) {
         self.ensure_main_thread();
         let waiters: Vec<usize> = (0..self.threads.len())
@@ -2839,15 +1871,8 @@ impl Cpu {
         }
     }
 
-    /// `svcWaitProcessWideKeyAtomic(mutex_addr, key, self, timeout)`: release
-    /// the mutex and block on the condition variable.
-    ///
-    /// The kernel publishes "a thread is queued here" into the condition
-    /// variable's own word on the way in. That is not bookkeeping: `nn::os`
-    /// reads the word before it signals and returns without a syscall when it
-    /// is zero, so a kernel that never writes it turns every
-    /// `SignalConditionVariable` in the process into a no-op and parks every
-    /// waiter for good.
+    /// `svcWaitProcessWideKeyAtomic`: release the mutex and block on the condvar,
+    /// marking the condvar word so `nn::os` signals it.
     pub(super) fn wait_process_wide_key(
         &mut self,
         mutex: u32,
@@ -2867,18 +1892,7 @@ impl Cpu {
         self.reschedule();
     }
 
-    /// Wake the timed waits whose deadline has passed, at most once every
-    /// [`TIME_SLICE`] cycles.
-    ///
-    /// The sweep used to ride on the preemption tick, and `slice_used` is
-    /// reset by every context switch, so a process whose threads yield more
-    /// often than once every 20,000 instructions never reached it at all. That
-    /// is not a rare shape: three of Album's threads sit on an
-    /// `svcWaitSynchronization` this emulator cannot satisfy, each yielding
-    /// after a handful of instructions, and its main thread's 10 ms sleep
-    /// simply never expired, asleep at cycle 13.7M and still asleep at 500M,
-    /// with the process frozen around it. A deadline has to be measured
-    /// against the clock that advances, not the counter a yield rewinds.
+    /// Wake expired timed waits, at most once per [`TIME_SLICE`] cycles of the clock.
     #[inline(always)]
     pub(super) fn sweep_timed_waits(&mut self) {
         if self.cycles < self.next_expiry {
@@ -2888,10 +1902,7 @@ impl Cpu {
         self.expire_timed_waits();
     }
 
-    /// Wake every timed wait (condition variable or address arbiter) whose
-    /// deadline has passed. Horizon reports the timeout to the waiter, and
-    /// `nn::os` answers one by re-checking its predicate, so waking is the
-    /// whole of it.
+    /// Wake every timed wait whose deadline has passed; `nn::os` rechecks its predicate.
     pub(super) fn expire_timed_waits(&mut self) {
         let now = self.cycles;
         for index in 0..self.threads.len() {
@@ -2914,21 +1925,7 @@ impl Cpu {
         }
     }
 
-    /// Take a condition variable's waiter off the queue **holding the mutex it
-    /// went to sleep with**, or queued for it, when someone else has it.
-    ///
-    /// `svcWaitProcessWideKeyAtomic` releases the mutex on the way in and the
-    /// kernel re-acquires it on the way out. That is true of every way the
-    /// wait can end, a timeout included, and it is the whole reason a
-    /// `while (!predicate) wait()` loop is safe to write: the predicate is
-    /// re-read under the same lock it was first read under.
-    ///
-    /// Waking one without it leaves the thread running outside a lock it
-    /// believes it holds, and its next unlock releases a mutex owned by
-    /// nobody. `nn::os::UnlockMutex` checks: it compares the word against its
-    /// own thread tag and aborts on a mismatch, which is where the Mii editor
-    /// ended its boot, one millisecond after a 1 ms `TimedWaitConditionVariable`
-    /// that [`Cpu::expire_timed_waits`] woke and left empty-handed.
+    /// Dequeue a condvar waiter holding (or queued for) its mutex, as the kernel does on every wake.
     fn wake_condvar_waiter(&mut self, index: usize, mutex: u32) {
         let handle = self.threads[index].handle as u32;
         let owner = self.mem.read_u32(mutex).unwrap_or(0);
@@ -2936,16 +1933,13 @@ impl Cpu {
             let _ = self.mem.write_u32(mutex, handle);
             self.threads[index].state = ThreadState::Runnable;
         } else {
-            // Someone holds it: queue up, and mark the word so the owner
-            // arbitrates its unlock instead of just clearing it.
+            // Contended: queue up and mark the word so the owner arbitrates its unlock.
             let _ = self.mem.write_u32(mutex, owner | MUTEX_HAS_LISTENERS);
             self.threads[index].state = ThreadState::WaitMutex(mutex);
         }
     }
 
-    /// `svcSignalProcessWideKey(key, count)`: wake up to `count` waiters
-    /// (`count` < 0 wakes all of them). A woken thread holds the mutex again,
-    /// or queues for it if someone else took it meanwhile.
+    /// `svcSignalProcessWideKey`: wake up to `count` waiters (all if negative).
     pub(super) fn signal_process_wide_key(&mut self, key: u32, count: i32) {
         self.ensure_main_thread();
         let mut woken = 0;
@@ -2966,8 +1960,7 @@ impl Cpu {
                 woken += 1;
             }
         }
-        // Emptying the queue clears the word again, so the next signal with
-        // nobody queued costs the guest nothing.
+        // Clear the word once the queue is empty.
         let queued = self.threads.iter().any(
             |t| matches!(t.state, ThreadState::WaitKey { key: waiting, .. } if waiting == key),
         );
@@ -2976,11 +1969,7 @@ impl Cpu {
         }
     }
 
-    /// The cycle count a wait of `timeout` nanoseconds expires at.
-    ///
-    /// A negative timeout waits forever; a positive one has to expire. A
-    /// thread that asked to be woken in 100ms and never was is a thread that
-    /// does its work on a timer and never does it again.
+    /// Deadline for a `timeout` in nanoseconds; negative waits forever.
     fn wait_deadline(&self, timeout: i64) -> Option<u64> {
         (timeout > 0).then(|| {
             let cycles = (timeout as u128) * u128::from(crate::cpu::power::CLOCK_RATES_HZ[0])
@@ -2991,24 +1980,10 @@ impl Cpu {
 
     // ---- the address arbiter ----
     //
-    // The other half of Horizon's "keep the word in guest memory, call the
-    // kernel only when a thread has to block" design. Unlike the mutex above,
-    // the arbiter word carries no ownership and the kernel never interprets
-    // it: it only compares it against the value the caller passed. `nn::os`
-    // builds its semaphores, barriers and newer condition variables out of one
-    // such word and these two syscalls.
+    // The arbiter word carries no ownership; the kernel only compares it with the caller's value.
 
-    /// The `svcWaitForAddress(addr, arb_type, value, timeout)` decision: does
-    /// the arbitration type's predicate hold, and whatever it does to the word
-    /// on the way in.
-    ///
-    /// Deciding is separate from [`Cpu::block_on_address`] because blocking
-    /// switches threads, and the caller has to have written its result to X0
-    /// before that happens: afterwards X0 belongs to whichever thread took
-    /// the CPU. Getting that order wrong here handed a freshly started thread
-    /// a zeroed X0 in place of the `nn::os::ThreadType` its entry stub was
-    /// about to install, so every mutex it later took looked like one it
-    /// already owned.
+    /// `svcWaitForAddress`'s decision, separate from [`Cpu::block_on_address`] so X0 is
+    /// written before switching threads.
     pub(super) fn arbitrate_address(
         &mut self,
         addr: u32,
@@ -3021,9 +1996,7 @@ impl Cpu {
             return ArbiterWait::Mismatch;
         };
         let holds = match arb_type {
-            // WaitIfLessThan, and the same with a decrement the kernel does
-            // atomically with the comparison: that decrement is how a
-            // semaphore's waiter claims its place in the queue.
+            // WaitIfLessThan, and its atomic-decrement variant.
             0 | 1 => current < value,
             // WaitIfEqual.
             2 => current == value,
@@ -3035,27 +2008,22 @@ impl Cpu {
         if arb_type == 1 {
             let _ = self.mem.write_u32(addr, current.wrapping_sub(1) as u32);
         }
-        // A zero timeout is a poll: the caller wanted to know whether it would
-        // have blocked, not to block.
+        // A zero timeout is a poll.
         if timeout == 0 {
             return ArbiterWait::TimedOut;
         }
         ArbiterWait::Blocked
     }
 
-    /// Park the running thread on the arbiter word at `addr` and give the CPU
-    /// to someone else. Only ever called after [`Cpu::arbitrate_address`] said
-    /// the wait should happen.
+    /// Park on the arbiter word at `addr`, after [`Cpu::arbitrate_address`] decided to wait.
     pub(super) fn block_on_address(&mut self, addr: u32, timeout: i64) {
         let deadline = self.wait_deadline(timeout);
         self.threads[self.current_thread].state = ThreadState::WaitAddress { addr, deadline };
         self.reschedule();
     }
 
-    /// `svcSignalToAddress(addr, signal_type, value, count)`: wake up to
-    /// `count` threads waiting on `addr` (`count` < 0 wakes all of them),
-    /// after the compare-and-modify the signal type asks for. Reports whether
-    /// the word still held `value`; when it did not, Horizon signals nobody.
+    /// `svcSignalToAddress`: wake up to `count` waiters (all if negative) after the
+    /// signal type's compare-and-modify. Reports whether the word held `value`.
     pub(super) fn signal_to_address(
         &mut self,
         addr: u32,
@@ -3079,12 +2047,7 @@ impl Cpu {
             let updated = match signal_type {
                 // SignalAndIncrementIfEqual.
                 1 => value.wrapping_add(1),
-                // SignalAndModifyByWaitingCountIfEqual: the word ends up
-                // saying how the queue compares to the batch being released,
-                // below it if more threads are still waiting than are woken,
-                // above it if the queue is drained. That is what lets a
-                // semaphore's next release know whether to call the kernel at
-                // all.
+                // SignalAndModifyByWaitingCountIfEqual: the new word tells a semaphore whether waiters remain.
                 _ => match (count > 0).then_some(waiting.cmp(&count)) {
                     Some(std::cmp::Ordering::Greater) => value.wrapping_sub(1),
                     Some(std::cmp::Ordering::Equal) => value,
@@ -3109,13 +2072,7 @@ impl Cpu {
         true
     }
 
-    /// The soonest a timed wait comes due, a sleep, or a condition variable
-    /// or arbiter wait that was given a timeout.
-    ///
-    /// Only meaningful to a caller about to idle the clock forward: a deadline
-    /// is a time this process is *known* to have work at, so it is the
-    /// furthest such a caller may skip to without inventing idleness that the
-    /// guest did not ask for.
+    /// The soonest timed-wait deadline: the furthest the clock may idle forward.
     pub(super) fn earliest_deadline(&self) -> Option<u64> {
         self.threads
             .iter()
@@ -3131,50 +2088,18 @@ impl Cpu {
             .min()
     }
 
-    /// Park the running thread until `deadline`. The caller leaves the PC on
-    /// the instruction that parked it, so the syscall is reissued, and its
-    /// predicate rechecked, when the thread wakes.
-    /// Hold the presenting thread until the display would actually have taken
-    /// the frame.
-    ///
-    /// A panel refreshes 60 times a second and a title cannot put frames on it
-    /// faster than that; on hardware the swapchain is what stops it. Nothing
-    /// here did, so Just Dance 2019 presented every 0.19 ms of *emulated* time
-    /// against a 16.7 ms refresh, 88 frames of clearing, resolving and
-    /// scanning out for every one a console would have shown, and 87 of them
-    /// identical. The work is not the cost so much as what it displaces: the
-    /// title's loading threads were left with about a fifth of the CPU, and
-    /// pacing this returned three times the guest progress per second.
-    ///
-    /// The thread is parked rather than spun, on a deadline that is certain to
-    /// arrive: the same treatment [`Cpu::audio_tick`]'s buffers get, and for
-    /// the same reason. It takes effect once the caller's reply is written;
-    /// see [`Cpu::pending_sleep`].
+    /// Park the presenting thread until the next 60 Hz refresh, as a swapchain would.
+    /// Takes effect after the reply is written; see [`Cpu::pending_sleep`].
     pub(super) fn pace_present(&mut self) {
         let tick = self.last_present_cycles.wrapping_add(VSYNC_PERIOD_CYCLES);
         if self.cycles < tick {
             self.pending_sleep = Some(tick);
         }
-        // A title slower than the panel is not dragged backwards to it.
+        // A title slower than the panel is not dragged backwards.
         self.last_present_cycles = self.cycles.max(tick);
     }
 
-    /// Put up a frame whose surface was still on the device when the guest
-    /// handed it over.
-    ///
-    /// A backend that keeps render targets on a device gets them back by
-    /// mapping a buffer, and a map completes only once the host's event loop
-    /// has run, which it cannot do inside the syscall that asked. So the
-    /// present is what waits, not the guest: `vi` keeps the buffer here and
-    /// the display picks it up from a later slice, by which time the host has
-    /// had its turn.
-    ///
-    /// It is the *frame* that is late, by a slice, and never the *contents*:
-    /// this presents the same surface the guest queued, once that surface has
-    /// arrived. Landing a readback one flush later instead, and presenting
-    /// whatever guest memory held meanwhile: is what came out black, because
-    /// a double-buffered title queues the surface whose readback was just
-    /// asked for.
+    /// Present a frame whose surface was still on the device, once it has come back.
     fn complete_pending_present(&mut self) {
         let Some(buffer) = self.pending_present else {
             return;
@@ -3191,8 +2116,7 @@ impl Cpu {
                 }
             }
             Err(e) => {
-                // Dropping the frame is the only other answer: holding it
-                // would stop the display for good over one bad readback.
+                // Drop the frame rather than stall the display.
                 self.pending_present = None;
                 self.diagnostic(
                     Level::Error,
@@ -3208,41 +2132,24 @@ impl Cpu {
         self.reschedule();
     }
 
-    /// When the display next refreshes. The only deadline this emulator can
-    /// promise a blocked thread: it comes off `cycles` rather than off another
-    /// guest thread, so it arrives whatever the process is doing.
+    /// The next display refresh, a deadline that always arrives.
     pub(super) fn next_display_tick(&self) -> u64 {
         self.last_vsync_cycles.wrapping_add(VSYNC_PERIOD_CYCLES)
     }
 
-    /// Park the running thread on the events it is waiting for, until one is
-    /// signalled or `deadline` passes. The caller leaves the PC on the `svc`,
-    /// so the wait is reissued and its handles rechecked either way.
+    /// Park on awaited events until one fires or `deadline` passes; the `svc` is reissued.
     pub(super) fn park_on_events(&mut self, deadline: u64) {
         self.ensure_main_thread();
         self.threads[self.current_thread].state = ThreadState::WaitEvent { deadline };
         self.reschedule();
     }
 
-    /// Switch away from the running thread after it blocked. If nothing can
-    /// run, everything blocked is woken: guests re-check their predicates in a
-    /// loop, so a spurious wake degrades to the old spin rather than a hang.
+    /// Switch away after blocking. If nothing can run, idle or wake everything.
     fn reschedule(&mut self) {
         if self.switch_to_next_runnable() {
             return;
         }
-        // Nothing can run, but a parked thread has a time it wakes at, so
-        // there is a right answer here rather than a spurious wake: idle the
-        // clock forward to the earliest of them. That is the console's own
-        // idle, and it is what stops a process whose only remaining work is
-        // waiting for audio from stepping tens of millions of instructions to
-        // get there.
-        //
-        // The earliest across *every* kind of timed wait, not just the
-        // sleepers. A display tick is 16.7 ms away and a loading thread sleeps
-        // in single milliseconds between work items, so idling to the tick
-        // regardless would spend a whole frame on each of them, the display
-        // throttle deciding how fast a title is allowed to load.
+        // Idle the clock to the earliest deadline of any kind, as the console idles.
         if let Some(deadline) = self.earliest_deadline() {
             if deadline > self.cycles {
                 self.cycles = deadline;
@@ -3252,11 +2159,7 @@ impl Cpu {
                 return;
             }
         }
-        // Nothing has a deadline either, so wake everything rather than
-        // hang. A spurious wake degrades to the old spin for a thread parked
-        // in `svcArbitrateLock` (it re-reads the word and asks again) but a
-        // condition variable's waiter has no such loop to fall back on and
-        // gets the handover a signal would have given it.
+        // No deadline either: wake everything rather than hang.
         for index in 0..self.threads.len() {
             match self.threads[index].state {
                 ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
@@ -3271,27 +2174,14 @@ impl Cpu {
         self.switch_to_next_runnable();
     }
 
-    /// Account for one retired instruction: a cycle on the clock, and a step.
-    ///
-    /// Both engines call this rather than touching either counter, so the two
-    /// cannot drift, and a third execution path would have to go out of its
-    /// way to count only one of them.
+    /// Account one retired instruction: a cycle and a step. Both engines call this.
     #[inline(always)]
     pub(super) fn retire(&mut self) {
         self.cycles += 1;
         self.steps += 1;
     }
 
-    /// Note a run of `count` consecutive instructions starting at `start` in
-    /// the fault trail.
-    ///
-    /// The trail used to hold one `(pc, insn)` pair per instruction, written
-    /// from the inner loop of both engines: a load of the instruction word, a
-    /// ring store and a counter bump on every step, for something nothing
-    /// reads until the machine faults. A translated block is seven
-    /// instructions on average, so recording it as one run is seven times less
-    /// of all three, and [`Cpu::record_fault`] expands the runs when it
-    /// actually needs them.
+    /// Record a run of `count` instructions from `start` in the fault trail.
     #[inline(always)]
     pub(super) fn record_run(&mut self, start: u32, count: u32) {
         // A single step that continues the last run extends it.
@@ -3347,9 +2237,7 @@ impl Cpu {
 
     fn load_context(&mut self, index: usize) {
         self.slice_used = 0;
-        // Taking the CPU away from a thread clears the local monitor, so an
-        // exclusive pair the switch landed inside fails and is retried rather
-        // than completing across the other thread's writes.
+        // A switch clears the local monitor.
         self.exclusive = None;
         let thread = self.threads[index].clone();
         self.regs = thread.regs;
@@ -3367,28 +2255,19 @@ impl Cpu {
         self.current_thread = index;
     }
 
-    /// Handle of the thread that is running, as the guest knows it.
     pub fn current_thread_handle(&self) -> u64 {
         self.threads
             .get(self.current_thread)
             .map_or(MAIN_THREAD_HANDLE, |t| t.handle)
     }
 
-    /// How many threads the guest has created (including the main thread).
+    /// Threads created, including the main thread.
     pub fn thread_count(&self) -> usize {
         self.threads.len().max(1)
     }
 
-    /// Boot a homebrew NRO the way HBL does: load the image, let the crt0's
-    /// relocation pass run up to the point it calls `main`, run the `.init_array`
-    /// (C++ static constructors) and set up the main thread's `ThreadVars`
-    /// (newlib reentrancy) that the skipped `__libnx_init` would normally
-    /// provide, then leave the CPU ready to enter `main`.
-    ///
-    /// The libnx "HOME BREW" crt0 runs the relocation pass itself and then
-    /// jumps to main; when it omits the `__libnx_init` step, every std::string
-    /// global is left empty and NX-Shell's `FS::GetDirList` resolves its SD
-    /// path to "" and exits. Running the constructors fixes that.
+    /// Boot a homebrew NRO as HBL does: run the crt0 up to `main`, then the `.init_array`
+    /// and main `ThreadVars` setup the skipped `__libnx_init` would provide.
     pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
         self.mem.clear_modules();
         self.module_names.clear();
@@ -3399,10 +2278,7 @@ impl Cpu {
             .wrapping_add(loaded.data.file_size)
             .wrapping_add(loaded.bss_size);
         self.record_module_name(loaded.base, end, "homebrew");
-        // Present the NRO on the SD card at the path the environment block
-        // advertises as argv[0]: libnx's `romfsMountSelf` re-opens the running
-        // NRO through the filesystem to read the RomFS appended to it, which
-        // is where homebrew keeps its assets.
+        // Expose the NRO at argv[0] on the SD card for `romfsMountSelf`.
         self.fs
             .write_file(crate::nro::HOMEBREW_NRO_PATH, data.to_vec());
         self.out.clear();
@@ -3419,8 +2295,7 @@ impl Cpu {
 
         let init = crate::nro::init_array_entries(data);
         if !init.is_empty() && loaded.env_addr != 0 {
-            // The crt0 calls main with `bl` at entry+0xc0 (libnx switch_crt0
-            // layout); by then BSS is zeroed and RELR relocations are applied.
+            // The crt0 calls main at entry+0xc0; BSS is zeroed and relocations applied by then.
             let main_call = loaded.entry.wrapping_add(0xc0);
             let main_insn = self.mem.fetch(main_call).ok();
             let is_bl = matches!(main_insn, Some(i) if (i & 0xFC00_0000) == 0x9400_0000);
@@ -3432,9 +2307,7 @@ impl Cpu {
                     }
                     self.step()?;
                 }
-                // ThreadVars at TLS+0x1E0: magic, handle, thread_ptr, _REENT,
-                // tls_tp. The _REENT can be zeroed; newlib's malloc lazily
-                // initializes it.
+                // ThreadVars at TLS+0x1E0: magic, handle, thread_ptr, _REENT (zeroed; lazily set up), tls_tp.
                 const TV_MAGIC: u32 = 0x2154_5624; // "!TV$"
                 const REENT_ADDR: u32 = 0x1FF1_0000;
                 let tls = self.tls_base();
@@ -3462,16 +2335,8 @@ impl Cpu {
                         self.step()?;
                     }
                 }
-                // The constructors clobber the entry registers; restore them
-                // and resume at the crt0's call so it is entered with the normal
-                // calling convention (x30 = the crt0's return path).
-                //
-                // That call is libnx's `__libnx_init(ctx, main_thread,
-                // saved_lr)`, and `saved_lr` is the loader's return address:
-                // `envSetup` keeps it as the exit function pointer, and
-                // `__nx_exit` branches straight to it. Leaving x2 at 0 made
-                // every clean exit jump to NULL, NX-Shell looked like it
-                // crashed when it was only returning from main.
+                // Restore the entry registers and resume at the crt0's call; x2 is the loader's
+                // return address, which `__nx_exit` jumps to.
                 for i in 0..=30u8 {
                     self.set_reg(i, 0);
                 }
@@ -3487,26 +2352,8 @@ impl Cpu {
         Ok(loaded)
     }
 
-    /// Boot a retail title's full module set (`rtld`, `main`, `subsdk*`,
-    /// `sdk`) the way Nintendo's process creation does: load every module
-    /// into one shared address space, back to back, and hand off to
-    /// `rtld`'s entry point, *not* `main`'s.
-    ///
-    /// `rtld` is Nintendo's own runtime linker; its job is to process every
-    /// other module's relocations (base-relative fixups, and resolving
-    /// cross-module calls, e.g. `main` importing something `sdk` exports)
-    /// before jumping into `main`'s own crt0. Jumping straight to `main`
-    /// (this emulator's first attempt) leaves its GOT full of unrelocated
-    /// placeholder addresses: confirmed against a real title, whose `main`
-    /// crt0 runs cleanly right up to its first PLT-style indirect call,
-    /// which lands on exactly such a placeholder.
-    ///
-    /// `modules` must be in Nintendo's required load order: `rtld`, `main`,
-    /// `subsdk0..subsdk9`, `sdk`: whichever of those a title actually has.
-    /// Actually running a retail title past `rtld`'s own work needs the
-    /// Horizon service surface a full SDK program expects, which this
-    /// emulator does not have yet; this gets it as far as that surface, the
-    /// same "boot as far as it goes" spirit as `boot_homebrew`.
+    /// Boot a retail title's modules (`rtld`, `main`, `subsdk*`, `sdk`, in that order)
+    /// back to back in one address space and enter `rtld`, which relocates the rest.
     pub fn boot_retail_program(
         &mut self,
         modules: &[(&str, &[u8])],
@@ -3521,39 +2368,21 @@ impl Cpu {
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }
-        // Horizon's process entry ABI, which `rtld` reads literally at its
-        // first two instructions (`cmp x0, #0` / `mov w19, w1`): X0 is the
-        // launch argument, 0 for a normal process launch, non-zero only for
-        // the homebrew loader's config block, and **X1 is the main thread's
-        // handle**. `nnSdk` stores that handle in the main
-        // `nn::os::ThreadType` (+0x1B0) and every `SdkMutex` compares its
-        // lock word against it; leaving X1 at 0 makes an *unlocked* mutex
-        // (lock word 0) compare equal to "owned by the current thread", so
-        // `nn::os::SdkMutexType::Lock` fires its recursive-lock assertion and
-        // `nn::oe::Initialize` aborts before the SDK ever reaches a service.
+        // Horizon's entry ABI: X0 is 0 for a normal launch, X1 the main thread handle
+        // (`nnSdk` compares `SdkMutex` lock words against it).
         self.set_reg(1, MAIN_THREAD_HANDLE);
         if self.mode == ExecMode::A32 {
-            // The loop above cleared x0..x30, and in this state that includes
-            // both the stack pointer and the link register. A64 keeps SP in a
-            // slot of its own, so it is only 32-bit code that has to put the
-            // stack back afterwards.
+            // A32 keeps SP in r13; restore it after clearing the registers.
             self.regs[13] = self.regs[SP_SLOT];
             self.regs[14] = SELF_RETURN_TRAMPOLINE as u64;
         } else {
             self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
         }
 
-        // Real inter-module gaps are whatever the kernel's ASLR/layout
-        // picked; page-aligned and back-to-back is a reasonable stand-in,
-        // each module is fully self-contained PC-relative code, so the only
-        // thing that matters is that nothing overlaps.
         const MODULE_ALIGN: u32 = 0x1000;
         let mut base = crate::nso::NSO_BASE;
         let mut loaded = Vec::with_capacity(modules.len());
-        // Which title the addresses below belong to. Every pc in a fatal is
-        // only meaningful against the binary it came from, and a report
-        // carrying the ranges but not the id has more than once been read
-        // against the wrong title's dump.
+        // Name the title, so fault addresses are read against the right binary.
         self.diagnostic(
             Level::Info,
             &format!("[loader] program {:#018x}", self.program_id),
@@ -3567,12 +2396,7 @@ impl Cpu {
                 .mem_addr
                 .wrapping_add(module.data.file_size)
                 .wrapping_add(module.bss_size);
-            // Where each module actually landed. `rtld` does not take the
-            // layout on trust: it finds modules itself, scanning with
-            // `svcQueryMemory` for R-X regions carrying `MOD0`, so the base
-            // it relocates against is one it worked out, and a fault
-            // afterwards is unreadable without knowing what it was supposed
-            // to have found.
+            // Where each module landed; `rtld` finds them itself via `svcQueryMemory`.
             self.diagnostic(Level::Info, &format!(
                 "[loader] {} at {:#010x}: text {:#010x}..{:#010x}, rodata {:#010x}..{:#010x}, data {:#010x}..{:#010x}, bss {:#010x}..{:#010x}",
                 name,
@@ -3600,19 +2424,8 @@ impl Cpu {
         Ok(loaded)
     }
 
-    /// Fill `am`'s launch-parameter table with what a console's launcher would
-    /// have left for the program being started.
-    ///
-    /// The HOME menu chooses the user before it starts an application and
-    /// passes that choice along as a `PreselectedUser` launch parameter.
-    /// `nn::account::Initialize` pops it and caches the uid; with nothing to
-    /// pop the cached uid stays zero, and `nn::account::OpenPreselectedUser`
-    /// fires its assertion rather than returning a handle, which is where
-    /// Just Dance 2019 aborted, before it had asked for a single service.
-    ///
-    /// A library applet is not started by the menu and gets no preselected
-    /// user; what its caller hands it arrives through `PopInData` instead. See
-    /// [`Cpu::seed_applet_launch_arguments`].
+    /// Seed `am`'s launch parameters as a console's launcher would, including the
+    /// `PreselectedUser` that `nn::account::OpenPreselectedUser` requires.
     fn seed_launch_parameters(&mut self) {
         self.am_launch_parameters.clear();
         if crate::cpu::am::is_library_applet(self.program_id) {
@@ -3624,20 +2437,8 @@ impl Cpu {
         );
     }
 
-    /// Queue what a library applet's caller would have pushed before starting
-    /// it, so `PopInData` has something to hand over.
-    ///
-    /// Every caller pushes `LibAppletCommonArguments` first, the 0x20-byte
-    /// block naming the interface version the two sides agreed on and the
-    /// theme to draw in. Running a library applet directly, as this emulator
-    /// does, there is nobody to push it, and an applet that cannot read its
-    /// own arguments aborts before it draws anything.
-    ///
-    /// Whatever the applet pops *after* that is its own launch struct, which
-    /// only a real caller could fill in: see
-    /// [`crate::cpu::am::applet_launch_storages`] for the ones synthesized
-    /// here. The keyboard and the controller applet pop **two**, and stopping
-    /// after the first left both of them aborting on `2128-0003`.
+    /// Queue what a library applet's caller would push: `LibAppletCommonArguments`, then
+    /// the applet's own launch structs (see [`crate::cpu::am::applet_launch_storages`]).
     fn seed_applet_launch_arguments(&mut self) {
         self.am_in_data.clear();
         self.am_out_data.clear();
@@ -3651,9 +2452,7 @@ impl Cpu {
         let mut args = Vec::with_capacity(COMMON_ARGS_SIZE as usize);
         args.extend_from_slice(&COMMON_ARGS_VERSION.to_le_bytes());
         args.extend_from_slice(&COMMON_ARGS_SIZE.to_le_bytes());
-        // LaVersion: the applet-interface revision the caller speaks. Each
-        // applet numbers its own, and a caller that claims one the applet
-        // does not know is refused, so this is the applet's own.
+        // LaVersion: the applet's own interface revision.
         args.extend_from_slice(
             &crate::cpu::am::applet_interface_version(self.program_id).to_le_bytes(),
         );
@@ -3661,50 +2460,31 @@ impl Cpu {
         args.extend_from_slice(&0u32.to_le_bytes());
         // PlayStartupSound, then padding out to the tick field.
         args.resize(0x18, 0);
-        // The tick the caller started the applet at. Nothing here measures
-        // elapsed time against it.
+        // The tick the caller started the applet at.
         args.extend_from_slice(&0u64.to_le_bytes());
         self.am_in_data.push_back(args);
-        // Then the applet's own launch structs. Refusing one of these pops is
-        // what a real applet treats as a launch it cannot honour, and it
-        // aborts rather than carry on without it.
+        // Then the applet's own launch structs.
         let user = self.current_user().uid;
         for storage in crate::cpu::am::applet_launch_storages(self.program_id, user) {
             self.am_in_data.push_back(storage);
         }
     }
 
-    /// Set the decrypted RomFS bytes `OpenDataStorageByCurrentProcess`
-    /// serves. The caller (the NCA-decryption loader) supplies these, `Cpu`
-    /// has no key material and doesn't know how to get from an NCA to a
-    /// RomFS image itself.
-    ///
-    /// Only for a RomFS small enough to hold: see [`Cpu::set_romfs_source`]
-    /// for the form a real title's uses.
+    /// Set the decrypted RomFS that `OpenDataStorageByCurrentProcess` serves, for small images.
+    /// See [`Cpu::set_romfs_source`].
     pub fn set_romfs(&mut self, data: Vec<u8>) {
         self.romfs = Some(Box::new(crate::source::MemSource(data)));
         self.romfs_indexes.remove(&None);
     }
 
-    /// Register a system data archive under its data id, for
-    /// `OpenDataStorageByDataId` to serve.
-    ///
-    /// These live on a real console's NAND as separate Data NCAs, one per
-    /// data id; an applet mounts one to get at assets it ships apart from its
-    /// own RomFS. Nothing here has a NAND, so the host registers whichever it
-    /// has and a request for any other is reported missing rather than
-    /// answered with an empty archive.
+    /// Register a system data archive for `OpenDataStorageByDataId`.
     pub fn add_data_archive(&mut self, data_id: u64, src: Box<dyn crate::source::ByteSource>) {
         self.data_archives.insert(data_id, src);
         self.romfs_indexes.remove(&Some(data_id));
     }
 
-    /// The id this title's add-on content is numbered upwards from.
-    ///
-    /// The NACP declares it, and a title that declares none gets the derived
-    /// one: the base program id (the low 13 bits are the program index and the
-    /// update flag, so they are masked off) plus 0x1000. DLC #1 of
-    /// `0100bee017fc0000` is `0100bee017fc1001`.
+    /// Base id for this title's DLC: the NACP's, or the base program id (low 13 bits
+    /// masked) plus 0x1000.
     pub fn add_on_content_base_id(&self) -> u64 {
         match self.add_on_content_base_id {
             0 => (self.program_id & !0x1FFF) + 0x1000,
@@ -3712,20 +2492,13 @@ impl Cpu {
         }
     }
 
-    /// Take the DLC base id out of the title's own NACP,
-    /// `nacp.add_on_content_base_id` is the whole call site, since a title
-    /// whose DLC is numbered from somewhere else says so there.
+    /// Set the DLC base id from the title's NACP.
     pub fn set_add_on_content_base_id(&mut self, base: u64) {
         self.add_on_content_base_id = base;
     }
 
-    /// Register one piece of add-on content: its RomFS under its own content
-    /// id, so `OpenDataStorageByDataId` serves it, and its index, so `aoc:u`
-    /// lists it.
-    ///
-    /// Returns the index, or `None` when the content belongs to another title
-    ///: a DLC's id is its base title's plus an index below 0x800, and one
-    /// that is not cannot be numbered against this title at all.
+    /// Register add-on content under its own id and return its index, or `None` when
+    /// it belongs to another title.
     pub fn add_add_on_content(
         &mut self,
         content_id: u64,
@@ -3738,42 +2511,35 @@ impl Cpu {
         self.data_archives.insert(content_id, src);
         self.romfs_indexes.remove(&Some(content_id));
         self.add_on_content.insert(index as u32);
-        // A title running when content arrives is told to look again. One that
-        // has not asked for the event yet reads the list when it does.
+        // Tell a running title to re-read the list.
         if let Some(event) = self.aoc_list_changed_event {
             self.signal_event(event);
         }
         Some(index as u32)
     }
 
-    /// Whether anything is registered under `data_id`, which is the question
-    /// `OpenDataStorageByDataId` answers by serving it or reporting it missing.
     pub fn has_data_archive(&self, data_id: u64) -> bool {
         self.data_archives.contains_key(&data_id)
     }
 
-    /// The add-on content indices this title has, in order.
     pub fn add_on_content(&self) -> Vec<u32> {
         self.add_on_content.iter().copied().collect()
     }
 
-    /// The save `key` names, creating it if this is the first time anything
-    /// has asked. A console formats a save on first open too.
+    /// The save `key` names, created on first open as on a console.
     pub fn save_data_mut(&mut self, key: SaveKey) -> &mut crate::vfs::Vfs {
         self.saves.entry(key).or_insert_with(crate::vfs::Vfs::empty)
     }
 
-    /// The save `key` names, if it exists.
     pub fn save_data(&self, key: SaveKey) -> Option<&crate::vfs::Vfs> {
         self.saves.get(&key)
     }
 
-    /// Every save that has been opened, for a host that persists them.
+    /// Every opened save, for a host that persists them.
     pub fn save_keys(&self) -> Vec<SaveKey> {
         self.saves.keys().copied().collect()
     }
 
-    /// The storage an `fsp-srv` object addresses.
     pub(super) fn vfs_for(&mut self, mount: Option<SaveKey>) -> &mut crate::vfs::Vfs {
         match mount {
             Some(key) => self.saves.entry(key).or_insert_with(crate::vfs::Vfs::empty),
@@ -3781,12 +2547,10 @@ impl Cpu {
         }
     }
 
-    /// Which storage the `fsp-srv` object under `key` addresses.
     pub(super) fn mount_of(&self, key: u64) -> Option<SaveKey> {
         self.fs_mount.get(&key).copied()
     }
 
-    /// Record that the object under `key` addresses `mount`.
     pub(super) fn set_mount(&mut self, key: u64, mount: Option<SaveKey>) {
         match mount {
             Some(id) => {
@@ -3798,9 +2562,7 @@ impl Cpu {
         }
     }
 
-    /// Same, backed by a [`ByteSource`](crate::source::ByteSource) that
-    /// decrypts on demand, [`crate::nca::Nca::romfs_source`] over the
-    /// container the title was launched from.
+    /// Same, backed by a decrypt-on-demand [`ByteSource`](crate::source::ByteSource).
     pub fn set_romfs_source(&mut self, src: Box<dyn crate::source::ByteSource>) {
         self.romfs = Some(src);
         self.romfs_indexes.remove(&None);
@@ -3813,8 +2575,7 @@ impl Cpu {
         self.pc
     }
 
-    /// The stack pointer, from whichever slot the running state keeps it in:
-    /// A64's dedicated [`SP_SLOT`], or `r13` in AArch32.
+    /// SP from [`SP_SLOT`] in A64 or `r13` in AArch32.
     #[inline]
     pub fn sp(&self) -> u64 {
         match self.mode {
@@ -3827,10 +2588,7 @@ impl Cpu {
         self.pc = pc;
     }
 
-    /// Allocate a handle and record it as an event. Callers are the services
-    /// that hand events out (`am`'s applet-message and GPU-error events,
-    /// `vi`'s display vsync, `nvdrv`'s QueryEvent), and the handle has to
-    /// reach the guest as a **copy** handle. See [`Cpu::write_ipc_reply`].
+    /// Allocate an event handle; it must reach the guest as a copy handle.
     pub(crate) fn alloc_event(&mut self, name: &'static str, auto_clear: bool) -> u64 {
         let handle = self.alloc_handle();
         self.events.insert(
@@ -3847,12 +2605,11 @@ impl Cpu {
         handle
     }
 
-    /// What an event handle is for, for diagnostics.
     pub(crate) fn event_name(&self, handle: u64) -> Option<&'static str> {
         self.events.get(&handle).map(|event| event.name)
     }
 
-    /// Queue an applet message and wake whatever is polling for one.
+    /// Queue an applet message and wake whatever polls for one.
     pub(super) fn queue_applet_message(&mut self, message: AppletMessage) {
         self.applet_messages.push_back(message as u32);
         if let Some(handle) = self.applet_event {
@@ -3860,56 +2617,35 @@ impl Cpu {
         }
     }
 
-    /// Whether the console is docked, as everything that reports it sees it.
     pub fn operation_mode(&self) -> OperationMode {
         self.operation_mode
     }
 
-    /// Dock or undock the console, while a title runs.
-    ///
-    /// The mode itself is only half of it: a title reads `GetOperationMode`
-    /// once and then lays out for that answer, so changing the number under
-    /// one that is already running changes nothing it can see. What makes it
-    /// act is the pair of AM messages a real dock sends, `OperationModeChanged`
-    /// and `PerformanceModeChanged`, which is what sends it back to ask.
-    ///
-    /// Setting the mode it is already in queues nothing. AM does not announce
-    /// a transition that did not happen, and a title told to re-lay-out has to
-    /// do the work whether or not anything actually changed.
+    /// Dock or undock while running: queues `OperationModeChanged` and
+    /// `PerformanceModeChanged` on a real change.
     pub fn set_operation_mode(&mut self, mode: OperationMode) {
         if self.operation_mode == mode {
             return;
         }
         self.operation_mode = mode;
-        // Undocking is also a lift: the touchscreen does not exist in the
-        // dock, so anything the host had down there is not still down. The
-        // sample is republished either way, which is what tells a reader the
-        // screen it is reading is the new one.
+        // Undocking lifts any touch; republish the sample either way.
         self.set_touch_state(&[]);
-        // The buffer queue's *default* geometry, what `QUERY_WIDTH` and
-        // `QUERY_HEIGHT` answer before a guest has dequeued anything. A guest
-        // that has already asked for a size of its own keeps it: DequeueBuffer
-        // overwrites these, and the size a title chose is not the dock's to
-        // change underneath it.
+        // Default buffer queue geometry; sizes a guest already dequeued are kept.
         let (width, height) = mode.display_size();
         self.display.set_default_size(width, height);
         self.queue_applet_message(AppletMessage::OperationModeChanged);
         self.queue_applet_message(AppletMessage::PerformanceModeChanged);
-        // And the event a title waits on to go and re-read the resolution,
-        // rather than only the message its applet framework polls for.
         if let Some(event) = self.display_resolution_event {
             self.signal_event(event);
         }
     }
 
-    /// Note which kind of proxy the process opened, so its focus transition is
-    /// the one its own applet framework is waiting for.
+    /// Record the proxy kind, which selects the focus message.
     pub(super) fn set_applet_is_application(&mut self, is_application: bool) {
         self.applet_is_application = is_application;
     }
 
-    /// The next AM message for the running applet, or `None` when the queue is
-    /// empty. The startup focus transition comes first and exactly once.
+    /// Next AM message; the startup focus transition comes first, once.
     pub(super) fn next_applet_message(&mut self) -> Option<u32> {
         if !self.applet_focus_announced {
             self.applet_focus_announced = true;
@@ -3922,29 +2658,16 @@ impl Cpu {
         self.applet_messages.pop_front()
     }
 
-    /// Whether AM has a message waiting, which is what the applet event says.
     pub(super) fn has_applet_message(&self) -> bool {
         !self.applet_focus_announced || !self.applet_messages.is_empty()
     }
 
-    /// Fire an event, and wake every thread parked on one.
-    ///
-    /// Every waiter rather than only this event's: a parked thread does not
-    /// record which handles it named, and it does not need to, it wakes onto
-    /// the `svc` that parked it, rechecks its own handles and parks again if
-    /// this was not the one it wanted. A signal is rare enough that the extra
-    /// laps cost nothing, and getting the *set* wrong here would be a lost
-    /// wakeup, which is the one failure a wait cannot recover from.
+    /// Fire an event and wake every parked waiter; each rechecks its own handles.
     pub fn signal_event(&mut self, handle: u64) {
         let Some(event) = self.events.get_mut(&handle) else {
             return;
         };
-        // Only a *transition* wakes anybody. Re-firing an event that is
-        // already signalled changes nothing a waiter could observe, and this
-        // is not a rare case: [`Cpu::audio_tick`] re-signals a device whose
-        // buffer has come due on every single `svcWaitSynchronization` in the
-        // process, so waking on each of them turned the park back into the
-        // spin it replaced.
+        // Only a transition wakes waiters.
         if event.signaled {
             return;
         }
@@ -3952,8 +2675,7 @@ impl Cpu {
         self.wake_event_waiters();
     }
 
-    /// Wake every thread parked in `svcWaitSynchronization`, to recheck its
-    /// handles: each one's pc was left on the `svc`, so the wait is reissued.
+    /// Wake every thread parked in `svcWaitSynchronization`; each reissues its wait.
     fn wake_event_waiters(&mut self) {
         for thread in &mut self.threads {
             if matches!(thread.state, ThreadState::WaitEvent { .. }) {
@@ -3962,20 +2684,7 @@ impl Cpu {
         }
     }
 
-    /// Whether `handle` names something a wait can be satisfied by that has
-    /// been: an event that has fired, or a thread that has exited. `None`
-    /// means the handle is neither.
-    ///
-    /// A thread handle is signalled when its thread ends, which is how
-    /// `nn::os::WaitThread` joins one. It used to count as ready whatever the
-    /// thread was doing, so a join returned while the thread was still
-    /// running, and the joiner went on to tear down a thread object that was
-    /// in use. Just Dance 2019 reuses one `ThreadType` for successive HTTP
-    /// threads: its joiner, told the old thread was done, cleaned up the
-    /// object while the new one ran in it, zeroed a return address on the
-    /// new thread's stack, and the thread returned through it into the exit
-    /// stub. Whether that happened depended only on where the scheduler
-    /// happened to switch, which is why it took the translator to show it.
+    /// Whether `handle` is a fired event or an exited thread; `None` if neither.
     pub(super) fn waitable_signaled(&self, handle: u64) -> Option<bool> {
         if let Some(signaled) = self.event_signaled(handle) {
             return Some(signaled);
@@ -3986,16 +2695,12 @@ impl Cpu {
             .map(|thread| thread.state == ThreadState::Finished)
     }
 
-    /// Whether `handle` names an event that has fired. `None` means the handle
-    /// is not modelled as an event at all.
-    ///
-    /// Public for the same reason [`Cpu::signal_event`] is: a host that can
-    /// fire an event can reasonably ask whether one it handed out has fired.
+    /// Whether `handle` names a fired event; `None` if it is not an event.
     pub fn event_signaled(&self, handle: u64) -> Option<bool> {
         self.events.get(&handle).map(|event| event.signaled)
     }
 
-    /// Consume an auto-clear event's signal after a wait has reported it.
+    /// Consume an auto-clear event's signal after a wait reported it.
     pub(crate) fn consume_event(&mut self, handle: u64) {
         if let Some(event) = self.events.get_mut(&handle) {
             if event.auto_clear {
@@ -4010,9 +2715,7 @@ impl Cpu {
         }
     }
 
-    /// `svcResetSignal`: clear a signalled event, reporting whether it *was*
-    /// signalled. An event this emulator does not model counts as signalled,
-    /// which is the same answer a wait on one gets.
+    /// `svcResetSignal`: returns whether the event was signalled; unmodelled handles count as signalled.
     pub(crate) fn reset_signal(&mut self, handle: u64) -> bool {
         match self.events.get_mut(&handle) {
             Some(event) => std::mem::replace(&mut event.signaled, false),
@@ -4020,23 +2723,18 @@ impl Cpu {
         }
     }
 
-    /// Debug/test counterpart to [`Cpu::service_handles_snapshot`]: bind a
-    /// handle to a service name without going through `sm`'s GetService, so a
-    /// test can drive one service's IPC surface directly.
+    /// Bind a handle to a service name directly, for tests.
     pub fn register_service_handle(&mut self, handle: u64, name: &str) {
         self.record_handle(handle, name);
     }
 
-    /// Debug: what interface a domain object id on `handle` names, or `None`
-    /// once it has been closed. The counterpart to
-    /// [`Cpu::service_handles_snapshot`] for the objects living on a session
-    /// rather than the sessions themselves.
+    /// The interface a domain object id on `handle` names, or `None` once closed.
     pub fn domain_interface_name(&self, handle: u64, object_id: u32) -> Option<String> {
         self.domain_interface(handle, object_id)
             .map(|s| s.to_owned())
     }
 
-    /// Debug: dump the fake-handle -> service-name map.
+    /// Debug: dump the fake-handle to service-name map.
     pub fn service_handles_snapshot(&self) -> Vec<(u64, String)> {
         let mut v: Vec<(u64, String)> = self
             .service_handles
@@ -4047,22 +2745,16 @@ impl Cpu {
         v
     }
 
-    /// Read a register in the forms where 31 is the stack pointer.
+    /// Read a register where 31 is SP.
     #[inline(always)]
     pub fn read_x(&self, idx: u8) -> u64 {
         self.regs[reg_slot(Self::x_slot(idx))]
     }
 
-    /// The slot a register number names when 31 means `SP`.
-    ///
-    /// The interpreter asks per execution and the block translator asks once
-    /// per instruction, but the mapping is the same one, so it is written
-    /// once here and both engines resolve register 31 through it.
+    /// The slot a register number names when 31 means SP.
     #[inline(always)]
     pub(super) fn x_slot(idx: u8) -> u8 {
         let idx = idx & 0x1F;
-        // 31 -> SP_SLOT, everything else itself. A compare and an add, which
-        // the branch this replaced could not beat.
         idx + (SP_SLOT as u8 - 31) * u8::from(idx == 31)
     }
 
@@ -4077,46 +2769,37 @@ impl Cpu {
         self.read_x(idx)
     }
 
-    /// Read the 128-bit SIMD&FP register Qn.
     pub fn read_vreg(&self, idx: u8) -> u128 {
         self.vregs.0[idx as usize]
     }
 
-    /// Base of the libnx TLS (thread-local storage) region.
     pub fn tls_base(&self) -> u32 {
         self.tpidr as u32
     }
 
-    /// Write the 128-bit SIMD&FP register Qn.
     pub fn set_vreg(&mut self, idx: u8, val: u128) {
         self.vregs.0[idx as usize] = val;
     }
 
-    /// Read a register in the forms where 31 is `XZR`. No test for 31:
-    /// [`ZR_SLOT`] holds zero and nothing ever writes it.
+    /// Read a register where 31 is `XZR`.
     #[inline(always)]
     fn read_zr(&self, idx: u8) -> u64 {
         self.regs[(idx & 0x1F) as usize]
     }
 
-    /// Write a register in the forms where 31 is `XZR`, whose writes the
-    /// architecture discards, so they go to [`ZR_DISCARD`] rather than being
-    /// tested for.
+    /// Write a register where 31 is `XZR`.
     #[inline(always)]
     fn write_zr(&mut self, idx: u8, val: u64) {
         self.regs[reg_slot(Self::zr_write_slot(idx))] = val;
     }
 
-    /// Write a register in the forms where 31 is `SP`.
+    /// Write a register where 31 is SP.
     #[inline(always)]
     fn write_x(&mut self, idx: u8, val: u64) {
         self.regs[reg_slot(Self::x_slot(idx))] = val;
     }
 
-    /// Read the register file by slot, for a caller that already knows which
-    /// of register 31's meanings it wants. See [`REG_SLOTS`]. The block
-    /// translator resolves that when it builds the op, so nothing about it is
-    /// left to run time.
+    /// Read the register file by slot; see [`REG_SLOTS`].
     #[inline(always)]
     pub(super) fn reg_at(&self, slot: u8) -> u64 {
         self.regs[reg_slot(slot)]
@@ -4143,19 +2826,9 @@ impl Cpu {
         }
     }
 
-    /// Write the host gamepad state so the guest can see it. The button
-    /// bitmask goes to the memory-mapped [`crate::INPUT_ADDR`] (simple polling
-    /// mechanism); when libnx has mapped its hid shared memory, the same state
-    /// is mirrored into the player-1 `HidNpadInternalState` layout that
-    /// `padUpdate` reads, so real homebrew (padInitialize/padUpdate) works too.
-    ///
-    /// `buttons` is a bitfield of `HidNpadButton` (A=1<<0, B=1<<1, X=1<<2,
-    /// Y=1<<3, StickL=1<<4, StickR=1<<5, L=1<<6, R=1<<7, ZL=1<<8, ZR=1<<9,
-    /// Plus=1<<10, Minus=1<<11, DpadLeft=1<<12, DpadUp=1<<13, DpadRight=1<<14,
-    /// DpadDown=1<<15). Sticks are signed -32768..32767, positive being right
-    /// and *up* as Horizon reports them. The stick pseudo-buttons
-    /// (`StickLLeft`..`StickRDown`, bits 16-23) are derived here, so a caller
-    /// only has to pass the analog values.
+    /// Publish host gamepad state to [`crate::INPUT_ADDR`] and, once mapped, hid shared memory.
+    /// `buttons` is a `HidNpadButton` mask; sticks are -32768..32767 with up positive.
+    /// Stick pseudo-buttons are derived here.
     pub fn set_gamepad_state(
         &mut self,
         buttons: u64,
@@ -4167,7 +2840,7 @@ impl Cpu {
         self.last_gamepad = (buttons, stick_lx, stick_ly, stick_rx, stick_ry);
         let buttons = buttons | Self::stick_pseudo_buttons(stick_lx, stick_ly, stick_rx, stick_ry);
 
-        // Simple host→guest register: a u64 mask, then two analog sticks.
+        // Host-to-guest register: a u64 mask, then two analog sticks.
         let _ = self.mem.write_u64(crate::INPUT_ADDR, buttons);
         let _ = self.mem.write_u32(crate::INPUT_ADDR + 8, stick_lx as u32);
         let _ = self.mem.write_u32(crate::INPUT_ADDR + 12, stick_ly as u32);
@@ -4180,12 +2853,7 @@ impl Cpu {
         self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
     }
 
-    /// Publish a fresh `hid` sample if the sysmodule's timer has come round.
-    ///
-    /// The host is not the clock `hid` runs on: it writes an entry every 5 ms
-    /// with whatever the pad is holding, and a reader that wants a sample
-    /// newer than its last one only gets it because of that. See
-    /// [`HID_SAMPLE_PERIOD_CYCLES`].
+    /// Publish a fresh `hid` sample when the 200 Hz timer comes round.
     pub(super) fn hid_tick(&mut self) {
         if self.hid_shmem_addr == 0
             || self.cycles.wrapping_sub(self.last_hid_cycles) < HID_SAMPLE_PERIOD_CYCLES
@@ -4199,9 +2867,7 @@ impl Cpu {
         self.set_touch_state(&touches);
     }
 
-    /// The `HidNpadButton_StickL*`/`StickR*` bits hid sets from stick
-    /// deflection. Homebrew navigates menus with `HidNpadButton_AnyUp` and
-    /// friends, which are the d-pad bit OR'd with these.
+    /// `HidNpadButton_StickL*`/`StickR*` bits derived from stick deflection.
     fn stick_pseudo_buttons(lx: i32, ly: i32, rx: i32, ry: i32) -> u64 {
         let mut mask = 0u64;
         for (i, (x, y)) in [(lx, ly), (rx, ry)].iter().enumerate() {
@@ -4222,23 +2888,14 @@ impl Cpu {
         mask
     }
 
-    /// Mirror the gamepad state into libnx's `HidSharedMemory`. The host pad is
-    /// published both as player 1 and as the handheld controller, because
-    /// homebrew polls whichever of the two it was built to expect; `padUpdate`
-    /// merges the slots it was asked for, so a program that reads both still
-    /// sees one pad's worth of input.
-    ///
-    /// Which *style* each is published in follows the title's own
-    /// `SetSupportedNpadStyleSet`. See [`NPAD_PRESENTATIONS`] for why a fixed
-    /// pair of styles is not enough.
+    /// Mirror the pad into `HidSharedMemory` as both player 1 and handheld, in the
+    /// styles the title requested (see [`NPAD_PRESENTATIONS`]).
     fn write_hid_gamepad_state(&mut self, buttons: u64, lx: i32, ly: i32, rx: i32, ry: i32) {
         use hid_shmem as h;
         self.sample_counter = self.sample_counter.wrapping_add(1);
         let sample = self.sample_counter;
         let supported = self.npad_style_set;
-        // The console-wide condition beside the per-pad state. It is published
-        // here so that mapping the shared memory publishes it too, before the
-        // guest has read a single pad.
+        // Published on mapping, before the guest reads a pad.
         self.write_npad_condition();
         self.write_npad_slot(
             0,
@@ -4247,9 +2904,7 @@ impl Cpu {
             buttons,
             (lx, ly, rx, ry),
         );
-        // The handheld slot is published unconditionally, as it always was. A
-        // title that did not name the style simply never reads it, and taking
-        // it away is a change that can only cost a title that works today.
+        // The handheld slot is always published.
         self.write_npad_slot(
             h::HANDHELD_SLOT,
             NPAD_HANDHELD,
@@ -4259,16 +2914,7 @@ impl Cpu {
         );
     }
 
-    /// Publish one `HidNpadInternalState`: the controller's style and device
-    /// type, then a single-entry LIFO holding the current button/stick state.
-    /// A reader takes `count` entries ending at `tail`, so one entry at index 0
-    /// is all `hidGetNpadStates*` needs.
-    /// Publish `nn::hid::NpadCondition`, the console-wide controller state
-    /// that `GetNpadJoyHoldType` reads straight out of shared memory.
-    ///
-    /// The hold type is the one `SetNpadJoyHoldType` stored, so the value here
-    /// and the one `hid`'s own getter answers cannot disagree: they are the
-    /// same field, published twice.
+    /// Publish `nn::hid::NpadCondition`, including the stored joy-con hold type.
     pub(super) fn write_npad_condition(&mut self) {
         use hid_shmem as h;
         if self.hid_shmem_addr == 0 {
@@ -4304,14 +2950,7 @@ impl Cpu {
             .mem
             .write_u32(base + h::DEVICE_TYPE, presentation.device_type);
 
-        // A pad that never writes its power info is a pad reporting an empty
-        // battery: `hidGetNpadPowerInfo*` reads `battery_level` straight out
-        // of here, and the zero an unwritten field holds is its "flat" step,
-        // not a missing reading. Both pads published here are attached to the
-        // console (one on its cable, one on the rails) so both are on
-        // external power with a full battery, and the level is written for the
-        // pad and for each of its halves because a caller asking about a
-        // handheld's left Joy-Con reads the second entry, not the first.
+        // Report external power and a full battery for the pad and each half; zero reads as flat.
         let _ = self.mem.write_u32(
             base + h::SYSTEM_PROPERTIES,
             h::SYSTEM_PROP_POWER_CONNECTED | h::SYSTEM_PROP_FULL_BUTTONS,
@@ -4329,13 +2968,7 @@ impl Cpu {
             sticks,
             presentation.attributes,
         );
-        // SystemExt is not one of the styles above but a second copy every pad
-        // carries, the way Eden's `npad.cpp` writes it after its per-style
-        // switch. **The Home Menu reads this LIFO and no other**, and never
-        // calls `SetSupportedNpadStyleSet` to ask for the style, so
-        // publishing only what a title asked for left it with no buttons at
-        // all. `style_tag` still names the physical style, which is why
-        // nothing above ORs the bit in.
+        // SystemExt: a second copy every pad carries; the Home Menu reads only this LIFO.
         self.write_npad_lifo(
             base.wrapping_add(h::SYSTEM_EXT_LIFO),
             sample,
@@ -4345,12 +2978,8 @@ impl Cpu {
         );
     }
 
-    /// Publish one state into one `HidNpadCommonLifo` at `lifo`.
-    ///
-    /// A reader takes `count` entries ending at `tail`, so one entry at index
-    /// 0 is all `hidGetNpadStates*` needs. The storage's sampling number is
-    /// the state's doubled because bit 0 is the seqlock's "being written"
-    /// flag, and a reader spins on the entry until it clears.
+    /// Publish one state into a `HidNpadCommonLifo`. The sampling number is doubled
+    /// because bit 0 is the seqlock's "being written" flag.
     fn write_npad_lifo(
         &mut self,
         lifo: u32,
@@ -4380,33 +3009,9 @@ impl Cpu {
         let _ = self.mem.write_u32(entry + h::STATE_ATTRIBUTES, attributes);
     }
 
-    /// Publish the host's touchscreen contacts where `hidGetTouchScreenStates`
-    /// reads them.
-    ///
-    /// Touch is a handheld-only input on real hardware: docked, the screen is
-    /// in the dock and nothing can be touching it, so contacts are dropped and
-    /// the sample is published empty. The sample is still published, because a
-    /// LIFO that stops advancing is not "no touches" to a reader waiting for
-    /// the next one.
-    ///
-    /// An empty slice is how a lift is reported. The caller has to keep
-    /// sending while a finger is down - which is also what makes a touch that
-    /// began before the guest mapped hid's shared memory show up as soon as it
-    /// has.
-    ///
-    /// **A contact that is merely present is not a tap.** `HidTouchState`
-    /// carries an `attributes` word whose bit 0 is `start_touch` and bit 1
-    /// `end_touch`, and a UI decides it has been pressed on those transitions
-    /// rather than on a finger simply being in the list. This published zero
-    /// for both and reported a lift by dropping the contact, so the Home Menu
-    /// saw a finger that never began and never ended: every tap registered and
-    /// none of them did anything.
-    ///
-    /// So the fingers down at the last sample are remembered here. A new id is
-    /// published with `start_touch`; an id that has gone is published **once
-    /// more**, still counted, with `end_touch`, and only then forgotten, which
-    /// is what Eden's `touch_screen_driver.cpp` does over its own
-    /// `TouchFinger::pressed`.
+    /// Publish touchscreen contacts for `hidGetTouchScreenStates`. New ids get
+    /// `start_touch`; lifted ids are published once more with `end_touch`. Docked, no
+    /// contacts are reported, but the sample still advances.
     pub fn set_touch_state(&mut self, touches: &[TouchPoint]) {
         self.last_touches = touches.to_vec();
         if self.hid_shmem_addr == 0 {
@@ -4430,15 +3035,12 @@ impl Cpu {
         let state = storage.wrapping_add(h::TOUCH_STATE);
         let _ = self.mem.write_u64(state + h::TOUCH_SAMPLING_NUMBER, sample);
 
-        // Docked, the screen is in the dock and nothing can be touching it, so
-        // every contact is treated as gone, which still reports the lift of
-        // one that was down when the console was docked.
+        // Docked: every contact is gone.
         let down: &[TouchPoint] = match self.operation_mode {
             OperationMode::Handheld => touches,
             OperationMode::Docked => &[],
         };
-        // The contacts to publish: the ones down now, then the ones that were
-        // down at the last sample and are not any more.
+        // Contacts down now, then those lifted since the last sample.
         let mut published: Vec<(TouchPoint, u32)> = Vec::with_capacity(TOUCH_MAX);
         for touch in down.iter().take(TOUCH_MAX) {
             let held = self
@@ -4463,9 +3065,7 @@ impl Cpu {
         let slot = |i: usize| state + h::TOUCH_TOUCHES + i as u32 * h::TOUCH_SIZE;
         for (i, (touch, attributes)) in published.iter().enumerate() {
             let e = slot(i);
-            // delta_time is how long this contact has been down. Nothing here
-            // measures it, and a title that wants a duration times its own
-            // frames; reporting a made-up figure would be worse than zero.
+            // delta_time is not measured.
             let _ = self.mem.write_u64(e + h::TOUCH_DELTA_TIME, 0);
             let _ = self.mem.write_u32(e + h::TOUCH_ATTRIBUTES, *attributes);
             let _ = self.mem.write_u32(e + h::TOUCH_FINGER_ID, touch.finger_id);
@@ -4479,9 +3079,7 @@ impl Cpu {
             let _ = self.mem.write_u32(e + h::TOUCH_DIAMETER_Y, TOUCH_DIAMETER);
             let _ = self.mem.write_u32(e + h::TOUCH_ROTATION_ANGLE, 0);
         }
-        // A reader that trusts the contact count never looks past it, but one
-        // that scans the array would find the fingers a previous, larger sample
-        // left there.
+        // Clear slots a previous larger sample left.
         for i in count..self.touch_published {
             let e = slot(i);
             for off in (0..h::TOUCH_SIZE).step_by(4) {
@@ -4491,9 +3089,7 @@ impl Cpu {
         self.touch_published = count;
     }
 
-    /// What the guest last asked the rumble motors to do, as `(low, high)`
-    /// amplitudes in 0.0..=1.0. The frontend maps these onto the Gamepad API's
-    /// `dual-rumble` strong and weak magnitudes.
+    /// Rumble `(low, high)` amplitudes in 0.0..=1.0.
     pub fn vibration(&self) -> (f32, f32) {
         self.vibration
     }
@@ -4513,16 +3109,12 @@ impl Cpu {
         self.hid_shmem_addr
     }
 
-    /// The rate and channel count of the samples [`Cpu::take_audio`] returns,
-    /// as `(sample_rate, channels)`. `(0, 0)` before the guest has opened an
-    /// audio device: there is nothing to play, and no format to play it in.
+    /// `(sample_rate, channels)` of [`Cpu::take_audio`]'s samples; `(0, 0)` before a device opens.
     pub fn audio_format(&self) -> (u32, u32) {
         self.audio_format
     }
 
-    /// Move up to `out.len()` interleaved samples of queued PCM into `out`,
-    /// returning how many were written. What is taken is gone: this is a
-    /// hand-off to the host's audio device, not a peek.
+    /// Move up to `out.len()` queued interleaved samples into `out`; returns the count.
     pub fn take_audio(&mut self, out: &mut [i16]) -> usize {
         let n = out.len().min(self.audio_pcm.len());
         for slot in out.iter_mut().take(n) {
@@ -4532,14 +3124,7 @@ impl Cpu {
         n
     }
 
-    /// Where the guest's audio has got to: every device and renderer it has
-    /// open, and the samples between them and the host.
-    ///
-    /// A title with no sound has lost it at one of four places: nothing
-    /// opened a device, a device was opened and never started or fed, the
-    /// samples were produced and the host never took them, or the host took
-    /// them and could not play them. The first three are here; the fourth is
-    /// the page's to say.
+    /// Every open audio device and renderer, and the samples queued for the host.
     pub fn audio_activity(&self) -> AudioActivity {
         let mut outputs: Vec<AudioOutActivity> = self
             .audio_outs
@@ -4590,11 +3175,7 @@ impl Cpu {
         }
     }
 
-    /// Queue interleaved PCM for the host, dropping the oldest samples once
-    /// the backlog passes [`Cpu::AUDIO_QUEUE_LIMIT`]. Dropping the oldest is
-    /// what a real device effectively does when nothing consumes its output:
-    /// the guest keeps running, and only the audio that could never have been
-    /// heard is lost.
+    /// Queue interleaved PCM, dropping the oldest past [`Cpu::AUDIO_QUEUE_LIMIT`].
     pub(crate) fn queue_audio(&mut self, samples: impl Iterator<Item = i16>) {
         let before = self.audio_pcm.len();
         self.audio_pcm.extend(samples);
@@ -4604,48 +3185,31 @@ impl Cpu {
         self.audio_dropped += over as u64;
     }
 
-    /// Roughly a second of 48 kHz stereo. Past this the host is not keeping
-    /// up and the backlog is only latency.
+    /// About a second of 48 kHz stereo.
     pub(crate) const AUDIO_QUEUE_LIMIT: usize = 48_000 * 2;
 
-    /// Provide the font `pl:u` hands out as every shared font type, as the
-    /// contents of a TrueType/OpenType file. Homebrew that draws text (hbmenu,
-    /// anything using `plGetSharedFont`) feeds these bytes to FreeType, so
-    /// without one nothing but pre-rendered bitmaps appears on screen.
+    /// Set the font `pl:u` serves for every shared font type (TrueType/OpenType).
     pub fn set_shared_font(&mut self, font: Vec<u8>) {
         self.shared_font = font;
-        // Whatever was assembled from the old font is stale.
         self.pl_shmem_image.clear();
         self.shared_font_regions.clear();
-        // A guest that already mapped the shared memory keeps the pointer it was
-        // given, so refill the region in place.
+        // Refill in place if the guest already mapped the region.
         if self.pl_shmem_addr != 0 {
             self.write_shared_font(self.pl_shmem_addr);
         }
     }
 
-    /// How many bytes of font data `pl:u` is serving.
     pub fn shared_font_len(&self) -> usize {
         self.shared_font.len()
     }
 
-    /// Assemble pl's shared memory, if it has not been assembled already.
-    ///
-    /// The real fonts come from the five system data archives a firmware dump
-    /// carries; each holds `.bfttf` files, which are a TrueType file behind an
-    /// eight-byte header with the whole thing xored by a fixed key. A guest
-    /// that has none of those registered: homebrew run without a firmware
-    /// dump, or a web build: gets the host-supplied font
-    /// ([`Cpu::set_shared_font`]) in every slot instead, wrapped identically
-    /// so there is one layout rather than two.
-    ///
-    /// This is deliberately lazy: the archives are registered after the `Cpu`
-    /// exists, and the guest cannot ask for a font before it has run.
+    /// Assemble pl's shared memory lazily: firmware `.bfttf` fonts, or the host font
+    /// wrapped the same way in every slot.
     pub(super) fn build_shared_fonts(&mut self) {
         if !self.shared_font_regions.is_empty() {
             return;
         }
-        // Read each archive at most once: two of them hold two fonts.
+        // Read each archive at most once: two hold two fonts.
         let mut archives: IdMap<u64, Vec<u8>> = IdMap::default();
         for (id, _) in SHARED_FONTS {
             if archives.contains_key(&id) {
@@ -4671,9 +3235,7 @@ impl Cpu {
         }
 
         if self.shared_font_regions.is_empty() && !self.shared_font.is_empty() {
-            // No firmware fonts. The host's font stands in for every type, so
-            // a guest that asks for the extension face gets *something*
-            // rather than an empty region it cannot draw with.
+            // No firmware fonts: the host font stands in for every type.
             let font = decode_bfttf(&encode_bfttf(&self.shared_font.clone()));
             if let Some(font) = font {
                 for _ in 0..SHARED_FONTS.len() {
@@ -4693,9 +3255,7 @@ impl Cpu {
         }
     }
 
-    /// Append one decoded font to the shared-memory image and record where its
-    /// TrueType data starts. A font that would not fit is dropped rather than
-    /// truncated: half a font is not a font.
+    /// Append a decoded font; one that does not fit is dropped, not truncated.
     fn push_shared_font(&mut self, font: &[u8]) {
         let offset = self.pl_shmem_image.len();
         if offset + font.len() > PL_SHMEM_SIZE as usize {
@@ -4708,15 +3268,12 @@ impl Cpu {
         });
     }
 
-    /// pl's shared memory as the guest sees it, for tests that need to check
-    /// a font really is where `pl:u` said it would be.
     #[cfg(test)]
     pub(super) fn shared_font_image(&mut self) -> &[u8] {
         self.build_shared_fonts();
         &self.pl_shmem_image
     }
 
-    /// Where each shared font sits in pl's shared memory.
     pub(super) fn shared_font_regions(&mut self) -> &[FontRegion] {
         self.build_shared_fonts();
         &self.shared_font_regions
@@ -4730,71 +3287,46 @@ impl Cpu {
         self.pl_shmem_image = image;
     }
 
-    /// Set the wall-clock time `time:u`/`time:s` reports, as POSIX seconds
-    /// (UTC). There is no OS clock under `wasm32-unknown-unknown`, so without
-    /// a host pushing this (from `Date.now()`), every clock reads the Unix
-    /// epoch.
+    /// Set the POSIX time (UTC) `time:u`/`time:s` report; the epoch until the host sets it.
     pub fn set_unix_time(&mut self, seconds: i64) {
         self.unix_time = seconds;
     }
 
-    /// Current value of the emulated RTC, as set by [`Cpu::set_unix_time`].
     pub fn unix_time(&self) -> i64 {
         self.unix_time
     }
 
-    /// Set the battery level `psm` reports. There is no host battery API
-    /// reachable from `wasm32-unknown-unknown`, so without a host pushing
-    /// this (from the browser's Battery Status API, where available), `psm`
-    /// reports a full, charging battery.
+    /// Set the battery `psm` reports; full and charging until the host sets it.
     pub fn set_battery(&mut self, percent: u8, charging: bool) {
         self.battery_percent = percent.min(100);
         self.battery_charging = charging;
     }
 
-    /// Current battery reading, as set by [`Cpu::set_battery`].
     pub fn battery(&self) -> (u8, bool) {
         (self.battery_percent, self.battery_charging)
     }
 
-    /// Set the program (title) id `pm:info` reports for the running process.
-    /// A loader that decrypted an NCA knows it; homebrew has none, and keeps
-    /// the Album applet's id it would run under on real hardware.
-    /// Tell the running title what it was allotted to store, out of its own
-    /// NACP: `SaveDataQuota::from(&control.nacp)` is the whole call site.
-    ///
-    /// Whatever the NACP says is passed through, zeroes included: a title that
-    /// declares no save has none, and a title that declares no ceiling never
-    /// extends the one it has. Correcting either would be answering a question
-    /// the title did not ask.
+    /// Set the NACP save quota, passed through as declared.
     pub fn set_save_data_quota(&mut self, quota: fs::SaveDataQuota) {
         self.save_data_quota = quota;
     }
 
-    /// What the running title was allotted, for the commands that report it.
     pub fn save_data_quota(&self) -> fs::SaveDataQuota {
         self.save_data_quota
     }
 
-    /// Choose this process's address space from the `system_resource_size`
-    /// its `main.npdm` declares. See [`MemoryLayout`]. Call it before
-    /// [`Cpu::boot_retail_program`]; the guest reads the resulting figures
-    /// out of `svcGetInfo` as soon as `nn::init` runs.
+    /// Set the NPDM `system_resource_size`, which selects the [`MemoryLayout`].
+    /// Call before [`Cpu::boot_retail_program`].
     pub fn set_system_resource_size(&mut self, size: u32) {
         self.system_resource_size = size;
         self.refresh_memory_layout();
     }
 
-    /// Re-choose the layout from whichever of the program id and the declared
-    /// system resource size have been set. Both setters call it: `common` sets
-    /// the size first and the browser sets the id first, and a layout that
-    /// depended on the order would be right in one caller and wrong in the
-    /// other.
+    /// Re-choose the layout from the program id and system resource size, set in either order.
     fn refresh_memory_layout(&mut self) {
         self.memory_layout = MemoryLayout::for_program(self.program_id, self.system_resource_size);
     }
 
-    /// The address space this process was given.
     pub fn memory_layout(&self) -> MemoryLayout {
         self.memory_layout
     }
@@ -4804,51 +3336,27 @@ impl Cpu {
         self.refresh_memory_layout();
     }
 
-    /// The program id `pm` reports, as set by [`Cpu::set_program_id`].
     pub fn program_id(&self) -> u64 {
         self.program_id
     }
 
-    /// The results a library applet pushed back before it exited, oldest
-    /// first, the keyboard's text, the controller applet's player count. The
-    /// caller that launched the applet is what pops these on a console; here
-    /// the host that started it is the caller, and this is where they arrive.
-    ///
-    /// Empty for anything that is not a library applet, and for one that has
-    /// not finished.
+    /// What a library applet pushed back before exiting, oldest first.
     pub fn library_applet_results(&self) -> &[Vec<u8>] {
         &self.am_out_data
     }
 
-    /// What a library applet has said to its caller mid-run through
-    /// `PushInteractiveOutData`, oldest first, the keyboard offering its text
-    /// to be checked, an inline keyboard reporting a keypress. The last of
-    /// these is the one waiting on an answer.
+    /// What a library applet pushed through `PushInteractiveOutData`, oldest first.
     pub fn library_applet_interactive_messages(&self) -> &[Vec<u8>] {
         &self.am_interactive_out
     }
 
-    /// Answer the applet as its caller would, through
-    /// `ILibraryAppletSelfAccessor::PopInteractiveInData`.
-    ///
-    /// An applet that has pushed an interactive message waits on the event
-    /// beside that pop, so queuing an answer fires it. Nothing here invents
-    /// one: the host that started the applet is its caller, and this is how it
-    /// speaks.
+    /// Answer the applet through `PopInteractiveInData`, firing its event.
     pub fn push_applet_interactive_in_data(&mut self, data: Vec<u8>) {
         self.am_interactive_in.push_back(data);
         self.refresh_applet_pop_events();
     }
 
-    /// A pseudo-random 64-bit value, for `csrng`.
-    ///
-    /// splitmix64 over a state seeded from the emulated clock. This is **not**
-    /// a CSPRNG and nothing that comes out of it should be used as a key:
-    /// `wasm32-unknown-unknown` has no OS entropy to draw on, and the security
-    /// processor whose hardware RNG really answers `csrng` is not modelled.
-    /// What it does guarantee is that a caller asking for random bytes gets
-    /// bytes that differ from each other and from the last call, which the
-    /// generic reply (leaving the caller's buffer untouched) did not.
+    /// A pseudo-random u64 for `csrng`: splitmix64 seeded from the clock. Not a CSPRNG.
     pub(crate) fn next_random_u64(&mut self) -> u64 {
         if self.rng_state == 0 {
             self.rng_state =
@@ -4880,24 +3388,13 @@ impl Cpu {
         }
     }
 
-    /// Compute `a + b + carry_in`, returning (result, carry-out, overflow).
-    /// Operands are masked to the operation size first: callers pass `b` as
-    /// the already-inverted subtrahend for SUB, whose 64-bit `!` would
-    /// otherwise pollute the 32-bit carry/overflow computation.
+    /// `a + b + carry_in` as (result, carry-out, overflow), with operands masked to the operation size.
     #[inline(always)]
     fn add_carry_overflow(a: u64, b: u64, carry_in: u64, sf: bool) -> (u64, u32, u32) {
         let mask = Self::mask(sf);
         let a = a & mask;
         let b = b & mask;
-        // No u128, and no branch on the width either. Two `overflowing_add`s
-        // whose carries are mutually exclusive (the second can only fire when
-        // the first did not) are the 64-bit carry chain, and masked operands
-        // make the same sum right for 32 bits with the carry-out one bit
-        // further down, so which of the two the operation means is a select on
-        // a value already in hand. wasm has no 128-bit integers, so the u128
-        // form this replaced lowered to a call on the hottest path there is,
-        // and `sf` varies from one instruction to the next, so branching on it
-        // mispredicted: ADD/SUB/CMP are 15% of a frame.
+        // Two exclusive `overflowing_add`s form the carry chain without u128 or a width branch.
         let (sum, c1) = a.overflowing_add(b);
         let (sum, c2) = sum.overflowing_add(carry_in);
         let carry = if sf {
@@ -4927,12 +3424,8 @@ impl Cpu {
         self.set_nzcv_from_alu(result, sf, carry, overflow);
     }
 
-    /// The ADD/SUB core. `sp_form` says whether register 31 names SP rather
-    /// than XZR, which differs by encoding: the immediate and extended-register
-    /// forms use SP, the shifted-register form uses XZR. Getting that wrong
-    /// turns `neg x1, x0` (`sub x1, xzr, x0`) into a read of the stack
-    /// pointer, which is exactly how `aligned_alloc` computes its rounded
-    /// size, so it silently corrupts every aligned allocation.
+    /// The ADD/SUB core. `sp_form`: register 31 is SP (immediate and extended forms)
+    /// rather than XZR (shifted-register form).
     #[inline(always)]
     fn add_sub(
         &mut self,
@@ -4944,9 +3437,7 @@ impl Cpu {
         sf: bool,
         sp_form: bool,
     ) {
-        // Rd=31 is SP only for the plain ADD/SUB immediate and extended forms.
-        // For the flag-setting forms and the shifted-register form it is XZR,
-        // so the result is discarded.
+        // Rd=31 is SP only for the non-flag-setting immediate and extended forms.
         let rd = if set_flags || !sp_form {
             Self::zr_write_slot(rd)
         } else {
@@ -4964,12 +3455,8 @@ impl Cpu {
         );
     }
 
-    /// The `ADD`/`SUB` core, with the direction already folded into `rhs` and
-    /// `carry`, and register 31's two meanings already resolved to slots.
-    ///
-    /// The block translator settles both when it builds the op and enters
-    /// here directly; [`Cpu::add_sub`] settles them per execution and lands
-    /// here too, so the addition itself is written once.
+    /// ADD/SUB with direction folded into `rhs`/`carry` and register 31 resolved; shared
+    /// by [`Cpu::add_sub`] and the block translator.
     #[inline(always)]
     pub(super) fn add_sub_pre(
         &mut self,
@@ -4990,23 +3477,18 @@ impl Cpu {
 
     // ---- main execution ----
 
-    /// Execute a single instruction. Returns `Ok(())` on success.
+    /// Execute a single instruction.
     pub fn step(&mut self) -> Result<()> {
         self.step_inner()
     }
 
-    /// The body of [`Cpu::step`], inlined into both the single-step entry point
-    /// and [`Cpu::run`]'s loop so a run does not pay a call per instruction.
+    /// Body of [`Cpu::step`], inlined into [`Cpu::run`]'s loop.
     #[inline(always)]
     fn step_inner(&mut self) -> Result<()> {
         if self.halted {
             return Err(Error::Cpu("attempted to step a halted CPU".into()));
         }
-        // Horizon preempts, and until this was here the scheduler only moved
-        // when a thread blocked. Between instructions is a safe place to
-        // switch (the whole architectural state is in the context) and
-        // `yield_thread` is a no-op when nothing else can run, so a
-        // single-threaded guest pays one counter increment for it.
+        // Preemption point; `yield_thread` is a no-op when nothing else can run.
         self.slice_used += 1;
         if self.slice_used >= TIME_SLICE {
             self.slice_used = 0;
@@ -5043,17 +3525,11 @@ impl Cpu {
     }
 
     fn record_fault(&mut self, e: &Error, pc: u32, insn: u32) {
-        // Whatever the parts of the emulator with no `Cpu` in reach have said
-        // belongs *before* the fault, not after it: a rasterizer complaining
-        // about the draw that led here is the context, not the aftermath.
+        // Traces from parts without a `Cpu` belong before the fault.
         self.absorb_traces();
-        // The separating blank line goes in unmarked and on its own: a marker
-        // grades the line it heads, so one written in front of a leading
-        // newline would have graded the tail of whatever came before.
+        // Unmarked, so the separator does not grade the previous line.
         self.trace_line("\n");
-        // Marking the block makes the register dump and instruction trail
-        // below inherit the fault's level rather than arriving as ordinary
-        // trace text: they carry no marker of their own.
+        // The dump and trail below inherit the fault's level.
         self.trace_marked(
             Level::Error,
             &format!(
@@ -5072,11 +3548,7 @@ impl Cpu {
         self.trace_trail();
     }
 
-    /// Show the run-up to wherever the machine is, so the path there is
-    /// readable without full tracing enabled. The trail holds runs rather
-    /// than instructions (see [`Cpu::record_run`]), so expand them here and
-    /// re-read the words: this is the one place that pays for keeping the
-    /// inner loops free of it.
+    /// Trace the run-up to the current PC, expanding the recorded runs.
     pub(super) fn trace_trail(&mut self) {
         let trail = self.trail_text();
         if !trail.is_empty() {
@@ -5084,9 +3556,7 @@ impl Cpu {
         }
     }
 
-    /// The trail [`Cpu::trace_trail`] writes, as text: a heading and one
-    /// disassembled instruction per line, or nothing when no instruction has
-    /// run yet.
+    /// The trail as text: a heading and one disassembled instruction per line.
     pub(super) fn trail_text(&self) -> String {
         let runs = self.recent_len.min(RECENT_LEN);
         if runs == 0 {
@@ -5115,22 +3585,12 @@ impl Cpu {
         text
     }
 
-    /// One line per guest thread: which one is running, what each is blocked
-    /// on, and where it stopped. The counterpart to [`Cpu::backtrace`] for
-    /// hangs that are about *scheduling* rather than about one call stack,
-    /// a thread spinning without ever reaching a blocking syscall looks
-    /// identical to a busy program until you can see that every other thread
-    /// is Runnable and none of them has moved.
-    /// Index of the thread the core is currently running, for host-side
-    /// sampling profilers.
+    /// Index of the running thread, for host-side sampling profilers.
     pub fn current_thread_index(&self) -> usize {
         self.current_thread
     }
 
-    /// Make every blocked thread runnable, and report how many that was. A
-    /// debugging lever only: guests re-check their predicates in a loop, so a
-    /// spurious wake degrades to a spin rather than a hang, and this answers
-    /// "is this process idle because a worker it parked was never woken".
+    /// Debugging lever: make every blocked thread runnable; returns the count.
     pub fn wake_all_blocked(&mut self) -> usize {
         let mut woken = 0;
         for index in 0..self.threads.len() {
@@ -5146,21 +3606,14 @@ impl Cpu {
         woken
     }
 
-    /// Every `(interface, command)` this run has reported as having no
-    /// implementation behind it, sorted.
-    ///
-    /// Each of these was announced once, at the moment it happened, and then
-    /// scrolled past. Collected they are the best single answer to "why does
-    /// this title not get further", which is why a crash report carries the
-    /// list rather than asking whoever files it to have kept the log.
+    /// Every `(interface, command)` reported as unimplemented, sorted.
     pub fn unimplemented_ipc(&self) -> Vec<(String, Option<u32>)> {
         let mut all: Vec<(String, Option<u32>)> = self.unimplemented_ipc.iter().cloned().collect();
         all.sort();
         all
     }
 
-    /// Every `(interface, command)` answered with nothing behind the answer.
-    /// See [`Cpu::warn_stub`] for why this is a different list.
+    /// Every `(interface, command)` answered by a stub; see [`Cpu::warn_stub`].
     pub fn stubbed_ipc(&self) -> Vec<(String, Option<u32>)> {
         let mut all: Vec<(String, Option<u32>)> = self.stubbed_ipc.iter().cloned().collect();
         all.sort();
@@ -5169,8 +3622,7 @@ impl Cpu {
 
     /// Count one failed nvdrv ioctl towards the next [`Cpu::take_nv_errors`].
     pub(super) fn count_nv_error(&mut self, node: &str, request: u32, error: u32) {
-        /// Distinct failures held between two readings; past it new ones go
-        /// uncounted.
+        /// Distinct failures held between readings.
         const CAP: usize = 64;
         if let Some(calls) = self
             .nv_errors
@@ -5184,8 +3636,7 @@ impl Cpu {
         }
     }
 
-    /// Every nvdrv ioctl that failed since the last call: the device node,
-    /// the request, the error, and how many times.
+    /// nvdrv ioctl failures since the last call: node, request, error, count.
     pub fn take_nv_errors(&mut self) -> Vec<(String, u32, u32, u64)> {
         std::mem::take(&mut self.nv_errors)
             .into_iter()
@@ -5193,8 +3644,7 @@ impl Cpu {
             .collect()
     }
 
-    /// The controller styles the title said it accepts (`HidNpadStyleTag`
-    /// bits, 0 before it says), and the one style the pad is presented as.
+    /// Requested `HidNpadStyleTag` bits (0 before any) and the presented style.
     pub fn npad_styles(&self) -> (u32, u32) {
         (
             self.npad_style_set,
@@ -5202,10 +3652,7 @@ impl Cpu {
         )
     }
 
-    /// Make every thread the guest created but never started runnable, and
-    /// report how many that was. A debugging lever only: it answers "is this
-    /// process idle because a thread it made never ran" without having to find
-    /// the code that would have started it.
+    /// Debugging lever: start every created-but-unstarted thread; returns the count.
     pub fn start_created_threads(&mut self) -> usize {
         let mut started = 0;
         for thread in &mut self.threads {
@@ -5219,12 +3666,7 @@ impl Cpu {
 
     pub fn thread_dump(&self) -> String {
         let mut out = String::new();
-        // A program that never created a thread has no slots at all,
-        // [`Cpu::ensure_main_thread`] makes the first one on demand, and this
-        // used to answer such a run with nothing whatsoever. That is the run
-        // most likely to be asking: a single-threaded title that has stopped
-        // and one that is working look identical from outside, and "no
-        // threads" reads as a broken dump rather than as an answer.
+        // Report the implicit main thread for a program that never created one.
         if self.threads.is_empty() {
             out.push_str(&format!(
                 "  [0]* handle={MAIN_THREAD_HANDLE:#x} state=Runnable paused=false pc={:#x}\n  \
@@ -5249,34 +3691,18 @@ impl Cpu {
         out
     }
 
-    /// Record a diagnostic the user needs to see wherever the emulator is
-    /// running. On the host that is stderr; in the browser there is no stderr
-    /// at all: `wasm32-unknown-unknown` has no WASI, so an `eprintln!` there
-    /// goes nowhere. The trace buffer is the channel the page actually drains
-    /// (`switch_drain_trace`), so anything that must reach a browser user goes
-    /// through here as well, and is recorded whether or not per-instruction
-    /// tracing is on, the same as fault context.
-    ///
-    /// `level` is not decoration. A title's `fatal` abort, a stubbed-out
-    /// command and a loader milestone all used to arrive as the same grey
-    /// text, so the one that explains the failure had to be found by reading;
-    /// the level travels with the line and the page colours by it.
+    /// Record a user-facing diagnostic: to stderr on the host and to the trace buffer
+    /// the browser drains, with a level the page colours by.
     pub fn diagnostic(&mut self, level: Level, line: &str) {
-        // Not `traceln!`: that also feeds the pending sink, and this line is
-        // already on its way into the trace buffer the sink drains into.
+        // Not `traceln!`: that would feed the pending sink a second time.
         #[cfg(not(target_arch = "wasm32"))]
         eprintln!("{line}");
         self.absorb_traces();
         self.trace_marked(level, line);
     }
 
-    /// Fold in whatever the parts of the emulator that have no `Cpu` in reach
-    /// (the rasterizer, the shader translator, the texture decoder) have
-    /// traced since the last time anything looked.
-    ///
-    /// Ordering between the two is only as good as how often this is called,
-    /// which is why it runs before every diagnostic and every fault as well as
-    /// at the drain.
+    /// Fold in traces from parts without a `Cpu` (rasterizer, shader translator, texture
+    /// decoder); called before diagnostics, faults and drains to keep ordering.
     pub fn absorb_traces(&mut self) {
         let pending = crate::trace::take_pending();
         if pending.is_empty() {
@@ -5287,17 +3713,14 @@ impl Cpu {
         self.trim_trace();
     }
 
-    /// Append a line that carries no level of its own, and so reads as a
-    /// continuation of the one before it, a register dump under a fault, an
-    /// instruction under a trace.
+    /// Append an unmarked line, a continuation of the previous one.
     fn trace_line(&mut self, line: &str) {
         self.note_dropped_trace();
         self.trace.extend_from_slice(line.as_bytes());
         self.trim_trace();
     }
 
-    /// Append a line at `level`, which every line after it inherits until
-    /// another marked one arrives.
+    /// Append a line at `level`, inherited by following unmarked lines.
     fn trace_marked(&mut self, level: Level, line: &str) {
         self.note_dropped_trace();
         self.trace.push(level.marker());
@@ -5308,11 +3731,7 @@ impl Cpu {
         self.trim_trace();
     }
 
-    /// Say that text was lost, once per loss, at the point it was lost.
-    ///
-    /// A counter reported at the end would have been simpler and would have
-    /// said the wrong thing: what matters about a gap is where in the stream
-    /// it is, and a note written at the drain claims the loss happened last.
+    /// Note lost text once per loss, where it was lost.
     fn note_dropped_trace(&mut self) {
         if !self.trace_dropped {
             return;
@@ -5323,19 +3742,7 @@ impl Cpu {
             .extend_from_slice(b"[trace] the buffer filled; older lines above were dropped\n");
     }
 
-    /// Bring the trace back under its cap by dropping the oldest text.
-    ///
-    /// It used to drop the newest: once the buffer was full nothing more was
-    /// appended at all, which threw away precisely the part worth keeping: a
-    /// fault writes its `=== FAULT ===` block, its register dump and its
-    /// instruction trail *after* everything that led up to them, so a run with
-    /// tracing on lost its entire crash report and kept half a megabyte of
-    /// ordinary disassembly.
-    ///
-    /// A quarter of the buffer goes at a time, so a full buffer costs one move
-    /// per 128 KiB rather than one per line, and the cut lands on a line
-    /// boundary so the host is never handed half a line or a level marker with
-    /// nothing behind it.
+    /// Drop the oldest quarter of the trace at a line boundary to get under the cap.
     fn trim_trace(&mut self) {
         if self.trace.len() <= self.trace_cap {
             return;
@@ -5344,8 +3751,7 @@ impl Cpu {
         let want = (least + self.trace_cap / 4).min(self.trace.len());
         let cut = match self.trace[want..].iter().position(|&b| b == b'\n') {
             Some(at) => want + at + 1,
-            // No line ending anywhere past the cut: one line is longer than
-            // the whole buffer, and keeping its tail is keeping nothing.
+            // A single line longer than the buffer: drop it all.
             None => self.trace.len(),
         };
         self.trace.drain(..cut);
@@ -5358,33 +3764,20 @@ impl Cpu {
         let _ = pc;
     }
 
-    /// Walk the guest's frame-pointer chain and return the return addresses,
-    /// innermost first. devkitA64 keeps X29 as a frame pointer (`stp x29, x30,
-    /// [sp]; mov x29, sp`), so each frame stores `{saved fp, saved lr}` at the
-    /// frame base. Stops as soon as the chain leaves mapped memory or fails to
-    /// move forward, so a corrupt stack cannot loop.
-    ///
-    /// Not every function keeps that convention: zlib's `inflate_fast` in Just
-    /// Dance 2019 holds data in x29 and x30, and a walk that trusted them
-    /// reported the thread as called from `0x74736964`, which is the text
-    /// "dist". So a frame is followed only if it lies at or above the stack
-    /// pointer, and an address is reported as a return address only if the
-    /// instruction before it is a call.
+    /// Walk the frame-pointer chain and return return addresses, innermost first.
+    /// Frames must lie above SP and addresses must follow a call, since not all code keeps x29.
     pub fn backtrace(&self, depth: usize) -> Vec<u32> {
         self.walk_frames(&self.regs, self.mode, depth)
     }
 
-    /// [`Cpu::backtrace`] over any register file: the running thread's, or a
-    /// switched-out thread's as saved when it last gave up the CPU.
+    /// [`Cpu::backtrace`] over any register file, live or saved.
     pub(super) fn walk_frames(
         &self,
         regs: &[u64; REG_FILE],
         mode: ExecMode,
         depth: usize,
     ) -> Vec<u32> {
-        // Both states chain {saved frame pointer, return address}, but from
-        // different registers and in different widths: x29/x30 over 16-byte
-        // frames in A64, r11/r14 over 8-byte ones in AArch32.
+        // x29/x30 with 16-byte frames in A64, r11/r14 with 8-byte frames in AArch32.
         let (mut fp, lr, sp, width) = match mode {
             ExecMode::A64 => (regs[29] as u32, regs[30] as u32, regs[SP_SLOT] as u32, 8),
             ExecMode::A32 => (regs[11] as u32, regs[14] as u32, regs[13] as u32, 4),
@@ -5393,9 +3786,7 @@ impl Cpu {
         if self.is_return_address(lr, mode) {
             out.push(lr);
         }
-        // A frame record is pushed onto the stack, so the first one is at or
-        // above the stack pointer; the `next_fp <= fp` check keeps every later
-        // one above that.
+        // The first frame is at or above SP; `next_fp <= fp` keeps later ones above it.
         if fp < sp {
             return out;
         }
@@ -5420,9 +3811,7 @@ impl Cpu {
         out
     }
 
-    /// Whether `addr` is somewhere a call returns to: just after a call
-    /// instruction, or one of the stubs a thread or a host call is started
-    /// with a return into.
+    /// Whether `addr` follows a call instruction or is a thread/host return stub.
     fn is_return_address(&self, addr: u32, mode: ExecMode) -> bool {
         if addr == THREAD_EXIT_TRAMPOLINE || addr == SELF_RETURN_TRAMPOLINE {
             return true;
@@ -5445,18 +3834,12 @@ impl Cpu {
         }
     }
 
-    /// Format a full register snapshot for debugging.
-    /// One general-purpose register, for host-side debuggers that need to
-    /// read an argument out of a running call rather than a whole dump.
+    /// One general-purpose register, for host-side debuggers.
     pub fn reg(&self, i: usize) -> u64 {
         self.regs[i]
     }
 
-    /// A register snapshot in whichever state the core is running.
-    ///
-    /// The names are not cosmetic: an AArch32 dump printed as `x0..x30` says
-    /// nothing about which slot is the stack pointer and which is the link
-    /// register, and shows sixteen registers the state does not have.
+    /// A register snapshot named for the current state (A64 or AArch32).
     pub fn reg_dump(&self) -> String {
         use std::fmt::Write;
         let mut s = String::with_capacity(1024);
@@ -5504,12 +3887,8 @@ impl Cpu {
         s
     }
 
-    /// Run up to `max_steps` instructions, stopping early on halt or error.
-    ///
-    /// Goes through the block translator when it is enabled (`cpu/jit.rs`),
-    /// which executes the same instructions without decoding them again. Full
-    /// tracing needs a disassembly line per instruction, which only the
-    /// interpreter produces, so it takes that path instead.
+    /// Run up to `max_steps` instructions, stopping early on halt or error. Uses the JIT
+    /// when enabled, except with full tracing, which needs the interpreter.
     pub fn run(&mut self, max_steps: u64) -> Result<RunReport> {
         self.complete_pending_present();
         if self.jit_enabled && !self.trace_enabled && self.mode == ExecMode::A64 {
@@ -5531,16 +3910,8 @@ impl Cpu {
         *next_pc = (self.pc as i64).wrapping_add(imm) as u32;
     }
 
-    /// Route an instruction by its top-level encoding group, bits 28:25 of
-    /// every A64 instruction, the same classification the architecture manual's
-    /// first decode table uses, and only then run that group's decoder.
-    ///
-    /// [`Cpu::execute_chain`] tries every group in turn, which means an `add`
-    /// used to walk the whole load/store, SIMD and floating-point decode before
-    /// anything recognised it: ~40ns per instruction, three quarters of the time
-    /// the interpreter spent on integer code. Anything a group's decoder does not
-    /// claim still falls through to the full chain, so this only changes which
-    /// decoder gets first look, never what is decodable.
+    /// Route an instruction by its top-level group (bits 28:25) to that group's decoder
+    /// first, falling back to [`Cpu::execute_chain`].
     fn execute(&mut self, insn: u32, next_pc: u32) -> Result<()> {
         let mut pc = next_pc;
         match (insn >> 25) & 0xF {
@@ -5565,12 +3936,7 @@ impl Cpu {
                     return Ok(());
                 }
             }
-            // Data processing -- SIMD and floating point. Scalar floating point
-            // has its own top bytes (0x1E/0x1F for the data-processing and
-            // 3-source forms, 0x9E/0x9F for the 64-bit register moves and
-            // conversions); everything else in the group is Advanced SIMD. Both
-            // decoders still get a look, but asking the right one first saves
-            // walking the whole of the other's guard chain.
+            // SIMD and FP: scalar FP top bytes are 0x1E/0x1F and 0x9E/0x9F; ask that decoder first.
             0x7 | 0xF => {
                 let scalar_fp = matches!((insn >> 24) & 0xFF, 0x1E | 0x1F | 0x9E | 0x9F);
                 #[allow(clippy::if_same_then_else)] // the order is the point
@@ -5591,15 +3957,13 @@ impl Cpu {
                     return Ok(());
                 }
             }
-            // The reserved and SVE groups, left to the chain.
+            // Reserved and SVE groups, left to the chain.
             _ => {}
         }
         self.execute_chain(insn, next_pc)
     }
 
-    /// ADR/ADRP. Fixed bits[28:24] == 10000; bits[30:29] are immlo (not zero in
-    /// general, so an older check that required them to be 0 silently dropped
-    /// real ADRP instructions).
+    /// ADR/ADRP: bits[28:24] == 10000; bits[30:29] are immlo.
     fn try_pc_relative(&mut self, insn: u32) -> bool {
         if ((insn >> 24) & 0x1F) != 0b10000 {
             return false;
@@ -5618,7 +3982,7 @@ impl Cpu {
         true
     }
 
-    /// `LDR Xt, label` and friends: the literal (PC-relative) load forms.
+    /// `LDR Xt, label` and friends.
     fn try_load_literal(&mut self, insn: u32) -> Result<bool> {
         if ((insn >> 27) & 0b111) != 0b011
             || ((insn >> 26) & 1) != 0
@@ -5642,19 +4006,14 @@ impl Cpu {
                 let val = self.mem.read_u32(addr)? as u64;
                 self.write_zr(rt, sext_u64(val, 32));
             }
-            // PRFM: a prefetch hint, so nothing to do.
+            // PRFM: a prefetch hint.
             _ => {}
         }
         Ok(true)
     }
 
-    /// Branches, exception generation and system instructions, the A64 group
-    /// with top-level bits 28:25 = 101x, dispatched on the top byte and ordered
-    /// by how often real code runs them. `b.cond` is the single most executed
-    /// instruction in hbmenu's render loop (12% of a frame), so it is first.
-    ///
-    /// Returns whether the instruction was handled; a handler sets `self.pc`
-    /// itself, since that is the whole point of the group.
+    /// Branches, exceptions and system (bits 28:25 = 101x), dispatched on the top byte
+    /// in order of frequency. Returns whether handled; handlers set `self.pc`.
     fn try_branch_or_system(&mut self, insn: u32, mut next_pc: u32) -> Result<bool> {
         match (insn >> 24) & 0xFF {
             // B.cond
@@ -5728,24 +4087,14 @@ impl Cpu {
                         Ok(true)
                     }
                     0b0001 => {
-                        // BLR: read the target *before* linking, because the
-                        // link register can be the target: `blr x30` is a
-                        // return-and-relink, and writing x30 first made it jump
-                        // to itself+4. hbmenu's NEON JPEG decoder ends its IDCT
-                        // that way, so its icon decode never returned.
+                        // BLR: read the target before linking, since it may be x30.
                         let target = self.read_zr(rn) as u32;
                         self.write_zr(30, next_pc as u64);
                         self.pc = target;
                         Ok(true)
                     }
                     0b0010 => {
-                        // RET. A `ret` that returns to address 0 is a homebrew
-                        // exit path whose return-address convention the boot
-                        // model doesn't provide (the crt0 stashes the loader's
-                        // LR in x27, but the atexit table runner returns via
-                        // x30 = 0). Redirect to the exit trampoline so it
-                        // surfaces as a clean ExitProcess instead of a NULL
-                        // fetch.
+                        // RET to 0 is a homebrew exit path; redirect to the exit trampoline.
                         let tgt = self.read_zr(rn) as u32;
                         self.pc = if tgt == 0 {
                             SELF_RETURN_TRAMPOLINE
@@ -5765,10 +4114,7 @@ impl Cpu {
                 0b000 => {
                     if (insn & 0x1F) == 0b00001 {
                         let imm = ((insn >> 5) & 0xFFFF) as u16;
-                        // Retire the SVC before dispatching it: a syscall that
-                        // switches threads installs the incoming thread's PC,
-                        // and the outgoing one has to resume after its own SVC
-                        // (which is what the real ELR holds).
+                        // Retire the SVC first: a thread switch installs the incoming thread's PC.
                         self.pc = next_pc;
                         self.syscall(imm)?;
                         Ok(true)
@@ -5800,14 +4146,9 @@ impl Cpu {
         }
     }
 
-    /// The original whole-encoding-space chain, kept as the fallback for
-    /// anything the group decoders above do not claim. Deliberately not inlined:
-    /// it is large and rarely reached, and inlining it into [`Cpu::execute`] made
-    /// the hot dispatcher too big to stay in cache.
-    ///
-    /// Groups are tried in this order: branches/exceptions/system, load
-    /// literal, loads and stores, SIMD, scalar floating point, PC-relative,
-    /// data processing immediate, data processing register.
+    /// Fallback over the whole encoding space, kept out of line to keep `execute` small.
+    /// Order: branch/system, load literal, load/store, SIMD, scalar FP, PC-relative,
+    /// DP immediate, DP register.
     #[cold]
     #[inline(never)]
     fn execute_chain(&mut self, insn: u32, mut next_pc: u32) -> Result<()> {
@@ -5863,16 +4204,7 @@ mod tests {
 
     #[test]
     fn the_idle_moves_the_clock_and_leaves_the_step_count_alone() {
-        // With nothing else runnable, `reschedule` idles the clock forward to
-        // the sleeper's own deadline. That is the console's idle and it covers
-        // millions of cycles nobody executed, so a counter that is *both* the
-        // clock and the instruction count stops being the second one.
-        //
-        // The browser's "Steps" readout was that counter: a parked Home Menu,
-        // every thread blocked and three of them sleeping to deadlines around
-        // 313M, jumped from 24M to 313M having run nothing. The loading
-        // screen's only sign that a title is working towards its first frame
-        // was the thing that moved fastest while the guest was stopped.
+        // Idling advances the clock but not the instruction count.
         let mut cpu = Cpu::new();
         cpu.bootstrap();
         let (clock, steps) = (cpu.cycles, cpu.steps);
@@ -5887,8 +4219,7 @@ mod tests {
         assert_eq!(cpu.steps, steps, "the idle executed nothing");
     }
 
-    /// Run `rounds` scheduling decisions, each the running thread yielding,
-    /// and count how often each thread ended up holding the CPU.
+    /// Run `rounds` yielding decisions and count how often each thread got the CPU.
     fn shares(cpu: &mut Cpu, rounds: usize) -> Vec<usize> {
         let mut held = vec![0; cpu.threads.len()];
         for _ in 0..rounds {
@@ -5898,9 +4229,7 @@ mod tests {
         held
     }
 
-    /// Horizon runs the most urgent runnable thread; here it gets most of the
-    /// CPU, and a less urgent one still gets a turn within
-    /// `STARVE_DECISIONS` rather than never.
+    /// The most urgent thread gets most of the CPU; others still run within `STARVE_DECISIONS`.
     #[test]
     fn the_most_urgent_thread_runs_most_and_starves_nobody() {
         let mut cpu = Cpu::new();
@@ -5909,7 +4238,6 @@ mod tests {
         assert!(cpu.start_thread(urgent) && cpu.start_thread(idle));
 
         let held = shares(&mut cpu, 900);
-        // Main is 44, the default; thread 1 is 30 and thread 2 is 50.
         assert!(
             held[1] > held[0] * 4,
             "the urgent thread dominates: {held:?}"
@@ -5921,7 +4249,7 @@ mod tests {
         assert!(held[0] > 0 && held[2] > 0, "nobody is starved: {held:?}");
     }
 
-    /// Among threads of one priority, Horizon takes turns.
+    /// Equal priorities take turns.
     #[test]
     fn threads_of_one_priority_take_turns() {
         let mut cpu = Cpu::new();
@@ -5931,9 +4259,7 @@ mod tests {
         assert_eq!(shares(&mut cpu, 300), vec![100, 100, 100]);
     }
 
-    /// `svcSetThreadPriority` on the running thread, through the pseudo
-    /// handle, is what a title raising its own loader does, and it has to
-    /// change what the next decision picks.
+    /// `svcSetThreadPriority` through the pseudo handle affects the next decision.
     #[test]
     fn a_priority_set_through_the_pseudo_handle_is_the_one_scheduled_on() {
         let mut cpu = Cpu::new();
@@ -5943,7 +4269,6 @@ mod tests {
         assert_eq!(cpu.thread_priority(worker), Some(44));
         assert_eq!(cpu.thread_priority(0xdead), None, "not a thread");
 
-        // The main thread makes itself urgent, and then keeps the CPU.
         assert!(cpu.set_thread_priority(CURRENT_THREAD_PSEUDO_HANDLE, 10));
         assert_eq!(cpu.thread_priority(MAIN_THREAD_HANDLE), Some(10));
         cpu.yield_thread();
@@ -5952,8 +4277,6 @@ mod tests {
             "the more urgent main thread keeps running"
         );
 
-        // A manifest's main-thread priority reaches a main thread that
-        // already has a slot, as well as one created later.
         cpu.set_main_thread_priority(20);
         assert_eq!(cpu.thread_priority(MAIN_THREAD_HANDLE), Some(20));
     }

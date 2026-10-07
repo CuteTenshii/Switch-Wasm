@@ -1,8 +1,5 @@
-//! VFP: the AArch32 floating-point coprocessor.
-//!
-//! The register file is A64's seen differently: `D(2n)` is the bottom half of
-//! `V(n)` and `D(2n+1)` the top, so several of these check the aliasing
-//! directly rather than only the arithmetic.
+//! VFP: the AArch32 floating-point coprocessor. `D(2n)` and `D(2n+1)` alias
+//! the low and high halves of `V(n)`.
 
 mod a32;
 
@@ -49,9 +46,7 @@ fn a_core_register_moves_to_and_from_a_single() {
     assert_eq!(cpu.read_vreg(0) as u32, 0x4048_F5C3, "s0 is V0's low word");
 }
 
-/// `D1` is the *top* half of `V0`, and `S2`/`S3` are its two words. A file
-/// that gave each its own storage would pass the arithmetic tests and fail
-/// this one.
+/// `D1` is the top half of `V0`, and `S2`/`S3` are its two words.
 #[test]
 fn the_single_double_and_vector_views_are_one_register_file() {
     let cpu = run(&[
@@ -84,8 +79,7 @@ fn the_arithmetic_on_singles() {
     );
 }
 
-/// The accumulating forms read their destination as a third operand, so a
-/// decoder that only fetched two would multiply into a register it never read.
+/// The accumulating forms read their destination as a third operand.
 #[test]
 fn the_multiply_accumulate_forms_read_their_destination() {
     /// `s0 = 7, s1 = 3, s3 = 100`, then `op`, then `r3 = s3`.
@@ -113,8 +107,7 @@ fn the_one_operand_arithmetic() {
     assert_eq!(s3(&with_singles(9.0, 0.0, &ops(0xEEF1_1AC0))), 3.0, "vsqrt");
 }
 
-/// `VABS` and `VNEG` are bit operations on the sign, not `f32::abs`: the sign
-/// of a NaN is architectural.
+/// `VABS` and `VNEG` only touch the sign bit, including on NaN.
 #[test]
 fn abs_and_neg_move_the_sign_bit_of_a_nan() {
     let nan = 0xFFC0_0000u32; // a negative quiet NaN
@@ -142,9 +135,7 @@ fn the_immediate_moves_expand_the_vfp_encoding() {
     assert_eq!(f64::from_bits(bits), -2.0);
 }
 
-/// A comparison writes FPSCR, not the condition flags. `VMRS APSR_nzcv` is
-/// what moves it across: without which every `vcmp` would be invisible to the
-/// branch that follows it.
+/// A comparison writes FPSCR; `VMRS APSR_nzcv` moves it into the flags.
 #[test]
 fn a_comparison_reaches_the_condition_flags_only_through_vmrs() {
     let mut code: Vec<u32> = Vec::new();
@@ -166,9 +157,7 @@ fn a_comparison_reaches_the_condition_flags_only_through_vmrs() {
     assert_eq!(r(&cpu, 3), 3, "vmrs does");
 }
 
-/// The conversions cross precisions, so the destination is numbered by the
-/// *other* register rule than the source. Using one rule for both writes a
-/// register sixteen away.
+/// Cross-precision conversions number source and destination by different rules.
 #[test]
 fn the_precision_conversions_number_their_destination_by_the_other_rule() {
     // A single widened into d1.
@@ -192,9 +181,7 @@ fn the_precision_conversions_number_their_destination_by_the_other_rule() {
     assert_eq!(f32::from_bits(r(&cpu, 3)), 2.5, "narrowed into s2");
 }
 
-/// The integer conversions always use an `S` register for the integer, even
-/// when the float half is a double, so that operand is numbered `Vm:M` and
-/// not `M:Vm`.
+/// The integer operand of a conversion is always an `S` register (`Vm:M`).
 #[test]
 fn the_integer_conversions_keep_the_integer_in_a_single() {
     let mut code: Vec<u32> = Vec::new();
@@ -232,8 +219,7 @@ fn the_loads_and_stores_move_singles_and_doubles() {
     assert_eq!((r(&cpu, 2), r(&cpu, 3)), (0x1111_1111, 0x2222_2222));
 }
 
-/// `vpush {d0-d7}` is the first VFP instruction Mario Kart 8 Deluxe's `rtld`
-/// reaches, 8192 instructions in.
+/// `vpush {d0-d7}` is the first VFP instruction Mario Kart 8 Deluxe's `rtld` reaches.
 #[test]
 fn vpush_and_vpop_round_trip_eight_doubles() {
     let mut code: Vec<u32> = Vec::new();

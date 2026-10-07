@@ -1,21 +1,12 @@
-//! Bit-level helpers shared by the instruction groups: the ARM sign/zero
-//! extension, shift and rotate primitives, the bitmask-immediate and
-//! bitfield decoders, saturating arithmetic and the float rounding modes.
+//! Bit-level helpers shared by the instruction groups: extension, shifts,
+//! bitmask and bitfield decoders, saturating arithmetic and float rounding.
 
-/// Mask of a vector element `bits` wide (`bits` <= 64).
 #[inline]
 pub(crate) fn elem_mask(bits: u32) -> u128 {
     (1u128 << bits) - 1
 }
 
-/// The `esize`-bit lane at `index` of a 128-bit vector register.
-///
-/// wasm has no 128-bit integer, so `v >> (esize * index)` with a distance only
-/// known at run time becomes a call to `__lshrti3` that V8 cannot inline,
-/// visible as 1% of a browser frame. Every A64 lane width divides 64 and every
-/// lane is aligned to its own width, so no lane straddles the halfway point
-/// and splitting the register into two halves keeps every shift 64-bit. The
-/// `>> 64` here is a constant, which is free: it just names the high half.
+/// The `esize`-bit lane at `index`, split by 64-bit half so no 128-bit shift is emitted.
 #[inline(always)]
 pub(crate) fn lane(v: u128, esize: u32, index: u32) -> u64 {
     let off = esize * index;
@@ -32,7 +23,6 @@ pub(crate) fn lane(v: u128, esize: u32, index: u32) -> u64 {
     (half >> shift) & mask
 }
 
-/// Replace the `esize`-bit lane at `index`, the counterpart to [`lane`].
 #[inline(always)]
 pub(crate) fn set_lane(v: u128, esize: u32, index: u32, val: u64) -> u128 {
     let off = esize * index;
@@ -51,22 +41,17 @@ pub(crate) fn set_lane(v: u128, esize: u32, index: u32, val: u64) -> u128 {
     u128::from(lo) | (u128::from(hi) << 64)
 }
 
-/// The FPCR bits this core observes: RMode (23:22), plus the FZ/DN/AH
-/// controls it stores so a guest reads back what it wrote.
+/// FPCR bits the core stores: RMode (23:22) and FZ/DN/AH.
 pub(crate) const FPCR_MASK: u32 = 0x07FF_9F00;
-/// FPSR: the cumulative exception flags (IDC, IXC, UFC, OFC, DZC, IOC) and
-/// QC, the sticky saturation flag.
+/// FPSR cumulative exception flags and QC.
 pub(crate) const FPSR_MASK: u32 = 0x0800_009F;
 
-/// FPSR cumulative exception flags.
-/// Only the two the core actually raises are named. Overflow, underflow and
-/// QC are storage the guest can write and read back, not signals we set.
+/// FPSR flags the core raises.
 pub(crate) const FPSR_IOC: u32 = 1 << 0;
 pub(crate) const FPSR_DZC: u32 = 1 << 1;
 pub(crate) const FPSR_IXC: u32 = 1 << 4;
 
-/// The rounding mode FPCR.RMode selects, for the instructions the
-/// architecture defines as rounding "to the current mode".
+/// The rounding mode FPCR.RMode selects.
 pub(crate) fn fpcr_rounding(fpcr: u32) -> Rounding {
     match (fpcr >> 22) & 0b11 {
         0b00 => Rounding::TiesEven,
@@ -76,8 +61,7 @@ pub(crate) fn fpcr_rounding(fpcr: u32) -> Rounding {
     }
 }
 
-/// Round a float to an integral float value in the given mode, FRINTX and
-/// FRINTI, which take their mode from FPCR rather than from the opcode.
+/// FRINTX/FRINTI: round to integral in the FPCR mode.
 pub(crate) fn round_to_integral(v: f64, r: Rounding) -> f64 {
     if !v.is_finite() {
         return v;
@@ -91,24 +75,18 @@ pub(crate) fn round_to_integral(v: f64, r: Rounding) -> f64 {
     }
 }
 
-/// Rounding mode for the float-to-integer conversion instructions.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rounding {
-    /// Round to nearest, ties to even.
+    /// Ties to even.
     TiesEven,
-    /// Round toward +infinity.
     TowardPos,
-    /// Round toward -infinity.
     TowardNeg,
-    /// Round to nearest, ties away from zero.
+    /// Ties away from zero.
     TiesAway,
-    /// Round toward zero (truncate).
     TowardZero,
 }
 
-/// Convert a float to a (possibly signed) integer using an explicit rounding
-/// mode, then truncate to the destination size. NaN → 0, out-of-range results
-/// saturate, matching the default FPCR behavior the emulator assumes.
+/// Float to integer with explicit rounding; NaN gives 0 and out-of-range saturates.
 pub(crate) fn round_to_int(f: f64, r: Rounding, signed: bool) -> u64 {
     if f.is_nan() {
         return 0;
@@ -135,9 +113,7 @@ pub(crate) fn round_to_int(f: f64, r: Rounding, signed: bool) -> u64 {
     }
 }
 
-/// [`round_to_int`] into a `bits`-wide destination: out-of-range values
-/// saturate at that width rather than wrapping, which is what the vector
-/// converts (`fcvtzs v0.4s, v1.4s`) need for their 32-bit lanes.
+/// [`round_to_int`] saturating at `bits` width, for vector converts.
 pub(crate) fn round_to_int_sized(f: f64, r: Rounding, signed: bool, bits: u32) -> u64 {
     if bits >= 64 {
         return round_to_int(f, r, signed);
@@ -162,7 +138,6 @@ pub(crate) fn round_to_int_sized(f: f64, r: Rounding, signed: bool, bits: u32) -
     }
 }
 
-/// Saturating add of two `bits`-wide lanes (`signed` selects SQADD/UQADD).
 pub(crate) fn saturating_add(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
     let sum = (a as i128) + (b as i128);
     if signed {
@@ -178,7 +153,6 @@ pub(crate) fn saturating_add(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
     }
 }
 
-/// Saturating subtract of two `bits`-wide lanes (`signed` selects SQSUB/UQSUB).
 pub(crate) fn saturating_sub(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
     let diff = (a as i128) - (b as i128);
     if signed {
@@ -194,7 +168,6 @@ pub(crate) fn saturating_sub(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
     }
 }
 
-/// Saturate a wide intermediate back into a `bits`-wide lane.
 pub(crate) fn saturate_to(v: i128, bits: u32, unsigned: bool) -> u64 {
     if unsigned {
         let max = if bits == 64 {
@@ -209,13 +182,8 @@ pub(crate) fn saturate_to(v: i128, bits: u32, unsigned: bool) -> u64 {
     }
 }
 
-/// The variable-shift family: SSHL/USHL, plus the saturating (SQSHL/UQSHL),
-/// rounding (SRSHL/URSHL) and both (SQRSHL/UQRSHL) forms. A negative amount
-/// shifts right.
-///
-/// The amount is the low **8 bits** of `b` sign-extended, not the whole lane:
-/// masking it to the element width made a negative amount impossible below
-/// 64 bits, so `sshl v0.4s, v1.4s, v2.4s` could only ever shift left.
+/// SSHL/USHL and the saturating/rounding forms; a negative amount shifts right.
+/// The amount is the low 8 bits of `b`, sign-extended.
 pub(crate) fn shift_by_reg(
     a: u64,
     b: u64,
@@ -232,8 +200,7 @@ pub(crate) fn shift_by_reg(
     };
     let shifted = if amount >= 0 {
         let sh = amount as u32;
-        // Any lane is at most 64 bits, so a shift that far always overflows
-        // and the saturated answer only depends on the sign.
+        // Any shift this far overflows; the result only depends on the sign.
         if sh >= 64 {
             if value == 0 {
                 0
@@ -250,8 +217,7 @@ pub(crate) fn shift_by_reg(
             value << sh
         }
     } else {
-        // 127 rather than the true 128: the rounding constant would overflow,
-        // and both shift every bit of a 64-bit lane away regardless.
+        // 127, not 128: the rounding constant would overflow.
         let sh = (-amount as u32).min(127);
         let rounded = if rounding {
             value + (1i128 << (sh - 1))
@@ -267,13 +233,7 @@ pub(crate) fn shift_by_reg(
     }
 }
 
-/// FP max/min with ARM semantics: if either operand is NaN the NaN operand is
-/// returned (Rust's `f64::max` would discard it).
-/// `FMULX`: an ordinary multiply, except that zero times infinity is 2.0 with
-/// the sign of the product rather than a NaN. That is the whole reason the
-/// instruction exists -- it is what makes `FRECPS`/`FRSQRTS` behave at the
-/// extremes of Newton-Raphson refinement, where a reciprocal estimate of
-/// infinity has to multiply back to a finite number.
+/// `FMULX`: multiply where zero times infinity is +/-2.0 instead of NaN.
 pub(crate) fn fmulx(x: f64, y: f64) -> f64 {
     if (x == 0.0 && y.is_infinite()) || (x.is_infinite() && y == 0.0) {
         return if x.is_sign_negative() != y.is_sign_negative() {
@@ -305,7 +265,7 @@ pub(crate) fn fp_min(a: f64, b: f64) -> f64 {
     }
 }
 
-/// FMAXNM/FMINNM: same NaN handling as the plain max/min.
+/// FMAXNM/FMINNM.
 pub(crate) fn fp_maxnum(a: f64, b: f64) -> f64 {
     fp_max(a, b)
 }
@@ -330,7 +290,6 @@ pub(crate) fn sext_u64<T: Into<u64>>(v: T, bits: u32) -> u64 {
     }
 }
 
-/// Shift `v` left/right logically or arithmetically, or rotate, by `sa`.
 #[inline(always)]
 pub(crate) fn shift_reg(v: u64, st: u32, sa: u32, sf: bool) -> u64 {
     let size = if sf { 64 } else { 32 };
@@ -358,11 +317,7 @@ pub(crate) fn shift_reg(v: u64, st: u32, sa: u32, sf: bool) -> u64 {
             }
         }
         2 => {
-            // ASR. The operand was masked to its own width above, so it has to
-            // be sign-extended from *that* width before shifting, shifting the
-            // masked value as a positive i64 turned `asr w0, w0, w1` on a
-            // negative word into a small positive number, which is how
-            // libjpeg-turbo's HUFF_EXTEND lost the sign of every DC difference.
+            // ASR: sign-extend from the operand width before shifting.
             if sa == 0 {
                 v
             } else if sa >= size {
@@ -389,14 +344,12 @@ pub(crate) fn shift_reg(v: u64, st: u32, sa: u32, sf: bool) -> u64 {
     }
 }
 
-/// Variable shift by register amount (LSLV/LSRV/ASRV).
 pub(crate) fn shift_var(v: u64, amt: u64, kind: u32, sf: bool) -> u64 {
     let size = if sf { 64 } else { 32 };
     let amt = (amt % size) as u32;
     shift_reg(v, kind, amt, sf)
 }
 
-/// Extend a register value for the ADD/SUB extended-register form.
 #[inline(always)]
 pub(crate) fn extend_reg(v: u64, option: u8, sf: bool) -> u64 {
     let extended = match option {
@@ -410,20 +363,11 @@ pub(crate) fn extend_reg(v: u64, option: u8, sf: bool) -> u64 {
         0b111 => v,               // SXTX
         _ => v,
     };
-    // Truncate to the operation width, don't clamp to it. `min` turned every
-    // negative 32-bit extend into `0xFFFF_FFFF`, so `add w0, w1, w2, sxtb` of
-    // `0x80` produced -1 where dynarmic's `SignExtendToWord` gives -128.
+    // Truncate to the operation width; don't clamp.
     extended & if sf { u64::MAX } else { u32::MAX as u64 }
 }
 
-/// Decode the rotated-element bitmask of the logical-immediate encoding.
-/// Decode a logical-immediate (AND/ORR/EOR/ANDS) bitmask, per ARM ARM
-/// `DecodeBitMasks`. Matches QEMU `logic_imm_decode_wmask`: the element size
-/// is derived from `N:NOT(imms)` and bits of `imms` above the element size
-/// are ignored (e.g. `mov w20, #0x80808080`).
-/// Expand a MOVI/MVNI 8-bit immediate per ARM `AdvSIMDExpandImm` (mirrors
-/// QEMU's `asimd_imm_const`). Returns the 64-bit lane value; the caller
-/// replicates it over the 128-bit register for Q=1.
+/// Expand a MOVI/MVNI immediate per `AdvSIMDExpandImm` into a 64-bit lane.
 pub(crate) fn simd_imm_const(imm: u32, cmode: u32, op: u32) -> u64 {
     let mut imm = imm;
     match cmode {
@@ -450,7 +394,6 @@ pub(crate) fn simd_imm_const(imm: u32, cmode: u32, op: u32) -> u64 {
         }
         15 => {
             if op == 1 {
-                // 64-bit float immediate (valid for AArch64).
                 let mut imm64 = ((imm & 0x3f) as u64) << 48;
                 if imm & 0x80 != 0 {
                     imm64 |= 0x8000_0000_0000_0000;
@@ -507,12 +450,7 @@ pub(crate) fn decode_bit_mask(sf: bool, n: u32, immr: u32, imms: u32) -> Option<
     Some(wmask)
 }
 
-/// `SBFM` and `UBFM`, which every one of their aliases (`LSL`, `LSR`, `ASR`,
-/// `UBFX`, `SBFX`, `UBFIZ`, `SBFIZ`, `SXTW`, `UXTB`, ...) reduces to three
-/// shifts: the field's top bit up to bit 63, back down to where the field
-/// lands with sign or zero filling in above it, and up again for the forms
-/// that place the field at a position. Decoded once from `immr`/`imms`, so
-/// what runs is branch-free and the same for every alias.
+/// `SBFM`/`UBFM` and all their aliases, decoded once into three shifts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Extract {
     left: u8,
@@ -522,8 +460,7 @@ pub(crate) struct Extract {
 }
 
 impl Extract {
-    /// `None` for `BFM`, which keeps bits of the destination, and for the
-    /// unallocated `opc`. `immr` and `imms` must already be in range for `sf`.
+    /// `None` for `BFM` and unallocated `opc`. `immr`/`imms` must be in range for `sf`.
     pub(crate) fn of(opc: u32, immr: u32, imms: u32, sf: bool) -> Option<Extract> {
         let signed = match opc {
             0b00 => true,
@@ -532,8 +469,6 @@ impl Extract {
         };
         let size = if sf { 64 } else { 32 };
         let left = 63 - imms;
-        // `imms >= immr` extracts bits imms:immr to the bottom; otherwise the
-        // low imms+1 bits are inserted at `size - immr`.
         let (right, up) = if imms >= immr {
             (left + immr, 0)
         } else {
@@ -547,15 +482,12 @@ impl Extract {
         })
     }
 
-    /// The three distances and the fill, for the wasm emitter, which writes
-    /// them out as shift constants instead of calling [`Extract::apply`].
+    /// Shift distances and fill, for the wasm emitter.
     pub(crate) fn parts(self) -> (u8, u8, u8, bool) {
         (self.left, self.right, self.up, self.signed)
     }
 
-    /// The result is truncated to the operand width: a write to a W register
-    /// zeroes bits 63:32, and the sign extension would otherwise fill them
-    /// (`asr w0, w0, #31` produced `0xFFFF_FFFF_FFFF_FFFF`).
+    /// Truncated to the operand width: a W write zeroes bits 63:32.
     #[inline(always)]
     pub(crate) fn apply(self, val: u64, sf: bool) -> u64 {
         let top = val << self.left;
@@ -568,10 +500,7 @@ impl Extract {
     }
 }
 
-/// `BFM` (`BFI`/`BFXIL`), which merges a field of `val` into the ORIGINAL
-/// destination `cur`. The old decoder used `cur = val` (Rn) and never read
-/// the destination register, so `bfi` zeroed the bits it was meant to
-/// preserve. libtransistor's squashfs `swab_super` relies on this.
+/// `BFM` (`BFI`/`BFXIL`): merges a field of `val` into the destination `cur`.
 pub(crate) fn bitfield_insert(val: u64, cur: u64, immr: u32, imms: u32, sf: bool) -> u64 {
     let datasize = if sf { 64 } else { 32 };
     let (lsb, msb) = (immr, imms);
@@ -634,7 +563,7 @@ pub(crate) fn clz(v: u64, size: u32) -> u64 {
     }) as u64
 }
 
-/// CLS: how many bits after the sign bit match it (so 31/63 for 0 and -1).
+/// CLS: how many bits after the sign bit match it.
 pub(crate) fn cls(v: u64, size: u32) -> u64 {
     if size == 32 {
         let v = v as u32 as i32;
@@ -656,7 +585,6 @@ pub(crate) fn ctz(v: u64, size: u32) -> u64 {
     }) as u64
 }
 
-/// Absolute difference of two `bits`-wide lanes (SABD/UABD).
 pub(crate) fn simd_abs_diff(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
     if unsigned {
         a.abs_diff(b)
@@ -667,11 +595,7 @@ pub(crate) fn simd_abs_diff(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
     }
 }
 
-/// CRC32/CRC32C accumulate over the low `size` bits of `val`.
-///
-/// ARM specifies these in terms of the bit-reversed accumulator and a
-/// polynomial division, which is exactly the classic reflected CRC loop over
-/// the bytes of `val` from least significant upwards.
+/// CRC32/CRC32C over the low `size` bits of `val`, as a reflected CRC loop.
 pub(crate) fn crc32(acc: u32, val: u64, size: u32, castagnoli: bool) -> u32 {
     let poly: u32 = if castagnoli { 0x82F6_3B78 } else { 0xEDB8_8320 };
     let mut crc = acc;
@@ -684,14 +608,13 @@ pub(crate) fn crc32(acc: u32, val: u64, size: u32, castagnoli: bool) -> u32 {
     crc
 }
 
-/// Widen an IEEE-754 half to a single. Exact for every input, so the callers
-/// that want a double can promote the result without rounding twice.
+/// Widen a half to a single (exact).
 pub(crate) fn f16_to_f32(h: u16) -> f32 {
     let sign = u32::from(h & 0x8000) << 16;
     let exp = u32::from((h >> 10) & 0x1F);
     let mant = u32::from(h & 0x3FF);
     if exp == 0x1F {
-        // Infinity, or a NaN whose payload carries over quieted.
+        // Infinity, or a NaN with its payload quieted.
         let bits = if mant == 0 {
             sign | 0x7F80_0000
         } else {
@@ -703,8 +626,7 @@ pub(crate) fn f16_to_f32(h: u16) -> f32 {
         if mant == 0 {
             return f32::from_bits(sign);
         }
-        // Subnormal halves are normal singles: shift the leading one up into
-        // the implicit position and pay for it in the exponent.
+        // Subnormal halves are normal singles.
         let mut m = mant;
         let mut e: i32 = -14;
         while m & 0x400 == 0 {
@@ -717,32 +639,25 @@ pub(crate) fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(sign | ((exp + 127 - 15) << 23) | (mant << 13))
 }
 
-/// Narrow a double to an IEEE-754 half, rounding to nearest-even once.
-///
-/// Singles come through here promoted (which is exact), so `fcvt h, s` rounds
-/// once rather than once into a double and again into the half.
+/// Narrow a double to a half, rounding to nearest-even once.
 pub(crate) fn f64_to_f16(v: f64) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 48) as u16) & 0x8000;
     if v.is_nan() {
-        // Keep the top of the payload and force it quiet, so the result cannot
-        // decay into an infinity.
+        // Force the NaN quiet so it cannot decay to infinity.
         return sign | 0x7C00 | 0x200 | (((bits >> 42) as u16) & 0x1FF);
     }
     if v.is_infinite() {
         return sign | 0x7C00;
     }
     let exp = (((bits >> 52) & 0x7FF) as i32) - 1023;
-    // Beyond the half's range in either direction the answer is fixed: 2^-25 is
-    // the largest magnitude that still ties down to zero.
+    // 2^-25 is the largest magnitude that still ties down to zero.
     if v == 0.0 || exp < -25 {
         return sign;
     }
     if exp > 15 {
         return sign | 0x7C00;
     }
-    // Round the 53-bit significand down to the 11 bits a normal half keeps, or
-    // to whatever fewer bits the fixed 2^-24 subnormal step leaves.
     let sig = (1u64 << 52) | (bits & 0x000F_FFFF_FFFF_FFFF);
     let shift = if exp >= -14 { 42 } else { (28 - exp) as u32 };
     let truncated = sig >> shift;
@@ -754,8 +669,6 @@ pub(crate) fn f64_to_f16(v: f64) -> u16 {
         truncated
     };
     if exp < -14 {
-        // A subnormal that rounds up to 0x400 lands on the smallest normal,
-        // which is what that bit pattern already means.
         return sign | (rounded as u16);
     }
     let mut half_exp = exp + 15;

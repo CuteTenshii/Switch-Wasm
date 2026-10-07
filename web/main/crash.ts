@@ -1,6 +1,4 @@
-/* The stage-level end state for a run that cannot continue. The detailed
-   evidence remains in the console and crash report; this surface says what
-   happened and puts the recovery paths where the guest screen used to be. */
+// Stage-level end state and recovery options for a run that cannot continue.
 
 import { saveCrashReport } from './debug';
 import { $ } from './dom';

@@ -1,17 +1,12 @@
-//! MAXWELL_DMA_COPY_A (class 0xB0B5), the copy engine.
-//!
-//! Moves rectangles of memory between pitch and block-linear surfaces, with an
-//! optional component remap that also serves as the hardware's buffer-fill
-//! path. deko3d drives it for `dkCmdBufCopyImage`/`CopyBuffer` and for the
-//! block-linear ⇄ linear conversions a swapchain present needs.
+//! MAXWELL_DMA_COPY_A (class 0xB0B5): copies rectangles between pitch and
+//! block-linear surfaces, with a component remap that doubles as buffer fill.
 
 use crate::gpu::engine::{field, Registers};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::surface::Layout;
 use crate::{Error, Result};
 
-/// The method write that launches a copy, so a caller can hand a GPU
-/// backend's surfaces back before it reads guest memory.
+/// The launch method, so a GPU backend can flush its surfaces before guest memory is read.
 pub const LAUNCH_DMA: u32 = 0x0C0;
 const OFFSET_IN: u32 = 0x100;
 const OFFSET_OUT: u32 = 0x102;
@@ -28,7 +23,6 @@ const SET_SRC_BLOCK_SIZE: u32 = 0x1CA;
 const SET_SRC_WIDTH: u32 = 0x1CB;
 const SET_SRC_ORIGIN: u32 = 0x1CF;
 
-/// Where a remapped destination component takes its value from.
 const REMAP_SRC_X: u32 = 0;
 const REMAP_CONST_0: u32 = 4;
 const REMAP_CONST_1: u32 = 5;
@@ -37,10 +31,8 @@ const REMAP_NO_WRITE: u32 = 6;
 #[derive(Debug, Default)]
 pub struct EngineCopy {
     pub regs: Registers,
-    /// One source run in flight, kept between launches rather than allocated
-    /// per line, hbmenu's present copies 720 of them a frame.
+    /// Reused source run buffer.
     run: Vec<u8>,
-    /// Copies by source and destination: see [`crate::gpu::activity`].
     pub activity: crate::gpu::activity::GpuActivity,
 }
 
@@ -110,7 +102,6 @@ impl EngineCopy {
         }
 
         if !multi_line && !remap {
-            // Plain 1D copy: contiguous on both sides, so it is one run.
             self.run.resize(line_length as usize, 0);
             ctx.read_run(src_base, &mut self.run)?;
             ctx.write_run(dst_base, &self.run)?;
@@ -165,7 +156,6 @@ impl EngineCopy {
             for element in 0..line_length {
                 let src_off = src.offset(element, line);
                 let dst_off = dst.offset(element, line);
-                // Read the source components, then scatter them per the remap.
                 let mut source = [0u32; 4];
                 for (i, s) in source
                     .iter_mut()
@@ -206,15 +196,7 @@ impl EngineCopy {
         Ok(())
     }
 
-    /// The remap-off copy, a contiguous run at a time rather than a byte.
-    ///
-    /// Every byte used to cost a block-linear swizzle and a GPU address
-    /// translation on each side. hbmenu's present is one 1280x720x4 copy, so
-    /// that was 3.7 million of each per frame and about a fifth of the frame.
-    /// A pitch row is contiguous to its end and a block-linear one in
-    /// sixteens, which is what `run_at` reports.
-    ///
-    /// An element is a byte here: that is what makes this the remap-off path.
+    /// The remap-off copy (one-byte elements), a contiguous run at a time.
     fn copy_runs(
         &mut self,
         ctx: &mut ExecCtx,
@@ -227,8 +209,7 @@ impl EngineCopy {
             let mut x = 0;
             while x < line_length {
                 let (src_at, src_run) = src.run_at(x, line);
-                // A pitch shorter than the line reports no run at all; one
-                // byte still makes progress, as the byte loop did.
+                // A pitch shorter than the line reports no run; still advance one byte.
                 let take = src_run.min(line_length - x).max(1);
                 self.run.resize(take as usize, 0);
                 ctx.read_run(src_at, &mut self.run)?;
@@ -246,8 +227,7 @@ impl EngineCopy {
         Ok(())
     }
 
-    /// `(source element bytes, destination element bytes, layout)` implied by
-    /// `SetRemapComponents`.
+    /// `(source element bytes, destination element bytes, layout)` from `SetRemapComponents`.
     fn remap_shape(&self) -> Result<(u32, u32, RemapComponents)> {
         let raw = self.regs.get(SET_REMAP_COMPONENTS);
         let component_size = field(raw, 16, 17) + 1;
@@ -291,25 +271,12 @@ impl RemapComponents {
     }
 }
 
-/// Address generation for one side of a copy.
 #[derive(Clone, Copy)]
 struct SurfaceWalk {
     layout: Layout,
-    /// The GPU address this side starts at, so a walk yields addresses rather
-    /// than offsets its caller has to rebase.
     base: u64,
-    /// The surface's row length in bytes. `SetDstWidth`/`SetSrcWidth` count
-    /// **elements**, so this is that width scaled by the element size, the
-    /// remap makes an element as wide as a pixel, and a block-linear
-    /// surface's row length in *bytes* is what decides how many GOBs a row
-    /// spans and therefore where the next block row starts.
-    ///
-    /// Taking the register as bytes worked for every copy with the remap
-    /// off, where an element is one byte and the two readings coincide,
-    /// which is how deko3d drives it. JKSV's Mesa uploads a 256x256 RGBA
-    /// icon with the remap on: 256 elements is 1024 bytes, and calling it
-    /// 256 made the row four GOBs wide instead of sixteen, shredding the
-    /// image into strips.
+    /// Row length in bytes: `Set{Src,Dst}Width` count elements, which the remap
+    /// can make wider than a byte.
     width_bytes: u32,
     origin_x_bytes: u32,
     origin_y: u32,
@@ -366,8 +333,7 @@ impl SurfaceWalk {
         SurfaceWalk { base, ..*self }
     }
 
-    /// The GPU address of `(element, line)`, plus how many bytes from there
-    /// are contiguous in memory.
+    /// GPU address of `(element, line)` and how many bytes from there are contiguous.
     fn run_at(&self, element: u32, line: u32) -> (u64, u32) {
         let x = self.origin_x_bytes + element * self.element_bytes;
         let (offset, run) = self
@@ -465,7 +431,6 @@ mod tests {
         engine.regs.set(LINE_COUNT, 4);
 
         let mut ctx = h.ctx();
-        // Multi-line, both sides pitch-linear.
         engine
             .write(LAUNCH_DMA, (1 << 7) | (1 << 8) | (1 << 9), &mut ctx)
             .unwrap();
@@ -490,7 +455,7 @@ mod tests {
         engine.regs.set(LINE_LENGTH_IN, 4);
         engine.regs.set(LINE_COUNT, 1);
         engine.regs.set(SET_REMAP_CONST, 0xDEAD_BEEF);
-        // One 4-byte destination component taken from RemapConst[0].
+        // One 4-byte destination component from RemapConst[0].
         engine.regs.set(
             SET_REMAP_COMPONENTS,
             REMAP_CONST_0 | (3 << 16) | (0 << 20) | (0 << 24),

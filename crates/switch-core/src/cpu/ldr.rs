@@ -1,62 +1,26 @@
-//! `ldr:ro`: run-time module loading.
-//!
-//! A title that links against an NRO maps it here rather than at startup, so
-//! this is a real loader, it relocates into [`super::RO_MODULE_REGION_ADDR`]
-//! and hands back where it landed.
+//! `ldr:ro`: run-time NRO loading into [`super::RO_MODULE_REGION_ADDR`].
 
 use super::Cpu;
 use crate::trace::Level;
 use crate::Result;
 
-/// The module number every result `ro` reports carries. A caller that acts on
-/// a failure at all switches on the description beside it, and a description
-/// under the wrong module names a different service's error entirely.
 const RO_RESULT_MODULE: u32 = 22;
 
-/// One NRO that `ldr:ro` has mapped into the process. See
-/// [`Cpu::ldr_ro_request`].
+/// One NRO `ldr:ro` has mapped into the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RoModule {
-    /// Where the caller's own copy of the NRO file lives, the address it
-    /// passed to `LoadModule`, kept so an unload naming the source rather than
-    /// the mapping still finds the module.
+    /// The caller's NRO buffer, so an unload naming the source still finds the module.
     source: u32,
-    /// The mapping: the image at `base`, its zero-filled BSS behind it, `size`
-    /// bytes in total.
+    /// The image at `base` followed by its zero-filled BSS, `size` bytes in total.
     base: u32,
     size: u32,
-    /// The `.text` range, read-only for as long as the module is mapped.
     text: (u32, u32),
 }
 
 impl Cpu {
-    /// `ldr:ro`, `nn::ro::detail::IRoInterface`, the half of dynamic module
-    /// loading that cannot happen inside the process.
-    ///
-    /// A title that loads code at run time (`nn::ro::LoadModule`, and libnx's
-    /// `ldrRoLoadNro` under `roDlopen`) holds the NRO file in its own memory
-    /// and asks this service to **map** it: a copy of the image at an address
-    /// the service picks, `.text` executable and unwritable, with the caller's
-    /// zero-filled BSS directly behind it. Everything after that,
-    /// relocations, symbol resolution, the module list: is the caller's own
-    /// work, done against the address returned here. So `LoadModule` is the
-    /// one command that has to do something real, and what it does is the
-    /// mapping.
-    ///
-    /// The rest of the interface is authorization. An NRR carries signed
-    /// hashes of the NROs a title is permitted to load, and
-    /// `RegisterModuleInfo` is the caller presenting one; `ro` checks the
-    /// signature chain against a key a console has and this emulator does not.
-    /// A registration is therefore accepted rather than verified, but it is
-    /// *recorded*, so unregistering one is not a blind success and a caller
-    /// that never registered anything is visible in the state rather than
-    /// indistinguishable from one that did.
-    ///
-    /// Nothing implemented this at all, which is how it announced itself:
-    /// `RegisterProcessHandle` is the first call `nn::ro::Initialize` makes,
-    /// and the fallback answered it with a fabricated object id. Had the title
-    /// got as far as `LoadModule`, that same fallback would have handed it an
-    /// object id to jump to.
+    /// `ldr:ro` (`nn::ro::detail::IRoInterface`). `LoadModule` maps the caller's
+    /// NRO; relocation is the caller's job. NRR registrations are recorded but not
+    /// verified.
     pub(super) fn ldr_ro_request(
         &mut self,
         tls: u32,
@@ -74,9 +38,7 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, "ldr:ro-control", cmd_id),
             };
         }
-        // Every command on this interface opens with the `u64` placeholder the
-        // pid descriptor really fills in, so each argument below sits one word
-        // further in than its position in the signature suggests.
+        // The pid placeholder shifts each argument one word in.
         let data = self.ipc_request_data(tls);
         let mut args = [0u64; 4];
         for (index, arg) in args.iter_mut().enumerate() {
@@ -86,15 +48,11 @@ impl Cpu {
                 .unwrap_or(0);
         }
         match cmd_id {
-            // LoadModule(pid, nro_address, nro_size, bss_address, bss_size)
-            // -> u64 mapped address. Called `LoadNro` before 3.0.0.
+            // LoadModule(pid, nro_address, nro_size, bss_address, bss_size) -> u64 address.
             Some(0) => self.ldr_ro_load_module(tls, args[0], args[1], args[2], args[3]),
             // UnloadModule(pid, address).
             Some(1) => self.ldr_ro_unload_module(tls, args[0]),
-            // RegisterModuleInfo(pid, nrr_address, nrr_size), and the 7.0.0+
-            // `RegisterProcessModuleInfo`, which is the same call with the
-            // process handle passed explicitly instead of through the pid
-            // descriptor. One process here, so they are the same work.
+            // RegisterModuleInfo(pid, nrr_address, nrr_size), and 7.0.0+ RegisterProcessModuleInfo.
             Some(2) | Some(10) => self.ldr_ro_register_module_info(tls, args[0], args[1]),
             // UnregisterModuleInfo(pid, nrr_address).
             Some(3) => {
@@ -105,27 +63,14 @@ impl Cpu {
                     None => self.write_ipc_response(tls, NOT_REGISTERED, &[], &[], &[]),
                 }
             }
-            // RegisterProcessHandle(pid, process handle) [3.0.0+]: the caller
-            // telling `ro` which process the modules it is about to load
-            // belong to. There is one process here and every module maps into
-            // it, so the handle names something already known, but the call
-            // is `nn::ro::Initialize`'s first, and refusing it stops a title
-            // before it loads anything.
+            // RegisterProcessHandle [3.0.0+]: `nn::ro::Initialize`'s first call.
             Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             _ => self.unimplemented_command(tls, "ldr:ro", cmd_id),
         }
     }
 
-    /// `IRoInterface::LoadModule`: map the NRO the caller is holding, and hand
-    /// back the address it now lives at.
-    ///
-    /// The mapping is a **copy**, not the alias a real kernel makes. Page
-    /// storage here is not shareable: [`crate::mem::Memory::copy_range`] has
-    /// the same constraint for `svcMapMemory`, so writes through the caller's
-    /// original buffer do not reach the loaded module. That is a difference a
-    /// guest could observe, and nothing does: the source buffer is a file
-    /// image the caller read and stops touching, and every write that matters
-    /// (the relocations `nn::ro` applies) goes to the returned address.
+    /// Map a copy of the caller's NRO and return its address. Unlike a real
+    /// kernel this is a copy, not an alias; guests never write the source after.
     fn ldr_ro_load_module(
         &mut self,
         tls: u32,
@@ -139,18 +84,14 @@ impl Cpu {
         const INVALID_ADDRESS: u32 = RO_RESULT_MODULE | (1025 << 9);
         const INVALID_SIZE: u32 = RO_RESULT_MODULE | (1026 << 9);
 
-        // A `u64` argument in a 32-bit address space: anything that does not
-        // fit is not an address the guest can have meant, and truncating it
-        // would map a module over whatever lives at the bottom 32 bits.
+        // Reject rather than truncate addresses beyond 32 bits.
         if nro_address > u64::from(u32::MAX) || bss_address > u64::from(u32::MAX) {
             return self.write_ipc_response(tls, INVALID_ADDRESS, &[], &[], &[]);
         }
         if !Self::ro_is_page_aligned(nro_address) || !Self::ro_is_page_aligned(bss_address) {
             return self.write_ipc_response(tls, INVALID_ADDRESS, &[], &[], &[]);
         }
-        // The region is the ceiling on any one module, and checking against it
-        // here is also what keeps a nonsense size from becoming a
-        // multi-gigabyte host allocation two lines further down.
+        // Also keeps a nonsense size from becoming a huge host allocation.
         let too_big = u64::from(super::RO_MODULE_REGION_SIZE);
         if nro_size == 0
             || !Self::ro_is_page_aligned(nro_size)
@@ -161,9 +102,6 @@ impl Cpu {
             return self.write_ipc_response(tls, INVALID_SIZE, &[], &[], &[]);
         }
 
-        // The whole image, because that is what validating it takes:
-        // `NroHeader::parse` checks each segment against the size the header
-        // declares, and it can only do that with the bytes in hand.
         let image = self.read_bytes(nro_address as u32, nro_size as u32);
         let header = match crate::nro::NroHeader::parse(&image) {
             Ok(header) => header,
@@ -175,10 +113,7 @@ impl Cpu {
                 return self.write_ipc_response(tls, INVALID_NRO, &[], &[], &[]);
             }
         };
-        // The BSS is mapped behind the image and nowhere else, so a caller
-        // that sized it short would have the module's zero-initialized data
-        // land outside the mapping, on somebody else's module, once the
-        // region has more than one.
+        // A short BSS would spill the module's data onto the next mapping.
         if bss_size < u64::from(header.bss_size) {
             self.diagnostic(
                 Level::Warn,
@@ -203,8 +138,7 @@ impl Cpu {
             return self.write_ipc_response(tls, OUT_OF_ADDRESS_SPACE, &[], &[], &[]);
         };
 
-        // Image and BSS in one write, so the BSS is genuinely zero rather than
-        // whatever an unloaded module left in a page this run reuses.
+        // One write so the BSS is zero, not leftovers from an unloaded module.
         let mut mapped = image;
         mapped.resize(size as usize, 0);
         self.mem.map(base, &mapped)?;
@@ -213,15 +147,9 @@ impl Cpu {
             base.wrapping_add(header.text_offset)
                 .wrapping_add(header.text_size),
         );
-        // `.text` is never a relocation target, and a real kernel maps an
-        // NRO's code segment read-execute, so a write into it is a bug worth
-        // faulting on rather than one to absorb. Undone by `UnloadModule`, or
-        // the protection would outlive the mapping and fault whatever is
-        // mapped over it next.
+        // `.text` is read-execute; `UnloadModule` must undo this.
         self.mem.mark_readonly(text.0, text.1);
-        // A module mapped after the process started carries the `Alias*`
-        // memory states rather than the process image's. See
-        // `Memory::mark_module`.
+        // Run-time modules carry the `Alias*` memory states; see `Memory::mark_module`.
         self.mem.mark_module(
             (text.0, base.wrapping_add(header.data_offset)),
             (
@@ -265,15 +193,7 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &u64::from(base).to_le_bytes(), &[])
     }
 
-    /// `IRoInterface::UnloadModule`: drop a mapping made by
-    /// [`Cpu::ldr_ro_load_module`], freeing both the pages and the address
-    /// space for the next load.
-    ///
-    /// The address is the one `LoadModule` returned: that is what `nn::ro`
-    /// keeps, but the source buffer is accepted too. The two are a `u64`
-    /// named `nro_address` in both directions of this interface, they are easy
-    /// to confuse from the outside, and unmapping the wrong module is a far
-    /// worse answer than accepting either.
+    /// Unmap a module by the address `LoadModule` returned, or by its source buffer.
     fn ldr_ro_unload_module(&mut self, tls: u32, address: u64) -> Result<()> {
         const NOT_LOADED: u32 = RO_RESULT_MODULE | (1028 << 9);
         let address = address as u32;
@@ -303,23 +223,15 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
-    /// `IRoInterface::RegisterModuleInfo`: the caller presenting the NRR that
-    /// says which NROs it may load.
-    ///
-    /// Only the magic is checked. The rest of an NRR is a signature chain over
-    /// a table of NRO hashes, verified on a console against a key that is not
-    /// here, and a hash check without the signature behind it authorizes
-    /// nothing, it only decides which NROs to refuse for a reason the caller
-    /// cannot distinguish from a real one. So this records the registration
-    /// and accepts it, which is also what a console with the check patched out
-    /// does.
+    /// Record an NRR registration. Only the magic is checked; the signature
+    /// chain cannot be verified without console keys.
     fn ldr_ro_register_module_info(
         &mut self,
         tls: u32,
         nrr_address: u64,
         nrr_size: u64,
     ) -> Result<()> {
-        /// "NRR0", the first four bytes of an NRR.
+        /// "NRR0".
         const NRR0_MAGIC: u32 = 0x3052_524E;
         const INVALID_NRR: u32 = RO_RESULT_MODULE | (6 << 9);
         const INVALID_ADDRESS: u32 = RO_RESULT_MODULE | (1025 << 9);
@@ -340,14 +252,7 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
-    /// The lowest free run of `size` bytes in the module region, or `None`
-    /// when nothing there can hold one.
-    ///
-    /// First fit over the live mappings rather than a bump allocator: a title
-    /// that loads and unloads plugins as it goes would otherwise walk the
-    /// region and run out of address space it is not using. `ro_modules` is
-    /// keyed by base address, so iterating it walks the mappings in order and
-    /// the gaps fall out of the walk.
+    /// First fit over live mappings, so load/unload cycles do not exhaust the region.
     fn ro_free_region(&self, size: u32) -> Option<u32> {
         let region_end = super::RO_MODULE_REGION_ADDR.wrapping_add(super::RO_MODULE_REGION_SIZE);
         let mut candidate = super::RO_MODULE_REGION_ADDR;
@@ -360,9 +265,6 @@ impl Cpu {
         (size <= region_end.saturating_sub(candidate)).then_some(candidate)
     }
 
-    /// Whether an address or size is a whole number of pages, which every
-    /// argument `ro` takes has to be: it is mapping memory, and half a page
-    /// of a module is not something to map.
     fn ro_is_page_aligned(value: u64) -> bool {
         value.is_multiple_of(crate::mem::PAGE_SIZE as u64)
     }

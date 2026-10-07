@@ -1,52 +1,33 @@
-//! What the GPU did, by surface: the draws into each render target, the
-//! clears of each, every copy and blit by source and destination, and which
-//! surface each presented frame scanned out.
-//!
-//! Counts alone ("9 draws, 1 clear") cannot say whether the draws landed in
-//! the surface that was then presented, which is the question a black frame
-//! asks. Each engine keeps one of these, and [`crate::gpu::Gpu::take_activity`]
-//! gathers them for the host to report.
-//!
-//! Keyed by numbers, not text: a title issues thousands of draws a frame, and
-//! a label formatted per draw would cost more than the draw's bookkeeping.
-//! The label is built once, when a surface is first seen.
+//! GPU work by surface (draws, clears, copies, blits, presents), so a black
+//! frame can be traced to where the draws landed. Labels are built once per surface.
 
 use std::collections::BTreeMap;
 
-/// How many distinct entries one tally holds between two readings. Past it,
-/// new surfaces are summed under one entry rather than dropped.
+/// Distinct entries per reading; past it, new surfaces share one entry.
 const CAP: usize = 256;
 
-/// How many distinct refusal reasons one tally holds between two readings.
-/// A reason can carry an address, so a title refused the same way at many
-/// places would otherwise grow the map without bound.
+/// Distinct refusal reasons per reading; reasons can carry addresses.
 const REFUSAL_CAP: usize = 32;
 
-/// What the refusals past [`REFUSAL_CAP`] are summed under.
 const OTHER_REASONS: &str = "(other reasons)";
 
-/// What an entry counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
-    /// Draws into a colour target. `amount` is vertices (or indices).
+    /// `amount` is vertices or indices.
     Draw,
-    /// Clears of a colour or depth target.
     Clear,
-    /// Copy-engine transfers. `amount` is bytes.
+    /// `amount` is bytes.
     Copy,
-    /// Inline uploads into memory. `amount` is bytes.
+    /// `amount` is bytes.
     Upload,
-    /// 2D-engine blits. `amount` is destination pixels.
+    /// `amount` is destination pixels.
     Blit,
-    /// Frames scanned out of a surface.
     Present,
-    /// Compute dispatches. Only ever a refusal: a dispatch that ran has no
-    /// surface to be counted against.
+    /// Only ever a refusal.
     Dispatch,
 }
 
 impl Kind {
-    /// The name the host sees.
     pub const fn name(self) -> &'static str {
         match self {
             Kind::Draw => "draw",
@@ -60,22 +41,16 @@ impl Kind {
     }
 }
 
-/// One entry: what it is about, how many times, and how much.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tally {
     pub label: String,
     pub count: u64,
     pub amount: u64,
-    /// Of `count`, how many the backend refused: a hole in the frame.
+    /// Of `count`, how many the backend refused.
     pub failed: u64,
 }
 
-/// The entries of one engine, or of the whole GPU once gathered.
-///
-/// Refusals are kept apart from the tallies, by reason rather than by
-/// surface: a refused draw is already counted as `failed` against its
-/// target, and what that count cannot say is *why*, which is the one thing
-/// that says what to implement next.
+/// One engine's entries; refusals are kept by reason rather than by surface.
 #[derive(Debug, Default, Clone)]
 pub struct GpuActivity {
     tallies: BTreeMap<(Kind, u64, u64), Tally>,
@@ -83,9 +58,7 @@ pub struct GpuActivity {
 }
 
 impl GpuActivity {
-    /// Count one `kind` on the surfaces `a` and `b` (a target, or a copy's
-    /// source and destination). `label` describes them, and is only called
-    /// the first time the pair is seen.
+    /// Count one `kind` on surfaces `a` and `b`; `label` is only called for a new pair.
     pub fn note(
         &mut self,
         kind: Kind,
@@ -112,7 +85,6 @@ impl GpuActivity {
         tally.failed += u64::from(failed);
     }
 
-    /// Count one `kind` of work the backend refused, for `reason`.
     pub fn refuse(&mut self, kind: Kind, reason: String) {
         self.refuse_times(kind, reason, 1);
     }
@@ -125,7 +97,7 @@ impl GpuActivity {
         *self.refusals.entry(key).or_insert(0) += times;
     }
 
-    /// Move everything in `other` into this one, leaving `other` empty.
+    /// Move everything from `other` into this one, leaving it empty.
     pub fn absorb(&mut self, other: &mut GpuActivity) {
         for ((kind, reason), times) in std::mem::take(&mut other.refusals) {
             self.refuse_times(kind, reason, times);
@@ -149,8 +121,7 @@ impl GpuActivity {
             .collect()
     }
 
-    /// Every refusal since the last call: what was refused, why, and how
-    /// many times, in kind order.
+    /// Every refusal since the last call, in kind order.
     pub fn take_refusals(&mut self) -> Vec<(Kind, String, u64)> {
         std::mem::take(&mut self.refusals)
             .into_iter()
@@ -159,9 +130,7 @@ impl GpuActivity {
     }
 }
 
-/// A surface the way the entries name it: where the GPU sees it, where the
-/// CPU does when that is known (which is what matches a render target to the
-/// buffer `present` names), its size and format.
+/// A surface's GPU address, CPU address when known, size, and format.
 pub fn surface_text(gpu_va: u64, cpu: Option<u32>, width: u32, height: u32, format: u32) -> String {
     let cpu = match cpu {
         Some(cpu) => format!(" (cpu {cpu:#x})"),

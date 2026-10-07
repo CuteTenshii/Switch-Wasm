@@ -1,27 +1,11 @@
-//! What the guest says about itself: `lm` (its log stream) and `fatal` (the
-//! way it says it is aborting).
-//!
-//! Neither is answered so much as *listened to*. A title's own diagnostics are
-//! often the only account of why it stopped, so `lm` reassembles the packets
-//! it is sent and prints them, and `fatal` reports the error the guest was
-//! about to die of rather than swallowing it.
+//! What the guest says about itself: `lm` (its log stream) and `fatal` (its abort report).
 
 use super::Cpu;
 use crate::trace::Level;
 use crate::Result;
 
 impl Cpu {
-    /// `fatal:u`, a process reporting that it cannot continue.
-    ///
-    /// Every one of its commands carries the `Result` that caused it, and that
-    /// value is the only account a guest ever gives of why it stopped.
-    /// Answering the call generically threw it away and left a process that
-    /// had *said* what was wrong looking like one that simply went quiet: the
-    /// Mii editor gives up here, 135 million instructions in.
-    ///
-    /// The report is a diagnostic, not a policy. Nothing here reboots into an
-    /// error screen, so the call succeeds and the guest carries on into
-    /// whatever it does after asking to die.
+    /// `fatal:u`: report the guest's `Result` as a diagnostic and let it carry on.
     pub(super) fn fatal_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         let result = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
         let module = result & 0x1FF;
@@ -35,25 +19,14 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
-    /// The fatal report for the program currently loaded, if it made one.
     pub fn guest_fatal(&self) -> Option<&str> {
         self.guest_fatal.as_deref()
     }
 
-    /// `lm`: the log manager, which is where a title's own diagnostic output
-    /// goes. `nnSdk`'s `NN_LOG` and everything built on it ends up here rather
-    /// than at `svcOutputDebugString`, so without this a retail title's
-    /// logging is simply thrown away, which is exactly the information that
-    /// makes the next failure legible.
-    ///
-    /// `ILogService::OpenLogger` hands back an `ILogger`, whose `Log` command
-    /// carries one **LogPacket** in a send buffer: a 0x18-byte header
-    /// (`pid`, `thread id`, `flags`, `severity`, `verbosity`, `payload_size`)
-    /// followed by TLV chunks keyed by field. The text of the message is key
-    /// 2; the rest are context the guest may or may not attach. A long message
-    /// is split across packets, with `flags` bit 0 marking the first and bit 1
-    /// the last, so the text is accumulated and only terminated with a newline
-    /// on the tail packet.
+    /// `lm`, the log manager behind `NN_LOG`. `ILogger::Log` carries one LogPacket:
+    /// a 0x18-byte header (`pid`, `thread id`, `flags`, `severity`, `verbosity`,
+    /// `payload_size`) then TLV chunks; the text is key 2. `flags` bit 0 marks the
+    /// first packet of a message and bit 1 the last.
     pub(super) fn lm_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
@@ -88,17 +61,13 @@ impl Cpu {
             },
             "lm:logger" => match cmd_id {
                 Some(0) => {
-                    // Log(buffer). `logSend` marks the buffer AutoSelect, and
-                    // this service answers QueryPointerBufferSize with 0, so it
-                    // always arrives as a map-alias send buffer rather than a
-                    // send-static.
+                    // Log(buffer): arrives as a map-alias send buffer.
                     if let Some((addr, size)) = self.ipc_send_buffer(tls, 0) {
                         self.absorb_log_packet(addr, size);
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // SetDestination(u32): which of the console's log sinks to use.
-                // There is one sink here and the guest is already using it.
+                // SetDestination(u32).
                 Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
@@ -106,16 +75,12 @@ impl Cpu {
         }
     }
 
-    /// Parse one `lm` LogPacket and append its text to the guest's console
-    /// output, so a title's own logging lands in the same place its
-    /// `svcOutputDebugString` writes do.
+    /// Parse one LogPacket and append its text to the guest's console output.
     fn absorb_log_packet(&mut self, addr: u32, size: u32) {
         const HEADER_LEN: u32 = 0x18;
         const FLAG_HEAD: u8 = 1 << 0;
         const FLAG_TAIL: u8 = 1 << 1;
-        // TLV keys. Only the ones worth putting in front of a human are read;
-        // the rest (line number, file, function, drop count, timestamps) are
-        // skipped by length like any other chunk.
+        // TLV keys; the rest are skipped by length.
         const KEY_TEXT: u8 = 2;
         const KEY_MODULE: u8 = 6;
         if size < HEADER_LEN {
@@ -124,8 +89,6 @@ impl Cpu {
         let flags = self.mem.read_u8(addr.wrapping_add(0x10)).unwrap_or(0);
         let severity = self.mem.read_u8(addr.wrapping_add(0x12)).unwrap_or(0);
         let payload_size = self.mem.read_u32(addr.wrapping_add(0x14)).unwrap_or(0);
-        // Trust the smaller of the declared payload and the buffer: a caller
-        // that got either wrong should not walk off the end of the mapping.
         let end = payload_size.min(size - HEADER_LEN);
 
         let mut module = String::new();
@@ -165,8 +128,6 @@ impl Cpu {
         if text.is_empty() {
             return;
         }
-        // A message longer than one packet is split, head to tail; only the
-        // first carries the prefix and only the last ends the line.
         if flags & FLAG_HEAD != 0 {
             let level = match severity {
                 0 => "TRACE",

@@ -5,7 +5,6 @@ mod common;
 use switch_core::nro::symbol_value;
 
 const USAGE: &str = "find_sym <path.nro> <name>";
-/// Where `load_nro` puts an NRO's first byte.
 const BASE: u64 = 0x0800_0000;
 
 fn main() {

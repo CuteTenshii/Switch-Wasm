@@ -1,8 +1,4 @@
-//! A compact A32 disassembler, for reading a fault trace of 32-bit code.
-//!
-//! Not a full one (the shifter's syntax stops at naming the shift) but
-//! enough to follow a crash back to the call that caused it, which is what a
-//! trace is for.
+//! A compact A32 disassembler for reading fault traces of 32-bit code.
 
 use super::shift::expand_imm_c;
 
@@ -15,8 +11,7 @@ const OPS: [&str; 16] = [
 ];
 const SHIFTS: [&str; 4] = ["lsl", "lsr", "asr", "ror"];
 
-/// `{r0, r4-r6, lr}` from a block transfer's 16-bit list, which is far easier
-/// to read against a prologue than the raw mask.
+/// Formats a block transfer's register mask as `{r0, r4-r6, lr}`.
 fn register_list(list: u32) -> String {
     let name = |r: u32| match r {
         13 => "sp".to_string(),
@@ -65,7 +60,6 @@ fn operand2(insn: u32) -> String {
     }
 }
 
-/// Name an A32 encoding: the mnemonic, its condition and its operands.
 pub fn disassemble_a32(insn: u32) -> String {
     let cond = COND[((insn >> 28) & 0xF) as usize];
     let rn = (insn >> 16) & 0xF;
@@ -87,8 +81,7 @@ pub fn disassemble_a32(insn: u32) -> String {
         0b101 => {
             let imm = ((insn & 0x00FF_FFFF) << 8) as i32 >> 6;
             let kind = if (insn >> 24) & 1 != 0 { "bl" } else { "b" };
-            // Relative to the instruction, which is what the trace's own
-            // addresses let a reader add up.
+            // Relative to the instruction.
             format!(
                 "{kind}{cond} pc{}{:#x}",
                 if imm < 0 { "-" } else { "+" },

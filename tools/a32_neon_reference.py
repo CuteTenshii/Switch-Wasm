@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """Print the expected-value table of `crates/switch-core/tests/a32_neon_reference_test.rs`.
 
-Each NEON case runs under `qemu-arm` on the same three vectors the test loads
-into q8, q9 and q10, with r2 holding 0x9abcdef0, and the table records all
-four afterwards: the destination, the source a permute rewrites, and the core
-register a lane move reads or writes. Needs `llvm-mc`,
-`clang` with `lld`, and `qemu-arm` (user-mode) on the PATH.
+Runs each case under `qemu-arm` with q8..q10 loaded and r2 = 0x9abcdef0, recording
+q8..q10 and r2 afterwards. Needs `llvm-mc`, `clang` with `lld`, and `qemu-arm`.
 
     python3 tools/a32_neon_reference.py > table.rs
 
-To cover another instruction, add a line of assembly to OPS that reads q8
-(or d16) and writes q10 (or d20), or a list of lines for a case that needs
-more than one, such as a store read back.
+A case in OPS reads q8 (or d16) and writes q10 (or d20).
 """
 
 import re
@@ -55,9 +50,7 @@ OPS += [f"{op}.{t}{s} d20, d16, d18" for op in ("vpmax", "vpmin") for t in "su"
 OPS += [f"vpadd.i{s} d20, d16, d18" for s in ("8", "16", "32")]
 OPS += [f"{op}.s{s} q10, q8, q9" for op in ("vqdmulh", "vqrdmulh") for s in ("16", "32")]
 OPS += ["vmul.p8 q10, q8, q9"]
-# The shifts by an immediate: right, rounding, accumulating and inserting,
-# left and saturating left, narrowing, widening, and fixed point, at the
-# smallest and largest amount of every size.
+# Immediate shifts at the smallest and largest amount of every size.
 for t, s, amounts in (("8", 8, (1, 8)), ("16", 16, (1, 16)), ("32", 32, (1, 32)),
                       ("64", 64, (1, 64))):
     for n in amounts:
@@ -79,7 +72,6 @@ for t, s in (("8", 8), ("16", 16), ("32", 32)):
             f"vshll.u{t} q10, d16, #{s - 1}"]
 OPS += [f"vcvt.{a}.{b} q10, q8, #{n}" for a, b in (("f32", "s32"), ("f32", "u32"),
         ("s32", "f32"), ("u32", "f32")) for n in (1, 16, 32)]
-# Three registers of different lengths: long, wide and narrow.
 for t in ("s8", "s16", "s32", "u8", "u16", "u32"):
     OPS += [f"{op}.{t} q10, d16, d18" for op in ("vaddl", "vsubl", "vabal", "vabdl", "vmlal",
                                                  "vmlsl", "vmull")]
@@ -89,8 +81,7 @@ OPS += [f"{op}.i{t} d20, q8, q9" for op in ("vaddhn", "vraddhn", "vsubhn", "vrsu
 OPS += [f"{op}.s{t} q10, d16, d18" for op in ("vqdmlal", "vqdmlsl", "vqdmull")
         for t in ("16", "32")]
 OPS += ["vmull.p8 q10, d16, d18"]
-# Moves between a core register and a lane, VDUP, and the interleaved
-# structure loads and stores, each store read back into q10.
+# Core register and lane moves, VDUP, and structure loads/stores read back into q10.
 OPS += ["vmov.8 d20[5], r2", "vmov.16 d21[3], r2", "vmov.32 d20[1], r2",
         "vmov.s8 r2, d16[3]", "vmov.u8 r2, d17[7]", "vmov.s16 r2, d16[1]",
         "vmov.u16 r2, d17[2]", "vmov.32 r2, d17[1]",
@@ -103,14 +94,12 @@ OPS += ["vld2.16 {d18, d19, d20, d21}, [r0]", "vld3.8 {d18, d19, d20}, [r0]",
 OPS += [[f"{st} {regs}, [r0]", "vld1.32 {d20, d21}, [r0]"]
         for st, regs in (("vst2.8", "{d16, d17}"), ("vst2.32", "{d16, d18}"),
                          ("vst3.16", "{d16, d17, d18}"), ("vst4.8", "{d16, d17, d18, d19}"))]
-# The crypto extension on A32.
 OPS += ["aese.8 q10, q8", "aesd.8 q10, q8", "aesmc.8 q10, q8", "aesimc.8 q10, q8",
         "sha1h.32 q10, q8", "sha1su1.32 q10, q8", "sha256su0.32 q10, q8",
         "sha1c.32 q10, q8, q9", "sha1p.32 q10, q8, q9", "sha1m.32 q10, q8, q9",
         "sha1su0.32 q10, q8, q9", "sha256h.32 q10, q8, q9", "sha256h2.32 q10, q8, q9",
         "sha256su1.32 q10, q8, q9"]
-# The modified immediates, every cmode and op: moves, inversions, and the
-# ORR and BIC forms that read the destination.
+# Modified immediates, every cmode and op.
 OPS += ["vmov.i32 q10, #0x5a", "vmov.i32 q10, #0x5a00", "vmov.i32 q10, #0x5a0000",
         "vmov.i32 q10, #0x5a000000", "vmov.i16 q10, #0x5a", "vmov.i16 q10, #0x5a00",
         "vmov.i32 q10, #0x5aff", "vmov.i32 q10, #0x5affff", "vmov.i8 q10, #0xa5",
@@ -119,9 +108,7 @@ OPS += ["vmov.i32 q10, #0x5a", "vmov.i32 q10, #0x5a00", "vmov.i32 q10, #0x5a0000
         "vorr.i32 q10, #0x5a00", "vorr.i16 q10, #0x5a00", "vbic.i32 q10, #0x5a000000",
         "vbic.i16 q10, #0x5a", "vmov.i8 d20, #0x3c"]
 
-# q8, q9 and q10 as four words each: sign extremes and carries for the
-# integer forms, and for the float forms a normal, a negative, the largest
-# finite value, a denormal, a NaN, an infinity and a signed zero.
+# Sign extremes and carries for integers; normal, negative, max, denormal, NaN, inf, -0 for floats.
 INPUTS = [
     ((0x80FF7F01, 0x00010203, 0xFFFF8000, 0x7FFFFFFF),
      (0x12345678, 0x9ABCDEF0, 0x0F0F0F0F, 0xF0F0F0F0),
@@ -150,9 +137,7 @@ def main():
            "ldr r1, =out"]
     data = [".data", "in:"]
     for i, (ops, (q8, q9, q10)) in enumerate(cases):
-        # Sixteen zero bytes after each case's vectors: a structure load or
-        # store reaches up to 32 bytes from q10's copy, and the test's
-        # scratch page is zero there too.
+        # Zero padding: structure loads/stores reach up to 32 bytes past q10's copy.
         data.append(".word " + ", ".join(f"{w:#x}" for w in q8 + q9 + q10 + (0, 0, 0, 0)))
         asm += [f"ldr r0, =in + {64 * i}", "vld1.32 {d16, d17, d18, d19}, [r0]!",
                 "vld1.32 {d20, d21}, [r0]", "movw r2, #0xdef0", "movt r2, #0x9abc"]

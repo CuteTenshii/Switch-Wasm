@@ -1,17 +1,11 @@
-//! A32 memory access: the single load/store forms, the halfword and
-//! doubleword "extra" forms, the block transfers, and the exclusive pairs.
+//! A32 memory access: single, extra (halfword/doubleword), block, and exclusive transfers.
 
 use super::shift::{decode_imm_shift, shift_c};
 use crate::cpu::Cpu;
 use crate::{Error, Result};
 
 impl Cpu {
-    /// Apply an addressing mode and hand back the address to access and the
-    /// value the base register should end up with.
-    ///
-    /// Pre-indexed and offset forms access `base ± offset`; post-indexed forms
-    /// access `base` and write the sum back. A post-indexed form always writes
-    /// back, which is what the `W` bit means only when `P` is set.
+    /// Returns the address to access and the base register's new value; post-indexed forms always write back.
     #[inline]
     fn a32_address(&self, base: u32, offset: u32, insn: u32) -> (u32, Option<u32>) {
         let pre = (insn >> 24) & 1 != 0;
@@ -54,8 +48,7 @@ impl Cpu {
             } else {
                 self.mem.read_u32(addr)?
             };
-            // The base is written back before the loaded value lands, so
-            // `ldr r0, [r0], #4` keeps the load and not the increment.
+            // Writeback first, so `ldr r0, [r0], #4` keeps the loaded value.
             if let Some(value) = writeback {
                 self.set_r32(rn, value);
             }
@@ -78,8 +71,7 @@ impl Cpu {
         Ok(())
     }
 
-    /// The halfword, signed-byte and doubleword forms, which the architecture
-    /// puts in the data-processing space rather than with the loads.
+    /// The halfword, signed-byte and doubleword forms.
     pub(super) fn a32_extra_load_store(&mut self, insn: u32) -> Result<()> {
         let rn = ((insn >> 16) & 0xF) as u8;
         let rt = ((insn >> 12) & 0xF) as u8;
@@ -125,12 +117,7 @@ impl Cpu {
         Ok(())
     }
 
-    /// `LDM`/`STM`: the block transfers a function prologue and epilogue are
-    /// built from.
-    ///
-    /// The list is always transferred lowest register to lowest address
-    /// whichever direction the addressing runs, so both directions are handled
-    /// by computing the lowest address first and walking up.
+    /// `LDM`/`STM`: registers always go lowest to lowest address, so start from the lowest address.
     pub(super) fn a32_load_store_multiple(&mut self, insn: u32) -> Result<()> {
         if (insn >> 22) & 1 != 0 {
             return Err(Error::Cpu(format!(
@@ -146,11 +133,7 @@ impl Cpu {
         let add = (insn >> 23) & 1 != 0;
         let bytes = count * 4;
 
-        // Where the lowest-numbered register goes, for each of the four
-        // addressing modes. Decrement-after ends *at* the base, so it starts
-        // one word above decrement-before: taking them as the same address
-        // loaded every LDMDA one word low, and Mario Kart 8 Deluxe read a
-        // count where it wanted an array pointer and wrote through it.
+        // Lowest address for each addressing mode; decrement-after ends at the base.
         let start = match (pre, add) {
             (false, true) => base,                                      // IA
             (true, true) => base.wrapping_add(4),                       // IB
@@ -165,9 +148,7 @@ impl Cpu {
 
         let load = (insn >> 20) & 1 != 0;
         let writeback = (insn >> 21) & 1 != 0;
-        // A load that names its own base in the list keeps what it loaded, not
-        // the writeback. A store transfers the base's *original* value, which
-        // is why the writeback happens after the loop rather than before it.
+        // A load naming its base keeps the loaded value; a store transfers the original base.
         let base_in_list = list & (1 << rn) != 0;
 
         let mut addr = start;
@@ -201,27 +182,18 @@ impl Cpu {
         Ok(())
     }
 
-    /// `LDREX`/`STREX` and the deprecated `SWP`, which share an encoding,
-    /// and ARMv8's load-acquire/store-release forms beside them.
+    /// `LDREX`/`STREX`, `SWP`, and the load-acquire/store-release forms.
     pub(super) fn a32_sync(&mut self, insn: u32) -> Result<()> {
         let rn = ((insn >> 16) & 0xF) as u8;
         let rd = ((insn >> 12) & 0xF) as u8;
         let rt = (insn & 0xF) as u8;
         let addr = self.r32(rn);
-        // Bits 9:8 say which kind of access this is: 11 exclusive, 10
-        // exclusive with acquire/release, 00 acquire/release alone. The
-        // ordering is free here, one core at a time, but the plain forms
-        // are not exclusive at all: run as `STREX` an `STLH` dropped its
-        // store whenever no monitor was open and wrote its status into the
-        // `Rd` field, which it fills with 1111. Mario Kart 8 Deluxe's SDK
-        // caches a session's pointer-buffer size with one, read it back as
-        // 0, and refused every pointer buffer on that session.
+        // Bits 9:8 == 00 is plain acquire/release, which does not use the monitor.
         if (insn >> 20) & 0b1000 != 0 && (insn >> 8) & 0b11 == 0b00 {
             return self.a32_acquire_release(insn, addr, rd, rt);
         }
         match (insn >> 20) & 0xF {
-            // SWP / SWPB: an unconditional read-modify-write, and the only
-            // form here that does not use the monitor.
+            // SWP / SWPB: a read-modify-write that does not use the monitor.
             0b0000 | 0b0100 => {
                 let byte = (insn >> 22) & 1 != 0;
                 let value = self.r32(rt);
@@ -235,9 +207,7 @@ impl Cpu {
                     self.set_r32(rd, old);
                 }
             }
-            // STREX{,D,B,H}: `rd` takes 0 on success, 1 when the monitor was
-            // lost. Same monitor the A64 pairs use, so a mode switch inside a
-            // sequence cannot make one succeed across the other's writes.
+            // STREX{,D,B,H}: `rd` takes 0 on success, 1 when the monitor was lost.
             0b1000 | 0b1010 | 0b1100 | 0b1110 => {
                 if self.exclusive.take() == Some(addr) {
                     let value = self.r32(rt);
@@ -290,10 +260,7 @@ impl Cpu {
         Ok(())
     }
 
-    /// `LDA{,B,H}` and `STL{,B,H}`: an ordinary load or store, since there
-    /// is no other core to order it against, that neither reads nor opens
-    /// the exclusive monitor. A load's destination is the `Rd` field; a
-    /// store's value is `Rt`, and it reports no status.
+    /// `LDA{,B,H}`/`STL{,B,H}`: plain accesses that leave the monitor alone; loads write `Rd`, stores read `Rt`.
     fn a32_acquire_release(&mut self, insn: u32, addr: u32, rd: u8, rt: u8) -> Result<()> {
         let load = (insn >> 20) & 1 != 0;
         match ((insn >> 21) & 0b11, load) {

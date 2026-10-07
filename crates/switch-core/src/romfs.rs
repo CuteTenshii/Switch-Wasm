@@ -1,56 +1,11 @@
-//! RomFS reader: the directory tree inside an NCA's RomFS section.
-//!
-//! [`crate::nca::Nca::decrypt_romfs_section`] hands back the raw image; this
-//! turns it into a list of paths and payload extents. The image starts with a
-//! 0x50-byte header of `u64` offset/size pairs:
-//!
-//! ```text
-//! 0x00  header size (always 0x50, RomFS has no magic, this is the check)
-//! 0x08  directory hash table offset
-//! 0x10  directory hash table size
-//! 0x18  directory metadata table offset
-//! 0x20  directory metadata table size
-//! 0x28  file hash table offset
-//! 0x30  file hash table size
-//! 0x38  file metadata table offset
-//! 0x40  file metadata table size
-//! 0x48  file data offset
-//! ```
-//!
-//! The two hash tables only accelerate lookup by name; the metadata tables on
-//! their own describe the whole tree, so this walks those and ignores the
-//! hashes. A directory entry is
-//!
-//! ```text
-//! 0x00  u32 parent directory offset
-//! 0x04  u32 next sibling directory offset
-//! 0x08  u32 first child directory offset
-//! 0x0C  u32 first file offset
-//! 0x10  u32 next directory in this hash bucket
-//! 0x14  u32 name length
-//! 0x18  name (UTF-8, padded to a 4-byte boundary)
-//! ```
-//!
-//! and a file entry is
-//!
-//! ```text
-//! 0x00  u32 parent directory offset
-//! 0x04  u32 next sibling file offset
-//! 0x08  u64 payload offset, relative to the file data offset
-//! 0x10  u64 payload size
-//! 0x18  u32 next file in this hash bucket
-//! 0x1C  u32 name length
-//! 0x20  name (UTF-8, padded to a 4-byte boundary)
-//! ```
-//!
-//! `0xFFFFFFFF` ends a sibling chain. The root directory is the entry at
-//! offset 0 of the directory metadata table and its own name is empty.
+//! RomFS reader: walks the directory and file metadata tables of an NCA's
+//! RomFS section (the name hash tables are ignored). `0xFFFFFFFF` ends a
+//! sibling chain; the root directory is entry 0 with an empty name.
 
 use crate::source::ByteSource;
 use crate::Error;
 
-/// The header's declared size. RomFS carries no magic number, so this
-/// doubles as the format check.
+/// The header's declared size; RomFS has no magic, so this is the format check.
 pub const HEADER_SIZE: u64 = 0x50;
 
 /// End-of-chain marker for the `next`/`first` links between entries.
@@ -121,17 +76,14 @@ impl<'a> RomFs<'a> {
         &self.files
     }
 
-    /// Look up a file by absolute path (`/control.nacp`), case-insensitively,
-    /// RomFS itself is case-sensitive, but the names this reader looks for are
-    /// SDK-generated and have been spelled inconsistently by repack tools.
+    /// Look up a file by absolute path (`/control.nacp`), case-insensitively.
     pub fn find(&self, path: &str) -> Option<&RomFsFile> {
         self.files
             .iter()
             .find(|f| f.path.eq_ignore_ascii_case(path))
     }
 
-    /// The payload bytes of `file`, or `None` if its extent falls outside the
-    /// image.
+    /// The payload bytes of `file`, or `None` if its extent falls outside the image.
     pub fn read(&self, file: &RomFsFile) -> Option<&'a [u8]> {
         let start = self.data_offset.checked_add(file.offset)? as usize;
         let end = start.checked_add(file.size as usize)?;
@@ -144,24 +96,16 @@ impl<'a> RomFs<'a> {
     }
 }
 
-/// The largest metadata table [`RomFsIndex::read`] will pull in. A retail
-/// title's tables run to a few megabytes; a size past this is a corrupt
-/// header, and believing it would allocate whatever it says.
+/// The largest metadata table [`RomFsIndex::read`] accepts before calling the
+/// header corrupt.
 const MAX_TABLE: u64 = 64 << 20;
 
-/// Which file each byte of a RomFS belongs to, read from its metadata tables
-/// alone.
-///
-/// A title reads its RomFS as raw ranges of an `IStorage` and walks the file
-/// table itself, so the emulator serving those ranges sees offsets and never
-/// a name. This is what puts the name back: the same tables the guest reads,
-/// read once, and turned into extents that an offset can be looked up in.
-/// Only the tables are read, never the payload, so it costs what the guest's
-/// own mount costs.
+/// Maps byte ranges of a RomFS to file names, from the metadata tables alone,
+/// so raw `IStorage` reads can be attributed to files.
 #[derive(Debug, Clone, Default)]
 pub struct RomFsIndex {
-    /// `(start, end, path)`, with `start`/`end` absolute within the image and
-    /// sorted by `start`. RomFS payloads never overlap, so `end` is sorted too.
+    /// `(start, end, path)`, absolute within the image and sorted by `start`
+    /// (payloads never overlap, so `end` is sorted too).
     extents: Vec<(u64, u64, String)>,
 }
 
@@ -212,12 +156,8 @@ impl RomFsIndex {
 
 /// Walk the metadata tables and collect every file they describe.
 fn walk(dir_table: &[u8], file_table: &[u8]) -> Result<Vec<RomFsFile>, Error> {
-    // Chains are just offsets into the tables, so a corrupt image can
-    // point an entry back at itself. The walk is bounded by the number of
-    // entries the tables could possibly hold: every entry is at least its
-    // fixed part long, so dividing each table by that is an upper bound on
-    // what it can contain. A directory is read twice, once when its
-    // parent lists it, once when it is walked itself, so it gets two.
+    // Bound the walk against cyclic chains: each table holds at most
+    // size / fixed-part entries, and each directory is read twice.
     let mut budget =
         2 * (dir_table.len() / DIR_ENTRY_SIZE) + file_table.len() / FILE_ENTRY_SIZE + 2;
     let spend = |budget: &mut usize| -> Result<(), Error> {
@@ -324,8 +264,6 @@ mod tests {
         let mut file_table: Vec<u8> = Vec::new();
         let mut data: Vec<u8> = Vec::new();
 
-        // Files are laid out root-first, then the subdirectory's, so each
-        // chain is a run of consecutive entries.
         let chain = |table: &mut Vec<u8>, data: &mut Vec<u8>, files: &[(&str, &[u8])]| -> u32 {
             if files.is_empty() {
                 return INVALID_OFFSET;
@@ -337,8 +275,6 @@ mod tests {
                 let next = if i + 1 == files.len() {
                     INVALID_OFFSET
                 } else {
-                    // Every entry in this chain has the same length only if
-                    // the names do; compute the next offset after the fact.
                     0
                 };
                 entry.extend_from_slice(&next.to_le_bytes());
@@ -497,9 +433,7 @@ mod tests {
         image
     }
 
-    /// The cycle guard has to leave room for a legitimately deep tree: every
-    /// directory is read twice, so budgeting one read each rejected a valid
-    /// image the moment it nested at all.
+    /// Every directory is read twice, so the cycle guard must budget for that.
     #[test]
     fn walks_a_deeply_nested_tree() {
         let image = build_nested(16);
@@ -509,8 +443,6 @@ mod tests {
         assert_eq!(romfs.read_path(&path).unwrap(), b"DEEP");
     }
 
-    /// The index has to name a file from nothing but a range: that is all a
-    /// guest's `IStorage::Read` carries.
     #[test]
     fn the_index_names_the_files_a_range_touches() {
         let image = build(&[("a.bin", b"AAAA")], Some(("sub", &[("b.bin", b"BB")])));

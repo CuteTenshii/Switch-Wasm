@@ -136,14 +136,12 @@ fn simd_table_lookup_gathers_bytes_and_zeroes_misses() {
         cpu.mem.write_u8(0x3000 + i, 0x10 + i as u8).unwrap();
         cpu.mem.write_u8(0x3010 + i, 0x20 + i as u8).unwrap();
     }
-    // v2: the low half reverses the first eight table bytes, the high half
-    // is 0x40: past the end of any table this test builds.
+    // v2: the low half reverses the first eight table bytes; the high half (0x40) is out of range.
     for i in 0..8u32 {
         cpu.mem.write_u8(0x3020 + i, 7 - i as u8).unwrap();
         cpu.mem.write_u8(0x3028 + i, 0x40).unwrap();
     }
-    // v3 starts as 0xaa so TBX keeping a byte is distinguishable from TBL
-    // zeroing it.
+    // v3 starts as 0xaa so TBX keeping a byte differs from TBL zeroing it.
     for i in 0..16u32 {
         cpu.mem.write_u8(0x3030 + i, 0xaa).unwrap();
     }
@@ -178,17 +176,7 @@ fn simd_table_lookup_gathers_bytes_and_zeroes_misses() {
 #[test]
 fn simd_ins_element_moves_one_lane_and_leaves_the_rest() {
     // `INS <Vd>.<Ts>[<i1>], <Vn>.<Ts>[<i2>]` is the `op == 1` half of the
-    // AdvSIMD copy group. The group was matched on bits[29:21], which pins
-    // `op` to 0, so every one of these fell through to the three-same integer
-    // decoder and executed as an unrelated arithmetic op, silently
-    // overwriting the whole destination register instead of one lane.
-    //
-    // The regression this comes from: libnx's `smEncodeName` builds an 8-byte
-    // `SmServiceName` in a vector register with one `ldr b<n>, [s, #i]` per
-    // character followed by a chain of `ins v31.b[i], v<n>.b[0]`, then
-    // `umov x1, v31.d[0]`. Checkpoint asked `sm` for `ns:am2` this way and the
-    // request went out with an all-zero name; the session it got back was
-    // filed under "", answered nothing, and the guest panicked.
+    // AdvSIMD copy group; libnx's `smEncodeName` builds service names with it.
     let mut cpu = cpu_at(0x1000);
     // v31 holds 'n' (as `ldr b31, [x0]` would leave it); one source register
     // per remaining character, each with the byte in lane 0.
@@ -210,9 +198,7 @@ fn simd_ins_element_moves_one_lane_and_leaves_the_rest() {
     assert_eq!(cpu.read_vreg(31), 0x326D_613A_736E);
     assert_eq!(cpu.read_x(1), u64::from_le_bytes(*b"ns:am2\0\0"));
 
-    // A non-zero source lane, and lanes wider than a byte. INS touches only
-    // the destination lane: the top half of Vd is left alone, unlike almost
-    // every other AdvSIMD encoding.
+    // A non-zero source lane and wider lanes; INS leaves the rest of Vd alone.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(0, 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
     cpu.set_vreg(1, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF);
@@ -309,11 +295,8 @@ fn scalar_fp_fadd_fmov() {
 
 #[test]
 fn scalar_fp_fcvtzs() {
-    // `scvtf s0, w1` = 0x1e220020 (1000 → 1000.0f) then `fcvtzs w2, s0` =
-    // 0x1e380002 back again. Bit 21 is a fixed 1 in this encoding class, so the
-    // operation is rmode (bits[20:19]) and opcode (bits[18:16]); the old
-    // hand-assembled encodings here had bit 21 clear, which is not a valid
-    // instruction at all.
+    // `scvtf s0, w1` = 0x1e220020 then `fcvtzs w2, s0` = 0x1e380002. Bit 21 is
+    // a fixed 1; rmode is bits[20:19], opcode bits[18:16].
     let code = [0x1e22_0020u32, 0x1e38_0002, nop()];
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 1000);
@@ -323,8 +306,7 @@ fn scalar_fp_fcvtzs() {
 
 #[test]
 fn movi_modified_immediate_cmodes() {
-    // MOVI cmode semantics + the split imm8 field (bits 18:16 ++ 9:5), values
-    // verified under qemu-aarch64 (real A57 semantics).
+    // MOVI cmode and the split imm8 field (bits 18:16 ++ 9:5), checked under qemu-aarch64.
     // movi v0.8b, #0x1c  → every byte 0x1c (q=0: upper half cleared)
     let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x0f00e780, nop()]);
     assert_eq!(cpu.read_vreg(0), 0x1c1c1c1c_1c1c1c1c);
@@ -373,9 +355,8 @@ fn fpr_load_store_pairs_and_scalar() {
 
 #[test]
 fn simd_scalar_byte_load_and_stur_q() {
-    // hbmenu / NX-Shell both faulted on `ldr b29, [x0, #0x280]` = 0x3d4a001d
-    // (SIMD scalar 8-bit load). Also covers `stur q17, [x0, #0x8]` = 0x3c808011
-    // (SIMD scalar STUR, unscaled offset) which the same libnx init loop uses.
+    // `ldr b29, [x0, #0x280]` = 0x3d4a001d (SIMD scalar 8-bit load) and
+    // `stur q17, [x0, #0x8]` = 0x3c808011 (SIMD scalar STUR).
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0x3000);
     cpu.mem.map_zero(0x3000, 0x300).unwrap();
@@ -405,9 +386,7 @@ fn simd_scalar_byte_load_and_stur_q() {
 
 #[test]
 fn scalar_cmge_with_zero_masks_predicate() {
-    // NX-Shell faulted on `cmge d31, d31, #0` = 0x7ee08bff (scalar integer
-    // compare-to-zero: Dd = all-ones if Dn >= 0, else 0), used as a predicate
-    // mask via `fmov x2, d31` in a string-layout loop.
+    // `cmge d31, d31, #0` = 0x7ee08bff: scalar compare-to-zero.
     // Encoding: bits[31:30] = 01 (D), U (bit29) = 1, bits[28:25] = 1111,
     // bits[24:21] = 0111, bits[20:16] = 00000 (zero operand), op = bits[15:10]
     // = 100010 (GE), Rn = bits[9:5], Rd = bits[4:0].
@@ -426,9 +405,7 @@ fn scalar_cmge_with_zero_masks_predicate() {
 
 #[test]
 fn simd_post_index_store_writes_back_the_base() {
-    // `str q27, [x2], #0x10` = 0x3c81045b. Without the write-back the base
-    // never advances, so the vectorised table-fill loops it appears in never
-    // terminate.
+    // `str q27, [x2], #0x10` = 0x3c81045b writes back the base.
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map_zero(0x4000, 0x100).unwrap();
     cpu.set_reg(2, 0x4000);
@@ -496,10 +473,7 @@ fn simd_multiply_and_multiply_accumulate() {
 
 #[test]
 fn ld1_multiple_structures_writes_back_only_when_post_indexed() {
-    // `ld1 {v1.16b, v2.16b}, [x2], #32` = 0x4cdfa041. The immediate post-index
-    // form has Rm == 31, which the old decode read as "no writeback", newlib's
-    // strrchr then computed its result from a base 32 bytes too low and
-    // PHYSFS_init failed on a garbage argv[0] directory.
+    // `ld1 {v1.16b, v2.16b}, [x2], #32` = 0x4cdfa041: immediate post-index has Rm == 31.
     let mut cpu = cpu_at(0x1000);
     map_ramp(&mut cpu, 0x3000, 64);
     cpu.set_reg(2, 0x3000);
@@ -508,8 +482,7 @@ fn ld1_multiple_structures_writes_back_only_when_post_indexed() {
     assert_eq!(cpu.read_vreg(2), mem_u128(&cpu, 0x3010));
     assert_eq!(cpu.read_reg(2), 0x3020);
 
-    // `ld1 {v3.16b}, [x0]` = 0x4c407003 has no writeback at all: Rm reads as 0
-    // there, and the old decode wrote the incremented base into x0.
+    // `ld1 {v3.16b}, [x0]` = 0x4c407003 has no writeback.
     let mut cpu = cpu_at(0x1000);
     map_ramp(&mut cpu, 0x3000, 64);
     cpu.set_reg(0, 0x3000);
@@ -548,9 +521,8 @@ fn ld1_multiple_structures_writes_back_only_when_post_indexed() {
 
 #[test]
 fn ld1r_replicates_one_element_to_every_lane() {
-    // `ld1r {v9.16b}, [x0]` = 0x4d40c009 and `ld1r {v10.4s}, [x0]` = 0x4d40c80a.
-    // The replicate group is `scale == 0b11`, which the old decode treated as a
-    // doubleword lane insert.
+    // `ld1r {v9.16b}, [x0]` = 0x4d40c009 and `ld1r {v10.4s}, [x0]` = 0x4d40c80a
+    // (the replicate group, `scale == 0b11`).
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map_zero(0x3000, 0x40).unwrap();
     cpu.mem.write_u32(0x3000, 0x1122_33AB).unwrap();
@@ -603,9 +575,7 @@ fn ld2_and_st2_interleave_lanes() {
 
 #[test]
 fn ld1_single_lane_addresses_the_whole_element() {
-    // `ld1 {v13.s}[1], [x0]` = 0x0d40900d replaces bits 32..63 and nothing
-    // else; the old decode shifted by the element's byte count and masked to
-    // that many bits, so it rewrote 4 bits at bit 4.
+    // `ld1 {v13.s}[1], [x0]` = 0x0d40900d replaces bits 32..63 and nothing else.
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map_zero(0x3000, 0x40).unwrap();
     cpu.mem.map_zero(0x3100, 0x40).unwrap();
@@ -620,9 +590,7 @@ fn ld1_single_lane_addresses_the_whole_element() {
 
 #[test]
 fn bsl_bit_and_bif_take_their_mask_from_the_right_register() {
-    // BSL selects with Vd, BIT and BIF with Vm. All three had the mask wrong,
-    // which broke newlib's vectorised strchr (it uses `bif` to fold the
-    // "matched" and "end of string" predicates together).
+    // BSL selects with Vd, BIT and BIF with Vm.
     let mut cpu = cpu_at(0x1000);
     let byte = |b: u8| u128::from_le_bytes([b; 16]);
     cpu.set_vreg(20, byte(0xF0));
@@ -643,10 +611,8 @@ fn bsl_bit_and_bif_take_their_mask_from_the_right_register() {
 
 #[test]
 fn scalar_fp_one_source_and_fused_multiply_add() {
-    // `fmov s0, s15` = 0x1e2041e0 is opcode 0 of the 1-source group, whose low
-    // opcode bit sits in bits[15], matching bits[15:10] as a unit missed the
-    // whole group, so NX-Shell faulted here. FMOV is a bit-exact copy, so a
-    // signalling NaN payload survives it.
+    // `fmov s0, s15` = 0x1e2041e0, opcode 0 of the 1-source group (low opcode
+    // bit in bit 15). FMOV is bit-exact, so a signalling NaN survives.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(15, 0x1111_1111_1111_1111_1111_1111_7FA0_1234);
     let cpu = run_program(cpu, 0x1000, &[0x1e20_41e0, nop()]);
@@ -658,8 +624,7 @@ fn scalar_fp_one_source_and_fused_multiply_add() {
     let cpu = run_program(cpu, 0x1000, &[0x1e60_4041, nop()]);
     assert_eq!(cpu.read_vreg(1), 0x4008_0000_0000_0000);
 
-    // FMADD/FMSUB/FNMADD/FNMSUB (`fmadd d3, d4, d5, d6` = 0x1f451883 and
-    // friends): the 3-source group has its own top byte, so it was unreachable.
+    // FMADD/FMSUB/FNMADD/FNMSUB (`fmadd d3, d4, d5, d6` = 0x1f451883 and friends).
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(4, 3.0f64.to_bits() as u128);
     cpu.set_vreg(5, 4.0f64.to_bits() as u128);
@@ -708,8 +673,7 @@ fn scalar_fp_one_source_and_fused_multiply_add() {
 
 #[test]
 fn vector_integer_float_conversions() {
-    // `scvtf v28.4s, v31.4s` = 0x4e21dbfc is where NX-Shell faulted: the
-    // two-register misc group was falling through to the three-same decode.
+    // `scvtf v28.4s, v31.4s` = 0x4e21dbfc, the two-register misc group.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(31, u32x4([1, 2, 3, 0xFFFF_FFFF]));
     let cpu = run_program(cpu, 0x1000, &[0x4e21_dbfc, nop()]);
@@ -752,8 +716,7 @@ fn vector_integer_float_conversions() {
 
 #[test]
 fn vector_floating_point_arithmetic() {
-    // `fdiv v28.4s, v28.4s, v30.4s` = 0x6e3eff9c, the FP three-same group
-    // (opcodes from 0b11000 up) was being decoded as integer ops.
+    // `fdiv v28.4s, v28.4s, v30.4s` = 0x6e3eff9c, FP three-same (opcodes from 0b11000).
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(28, f32x4([1.0, 3.0, 5.0, 9.0]));
     cpu.set_vreg(30, f32x4([2.0, 4.0, 5.0, 3.0]));
@@ -965,9 +928,7 @@ fn vector_two_register_misc_integer_ops() {
 
 #[test]
 fn scalar_integer_float_conversions_and_rounding_modes() {
-    // `ucvtf d0, x1` = 0x9e630020 is where NX-Shell died: rmode/opcode were
-    // read as one 6-bit field including the fixed bit 21, so this decoded as
-    // FCVTMU and wrote x0: clobbering a live pointer.
+    // `ucvtf d0, x1` = 0x9e630020: rmode/opcode exclude the fixed bit 21.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0xDEAD_BEEF);
     cpu.set_reg(1, 5);
@@ -1032,9 +993,7 @@ fn scalar_integer_float_conversions_and_rounding_modes() {
 
 #[test]
 fn fcmp_against_zero_uses_the_opcode2_bit() {
-    // `fcmp d8, #0.0` = 0x1e602108. The compare-with-zero flag is bit 3 of
-    // opcode2 (bits[4:0]); reading it from bits[9:8] took it out of Rn, so this
-    // compared d8 against v0 instead of zero.
+    // `fcmp d8, #0.0` = 0x1e602108: the zero flag is bit 3 of opcode2 (bits[4:0]).
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(8, (1.5f64).to_bits() as u128);
     cpu.set_vreg(0, (1.5f64).to_bits() as u128);
@@ -1061,8 +1020,8 @@ fn fcmp_against_zero_uses_the_opcode2_bit() {
 
 #[test]
 fn ext_extracts_across_a_vector_pair() {
-    // `ext v0.16b, v1.16b, v2.16b, #4` = 0x6e022020 takes the top 12 bytes of
-    // Vn followed by the low 4 of Vm. NX-Shell faulted on the `#8` form.
+    // `ext v0.16b, v1.16b, v2.16b, #4` = 0x6e022020: the top 12 bytes of Vn,
+    // then the low 4 of Vm.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(1, 0x1F1E_1D1C_1B1A_1918_1716_1514_1312_1110);
     cpu.set_vreg(2, 0x2F2E_2D2C_2B2A_2928_2726_2524_2322_2120);
@@ -1092,9 +1051,7 @@ fn ext_extracts_across_a_vector_pair() {
 
 #[test]
 fn scalar_shift_by_immediate() {
-    // `ushr d30, d31, #32` = 0x7f6007fe. The scalar forms differ from the
-    // vector ones only in bit 28 and always operate on one 64-bit lane; only
-    // the vector encodings were decoded, so NX-Shell faulted here.
+    // `ushr d30, d31, #32` = 0x7f6007fe: scalar forms differ from vector ones in bit 28.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(31, 0xFFFF_FFFF_FFFF_FFFF_1122_3344_5566_7788);
     let cpu = run_program(cpu, 0x1000, &[0x7f60_07fe, nop()]);
@@ -1111,8 +1068,7 @@ fn scalar_shift_by_immediate() {
 
 #[test]
 fn fcsel_fccmp_and_fixed_point_conversions() {
-    // `fcsel s29, s31, s30, gt` = 0x1e3ecffd. FCSEL and FCCMP have bit 21 set;
-    // they were guarded on bit 21 being clear, so neither was reachable.
+    // `fcsel s29, s31, s30, gt` = 0x1e3ecffd. FCSEL and FCCMP have bit 21 set.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(31, (1.5f32).to_bits() as u128);
     cpu.set_vreg(30, (2.5f32).to_bits() as u128);
@@ -1144,9 +1100,8 @@ fn fcsel_fccmp_and_fixed_point_conversions() {
     let cpu = run_program(cpu, 0x1000, &[0x1e63_2060, 0x1e62_1425, nop()]);
     assert_eq!(cpu.nzcv() >> 28, 0b0101);
 
-    // The fixed-point conversions (bit 21 clear) used to land in the branch
-    // those conditionals occupied: `scvtf s0, w1, #8` = 0x1e02e020 scales by
-    // 2^-8, and `fcvtzs w2, s0, #4` = 0x1e18f002 scales back up by 2^4.
+    // Fixed-point conversions (bit 21 clear): `scvtf s0, w1, #8` = 0x1e02e020
+    // scales by 2^-8, `fcvtzs w2, s0, #4` = 0x1e18f002 by 2^4.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 256);
     cpu.set_reg(4, 3);
@@ -1164,9 +1119,8 @@ fn fcsel_fccmp_and_fixed_point_conversions() {
 
 #[test]
 fn scalar_two_register_misc_converts_one_lane() {
-    // `ucvtf s13, s13` = 0x7e21d9ad, the scalar form of the two-register misc
-    // group (bits[31:30] = 01, bits[28:24] = 11110). Only the vector encodings
-    // were decoded, so NX-Shell faulted here.
+    // `ucvtf s13, s13` = 0x7e21d9ad, the scalar two-register misc group
+    // (bits[31:30] = 01, bits[28:24] = 11110).
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(13, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_0000_0007);
     let cpu = run_program(cpu, 0x1000, &[0x7e21_d9ad, nop()]);
@@ -1257,27 +1211,17 @@ fn widening_and_by_element_multiplies() {
 
 #[test]
 fn advsimd_scalar_by_element_multiplies() {
-    // `01 U 11111 size L M Rm opcode H 0 Rn Rd`: one lane of Vn times one
-    // selected lane of Vm, written as a *scalar* -- bottom element, everything
-    // above it zeroed. It differs from the vector-by-element form only in
-    // bits[28:24], 11111 against 01111, so the whole group was falling through
-    // that check. "A Short Hike" reaches `fmul s3, s4, v3.s[0]` two billion
-    // instructions in, having got that far only once every earlier fix landed.
-    //
-    // Every encoding below is what LLVM assembles the named instruction to,
-    // not one derived by hand from the manual.
+    // `01 U 11111 size L M Rm opcode H 0 Rn Rd`: scalar by-element, the bottom
+    // element written and the rest zeroed. Encodings are LLVM's.
 
-    // fmul s3, s4, v3.s[0] -- Rd and Rm are the same register here, which is
-    // the real instruction from the title, so it also pins that reading Vm
-    // happens before writing Vd.
+    // fmul s3, s4, v3.s[0]: Rd == Rm, so Vm must be read before Vd is written.
     let cpu = simd1(
         0x5f839083,
         &[(4, f32b(3.0)), (3, f32b(2.0) | (f32b(9.0) << 32))],
     );
     assert_eq!(cpu.read_vreg(3), f32b(6.0), "fmul s3, s4, v3.s[0]");
 
-    // fmul d0, d1, v2.d[1] -- the index picks the *high* half of Vm, and the
-    // 64-bit result must not leave the old top half of Vd behind.
+    // fmul d0, d1, v2.d[1]: the high half of Vm; Vd's top half is cleared.
     let cpu = simd1(
         0x5fc29820,
         &[
@@ -1305,8 +1249,7 @@ fn advsimd_scalar_by_element_multiplies() {
     // fmulx s0, s1, v2.s[0]: an ordinary multiply...
     let cpu = simd1(0x7f829020, &[(1, f32b(2.0)), (2, f32b(3.0))]);
     assert_eq!(cpu.read_vreg(0), f32b(6.0), "fmulx s0, s1, v2.s[0]");
-    // ...except that zero times infinity is 2.0 rather than a NaN, which is
-    // the only reason the instruction exists apart from FMUL.
+    // ...except zero times infinity is 2.0 rather than a NaN.
     let cpu = simd1(0x7f829020, &[(1, f32b(0.0)), (2, f32b(f32::INFINITY))]);
     assert_eq!(cpu.read_vreg(0), f32b(2.0), "fmulx 0 * inf");
     let cpu = simd1(0x7f829020, &[(1, f32b(-0.0)), (2, f32b(f32::INFINITY))]);
@@ -1328,8 +1271,7 @@ fn advsimd_scalar_by_element_multiplies() {
     let cpu = simd1(0x5f82d820, &[(1, 1 << 30), (2, (1u128 << 30) << 64)]);
     assert_eq!(cpu.read_vreg(0), 1 << 29, "sqrdmulh s0, s1, v2.s[2]");
 
-    // sqdmull s0, h1, v2.h[0]: doubled, kept at twice the width rather than
-    // shifted back down -- so the same inputs give the whole 0x2000_0000.
+    // sqdmull s0, h1, v2.h[0]: doubled at twice the width, giving 0x2000_0000.
     let cpu = simd1(0x5f42b020, &[(1, 0x4000), (2, 0x4000)]);
     assert_eq!(cpu.read_vreg(0), 0x2000_0000, "sqdmull s0, h1, v2.h[0]");
     let cpu = simd1(0x5f42b020, &[(1, 0x8000), (2, 0x8000)]);
@@ -1357,24 +1299,16 @@ fn advsimd_scalar_by_element_multiplies() {
 
 #[test]
 fn dup_element_to_a_scalar_takes_the_lane_and_zeroes_the_rest() {
-    // The AdvSIMD *scalar* copy group holds exactly one instruction: `DUP
-    // (element)`, which lifts one lane of a vector into a scalar register.
-    // `mov s1, v0.s[1]` is an alias for it, and it is what a vectorised hash
-    // reaches for to fold its accumulator lanes together -- "A Short Hike"
-    // stops on one 1.29 billion instructions in.
-    //
-    // It differs from the vector copy group only in bits[28:21], so it was
-    // being rejected along with everything else that is not 0111 0000. Unlike
-    // the vector DUP the lane is *not* replicated: it goes at the bottom and
-    // the rest of the register is zeroed.
+    // The AdvSIMD scalar copy group: `DUP (element)` (alias `mov s1, v0.s[1]`).
+    // Unlike vector DUP, the lane goes to the bottom and the rest is zeroed.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(0, 0x4444_4444_3333_3333_2222_2222_1111_1111u128);
     cpu.mem.map(0x1000, &0x5e0c0401u32.to_le_bytes()).unwrap(); // dup s1, v0.s[1]
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_vreg(1), 0x2222_2222);
 
-    // The lane size comes from the lowest set bit of imm5, the index from the
-    // bits above it: `dup d1, v0.d[1]` = 0x5e180401.
+    // Lane size from imm5's lowest set bit, index from the bits above:
+    // `dup d1, v0.d[1]` = 0x5e180401.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(0, 0x4444_4444_3333_3333_2222_2222_1111_1111u128);
     cpu.mem.map(0x1000, &0x5e180401u32.to_le_bytes()).unwrap();
@@ -1402,10 +1336,8 @@ fn dup_element_to_a_scalar_takes_the_lane_and_zeroes_the_rest() {
 
 #[test]
 fn crc32_accumulates_over_the_bytes_of_its_operand() {
-    // The check value of "123456789" for both polynomials, fed in as one
-    // doubleword plus a trailing byte. The instructions accumulate without
-    // the final inversion, so these are the complements of the usual
-    // 0xCBF43926 and 0xE3069283.
+    // The check value of "123456789", as one doubleword plus a byte. Without the
+    // final inversion these are the complements of 0xCBF43926 and 0xE3069283.
     let mut cpu = Cpu::new();
     cpu.set_reg(0, u64::from_le_bytes(*b"12345678"));
     cpu.set_reg(1, 0xFFFF_FFFF);
@@ -1430,8 +1362,7 @@ fn crc32_accumulates_over_the_bytes_of_its_operand() {
     assert_eq!(cpu.read_x(7), 0xBAA7_3FBF);
 }
 
-/// AESE then AESMC is one AES round bar the key schedule, so FIPS-197's own
-/// round-1 vector pins both instructions and the decoder that reaches them.
+/// AESE then AESMC is one AES round bar the key schedule; FIPS-197's round-1 vector.
 #[test]
 fn the_aes_instructions_run_a_fips_197_round() {
     let mut cpu = cpu_at(0x1000);
@@ -1552,8 +1483,7 @@ fn pmull_multiplies_without_carrying() {
     assert_eq!(cpu.read_vreg(2), 1u128 << 126);
 }
 
-/// `fcvt` to and from a half is ARMv8.0 baseline, the half-precision
-/// *arithmetic* the A57 lacks is a separate thing.
+/// `fcvt` to and from a half is ARMv8.0 baseline, unlike half-precision arithmetic.
 #[test]
 fn fcvt_converts_to_and_from_half_precision() {
     // 1.0 as a half is 0x3C00; as a single 0x3F800000, as a double 0x3FF0...
@@ -1657,8 +1587,7 @@ fn every_half_survives_a_round_trip_through_single() {
     }
 }
 
-/// FCVTL/FCVTN move a whole vector of halves, and are the form the vectorised
-/// half-float packing in shader and texture code actually uses.
+/// FCVTL/FCVTN on a whole vector of halves.
 #[test]
 fn the_vector_half_conversions_move_four_lanes() {
     // FCVTL v1.4s, v0.4h : 0 Q 0 01110 size 10000 10111 10 Rn Rd, size = 00
@@ -1685,9 +1614,7 @@ fn the_vector_half_conversions_move_four_lanes() {
     );
 }
 
-/// The shift amount is the low **byte** of the lane sign-extended, so a
-/// negative one shifts right. Reading the whole lane instead made that
-/// impossible below 64 bits: `sshl` could only ever shift left.
+/// The shift amount is the lane's low byte sign-extended, so negative shifts right.
 #[test]
 fn sshl_shifts_right_on_a_negative_amount_in_every_lane_width() {
     for (size, esize) in [(0u32, 8u32), (1, 16), (2, 32), (3, 64)] {
@@ -1849,8 +1776,7 @@ fn the_scalar_variable_shifts_decode_and_clear_the_rest_of_the_register() {
     assert_eq!(cpu.read_vreg(2), 4);
 }
 
-/// `fegetround`/`fesetround` are an MRS/MSR pair on FPCR, so the register has
-/// to be real storage before either can mean anything.
+/// `fegetround`/`fesetround` are MRS/MSR on FPCR, so it must be real storage.
 #[test]
 fn fpcr_and_fpsr_round_trip_through_mrs_and_msr() {
     let (a, b, c, d) = FPCR_REG;
@@ -1886,8 +1812,7 @@ fn fpcr_and_fpsr_round_trip_through_mrs_and_msr() {
     );
 }
 
-/// FRINTX and FRINTI are the two that round to whatever mode FPCR names, so
-/// changing the mode has to change their answer.
+/// FRINTX and FRINTI round in FPCR's mode.
 #[test]
 fn frinti_follows_the_rounding_mode_in_fpcr() {
     let (a, b, c, d) = FPCR_REG;
@@ -2005,9 +1930,7 @@ fn the_exception_flags_are_sticky_until_written() {
     assert_eq!(cpu.read_x(8), 0, "writing FPSR did not clear the flags");
 }
 
-/// Fixed-point conversions, the shift-by-immediate encodings whose shift is a
-/// count of fraction bits. `fcvtzs v0.4s, v0.4s, #15` is Just Dance 2023
-/// turning float samples into Q15, and the first one it reached ended the run.
+/// Fixed-point conversions: shift-by-immediate encodings counting fraction bits.
 #[test]
 fn simd_fixed_point_converts_in_both_directions() {
     let f32s = |lanes: [f32; 4]| -> u128 {
@@ -2068,10 +1991,8 @@ fn simd_fixed_point_converts_in_both_directions() {
     assert_eq!(cpu.read_vreg(9), u128::from((-1.0f64).to_bits()));
 }
 
-/// The scalar integer compares and ADD/SUB, which exist only on a doubleword.
-/// Minus one against one is where the signed and unsigned forms disagree.
-/// `cmeq d4, d19, d4` is Tomodachi Life's, and the first one it reached
-/// stopped the run.
+/// The doubleword-only scalar integer compares and ADD/SUB; -1 against 1
+/// separates signed from unsigned.
 #[test]
 fn simd_scalar_compares_and_add_sub_on_a_doubleword() {
     const ONES: u64 = u64::MAX;
@@ -2119,8 +2040,7 @@ fn simd_scalar_compares_and_add_sub_on_a_doubleword() {
     assert_eq!(cpu.read_vreg(18), u128::from(ONES), "sub: 5 - 6 wraps");
 }
 
-/// The floating-point reductions across four lanes. `fmaxnmv s0, v0.4s` is
-/// Tomodachi Life's, and the first one it reached stopped the run.
+/// The floating-point reductions across four lanes.
 #[test]
 fn simd_fp_reductions_across_lanes() {
     let f32s = |lanes: [f32; 4]| -> u128 {
@@ -2152,9 +2072,7 @@ fn simd_fp_reductions_across_lanes() {
     assert_eq!(cpu.read_vreg(5), u128::from((-7.0f32).to_bits()));
 }
 
-/// The scalar pairwise reductions: two lanes into one, on a doubleword pair
-/// or a single or double one. `fmaxp s0, v0.2s` is Tomodachi Life's, and the
-/// first one it reached stopped the run.
+/// The scalar pairwise reductions.
 #[test]
 fn simd_scalar_pairwise_reduces_two_lanes_into_one() {
     let singles = |a: f32, b: f32| u128::from(a.to_bits()) | (u128::from(b.to_bits()) << 32);

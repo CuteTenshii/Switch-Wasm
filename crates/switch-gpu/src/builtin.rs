@@ -1,22 +1,10 @@
-//! The shaders the backend writes for itself.
-//!
-//! None of these come from the guest. They are the passes a device needs that
-//! a Maxwell draw does not describe: putting a depth surface the guest wrote
-//! by hand back onto the device, clearing part of a surface, and moving a
-//! surface between the sample grid it is stored on and the one a pass renders
-//! at.
+//! Backend-internal shaders for passes a Maxwell draw does not describe:
+//! depth uploads, partial clears, and multisample resampling.
 
 use switch_core::gpu::surface::{SampleGrid, MAX_SAMPLES};
 
-/// The pass that puts a guest depth surface onto the device.
-///
-/// `depth32float` is a format a copy may read out of and never write into,
-/// so the only way in is to draw it: a fullscreen triangle whose fragment
-/// reads the texel that was uploaded to an ordinary `r32float` texture and
-/// reports it as its own depth. `depth16unorm` needs none of this: it is
-/// the one depth format a copy may write, but it goes the same way, because
-/// two paths that must agree about a surface's contents are one more place
-/// for them to disagree than there needs to be.
+/// Writes an uploaded `r32float` texture into a depth surface as frag depth;
+/// a copy cannot write `depth32float`.
 pub(crate) const LOAD_DEPTH_WGSL: &str = "\
 @group(0) @binding(0) var src: texture_2d<f32>;
 
@@ -35,13 +23,8 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @builtin(frag_depth) f32 {
 }
 ";
 
-/// The pass that clears part of a surface.
-///
-/// A clear that covers the whole of one is a render pass's load operation and
-/// needs none of this. A clear that covers a rectangle of it, or only some of
-/// its channels, is not something a load operation can say, so it is a
-/// fullscreen triangle under a scissor, with the write mask baked into the
-/// pipeline and the value in a uniform.
+/// A partial clear: a fullscreen triangle under a scissor, for rectangles or
+/// channel masks a load operation cannot express.
 pub(crate) const CLEAR_RECT_WGSL: &str = "\
 struct Clear {
   color: vec4<f32>,
@@ -67,20 +50,9 @@ fn fs_depth() -> @builtin(frag_depth) f32 {
 }
 ";
 
-/// The WGSL that moves a multisampled surface between the two shapes it has.
-///
-/// A Maxwell multisample surface stores its samples *spatially*: a pixel owns
-/// a `samples_x` by `samples_y` tile of texels, and that expanded image is
-/// what guest memory holds and what a readback has to produce. A device's own
-/// multisampling stores them opaquely, in a texture a copy may not touch at
-/// all. So the two shapes both exist, and this is the pass between them,
-/// `gather` on the way in, `scatter` on the way out.
-///
-/// `sampled` is how the source is declared and `load` is how one texel comes
-/// out of it, which is the only thing that differs between the four
-/// directions. The grid is a storage buffer rather than a uniform because its
-/// tables are indexed by a value only known at run time and a uniform array
-/// pads every element to sixteen bytes.
+/// The WGSL that moves a multisampled surface between Maxwell's spatial
+/// layout (a `samples_x` by `samples_y` texel tile per pixel, as guest memory
+/// holds it) and a device multisample texture: `gather` in, `scatter` out.
 pub(crate) fn resample_wgsl(sampled: &str, load: &str, depth: bool) -> String {
     let output = if depth {
         "@builtin(frag_depth) f32"
@@ -155,8 +127,7 @@ fn fs_scatter(@builtin(position) position: vec4<f32>) -> {output} {{
 pub(crate) struct ResampleKey {
     /// Which fragment entry point of [`resample_wgsl`] runs.
     pub(crate) entry: &'static str,
-    /// The destination's format, which is also the source's: a companion is
-    /// the same format as the surface it stands in for.
+    /// The destination's format, which is also the source's.
     pub(crate) dst: wgpu::TextureFormat,
     /// The destination's sample count.
     pub(crate) samples: u32,

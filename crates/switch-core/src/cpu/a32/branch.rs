@@ -1,6 +1,4 @@
-//! A32 control flow and the coprocessor space: the immediate branches, the
-//! `cond == 0xF` encodings that are unconditional by construction, and CP15,
-//! which at EL0 is only the thread-pointer pair.
+//! A32 branches, the unconditional `cond == 0xF` space, and CP15.
 
 use crate::cpu::Cpu;
 use crate::{Error, Result};
@@ -17,12 +15,9 @@ impl Cpu {
         Ok(())
     }
 
-    /// The `cond == 0xF` encoding space, which is unconditional by
-    /// construction: the memory barriers and preload hints a guest issues, and
-    /// the one branch that would switch to Thumb.
+    /// The `cond == 0xF` space: barriers, preload hints, and BLX to Thumb.
     pub(super) fn a32_unconditional(&mut self, insn: u32) -> Result<()> {
-        // DSB/DMB/ISB, CLREX, and the PLD/PLI preload hints: architectural
-        // no-ops here, since there is one core and no cache to maintain.
+        // DSB/DMB/ISB, CLREX and PLD/PLI are no-ops with one core and no cache.
         let barrier = (insn & 0xFFFF_FFF0) == 0xF57F_F040
             || (insn & 0xFFFF_FFF0) == 0xF57F_F050
             || (insn & 0xFFFF_FFF0) == 0xF57F_F060;
@@ -37,16 +32,14 @@ impl Cpu {
             self.pc = self.pc.wrapping_add(4);
             return Ok(());
         }
-        // Advanced SIMD data processing is the whole of bits 27:25 == 001 in
-        // this space, and its load/store forms are 100.
+        // Advanced SIMD data processing is bits 27:25 == 001; its load/stores are 100.
         if (insn >> 25) & 0x7 == 0b001 {
             return self.a32_neon_data(insn);
         }
         if (insn >> 24) & 0xFF == 0xF4 {
             return self.a32_neon_load_store(insn);
         }
-        // The ARMv8 floating-point additions, which are unconditional because
-        // they carry their own condition or rounding mode.
+        // ARMv8 FP additions carry their own condition or rounding mode.
         if (insn >> 24) & 0xFF == 0xFE && matches!((insn >> 8) & 0xF, 10 | 11) {
             return self.a32_vfp_v8(insn);
         }
@@ -70,11 +63,8 @@ impl Cpu {
         )))
     }
 
-    /// `MRC`/`MCR` and the rest of the coprocessor space. The only coprocessor
-    /// a Horizon guest reaches at EL0 is CP15's thread-pointer pair, which is
-    /// AArch32's spelling of `TPIDRRO_EL0` and `TPIDR_EL0`; the emulator
-    /// already keeps those apart, and aliasing them breaks IPC exactly as it
-    /// does in A64.
+    /// `MRC`/`MCR`. At EL0 only CP15's thread-pointer pair (`TPIDR_EL0` and
+    /// `TPIDRRO_EL0`) is reachable; aliasing the two breaks IPC.
     pub(super) fn a32_coproc(&mut self, insn: u32) -> Result<()> {
         let coproc = (insn >> 8) & 0xF;
         if coproc == 10 || coproc == 11 {
@@ -86,10 +76,7 @@ impl Cpu {
         let crm = insn & 0xF;
         let opc2 = (insn >> 5) & 0x7;
         let rt = ((insn >> 12) & 0xF) as u8;
-        // CP15 c7 is cache maintenance and the pre-ARMv7 barriers, `MCR
-        // p15, 0, rX, c7, c10, 5` is how a v6-era build spells `DMB`. There is
-        // one core here and no cache to maintain, so every one of them
-        // retires.
+        // CP15 c7 is cache maintenance and pre-ARMv7 barriers; all retire as no-ops.
         if coproc == 15 && crn == 7 && !is_mrc {
             self.pc = self.pc.wrapping_add(4);
             return Ok(());
@@ -102,8 +89,7 @@ impl Cpu {
                     self.set_r32(rt, val);
                 }
                 (false, 2) => self.tpidr_rw = u64::from(self.r32(rt)),
-                // TPIDRURO: the kernel-set, read-only thread pointer the IPC
-                // message buffer hangs off.
+                // TPIDRURO: the read-only thread pointer the IPC buffer hangs off.
                 (true, 3) => {
                     let val = self.tpidr as u32;
                     self.set_r32(rt, val);

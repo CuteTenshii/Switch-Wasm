@@ -1,76 +1,48 @@
-//! What each guest thread has been doing, for a host that reports it.
-//!
-//! Two halves. The lifecycle, every thread created, started, paused, resumed
-//! and ended, is journalled as it happens: those are rare, and each one is
-//! worth a line. Everything a thread does in between, blocking and waking
-//! thousands of times a second, is summarised instead, as how many
-//! instructions each thread ran since the last reading, where it is, and what
-//! it is waiting on now, which is the question a stalled title raises: which
-//! thread is spinning, and which one is asleep on something that will never
-//! come.
+//! Per-thread activity for host reports: a lifecycle journal plus a summary
+//! of each thread's work, location and wait since the last reading.
 
 use super::{Cpu, ThreadState};
 
-/// How many lifecycle lines are held between two readings. Past it they are
-/// counted instead.
+/// Lifecycle lines held between readings; the rest are only counted.
 const LOG_CAP: usize = 256;
 
-/// The size of `nn::os::ThreadType`, which is how far into one the name
-/// search looks. Measured rather than taken from a header: Just Dance 2017
-/// allocates its threads' `ThreadType`s back to back, and consecutive entry
-/// arguments are exactly this far apart. Looking further would read the next
-/// thread's name buffer and report it as this one's.
+/// Size of `nn::os::ThreadType`, which bounds the name search.
 const THREAD_TYPE_SIZE: u32 = 0x1C0;
 
-/// How many frames above a thread's pc its report walks: enough to climb out
-/// of the SDK's wrappers into the code that called them.
+/// Frames above a thread's pc its report walks.
 const CALLERS: usize = 4;
 
 /// The longest name the search accepts, `nn::os`'s own limit included.
 const NAME_MAX: u32 = 64;
 
-/// Fewer instructions than this between two reports is no work: a thread
-/// woken spuriously reissues its wait in a handful, and one doing anything
-/// real runs tens of thousands.
+/// Fewer instructions than this between two reports counts as no work.
 const IDLE_WORK: u64 = 20_000;
 
-/// One thread, as of the reading that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadReport {
-    /// Its slot: 0 is the main thread, the rest in creation order.
+    /// 0 is the main thread, the rest in creation order.
     pub index: usize,
-    /// Its handle, as the guest knows it.
     pub handle: u64,
-    /// The name `nn::os` gave it, when one could be found, as the report
-    /// prints it: in quotes, or for a thread never named, the function the
-    /// SDK's default name records. See [`Cpu::name_text`].
+    /// The `nn::os` name, formatted by [`Cpu::name_text`].
     pub name: Option<String>,
-    /// Where it started, as `module+offset` when the address is in a loaded
-    /// module.
+    /// Entry point, as `module+offset` when inside a loaded module.
     pub entry: String,
-    /// Where it is now and who called the function it is in, as
-    /// `module+offset`.
+    /// Current pc and callers, as `module+offset`.
     pub at: String,
-    /// What it is doing, in words.
     pub state: String,
-    /// Its priority, 0 (most urgent) to 63.
+    /// 0 (most urgent) to 63.
     pub priority: u8,
-    /// Whether it holds the CPU right now.
     pub running: bool,
-    /// Instructions it retired since the last reading.
+    /// Instructions retired since the last reading.
     pub ran: u64,
-    /// Times it was given the CPU since the last reading.
+    /// Times scheduled since the last reading.
     pub switches: u64,
-    /// Guest milliseconds since a report last saw it do real work: a
-    /// thread blocked on something that never comes counts up, one that
-    /// wakes and does its job resets. 0 for a thread never started or
-    /// ended.
+    /// Guest milliseconds since a report last saw real work; 0 if never started or ended.
     pub idle_ms: u64,
 }
 
 impl Cpu {
-    /// Charge the instructions retired since the last switch to thread
-    /// `index`, which is the one that ran them.
+    /// Charge instructions retired since the last switch to thread `index`.
     pub(super) fn account_slice(&mut self, index: usize) {
         let ran = self.steps.wrapping_sub(self.switched_in_at);
         if let Some(thread) = self.threads.get_mut(index) {
@@ -79,7 +51,6 @@ impl Cpu {
         self.switched_in_at = self.steps;
     }
 
-    /// Journal one lifecycle event, or count it when the journal is full.
     pub(super) fn log_thread(&mut self, line: String) {
         if self.thread_log.len() < LOG_CAP {
             self.thread_log.push(line);
@@ -88,24 +59,17 @@ impl Cpu {
         }
     }
 
-    /// Remember that `name` occupies `start..end`, so an address in it can be
-    /// named as an offset into it.
     pub(super) fn record_module_name(&mut self, start: u32, end: u32, name: &str) {
         self.module_names
             .retain(|&(s, e, _)| e <= start || s >= end);
         self.module_names.push((start, end, name.to_owned()));
     }
 
-    /// Forget the module at `start`, when it is unloaded.
     pub(super) fn forget_module_name(&mut self, start: u32) {
         self.module_names.retain(|&(s, _, _)| s != start);
     }
 
     /// An address as `module+offset`, or bare when no loaded module holds it.
-    ///
-    /// Offsets are what a disassembly of the module is read against, so this
-    /// is the form a report can be checked with; a bare address only means
-    /// something against this one run's layout.
     pub fn locate(&self, addr: u32) -> String {
         match self
             .module_names
@@ -117,14 +81,12 @@ impl Cpu {
         }
     }
 
-    /// The lifecycle events since the last call, how many more there were
-    /// than the journal had room for, and where every thread stands now.
-    /// Each thread's instruction and switch counts restart from zero.
+    /// Lifecycle events since the last call, the overflow count, and every
+    /// thread's state. Resets per-thread counters.
     pub fn take_thread_report(&mut self) -> (Vec<ThreadReport>, Vec<String>, u64) {
         let log = std::mem::take(&mut self.thread_log);
         let dropped = std::mem::take(&mut self.thread_log_dropped);
-        // A process that never created a thread has no slot for its main one
-        // yet; everything it ran is the main thread's.
+        // Without any created thread, everything ran on the main thread.
         if self.threads.is_empty() {
             let ran = self.steps.wrapping_sub(self.switched_in_at);
             self.switched_in_at = self.steps;
@@ -182,13 +144,7 @@ impl Cpu {
         (reports, log, dropped)
     }
 
-    /// Where thread `index` is: its pc, then the return addresses of the
-    /// frames above it, innermost first.
-    ///
-    /// The callers are the part that says what the thread is *doing*. A
-    /// blocked thread's pc is the `svc` in the SDK's wait wrapper, which
-    /// every blocked thread shares, and the first caller or two are still
-    /// the SDK's; the game's own code is further up.
+    /// Thread `index`'s pc, then its frames' return addresses, innermost first.
     fn where_is(&self, index: usize) -> String {
         let (pc, regs, mode) = match self.threads.get(index) {
             Some(thread) if index != self.current_thread => (thread.pc, &thread.regs, thread.mode),
@@ -209,16 +165,8 @@ impl Cpu {
         )
     }
 
-    /// The name `nn::os` gave thread `index`, when it can be found.
-    ///
-    /// A thread made by `nn::os::CreateThread` enters with its `ThreadType`
-    /// as its argument, and a `ThreadType` carries its name as a pointer to a
-    /// buffer inside itself. Where in it depends on the SDK version, so the
-    /// pointer is looked for rather than read from a fixed offset: the first
-    /// word in the struct that points back into the struct at readable text.
-    /// Pointing *into the struct* is what makes this a name rather than any
-    /// string the thread happens to reference, and a thread that was not
-    /// made by `nn::os` has no such word and gets no name.
+    /// The name `nn::os` gave thread `index`: found via the first word in its
+    /// `ThreadType` that points back into the struct at readable text.
     fn thread_name(&self, index: usize) -> Option<String> {
         let base = u32::try_from(self.threads.get(index)?.arg).ok()?;
         if base == 0 {
@@ -235,13 +183,7 @@ impl Cpu {
         })
     }
 
-    /// A thread's name the way the report prints it.
-    ///
-    /// A thread nobody named keeps the name `nn::os` made up for it,
-    /// `Thread_0x` and the address of its function. That address is worth
-    /// more than the name: every such thread enters through the same SDK
-    /// trampoline, so the function is the one thing telling them apart, and
-    /// it is printed as `module+offset` like every other address here.
+    /// A thread's printed name; unnamed `Thread_0x` threads print their function.
     fn name_text(&self, name: &str) -> String {
         match name
             .strip_prefix("Thread_0x")
@@ -253,9 +195,7 @@ impl Cpu {
         }
     }
 
-    /// The NUL-terminated printable text at `at`, when there is some that
-    /// could be a name: at least two characters, at least one of them a
-    /// letter, and shorter than [`NAME_MAX`].
+    /// Printable NUL-terminated text at `at` that could be a name.
     fn read_name(&self, at: u32) -> Option<String> {
         let mut name = String::new();
         for i in 0..NAME_MAX {
@@ -271,8 +211,7 @@ impl Cpu {
         (name.len() >= 2 && name.chars().any(|c| c.is_ascii_alphabetic())).then_some(name)
     }
 
-    /// What thread `index` is doing, in words: for a blocked thread, what it
-    /// is blocked on and, where it can be said, who holds it.
+    /// What a blocked thread is blocked on and, where known, who holds it.
     fn describe_thread(&self, index: usize) -> String {
         let thread = &self.threads[index];
         let running = index == self.current_thread;
@@ -287,8 +226,7 @@ impl Cpu {
             ThreadState::Runnable => "ready to run".to_owned(),
             ThreadState::Finished => "exited".to_owned(),
             ThreadState::WaitMutex(addr) => {
-                // The lock word holds its owner's handle, which says whose
-                // turn it is to let go.
+                // The lock word holds its owner's handle.
                 let owner = self.mem.read_u32(addr).unwrap_or(0) & !super::MUTEX_HAS_LISTENERS;
                 format!(
                     "waiting for the mutex at {addr:#x}, held by {}",
@@ -310,9 +248,7 @@ impl Cpu {
             ),
             ThreadState::Sleeping { deadline } => format!("asleep, wakes in {}", until(deadline)),
             ThreadState::WaitEvent { .. } => {
-                // Parked with its pc on the `svcWaitSynchronization`, so the
-                // arguments are still in its saved registers: the handle list
-                // and how long it is.
+                // Parked on `svcWaitSynchronization`: handles are in its saved registers.
                 let list = thread.regs[1] as u32;
                 let count = (thread.regs[2] as u32).min(0x40);
                 let waits: Vec<String> = (0..count)
@@ -326,8 +262,7 @@ impl Cpu {
                         }
                     })
                     .collect();
-                // `nn::os` sleeps by waiting on no handles at all, and that
-                // is a thread with nothing to be woken by but its timeout.
+                // `nn::os` sleeps by waiting on no handles.
                 if waits.is_empty() {
                     "asleep in a wait on no handles".to_owned()
                 } else {
@@ -341,7 +276,6 @@ impl Cpu {
         text
     }
 
-    /// A thread by its handle, as the report numbers it.
     fn thread_named_by(&self, handle: u64) -> String {
         match self.threads.iter().position(|t| t.handle == handle) {
             Some(index) => match self.thread_name(index) {
@@ -352,8 +286,7 @@ impl Cpu {
         }
     }
 
-    /// A thread as its lifecycle lines name it: its number, its name once it
-    /// has one, and where it started.
+    /// A thread as lifecycle lines name it: number, name, and entry point.
     pub(super) fn thread_label(&self, handle: u64) -> String {
         match self.threads.iter().position(|t| t.handle == handle) {
             Some(0) => "thread 0 (main)".to_owned(),
@@ -441,10 +374,7 @@ mod tests {
         assert!(cpu.take_thread_report().1.is_empty(), "taken, not read");
     }
 
-    /// A function free to use x29 and x30 for data, as zlib's `inflate_fast`
-    /// does, leaves text and small integers where the walk looks for frames.
-    /// Only a frame on the stack whose return address follows a call is
-    /// reported, and the walk stops at the first one that is not.
+    /// Frames are only reported while their return address follows a call.
     #[test]
     fn a_backtrace_reports_only_frames_that_return_after_a_call() {
         use crate::cpu::SP_SLOT;
@@ -491,10 +421,7 @@ mod tests {
         assert_eq!(cpu.backtrace(8), [] as [u32; 0], "\"dist\" is no frame");
     }
 
-    /// A thread handle is what `nn::os::WaitThread` waits on, and it has to
-    /// stay unsignalled until the thread really ends: a join that returned
-    /// early let Just Dance 2019 tear down a thread object that was still in
-    /// use, and the process exited through the wreckage.
+    /// A thread handle stays unsignalled until the thread really ends.
     #[test]
     fn a_thread_handle_is_signalled_when_its_thread_exits_and_wakes_its_joiner() {
         use crate::cpu::ThreadState;
@@ -522,9 +449,7 @@ mod tests {
         );
     }
 
-    /// The name is found by what points at it, not by where it sits, and a
-    /// pointer that leaves the `ThreadType` is not taken for one: that is how
-    /// a neighbouring thread's name, or any other string, stays out.
+    /// A name pointer that leaves the `ThreadType` is not taken.
     #[test]
     fn a_thread_is_named_from_the_pointer_its_thread_type_keeps_to_itself() {
         const TYPE: u32 = 0x3096_5000;
@@ -550,8 +475,7 @@ mod tests {
         assert_eq!(threads[1].name.as_deref(), Some("\"LoadingThread\""));
         assert!(cpu.thread_label(handle).contains("\"LoadingThread\""));
 
-        // The name the SDK gives a thread nobody named is its function's
-        // address, which is the more useful thing to print.
+        // An SDK default name prints its function's address instead.
         cpu.record_module_name(0x0800_4000, 0x0900_0000, "main");
         for (i, &b) in b"Thread_0x00000000086563A8\0".iter().enumerate() {
             cpu.mem.write_u8(TYPE + 0x188 + i as u32, b).unwrap();
@@ -562,8 +486,7 @@ mod tests {
             Some("unnamed, runs main+0x6523a8")
         );
 
-        // A struct whose only inward pointer is to something that is not text
-        // is nameless rather than named after garbage.
+        // An inward pointer to non-text yields no name.
         cpu.mem.write_u8(TYPE + 0x188, 0x01).unwrap();
         let (threads, _, _) = cpu.take_thread_report();
         assert_eq!(threads[1].name, None);

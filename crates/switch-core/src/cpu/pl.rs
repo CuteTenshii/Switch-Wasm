@@ -1,35 +1,10 @@
-//! `pl:u`: the shared font.
-//!
-//! The console keeps its system fonts in shared memory rather than handing
-//! them over as files, so this maps an image of them and reports where each
-//! one landed inside it. Homebrew that draws text, hbmenu, anything using
-//! `plGetSharedFont`, feeds those bytes straight to FreeType, so without a
-//! font nothing but pre-rendered bitmaps ever appears on screen.
-//!
-//! The image itself is built in [`super::Cpu::build_shared_fonts`]; this is
-//! only the service that describes it.
+//! `pl:u`: the shared system fonts, built by [`super::Cpu::build_shared_fonts`].
 
 use super::{Cpu, FontRegion};
 use crate::Result;
 
 impl Cpu {
-    /// The `set` service: system language settings.
-    ///
-    /// `SetLanguage` is an index into this list, and `setMakeLanguage` maps a
-    /// language code back to it by searching the array
-    /// `GetAvailableLanguageCodes` returns, so the order matters and both
-    /// commands have to agree.
-    /// `pl:u` (`IPlatformServiceManager`): the shared system fonts.
-    ///
-    /// A guest asks for the fonts by type, gets back an offset and a size, and
-    /// reads the font data straight out of pl's shared memory: hbmenu hands
-    /// that pointer to `FT_New_Memory_Face`, and `nn::font` walks it itself.
-    /// [`Cpu::build_shared_fonts`] is what puts them there.
-    ///
-    /// Every type is answered, not just the standard one. The Home Menu asks
-    /// for the whole set and then looks a character up in each in turn; with
-    /// one Latin-only face registered it found no glyph for anything it wanted
-    /// to draw, read the `cmap`s, and never went on to read a single outline.
+    /// `pl:u` (`IPlatformServiceManager`): every font type is answered.
     pub(super) fn pl_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         // Which font a per-type command is asking about.
         let font_type = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
@@ -47,32 +22,18 @@ impl Cpu {
             Some(2) => self.write_ipc_response(tls, 0, &[], &region.size.to_le_bytes(), &[]),
             // GetSharedMemoryAddressOffset(u32) -> u32
             Some(3) => self.write_ipc_response(tls, 0, &[], &region.offset.to_le_bytes(), &[]),
-            // GetSharedMemoryNativeHandle -> a shared memory handle;
-            // `svcMapSharedMemory` fills the region with the fonts.
+            // GetSharedMemoryNativeHandle -> a shared memory handle.
             Some(4) => {
                 let handle = self.alloc_handle();
                 self.write_ipc_response(tls, 0, &[handle], &[], &[])
             }
-            // GetSharedFontInOrderOfPriority(u64 LanguageCode) ->
-            // { u8 Loaded, u8 pad[3], s32 total_fonts }, with the types, the
-            // offsets and the sizes of the fonts in three output buffers.
-            //
-            // Command 6 is the same request asked on behalf of the system
-            // rather than of a title, and is answered from the same set.
-            // It used to fall into the catch-all below and come back as
-            // success with no count and no buffers filled, which a caller
-            // reads as "loaded, zero fonts" and retries forever: `cabinet`
-            // was reopening `pl:u` and asking again for the whole run.
-            //
-            // The priority order a language code would pick is not modelled:
-            // every font is reported, in `PlSharedFontType` order, which is
-            // what a console answers for the language the fonts are indexed
-            // by anyway.
+            // GetSharedFontInOrderOfPriority (5, and 6 for the system) ->
+            // { u8 Loaded, u8 pad[3], s32 total_fonts }, plus types, offsets and sizes
+            // in three output buffers. Every font is reported in `PlSharedFontType` order.
             Some(5) | Some(6) => {
                 let (_, recv) = self.ipc_buffers(tls);
                 let regions = self.shared_font_regions().to_vec();
-                // A caller sizes all three buffers alike, but it is the
-                // smallest that says how many entries actually fit.
+                // The smallest of the three buffers bounds the entry count.
                 let room = recv.iter().map(|(_, size)| size / 4).min().unwrap_or(0);
                 let count = (regions.len() as u32).min(room);
                 for (i, region) in regions.iter().enumerate().take(count as usize) {
@@ -98,22 +59,13 @@ mod tests {
 
     #[test]
     fn pl_serves_the_host_font_from_its_shared_memory() {
-        // `plGetSharedFont` asks for the sizes and offsets of the shared fonts
-        // and then reads the font data straight out of pl's shared memory,
-        // which is where they land when the guest maps it. The three output
-        // buffers take the type, the offset and the size of each font.
-        //
-        // With no firmware fonts registered the host font stands in for every
-        // type, so a guest that asks for the extension face gets something it
-        // can draw with rather than an empty region.
+        // With no firmware fonts, the host font stands in for every type.
         const BUFFERS: u32 = 0x3000;
         const TYPES: u32 = 7;
         // 40 bytes, a whole number of words, so no padding is in play.
         let font = b"not really a font, but bytes are bytes!!".to_vec();
 
-        // GetSize and GetSharedMemoryAddressOffset, per font type. Each font
-        // sits behind the eight-byte header a console puts in front of it, so
-        // the offsets step by the whole blob and never point at the header.
+        // Each font sits behind an eight-byte header the offsets skip.
         for i in 0..TYPES {
             let mut cpu = request(false, 2, &i.to_le_bytes());
             cpu.set_shared_font(font.clone());
@@ -189,9 +141,7 @@ mod tests {
     #[test]
     fn only_a_real_bfttf_decodes() {
         use crate::cpu::decode_bfttf;
-        // The magic is what the key is derived from on a console, so a file
-        // without it cannot be decoded at all, and a plain TrueType file
-        // handed here by mistake must be refused rather than xored into noise.
+        // A plain TrueType file has no magic and must be refused.
         assert!(decode_bfttf(&[0x00, 0x01, 0x00, 0x00, 0, 0, 0, 0]).is_none());
         assert!(
             decode_bfttf(&[0x36, 0xf8, 0x1a]).is_none(),
@@ -201,8 +151,7 @@ mod tests {
 
     #[test]
     fn pl_reports_only_as_many_fonts_as_the_caller_left_room_for() {
-        // The count in the reply has to match what was written, or the caller
-        // reads entries out of the tail of its own uninitialised array.
+        // The reply count must match the entries written.
         const BUFFERS: u32 = 0x3000;
         let mut cpu = Cpu::new();
         cpu.set_shared_font(b"font".to_vec());
@@ -229,8 +178,7 @@ mod tests {
 
     #[test]
     fn without_a_font_pl_reports_an_empty_set() {
-        // A guest must get a well-formed "no fonts" answer rather than spin in
-        // `_plRequestLoadWait` or read a font that isn't there.
+        // A well-formed "no fonts" answer, not a spin in `_plRequestLoadWait`.
         const BUFFERS: u32 = 0x3000;
         let mut cpu = request(false, 1, &[]);
         cpu.pl_request(TLS, Some(1)).unwrap();

@@ -1,63 +1,44 @@
 //! The translated form of an instruction: what a [`Block`] is made of.
-//!
-//! Every field an [`Op`] carries was extracted from the encoding when the
-//! block was built, so executing one asks nothing about the instruction it
-//! came from. The load/store vocabulary these share with the interpreter
-//! ([`Acc`], [`Ext`], [`PairKind`], [`Wb`]) lives in
-//! [`crate::cpu::loadstore`], and the system-register one in
-//! [`crate::cpu::system`].
+//! Operands are extracted from the encoding when the block is built.
 
 use crate::cpu::bits::Extract;
 use crate::cpu::fp::FpForm;
 use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
 use crate::cpu::system::SysOp;
 
-/// One translated instruction: what it does, with its operands already pulled
-/// out of the encoding.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::cpu) enum Op {
-    /// A hint, barrier or PSTATE-immediate write the interpreter also retires
-    /// with no effect.
+    /// A hint, barrier or PSTATE-immediate write, retired with no effect.
     Nop,
     /// Not translated: run the original instruction through the interpreter.
     Interpret {
         insn: u32,
     },
-    /// SIMD and floating point, handed to the decoder that owns it instead of
-    /// back through [`crate::cpu::Cpu::execute`]'s group match. `scalar` is the
-    /// same top-byte test `execute` makes to decide which of the two decoders
-    /// gets first look, and `form` is which of the scalar forms it is, both
-    /// decided once here rather than on every execution.
+    /// SIMD and floating point, sent straight to the owning decoder.
     Fp {
         insn: u32,
         scalar: bool,
         form: FpForm,
     },
-    /// A system instruction [`SysOp::of`] could not place, its
-    /// [`SysOp::Unhandled`]. Straight to [`crate::cpu::Cpu::system`], which is
-    /// where its error comes from.
+    /// A system instruction [`SysOp::of`] could not place.
     System {
         insn: u32,
     },
-    /// `MRS`, `MSR` and `DC ZVA`, already resolved to the register they name.
+    /// `MRS`, `MSR` and `DC ZVA`, resolved to the register they name.
     Sys {
         op: SysOp,
     },
-    /// A SIMD&FP load or store, straight to the decoder that owns the V=1
-    /// forms instead of back through the whole load/store group.
+    /// A SIMD&FP load or store, sent straight to the V=1 decoder.
     SimdLoadStore {
         insn: u32,
     },
 
-    /// A value the translator already computed: `MOVZ`/`MOVN`, and the
-    /// PC-relative `ADR`/`ADRP` whose result depends only on where the
-    /// instruction is.
+    /// A precomputed value: `MOVZ`/`MOVN`, `ADR`/`ADRP`.
     MovConst {
         rd: u8,
         val: u64,
     },
-    /// `MOV` between registers, the `ORR` with the zero register it aliases,
-    /// with the width in the variant.
+    /// `MOV` between registers (`ORR` with the zero register).
     Mov32 {
         rd: u8,
         rn: u8,
@@ -66,10 +47,7 @@ pub(in crate::cpu) enum Op {
         rd: u8,
         rn: u8,
     },
-    /// `MOVK`: replace the 16-bit field at `shift` with `val`. Held as a
-    /// shift and a halfword rather than a mask and a placed value so the
-    /// variant needs one 64-bit word instead of two, which is what decides
-    /// [`Op`]'s size, and so a block body's whole cache footprint.
+    /// `MOVK`: replace the 16-bit field at `shift` with `val`.
     MovK {
         rd: u8,
         shift: u8,
@@ -77,12 +55,8 @@ pub(in crate::cpu) enum Op {
         sf: bool,
     },
 
-    /// `ADD`/`SUB`/`ADDS`/`SUBS` against a constant.
-    ///
-    /// `rhs` arrives already inverted for the subtractions, with `carry` set
-    /// to match, so which direction the operation runs in does not survive to
-    /// run time. `rn_sp`/`rd_sp` are the two places register 31 means the
-    /// stack pointer rather than the zero register, also decided here.
+    /// `ADD`/`SUB`/`ADDS`/`SUBS` against a constant; `rhs` is pre-inverted for
+    /// subtractions with `carry` set to match.
     AddSubImm {
         rd: u8,
         rn: u8,
@@ -91,9 +65,7 @@ pub(in crate::cpu) enum Op {
         set_flags: bool,
         sf: bool,
     },
-    /// The shifted-register form, where both `Rd` and `Rn` are always the zero
-    /// register. `carry` is 1 for the subtractions, and doubles as the mask
-    /// that inverts the operand.
+    /// Shifted-register form; `carry` is 1 for subtractions and doubles as the inversion mask.
     AddSubShifted {
         rd: u8,
         rn: u8,
@@ -104,8 +76,7 @@ pub(in crate::cpu) enum Op {
         set_flags: bool,
         sf: bool,
     },
-    /// The same with no shift at all (`add x0, x1, x2`) which is most of
-    /// them, and skips [`crate::cpu::bits::shift_reg`] entirely.
+    /// The same with no shift.
     AddSubReg {
         rd: u8,
         rn: u8,
@@ -125,7 +96,7 @@ pub(in crate::cpu) enum Op {
         sf: bool,
     },
 
-    /// `AND`/`ORR`/`EOR`/`ANDS` with the bitmask immediate already decoded.
+    /// `AND`/`ORR`/`EOR`/`ANDS` with the bitmask immediate decoded.
     LogicalImm {
         rd: u8,
         rn: u8,
@@ -143,7 +114,7 @@ pub(in crate::cpu) enum Op {
         invert: bool,
         sf: bool,
     },
-    /// The unshifted form, which covers every `mov xd, xm` and `mvn xd, xm`.
+    /// The unshifted form (`mov xd, xm`, `mvn xd, xm`).
     LogicalReg {
         rd: u8,
         rn: u8,
@@ -153,15 +124,14 @@ pub(in crate::cpu) enum Op {
         sf: bool,
     },
 
-    /// `SBFM`/`UBFM` and every alias of them, already decoded to the shifts
-    /// they are. 3.9% of a retail frame, most of it `LSL`/`LSR`/`UBFX`.
+    /// `SBFM`/`UBFM` and their aliases, decoded to shifts.
     Extract {
         rd: u8,
         rn: u8,
         extract: Extract,
         sf: bool,
     },
-    /// `BFM`, the one form that keeps bits of Rd, and the unallocated `opc`.
+    /// `BFM` and the unallocated `opc`.
     Bitfield {
         rd: u8,
         rn: u8,
@@ -250,8 +220,7 @@ pub(in crate::cpu) enum Op {
         signed: bool,
         sf: bool,
     },
-    /// `RBIT`/`REV16`/`REV32`/`REV`/`CLZ`/`CLS`/`CTZ`, by the group's own
-    /// opcode field.
+    /// `RBIT`/`REV16`/`REV32`/`REV`/`CLZ`/`CLS`/`CTZ`, by opcode field.
     OneSource {
         rd: u8,
         rn: u8,
@@ -274,15 +243,8 @@ pub(in crate::cpu) enum Op {
         wb: Wb,
         offset: i64,
     },
-    /// [`Op::LoadStoreImm`] for the six accesses a retail frame makes almost
-    /// all of its single-register loads and stores with, the access folded
-    /// into the variant. Build them through [`Op::load_store_imm`].
-    ///
-    /// The general form dispatches twice, once on the op and again on `acc`,
-    /// and under V8 each of the two is an indirect jump that mispredicts on
-    /// its own. The samples of the general arm sat on the instructions just
-    /// past those jumps rather than on the memory access, so the second one
-    /// goes where the first already is.
+    /// [`Op::LoadStoreImm`] specialized for the six commonest accesses.
+    /// Build through [`Op::load_store_imm`].
     Load64 {
         rt: u8,
         rn: u8,
@@ -336,10 +298,7 @@ pub(in crate::cpu) enum Op {
         kind: PairKind,
         wb: Wb,
     },
-    /// [`Op::Pair`] for `LDP`/`STP` of X registers, which is what every
-    /// prologue and epilogue saves and restores through, with the kind folded
-    /// into the variant for the same reason as [`Op::Load64`]. Build them
-    /// through [`Op::pair`].
+    /// [`Op::Pair`] specialized for X-register `LDP`/`STP`. Build through [`Op::pair`].
     PairLoad64 {
         rt: u8,
         rt2: u8,
@@ -354,14 +313,13 @@ pub(in crate::cpu) enum Op {
         offset: i64,
         wb: Wb,
     },
-    /// `LDR <t>, label`, with the literal's address already resolved.
+    /// `LDR <t>, label`, with the literal's address resolved.
     LoadLiteral {
         rt: u8,
         addr: u32,
         acc: Acc,
     },
-    /// `LDXR`/`LDAXR`, one register. The lock word of every `nn::os` mutex
-    /// goes through this and [`Op::StoreExclusive`].
+    /// `LDXR`/`LDAXR`, one register.
     LoadExclusive {
         rt: u8,
         rn: u8,
@@ -377,8 +335,6 @@ pub(in crate::cpu) enum Op {
 }
 
 impl Op {
-    /// A single-register load or store with an immediate offset, as the
-    /// variant that has its access built in when there is one.
     pub(super) fn load_store_imm(rt: u8, rn: u8, acc: Acc, wb: Wb, offset: i64) -> Op {
         match acc {
             Acc::Load64 => Op::Load64 { rt, rn, wb, offset },
@@ -397,8 +353,6 @@ impl Op {
         }
     }
 
-    /// A load or store pair, as the variant that has its kind built in when
-    /// there is one.
     pub(super) fn pair(rt: u8, rt2: u8, rn: u8, offset: i64, kind: PairKind, wb: Wb) -> Op {
         match kind {
             PairKind::Load64 => Op::PairLoad64 {
@@ -427,23 +381,17 @@ impl Op {
     }
 }
 
-/// The instruction a block ends on: one that always moves the PC somewhere
-/// other than the following instruction. The conditional branches, whose
-/// not-taken path *is* the following instruction, are [`Exit`]s instead and do
-/// not end a block. A block with no terminator ran into the block-length or
-/// page limit and simply falls through.
+/// The instruction a block ends on. Conditional branches are [`Exit`]s instead;
+/// a block with no terminator falls through at the length or page limit.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Term {
     /// `B #imm`.
     B { target: u32 },
     /// `BL #imm`.
     Bl { target: u32, ret_pc: u32 },
-    /// `BL` to a PLT stub, with the stub run as part of it: see
-    /// [`super::decode`]'s `plt_slot`. `got` is the slot the stub loads its
-    /// target from, and `stub` where the stub is, for the fallback.
+    /// `BL` to a PLT stub, run inline; `got` is the slot it loads from, `stub` the fallback.
     BlPlt { got: u32, stub: u32, ret_pc: u32 },
-    /// `B` to a PLT stub, a tail call into another module, folded the same
-    /// way.
+    /// `B` to a PLT stub (a tail call), folded the same way.
     BPlt { got: u32, stub: u32 },
     /// `BR Xn`.
     Br { rn: u8 },
@@ -453,25 +401,14 @@ pub(super) enum Term {
     Ret { rn: u8 },
     /// `SVC #imm`.
     Svc { imm: u16, next: u32 },
-    /// A control instruction with no op of its own: the interpreter decodes it
-    /// and sets the PC itself.
+    /// A control instruction the interpreter decodes, setting the PC itself.
     Interpret { insn: u32, next: u32 },
-    /// The instruction could not be read when the block was translated. Try
-    /// again at run time, so the fault is raised against the state the guest
-    /// is actually in.
+    /// Unreadable at translation time; retried at run time so the fault is current.
     Fetch,
 }
 
-/// A conditional branch *inside* a block: control leaves at this instruction
-/// if the condition holds, and otherwise carries straight on to the next one.
-///
-/// These are the only three A64 branches whose not-taken path is the following
-/// instruction, which is what lets a block continue past them at all.
-///
-/// With a tag byte of its own. Left to itself the compiler hid the tag in a
-/// spare value of one variant's `bool`, and every exit taken then worked out
-/// which kind it was with five instructions of arithmetic before it could
-/// even jump on it.
+/// A conditional branch inside a block: leave if the condition holds, else continue.
+/// Carries its own tag byte for cheaper dispatch.
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub(super) enum Exit {
@@ -491,18 +428,8 @@ pub(super) enum Exit {
         nz: bool,
         target: u32,
     },
-    /// A `CMP`/`CMN` against a constant, fused with the `B.cond` that reads
-    /// its flags, the commonest pair in compiled code, and one that only
-    /// became fusable when blocks started running through conditional
-    /// branches. The destination was the zero register, so nothing but NZCV
-    /// is written.
-    ///
-    /// `imm` is the constant as the instruction encodes it, twelve bits and
-    /// perhaps a shift, and `carry` is 1 for `CMP`, which inverts it on the
-    /// way in as the register form does. Held that way rather than inverted
-    /// ahead of time because the inverted form is a `u64`, and one of those
-    /// beside `target` made this variant, and so every exit, 24 bytes once
-    /// the enum has a tag of its own.
+    /// `CMP`/`CMN` against a constant fused with the following `B.cond`.
+    /// `imm` is as encoded; `carry` is 1 for `CMP`.
     CmpImm {
         rn: u8,
         imm: u32,
@@ -511,9 +438,7 @@ pub(super) enum Exit {
         cond: u8,
         target: u32,
     },
-    /// A flagless `ADD`/`SUB` of a constant fused ahead of a
-    /// [`Exit::CmpImm`]: a loop counter's step, its test and the branch back.
-    /// Both constants are [`PackedImm`] so the variant still fits two words.
+    /// A flagless `ADD`/`SUB` of a constant fused ahead of an [`Exit::CmpImm`].
     UpdateCmpImm {
         rd: u8,
         source: u8,
@@ -532,15 +457,12 @@ pub(super) enum Exit {
         cond: u8,
         target: u32,
     },
-    /// A `B #imm` the translator followed: always taken, and the block goes
-    /// on at `target` rather than ending. The ops after it are the ones at
-    /// `target`.
+    /// A `B #imm` the translator followed; the ops after it are at `target`.
     Jump { target: u32 },
 }
 
 impl Exit {
-    /// How many instructions the exit covers: two once a compare has been
-    /// folded into it, three once an update has been folded ahead of that.
+    /// Instructions the exit covers, including fused compare and update.
     fn span(&self) -> u8 {
         match self {
             Exit::CmpImm { .. } | Exit::CmpReg { .. } => 2,
@@ -550,8 +472,7 @@ impl Exit {
     }
 }
 
-/// An `ADD`/`SUB`/`CMP`/`CMN` immediate in sixteen bits: the twelve encoded
-/// bits, the `LSL #12` flag, whether it subtracts, and the operand width.
+/// An `ADD`/`SUB`/`CMP`/`CMN` immediate packed into sixteen bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PackedImm(u16);
 
@@ -560,8 +481,6 @@ impl PackedImm {
     const SUB: u16 = 1 << 13;
     const SF: u16 = 1 << 14;
 
-    /// `imm` as the instruction encodes it, if it is one an immediate
-    /// `ADD`/`SUB` can encode.
     pub(super) fn new(imm: u32, sub: bool, sf: bool) -> Option<PackedImm> {
         let low = if imm & !0xFFF == 0 {
             imm as u16
@@ -595,20 +514,12 @@ impl PackedImm {
     }
 }
 
-/// Where a conditional branch sits in a block, and how much of it the branch
-/// speaks for.
-///
-/// The span is [`Exit::span`] resolved once, when the block is built. Asking
-/// the branch itself meant loading its discriminant and testing it before the
-/// exit could even be evaluated, on the same pass that then dispatches on that
-/// discriminant again; the padding in this record was already there to hold
-/// it.
+/// Where a conditional branch sits in a block, with its span precomputed.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Branch {
-    /// Index into [`Block::ops`]: the instruction the branch is checked at.
+    /// Index into [`Block::ops`].
     pub(super) at: u32,
-    /// Instructions the branch covers, two once a compare has been fused into
-    /// it.
+    /// Instructions the branch covers.
     pub(super) span: u8,
     pub(super) exit: Exit,
 }
@@ -623,101 +534,47 @@ impl Branch {
     }
 }
 
-/// The address an empty link slot holds. Unaligned, so no block starts there
-/// and an empty slot can never match.
+/// An empty link slot; unaligned, so it never matches a block.
 const NO_LINK: u32 = 1;
 
 /// How many successors a block remembers.
-///
-/// A block that runs through a conditional branch has two, the branch's target
-/// and wherever its terminator goes, and one slot evicted one for the other
-/// every time the branch changed its mind. A function's `RET` has as many as
-/// it has callers. On a Just Dance 2019 frame one slot linked 73.3% of block
-/// entries, two 79.8% and four 82.5%, each step taking 2.2% and then 1.4% off
-/// the frame in the wasm build. Eight linked 82.6%: what still misses is `RET`
-/// from functions with more callers than any small cache holds.
 const LINKS: usize = 4;
 
-/// Whether a block has been written out as wasm, and where that went.
-///
-/// A block starts cold and is counted up as it is entered, because emitting
-/// one costs more than interpreting it a few times does: most blocks a program
-/// translates are entered once or twice and never again, and writing those out
-/// would be work spent on code that is already finished with.
+/// Whether a block has been emitted as wasm. Blocks start cold and are counted up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Code {
-    /// Entered this many times, and not emitted yet.
+    /// Entered this many times, not emitted yet.
     Cold(u32),
-    /// Emitted and installed: the entry point [`super::host::install`] gave
-    /// it, and how many times entering it has handed straight back without
-    /// retiring anything.
+    /// Emitted: its entry point and how many entries handed back without retiring anything.
     Ready {
         entry: super::host::Entry,
         misses: u16,
     },
-    /// Never to be emitted: the emitter refused it, the host could not compile
-    /// it, or it kept handing back at its first instruction. Whichever it was,
-    /// asking again would answer the same.
+    /// Never to be emitted.
     Never,
 }
 
 /// A run of instructions with a single entry point, translated once.
 #[derive(Debug)]
 pub(super) struct Block {
-    /// The last [`LINKS`] places control went when this block was left, and
-    /// the blocks it found there: an inline cache filled on the way past, most
-    /// recent first.
-    ///
-    /// A retail frame enters a block every 6.1 instructions, so what a block
-    /// boundary costs is charged against six instructions rather than against
-    /// a whole loop body. Most of those boundaries go somewhere they have been
-    /// before: a loop alternating between two blocks, a `RET` to the site that
-    /// called it, a `BLR` through a call site that is monomorphic in practice.
-    ///
-    /// Held [`Weak`] so it cannot keep a block alive. That is not only about
-    /// the A-to-B-to-A cycle leaking: a block dropped because a guest store
-    /// landed on its page is *gone* from the cache, and a link that still
-    /// upgraded would be running code the guest has overwritten. Failing to
-    /// upgrade is exactly the right answer, and it needs no invalidation pass
-    /// of its own.
+    /// The last [`LINKS`] successors, most recent first. [`Weak`] so a dropped
+    /// (invalidated) block cannot be reached through a link.
     pub(super) link: std::cell::RefCell<[(u32, std::rc::Weak<Block>); LINKS]>,
-    /// Whether this block has been written out as wasm. In a [`Cell`] because
-    /// a block is reached through an [`std::rc::Rc`] shared with the cache and
-    /// with whatever linked to it, so there is no `&mut` to it anywhere on the
-    /// path that would promote one.
     pub(super) code: std::cell::Cell<Code>,
-    /// Guest address of the first instruction.
     pub(super) start: u32,
-    /// One entry per instruction the block covers before its terminator, in
-    /// the order they run. Consecutive entries are consecutive instructions
-    /// except across an [`Exit::Jump`], after which they are the ones at its
-    /// target. The slots that hold a branch carry [`Op::Nop`]
-    /// as filler, the branch itself is in `exits`, and keeping one slot per
-    /// instruction is worth one dead slot per exit.
+    /// One entry per instruction before the terminator; branch slots hold [`Op::Nop`].
     pub(super) ops: Vec<Op>,
-    /// The original instruction words, body then terminator, kept so a fault
-    /// inside a block leaves the same run-up trail an interpreted one does.
+    /// Original instruction words, kept for fault run-up trails.
     pub(super) words: Vec<u32>,
-    /// The conditional branches the block runs through, in ascending order of
-    /// where they sit.
+    /// Conditional branches, in ascending order.
     pub(super) exits: Vec<Branch>,
     pub(super) term: Option<Term>,
-    /// Every page the block's instructions were read from, as page numbers.
-    /// One for most blocks; more once it follows a `B`, runs off the end of
-    /// a page, or folds in a PLT stub that lives on another. A store to any
-    /// of them has to drop the block.
+    /// Page numbers the block was read from; a store to any drops the block.
     pub(super) pages: Vec<u32>,
 }
 
 impl Block {
-    /// A block with nothing linked to it yet, from the parts [`super::decode`]
-    /// builds.
-    ///
-    /// The translator sizes `ops` and `words` for the longest block a page
-    /// allows, 1.25 KiB between them, and a block is a handful of
-    /// instructions, so both are trimmed here. Kept at that size, a full cache
-    /// was ~80 MiB of mostly empty heap, in a wasm32 address space the guest
-    /// may claim 3.2 GiB of.
+    /// Trims `ops` and `words`, which the translator sizes for the longest block.
     pub(super) fn new(
         start: u32,
         mut ops: Vec<Op>,
@@ -741,16 +598,12 @@ impl Block {
         }
     }
 
-    /// The block at `pc`, if that is one of the places this one went recently
-    /// and it is still translated.
     #[inline(always)]
     pub(super) fn successor(&self, pc: u32) -> Option<std::rc::Rc<Block>> {
         let links = self.link.borrow();
         links.iter().find(|l| l.0 == pc).and_then(|l| l.1.upgrade())
     }
 
-    /// Remember that control went to `block` at `pc`, forgetting the oldest
-    /// place it remembered before.
     #[inline(always)]
     pub(super) fn link_to(&self, pc: u32, block: &std::rc::Rc<Block>) {
         let mut links = self.link.borrow_mut();
@@ -758,11 +611,7 @@ impl Block {
         links[0] = (pc, std::rc::Rc::downgrade(block));
     }
 
-    /// Stop running this block's emitted form, giving its table slot back.
-    ///
-    /// The block itself is unaffected and goes on being interpreted. Called
-    /// when the emitted form turns out not to be worth entering, and on the
-    /// way out in [`Block::drop`].
+    /// Release the emitted form's table slot; the block goes on being interpreted.
     pub(super) fn drop_code(&self) {
         if let Code::Ready { entry, .. } = self.code.replace(Code::Never) {
             super::host::release(entry);
@@ -770,11 +619,7 @@ impl Block {
     }
 }
 
-/// A block's emitted form is a slot in the module's function table, and the
-/// cache drops blocks constantly: on a store that lands on translated code,
-/// and on every rotation. Without this the table would grow by one slot per
-/// block the program ever translated, which on a retail title is six figures
-/// of compiled code nothing can reach.
+/// Free the function table slot when a block is dropped.
 impl Drop for Block {
     fn drop(&mut self) {
         self.drop_code();
@@ -785,32 +630,17 @@ impl Drop for Block {
 mod tests {
     use super::{Branch, Exit, Op, SysOp};
 
-    /// A block body is an array of [`Op`], so its size is that body's whole
-    /// cache footprint, which is why [`Op::MovK`] holds a shift and a
-    /// halfword rather than a mask and a placed value, and why
-    /// [`super::SysReg::Fixed`] is a `u32`. One 64-bit payload plus its
-    /// discriminant is the budget those choices were made against.
     #[test]
     fn an_op_still_costs_one_word_and_its_tag() {
         assert_eq!(std::mem::size_of::<Op>(), 16);
-        // Folding the four system-instruction variants into one `Op::Sys`
-        // only stays free while `SysOp` fits inside that budget.
         assert!(std::mem::size_of::<SysOp>() <= 16);
     }
 
-    /// [`Branch::span`] was added into the padding an `(index, Exit)` pair
-    /// already carried, when that was 24 bytes. [`Exit`] has since lost its
-    /// eight-byte field and the pair is 20, but a branch is still the 24 it
-    /// was: the span costs the word the padding rounds to, and no more. Grow
-    /// either past this and the span is worth re-deriving instead.
     #[test]
     fn a_branch_costs_no_more_than_the_pair_it_replaced() {
         assert_eq!(std::mem::size_of::<Branch>(), 24);
     }
 
-    /// An exit's tag is a byte of its own (see [`Exit`]), which is only free
-    /// while every variant still fits beside it in two words. A `u64` operand
-    /// next to a `u32` target does not.
     #[test]
     fn an_exit_with_its_own_tag_still_costs_two_words() {
         assert_eq!(std::mem::size_of::<Exit>(), 16);

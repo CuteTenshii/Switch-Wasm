@@ -1,5 +1,5 @@
-/* The debug panel: instruction tracing, register dumps, and the trace buffer
-   the emulator also uses for diagnostics. */
+// The debug panel: instruction tracing, register dumps, and the trace buffer
+// the emulator also uses for diagnostics.
 
 import type { LogClass } from './log';
 import {
@@ -32,7 +32,7 @@ for (const button of debugGroups) {
   button.addEventListener('click', () => selectDebugGroup(button.dataset.debugGroup || 'cpu'));
 }
 
-/** Tracing caps the run slice, so the loop has to ask. */
+// Tracing caps the run slice.
 export function traceEnabled(): boolean {
   return traceCb.checked;
 }
@@ -43,12 +43,8 @@ traceCb.addEventListener('change', () => {
   if (traceCb.checked) log('Tracing enabled - run slices are capped for readability. The trace shows at the Debug log level.');
 });
 
-// The trace buffer carries more than the per-instruction disassembly: the
-// emulator records diagnostics there whether or not tracing is enabled -
-// services and applet commands a guest asked for that have no implementation
-// behind them, and the whole of a fault. There is no stderr in the browser, so
-// this is the only way they reach anyone. Drained as the run goes rather than
-// only at the end.
+// The trace buffer also carries diagnostics (unimplemented services, faults),
+// so it is drained as the run goes.
 export async function drainDiagnostics(): Promise<void> {
   logTrace(await drainTrace());
 }
@@ -59,10 +55,7 @@ export async function drainTrace(): Promise<string> {
   return '';
 }
 
-/* The level a line of trace carries, as `switch_core::trace::Level` writes it:
-   a control byte at the head of the line. A line with no marker continues the
-   one before it -- which is what keeps a fault's register dump and instruction
-   trail with the fault instead of reverting to grey. */
+// Trace line levels from `switch_core::trace::Level`; an unmarked line continues the previous one.
 const MARKERS: Record<string, LogClass> = {
   '\u0001': 'err',
   '\u0002': 'warn',
@@ -70,7 +63,6 @@ const MARKERS: Record<string, LogClass> = {
   '\u0004': 'dim',
 };
 
-/** Put a drained trace into the console, each line at the level it carries. */
 export function logTrace(text: string): void {
   if (!text) return;
   let cls: LogClass = 'dim';
@@ -92,16 +84,12 @@ jitCb.addEventListener('change', () => {
 $('btn-jitstats').addEventListener('click', async () => {
   const s = await call('jit_stats');
   openPanel('console');
-  // Blocks entered per translation is the number that says whether
-  // translating was worth it: one means every block was thrown away unused.
   const reuse = s.translated ? (s.executed / s.translated).toFixed(1) : '0';
   log(
     `translation: ${s.enabled ? 'on' : 'off'}, ${s.blocks} blocks cached, `
     + `${s.translated} translated, ${s.executed} entered (${reuse}x each), `
     + `${s.invalidated} invalidated`,
   );
-  // What share of those entries ran compiled code rather than walking the
-  // block's ops, which is the number that says what the emitter is worth.
   const emitted = s.emitted ?? 0;
   const entered = s.enteredEmitted ?? 0;
   const share = s.executed ? ((100 * entered) / s.executed).toFixed(1) : '0';
@@ -122,8 +110,6 @@ $('btn-gpustats').addEventListener('click', async () => {
   const drawn = g.drawn ?? 0;
   const fallbacks = g.fallbacks ?? 0;
   const errors = g.deviceErrorCount ?? 0;
-  // Share of draws the device actually took. A frame can look fine and still
-  // be almost entirely the rasterizer's.
   const share = drawn + fallbacks ? ((drawn * 100) / (drawn + fallbacks)).toFixed(1) : '0';
   log(
     `rendering: ${drawn} draws on the device, ${fallbacks} fell back (${share}% device), `
@@ -139,8 +125,7 @@ $('btn-gpustats').addEventListener('click', async () => {
   }
   if (g.unlatched) log(`rendering: the software-frame latch has let go ${g.unlatched} time(s).`);
   for (const why of g.reasons ?? []) log('  fell back: ' + why);
-  // Loud, and above the counters: a rejected draw is still counted as drawn,
-  // so this is the only line that contradicts a clean-looking 100% device.
+  // A rejected draw is still counted as drawn; this line contradicts a clean 100%.
   if (errors) {
     const distinct = g.deviceErrors ?? [];
     const rest = errors - distinct.length;
@@ -170,10 +155,6 @@ $('btn-gpustats').addEventListener('click', async () => {
       + `modules ${t.modules}ms, pipeline ${t.pipeline}ms, encode ${t.encode}ms, `
       + `flush ${t.flush}ms`,
     );
-    // Split out, because `flush` being most of the frame says nothing about
-    // what to do next and these three each name a different fix. Per frame as
-    // well as total: the totals grow with the run and only the per-frame cost
-    // can be compared against the frame budget.
     if (t.flushLand !== undefined) {
       const frames = Math.max(g.frames ?? 0, 1);
       const per = (v: number) => (v / frames).toFixed(1);
@@ -260,9 +241,6 @@ $('btn-threads').addEventListener('click', async () => {
   }
 });
 
-// Both of these change what the guest is doing, so they say what they did:
-// a lever that reports nothing is indistinguishable from one that found
-// nothing to do.
 $('btn-wake').addEventListener('click', async () => {
   const woken = await call('wake_blocked');
   openPanel('console');
@@ -308,16 +286,9 @@ $('btn-readreg').addEventListener('click', async () => {
   $('reg-val').textContent = await call('get_reg', parseInt(regIdx.value, 10));
 });
 
-/* The crash report.
-
-   Every field in it already existed and every one had to be asked for
-   separately, through a different button, before the state that made it worth
-   reading was gone. This is the bundling: one button, one file, everything an
-   issue needs to be readable by somebody who was not there. */
+// The crash report: everything an issue needs, in one file.
 async function crashReport(): Promise<string> {
   const report = await call('crash_report');
-  // The browser is half of any report about a browser emulator, and only the
-  // page can say what it is.
   return JSON.stringify(
     {
       ...report,
@@ -329,9 +300,7 @@ async function crashReport(): Promise<string> {
         deviceMemory: (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? null,
         display: displayMetrics(),
       },
-      // The page's own log too: it holds what the page said as well as what
-      // the core did -- the worker errors, the load failures, the renderer
-      // notes -- and none of that is in the core's trace.
+      // The page's log holds worker errors, load failures and renderer notes.
       log: consoleText().split('\n'),
     },
     null,

@@ -1,12 +1,10 @@
-//! A32 memory access: the addressing modes, the block transfers, and the
-//! exclusive pairs.
+//! A32 memory access: addressing modes, block transfers, exclusive pairs.
 
 mod a32;
 
 use a32::{r, run, HALT, SCRATCH};
 
-/// Every addressing mode moves the lowest register to the lowest address,
-/// whichever direction the base walks.
+/// The lowest register goes to the lowest address in every mode.
 #[test]
 fn the_block_transfers_all_run_lowest_register_to_lowest_address() {
     let cpu = run(&[
@@ -36,8 +34,7 @@ fn a_decrementing_store_writes_below_its_base_and_leaves_it_there() {
     assert_eq!(r(&cpu, 0), SCRATCH - 8);
 }
 
-/// A store transfers the base's *original* value, so the writeback cannot
-/// happen before the loop that reads the registers.
+/// A store transfers the base's original value.
 #[test]
 fn a_store_of_its_own_base_transfers_the_value_it_started_with() {
     let cpu = run(&[
@@ -53,8 +50,7 @@ fn a_store_of_its_own_base_transfers_the_value_it_started_with() {
     );
 }
 
-/// `push {..., lr}` / `pop {..., pc}` is how every A32 function returns, so a
-/// load of r15 out of a block transfer has to branch.
+/// Loading r15 from a block transfer branches.
 #[test]
 fn a_block_load_of_r15_branches() {
     let cpu = run(&[
@@ -71,8 +67,7 @@ fn a_block_load_of_r15_branches() {
     assert_eq!(r(&cpu, 2), 0, "the branch skipped this");
 }
 
-/// A post-indexed load writes the base back *after* the value lands, so
-/// `ldr r0, [r0], #4` keeps what it loaded.
+/// `ldr r0, [r0], #4` keeps the loaded value, not the written-back base.
 #[test]
 fn a_post_indexed_load_into_its_own_base_keeps_the_value() {
     let cpu = run(&[
@@ -145,11 +140,7 @@ fn an_exclusive_store_fails_without_a_matching_load() {
     assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 0);
 }
 
-/// ARMv8's `STL`/`LDA` share the exclusive pairs' encoding and differ in
-/// bits 9:8. They are plain accesses: a store lands with no monitor open and
-/// reports nothing, a load opens no monitor, and neither touches the `Rd`
-/// field a store leaves as 1111, which is `pc`. Mario Kart 8 Deluxe caches a
-/// session's pointer-buffer size with `STLH`.
+/// `STL`/`LDA` are plain accesses: no monitor, no status, and `Rd` (1111) untouched.
 #[test]
 fn a_store_release_is_not_an_exclusive_store() {
     let cpu = run(&[
@@ -177,9 +168,7 @@ fn a_store_release_is_not_an_exclusive_store() {
     assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 0x8707);
 }
 
-/// Decrement-after ends at the base: the highest register goes to the base
-/// address itself and the one below it a word lower, the reverse of what a
-/// decrement-before does.
+/// Decrement-after puts the highest register at the base address.
 #[test]
 fn a_decrement_after_transfer_ends_at_the_base() {
     let cpu = run(&[

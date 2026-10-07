@@ -1,5 +1,4 @@
-//! Disassemble the instructions either side of an address in a loaded NRO,
-//! what a fault report needs to be read against: `disasm_around <path.nro> <pc>`.
+//! Disassemble the instructions around an address in an NRO: `disasm_around <path.nro> <pc>`.
 mod common;
 
 use switch_core::disasm::disassemble;
@@ -7,7 +6,6 @@ use switch_core::mem::Memory;
 use switch_core::nro::load_nro;
 
 const USAGE: &str = "disasm_around <path.nro> <pc>";
-/// How far either side of the address to show.
 const CONTEXT: u32 = 32;
 
 fn main() {

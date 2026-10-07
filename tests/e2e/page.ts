@@ -1,7 +1,6 @@
 import { test as base, expect, type Page } from '@playwright/test';
 
-/** Playwright's `test`, failing any test the page threw during or that left
- *  an error in the page's console. */
+// Fails any test during which the page threw or logged a console error.
 export const test = base.extend<{ pageErrors: string[] }>({
   pageErrors: [async ({ page }, use) => {
     const errors: string[] = [];
@@ -17,14 +16,12 @@ export const test = base.extend<{ pageErrors: string[] }>({
 
 export { expect };
 
-/** Open the page and wait for the core to come up. */
 export async function openPage(page: Page): Promise<void> {
   await page.goto('./');
   await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
 }
 
-/** A static AArch64 ELF whose one segment, at 0x0800_0000, runs `code` from
- *  its entry. */
+// A static AArch64 ELF whose one segment, at 0x0800_0000, runs `code` from its entry.
 export function aarch64Elf(code: number[]): Buffer {
   const vaddr = 0x0800_0000n;
   const codeAt = 0x78;
@@ -49,7 +46,6 @@ export function aarch64Elf(code: number[]): Buffer {
   return out;
 }
 
-/** Boot `elf` through the page's own file picker. */
 export async function bootElf(page: Page, elf: Buffer): Promise<void> {
   await page.locator('#nro-file').setInputFiles({
     name: 'test.elf', mimeType: 'application/octet-stream', buffer: elf,

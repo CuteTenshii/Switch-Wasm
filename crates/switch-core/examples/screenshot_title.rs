@@ -1,65 +1,9 @@
-//! Boot a retail title, an NSP, a cartridge image or a bare Program NCA,
-//! decided by the container's header, and write the Nth presented frame to a
-//! PPM:
+//! Boot a title (NSP, XCI or Program NCA) and write its Nth presented frame to a PPM:
 //! `screenshot_title <container> <prod.keys> [title.keys] <out.ppm> [frame]`.
 //!
-//! The counterpart to `screenshot` for a title rather than an NRO. The
-//! difference from `boot_nsp SHOT=` is that this stops *at* the frame rather
-//! than at a step budget, which matters more than it sounds: a title needs
-//! **seconds** of console time before its first frame, which is billions of
-//! steps, and picking a budget that lands after it is guesswork, "A Short
-//! Hike" reaches frame 30 at step 3.3 billion.
-//!
-//! This was `screenshot_nsp` and `screenshot_nca`. They differed in which
-//! container each could open, and once that was decided by header instead,
-//! they differed only in which investigation's knobs each had accumulated,
-//! neither set having anything to do with the container kind.
-//!
-//! `SWITCH_FIRMWARE=<dir>` registers the system data archives. A system applet
-//! needs them far more than a game does, since its fonts, icons and settings
-//! all live there.
-//!
-//! Beyond the knobs every runner shares (see [`common::Debug`]):
-//!
-//! - `STEPS=<n>` caps the run; it otherwise goes until the frame arrives.
-//! - `PROFILE=<interval>` samples the pc that often, hot pcs, hot 4 KiB pages
-//!   and which thread is running. Same spelling as `boot_nsp`'s. `STACKS=1`
-//!   adds a return-address histogram at the same interval, so a frame loop's
-//!   whole call tree comes out of one run instead of one backtrace at a time.
-//! - `COVER=<lo>:<hi>` records which instructions in a range ever execute.
-//!   Chasing a call chain statically stops the moment a function has no
-//!   reference anywhere in the image; this answers "which of these ran" for a
-//!   whole class at once.
-//! - `WATCH_MEM=<addr>` reports the first step at which a 4 KiB window there
-//!   stops being all zeroes. A GPU reading zeroes is either looking at the
-//!   wrong memory or at memory nothing has filled yet, and this tells the two
-//!   apart. `SCAN_MEM=<addr>:<size>[,...]` lists each region's non-zero
-//!   spans once the run has stopped, which is how you find the buffer you
-//!   meant among the ones you did not, and `DUMP_VERTS=<addr>[,...]` reads
-//!   three 60-byte rows as floats: real positions are ordinary numbers, and a
-//!   structure reinterpreted as float is a wall of denormals.
-//! - `DUMP_SURFACE=<addr>:<w>x<h>:<format>[:<block height>][,...]` writes a
-//!   block-linear colour surface in guest memory to `<out>.<addr>.ppm` once
-//!   the run has stopped, decoded as the next pass would read it. `<format>`
-//!   is the render-target format the draw trace prints (`fmt=0xe0`), and the
-//!   block height is in GOBs, 16 unless given. A frame's passes read each
-//!   other's targets, and this is how to see which of them went wrong.
-//! - `POKE_U32=<addr>:<value>` writes a word every sampling tick, or once at
-//!   `POKE_AT=<step>`. A latched state flag is only a theory until you clear
-//!   it and see what the guest does.
-//! - `START_THREADS=<step>` makes every created-but-never-started thread
-//!   runnable, and `WAKE_ALL=<period>` makes every blocked one runnable that
-//!   often.
-//! - `GATE_SNIFF=1` finds the applet framework's "reasons to skip this frame"
-//!   mask without knowing the object's address: the frame loop reads it with
-//!   `ldr w8, [xN, #0x3e8]`, so the first time that instruction executes, the
-//!   word it names is the gate. Then it holds that word at zero. **Zeroing it
-//!   is not free**: on 18.0.1's qlaunch the sniffer finds the gate at step
-//!   26M, and the run then reaches its frame with 0 draws instead of 8.
-//! - `FIND_MAGIC=SARC` scans guest memory for a four-byte magic. A layout
-//!   archive arrives Yaz0-compressed and is decompressed by the guest; if the
-//!   decompressed form is nowhere in memory, the decompression produced
-//!   nothing and the UI has no panes to draw.
+//! Knobs beyond [`common::Debug`]: `SWITCH_FIRMWARE`, `STEPS`, `PROFILE`, `STACKS`,
+//! `COVER`, `WATCH_MEM`, `SCAN_MEM`, `DUMP_VERTS`, `DUMP_SURFACE`, `POKE_U32`,
+//! `POKE_AT`, `START_THREADS`, `WAKE_ALL`, `GATE_SNIFF`, `FIND_MAGIC`.
 mod common;
 
 use common::{Flow, Pace};
@@ -69,25 +13,20 @@ use switch_core::cpu::Cpu;
 
 const USAGE: &str = "screenshot_title <container> <prod.keys> [title.keys] <out.ppm> [frame]";
 
-/// The sampling interval `STACKS=1` implies when `PROFILE=` names none. Short
-/// enough that a hot loop still resolves.
 const DEFAULT_INTERVAL: u64 = 4096;
 
-/// A hex `<lo>:<hi>` pair, both ends given, unlike [`common::env_span`]'s
-/// address and length.
+/// A hex `<lo>:<hi>` pair.
 fn env_bounds(name: &str) -> Option<(u32, u32)> {
     let raw = env::var(name).ok()?;
     let (lo, hi) = raw.split_once(':')?;
     Some((common::hex(lo), common::hex(hi)))
 }
 
-/// What `PROFILE=` and `STACKS=` collected.
 #[derive(Default)]
 struct Profile {
     /// Samples per (thread index, pc).
     hot: HashMap<(usize, u32), u64>,
-    /// How often each return address was on the stack, and the shallowest
-    /// depth it appeared at.
+    /// Return address to (count, shallowest depth).
     frames: HashMap<u32, (u64, usize)>,
     /// Samples per thread index.
     share: [u64; 32],
@@ -152,8 +91,6 @@ fn main() {
     debug.arm(&mut cpu);
 
     let stacks = env::var("STACKS").is_ok();
-    // A stack histogram is profiling by another name, so asking for one
-    // without an interval still samples.
     let interval = match (common::env_u64("PROFILE", 0), stacks) {
         (0, true) => DEFAULT_INTERVAL,
         (given, _) => given,
@@ -174,11 +111,6 @@ fn main() {
     let gate_sniff = env::var("GATE_SNIFF").is_ok();
     let mut gate: Option<u32> = None;
 
-    // Every hook below reads the machine between two instructions, which is
-    // what `Pace::Instructions` is for, and about half the speed. With none
-    // of them armed the run goes through the block translator instead, which
-    // is the engine the frontend uses. `screenshot_nsp` used to be stepwise
-    // unconditionally, so every run it ever timed was of the interpreter.
     let pace = if debug.stepwise()
         || interval > 0
         || cover.is_some()
@@ -216,7 +148,6 @@ fn main() {
             }
             if let Some((addr, value)) = poke {
                 match poke_at {
-                    // One shot: does the guest keep the value, or put it back?
                     Some(at) if done == at => {
                         let _ = cpu.mem.write_u32(addr, value);
                         println!("[poke] {addr:#x} = {value:#x} at step {done}");
@@ -301,8 +232,6 @@ fn main() {
         }
         println!("[find] {magic}: {hits} hit(s)");
     }
-    // Several regions at once: a frame's render targets are a chain, and
-    // finding where it goes blank one region per run costs a run per link.
     for (lo, hi) in common::env_spans("SCAN_MEM") {
         let mut spans = Vec::new();
         let mut span: Option<u32> = None;
@@ -361,9 +290,6 @@ fn main() {
 }
 
 /// One `DUMP_SURFACE` entry: `<addr>:<w>x<h>:<format>[:<block height>]`.
-/// Channels outside 0..1, which a float target holds, are clamped, and the
-/// largest one is reported so a surface that is only dark can be told from
-/// one that is empty.
 fn dump_surface(cpu: &switch_core::cpu::Cpu, spec: &str, out: &str) {
     use switch_core::gpu::surface::{block_linear_offset, ColorFormat};
     let fields: Vec<&str> = spec.split(':').collect();

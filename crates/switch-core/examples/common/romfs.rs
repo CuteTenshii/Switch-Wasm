@@ -1,25 +1,11 @@
 //! The RomFS metadata tables: every file in an image, and where each one is.
-//!
-//! The tables are a few hundred kilobytes at the end of an image that runs to
-//! gigabytes, so reading *those* out of the streamed section names every file
-//! without decrypting the rest, which is what lets a tool list a 7 GiB RomFS
-//! in under a second.
-//!
-//! Two tools want it and neither should own it: `romfs_ls` turns a
-//! `[storage] read offset=…` line into the file it was for, and
-//! `romfs_selftest` needs the real ranges a guest asks for, because a bug in
-//! the layers underneath shows up at a file's boundaries long before it shows
-//! up at a random offset.
-//!
-//! Offsets are in the coordinates the trace prints: from the start of the
-//! RomFS image, past the NCA's IVFC hash levels.
+//! Offsets are from the start of the RomFS image, past the NCA's IVFC hash levels.
 
 use switch_core::source::ByteSource;
 
-/// The RomFS header's declared size. The format carries no magic number, so
-/// this doubles as the check that the section decrypted to a RomFS at all.
+/// The RomFS header's declared size; the format has no magic, so this is the validity check.
 pub const HEADER_SIZE: u64 = 0x50;
-/// End-of-chain marker for the links between metadata entries.
+/// End-of-chain marker for links between metadata entries.
 const INVALID_OFFSET: u32 = 0xFFFF_FFFF;
 /// Fixed part of a directory entry, before its name.
 const DIR_ENTRY_SIZE: usize = 0x18;
@@ -34,32 +20,21 @@ fn read_u64(data: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(data[at..at + 8].try_into().unwrap_or([0; 8]))
 }
 
-/// One file, in the coordinates the `[storage]` trace speaks: `start` is an
-/// offset into the RomFS image, not into the file data region.
+/// One file; `start` is an offset into the RomFS image, not the file data region.
 pub struct Entry {
     pub path: String,
     pub start: u64,
     pub size: u64,
 }
 
-/// An image's metadata: its geometry and every file in it, ordered by offset.
 pub struct Image {
-    /// The decompressed image's length.
     pub len: u64,
-    /// Where the file data region begins.
     pub data_offset: u64,
-    /// The two metadata tables' sizes, which is what says whether an image
-    /// with no files is empty or unreadable.
     pub dir_table_size: u64,
     pub file_table_size: u64,
     pub files: Vec<Entry>,
 }
 
-/// Read the tables and walk them.
-///
-/// Returns the reason rather than panicking: "that section does not start
-/// with a RomFS header" is the first thing a wrong key looks like, and a
-/// caller wants to say so in its own words.
 pub fn read(source: &dyn ByteSource) -> Result<Image, String> {
     let header = source
         .read_vec(0, HEADER_SIZE)
@@ -86,7 +61,6 @@ pub fn read(source: &dyn ByteSource) -> Result<Image, String> {
 }
 
 impl Image {
-    /// The file an image offset falls in, if it falls in one at all.
     pub fn file_at(&self, at: u64) -> Option<&Entry> {
         self.files
             .iter()
@@ -94,12 +68,7 @@ impl Image {
     }
 }
 
-/// Walk the directory and file metadata tables and collect every file.
-///
-/// The chains are offsets into the tables and a malformed image can point one
-/// back at itself, so the walk is bounded the way [`switch_core::romfs`]
-/// bounds its own: every entry is at least its fixed part long, so the table
-/// sizes are an upper bound on how many there can be.
+/// Walk the metadata tables, bounded by table size since chains can loop.
 fn walk(dirs: &[u8], files: &[u8], data_offset: u64) -> Vec<Entry> {
     let mut budget = 2 * (dirs.len() / DIR_ENTRY_SIZE) + files.len() / FILE_ENTRY_SIZE + 2;
     let mut out = Vec::new();
@@ -137,8 +106,6 @@ fn walk(dirs: &[u8], files: &[u8], data_offset: u64) -> Vec<Entry> {
     out
 }
 
-/// The bytes of one metadata entry: its fixed part plus the name its own
-/// length field sizes.
 fn entry(table: &[u8], offset: u32, fixed_size: usize) -> Option<&[u8]> {
     let start = offset as usize;
     let fixed_end = start.checked_add(fixed_size)?;

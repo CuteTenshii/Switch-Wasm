@@ -1,13 +1,8 @@
 //! GM20B (Tegra X1 Maxwell) GPU model.
 //!
-//! The pieces mirror the hardware: [`nvmap`] is the memory-object table,
-//! [`vmm`] is the graphics MMU, [`syncpt`] is host1x, [`channel`] is the
-//! command processor with the [`engine`] classes behind it, and [`nvdrv`] is
-//! the driver the guest actually talks to over IPC.
-//!
-//! Everything the GPU touches lives in the same [`Memory`] the ARM core runs
-//! from, because on Tegra it genuinely does: the guest allocates a buffer, and
-//! nvmap plus the GMMU just make that buffer visible at a GPU address.
+//! [`nvmap`] is the memory-object table, [`vmm`] the GMMU, [`syncpt`] host1x, [`channel`] the
+//! command processor with the [`engine`] classes behind it, and [`nvdrv`] the driver the guest
+//! talks to. Everything the GPU touches lives in the same [`Memory`] the CPU runs from.
 
 pub mod activity;
 pub mod bcn;
@@ -41,8 +36,7 @@ use surface::{ColorFormat, Layout};
 use syncpt::{Host1x, NvFence};
 use vmm::AddressSpace;
 
-/// An image ready for display, as 32-bit `0xAABBGGRR` pixels (what a canvas
-/// `ImageData` wants).
+/// An image ready for display, as `0xAABBGGRR` pixels.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Framebuffer {
     pub width: u32,
@@ -56,11 +50,10 @@ impl Framebuffer {
     }
 }
 
-/// A surface handed to the display, as described by an `NvGraphicBuffer`
-/// plane in the binder parcel the compositor receives.
+/// A surface handed to the display, from an `NvGraphicBuffer` plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayBuffer {
-    /// nvmap object id (not a handle, the parcel crosses processes).
+    /// nvmap object id, not a handle.
     pub nvmap_id: u32,
     /// Byte offset of the plane inside the nvmap object.
     pub offset: u32,
@@ -71,28 +64,15 @@ pub struct DisplayBuffer {
     /// `NvLayout`: 1 = pitch, 3 = block-linear.
     pub layout: u32,
     pub block_height_log2: u32,
-    /// Low byte of `NvColorFormat` is bits-per-pixel; the whole value selects
-    /// the channel order.
+    /// Low byte of `NvColorFormat` is bits-per-pixel; the whole value selects the channel order.
     pub color_format: u64,
-    /// The `NATIVE_WINDOW_TRANSFORM_*` bits the producer queued the buffer
-    /// with: how the image is stored versus how it is to be shown.
-    ///
-    /// A title that finds it cheaper to render y-down says so here rather
-    /// than by mirroring its viewport, and the display is what puts it the
-    /// right way up. Minecraft queues every frame `FLIP_V`; A Short Hike and
-    /// the Home Menu queue `0`.
+    /// `NATIVE_WINDOW_TRANSFORM_*` bits: how the image is stored versus shown.
     pub transform: u32,
     /// Which part of the surface is the image.
     pub crop: Crop,
 }
 
-/// The `Rect` a producer queues beside its buffer: the window of the surface
-/// that is actually the frame.
-///
-/// A title whose render resolution is not its swapchain's says so here. A
-/// Short Hike allocates 1920x1080 buffers, renders 1280x720 into the corner
-/// of one and queues `(0, 0, 1280, 720)`; scanning out the whole surface put
-/// its frame in the corner of a screen that was 55% pixels it never wrote.
+/// The `Rect` a producer queues: the window of the surface that is the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Crop {
     pub left: i32,
@@ -102,7 +82,6 @@ pub struct Crop {
 }
 
 impl Crop {
-    /// The whole surface, which is what an empty rectangle asks for.
     pub const ALL: Crop = Crop {
         left: 0,
         top: 0,
@@ -110,16 +89,12 @@ impl Crop {
         bottom: 0,
     };
 
-    /// Android calls a rectangle with no area empty, and a producer with
-    /// nothing to crop queues one.
+    /// Android calls a rectangle with no area empty.
     pub fn is_empty(&self) -> bool {
         self.right <= self.left || self.bottom <= self.top
     }
 
-    /// This crop against a `width` x `height` surface, as
-    /// `(x, y, width, height)`. Clamped rather than trusted: the rectangle
-    /// crosses from the guest, and one reaching past the surface would read
-    /// the row below.
+    /// `(x, y, width, height)` against the surface, clamped since the rectangle is guest data.
     pub fn window(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
         if self.is_empty() {
             return (0, 0, width, height);
@@ -128,8 +103,7 @@ impl Crop {
         let y = (self.top.max(0) as u32).min(height);
         let right = (self.right.max(0) as u32).min(width);
         let bottom = (self.bottom.max(0) as u32).min(height);
-        // A rectangle entirely off the surface leaves nothing to show, and a
-        // zero-sized frame is not one, so it falls back to the whole thing.
+        // Off the surface entirely: show the whole thing.
         if right <= x || bottom <= y {
             return (0, 0, width, height);
         }
@@ -137,48 +111,29 @@ impl Crop {
     }
 }
 
-/// `NATIVE_WINDOW_TRANSFORM_FLIP_H`: mirror the image left to right.
 pub const TRANSFORM_FLIP_H: u32 = 0x01;
-/// `NATIVE_WINDOW_TRANSFORM_FLIP_V`: mirror the image top to bottom.
 pub const TRANSFORM_FLIP_V: u32 = 0x02;
-/// `NATIVE_WINDOW_TRANSFORM_ROT_90`. Not applied: it transposes the frame,
-/// so the surface a guest queued and the image it asked to be shown are
-/// different shapes, and nothing seen so far queues one.
+/// Not applied: it would change the frame's shape.
 pub const TRANSFORM_ROT_90: u32 = 0x04;
 
-/// `NvLayout_Pitch`.
 pub const NV_LAYOUT_PITCH: u32 = 1;
-/// `NvLayout_BlockLinear`.
 pub const NV_LAYOUT_BLOCK_LINEAR: u32 = 3;
 
 #[derive(Debug)]
 pub struct Gpu {
-    /// Which surfaces were presented since the host last asked: see
-    /// [`Gpu::take_activity`].
     activity: activity::GpuActivity,
     pub nvmap: NvMap,
     pub host1x: Host1x,
     pub address_spaces: HashMap<u32, AddressSpace>,
     pub channels: HashMap<u32, Channel>,
-    /// The one GPU backend this session has, lent to whichever channel is
-    /// executing. See [`Gpu::submit`].
-    ///
-    /// It lives here and not on a [`Channel`] because a channel is not the
-    /// unit a device belongs to: every `open("/dev/nvhost-gpu")` makes
-    /// another one (Asphalt 9 opens four), `nvClose` destroys one, and which
-    /// of them a title draws through is the title's business. Installing on
-    /// one of them left the device somewhere nothing drew.
+    /// The session's one backend, lent to whichever channel is executing.
     renderer: Box<dyn renderer::Renderer>,
-    /// The channel the backend was last lent to, so a flush runs through the
-    /// address space its held surfaces were produced under.
+    /// The channel the backend was last lent to, whose address space a flush uses.
     last_channel: Option<u32>,
     pub stats: GpuStats,
-    /// The most recently presented frame, ready for the host to display.
     pub framebuffer: Framebuffer,
-    /// The swizzled bytes of the surface being scanned out, kept so that
-    /// reading one does not allocate a surface's worth of zeros per frame.
+    /// Reused between frames to avoid a per-frame allocation.
     scan_out: Vec<u8>,
-    /// Frames presented since boot.
     pub frames: u64,
     next_as_id: u32,
     next_channel_id: u32,
@@ -237,9 +192,7 @@ impl Gpu {
             .ok_or_else(|| Error::Gpu(format!("gpu: no channel {}", id)))
     }
 
-    /// Execute a GPFIFO submission on `channel_id` and return the fence the
-    /// guest should wait on. The work runs to completion here, so the fence is
-    /// already expired by the time the caller sees it.
+    /// Runs the GPFIFO submission to completion, so the returned fence is already expired.
     pub fn submit(
         &mut self,
         channel_id: u32,
@@ -276,9 +229,7 @@ impl Gpu {
             stats: &mut self.stats,
             trace: crate::trace::enabled(crate::trace::Trace::Gpu),
         };
-        // The backend is lent for the length of the submission and taken
-        // back whether or not it faulted: leaving it on a channel would hand
-        // the next submission on another channel the software rasterizer.
+        // Lent for the submission and taken back even on a fault.
         chan.three_d.swap_renderer(&mut self.renderer);
         let submitted = chan.submit(entries, fence, &mut ctx);
         chan.three_d.swap_renderer(&mut self.renderer);
@@ -287,9 +238,7 @@ impl Gpu {
         Ok(fence)
     }
 
-    /// Everything the GPU drew, cleared, copied and presented since the last
-    /// call, by surface, and every draw and dispatch it refused, by reason,
-    /// gathered from every channel's engines.
+    /// Everything drawn, cleared, copied, presented and refused since the last call.
     pub fn take_activity(&mut self) -> activity::GpuActivity {
         let mut all = std::mem::take(&mut self.activity);
         for channel in self.channels.values_mut() {
@@ -303,29 +252,20 @@ impl Gpu {
         all
     }
 
-    /// Install the backend every channel draws through.
-    ///
-    /// The one place a GPU backend gets installed. It replaces whatever was
-    /// there, which is [`renderer::Software`] until something calls this.
+    /// Replaces the default [`renderer::Software`].
     pub fn set_renderer(&mut self, renderer: Box<dyn renderer::Renderer>) {
         self.renderer = renderer;
     }
 
-    /// What the installed backend has been doing: see
-    /// [`renderer::Renderer::report_json`].
     pub fn renderer_report(&self) -> String {
         self.renderer.report_json()
     }
 
-    /// Whether the installed backend wants replacing: see
-    /// [`renderer::Renderer::lost`].
     pub fn renderer_lost(&self) -> bool {
         self.renderer.lost()
     }
 
-    /// The channel a flush should run through: the one that last submitted,
-    /// or any channel still holding an address space when that one has been
-    /// closed under us.
+    /// The channel that last submitted, or any channel still holding an address space.
     fn flush_channel(&self) -> Option<u32> {
         let usable = |id: u32| {
             self.channels.get(&id).is_some_and(|channel| {
@@ -340,18 +280,8 @@ impl Gpu {
         self.channels.keys().copied().find(|&id| usable(id))
     }
 
-    /// Hand back anything a GPU backend is holding, so that whatever reads a
-    /// render target next reads what was drawn into it.
-    ///
-    /// Called before [`Gpu::present`], which is the reader that always
-    /// matters. A backend with nothing to hand back, the software
-    /// rasterizer, which writes guest memory as it goes: does nothing here.
-    ///
-    /// Plural in name only: a session has one backend. The name is kept
-    /// because it is what `vi` and [`crate::cpu::Cpu`] call.
+    /// Writes back anything the backend holds, so the next reader of a render target sees it.
     pub fn flush_renderers(&mut self, mem: &mut Memory) -> Result<renderer::Flush> {
-        // One backend, so one flush: asking once per channel would ask the
-        // same object to write the same surfaces back N times.
         let Some(channel_id) = self.flush_channel() else {
             return Ok(renderer::Flush::Done);
         };
@@ -379,10 +309,7 @@ impl Gpu {
         flushed
     }
 
-    /// Read a surface the display was handed and convert it to the RGBA8888
-    /// [`Framebuffer`] the host presents. This is the scan-out step: the guest
-    /// renders into a block-linear image, the compositor is given its nvmap
-    /// id, and the display controller de-swizzles it on the way to the panel.
+    /// Scan-out: convert a display surface to the RGBA8888 [`Framebuffer`].
     pub fn present(&mut self, mem: &Memory, buffer: &DisplayBuffer) -> Result<()> {
         let handle = self.nvmap.by_id(buffer.nvmap_id).ok_or_else(|| {
             Error::Gpu(format!(
@@ -455,23 +382,11 @@ impl Gpu {
             Layout::BlockLinear { .. } => buffer.width * bpp,
         };
 
-        // Asked once, not once per pixel: the answer is the same for every
-        // one of the 921,600 in a 720p frame.
         let srgb = format.is_srgb();
         let shuffle = format.host_shuffle();
         let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
 
-        // The whole buffer in one walk of the page table rather than 921,600.
-        //
-        // `read_le` finds the page, bounds-checks it and assembles a word for
-        // every pixel, and scan-out does that for every pixel of every frame
-        // whichever renderer drew it, so it was the cost of a frame in a
-        // title that draws nothing at all. `read_into` copies whole pages,
-        // and what is left is arithmetic over a slice.
-        // Kept between frames rather than allocated per frame: it is the
-        // size of the surface, and `read_into` writes over all of it, so a
-        // fresh zeroed one is 3.7 MB of zeroing thrown away sixty times a
-        // second.
+        // The whole surface in one page-table walk, into a buffer reused between frames.
         let swizzled = layout.layer_stride(width_bytes, buffer.height) as usize;
         let mut raw_bytes = std::mem::take(&mut self.scan_out);
         raw_bytes.resize(swizzled, 0);
@@ -480,31 +395,21 @@ impl Gpu {
         let flip_v = buffer.transform & TRANSFORM_FLIP_V != 0;
         let flip_h = buffer.transform & TRANSFORM_FLIP_H != 0;
         if buffer.transform & TRANSFORM_ROT_90 != 0 {
-            // Said once rather than rotated wrongly: the frame would come out
-            // the other way round from the surface that holds it.
             return Err(Error::Gpu(format!(
                 "present: no rotation for queue transform {:#x}",
                 buffer.transform
             )));
         }
 
-        // Only the window the producer queued. The rest of the surface is
-        // whatever the title happened to leave there, which on a 1080p buffer
-        // holding a 720p frame is more than half of it.
+        // Only the window the producer queued.
         let (crop_x, crop_y, out_width, out_height) =
             buffer.crop.window(buffer.width, buffer.height);
 
         let mut pixels = Vec::with_capacity((out_width * out_height) as usize);
-        // The row of the *surface* each row of the image comes from.
+        // The surface row each image row comes from.
         let surface_row = |row: u32| crop_y + if flip_v { out_height - 1 - row } else { row };
 
-        // The common case in one pass: a 32-bit format that is a shuffle, and
-        // every pixel of the window in the bytes just read. A pixel's offset
-        // is its row's half of the swizzle plus its column's, the same sum
-        // `Layout::run_at` makes, so each half is worked out once, the
-        // columns for the frame and the rows as they come, rather than the
-        // whole swizzle once per 16-byte run. That swizzle was most of what
-        // scan-out cost.
+        // Fast path for 32-bit shuffle formats: row and column swizzle halves are computed once.
         let mut scanned = false;
         if let Some(shuffle) = shuffle.filter(|_| held && bpp == 4) {
             let columns: Vec<u32> = (0..out_width)
@@ -517,11 +422,7 @@ impl Gpu {
                 + u64::from(columns.iter().copied().max().unwrap_or(0))
                 + u64::from(bpp);
             if furthest <= swizzled as u64 && swizzled >= 4 {
-                // `furthest` has just established that every offset below is
-                // in range. The clamp is how the compiler is told so: without
-                // it each of the 921,600 reads carries its own bounds check,
-                // and the live panic path behind it spills the offset to the
-                // stack on the way past.
+                // `furthest` bounds every offset; the slice lets the compiler drop per-read checks.
                 let scan = &raw_bytes[..swizzled];
                 let last = scan.len() - 4;
                 for &row_offset in &rows {
@@ -544,9 +445,7 @@ impl Gpu {
         for row in 0..rows_left {
             let y = surface_row(row);
             let row_start = pixels.len();
-            // Swizzled once per contiguous run rather than once per pixel:
-            // `Layout::run_at` says how far the addresses stay linear, which
-            // at 32 bits a pixel is four of them.
+            // Swizzled once per contiguous run rather than per pixel.
             let mut x = 0;
             while x < out_width {
                 let (offset, run) = layout.run_at((crop_x + x) * bpp, y, width_bytes);
@@ -554,8 +453,7 @@ impl Gpu {
                 let count = (run / bpp).clamp(1, out_width - x);
                 let run_bytes = offset as usize..(offset + count * bpp) as usize;
                 if let Some(shuffle) = shuffle.filter(|_| held && run_bytes.end <= swizzled) {
-                    // A shuffle is only ever an 8-bit-per-channel format, so
-                    // four bytes a pixel.
+                    // A shuffle is always 8 bits per channel.
                     pixels.extend(
                         raw_bytes[run_bytes]
                             .as_chunks::<4>()
@@ -568,10 +466,6 @@ impl Gpu {
                 }
                 for i in 0..count {
                     let at = (offset + i * bpp) as usize;
-                    // Four bytes as one word, not four shifts into a `u128`:
-                    // every display format but the 16-bit ones is four bytes,
-                    // and a byte loop here costs more than the page lookup it
-                    // was meant to save.
                     let raw = match (held, at + bpp as usize <= swizzled) {
                         (true, true) if bpp == 4 => u128::from(u32::from_le_bytes(
                             raw_bytes[at..at + 4].try_into().expect("four bytes"),
@@ -581,9 +475,7 @@ impl Gpu {
                         )),
                         _ => mem.read_le(addr.wrapping_add(i * bpp), bpp)?,
                     };
-                    // The common surface is already the word the canvas
-                    // wants; only a format whose decode is real work goes
-                    // through linear light and straight back again.
+                    // Shuffle formats are already the canvas word; others decode through linear light.
                     if let Some(shuffle) = shuffle {
                         pixels.push(shuffle.apply(raw as u32));
                         continue;
@@ -618,12 +510,7 @@ impl Gpu {
     }
 }
 
-/// Map an `NvColorFormat` onto the equivalent Maxwell colour surface format,
-/// so the same decoder serves both the engines and scan-out.
-///
-/// `NvColorFormat` names its channels most-significant first and ends with the
-/// bits-per-pixel byte, so `A8B8G8R8` stores red in the lowest byte, the same
-/// order Maxwell calls `RGBA8`.
+/// `NvColorFormat` to the equivalent Maxwell colour surface format.
 fn display_color_format(nv_format: u64) -> Result<ColorFormat> {
     let raw = match nv_format {
         0x01_0053_2120 => 0xD5, // A8B8G8R8    -> RGBA8Unorm
@@ -664,8 +551,7 @@ mod tests {
         assert_ne!(syncpt_a, syncpt_b);
     }
 
-    /// A backend that answers to a name and counts its flushes, so a test can
-    /// tell it from [`renderer::Software`] and see it being reached.
+    /// A named backend that counts its flushes.
     #[derive(Debug)]
     struct Stub {
         flushes: std::rc::Rc<std::cell::Cell<u32>>,
@@ -711,10 +597,7 @@ mod tests {
         }
     }
 
-    /// A channel is not what a backend belongs to. Every
-    /// `open("/dev/nvhost-gpu")` makes another one: Asphalt 9 opens four,
-    /// and `nvClose` destroys one; installing on `channels.values().next()`
-    /// put the device on an arbitrary channel and lost it on a close.
+    /// The backend belongs to the `Gpu`, not a channel: titles open several and close them.
     #[test]
     fn the_backend_outlives_more_channels_and_a_close() {
         let mut gpu = Gpu::new();
@@ -743,13 +626,8 @@ mod tests {
         (method & 0x1FFF) | ((subchannel & 7) << 13) | ((arg & 0x1FFF) << 16) | (mode << 29)
     }
 
-    /// The backend is lent to whichever channel is executing, so a title that
-    /// draws through its *second* channel still reaches it, and it is back on
-    /// the `Gpu` afterwards for the next channel to borrow.
-    ///
-    /// Driven through a real submission rather than through
-    /// [`Gpu::flush_renderers`], which does its own lending and so would pass
-    /// with the backend stranded on a channel nothing runs.
+    /// A title drawing through its second channel still reaches the backend,
+    /// and the backend is back on the `Gpu` afterwards.
     #[test]
     fn a_later_channel_reaches_the_backend() {
         let mut gpu = Gpu::new();
@@ -762,10 +640,7 @@ mod tests {
             .map(0x3000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
             .unwrap();
 
-        // Bind the copy engine and launch a transfer. `Channel::method` hands
-        // the 3D engine's surfaces back before one, because a copy reads a
-        // render target straight out of guest memory, so this is a
-        // submission that has to reach the backend to be correct.
+        // A copy flushes the 3D engine's surfaces first, so this submission must reach the backend.
         let words = [
             header(3, 1, 0, 0),
             crate::gpu::engine::CLASS_COPY,
@@ -837,8 +712,7 @@ mod tests {
             .unwrap();
         let id = gpu.nvmap.get(handle).unwrap().id;
 
-        // A 16x8 RGBA8 image is exactly one GOB; write a distinct value at the
-        // swizzled position of pixel (1, 0) and (0, 1).
+        // A 16x8 RGBA8 image is exactly one GOB.
         let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
         mem.write_u32(at(1, 0), 0xFF00_0000).unwrap();
         mem.write_u32(at(0, 1), 0x0000_00FF).unwrap();
@@ -867,10 +741,7 @@ mod tests {
         assert_eq!(gpu.frames, 1);
     }
 
-    /// A producer that renders y-down queues the buffer `FLIP_V` rather than
-    /// mirroring its viewport, and the display is what puts it up the right
-    /// way. Minecraft queues every frame that way; discarding the field drew
-    /// the whole title upside down.
+    /// `FLIP_V` is applied at scan-out.
     #[test]
     fn a_flipped_queue_transform_turns_the_frame_over() {
         let mut gpu = Gpu::new();
@@ -919,10 +790,7 @@ mod tests {
         assert!(gpu.present(&mem, &buffer(TRANSFORM_ROT_90)).is_err());
     }
 
-    /// A producer whose render resolution is smaller than its swapchain
-    /// queues the window it actually drew. A Short Hike renders 1280x720 into
-    /// the corner of a 1920x1080 buffer, and scanning out the whole surface
-    /// showed the frame in the corner of a mostly-black screen.
+    /// Only the queued crop window is scanned out.
     #[test]
     fn a_queued_crop_is_the_frame() {
         let mut gpu = Gpu::new();
@@ -972,8 +840,7 @@ mod tests {
         assert_eq!(gpu.framebuffer.pixels[3 * 8], 0xFF00_0000);
         assert_eq!(gpu.framebuffer.pixels[7], 0x0000_00FF);
 
-        // An empty rectangle is how a producer says "all of it", and one off
-        // the surface is not a frame of no pixels.
+        // Empty and off-surface rectangles both mean the whole surface.
         for crop in [
             Crop::ALL,
             Crop {

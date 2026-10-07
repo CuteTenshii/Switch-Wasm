@@ -1,26 +1,15 @@
-//! The block translator against the interpreter.
-//!
-//! The translator's contract is that a translated run and an interpreted one
-//! are the same computation, so almost everything here is differential: run
-//! the same program both ways and compare every piece of state a guest can
-//! observe, the register file, the flags, the vector registers, the program
-//! counter, the retired instruction count and the memory it wrote.
-//!
-//! The corpus is real assembler output (`llvm-mc` + `ld.lld`, linked at
-//! `CODE`), chosen to reach every class of operation the translator has an op
-//! for, plus a sample of the ones it deliberately hands back: the system
-//! registers and scalar floating point.
+//! The block translator against the interpreter: run the same program both
+//! ways and compare all guest-visible state. The corpus is `llvm-mc` + `ld.lld`
+//! output linked at `CODE`.
 
 use switch_core::cpu::Cpu;
 
 const CODE: u32 = 0x1000;
 const DATA: u32 = 0x8000;
-/// Bytes of `DATA` the corpus can reach, and so what a comparison has to
-/// cover.
+/// Bytes of `DATA` the corpus can reach.
 const DATA_LEN: usize = 0x200;
 
-/// The corpus, assembled at [`CODE`]. Instructions run to `spin`, a
-/// self-branch, followed by the literal pool the `LDR <t>, label` forms read.
+/// The corpus, assembled at [`CODE`]: runs to the `spin` self-branch, then the literal pool.
 #[rustfmt::skip]
 const CORPUS: &[u32] = &[
     0xd2824680, 0xf2b579a0, 0xf2e1e1e0, 0x9281e1e1,
@@ -62,7 +51,6 @@ const CORPUS: &[u32] = &[
     0x89abcdef, 0x01234567, 0x89abcdef, 0x00000000,
 ];
 
-/// Everything a program can observe about itself.
 struct State {
     /// X0..=X30 then SP.
     regs: [u64; 32],
@@ -94,8 +82,7 @@ fn snapshot(cpu: &Cpu) -> State {
     }
 }
 
-/// Compare two runs field by field, naming what differs rather than dumping
-/// two opaque structs.
+/// Compare two runs field by field, naming what differs.
 fn assert_same(interpreted: &State, translated: &State, what: &str) {
     for i in 0..32 {
         let name = if i == 31 {
@@ -132,8 +119,7 @@ fn assert_same(interpreted: &State, translated: &State, what: &str) {
     );
 }
 
-/// A CPU with `code` mapped at [`CODE`], a data region at [`DATA`], and the
-/// translator in the requested state.
+/// A CPU with `code` at [`CODE`], data at [`DATA`], and the translator on or off.
 fn loaded(code: &[u32], jit: bool) -> Cpu {
     let mut cpu = Cpu::new();
     cpu.set_jit_enabled(jit);
@@ -148,7 +134,6 @@ fn loaded(code: &[u32], jit: bool) -> Cpu {
     cpu
 }
 
-/// Run `code` both ways for `steps` instructions and compare.
 fn compare(code: &[u32], steps: u64, what: &str) {
     let mut interpreted = loaded(code, false);
     let mut translated = loaded(code, true);
@@ -164,9 +149,7 @@ fn compare(code: &[u32], steps: u64, what: &str) {
 
 #[test]
 fn the_interpreter_runs_the_whole_corpus_without_faulting() {
-    // The differential tests below compare two runs, which would pass just as
-    // well if both faulted on the first unimplemented encoding. This is what
-    // says the corpus is really being executed.
+    // Guards against both runs faulting on the first encoding and still matching.
     let mut cpu = loaded(CORPUS, false);
     let report = cpu.run(400).unwrap();
     assert_eq!(report.steps, 400);
@@ -180,9 +163,7 @@ fn a_translated_run_matches_an_interpreted_one() {
 
 #[test]
 fn a_translated_run_matches_at_every_step_budget() {
-    // A budget that runs out part-way through a block has to leave the CPU
-    // exactly where the interpreter would have: on the next instruction, with
-    // the retired count matching to the instruction.
+    // A budget ending mid-block stops on the next instruction with an exact retired count.
     for steps in 1..=CORPUS.len() as u64 + 8 {
         compare(CORPUS, steps, &format!("corpus, {steps} steps"));
     }
@@ -190,8 +171,7 @@ fn a_translated_run_matches_at_every_step_budget() {
 
 #[test]
 fn a_translated_run_matches_when_resumed_repeatedly() {
-    // The frontend runs a frame's worth of instructions per call, so blocks
-    // are entered, left part-way through and re-entered constantly.
+    // Blocks are entered, left part-way and re-entered across many calls.
     let mut interpreted = loaded(CORPUS, false);
     let mut translated = loaded(CORPUS, true);
     for chunk in [1u64, 3, 5, 7, 11, 13, 17, 64, 65, 63, 128] {
@@ -231,7 +211,7 @@ fn exclusives_and_sign_filled_bitfields_run_as_ops_and_match() {
     assert_eq!(cpu.read_x(14), 0xf0);
     assert_eq!(cpu.read_x(15), 0);
     assert_eq!(cpu.read_x(16), 0x9abc_def0);
-    // The field is 0xF0, negative, so the sign fills everything above it.
+    // The field is 0xF0, so the sign fills everything above it.
     assert_eq!(cpu.read_x(17), 0xffff_ff00);
     assert_eq!(cpu.read_x(18), 0xffff_ffff_ffff_0000);
     assert_eq!(
@@ -243,7 +223,7 @@ fn exclusives_and_sign_filled_bitfields_run_as_ops_and_match() {
 
 #[test]
 fn a_fault_inside_a_block_reports_what_the_interpreter_would() {
-    // LDR x0, [x1] with x1 still zero: page zero is not mapped here.
+    // LDR x0, [x1] with x1 zero; page zero is unmapped.
     let code = [0xf9400020u32];
     let mut interpreted = loaded(&code, false);
     let mut translated = loaded(&code, true);
@@ -284,8 +264,7 @@ fn a_host_write_into_translated_code_is_noticed() {
     assert!(cpu.jit_stats().invalidated > 0, "nothing was invalidated");
 }
 
-/// A program that calls a subroutine, overwrites its first instruction, and
-/// calls it again. Assembled from:
+/// Calls a subroutine, overwrites its first instruction, calls it again:
 ///
 /// ```text
 ///         movz  x6, #0
@@ -323,8 +302,7 @@ fn guest_code_that_rewrites_itself_runs_the_new_instruction() {
     compare(SELF_MODIFYING, 64, "self-modifying code");
 }
 
-/// A loop whose back edge lands in the middle of the block it is already in,
-/// then two `svc`s. Assembled from:
+/// A back edge into the middle of a cached block, then two `svc`s:
 ///
 /// ```text
 ///         movz  x0, #0
@@ -346,16 +324,11 @@ const REENTRY: &[u32] = &[
 
 #[test]
 fn control_landing_inside_a_translated_block_re_enters_it() {
-    // The first block runs from the entry to the `b.lt`, so the back edge
-    // targets an address half way through a block that is already cached.
-    // Nothing may be skipped and nothing re-run: a syscall that parks a thread
-    // rewinds the pc onto its own `svc` for exactly this reason, and the `svc`
-    // is never a block entry until it does.
+    // The back edge targets the middle of a cached block; nothing may be skipped or re-run.
     compare(REENTRY, 32, "re-entry into a translated block");
     let mut cpu = loaded(REENTRY, true);
     cpu.run(32).unwrap();
-    // Three passes over the back edge, each adding 7. x0 counted them but the
-    // first `svc` overwrote it: svcSleepThread writes its result code into x0.
+    // Three passes of +7; svcSleepThread overwrote x0 with its result.
     assert_eq!(
         cpu.read_x(1),
         21,
@@ -375,10 +348,7 @@ fn control_landing_inside_a_translated_block_re_enters_it() {
 
 #[test]
 fn a_syscall_terminates_a_block_and_resumes_after_it() {
-    // `Term::Svc` retires the instruction before dispatching it, because a
-    // syscall that switches threads installs the incoming thread's pc and the
-    // outgoing one has to resume after its own `svc`. Both engines have to
-    // leave the pc in the same place.
+    // `Term::Svc` retires the `svc` first; both engines must agree on the pc.
     for steps in 1..=REENTRY.len() as u64 + 4 {
         compare(REENTRY, steps, &format!("syscall block, {steps} steps"));
     }
@@ -386,18 +356,7 @@ fn a_syscall_terminates_a_block_and_resumes_after_it() {
 
 #[test]
 fn writing_the_zero_register_never_makes_it_read_back() {
-    // XZR discards every write and reads as zero, whatever names it. That is
-    // easy to get wrong the moment anyone tries to make register access
-    // cheaper - a 32-slot file with a pinned-zero slot 31 removes a branch and
-    // a bounds check from every operand, and is correct only for as long as
-    // nothing ever stores into that slot. (Measured: it is worth nothing
-    // either way, native or wasm, so the file is still 31 slots. The test is
-    // here because the next person to try it should find out from a test
-    // rather than from a title going wrong.)
-    //
-    // Write XZR through every shape of instruction that can name it as a
-    // destination, then read it back.
-    //
+    // XZR discards writes in every destination shape and reads as zero:
     //   movz xzr, #0x1234        ; wide move
     //   cmn  x0, #1              ; ADDS immediate, i.e. Rd=31 as ZR not SP
     //   add  xzr, x0, x0         ; shifted register
@@ -431,9 +390,7 @@ fn writing_the_zero_register_never_makes_it_read_back() {
 
 #[test]
 fn a_block_across_two_pages_is_dropped_by_a_store_to_the_second() {
-    // Straight-line code runs off the end of its page into the next, and the
-    // block it becomes is listed under both, so rewriting the instruction on
-    // the second page has to be noticed exactly as one on the first would.
+    // A block spanning two pages is invalidated by a store to either.
     let mut cpu = Cpu::new();
     cpu.set_jit_enabled(true);
     cpu.mem.map_zero(0x1000, 0x2000).unwrap();
@@ -463,10 +420,7 @@ fn a_block_across_two_pages_is_dropped_by_a_store_to_the_second() {
     assert!(cpu.jit_stats().invalidated > 0, "nothing was invalidated");
 }
 
-/// A forward `B` past two instructions that must not run, a `BL` into a
-/// function and back, and a second `B`. The translator follows both `B`s
-/// rather than ending a block on them; the `BL` still ends one. Assembled
-/// from:
+/// `B`s are followed within a block; the `BL` still ends one:
 ///
 /// ```text
 ///         movz  x0, #1
@@ -491,10 +445,7 @@ const FOLLOWED: &[u32] = &[
 
 #[test]
 fn followed_branches_match_the_interpreter_at_every_step_budget() {
-    // Every budget stops somewhere different relative to the branches the
-    // block follows: before one, on it, just past it into its target. Each
-    // has to leave the pc, the registers and the retired count exactly where
-    // the interpreter would.
+    // Budgets ending before, on, and past each followed branch.
     for steps in 1..=16 {
         compare(
             FOLLOWED,
@@ -507,9 +458,7 @@ fn followed_branches_match_the_interpreter_at_every_step_budget() {
     assert_eq!(cpu.read_x(0), 2, "a skipped instruction ran");
     assert_eq!(cpu.read_x(1), 7);
     assert_eq!(cpu.read_x(30), u64::from(CODE + 0x14), "BL did not link");
-    // Followed, the path is four blocks: the entry through `b one` to the
-    // `bl`, the function, the return site through `b two` to the spin, and
-    // the spin itself. Six means the `B`s ended blocks instead.
+    // Four blocks; six would mean the `B`s ended blocks.
     assert_eq!(
         cpu.jit_stats().translated,
         4,
@@ -519,9 +468,7 @@ fn followed_branches_match_the_interpreter_at_every_step_budget() {
 
 #[test]
 fn a_fault_past_a_followed_branch_names_the_right_instruction() {
-    // b over one instruction, then LDR x0, [x1] with x1 still zero. The load
-    // is the second instruction of the block but not at `start + 4`, so the
-    // fault has to be placed from where the branch went, not from the index.
+    // The fault is placed from the branch target, not the instruction index.
     let code = [0x14000002u32, 0xd503201f, 0xf9400020];
     let mut interpreted = loaded(&code, false);
     let mut translated = loaded(&code, true);
@@ -535,10 +482,7 @@ fn a_fault_past_a_followed_branch_names_the_right_instruction() {
     );
 }
 
-/// Two calls through a PLT stub, the way every call into another module is
-/// made, to a function that sets `x1`. The stub's GOT slot is at
-/// `DATA + 0x10` and is filled in by the test, as a dynamic linker would.
-/// Assembled from:
+/// Two calls through a PLT stub whose GOT slot at `DATA + 0x10` the test fills:
 ///
 /// ```text
 ///         bl    stub
@@ -574,9 +518,7 @@ fn bound(code: &[u32], jit: bool, target: u64) -> Cpu {
 
 #[test]
 fn a_call_through_a_plt_stub_matches_the_interpreter_at_every_step_budget() {
-    // The stub is folded into the `BL` that reaches it, so a budget can end
-    // between the two, inside the stub, or just past it. Each has to leave
-    // x16, x17, x30, the pc and the retired count where the interpreter does.
+    // Budgets ending between the `BL` and the folded stub, inside it, or past it.
     for steps in 1..=20 {
         let mut interpreted = bound(THROUGH_PLT, false, FIVE);
         let mut translated = bound(THROUGH_PLT, true, FIVE);
@@ -591,8 +533,7 @@ fn a_call_through_a_plt_stub_matches_the_interpreter_at_every_step_budget() {
     assert_eq!(cpu.read_x(1), 5);
     assert_eq!(cpu.read_x(16), u64::from(PLT_SLOT));
     assert_eq!(cpu.read_x(17), FIVE);
-    // The entry, the function, the return site and the spin. A fifth block
-    // would be the stub, run on its own rather than folded.
+    // A fifth block would be the stub, unfolded.
     assert_eq!(
         cpu.jit_stats().translated,
         4,
@@ -602,8 +543,7 @@ fn a_call_through_a_plt_stub_matches_the_interpreter_at_every_step_budget() {
 
 #[test]
 fn a_rebound_plt_slot_is_followed_on_the_next_call() {
-    // The stub's code is taken as fixed; its slot is not, so a slot rewritten
-    // between two calls has to send the second one to the new target.
+    // A rewritten GOT slot redirects the next call.
     let mut cpu = bound(THROUGH_PLT, true, FIVE);
     // `bl`, the stub's four, `movz` and `ret`.
     cpu.run(7).unwrap();
@@ -616,9 +556,7 @@ fn a_rebound_plt_slot_is_followed_on_the_next_call() {
 
 #[test]
 fn a_plt_slot_that_cannot_be_read_faults_where_the_interpreter_does() {
-    // The same stub pointed at a slot on an unmapped page: `adrp x16`, one page
-    // past `DATA`. The folded call has to fall back to running the stub, so
-    // the load faults on the stub's own `ldr`.
+    // A GOT slot on an unmapped page: the folded call falls back and faults on the stub's `ldr`.
     let mut code = THROUGH_PLT.to_vec();
     code[8] = 0x90000050;
     let mut interpreted = loaded(&code, false);
@@ -640,9 +578,7 @@ fn a_plt_slot_that_cannot_be_read_faults_where_the_interpreter_does() {
 
 #[test]
 fn a_hot_loop_is_translated_once_and_entered_many_times() {
-    // The whole point: a loop body pays for its decode on the first pass and
-    // never again.
-    //
+    // A loop body is decoded once:
     //     movz x0, #1000
     //     back: subs x0, x0, #1
     //     b.ne  back
@@ -680,9 +616,7 @@ fn turning_the_translator_off_drops_what_it_had_cached() {
 
 #[test]
 fn tracing_a_run_still_produces_a_line_per_instruction() {
-    // Full tracing needs a disassembly of every instruction, which only the
-    // interpreter emits, so `run` has to take that path even with the
-    // translator enabled.
+    // Full tracing takes the interpreter path even with the translator on.
     let mut cpu = loaded(CORPUS, true);
     cpu.trace_enabled = true;
     cpu.run(32).unwrap();
@@ -694,8 +628,7 @@ fn tracing_a_run_still_produces_a_line_per_instruction() {
     );
 }
 
-// Reserved two-source opcodes and invalid CRC widths must keep the
-// interpreter's error path instead of reaching a fast helper's unreachable.
+// Reserved two-source opcodes and invalid CRC widths take the interpreter's error path.
 #[test]
 fn invalid_two_source_forms_report_the_interpreters_error() {
     for sf in [0u32, 1] {
@@ -745,10 +678,8 @@ fn register_copies_mask_the_32_bit_form_and_read_the_zero_register() {
 fn fused_updates_match_at_partial_budgets_and_on_resume() {
     // add w3, w3, #1; cmp w3, #720; b.ne back to the add; b .
     let code = [0x11000463, 0x710b407f, 0x54ffffc1, 0x14000000];
-    // 718 takes the branch after its update, 719 falls through.
     for initial in [718, 719] {
-        // A budget ending after the update, after the compare, after the
-        // branch, and one that runs past the fused exit altogether.
+        // Budgets ending after the update, the compare, the branch, and past the fused exit.
         for budget in [1, 2, 3, 8] {
             let mut interpreted = loaded(&code, false);
             let mut translated = loaded(&code, true);

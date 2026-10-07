@@ -1,10 +1,4 @@
-//! Minimal AES-128 primitives (ECB + XTS) and the GF(2^128) multiply used by
-//! XTS: enough to decrypt an NCA header, which is AES-128-XTS over two
-//! 0x200-byte sectors with the global `header_key` from `prod.keys`.
-//!
-//! FIPS-197 Rijndael with a 128-bit key, hand-rolled (the workspace forbids
-//! external dependencies). Verified against the NIST SP 800-38A / SP 800-38E
-//! test vectors in the unit tests below.
+//! Hand-rolled AES-128 (ECB, XTS, CTR) and SHA-256, enough to decrypt NCAs.
 
 const SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -81,10 +75,7 @@ fn add_round_key(state: &mut [u8; 16], round_key: &[u8]) {
     }
 }
 
-/// SubBytes, ShiftRows and MixColumns, one pass over the state each, the
-/// textbook shape. It is both the reference [`RoundKeys::encrypt_block`]'s
-/// table-driven round is checked against and what the guest's own AES
-/// instructions run, since those expose the steps individually.
+/// The textbook AES steps, used by the reference round and by the guest's AES instructions.
 pub(crate) fn sub_bytes(state: &mut [u8; 16]) {
     for b in state.iter_mut() {
         *b = SBOX[*b as usize];
@@ -143,18 +134,8 @@ const fn xtime(a: u8) -> u8 {
     (a << 1) ^ (if a & 0x80 != 0 { 0x1b } else { 0 })
 }
 
-/// SubBytes, ShiftRows and MixColumns folded into one table lookup per byte,
-/// the standard way AES is implemented, and four times the rate of doing the
-/// three as separate passes over the state.
-///
-/// `TE[r][x]` is the contribution row `r`'s byte makes to a whole output
-/// column, packed the way [`RoundKeys::encrypt_block`] holds a column: row 0
-/// in the low byte. Four of them XORed together, plus the round key, is the
-/// column.
-///
-/// 4 KiB of tables. Table-driven AES leaks key material through cache timing,
-/// which matters not at all here: what this decrypts is firmware and game
-/// content, with keys the user already has on disk.
+/// SubBytes, ShiftRows and MixColumns folded into one lookup per byte. `TE[r][x]` is
+/// row `r`'s contribution to an output column, row 0 in the low byte.
 const TE: [[u32; 256]; 4] = {
     let mut t = [[0u32; 256]; 4];
     let mut x = 0usize;
@@ -234,8 +215,6 @@ fn block_words(state: &[u8; 16]) -> [u32; 4] {
     [0, 1, 2, 3].map(|c| column_word(state, c))
 }
 
-/// The same four columns back as the sixteen bytes they came from, which is
-/// [`block_words`] the other way round.
 #[inline]
 fn block_bytes(words: &[u32; 4]) -> [u8; 16] {
     let mut out = [0u8; 16];
@@ -246,20 +225,13 @@ fn block_bytes(words: &[u32; 4]) -> [u8; 16] {
     out
 }
 
-/// The same packing, out of a longer buffer at a byte offset, the round keys
-/// are one flat 176-byte array.
+/// Column packing out of a flat buffer at a byte offset.
 #[inline]
 fn column_word_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
-/// One AES-128 key's expanded round keys.
-///
-/// Held apart from the block operations because every bulk mode uses one
-/// schedule for every block it touches, and deriving it is comparable work to
-/// encrypting with it. Expanding per block made the firmware fonts, 17.7 MB
-/// of AES-CTR across five NCA sections, expand it 1.1 million times, which
-/// was 28% of a Home Menu boot.
+/// One AES-128 key's expanded round keys, shared across every block of a bulk mode.
 #[derive(Clone)]
 pub struct RoundKeys([u8; 176]);
 
@@ -268,27 +240,12 @@ impl RoundKeys {
         RoundKeys(expand_key(key))
     }
 
-    /// Encrypt one 16-byte block.
-    ///
-    /// The state is held as four column words rather than sixteen bytes, so a
-    /// round is four table lookups and four XORs per column instead of four
-    /// separate passes over a byte array. `column_word` and the row/column
-    /// indexing are the same convention [`shift_rows`] uses: `state[c * 4 + r]`
-    /// is row `r` of column `c`, and ShiftRows takes row `r` of a column from
-    /// column `c + r`.
+    /// Encrypt one 16-byte block. `state[c * 4 + r]` is row `r` of column `c`.
     pub fn encrypt_block(&self, block: &[u8; 16]) -> [u8; 16] {
         block_bytes(&self.encrypt_block_words(&block_words(block)))
     }
 
-    /// The same block cipher, in and out as the four column words the rounds
-    /// already work in.
-    ///
-    /// [`RoundKeys::encrypt_block`]'s last round used to write sixteen bytes
-    /// one at a time, and its only bulk caller
-    /// ([`aes128_ctr_xor_in_place`]) then read all sixteen back one at a time
-    /// to XOR them. Neither side ever wanted the byte array: the rounds hold
-    /// the state as four words and the keystream is consumed four bytes at a
-    /// time, so the scatter and the gather cancelled out.
+    /// [`RoundKeys::encrypt_block`] on column words.
     pub fn encrypt_block_words(&self, block: &[u32; 4]) -> [u32; 4] {
         let w = &self.0;
         let mut s = [0u32; 4];
@@ -307,9 +264,7 @@ impl RoundKeys {
             }
             s = next;
         }
-        // The last round has no MixColumns, so no table: SubBytes and
-        // ShiftRows straight into the output, packed the way `column_word`
-        // packs a column, row 0 in the low byte.
+        // The last round has no MixColumns, so no table.
         let mut out = [0u32; 4];
         for (c, column) in out.iter_mut().enumerate() {
             *column = u32::from(SBOX[byte_of(&s, c, 0)])
@@ -338,13 +293,11 @@ impl RoundKeys {
     }
 }
 
-/// Encrypt one 16-byte block. Expands the key schedule for this block alone,
-/// use [`RoundKeys`] directly for more than one.
+/// Encrypt one block, expanding the schedule for it alone; use [`RoundKeys`] for more.
 pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     RoundKeys::new(key).encrypt_block(block)
 }
 
-/// Decrypt one 16-byte block. See [`aes128_encrypt_block`] on the schedule.
 pub fn aes128_decrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     RoundKeys::new(key).decrypt_block(block)
 }
@@ -373,11 +326,7 @@ pub fn aes128_ecb_decrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Multiply a 128-bit XTS tweak by x in GF(2^128) (poly 0x87), the standard
-/// "next tweak" step. OpenSSL's reference (and the `cryptography` bindings)
-/// treat the tweak bytes little-endian (byte 0 = least significant), so
-/// multiply by x is a left shift toward byte 15 with the reduction XORed into
-/// byte 0.
+/// Multiply an XTS tweak by x in GF(2^128) (poly 0x87), bytes little-endian.
 fn xts_mul_x(tweak: &mut [u8; 16]) {
     let carry = tweak[15] & 0x80;
     for i in (0..15).rev() {
@@ -389,10 +338,8 @@ fn xts_mul_x(tweak: &mut [u8; 16]) {
     }
 }
 
-/// AES-128-XTS decrypt of `data` using a 32-byte key (two 128-bit halves).
-/// `sector` is the starting sector number; `sector_size` is the XTS sector
-/// size (e.g. 0x200 for NCA headers). Nintendo's tweak places the little-endian
-/// sector number in the high 8 bytes of the 128-bit tweak.
+/// AES-128-XTS decrypt with a 32-byte key. Nintendo's tweak puts the little-endian
+/// sector number in the high 8 bytes.
 pub fn aes128_xts_decrypt(key: &[u8; 32], data: &[u8], sector: u64, sector_size: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     for (s, chunk) in (sector..).zip(data.chunks(sector_size)) {
@@ -434,30 +381,17 @@ pub fn aes128_xts_decrypt_sector(
     }
 }
 
-/// AES-128-CTR keystream XOR (encryption and decryption are the same
-/// operation). `counter` is the initial 128-bit big-endian counter block; it
-/// increments by one, as a big-endian integer, every 16 bytes of `data`. This
-/// is the primitive NCA section bodies are encrypted with, the counter's
-/// initial value is derived from the section's FS header (see `nca.rs`).
+/// AES-128-CTR keystream XOR. `counter` is a 128-bit big-endian block, incremented
+/// every 16 bytes.
 pub fn aes128_ctr_xor(key: &[u8; 16], counter: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let mut out = data.to_vec();
     aes128_ctr_xor_in_place(key, counter, &mut out);
     out
 }
 
-/// The same keystream, applied to a buffer already in place.
-///
-/// `data` must start on a cipher-block boundary relative to `counter`, the
-/// keystream block a byte gets is decided by its index here, so a caller
-/// decrypting a range out of the middle of a stream aligns the range down to
-/// a multiple of 16 and advances `counter` to match (see
-/// [`crate::nca::SectionSource`], which reads sections that way).
+/// [`aes128_ctr_xor`] in place. `data` must start on a block boundary relative to `counter`.
 pub fn aes128_ctr_xor_in_place(key: &[u8; 16], counter: &[u8; 16], data: &mut [u8]) {
     let keys = RoundKeys::new(key);
-    // The counter is one 128-bit big-endian integer. Held as its two halves,
-    // advancing it is an add and a carry rather than a walk back down sixteen
-    // bytes looking for the one that did not wrap, which ran per block and
-    // found the last byte 255 times in 256.
     let mut hi = u64::from_be_bytes(counter[..8].try_into().unwrap());
     let mut lo = u64::from_be_bytes(counter[8..].try_into().unwrap());
     let (blocks, tail) = data.as_chunks_mut::<16>();
@@ -472,8 +406,6 @@ pub fn aes128_ctr_xor_in_place(key: &[u8; 16], counter: &[u8; 16], data: &mut [u
             hi = hi.wrapping_add(1);
         }
     }
-    // A final partial block takes as much of its keystream as it has bytes
-    // for; nothing follows it, so the counter need not advance again.
     if !tail.is_empty() {
         let stream = block_bytes(&keys.encrypt_block_words(&counter_words(hi, lo)));
         for (b, k) in tail.iter_mut().zip(stream.iter()) {
@@ -506,10 +438,7 @@ const SHA256_K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-/// SHA-256 (FIPS 180-4). Used to verify a decrypted NCA section's hash-table
-/// region against the FS header's stored master hash, the only way to tell
-/// whether an NCA decrypted correctly, since a wrong key produces plausible
-/// garbage rather than an obvious error.
+/// SHA-256 (FIPS 180-4).
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h = SHA256_H0;
     let bit_len = (data.len() as u64) * 8;
@@ -596,10 +525,7 @@ mod tests {
 
     #[test]
     fn aes128_xts_cross_checked() {
-        // Two-block AES-128-XTS, verified against OpenSSL's `xts128.c`
-        // (via the `cryptography` bindings): key halves are distinct, tweak is
-        // the 16 zero bytes for data unit 0, 32 bytes of input. Decrypting the
-        // ciphertext must reproduce the plaintext.
+        // Two-block AES-128-XTS, checked against OpenSSL's `xts128.c`.
         let mut key = [0u8; 32];
         for i in 0..16 {
             key[i] = i as u8;
@@ -619,10 +545,7 @@ mod tests {
 
     #[test]
     fn aes128_ctr_cross_checked() {
-        // Cross-checked against `openssl enc -aes-128-ctr`: a 3-block message
-        // with an initial counter chosen so the increment carries across two
-        // bytes (...fffe -> ...ffff -> ...0000), which is the part most likely
-        // to have a bug.
+        // Checked against `openssl enc -aes-128-ctr`, with the counter carrying across two bytes.
         let mut key = [0u8; 16];
         for (i, b) in key.iter_mut().enumerate() {
             *b = i as u8;
@@ -638,12 +561,7 @@ mod tests {
         // CTR is its own inverse.
         assert_eq!(aes128_ctr_xor(&key, &ctr, &ct), pt);
 
-        // A message that stops part-way through a block gets the prefix of the
-        // same keystream, which is the whole of what the last partial block
-        // means. The vector above is three whole blocks, so it is every length
-        // up to it that says the tail is handled: the bulk path runs over
-        // whole blocks and the remainder is served separately, and nothing
-        // else here would notice if the two disagreed by a byte.
+        // Every length up to three blocks, so the partial tail matches the bulk keystream.
         for n in 0..=pt.len() {
             assert_eq!(
                 aes128_ctr_xor(&key, &ctr, &pt[..n]),
@@ -696,10 +614,7 @@ mod tests {
 mod table_driven {
     use super::*;
 
-    /// AES-128 encryption written the textbook way: one pass over the state
-    /// per step. [`RoundKeys::encrypt_block`] folds three of those steps into
-    /// a table lookup, which is four times the rate and much easier to get
-    /// subtly wrong, so it is checked against this.
+    /// Textbook AES-128, the reference for the table-driven round.
     fn reference(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
         let w = expand_key(key);
         let mut state = *block;
@@ -718,10 +633,6 @@ mod table_driven {
 
     #[test]
     fn the_table_driven_round_matches_the_textbook_one() {
-        // A NIST vector says the cipher is right at one point; this says the
-        // two implementations agree everywhere, which is what a rewrite of a
-        // primitive actually needs. Deterministic inputs, so a failure is
-        // reproducible.
         let mut key = [0u8; 16];
         let mut block = [0u8; 16];
         let mut x = 0x1234_5678u32;
@@ -743,8 +654,6 @@ mod table_driven {
 
     #[test]
     fn a_ctr_stream_still_round_trips() {
-        // CTR is its own inverse, and it is the mode every NCA section body
-        // uses, so this is the path the firmware fonts go through.
         let key = [0x42u8; 16];
         let counter = [0x11u8; 16];
         let plain: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();

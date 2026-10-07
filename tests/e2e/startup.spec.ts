@@ -63,8 +63,7 @@ test('the guest crash screen exposes recovery paths', async ({ page }) => {
   );
   await expect(crash.getByRole('button', { name: 'Save crash report' })).toBeVisible();
 
-  // The fault report is logged as errors on purpose; the fixture fails on any
-  // left in the console, so it is cleared once checked.
+  // The fixture fails on console errors, so clear the expected fault report.
   await expect(page.locator('#console .err', {
     hasText: 'Fault: CPU: read from unmapped address 0xfff00000',
   })).toHaveCount(1);

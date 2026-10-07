@@ -1,30 +1,9 @@
-//! Writing a wasm module, byte by byte.
-//!
-//! [`super::emit`] turns a translated block into wasm; this is what it writes
-//! that wasm *with*. Nothing here knows anything about AArch64 or about this
-//! emulator: it is the binary format and nothing else, so it can be read
-//! against the spec on its own.
-//!
-//! The core has no dependencies (see AGENTS.md), so there is no `wasm-encoder`
-//! to reach for, and there could not be: this code has to compile *to* wasm as
-//! well as run on the host, and it is on the path of every first visit to a
-//! block, so it has to be small.
-//!
-//! # What is deliberately missing
-//!
-//! Only the instructions and sections an emitted block needs. There are no
-//! floats, no SIMD, no globals and no multi-memory: a block that needs
-//! something not here does not get emitted at all and stays with the
-//! interpreter, which is the same "slower, never wrong" rule the translator
-//! already works to. Adding an opcode is a line; guessing at one that is never
-//! emitted is dead code that no test can reach.
+//! A minimal wasm binary encoder: only the sections and instructions emitted
+//! blocks need.
 
-/// Value types, as they appear in a signature or a local declaration.
 pub(super) const I32: u8 = 0x7F;
 pub(super) const I64: u8 = 0x7E;
 
-/// Append `v` as an unsigned LEB128, the encoding every length, index and
-/// memory offset in the format uses.
 pub(super) fn uleb(out: &mut Vec<u8>, mut v: u64) {
     loop {
         let mut byte = (v & 0x7F) as u8;
@@ -39,13 +18,7 @@ pub(super) fn uleb(out: &mut Vec<u8>, mut v: u64) {
     }
 }
 
-/// Append `v` as a signed LEB128, which is what `i32.const` and `i64.const`
-/// take.
-///
-/// Not interchangeable with [`uleb`]: the two agree only while the value fits
-/// in six bits, so a constant of 64 written the unsigned way decodes as -64.
-/// That is a silent wrong answer rather than a validation error, which is why
-/// the two have separate names here rather than one function with a flag.
+/// Signed LEB128, for `i32.const` and `i64.const`. Not interchangeable with [`uleb`].
 pub(super) fn sleb(out: &mut Vec<u8>, mut v: i64) {
     loop {
         let byte = (v & 0x7F) as u8;
@@ -59,7 +32,6 @@ pub(super) fn sleb(out: &mut Vec<u8>, mut v: i64) {
     }
 }
 
-/// A section, length-prefixed as the format requires.
 fn section(out: &mut Vec<u8>, id: u8, body: &[u8]) {
     if body.is_empty() {
         return;
@@ -69,21 +41,13 @@ fn section(out: &mut Vec<u8>, id: u8, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-/// A vector: a count followed by the elements, which is how every list in the
-/// format is written.
 fn vec_header(out: &mut Vec<u8>, count: usize) {
     uleb(out, count as u64);
 }
 
-/// One function's locals and body.
-///
-/// The body is built by calling the instruction methods in order; each appends
-/// its own encoding, so the `Vec` *is* the instruction stream and there is no
-/// separate list of instructions to lower.
 #[derive(Default)]
 pub(super) struct Func {
-    /// Run-length encoded local declarations, `(count, type)`, as the format
-    /// stores them.
+    /// Run-length encoded `(count, type)` declarations.
     locals: Vec<(u32, u8)>,
     code: Vec<u8>,
 }
@@ -93,11 +57,8 @@ impl Func {
         Func::default()
     }
 
-    /// Declare `count` locals of type `ty`, returning the index of the first.
-    ///
-    /// Indices continue from the parameters, so a function's first local is
-    /// numbered after its last parameter; the caller passes `params` because
-    /// this type never sees the signature.
+    /// Declares `count` locals of type `ty` and returns the first index, which
+    /// continues after the `params` parameters.
     pub(super) fn locals(&mut self, params: u32, count: u32, ty: u8) -> u32 {
         let first = params + self.locals.iter().map(|&(n, _)| n).sum::<u32>();
         self.locals.push((count, ty));
@@ -131,8 +92,6 @@ impl Func {
         self.op_idx(0x21, i);
     }
 
-    /// Store the value on the stack into a local and leave it there. The
-    /// rotates need their operand twice and have it once.
     pub(super) fn local_tee(&mut self, i: u32) {
         self.op_idx(0x22, i);
     }
@@ -141,25 +100,16 @@ impl Func {
         self.op(0x1A);
     }
 
-    /// Pick between two values already on the stack: the first if the
-    /// condition under them is non-zero.
-    ///
-    /// Both arms are evaluated, which is what makes this the right shape for a
-    /// conditional *value* and the wrong one for anything that can trap. The
-    /// divides use [`Func::if_result`] for exactly that reason.
+    /// Evaluates both arms, so it must not be used for anything that can trap.
     pub(super) fn select(&mut self) {
         self.op(0x1B);
     }
 
-    /// An `if` whose two arms each leave one value of type `ty`. Closed by
-    /// [`Func::else_`] and then [`Func::end`].
     pub(super) fn if_result(&mut self, ty: u8) {
         self.code.push(0x04);
         self.code.push(ty);
     }
 
-    /// An `if` whose arm leaves nothing, so it needs no `else`. Closed by
-    /// [`Func::end`].
     pub(super) fn if_void(&mut self) {
         self.code.push(0x04);
         self.code.push(0x40);
@@ -169,23 +119,11 @@ impl Func {
         self.op(0x05);
     }
 
-    /// Leave the function with whatever its result type asks for already on
-    /// the stack.
     pub(super) fn return_(&mut self) {
         self.op(0x0F);
     }
 
-    /// A load or store's immediates are an alignment *hint* (log2 of the
-    /// assumed alignment) and a static byte offset. The offset is what makes
-    /// guest state cheap to reach: the address operand stays dynamic and the
-    /// base of the register file or the guest arena is folded into the
-    /// instruction.
-    ///
-    /// The hint is a promise, not a request: an engine may use it to pick a
-    /// wider instruction, so it has to be no larger than the address is really
-    /// aligned to. Emulator state is naturally aligned and a guest address is
-    /// aligned to nothing the emitter knows, which is why every caller passes
-    /// one explicitly rather than taking the access width's own.
+    /// `align` is a log2 hint and must not exceed the address's real alignment.
     fn mem(&mut self, opcode: u8, align: u8, offset: u32) {
         debug_assert!(align <= 3, "an alignment hint is a log2, not a width");
         self.code.push(opcode);
@@ -201,10 +139,6 @@ impl Func {
         self.mem(0x29, align, offset);
     }
 
-    /// The narrowing loads, which widen what they read into an `i64` on the
-    /// way: `_u` with zeroes and `_s` with the sign. A64's loads are exactly
-    /// these two shapes, so a `LDRB`/`LDRSB` pair needs no shifting of its
-    /// own.
     pub(super) fn i64_load8_s(&mut self, offset: u32) {
         self.mem(0x30, 0, offset);
     }
@@ -237,8 +171,6 @@ impl Func {
         self.mem(0x37, align, offset);
     }
 
-    /// The narrowing stores, which write the low bytes of an `i64` and drop
-    /// the rest: A64's `STRB`/`STRH`/`STR W` with nothing masked first.
     pub(super) fn i64_store8(&mut self, offset: u32) {
         self.mem(0x3C, 0, offset);
     }
@@ -299,9 +231,7 @@ impl Func {
         self.op(0x7E);
     }
 
-    /// Traps on a zero divisor, and `i64.div_s` traps again on
-    /// `i64::MIN / -1`. A64 defines both as answers rather than faults, so
-    /// every emitted divide guards them; see [`super::emit`].
+    /// Traps on a zero divisor and on `i64::MIN / -1`; callers must guard both.
     pub(super) fn i64_div_s(&mut self) {
         self.op(0x7F);
     }
@@ -322,10 +252,7 @@ impl Func {
         self.op(0x85);
     }
 
-    /// Every wasm shift and rotate takes its distance modulo the operand
-    /// width, which is what A64's variable shifts do too, so a `ShiftVar`'s
-    /// 64-bit form needs no masking of the amount. The 32-bit form does: its
-    /// modulus is 32 and this one's is still 64.
+    /// Shift distances are taken modulo 64.
     pub(super) fn i64_shl(&mut self) {
         self.op(0x86);
     }
@@ -358,12 +285,6 @@ impl Func {
         self.op(0x54);
     }
 
-    /// Sign-extend the low 8, 16 or 32 bits of an i64 over the rest of it.
-    ///
-    /// These are the sign-extension opcodes rather than a shift-left and an
-    /// arithmetic shift-right, which is what an engine without them needs. A64
-    /// asks for this constantly: every `ASR`, every `SDIV`, and the `SXTB`,
-    /// `SXTH` and `SXTW` of the extended-register form.
     pub(super) fn i64_extend8_s(&mut self) {
         self.op(0xC2);
     }
@@ -376,15 +297,10 @@ impl Func {
         self.op(0xC4);
     }
 
-    /// Narrow an i64 to i32. Every guest address is computed in 64 bits and
-    /// then used as a wasm address, which is 32-bit, so this is on the path of
-    /// every guest load and store.
     pub(super) fn i32_wrap_i64(&mut self) {
         self.op(0xA7);
     }
 
-    /// Widen an i32 to i64 with zeroes, which is what a page number needs
-    /// before it can be a shift distance in a 64-bit word.
     pub(super) fn i64_extend_i32_u(&mut self) {
         self.op(0xAD);
     }
@@ -393,20 +309,14 @@ impl Func {
         self.op(0x0B);
     }
 
-    /// How many bytes the body has reached. The emitter uses this to decide a
-    /// block has grown past what is worth compiling.
     pub(super) fn len(&self) -> usize {
         self.code.len()
     }
 
-    /// The instruction stream as it stands, for [`super::emit::defers`], which
-    /// asks what an op wrote rather than keeping its own list of which ops
-    /// write what.
     pub(super) fn code(&self) -> &[u8] {
         &self.code
     }
 
-    /// The function as the code section holds it: size, locals, body.
     fn encode(&self) -> Vec<u8> {
         let mut inner = Vec::with_capacity(self.code.len() + 8);
         vec_header(&mut inner, self.locals.len());
@@ -422,19 +332,12 @@ impl Func {
     }
 }
 
-/// A function signature.
 pub(super) struct Type {
     pub(super) params: Vec<u8>,
     pub(super) results: Vec<u8>,
 }
 
-/// A module under construction.
-///
-/// The emitted module imports its memory rather than defining one, because the
-/// memory it has to address is the emulator's own linear memory: the guest
-/// register file and the guest arena both live there, so an emitted block
-/// reaches guest state with a plain `i64.load` at a static offset instead of
-/// calling back into the host.
+/// A module that imports the host's linear memory as `e`.`m`.
 #[derive(Default)]
 pub(super) struct Module {
     types: Vec<Type>,
@@ -479,17 +382,12 @@ impl Module {
         }
         section(&mut out, 1, &body);
 
-        // The memory import is written here rather than being a field, because
-        // there is exactly one and it is not optional: an emitted module with
-        // its own memory could not see guest state at all.
         body.clear();
         vec_header(&mut body, 1);
         name_bytes(&mut body, "e");
         name_bytes(&mut body, "m");
         body.push(0x02);
-        // A minimum of zero pages: the host's memory is already as large as it
-        // is, and asking for more here would only fail an instantiation the
-        // host has already sized correctly.
+        // Minimum of zero pages; the host memory is already sized.
         body.push(0x00);
         uleb(&mut body, 0);
         section(&mut out, 2, &body);
@@ -521,7 +419,6 @@ impl Module {
     }
 }
 
-/// A name, as the format writes one: a length and its UTF-8 bytes.
 fn name_bytes(out: &mut Vec<u8>, name: &str) {
     uleb(out, name.len() as u64);
     out.extend_from_slice(name.as_bytes());
@@ -553,10 +450,6 @@ mod tests {
         assert_eq!(u(u32::MAX as u64), vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
     }
 
-    /// The encoding a constant needs is the *signed* one, and the two agree
-    /// only up to 63. A guest immediate of 64 written unsigned decodes as -64,
-    /// which validates and computes the wrong answer, so this is the check
-    /// that the two never got swapped.
     #[test]
     fn signed_leb128_is_not_the_unsigned_one() {
         assert_eq!(s(0), vec![0x00]);
@@ -567,15 +460,10 @@ mod tests {
         assert_eq!(s(-123456), vec![0xC0, 0xBB, 0x78]);
         assert_eq!(s(i64::from(i32::MIN)), vec![0x80, 0x80, 0x80, 0x80, 0x78]);
 
-        // Where they differ is the whole point: 64 and every value with bit 6
-        // set in its last byte.
         assert_ne!(s(64), u(64));
         assert_eq!(s(63), u(63));
     }
 
-    /// A module with one function that adds its two parameters, checked byte
-    /// for byte. If the section framing is wrong this is where it shows,
-    /// rather than in a browser with a `CompileError` and no offset.
     #[test]
     fn a_minimal_module_encodes_to_the_expected_bytes() {
         let mut m = Module::new();
@@ -605,9 +493,6 @@ mod tests {
         assert_eq!(bytes, expected);
     }
 
-    /// Locals are numbered after the parameters, and a second group continues
-    /// from the first. Getting this wrong reads a parameter as a local, which
-    /// validates whenever the types happen to line up.
     #[test]
     fn local_indices_continue_from_the_parameters() {
         let mut f = Func::new();

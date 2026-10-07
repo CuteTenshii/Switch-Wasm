@@ -1,10 +1,4 @@
 //! Advanced SIMD (NEON).
-//!
-//! The classes covered here are the ones Mario Kart 8 Deluxe's modules
-//! actually contain, measured by canonicalising every NEON encoding in their
-//! 4.8M instruction words. `Qn` is `V(n)` whole and `Dn` its halves, so the
-//! vector register file is checked through `read_vreg` directly rather than
-//! only through the arithmetic.
 
 mod a32;
 
@@ -12,7 +6,6 @@ use a32::{cpu as new_cpu, load, r, SCRATCH};
 
 use switch_core::cpu::Cpu;
 
-/// A quad register holding four `f32` lanes.
 fn quad(values: [f32; 4]) -> u128 {
     values.iter().enumerate().fold(0u128, |acc, (i, v)| {
         acc | (u128::from(v.to_bits()) << (32 * i))
@@ -28,7 +21,6 @@ fn lanes(cpu: &Cpu, q: u8) -> [f32; 4] {
     out
 }
 
-/// Run `ops` with `q0` and `q1` preloaded.
 fn with_quads(a: [f32; 4], b: [f32; 4], ops: &[u32]) -> Cpu {
     let mut cpu = new_cpu();
     cpu.set_vreg(0, quad(a));
@@ -46,8 +38,7 @@ fn the_immediate_move_expands_its_pattern_across_the_register() {
     cpu.run(2).unwrap();
     assert_eq!(cpu.read_vreg(0), 0, "vmov.i32 q0, #0 clears the whole quad");
 
-    // A byte pattern replicates through a D register and leaves the quad's
-    // other half alone.
+    // A byte pattern replicates through a D register and leaves the quad's other half alone.
     let mut cpu = new_cpu();
     cpu.set_vreg(0, 0x0123_4567_89AB_CDEF_1357_9BDF_2468_ACE0);
     load(&mut cpu, &[0xF387_0E1Fu32]);
@@ -102,9 +93,7 @@ fn the_integer_add_wraps_within_each_lane() {
     assert_eq!(v >> 96, 0, "and the top lane wrapped inside itself");
 }
 
-/// The bitwise operations take their operation from the `size` field rather
-/// than the opcode, which is the one place in the three-register group where
-/// `size` is not an element width.
+/// The bitwise operations take their operation from the `size` field.
 #[test]
 fn the_bitwise_operations_are_selected_by_the_size_field() {
     let mut cpu = new_cpu();
@@ -117,8 +106,7 @@ fn the_bitwise_operations_are_selected_by_the_size_field() {
     assert_eq!(cpu.read_vreg(2), 0xF0F0_F0F0 & 0x00FF_00FF, "vand");
 }
 
-/// `VBSL` takes its mask from the *destination*, which is what distinguishes
-/// it from `VBIT` and `VBIF` beside it.
+/// `VBSL` takes its mask from the destination.
 #[test]
 fn bit_select_takes_its_mask_from_the_destination() {
     let mut cpu = new_cpu();
@@ -130,8 +118,6 @@ fn bit_select_takes_its_mask_from_the_destination() {
     assert_eq!(cpu.read_vreg(2), 0x5555_AAAA);
 }
 
-/// The float multiply-accumulate by element is the single most common NEON
-/// encoding in the title, 2,898 of them.
 #[test]
 fn the_multiply_by_element_broadcasts_one_lane() {
     let mut cpu = new_cpu();
@@ -160,8 +146,7 @@ fn the_multiply_by_element_broadcasts_one_lane() {
     );
 }
 
-/// `VEXT` slides a window across the pair, and shares its `1011` opcode field
-/// with the two-register group: bit 24 is all that tells them apart.
+/// `VEXT` differs from the two-register group only in bit 24.
 #[test]
 fn ext_slides_a_window_across_the_register_pair() {
     let mut cpu = new_cpu();
@@ -219,8 +204,6 @@ fn the_two_register_miscellaneous_operations() {
     assert_eq!([out[0], out[1], out[2], out[3]], [1, 2, 4, 8], "vcnt.8");
 }
 
-/// `VLD1`/`VST1` moving two `D` registers is the commonest NEON memory
-/// instruction in the title, 14,168 across its modules, mostly this shape.
 #[test]
 fn the_vector_loads_and_stores_move_two_registers_and_advance_the_base() {
     let mut cpu = new_cpu();
@@ -243,12 +226,10 @@ fn the_vector_loads_and_stores_move_two_registers_and_advance_the_base() {
     assert_eq!(r(&cpu, 0), SCRATCH + 16, "and so did the load");
 }
 
-/// `VSEL` carries its own condition rather than the instruction's, which is
-/// why it lives in the unconditional encoding space.
+/// `VSEL` carries its own condition rather than the instruction's.
 #[test]
 fn vsel_reads_the_condition_flags_it_names() {
-    // s0 = 1.0, s1 = 2.0; compare 1 against 2 so GT is false and the second
-    // operand is taken.
+    // s0 = 1.0, s1 = 2.0; GT is false, so the second operand is taken.
     let mut cpu = new_cpu();
     let code = [
         0xE3A0_0001u32, // mov r0, #1  -> sets no flags

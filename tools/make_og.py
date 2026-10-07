@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Render the social preview card (web/public/assets/og.png).
-
-Composes an SVG around a real captured frame from the emulator
-(`tools/screenshot.png`) and rasterizes it with rsvg-convert, so the
-picture people see when the link is shared is the emulator's actual output
-rather than a mock-up.
+"""Render the social preview card (web/public/assets/og.png) around `tools/screenshot.png`.
 
 Usage: tools/make_og.py
 """
@@ -24,9 +19,7 @@ TITLE = "switch-wasm"
 HEADLINE = ["A Nintendo Switch", "emulator that runs", "in your browser"]
 SUBTITLE = "ARM64 interpreter · GM20B GPU · WebAssembly"
 
-# The captured frame is 16:9, and so is the screen area it is drawn into.
-# A value above 1 scales it up and clips to the top-left corner, for frames
-# whose output only fills part of the screen.
+# Above 1 scales the frame up and clips to the top-left corner.
 SCREEN_ZOOM = 1.0
 SCREEN_WIDTH = 512
 SCREEN_HEIGHT = SCREEN_WIDTH * 9 // 16
@@ -70,7 +63,6 @@ def build_svg(screenshot_uri: str) -> str:
 
     headline_markup = ""
     for index, line in enumerate(HEADLINE):
-        # The last line carries the accent colour.
         colour = "#6ea8ff" if index == len(HEADLINE) - 1 else "#ffffff"
         headline_markup += (
             f'<text x="80" y="{212 + index * 62}" font-family="{SANS}" font-size="50"'

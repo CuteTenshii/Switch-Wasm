@@ -1,31 +1,11 @@
-//! ASTC LDR (`ASTC_2D_*`): 16 bytes covering a footprint from 4x4 up to 12x12.
-//!
-//! Everything about a block is variable. The footprint is chosen per texture,
-//! and within a block the *weight grid* is a separate, usually smaller, grid
-//! that is bilinearly resampled up to the footprint; the number of partitions,
-//! which endpoint pairs each partition gets, and the numeric range every one of
-//! those values is stored in all come out of the block's own header. There is
-//! no fixed field layout to tabulate: the layout is computed from the header
-//! and then the two halves of the block are read towards each other, endpoints
-//! forwards from the low end and weights backwards from bit 127.
-//!
-//! The one genuinely unusual mechanism is Integer Sequence Encoding, which
-//! packs values whose range is not a power of two, five values into eight bits
-//! plus a trit each, or three into seven bits plus a quint, so that a
-//! range of, say, 0..11 costs a little over three and a half bits rather than
-//! four. [`TRITS_FROM_T`] and [`QUINTS_FROM_Q`] are its unpacking tables.
-//!
-//! Only the LDR profile is decoded, which is what Maxwell exposes and what
-//! every `DkImageFormat_RGBA_ASTC_*` is. A block asking for an HDR endpoint
-//! mode, or one whose header does not describe a legal configuration, decodes
-//! to the specification's error colour: opaque magenta.
+//! ASTC LDR (`ASTC_2D_*`) block decoding: 16-byte blocks, footprints 4x4 to
+//! 12x12. Endpoints are read forwards from the header and weights backwards
+//! from bit 127. HDR or illegal blocks decode to the error colour (magenta).
 
 use crate::{Error, Result};
 
-/// The largest footprint, and so the most texels one block can carry.
 pub const MAX_TEXELS: usize = 12 * 12;
 
-/// The error colour a malformed or unsupported block decodes to.
 const ERROR_COLOUR: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
 
 include!("astc_tables.rs");
@@ -53,8 +33,7 @@ fn reverse_bits(value: u32, count: i32) -> u32 {
     out
 }
 
-/// Spread `count` source bits across `dst_bits` by repeating them, which is how
-/// ASTC widens a quantised value without changing its endpoints.
+/// Widen a quantised value by repeating its bits.
 fn replicate(value: u32, src_bits: i32, dst_bits: i32) -> u32 {
     let mut out = 0u32;
     let mut shift = dst_bits - src_bits;
@@ -69,11 +48,8 @@ fn replicate(value: u32, src_bits: i32, dst_bits: i32) -> u32 {
     out
 }
 
-/// A run of bits read either forwards from `start` or backwards from it.
-///
-/// The two halves of a block grow towards each other: endpoints upwards from
-/// just past the header, weights downwards from bit 127. Reads past `length`
-/// yield zeroes rather than running into the other half.
+/// A run of bits read forwards or backwards from `start`; reads past `length`
+/// yield zeroes.
 struct Stream {
     data: u128,
     start: i32,
@@ -126,7 +102,6 @@ struct Ise {
     bits: i32,
 }
 
-/// One decoded value: its low bits, its trit or quint, and the two combined.
 #[derive(Clone, Copy, Default)]
 struct IseValue {
     low: u32,
@@ -146,11 +121,7 @@ fn ise_required_bits(params: Ise, values: i32) -> i32 {
     }
 }
 
-/// The widest range that fits `values` numbers into `available` bits.
-///
-/// ASTC does not store the range; it is whatever the largest representable one
-/// is for the space left over once the header and the other half of the block
-/// have taken their share, so encoder and decoder derive it the same way.
+/// The widest ISE range that fits `values` numbers into `available` bits.
 fn max_range_ise(available: i32, values: i32) -> Ise {
     let (mut trit, mut quint, mut plain) = (6i32, 5i32, 8i32);
     loop {
@@ -189,9 +160,7 @@ fn max_range_ise(available: i32, values: i32) -> Ise {
     }
 }
 
-/// Unpack a sequence of ISE values. Trits arrive five at a time and quints
-/// three at a time, each group interleaving its low bits with the packed
-/// trit/quint field.
+/// Unpack ISE values: trits in groups of five, quints in groups of three.
 fn decode_ise(out: &mut [IseValue], count: usize, stream: &mut Stream, params: Ise) {
     match params.mode {
         IseMode::Trit => {
@@ -260,7 +229,6 @@ fn decode_ise(out: &mut [IseValue], count: usize, stream: &mut Stream, params: I
     }
 }
 
-/// What a block's first eleven bits say about its weight grid.
 struct BlockMode {
     void_extent: bool,
     dual_plane: bool,
@@ -393,7 +361,6 @@ fn block_mode(data: u32) -> Option<BlockMode> {
     })
 }
 
-/// How many values a colour endpoint mode spends.
 fn endpoint_values(mode: u32) -> i32 {
     (mode as i32 / 4 + 1) * 2
 }
@@ -402,7 +369,6 @@ fn is_hdr_endpoint_mode(mode: u32) -> bool {
     matches!(mode, 2 | 3 | 7 | 11 | 14 | 15)
 }
 
-/// Spread quantised endpoints back over 0..255.
 fn unquantize_endpoints(out: &mut [u32], values: &[IseValue], count: usize, params: Ise) {
     if params.mode == IseMode::Plain {
         for i in 0..count {
@@ -440,8 +406,7 @@ fn unquantize_endpoints(out: &mut [u32], values: &[IseValue], count: usize, para
     }
 }
 
-/// Move the low bit of `a` into `b`'s sign, which is how the modes that store
-/// a base and a signed offset pack nine bits of range into eight.
+/// Move the low bit of `a` into `b`'s sign (base + signed offset modes).
 fn bit_transfer_signed(a: &mut i32, b: &mut i32) {
     *b >>= 1;
     *b |= *a & 0x80;
@@ -465,8 +430,7 @@ fn clamped(rgba: [i32; 4]) -> [u32; 4] {
     ]
 }
 
-/// Turn a partition's unquantised values into its two endpoints. Only the LDR
-/// modes are here; an HDR one is rejected before this is reached.
+/// A partition's two endpoints from its unquantised values (LDR modes only).
 fn decode_endpoint_pair(mode: u32, v: &[u32]) -> ([u32; 4], [u32; 4]) {
     match mode {
         0 => ([v[0], v[0], v[0], 0xFF], [v[1], v[1], v[1], 0xFF]),
@@ -621,8 +585,7 @@ fn unquantize_weights(out: &mut [u32; 64], grid: &[IseValue], count: usize, para
     }
 }
 
-/// Resample the weight grid up to the footprint, bilinearly, in the fixed-point
-/// arithmetic the specification prescribes.
+/// Bilinearly resample the weight grid to the footprint, in the spec's fixed point.
 fn interpolate_weights(
     out: &mut [[u32; 2]; MAX_TEXELS],
     weights: &[u32; 64],
@@ -651,8 +614,7 @@ fn interpolate_weights(
                 i00 + mode.grid_width + 1,
             ];
             for plane in 0..planes {
-                // Out-of-grid corners always carry a zero weight, and masking
-                // keeps the read inside the array as the hardware does.
+                // Out-of-grid corners carry zero weight; masking keeps the read in bounds.
                 let at = |i: i32| weights[((i * planes + plane) & 0x3F) as usize];
                 out[(y * bw + x) as usize][plane as usize] = (at(indices[0]) * w00 as u32
                     + at(indices[1]) * w01 as u32
@@ -680,10 +642,7 @@ fn hash52(value: u32) -> u32 {
     p
 }
 
-/// Which partition a texel belongs to. ASTC computes this rather than storing
-/// it: a seed from the block header feeds a hash whose output is twelve small
-/// coefficients, and the partition is whichever of up to four linear functions
-/// of the texel's position comes out largest.
+/// Which partition a texel belongs to, from the seeded partition hash.
 fn texel_partition(seed: u32, x: u32, y: u32, partitions: i32, small_block: bool) -> usize {
     let (x, y) = if small_block {
         (x << 1, y << 1)
@@ -760,8 +719,7 @@ fn fill(out: &mut [[f32; 4]], texels: usize, colour: [f32; 4]) {
     }
 }
 
-/// Decode one ASTC block of the given footprint into `out`, which must hold at
-/// least `block_width * block_height` texels.
+/// `out` must hold at least `block_width * block_height` texels.
 pub fn decode_astc(
     block: &[u8],
     block_width: u32,
@@ -781,9 +739,7 @@ pub fn decode_astc(
     };
 
     if mode.void_extent {
-        // A void extent paints one colour over the whole block, and names the
-        // region of the texture over which that stays true; the region only
-        // matters to a filtering hardware unit, not to a single-block decode.
+        // A void extent is one colour; its extent region is ignored.
         let min_s = bits(data, 12, 24);
         let max_s = bits(data, 25, 37);
         let min_t = bits(data, 38, 50);
@@ -846,7 +802,6 @@ pub fn decode_astc(
             }
         };
 
-    // Colour endpoint modes, one per partition.
     let mut modes = [0u32; 4];
     if partitions == 1 {
         modes[0] = bits(data, 13, 16);
@@ -913,7 +868,6 @@ pub fn decode_astc(
         taken += endpoint_values(mode) as usize;
     }
 
-    // Weights are read from the top of the block downwards.
     let mut weight_raw = [IseValue::default(); 64];
     let mut stream = Stream::new(data, 127, weight_bits, false);
     decode_ise(
@@ -965,9 +919,7 @@ pub fn decode_astc(
 mod tests {
     use super::*;
 
-    /// A void-extent block: the low nine bits mark it, the four extent fields
-    /// are all-ones (the encoding for "this colour is not known to extend
-    /// anywhere"), and the colour sits in the top four sixteen-bit fields.
+    /// A void-extent block with all-ones extents and the colour in the top fields.
     fn void_extent(r: u16, g: u16, b: u16, a: u16) -> [u8; 16] {
         let low: u64 = 0x1FC | (0x1FFF << 12) | (0x1FFF << 25) | (0x1FFF << 38) | (0x1FFF << 51);
         let high: u64 = r as u64 | ((g as u64) << 16) | ((b as u64) << 32) | ((a as u64) << 48);
@@ -1021,8 +973,6 @@ mod tests {
         assert!(decode_astc(&[0u8; 8], 4, 4, &mut out).is_err());
     }
 
-    /// The integer-sequence tables are the specification's, and each row has
-    /// to hold values in range for its base.
     #[test]
     fn the_trit_and_quint_tables_are_in_range() {
         assert_eq!(TRITS_FROM_T.len(), 256);
@@ -1035,8 +985,6 @@ mod tests {
         }
     }
 
-    /// The widest range that fits has to actually fit, and one step wider
-    /// must not.
     #[test]
     fn the_ise_range_is_the_widest_that_fits() {
         use IseMode::{Plain, Quint, Trit};

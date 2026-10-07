@@ -1,9 +1,5 @@
-//! The ARMv8 cryptographic extension: AES, SHA-1, SHA-256 and the polynomial
-//! multiplies. The Tegra X1's A57 implements all of it, so guest code is free
-//! to use it.
-//!
-//! The AES steps are the ones [`crate::crypto`] already decrypts NCAs with,
-//! same column-major state, so the instructions are just a different way in.
+//! ARMv8 crypto extension: AES, SHA-1, SHA-256 and PMULL. AES reuses
+//! [`crate::crypto`]'s column-major state.
 
 use super::Cpu;
 use crate::crypto::{
@@ -49,8 +45,7 @@ fn sigma1_lower(x: u32) -> u32 {
     x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10)
 }
 
-/// Four SHA-1 rounds. `f` is the round function the opcode picks, and the
-/// 160-bit `Y:X` rotate at the end of each round is what walks the state.
+/// Four SHA-1 rounds; `f` is the round function the opcode picks.
 fn sha1_rounds(mut x: u128, mut y: u32, w: u128, f: fn(u32, u32, u32) -> u32) -> u128 {
     for e in 0..4 {
         let (x0, x1, x2, x3) = (elem32(x, 0), elem32(x, 1), elem32(x, 2), elem32(x, 3));
@@ -65,8 +60,7 @@ fn sha1_rounds(mut x: u128, mut y: u32, w: u128, f: fn(u32, u32, u32) -> u32) ->
     x
 }
 
-/// Four SHA-256 rounds over the two halves of the state. `part1` selects which
-/// half the instruction keeps.
+/// Four SHA-256 rounds; `part1` selects which half of the state is kept.
 fn sha256_rounds(mut x: u128, mut y: u128, w: u128, part1: bool) -> u128 {
     for e in 0..4 {
         let (y0, y1, y2, y3) = (elem32(y, 0), elem32(y, 1), elem32(y, 2), elem32(y, 3));
@@ -100,10 +94,7 @@ pub(super) fn poly_mul(a: u64, b: u64, bits: u32) -> u128 {
     out
 }
 
-/// One AES step, by the A64 `opcode`: AESE (`0b00100`), AESD (`0b00101`),
-/// AESMC (`0b00110`) or AESIMC (`0b00111`). AESE and AESD fold in `d` EOR
-/// `n` first; the mix-columns steps are separate instructions, so a full
-/// round is built from a pair. A32's forms are the same operations.
+/// One AES step by A64 `opcode`: AESE, AESD, AESMC, AESIMC (`0b00100..=0b00111`).
 pub(super) fn aes(opcode: u32, d: u128, n: u128) -> Option<u128> {
     let mut state = (if opcode < 0b00110 { d ^ n } else { n }).to_le_bytes();
     match opcode {
@@ -122,15 +113,14 @@ pub(super) fn aes(opcode: u32, d: u128, n: u128) -> Option<u128> {
     Some(u128::from_le_bytes(state))
 }
 
-/// The three-register SHA operations by the A64 `opcode`: SHA1C, SHA1P,
-/// SHA1M, SHA1SU0, SHA256H, SHA256H2 and SHA256SU1, 0 to 6.
+/// Three-register SHA ops by A64 `opcode` 0..=6: SHA1C, SHA1P, SHA1M, SHA1SU0,
+/// SHA256H, SHA256H2, SHA256SU1.
 pub(super) fn sha_three(opcode: u32, d: u128, n: u128, m: u128) -> Option<u128> {
     Some(match opcode {
         0b000 => sha1_rounds(d, n as u32, m, sha_choose),
         0b001 => sha1_rounds(d, n as u32, m, sha_parity),
         0b010 => sha1_rounds(d, n as u32, m, sha_majority),
-        // SHA1SU0: the schedule's three-way XOR, over a window that
-        // straddles two of the message vectors.
+        // SHA1SU0
         0b011 => {
             let shifted = (d >> 64) | (n << 64);
             shifted ^ d ^ m
@@ -158,8 +148,7 @@ pub(super) fn sha_three(opcode: u32, d: u128, n: u128, m: u128) -> Option<u128> 
     })
 }
 
-/// The two-register SHA operations by the A64 `opcode`: SHA1H, SHA1SU1 and
-/// SHA256SU0, 0 to 2.
+/// Two-register SHA ops by A64 `opcode` 0..=2: SHA1H, SHA1SU1, SHA256SU0.
 pub(super) fn sha_two(opcode: u32, d: u128, n: u128) -> Option<u128> {
     Some(match opcode {
         // SHA1H writes a scalar, so the rest of the register clears.
@@ -185,9 +174,7 @@ pub(super) fn sha_two(opcode: u32, d: u128, n: u128) -> Option<u128> {
 }
 
 impl Cpu {
-    /// AES and SHA. These sit in the Advanced SIMD encoding space but share
-    /// bits with the copy group, so [`Cpu::try_simd`] has to offer them here
-    /// first.
+    /// AES and SHA. These share bits with the SIMD copy group, so must be tried first.
     pub(super) fn try_crypto(&mut self, insn: u32) -> Result<bool> {
         let rd = (insn & 0x1F) as u8;
         let rn = ((insn >> 5) & 0x1F) as u8;
@@ -247,8 +234,7 @@ impl Cpu {
 mod tests {
     use super::*;
 
-    /// Drive a whole SHA-256 block through the instruction opcodes exactly as
-    /// the ARM-optimised implementations sequence them, and check the digest.
+    /// Drive a SHA-256 block through the opcodes as ARM-optimised code sequences them.
     #[test]
     fn the_sha256_helpers_hash_abc() {
         const K: [u32; 64] = [
@@ -315,7 +301,7 @@ mod tests {
         );
     }
 
-    /// The same for SHA-1, whose round function changes every twenty rounds.
+    /// The same for SHA-1.
     #[test]
     fn the_sha1_helpers_hash_abc() {
         const K: [u32; 4] = [0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6];

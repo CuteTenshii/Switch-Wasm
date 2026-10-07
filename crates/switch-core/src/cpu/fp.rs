@@ -4,19 +4,15 @@
 use super::bits::*;
 use super::Cpu;
 
-/// Which of the scalar floating-point forms an encoding is. See
-/// [`Cpu::fp_form`], which is the only thing that produces one.
+/// Which scalar floating-point form an encoding is, from [`Cpu::fp_form`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FpForm {
-    /// `FMOV` (immediate).
     MovImm,
     /// The 1-source group: `FCVT`, `FMOV` register-to-register, `FABS`, ...
     OneSource,
     /// `FMOV` between a general-purpose register and a vector lane.
     MovReg,
-    /// Conversion between floating point and integer.
     IntConv,
-    /// Conversion between floating point and fixed point.
     FixedConv,
     /// The scalar integer compare-to-zero forms.
     CmpZero,
@@ -24,7 +20,6 @@ pub(super) enum FpForm {
     ThreeSource,
     /// The 2-source arithmetic, the compares and the conditional forms.
     DataProc,
-    /// Nothing here claims the encoding.
     None,
 }
 use crate::Result;
@@ -40,8 +35,7 @@ impl Cpu {
         f64::from_bits(self.vregs[r as usize] as u64)
     }
 
-    /// Write Sn. A scalar FP write is a 32-bit write to the vector register, so
-    /// it zeroes the other 96 bits rather than leaving whatever was there.
+    /// Write Sn, zeroing the other 96 bits of the vector register.
     #[inline]
     pub(super) fn fp_set_f32(&mut self, r: u8, v: f32) {
         self.vregs[r as usize] = u128::from(v.to_bits());
@@ -52,24 +46,10 @@ impl Cpu {
         self.vregs[r as usize] = v.to_bits() as u128;
     }
 
-    /// Which scalar floating-point form an encoding is, and so which handler
-    /// below owns it, decided from the encoding alone, with no side effects.
-    ///
-    /// The forms are tested in the order [`Cpu::try_fp`] used to test them
-    /// inline, because that order is load-bearing: the fixed-point conversions
-    /// have to be recognised before the `sf`-inclusive guard that follows
-    /// them, and the 3-source group before the `00011110` space.
-    ///
-    /// Separating classification from execution is what lets the block
-    /// translator settle the form once ([`super::jit::ir::Op::Fp`]) instead of
-    /// walking eight guards on every execution, `scvtf`, `fcvt`, `fadd` and
-    /// `fcmpe` sit in four different ones, and together they are most of the
-    /// floating point hbmenu runs.
+    /// Classify a scalar FP encoding with no side effects. The test order matters:
+    /// fixed-point conversions before the `sf`-inclusive guard, 3-source before `00011110`.
     pub(super) fn fp_form(insn: u32) -> FpForm {
-        // FMOV (immediate): bits[31:24] = 00011110, bit21 = 1,
-        // bits[12:10] = 100, bits[9:5] = 0, imm8 = bits[20:13], type in
-        // bits[23:22] (00 = S, 01 = D). The value is VFPExpandImm(),
-        // `fmov s0, #1.0` = 0x1E2E1002 (sdl-hello's float env-var helper).
+        // FMOV (immediate): imm8 = bits[20:13], type in bits[23:22].
         if ((insn >> 24) & 0xFF) == 0b00011110
             && ((insn >> 21) & 1) == 1
             && ((insn >> 10) & 0b111) == 0b100
@@ -77,53 +57,33 @@ impl Cpu {
         {
             return FpForm::MovImm;
         }
-        // Scalar FP 1-source: bits[31:24] = 00011110, bit21 = 1,
-        // bits[14:10] = 10000, opcode in bits[20:15], `type` in bits[23:22]
-        // (00 = S, 01 = D). Note the opcode's low bit lands in bits[15], so
-        // matching on bits[15:10] as a unit misses half the group, which is
-        // how `fmov s0, s15` (opcode 0) came out unimplemented.
-        // `fcvt s0, d0` = 0x1E624000, `fmov s0, s15` = 0x1E2041E0.
+        // 1-source: opcode in bits[20:15], so bits[15:10] is not one field.
         if ((insn >> 24) & 0xFF) == 0b00011110
             && ((insn >> 21) & 1) == 1
             && ((insn >> 10) & 0x1F) == 0b10000
         {
             return FpForm::OneSource;
         }
-        // FMOV (register): move between GPR and a vector lane. bits[30:24] =
-        // 0011110, bits[15:10] = 000000, bits[21:16] select direction/size.
+        // FMOV (register) between GPR and vector lane; bits[21:16] select direction/size.
         if ((insn >> 24) & 0x7F) == 0b0011110
             && ((insn >> 10) & 0x3F) == 0
             && matches!((insn >> 16) & 0x3F, 0b100110 | 0b100111)
         {
             return FpForm::MovReg;
         }
-        // Conversion between floating-point and integer: bits[30:24] =
-        // 0011110 (sf at bit31), `type` in bits[23:22], bit21 = 1,
-        // bits[15:10] = 0 (non-zero there is the fixed-point scale, a separate
-        // class). The operation is `rmode` (bits[20:19]) and `opcode`
-        // (bits[18:16]), treating bits[21:16] as one 6-bit field folds the
-        // fixed bit21 into the value, which made `ucvtf d0, x1` decode as
-        // FCVTMU and write x0 instead of d0 (NX-Shell then dereferenced the
-        // clobbered pointer).
+        // FP <-> integer: rmode bits[20:19] and opcode bits[18:16] are separate fields
+        // (folding in the fixed bit21 misdecodes e.g. `ucvtf d0, x1`).
         if ((insn >> 24) & 0x7F) == 0b0011110
             && ((insn >> 21) & 1) == 1
             && ((insn >> 10) & 0x3F) == 0
         {
             return FpForm::IntConv;
         }
-        // Floating-point <-> fixed-point conversion: bits[30:24] = 0011110
-        // with bit21 = 0. Same rmode/opcode split as the integer conversions,
-        // with the binary point `64 - scale` bits in from bits[15:10]. `sf` is
-        // bit31, so this has to be matched before the bit31-inclusive guard
-        // below (which is only correct for the forms that have no `sf`).
+        // FP <-> fixed-point (bit21 = 0); must precede the bit31-inclusive guard below.
         if ((insn >> 24) & 0x7F) == 0b0011110 && ((insn >> 21) & 1) == 0 {
             return FpForm::FixedConv;
         }
-        // Scalar integer compare-to-zero: CMGE/CMGT/CMLE/CMLT <Dd>, <Dn>, #0.
-        // bits[31:30] = 01 (D), bit29 = U, bits[28:25] = 1110,
-        // bits[24:21] = 0111, bits[20:16] = 00000 (the zero operand),
-        // op = bits[15:10]. The result is an all-ones/all-zeros mask (used as
-        // a predicate by NX-Shell: `cmge d31, d31, #0` then `fmov x2, d31`).
+        // CMGE/CMGT/CMLE/CMLT <Dd>, <Dn>, #0, producing an all-ones/all-zeros mask.
         if ((insn >> 31) & 1) == 0
             && ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 25) & 0b1111) == 0b1111
@@ -132,25 +92,18 @@ impl Cpu {
         {
             return FpForm::CmpZero;
         }
-        // 3-source fused ops: bits[31:24] = 00011111, `type` in bits[23:22],
-        // o1 = bit21, o0 = bit15, Ra in bits[14:10]. This group has its own
-        // top byte, so it has to be matched before the 00011110 space below.
-        // `fmadd d0, d31, d26, d0` = 0x1F5A03E0.
+        // 3-source fused ops have their own top byte `00011111`.
         if ((insn >> 24) & 0xFF) == 0b00011111 {
             return FpForm::ThreeSource;
         }
-        // Scalar FP data processing: bits[31:24] = 00011110 (single/double;
-        // bit23 = 1 selects half precision, which is out of scope).
+        // 2-source data processing; bit23 = 1 (half precision) is out of scope.
         if ((insn >> 24) & 0xFF) == 0b00011110 && ((insn >> 23) & 1) == 0 {
             return FpForm::DataProc;
         }
         FpForm::None
     }
 
-    /// Run a scalar floating-point instruction whose form is already known.
-    /// Returns whether the form's handler claimed it: a handler may still
-    /// decline (half precision, an unallocated opcode), in which case nothing
-    /// else here gets a look, exactly as the guard chain behaved.
+    /// Run an FP instruction whose form is known; a handler may still decline it.
     pub(super) fn run_fp(&mut self, form: FpForm, insn: u32) -> Result<bool> {
         match form {
             FpForm::MovImm => self.fp_mov_imm(insn),
@@ -200,9 +153,7 @@ impl Cpu {
         let rn = ((insn >> 5) & 0x1F) as u8;
         let rd = (insn & 0x1F) as u8;
         let ftype = (insn >> 22) & 0b11;
-        // FCVT is the one form whose destination width differs from its
-        // source, so it can't share the write-back below, and the only
-        // scalar form that reaches half precision at all.
+        // FCVT's destination width differs from its source, so it has its own write-back.
         let half = |v: &Self| f16_to_f32(v.vregs[rn as usize] as u16);
         match (op, ftype) {
             (0b000100, 0b01) => {
@@ -221,9 +172,7 @@ impl Cpu {
                 self.fp_set_f64(rd, f64::from(half(self)));
                 return Ok(true);
             }
-            // FCVT Hd, Sn/Dn. A half is a 16-bit write, so it clears the
-            // rest of the register like every other scalar FP write.
-            // Singles go via a double, which is exact, so they round once.
+            // FCVT Hd, Sn/Dn. Singles go via an exact double, so they round once.
             (0b000111, 0b00) => {
                 let v = f64::from(self.fp_get_f32(rn));
                 self.vregs[rd as usize] = u128::from(f64_to_f16(v));
@@ -238,12 +187,11 @@ impl Cpu {
         let double = match ftype {
             0b00 => false,
             0b01 => true,
-            // Half-precision *arithmetic* is ARMv8.2 and not on the A57.
+            // Half-precision arithmetic is ARMv8.2, not on the A57.
             _ => return Ok(false),
         };
         if op == 0 {
-            // FMOV Sd/Dd, Sn/Dn: a bit-exact copy, so it must not go
-            // through a float conversion (that can canonicalize NaNs).
+            // Bit-exact copy: a float conversion could canonicalize NaNs.
             let bits = self.vregs[rn as usize];
             self.vregs[rd as usize] = if double {
                 u128::from(bits as u64)
@@ -252,9 +200,7 @@ impl Cpu {
             };
             return Ok(true);
         }
-        // FABS/FNEG are bit operations on the sign, and single-precision
-        // FSQRT/FRINTx round once, computing them in f64 and narrowing
-        // would round twice.
+        // Single precision is computed in f32 to avoid double rounding.
         let mode = fpcr_rounding(self.fpcr);
         if op == 0b000011 && self.fp_sqrt_is_invalid(rn, double) {
             self.fpsr |= FPSR_IOC;
@@ -270,8 +216,7 @@ impl Cpu {
                 0b001010 => a.floor(),           // FRINTM
                 0b001011 => a.trunc(),           // FRINTZ
                 0b001100 => a.round(),           // FRINTA (ties away)
-                // FRINTX/FRINTI are the two that round to whatever mode
-                // FPCR currently selects.
+                // FRINTX/FRINTI round with the FPCR mode.
                 0b001110 | 0b001111 => round_to_integral(a, mode),
                 _ => return Ok(false),
             };
@@ -302,7 +247,6 @@ impl Cpu {
         let rn = ((insn >> 5) & 0x1F) as u8;
         match sel {
             0b100110 => {
-                // FMOV Xd/Wd, Dn/Sn: move the FP bit pattern to a GPR.
                 let val = if double {
                     self.fp_get_f64(rn).to_bits()
                 } else {
@@ -311,7 +255,6 @@ impl Cpu {
                 self.write_zr(rd, val);
             }
             0b100111 => {
-                // FMOV Vd.D/S, Xn/Wn: move a GPR bit pattern to FP.
                 if double {
                     self.fp_set_f64(rd, f64::from_bits(self.read_zr(rn)));
                 } else {
@@ -336,8 +279,7 @@ impl Cpu {
         let rn = ((insn >> 5) & 0x1F) as u8;
         let wide = sf != 0;
         match (rmode, opcode) {
-            // SCVTF / UCVTF: integer → float. `sf` gives the source width,
-            // `type` the destination's, and they are independent.
+            // SCVTF / UCVTF: `sf` gives the source width, `type` the destination's.
             (0b00, 0b010) | (0b00, 0b011) => {
                 let signed = opcode == 0b010;
                 let v = self.read_zr(rn);
@@ -356,9 +298,7 @@ impl Cpu {
             }
             // FMOV between a GPR and an FP register is handled above.
             (0b00, 0b110) | (0b00, 0b111) => Ok(false),
-            // Float → integer. `opcode` picks signed/unsigned and `rmode`
-            // the rounding: 00 = nearest-even (FCVTNS/NU), 01 = +inf
-            // (FCVTPS/PU), 10 = -inf (FCVTMS/MU), 11 = zero (FCVTZS/ZU).
+            // Float to integer. rmode: 00 nearest-even, 01 +inf, 10 -inf, 11 zero;
             // rmode 00 with opcode 100/101 is FCVTAS/FCVTAU (ties away).
             (_, 0b000) | (_, 0b001) | (0b00, 0b100) | (0b00, 0b101) => {
                 let signed = opcode & 1 == 0;
@@ -402,7 +342,7 @@ impl Cpu {
         let wide = sf != 0;
         let scale = Self::pow2(fbits);
         match (rmode, opcode) {
-            // SCVTF / UCVTF: fixed-point → float.
+            // SCVTF / UCVTF: fixed-point to float.
             (0b00, 0b010) | (0b00, 0b011) => {
                 let signed = opcode == 0b010;
                 let v = self.read_zr(rn);
@@ -419,7 +359,7 @@ impl Cpu {
                 }
                 Ok(true)
             }
-            // FCVTZS / FCVTZU: float → fixed-point, rounding toward zero.
+            // FCVTZS / FCVTZU: float to fixed-point, rounding toward zero.
             (0b11, 0b000) | (0b11, 0b001) => {
                 let signed = opcode == 0b000;
                 let f = if double {
@@ -469,11 +409,9 @@ impl Cpu {
         let ra = ((insn >> 10) & 0x1F) as u8;
         let o0 = (insn >> 15) & 1;
         let o1 = (insn >> 21) & 1;
-        // o1 negates the accumulator, o1 != o0 the product:
-        // 00 FMADD, 01 FMSUB, 10 FNMADD, 11 FNMSUB.
+        // o1 negates the accumulator, o1 != o0 the product.
         let neg_a = o1 == 1;
         let neg_n = o1 != o0;
-        // These are fused: one rounding for the whole multiply-add.
         if double {
             let mut fa = self.fp_get_f64(ra);
             let mut fnn = self.fp_get_f64(rn);
@@ -505,15 +443,11 @@ impl Cpu {
         let rn = ((insn >> 5) & 0x1F) as u8;
         let rd = (insn & 0x1F) as u8;
         let rm = ((insn >> 16) & 0x1F) as u8;
-        // bit21 == 1. The 1-source group is handled above; bits[11:10] split the
-        // rest: 01 = FCCMP, 11 = FCSEL, 10 = the 2-source ops, 00 = FCMP. Both
-        // conditional forms have bit21 SET: testing for 0 made them dead code,
-        // so `fcsel s30, s31, s30, gt` came out unimplemented.
+        // bits[11:10]: 01 FCCMP, 11 FCSEL, 10 2-source, 00 FCMP (all bit21 = 1).
         let cond = ((insn >> 12) & 0xF) as u8;
         match (insn >> 10) & 0b11 {
             0b01 => {
-                // FCCMP: compare, or set NZCV from the immediate when the
-                // condition fails.
+                // FCCMP: when the condition fails, NZCV comes from the immediate.
                 if self.condition_holds(cond) {
                     self.fp_cmp(rn, rm, double);
                 } else {
@@ -522,7 +456,6 @@ impl Cpu {
                 return Ok(true);
             }
             0b11 => {
-                // FCSEL: select Vn or Vm on the condition.
                 let v = if self.condition_holds(cond) { rn } else { rm };
                 if double {
                     let f = self.fp_get_f64(v);
@@ -537,12 +470,7 @@ impl Cpu {
         }
         let fixed = (insn >> 10) & 0x3F;
         if fixed == 0b001000 {
-            // FCMP / FCMPE. `opcode2` is bits[4:0]: bit3 selects the
-            // compare-with-zero form and bit4 the signalling (E) variant, which
-            // only differs in which NaNs raise an exception - not modelled.
-            // Reading them from bits[9:8] took them out of Rn instead, so
-            // `fcmp d0, #0.0` compared d0 with d0 and `fcmp d8, #0.0` compared
-            // against whatever v0 held.
+            // FCMP / FCMPE: `opcode2` bit3 compares with zero, bit4 signals (unmodelled).
             let z = (insn >> 3) & 1;
             if z == 1 {
                 self.fp_cmp_zero(rn, double);
@@ -551,9 +479,7 @@ impl Cpu {
             }
             return Ok(true);
         }
-        // 2-source: opcode in bits[15:11] (its low bit is the fixed 1 of
-        // bits[11:10] = 10). Single precision is computed in f32 rather than in
-        // f64 and narrowed, which would round twice.
+        // 2-source: opcode in bits[15:11]. Single precision stays in f32 to avoid double rounding.
         let op = (insn >> 11) & 0x1F;
         if double {
             let a = self.fp_get_f64(rn);
@@ -597,21 +523,14 @@ impl Cpu {
         Ok(true)
     }
 
-    /// `2^n` as an `f64`, built rather than computed.
-    ///
-    /// `f64::powi` is a libcall in wasm (`__powidf2`, 1.4% of a translated
-    /// frame), and every `fcvtzs` went through two of them for its saturation
-    /// bounds. A power of two is exact: the exponent field is `1023 + n` and
-    /// the mantissa is zero.
+    /// `2^n` built from the exponent field; `f64::powi` is a libcall in wasm.
     #[inline(always)]
     pub(super) fn pow2(n: u32) -> f64 {
         debug_assert!(n <= 1023);
         f64::from_bits(u64::from(1023 + n) << 52)
     }
 
-    /// The Invalid and Inexact flags a float-to-integer convert raises: a NaN
-    /// or a result the destination cannot hold is Invalid (and saturates), and
-    /// anything that lost a fraction is Inexact.
+    /// Raise Invalid (NaN or out of range, saturating) and Inexact for a float-to-int convert.
     fn note_convert_exceptions(&mut self, v: f64, r: Rounding, signed: bool, bits: u32) {
         if v.is_nan() {
             self.fpsr |= FPSR_IOC;
@@ -631,8 +550,7 @@ impl Cpu {
         }
     }
 
-    /// The square root of a negative has no real answer, which is Invalid.
-    /// Negative zero is not negative for this purpose.
+    /// Square root of a negative (not -0) is Invalid.
     fn fp_sqrt_is_invalid(&self, rn: u8, double: bool) -> bool {
         let v = if double {
             self.fp_get_f64(rn)
@@ -642,8 +560,7 @@ impl Cpu {
         v < 0.0
     }
 
-    /// Division raises Divide-by-zero for a finite numerator over zero, and
-    /// Invalid for the two forms with no answer at all.
+    /// Divide-by-zero for finite / 0; Invalid for 0/0 and inf/inf.
     fn note_divide_exceptions(&mut self, a: f64, b: f64) {
         if (a == 0.0 && b == 0.0) || (a.is_infinite() && b.is_infinite()) {
             self.fpsr |= FPSR_IOC;
@@ -652,7 +569,6 @@ impl Cpu {
         }
     }
 
-    /// Compare two FP values and set NZCV.
     pub(super) fn fp_cmp(&mut self, rn: u8, rm: u8, double: bool) {
         let a = if double {
             self.fp_get_f64(rn)
@@ -690,19 +606,16 @@ impl Cpu {
     }
 }
 
-/// One unpacked float: `value = 1.mantissa × 2^exponent`, with the mantissa's
-/// binary point at [`NORMALIZED_POINT`] so both widths share one routine.
+/// One unpacked float: `value = 1.mantissa x 2^exponent`, point at [`NORMALIZED_POINT`].
 struct Unpacked {
     sign: bool,
     exponent: i32,
     mantissa: u64,
 }
 
-/// Where the binary point sits in an unpacked mantissa. High enough that a
-/// double's 52 bits fit under it with room to normalise a subnormal.
+/// High enough to fit a double's 52 bits with room to normalise a subnormal.
 const NORMALIZED_POINT: u32 = 62;
 
-/// `(mantissa width, exponent bias)` for a 32- or 64-bit float.
 fn format(esize: u32) -> (u32, i32) {
     if esize == 64 {
         (52, 1023)
@@ -717,9 +630,7 @@ fn unpack(bits: u64, esize: u32) -> Unpacked {
     let field = ((bits >> width) & ((1 << (esize - 1 - width)) - 1)) as i32;
     let frac = bits & ((1u64 << width) - 1);
     if field == 0 {
-        // Subnormal: shift the leading one up to the point, paying an
-        // exponent for each place, which is what makes the estimate of a
-        // subnormal the estimate of the normal number it equals.
+        // Subnormal: normalise the leading one, paying an exponent per place.
         let mut mantissa = frac << (NORMALIZED_POINT - width);
         let mut exponent = 1 - bias;
         while mantissa != 0 && mantissa & (1 << NORMALIZED_POINT) == 0 {
@@ -775,8 +686,7 @@ fn zero(sign: bool, esize: u32) -> u64 {
     (sign as u64) << (esize - 1)
 }
 
-/// ARM's `RecipEstimate`: a u0.9 input in [0.5, 1) to a u0.8 output with an
-/// implied leading one.
+/// ARM's `RecipEstimate`: a u0.9 input in [0.5, 1) to a u0.8 output.
 fn recip_estimate(scaled: u64) -> u8 {
     let a = (scaled - 256) + 256;
     let a = a * 2 + 1;
@@ -784,11 +694,7 @@ fn recip_estimate(scaled: u64) -> u8 {
     b.div_ceil(2) as u8
 }
 
-/// ARM's `RecipSqrtEstimate`: a u0.9 input in [0.25, 1) to the same u0.8 form.
-///
-/// Defined by search rather than by a formula, the largest `b` whose square
-/// still fits under the input's reciprocal, which is why it is a table on
-/// hardware and is cached here.
+/// ARM's `RecipSqrtEstimate`: a u0.9 input in [0.25, 1) to u0.8, cached as a table.
 fn recip_sqrt_estimate(scaled: u64) -> u8 {
     static TABLE: std::sync::OnceLock<[u8; 512]> = std::sync::OnceLock::new();
     let table = TABLE.get_or_init(|| {
@@ -811,15 +717,7 @@ fn recip_sqrt_estimate(scaled: u64) -> u8 {
     table[scaled as usize]
 }
 
-/// `FRECPE`: the architectural **estimate**, not a division.
-///
-/// It was a division here, on the grounds that the Newton-Raphson step a
-/// caller follows it with converges either way. That is true of the maths and
-/// false of the machine: hardware's estimate is 8 bits and a division is 24,
-/// so every result downstream differs in its low bits, and a title that
-/// compares one against a threshold, or hashes it, or just rounds it, takes a
-/// different branch than it does on a console. `1/1.5` is `0x3f2aaaab` exactly
-/// and `0x3f2a8000` on hardware.
+/// `FRECPE`: the architectural 8-bit estimate, not a division.
 pub(super) fn recip_estimate_bits(bits: u64, esize: u32) -> u64 {
     let (width, bias) = format(esize);
     if is_nan(bits, esize) {
@@ -834,16 +732,14 @@ pub(super) fn recip_estimate_bits(bits: u64, esize: u32) -> u64 {
     }
     let exponent_min = 1 - bias;
     if value.exponent < exponent_min - 2 {
-        // Too small to have a reciprocal in range; round-to-nearest takes it
-        // to infinity rather than to the largest normal.
+        // Round-to-nearest takes a too-small input to infinity.
         return infinity(value.sign, esize);
     }
     let scaled = value.mantissa >> (NORMALIZED_POINT - 8);
     let mut estimate = u64::from(recip_estimate(scaled)) << (width - 8);
     let mut result_exponent = -(value.exponent + 1);
     if result_exponent < exponent_min {
-        // The reciprocal is subnormal: put the implicit one back and shift it
-        // down into the fraction, which is what a subnormal encoding is.
+        // Subnormal reciprocal: restore the implicit one and shift it into the fraction.
         let implicit = 1u64 << width;
         if result_exponent == exponent_min - 1 {
             estimate = (estimate | implicit) >> 1;
@@ -856,10 +752,7 @@ pub(super) fn recip_estimate_bits(bits: u64, esize: u32) -> u64 {
     ((value.sign as u64) << (esize - 1)) | (field << width) | (estimate & ((1u64 << width) - 1))
 }
 
-/// `FRSQRTE`: the same estimate for the reciprocal square root.
-///
-/// A negative input is not a sign-preserving NaN but the **default** NaN,
-/// which is the other half of what this used to get wrong.
+/// `FRSQRTE`; a negative input gives the default NaN.
 pub(super) fn rsqrt_estimate_bits(bits: u64, esize: u32) -> u64 {
     let (width, bias) = format(esize);
     if is_nan(bits, esize) {
@@ -876,8 +769,7 @@ pub(super) fn rsqrt_estimate_bits(bits: u64, esize: u32) -> u64 {
         return zero(false, esize);
     }
     let result_exponent = -(value.exponent + 1) >> 1;
-    // An odd exponent leaves a factor of two behind, and the table takes it as
-    // an extra bit of input rather than as a scale on the answer.
+    // An odd exponent becomes an extra bit of table input.
     let odd = value.exponent.rem_euclid(2) == 0;
     let scaled = value.mantissa >> (NORMALIZED_POINT - if odd { 7 } else { 8 });
     let estimate = u64::from(recip_sqrt_estimate(scaled)) << (width - 8);
@@ -889,13 +781,7 @@ pub(super) fn rsqrt_estimate_bits(bits: u64, esize: u32) -> u64 {
 mod tests {
     use super::{recip_estimate_bits, rsqrt_estimate_bits};
 
-    /// The values `qemu-aarch64` produces for `frecpe v3.4s, v10.4s` over
-    /// (1.5, -2.25, 3.0, 0.5): the four that `tools/difftest.py` runs.
-    ///
-    /// Pinned here as well because the difference is subtle enough to be
-    /// "fixed" back: an exact reciprocal passes every plausibility check a
-    /// reader applies to `1/1.5`, and differs from the hardware in the eight
-    /// low bits of every result.
+    /// `qemu-aarch64` results for `frecpe v3.4s` over (1.5, -2.25, 3.0, 0.5).
     #[test]
     fn the_reciprocal_estimate_is_eight_bits_wide_like_the_hardware() {
         for (input, expected) in [
@@ -906,12 +792,9 @@ mod tests {
         ] {
             let got = recip_estimate_bits(u64::from(input.to_bits()), 32) as u32;
             assert_eq!(got, expected, "frecpe {input}: {got:#010x}");
-            // The exact reciprocal is a different number, which is the whole
-            // point: nothing below the estimate's eight bits survives.
             assert_ne!(f32::from_bits(got), 1.0 / input);
         }
-        // The double form reads the same table, so its mantissa is the f32
-        // one shifted into a wider field rather than a more accurate answer.
+        // The double form reads the same table.
         assert_eq!(
             recip_estimate_bits(1.5f64.to_bits(), 64),
             0x3FE5_5000_0000_0000
@@ -929,15 +812,12 @@ mod tests {
             let got = rsqrt_estimate_bits(u64::from(input.to_bits()), 32) as u32;
             assert_eq!(got, expected, "frsqrte {input}: {got:#010x}");
         }
-        // Not a sign-preserving NaN: the sign bit is what a negative input
-        // used to leave set here, and no hardware NaN comes back that way.
         assert_eq!(rsqrt_estimate_bits((-1.0f64).to_bits(), 64) >> 63, 0);
     }
 
     #[test]
     fn the_estimates_answer_the_edges_the_way_a_divide_cannot() {
-        // Zero divides, infinity vanishes, and both keep the sign they came
-        // with: except a negative square root, which has no sign to keep.
+        // Zero and infinity keep their sign, except a negative square root.
         assert_eq!(
             recip_estimate_bits(0.0f32.to_bits().into(), 32),
             0x7F80_0000

@@ -1,58 +1,38 @@
-//! GM20B graphics MMU (GMMU): the GPU-side virtual address space.
-//!
-//! On the Switch the guest allocates its own CPU-visible memory and hands the
-//! backing address to nvmap; `/dev/nvhost-as-gpu` then maps those nvmap
-//! handles into a GPU address space. So a GPU virtual address resolves to a
-//! CPU address in the same [`Memory`] the ARM core executes from: there is no
-//! separate VRAM.
-//!
-//! Mappings are whole buffers rather than individual pages: an
-//! `NVGPU_AS_IOCTL_MAP_BUFFER_EX` maps one contiguous nvmap range at one
-//! contiguous GPU VA, so a sorted list of ranges translates exactly and costs
-//! nothing per page.
+//! GM20B GMMU: the GPU virtual address space. GPU addresses resolve into the
+//! same guest [`Memory`] (no VRAM), as whole contiguous nvmap ranges.
 
 use crate::mem::Memory;
 use crate::{Error, Result};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-/// GPU small page size (the GMMU's finest granularity).
 pub const SMALL_PAGE_SIZE: u64 = 0x1000;
-/// GPU big page size used by the Switch driver.
 pub const BIG_PAGE_SIZE: u64 = 0x1_0000;
 
 /// Base of the small-page VA region reported by `GET_VA_REGIONS`.
 pub const SMALL_REGION_BASE: u64 = 0x0400_0000;
-/// End of the small-page VA region / base of the big-page region.
 pub const SMALL_REGION_END: u64 = 0x1_0000_0000;
-/// End of the big-page VA region (the 40-bit GPU address space).
+/// End of the big-page region (40-bit GPU address space).
 pub const BIG_REGION_END: u64 = 0x100_0000_0000;
 
 /// `NVGPU_AS_ALLOC_SPACE_FLAGS_FIXED_OFFSET` / `..._MAP_BUFFER_FLAGS_FIXED_OFFSET`.
 pub const FLAG_FIXED_OFFSET: u32 = 1 << 0;
-/// `NVGPU_AS_MAP_BUFFER_FLAGS_MAPPABLE_COMPBITS`, irrelevant to us but
-/// forwarded by the driver, so it must not be mistaken for a fixed offset.
+/// `NVGPU_AS_MAP_BUFFER_FLAGS_MAPPABLE_COMPBITS`, ignored.
 pub const FLAG_MAPPABLE_COMPBITS: u32 = 1 << 1;
 /// `NVGPU_AS_MAP_BUFFER_FLAGS_CACHEABLE`.
 pub const FLAG_CACHEABLE: u32 = 1 << 2;
-/// `NVGPU_AS_MAP_BUFFER_FLAGS_MODIFY`: `MAP_BUFFER_EX` is not mapping a new
-/// nvmap handle at all, it is **re-mapping a sub-range of a mapping that
-/// already exists** with a different memory kind. The `offset` field names the
-/// existing mapping rather than requesting one, and the nvmap handle field is
-/// unused, which is why treating this as an ordinary map rejected it with
-/// `BadParameter` for handle 0.
+/// `NVGPU_AS_MAP_BUFFER_FLAGS_MODIFY`: re-map a sub-range of an existing
+/// mapping with a new kind; `offset` names it and the handle is unused.
 pub const FLAG_REMAP_SUB_RANGE: u32 = 1 << 8;
 
-/// One mapped nvmap range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mapping {
     pub gpu_va: u64,
     pub size: u64,
-    /// CPU address of the first byte, in the guest's address space.
     pub cpu_addr: u32,
-    /// nvmap handle this range came from (0 for a raw/anonymous mapping).
+    /// 0 for a raw mapping.
     pub handle: u32,
-    /// Memory kind (block-linear layout selector) the buffer was mapped with.
+    /// Memory kind (block-linear layout selector).
     pub kind: u8,
 }
 
@@ -62,8 +42,7 @@ impl Mapping {
     }
 }
 
-/// A VA range reserved by `ALLOC_SPACE`. Mappings with a fixed offset land
-/// inside one of these; the allocator never hands the same range out twice.
+/// A VA range reserved by `ALLOC_SPACE`; fixed-offset mappings land inside one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Reservation {
     base: u64,
@@ -71,40 +50,22 @@ struct Reservation {
     page_size: u64,
 }
 
-/// How many mappings [`AddressSpace::translate`] remembers.
 const TRANSLATION_WAYS: usize = 8;
 
-/// One GPU address space (one `/dev/nvhost-as-gpu` fd).
+/// One `/dev/nvhost-as-gpu` fd.
 #[derive(Debug)]
 pub struct AddressSpace {
-    /// Big page size negotiated by `INITIALIZE_EX` (0 until then).
+    /// Negotiated by `INITIALIZE_EX`; 0 until then.
     pub big_page_size: u64,
     mappings: BTreeMap<u64, Mapping>,
     reservations: BTreeMap<u64, Reservation>,
-    /// Bump pointer for un-fixed small-page allocations.
     next_small: u64,
-    /// Bump pointer for un-fixed big-page allocations.
     next_big: u64,
-    /// The mappings recent translations resolved to. Engines walk a surface
-    /// address by address, so without this a blit pays a `BTreeMap` search
-    /// for every pixel it touches.
-    ///
-    /// Several entries rather than one, because a shaded pixel does not stay
-    /// in a single mapping: it reads two or three constant buffers, samples a
-    /// texture and reads and writes the render target, each of which is its
-    /// own. A one-entry cache is evicted by every one of those in turn and
-    /// hits almost never: the `BTreeMap` search was still 5% of the Home
-    /// Menu's frame with it in place.
-    ///
-    /// Split across three arrays because the scan is what runs per pixel and
-    /// it only needs two of the three: a `Cell<Option<(u64, u32, u64)>>` per
-    /// way made rejecting a way copy the whole thirty-two-byte option out of
-    /// the cell. A `size` of zero is an empty way, so no discriminant is
-    /// needed to say so: no mapping is zero bytes long.
+    /// Recently translated mappings, split by field so the per-pixel scan reads
+    /// only two arrays. A `size` of zero is an empty way.
     recent_base: [Cell<u64>; TRANSLATION_WAYS],
     recent_size: [Cell<u64>; TRANSLATION_WAYS],
     recent_cpu: [Cell<u32>; TRANSLATION_WAYS],
-    /// Round-robin replacement cursor for the three arrays above.
     next_translation: Cell<usize>,
 }
 
@@ -129,9 +90,7 @@ impl AddressSpace {
         }
     }
 
-    /// Reserve `pages * page_size` bytes of address space. With
-    /// [`FLAG_FIXED_OFFSET`] the caller picks the base; otherwise one is
-    /// allocated from the region matching `page_size`.
+    /// Reserve address space at a fixed or allocated base.
     pub fn alloc_space(
         &mut self,
         pages: u32,
@@ -161,8 +120,7 @@ impl AddressSpace {
         Ok(base)
     }
 
-    /// Release a reservation made by [`AddressSpace::alloc_space`]. Any
-    /// mappings still inside it are torn down, mirroring the driver.
+    /// Release a reservation, tearing down mappings inside it.
     pub fn free_space(&mut self, base: u64, pages: u32, page_size: u32) -> Result<()> {
         let size = (pages as u64)
             .checked_mul(page_size as u64)
@@ -180,9 +138,7 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Map `size` bytes of the buffer at `cpu_addr` into the address space.
-    /// With [`FLAG_FIXED_OFFSET`] the mapping lands at `requested`; otherwise
-    /// a fresh VA is allocated. Returns the GPU VA.
+    /// Map `size` bytes at `cpu_addr`, at `requested` or a fresh VA. Returns the GPU VA.
     pub fn map(
         &mut self,
         cpu_addr: u32,
@@ -220,21 +176,8 @@ impl AddressSpace {
         Ok(gpu_va)
     }
 
-    /// Re-map `[gpu_va, gpu_va + size)`, a sub-range of a mapping that
-    /// already exists, with a different memory kind
-    /// ([`FLAG_REMAP_SUB_RANGE`]). Returns whether a mapping covered it.
-    ///
-    /// This is how a driver gives one buffer several layouts: the whole nvmap
-    /// handle is mapped once, then the ranges holding block-linear images are
-    /// re-mapped over the top with the kind that describes their swizzle. The
-    /// backing memory does not move: the sub-range keeps resolving to exactly
-    /// the CPU bytes it did before, so the only thing that changes is the
-    /// kind recorded for those pages.
-    ///
-    /// The covering mapping is split rather than overwritten. Overwriting it
-    /// would drop whatever lay past the sub-range (the map is keyed by start
-    /// VA, so a sub-range starting at the same VA replaces the whole entry),
-    /// and [`AddressSpace::translate`] relies on the ranges not overlapping.
+    /// Re-map a sub-range of an existing mapping with a different kind, splitting
+    /// the covering mapping. Returns whether a mapping covered it.
     pub fn remap(&mut self, gpu_va: u64, size: u64, kind: Option<u8>) -> bool {
         if size == 0 {
             return false;
@@ -247,8 +190,7 @@ impl AddressSpace {
         if !covering.contains(gpu_va) || end > covering_end {
             return false;
         }
-        // `NV_KIND_INVALID` means "keep what the mapping already had", and a
-        // kind that is already what it should be needs no split at all.
+        // `NV_KIND_INVALID` keeps the existing kind.
         let kind = match kind {
             Some(kind) if kind != covering.kind => kind,
             _ => return true,
@@ -278,21 +220,13 @@ impl AddressSpace {
         true
     }
 
-    /// Drop the mapping that starts at `gpu_va` (`UNMAP_BUFFER`).
     pub fn unmap(&mut self, gpu_va: u64) -> Result<()> {
         self.mappings.remove(&gpu_va);
         self.forget_translations();
         Ok(())
     }
 
-    /// Clear `[gpu_va, gpu_va + size)`, keeping whatever lies outside it.
-    ///
-    /// `REMAP` addresses a range rather than a whole buffer, so what it
-    /// replaces can be part of a larger mapping or several smaller ones. A
-    /// partly-covered mapping is trimmed instead of dropped, because
-    /// [`AddressSpace::translate`] takes the ranges to be disjoint: leaving an
-    /// old mapping overlapping a new one resolves addresses through whichever
-    /// starts lower, which is not the one the guest just asked for.
+    /// Clear a range, trimming partly covered mappings so ranges stay disjoint.
     pub fn unmap_range(&mut self, gpu_va: u64, size: u64) {
         let end = gpu_va.saturating_add(size);
         let overlapping: Vec<Mapping> = self
@@ -324,8 +258,6 @@ impl AddressSpace {
         self.forget_translations();
     }
 
-    /// Allocate `size` bytes of VA from the region that matches `page_size`,
-    /// aligned up to it.
     fn bump(&mut self, size: u64, page_size: u64) -> Result<u64> {
         let big = page_size >= BIG_PAGE_SIZE;
         let align = page_size.max(SMALL_PAGE_SIZE);
@@ -347,7 +279,6 @@ impl AddressSpace {
         Ok(base)
     }
 
-    /// Translate a GPU VA to `(cpu_addr, bytes_left_in_mapping)`.
     #[inline]
     pub fn translate(&self, gpu_va: u64) -> Option<(u32, u64)> {
         for way in 0..TRANSLATION_WAYS {
@@ -373,7 +304,6 @@ impl AddressSpace {
         Some((m.cpu_addr.wrapping_add(off as u32), m.size - off))
     }
 
-    /// Drop every cached translation. Called whenever a mapping changes, since
     /// a cached entry outliving its mapping would hand out a stale address.
     fn forget_translations(&self) {
         for way in 0..TRANSLATION_WAYS {
@@ -381,7 +311,6 @@ impl AddressSpace {
         }
     }
 
-    /// The mapping covering `gpu_va`, if any.
     pub fn mapping_at(&self, gpu_va: u64) -> Option<&Mapping> {
         let (_, m) = self.mappings.range(..=gpu_va).next_back()?;
         if m.contains(gpu_va) {
@@ -391,7 +320,6 @@ impl AddressSpace {
         }
     }
 
-    /// Every live mapping, in ascending GPU VA order.
     pub fn mappings(&self) -> impl Iterator<Item = &Mapping> {
         self.mappings.values()
     }
@@ -522,7 +450,6 @@ mod tests {
             .map(0x2000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
             .unwrap();
         vmm.unmap_range(va + 0x1000, 0x1000);
-        // The hole is gone and both sides keep resolving to their own bytes.
         assert_eq!(vmm.translate(va), Some((0x2000_0000, 0x1000)));
         assert_eq!(vmm.translate(va + 0x1000), None);
         assert_eq!(vmm.translate(va + 0x2000), Some((0x2000_2000, 0x2000)));

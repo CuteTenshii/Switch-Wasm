@@ -1,9 +1,5 @@
-/* switch-wasm browser frontend.
-
-   The emulator runs in a web worker (web/worker) so long executions don't
-   freeze the page; this module starts it, brings a session up with everything
-   the last one persisted, and wires the one action that touches every part of
-   the page at once - Reset. */
+// switch-wasm browser frontend entry: starts the worker, restores a session
+// and wires Reset.
 
 import { resetAudio } from './audio';
 import { watchBattery } from './battery';
@@ -23,20 +19,15 @@ import { recycleSession, stageFont } from './session';
 import { setRunning } from './title';
 import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
 
-// Registered for their side effects: each of these owns a part of the page and
-// binds its own controls when it is loaded.
+// Imported for their side effects: each binds its own part of the page.
 import './boot';
 import './dock';
 import './input';
 
-// Every diagnostic channel's line is debug output, so the channels record only
-// when the console would show them.
+// Diagnostic channels record only at debug log level.
 onLogLevel((level) => void call('set_trace_channels', level === 'debug'));
 
-// Bringing the core up is the page's own load, and every step of it is
-// something that can take a visible moment on a cold cache or a full SD card.
-// The loading screen is up from first paint (see index.html) so this only ever
-// names the step it has reached.
+// The loading screen is up from first paint (see index.html); this names each step.
 async function init(): Promise<void> {
   try {
     initWorker();
@@ -56,22 +47,13 @@ async function init(): Promise<void> {
       call('set_trace_channels', logLevel() === 'debug'),
       hasKeys() ? stageKeys() : undefined,
     ]);
-    // The build, named on the status bar and in the log. A report that does
-    // not say which code produced it can only be read by guessing at its age,
-    // and this is the line somebody copies without being asked to.
     $('wasm-ver').textContent = 'core ' + version;
     log('core ready - build ' + version, 'ok');
     updateKeysState();
-    // And then the NAND, which needs those keys to parse a header. Only its
-    // index is waited for here; the archives it holds register behind the
-    // page, so a firmware dump does not stand between a cold load and the
-    // first file the user drops on the stage.
+    // The NAND needs the keys. Only its index is awaited; archives register later.
     loadPhase('reading the NAND');
     await initNand();
   } catch (err) {
-    // A core that never came up leaves nothing behind it worth uncovering, so
-    // the screen stays and says so rather than handing over to an idle splash
-    // that would invite a boot which cannot work.
     failLoad('The core could not be started: ' + (err as Error).message);
     log('core failed to start: ' + (err as Error).message, 'err');
     return;
@@ -80,15 +62,10 @@ async function init(): Promise<void> {
 }
 
 $('btn-reset').addEventListener('click', async () => {
-  // A reset rebuilds everything a boot built, so it reports itself the same
-  // way a boot does instead of freezing the stage on the last frame it drew.
-  // Stopping the run and disowning the session are `recycleSession`'s first
-  // two acts, so they are not repeated here.
+  // `recycleSession` stops the run and disowns the session first.
   beginLoad('resetting', 'freeing the session');
   try {
-    // `force`, because Reset means "give me a new console" whether or not this
-    // one ever booted anything, and `reopen` because the page is left showing
-    // exactly what it was showing before.
+    // `force`: a new console even if nothing booted.
     await recycleSession({ reopen: reopenContainer, force: true });
   } catch (err) {
     failLoad('The session could not be rebuilt: ' + (err as Error).message);

@@ -1,8 +1,4 @@
-//! SILK's constant tables, as RFC 6716 fixes them.
-//!
-//! As with the CELT tables these are normative, the probability models the
-//! range coder reads against, the vector codebooks it indexes, and the fixed
-//! filters the synthesis runs. Transcribed rather than derived.
+//! SILK's constant tables, transcribed from RFC 6716.
 
 pub(super) const NLSF_CB1_NB_MB_Q8: [u8; 320] = [
     12, 35, 60, 83, 108, 132, 157, 180, 206, 228, 15, 32, 55, 77, 101, 125, 151, 175, 201, 225, 19,
@@ -418,15 +414,11 @@ pub(super) const RESAMPLER_UP2_HQ_0: [i16; 3] = [1746, 14986, -26453];
 
 pub(super) const RESAMPLER_UP2_HQ_1: [i16; 3] = [6854, 25769, -9994];
 
-/// How much of a millisecond of input the resampler holds back, per
-/// `(internal rate, output rate)`. Every path is padded to the same total
-/// delay so a bandwidth switch does not move the signal in time.
+/// Resampler delay in ms, per `(internal rate, output rate)`.
 pub(super) const RESAMPLER_DELAY_MATRIX_DEC: [[i8; 5]; 3] =
     [[4, 0, 2, 0, 0], [0, 9, 4, 7, 4], [0, 3, 12, 7, 7]];
 
-/// How hard concealment attenuates the harmonic part, then the noise part
-/// for a voiced frame and for an unvoiced one, first lost frame, then every
-/// one after.
+/// Concealment attenuation: harmonic, then noise (voiced, unvoiced), first frame then later.
 pub(super) const PLC_HARM_ATT_Q15: [i32; 2] = [32440, 31130];
 
 pub(super) const PLC_RAND_ATTENUATE_V_Q15: [i32; 2] = [31130, 26214];

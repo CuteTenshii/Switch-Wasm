@@ -1,23 +1,6 @@
-//! The CELT layer: the MDCT half of Opus, and the whole of it above 8 kHz.
-//!
-//! CELT codes a frame as *shape* and *energy*, separately. Energy is one
-//! value per band, differentially coded across time and frequency; shape is a
-//! unit-norm vector per band, coded as a point on a hypersphere by the
-//! algebraic PVQ. Nothing in the shape carries level, so a band always comes
-//! back with exactly the energy that was signalled for it, which is why the
-//! codec degrades by going grainy rather than by dropping bands.
-//!
-//! The bit allocation is the part that makes it work and the part that makes
-//! it unforgiving. Encoder and decoder both compute, from the frame size, the
-//! coded bandwidth and the bits consumed so far, exactly how many bits each
-//! band gets, no side information. Everything downstream of a disagreement
-//! is noise, so every count here is integer arithmetic that has to match the
-//! encoder's bit for bit, right down to the direction each division rounds.
-//!
-//! Structure of one frame (RFC 6716 §4.3): silence flag, postfilter
-//! parameters, transient flag, coarse energy, time-frequency resolution,
-//! spread, per-band dynamic allocation boosts, allocation trim, the bands
-//! themselves, then the fine energy that uses up whatever is left.
+//! The CELT layer of Opus (RFC 6716 §4.3): per-band energy plus a PVQ-coded
+//! unit-norm shape. The bit allocation is implicit, so every count here must
+//! match the encoder's integer arithmetic bit for bit.
 
 use super::mdct::Mdct;
 use super::range::{ilog, RangeDecoder, BITRES};
@@ -53,12 +36,10 @@ const SPREAD_AGGRESSIVE: usize = 3;
 /// The pre-emphasis the encoder applied, which synthesis has to undo.
 const PREEMPH: f32 = 0.85000610;
 
-/// The internal signal scale: one unit of `celt_sig` is one 16-bit sample
-/// step, so a full-scale signal runs to ±32768.
+/// One unit is one 16-bit sample step.
 pub(super) const SIG_SCALE: f32 = 32768.0;
 
-/// Everything about the 48 kHz / 960 mode that is computed rather than
-/// tabulated. One per decoder; it is small, and sharing it would buy nothing.
+/// The 48 kHz / 960 mode's computed (not tabulated) values.
 pub(super) struct Mode {
     mdct: Mdct,
 }
@@ -71,37 +52,29 @@ impl Mode {
     }
 }
 
-/// One tap of the MDCT window, which the mode-transition cross-fades borrow
-/// so their two halves sum the same way an overlap-add would.
+/// One MDCT window tap, also used by mode-transition cross-fades.
 pub(super) fn window_at(i: usize) -> f32 {
     WINDOW120[i]
 }
 
-/// `U(n, k)`: how many PVQ codewords place `k` pulses in `n` dimensions with
-/// the first dimension's pulse positive. The table is symmetric, so it is
-/// stored as ragged rows indexed by the smaller of the two.
+/// `U(n, k)`: PVQ codewords with `k` pulses in `n` dimensions and a positive
+/// first pulse. Symmetric, stored as ragged rows.
 fn pvq_u(n: usize, k: usize) -> u32 {
     let (lo, hi) = if n < k { (n, k) } else { (k, n) };
     PVQ_U_DATA[PVQ_U_ROW[lo] + hi]
 }
 
-/// `V(n, k)`: the full codebook size, both signs of the leading pulse.
 fn pvq_v(n: usize, k: usize) -> u32 {
     pvq_u(n, k).wrapping_add(pvq_u(n, k + 1))
 }
 
-/// Turn a codeword index back into its pulse vector, returning the vector's
-/// squared norm. This walks the combinatorial ranking one dimension at a
-/// time, subtracting the count of codewords that start with fewer pulses
-/// until the index falls inside the current dimension's block.
+/// Decode a codeword index into its pulse vector, returning its squared norm.
 fn cwrsi(mut n: usize, mut k: usize, mut i: u32, y: &mut [i32]) -> f32 {
     let mut yy = 0.0f32;
     let mut at = 0usize;
     while n > 2 {
         let (p, s, k0);
         if k >= n {
-            // More pulses than dimensions: the leading dimension almost
-            // certainly holds some, so search down from `k`.
             let row = PVQ_U_ROW[n];
             let pv = PVQ_U_DATA[row + k + 1];
             s = if i >= pv { -1i32 } else { 0 };
@@ -127,7 +100,6 @@ fn cwrsi(mut n: usize, mut k: usize, mut i: u32, y: &mut [i32]) -> f32 {
             }
             i -= p;
         } else {
-            // More dimensions than pulses: this one is most likely empty.
             let pv = pvq_u(k, n);
             let q = pvq_u(k + 1, n);
             if pv <= i && i < q {
@@ -181,9 +153,7 @@ fn decode_pulses(y: &mut [i32], n: usize, k: usize, dec: &mut RangeDecoder) -> f
     cwrsi(n, k, index, y)
 }
 
-/// How many pulses a pseudo-pulse count stands for. Above 8 the count is
-/// coded logarithmically, because the codebook grows faster than the ear
-/// cares.
+/// Pulses a pseudo-pulse count stands for; above 8 it is logarithmic.
 fn get_pulses(i: i32) -> i32 {
     if i < 8 {
         i
@@ -192,8 +162,8 @@ fn get_pulses(i: i32) -> i32 {
     }
 }
 
-/// The cache row for one band at one block size: `bits[0]` is the number of
-/// entries, and `bits[q]` is one less than the bits `q` pseudo-pulses cost.
+/// Cache row for a band and block size: `bits[0]` is the entry count,
+/// `bits[q]` one less than the cost of `q` pseudo-pulses.
 fn cache_row(band: usize, lm: i32) -> &'static [u8] {
     let index = CACHE_INDEX50[((lm + 1) as usize) * NB_EBANDS + band];
     debug_assert!(
@@ -237,9 +207,7 @@ fn pulses2bits(band: usize, lm: i32, pulses: i32) -> i32 {
     }
 }
 
-/// A cosine accurate to the last bit on every platform. The bit allocation
-/// depends on it, so an implementation that merely rounded differently would
-/// hand the bands different budgets than the encoder used.
+/// A bit-exact cosine; the bit allocation depends on it.
 fn bitexact_cos(x: i16) -> i32 {
     let tmp = (4096 + i32::from(x) * i32::from(x)) >> 13;
     let x2 = (32767 - tmp) + frac_mul16(tmp, -7651 + frac_mul16(tmp, 8277 + frac_mul16(-626, tmp)));
@@ -255,20 +223,17 @@ fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
         - frac_mul16(icos, frac_mul16(icos, -2597) + 7932)
 }
 
-/// Multiply two Q15 values, rounding, exactly as the reference does, both
-/// operands are truncated to 16 bits first, and the allocation depends on it.
+/// Rounded Q15 multiply of 16-bit-truncated operands, as the reference does.
 fn frac_mul16(a: i32, b: i32) -> i32 {
     (16384 + (a as i16 as i32) * (b as i16 as i32)) >> 15
 }
 
-/// The linear congruential generator CELT fills empty bands with. Its exact
-/// sequence is part of the format: the encoder assumed these samples when it
-/// decided the band needed no bits.
+/// CELT's LCG for filling empty bands; its sequence is part of the format.
 fn lcg_rand(seed: u32) -> u32 {
     seed.wrapping_mul(1664525).wrapping_add(1013904223)
 }
 
-/// A Laplace-distributed value, used for every coarse energy delta.
+/// A Laplace-distributed coarse energy delta.
 fn laplace_decode(dec: &mut RangeDecoder, fs0: u32, decay: i32) -> i32 {
     /// The floor probability of any delta, out of 32768.
     const MINP: u32 = 1;
@@ -305,11 +270,8 @@ fn laplace_decode(dec: &mut RangeDecoder, fs0: u32, decay: i32) -> i32 {
     val
 }
 
-/// Coarse energy: one value per band per channel, predicted from the band
-/// below and from the same band in the previous frame.
-///
-/// The inter-frame predictor is why a lost frame is audible beyond itself,
-/// and why `intra` exists, to break the chain at a cost in bits.
+/// Coarse energy, predicted from the band below and the previous frame
+/// (`intra` breaks the inter-frame chain).
 fn unquant_coarse_energy(
     start: usize,
     end: usize,
@@ -365,8 +327,7 @@ fn unquant_coarse_energy(
     }
 }
 
-/// Fine energy: the bits the allocator set aside to refine each coarse value,
-/// read as a plain uniform fraction of the coarse step.
+/// Fine energy: a uniform fraction of the coarse step.
 fn unquant_fine_energy(
     start: usize,
     end: usize,
@@ -387,8 +348,7 @@ fn unquant_fine_energy(
     }
 }
 
-/// Whatever bits are left after everything else, spent one at a time on the
-/// bands the allocator marked as having been rounded down.
+/// Leftover bits, one at a time, to bands the allocator rounded down.
 fn unquant_energy_finalise(
     start: usize,
     end: usize,
@@ -417,9 +377,7 @@ fn unquant_energy_finalise(
     }
 }
 
-/// Rotate a band's samples so that a small number of pulses spreads across it
-/// rather than sitting as isolated spikes. The encoder rotated the other way
-/// before searching, so this is exactly invertible.
+/// Spread a few pulses across a band; the inverse of the encoder's rotation.
 fn exp_rotation(x: &mut [f32], len: usize, stride: usize, k: i32, spread: usize) {
     const SPREAD_FACTOR: [i32; 3] = [15, 10, 5];
     if 2 * k >= len as i32 || spread == SPREAD_NONE {
@@ -465,9 +423,7 @@ fn exp_rotation1(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
     }
 }
 
-/// Which of a band's `blocks` sub-blocks got at least one pulse. A block with
-/// none has collapsed, and [`anti_collapse`] will refill it with noise rather
-/// than leave a hole that pumps.
+/// Which sub-blocks got a pulse; empty ones are refilled by [`anti_collapse`].
 fn extract_collapse_mask(y: &[i32], n: usize, blocks: usize) -> u32 {
     if blocks <= 1 {
         return 1;
@@ -489,8 +445,7 @@ fn renormalise_vector(x: &mut [f32], gain: f32) {
     }
 }
 
-/// Decode one band's shape: a PVQ codeword, scaled to the gain the caller
-/// worked out from the energy split.
+/// Decode a band's PVQ shape, scaled to `gain`.
 fn alg_unquant(
     x: &mut [f32],
     n: usize,
@@ -510,8 +465,7 @@ fn alg_unquant(
     extract_collapse_mask(&iy, n, blocks)
 }
 
-/// One step of a Haar transform, which is how CELT trades frequency
-/// resolution for time resolution inside a band.
+/// One Haar step, trading frequency for time resolution in a band.
 fn haar1(x: &mut [f32], n0: usize, stride: usize) {
     const SQRT_HALF: f32 = 0.70710678;
     let half = n0 >> 1;
@@ -563,9 +517,7 @@ fn compute_qn(n: usize, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> i3
     if stereo && n == 2 {
         n2 -= 1;
     }
-    // The cap keeps a stereo split with the angle hard over from leaving the
-    // side with no bits at all: a side band with no pulses is not folded, so
-    // it would collapse to silence.
+    // The cap stops a hard-over stereo angle leaving the side with no bits.
     let mut qb = (b + n2 * offset) / n2;
     qb = qb.min(b - pulse_cap - (4 << BITRES));
     qb = qb.min(8 << BITRES);
@@ -577,7 +529,6 @@ fn compute_qn(n: usize, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> i3
     }
 }
 
-/// What a stereo (or time) split decided, and what it cost.
 struct SplitCtx {
     inv: bool,
     imid: i32,
@@ -587,7 +538,6 @@ struct SplitCtx {
     qalloc: i32,
 }
 
-/// Everything a band decode carries between its recursive halves.
 struct BandCtx<'a, 'p> {
     dec: &'a mut RangeDecoder<'p>,
     band: usize,
@@ -599,8 +549,7 @@ struct BandCtx<'a, 'p> {
     disable_inv: bool,
 }
 
-/// Decode the angle between the two halves of a split, and work out how the
-/// bits divide between them.
+/// Decode the split angle and divide the bits between the halves.
 fn compute_theta(
     ctx: &mut BandCtx,
     n: usize,
@@ -627,8 +576,7 @@ fn compute_theta(
     let mut inv = false;
 
     if qn != 1 {
-        // A uniform pdf for a time split, a step for stereo, a triangular one
-        // for the rest: the shapes the angle actually takes.
+        // Uniform pdf for time splits, step for stereo, triangular otherwise.
         if stereo && n > 2 {
             let p0 = 3u32;
             let x0 = (qn / 2) as u32;
@@ -710,9 +658,7 @@ fn compute_theta(
     }
 }
 
-/// Integer square root, matching the reference's exactly, the triangular
-/// angle pdf inverts through it, so a value one off decodes a different
-/// angle.
+/// Integer square root matching the reference exactly.
 fn isqrt32(mut val: u32) -> u32 {
     let mut g = 0u32;
     let mut bshift = (ilog(val) as i32 - 1) >> 1;
@@ -732,7 +678,6 @@ fn isqrt32(mut val: u32) -> u32 {
     g
 }
 
-/// A band of one coefficient: nothing to shape, just a sign.
 fn quant_band_n1(
     ctx: &mut BandCtx,
     x: &mut [f32],
@@ -765,9 +710,8 @@ fn quant_band_n1(
     1
 }
 
-/// Decode one partition, splitting it in two and coding the energy angle
-/// between the halves whenever a single PVQ codeword would need more bits
-/// than the band was given.
+/// Decode one partition, splitting it in two when one codeword would cost
+/// more bits than the band has.
 fn quant_partition(
     ctx: &mut BandCtx,
     x: &mut [f32],
@@ -803,8 +747,7 @@ fn quant_partition(
         let side = sctx.iside as f32 * (1.0 / 32768.0);
         let mut delta = sctx.delta;
 
-        // Short blocks that carry little energy still need enough bits not to
-        // pre-echo, so bias the split towards the quieter half.
+        // Bias short low-energy blocks toward the quieter half to avoid pre-echo.
         if b0 > 1 && (sctx.itheta & 0x3fff) != 0 {
             if sctx.itheta > 8192 {
                 delta -= delta >> (4 - lm);
@@ -886,7 +829,6 @@ fn quant_partition(
         let mut q = bits2pulses(ctx.band, lm, b);
         let mut curr_bits = pulses2bits(ctx.band, lm, q);
         ctx.remaining_bits -= curr_bits;
-        // Never bust the budget: drop a pulse at a time until it fits.
         while ctx.remaining_bits < 0 && q > 0 {
             ctx.remaining_bits += curr_bits;
             q -= 1;
@@ -897,8 +839,7 @@ fn quant_partition(
         if q != 0 {
             alg_unquant(x, n, get_pulses(q), ctx.spread, blocks, ctx.dec, gain)
         } else {
-            // No pulses: fill the band from somewhere rather than leave it
-            // empty, because silence in one band of a loud frame is audible.
+            // No pulses: fold or fill rather than leave the band empty.
             let mask = ((1u32 << blocks) - 1) as i32;
             fill &= mask;
             if fill == 0 {
@@ -915,8 +856,7 @@ fn quant_partition(
                         mask as u32
                     }
                     Some(lb) => {
-                        // Folded spectrum: a copy of a lower band, dithered
-                        // about 48 dB below the normal folding level.
+                        // Folded spectrum, dithered ~48 dB below normal folding.
                         for j in 0..n {
                             ctx.seed = lcg_rand(ctx.seed);
                             let tmp = if ctx.seed & 0x8000 != 0 {
@@ -935,8 +875,7 @@ fn quant_partition(
     }
 }
 
-/// Decode one band of one channel, applying whatever time-frequency
-/// resolution change the frame asked for around the partition decode.
+/// Decode one band of one channel, with any time-frequency change around it.
 #[allow(clippy::too_many_arguments)]
 fn quant_band(
     ctx: &mut BandCtx,
@@ -970,9 +909,7 @@ fn quant_band(
         recombine = tf_change;
     }
 
-    // `lowband` is the caller's own copy of the folding source, not the
-    // `norm` history itself, because the transforms below rewrite it in
-    // place and a later band still has to fold from the original.
+    // A private copy: the transforms below rewrite it, and later bands fold from the original.
     let mut lowband = lowband;
 
     for k in 0..recombine {
@@ -1024,8 +961,7 @@ fn quant_band(
     }
     blocks <<= recombine;
 
-    // Scale for whoever folds from this band later: folding wants the band at
-    // the amplitude it would have if it were a full-length spectrum.
+    // Scale for later folding, as if a full-length spectrum.
     if let Some(out) = lowband_out {
         let scale = (n0 as f32).sqrt();
         for j in 0..n0 {
@@ -1035,8 +971,7 @@ fn quant_band(
     cm & ((1 << blocks) - 1)
 }
 
-/// Decode one band of both channels together, coding the angle between them
-/// rather than each channel's energy separately.
+/// Decode one band of both channels by coding the angle between them.
 #[allow(clippy::too_many_arguments)]
 fn quant_band_stereo(
     ctx: &mut BandCtx,
@@ -1063,7 +998,6 @@ fn quant_band_stereo(
 
     let cm;
     if n == 2 {
-        // Mid and side are orthogonal here, so the side needs only a sign.
         let mut mbits = b;
         let mut sbits = 0;
         if sctx.itheta != 0 && sctx.itheta != 16384 {
@@ -1085,8 +1019,7 @@ fn quant_band_stereo(
         } else {
             (&mut *x, &mut *y)
         };
-        // `orig_fill`, not `fill`: the side is still folded even when the
-        // angle cleared the low bits.
+        // `orig_fill`: the side is folded even when the angle cleared the low bits.
         cm = quant_band(
             ctx,
             x2,
@@ -1193,8 +1126,7 @@ fn quant_band_stereo(
     cm
 }
 
-/// Turn a decoded mid/side pair back into left and right, normalising each to
-/// the energy the angle implies.
+/// Mid/side back to left/right, normalised to the angle's energy.
 fn stereo_merge(x: &mut [f32], y: &mut [f32], mid: f32, n: usize) {
     let mut xp = 0.0f32;
     let mut side = 0.0f32;
@@ -1220,9 +1152,7 @@ fn stereo_merge(x: &mut [f32], y: &mut [f32], mid: f32, n: usize) {
     }
 }
 
-/// Copy enough of the first coded band's folding data forward that the second
-/// band has something to fold from. Only hybrid frames, which start above
-/// band 0, need it.
+/// Hybrid frames: copy folding data so the second band has something to fold from.
 fn special_hybrid_folding(norm: &mut [f32], norm2: Option<&mut [f32]>, start: usize, m: usize) {
     let n1 = m * (EBAND_5MS[start + 1] - EBAND_5MS[start]) as usize;
     let n2 = m * (EBAND_5MS[start + 2] - EBAND_5MS[start + 1]) as usize;
@@ -1235,8 +1165,7 @@ fn special_hybrid_folding(norm: &mut [f32], norm2: Option<&mut [f32]>, start: us
     }
 }
 
-/// Decode every band of the frame, in order, tracking the running bit balance
-/// the encoder used to decide what each band could afford.
+/// Decode every band, tracking the encoder's running bit balance.
 #[allow(clippy::too_many_arguments)]
 fn quant_all_bands(
     start: usize,
@@ -1316,14 +1245,11 @@ fn quant_all_bands(
 
         ctx.tf_change = tf_res[i];
 
-        // A conservative estimate of which sub-blocks of the folding source
-        // carry energy: where it collapsed, folding from it would leave this
-        // band silent too, and the encoder assumed the same.
+        // Estimate which folding-source blocks carry energy, as the encoder does.
         let mut effective_lowband: Option<usize> = None;
         let mut x_cm;
         let mut y_cm;
         if lowband_offset != 0 && (spread != SPREAD_AGGRESSIVE || blocks > 1 || ctx.tf_change < 0) {
-            // Never repeat spectral content within one band.
             let eff = (m * EBAND_5MS[lowband_offset] as usize).saturating_sub(norm_offset + n);
             effective_lowband = Some(eff);
             let mut fold_start = lowband_offset;
@@ -1347,15 +1273,13 @@ fn quant_all_bands(
                 y_cm |= u32::from(collapse_masks[fold_i * channels + channels - 1]);
             }
         } else {
-            // Nothing to fold from, so the LCG fills the band and every block
-            // is (almost always) non-zero.
+            // Nothing to fold from: the LCG fills every block.
             x_cm = (1u32 << blocks) - 1;
             y_cm = x_cm;
         }
 
         if dual_stereo && i == intensity {
-            // Intensity coding takes over here, so the two folding histories
-            // become one.
+            // Intensity coding merges the two folding histories.
             dual_stereo = false;
             for j in 0..lo - norm_offset {
                 norm[j] = 0.5 * (norm[j] + norm2[j]);
@@ -1363,9 +1287,7 @@ fn quant_all_bands(
         }
 
         let split = lo - norm_offset;
-        // A private copy of the folding source: the transforms inside
-        // `quant_band` rewrite it, and in a hybrid frame the region it comes
-        // from overlaps the one this band is about to write back.
+        // A private copy: the source may overlap this band's output in hybrid frames.
         let mut lowband = effective_lowband.map(|o| norm[o..o + n].to_vec());
         let mut lowband2 = if dual_stereo {
             effective_lowband.map(|o| norm2[o..o + n].to_vec())
@@ -1447,15 +1369,13 @@ fn quant_all_bands(
         collapse_masks[i * channels + channels - 1] = y_cm as u8;
         balance += pulses[i] + tell;
 
-        // Keep moving the folding source forward only while the band has at
-        // least one bit per sample to be folded from.
+        // Advance the folding source only while it has a bit per sample.
         update_lowband = b > (n as i32) << BITRES;
     }
     *seed = ctx.seed;
 }
 
-/// The most bits a band can use before more would be wasted: past this the
-/// PVQ codebook is finer than the band's own energy resolution.
+/// The most bits a band can use before PVQ outresolves its energy.
 fn init_caps(cap: &mut [i32], lm: usize, channels: usize) {
     for i in 0..NB_EBANDS {
         let n = ((EBAND_5MS[i + 1] - EBAND_5MS[i]) as i32) << lm;
@@ -1464,11 +1384,8 @@ fn init_caps(cap: &mut [i32], lm: usize, channels: usize) {
     }
 }
 
-/// Interpolate between the two nearest rows of the allocation table, then
-/// split each band's share into fine-energy bits and PVQ bits.
-///
-/// The bisection is the whole trick: both ends run it identically, so the
-/// only thing on the wire is which bands were skipped.
+/// Interpolate the allocation table rows, then split into fine-energy and PVQ
+/// bits. Both ends bisect identically; only skips are transmitted.
 #[allow(clippy::too_many_arguments)]
 fn interp_bits2pulses(
     start: usize,
@@ -1531,9 +1448,7 @@ fn interp_bits2pulses(
         psum += tmp;
     }
 
-    // Decide which bands to skip, working back from the top. Never skip the
-    // first band or one dynalloc boosted: either would spend a bit saying the
-    // bits just requested should be thrown away.
+    // Skip bands from the top, never the first or a dynalloc-boosted one.
     let mut coded_bands = end;
     loop {
         let j = coded_bands - 1;
@@ -1547,8 +1462,7 @@ fn interp_bits2pulses(
         let rem = 0.max(left - (EBAND_5MS[j] - EBAND_5MS[start]) as i32);
         let band_width = (EBAND_5MS[coded_bands] - EBAND_5MS[j]) as i32;
         let mut band_bits = bits[j] + percoeff * band_width + rem;
-        // Only code a skip decision when the band could afford the flag;
-        // below that it is force-skipped and nothing is transmitted.
+        // Below the flag's cost a band is force-skipped silently.
         if band_bits >= thresh[j].max(alloc_floor + (1 << BITRES)) {
             if dec.decode_bit_logp(1) {
                 break;
@@ -1581,7 +1495,6 @@ fn interp_bits2pulses(
     }
     *dual_stereo = dual_stereo_rsv > 0 && dec.decode_bit_logp(1);
 
-    // Hand out what is left, a whole coefficient at a time.
     let mut left = total - psum;
     let percoeff = left / (EBAND_5MS[coded_bands] - EBAND_5MS[start]) as i32;
     left -= (EBAND_5MS[coded_bands] - EBAND_5MS[start]) as i32 * percoeff;
@@ -1605,8 +1518,7 @@ fn interp_bits2pulses(
             excess = 0.max(bit - cap[j]);
             bits[j] = bit - excess;
 
-            // Stereo has an extra degree of freedom when the two channels are
-            // coded jointly, and it costs bits like any other.
+            // Joint stereo costs bits for its extra degree of freedom.
             let den = channels as i32 * n
                 + i32::from(channels == 2 && n > 2 && !*dual_stereo && j < *intensity);
             let nclogn = den * (i32::from(LOG_N400[j]) + log_m);
@@ -1614,8 +1526,7 @@ fn interp_bits2pulses(
             if n == 2 {
                 offset += den << BITRES >> 2;
             }
-            // The second and third fine bits are worth more than the curve
-            // says, so bring them forward.
+            // Bring the second and third fine bits forward.
             if bits[j] + offset < (den * 2) << BITRES {
                 offset += nclogn >> 2;
             } else if bits[j] + offset < (den * 3) << BITRES {
@@ -1627,20 +1538,18 @@ fn interp_bits2pulses(
                 ebits[j] = bits[j] >> u32::from(stereo) >> BITRES;
             }
             ebits[j] = ebits[j].min(MAX_FINE_BITS);
-            // A band rounded down here is a candidate for the final pass that
-            // spends whatever is left over.
+            // Rounded-down bands are candidates for the final pass.
             fine_priority[j] = i32::from(ebits[j] * (den << BITRES) >= bits[j] + offset);
             bits[j] -= (channels as i32 * ebits[j]) << BITRES;
         } else {
-            // One coefficient: everything but the sign goes to fine energy.
+            // One coefficient: all but the sign goes to fine energy.
             excess = 0.max(bit - ((channels as i32) << BITRES));
             bits[j] = bit - excess;
             ebits[j] = 0;
             fine_priority[j] = 1;
         }
 
-        // Fine energy cannot use the rebalancing that happens while the bands
-        // are decoded, so rebalance it here instead.
+        // Rebalance fine energy here, since band-decode rebalancing can't reach it.
         if excess > 0 {
             let extra_fine = (excess >> (u32::from(stereo) + BITRES)).min(MAX_FINE_BITS - ebits[j]);
             ebits[j] += extra_fine;
@@ -1652,7 +1561,6 @@ fn interp_bits2pulses(
     }
     *balance_out = balance;
 
-    // A skipped band spends all it has on fine energy.
     for j in coded_bands..end {
         ebits[j] = bits[j] >> u32::from(stereo) >> BITRES;
         bits[j] = 0;
@@ -1661,8 +1569,7 @@ fn interp_bits2pulses(
     coded_bands
 }
 
-/// Work out how many bits each band gets, from the frame size, the coded
-/// bandwidth, the dynamic-allocation boosts and the trim.
+/// Per-band bits from frame size, bandwidth, dynalloc boosts and trim.
 #[allow(clippy::too_many_arguments)]
 fn compute_allocation(
     start: usize,
@@ -1683,7 +1590,6 @@ fn compute_allocation(
 ) -> usize {
     total = total.max(0);
     let mut skip_start = start;
-    // One bit says where manual skipping stops.
     let skip_rsv = if total >= 1 << BITRES { 1 << BITRES } else { 0 };
     total -= skip_rsv;
 
@@ -1707,7 +1613,6 @@ fn compute_allocation(
 
     for j in start..end {
         let width = (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
-        // Below this a band gets no PVQ bits at all.
         thresh[j] = ((channels as i32) << BITRES).max(((3 * width) << lm << BITRES) >> 4);
         trim_offset[j] = (channels as i32
             * width
@@ -1715,8 +1620,7 @@ fn compute_allocation(
             * (end - j - 1) as i32
             * (1i32 << (lm + BITRES as usize)))
             >> 6;
-        // A band of one coefficient gains more from a coarse value per
-        // coefficient than from resolution, so give it less.
+        // Single-coefficient bands get less.
         if width << lm == 1 {
             trim_offset[j] -= (channels as i32) << BITRES;
         }
@@ -1806,8 +1710,7 @@ fn compute_allocation(
     )
 }
 
-/// Read the per-band time-frequency resolution changes, then the one bit that
-/// selects which of two interpretations of them the frame meant.
+/// Per-band time-frequency changes and the bit selecting their interpretation.
 fn tf_decode(
     start: usize,
     end: usize,
@@ -1844,8 +1747,7 @@ fn tf_decode(
     }
 }
 
-/// Scale each band's unit-norm shape back up to the energy that was coded for
-/// it. This is where the two halves of the codec come back together.
+/// Scale each unit-norm shape to its coded energy.
 fn denormalise_bands(
     x: &[f32],
     freq: &mut [f32],
@@ -1881,9 +1783,7 @@ fn denormalise_bands(
     }
 }
 
-/// `2^x`. The energy is coded in base-2 log units, so this is the only place
-/// the decoder needs an exponential, and it needs one that cannot overflow
-/// on a corrupt band.
+/// `2^x` for base-2 log energies, safe on corrupt bands.
 fn exp2_approx(x: f32) -> f32 {
     if x <= -128.0 {
         0.0
@@ -1892,10 +1792,7 @@ fn exp2_approx(x: f32) -> f32 {
     }
 }
 
-/// Refill blocks that a transient left with no pulses at all.
-///
-/// Without this, a short block that got nothing decodes to silence between
-/// two loud ones, which is heard as a rattle rather than as quiet.
+/// Refill transient blocks left with no pulses, which would otherwise rattle.
 #[allow(clippy::too_many_arguments)]
 fn anti_collapse(
     x: &mut [f32],
@@ -1913,7 +1810,6 @@ fn anti_collapse(
 ) {
     for i in start..end {
         let n0 = (EBAND_5MS[i + 1] - EBAND_5MS[i]) as usize;
-        // Depth in eighths of a bit.
         let depth = ((1 + pulses[i]) / (EBAND_5MS[i + 1] - EBAND_5MS[i]) as i32) >> lm;
         let thresh = 0.5 * exp2_approx(-0.125 * depth as f32);
         let sqrt_1 = 1.0 / ((n0 << lm) as f32).sqrt();
@@ -1926,8 +1822,7 @@ fn anti_collapse(
                 prev2 = prev2.max(prev2_log_e[NB_EBANDS + i]);
             }
             let ediff = (log_e[c * NB_EBANDS + i] - prev1.min(prev2)).max(0.0);
-            // Short blocks carry less energy than long ones, so the noise
-            // that replaces a collapsed one has to be scaled up to match.
+            // Scale up noise replacing a collapsed short block.
             let mut r = 2.0 * exp2_approx(-ediff);
             if lm == 3 {
                 r *= 1.41421356;
@@ -1952,9 +1847,7 @@ fn anti_collapse(
     }
 }
 
-/// The pitch postfilter, run over the synthesis to put back the harmonic
-/// structure the MDCT smeared. `t0`/`g0` are the previous frame's period and
-/// gain, cross-faded into `t1`/`g1` over the overlap.
+/// Pitch postfilter, cross-fading from `t0`/`g0` to `t1`/`g1` over the overlap.
 #[allow(clippy::too_many_arguments)]
 fn comb_filter(
     buf: &mut [f32],
@@ -1972,8 +1865,7 @@ fn comb_filter(
     if g0 == 0.0 && g1 == 0.0 {
         return;
     }
-    // A zero gain leaves its period unset, and a period of zero would read
-    // whatever is in front of the buffer.
+    // A zero gain leaves the period unset; zero would read before the buffer.
     let t0 = t0.max(COMBFILTER_MINPERIOD);
     let t1 = t1.max(COMBFILTER_MINPERIOD);
     let g = [
@@ -1988,7 +1880,6 @@ fn comb_filter(
             g1 * COMB_GAINS[tapset1][2],
         ],
     ];
-    // No change means no cross-fade to do.
     let overlap = if g0 == g1 && t0 == t1 && tapset0 == tapset1 {
         0
     } else {
@@ -2020,8 +1911,7 @@ fn comb_filter(
     }
 }
 
-/// The same filter with no cross-fade, reading one buffer and writing
-/// another. Only the concealment path needs this shape.
+/// The filter without cross-fade, buffer to buffer, for concealment.
 fn comb_filter_const(
     out: &mut [f32],
     src: &[f32],
@@ -2049,10 +1939,7 @@ fn comb_filter_const(
     }
 }
 
-/// Undo the encoder's pre-emphasis and hand the result out as PCM.
-///
-/// The filter has state across frames, so this is also what makes a decoder
-/// that skipped a frame sound different from one that did not.
+/// Undo pre-emphasis and output PCM; stateful across frames.
 fn deemphasis(
     channels: &[Vec<f32>],
     at: usize,
@@ -2087,9 +1974,7 @@ fn deemphasis(
     }
 }
 
-/// Levinson-Durbin: turn an autocorrelation into the LPC filter that whitens
-/// it. Concealment works in the excitation domain, and this is the filter
-/// that gets it there and back.
+/// Levinson-Durbin: autocorrelation to whitening LPC filter, for concealment.
 fn celt_lpc(lpc: &mut [f32], ac: &[f32], p: usize) {
     lpc[..p].fill(0.0);
     if ac[0] <= 1e-10 {
@@ -2111,15 +1996,14 @@ fn celt_lpc(lpc: &mut [f32], ac: &[f32], p: usize) {
             lpc[i - 1 - j] = tmp2 + r * tmp1;
         }
         error -= r * r * error;
-        // Thirty dB of prediction gain is as much as this is worth.
+        // Stop at 30 dB of prediction gain.
         if error <= 0.001 * ac[0] {
             break;
         }
     }
 }
 
-/// Autocorrelation over `x`, tapered at both ends by `window` so the estimate
-/// is not dominated by the discontinuity at the edges.
+/// Windowed autocorrelation.
 fn celt_autocorr(
     x: &[f32],
     ac: &mut [f32],
@@ -2150,7 +2034,7 @@ fn celt_autocorr(
     }
 }
 
-/// FIR: run the LPC analysis filter to get the excitation.
+/// LPC analysis filter.
 fn celt_fir(x: &[f32], num: &[f32], y: &mut [f32], n: usize, ord: usize) {
     for i in 0..n {
         let mut sum = x[ord + i];
@@ -2161,7 +2045,7 @@ fn celt_fir(x: &[f32], num: &[f32], y: &mut [f32], n: usize, ord: usize) {
     }
 }
 
-/// IIR: run the LPC synthesis filter to turn an excitation back into signal.
+/// LPC synthesis filter.
 fn celt_iir(x: &[f32], den: &[f32], y: &mut [f32], n: usize, ord: usize, mem: &mut [f32]) {
     for i in 0..n {
         let mut sum = x[i];
@@ -2176,9 +2060,7 @@ fn celt_iir(x: &[f32], den: &[f32], y: &mut [f32], n: usize, ord: usize, mem: &m
     }
 }
 
-/// Halve the sample rate and whiten, which is what the pitch search actually
-/// runs on: at 24 kHz the correlation peak is just as sharp and costs a
-/// quarter as much to find.
+/// Halve the rate and whiten for the pitch search.
 fn pitch_downsample(channels: &[Vec<f32>], x_lp: &mut [f32], len: usize, cc: usize) {
     for i in 1..len >> 1 {
         x_lp[i] = 0.25 * channels[0][2 * i - 1]
@@ -2197,8 +2079,7 @@ fn pitch_downsample(channels: &[Vec<f32>], x_lp: &mut [f32], len: usize, cc: usi
 
     let mut ac = [0.0f32; 5];
     celt_autocorr(x_lp, &mut ac, None, 0, 4, len >> 1);
-    // A noise floor 40 dB down, and lag windowing, so the recursion below
-    // cannot produce a filter that rings.
+    // 40 dB noise floor and lag windowing so the filter can't ring.
     ac[0] *= 1.0001;
     for i in 1..=4 {
         ac[i] -= ac[i] * (0.008 * i as f32) * (0.008 * i as f32);
@@ -2210,7 +2091,6 @@ fn pitch_downsample(channels: &[Vec<f32>], x_lp: &mut [f32], len: usize, cc: usi
         tmp *= 0.9;
         *coef *= tmp;
     }
-    // Add a zero at 0.8, which flattens the spectrum further.
     let c1 = 0.8f32;
     let lpc2 = [
         lpc[0] + 0.8,
@@ -2233,7 +2113,6 @@ fn pitch_downsample(channels: &[Vec<f32>], x_lp: &mut [f32], len: usize, cc: usi
     }
 }
 
-/// The two best normalised correlation peaks, and where they are.
 fn find_best_pitch(
     xcorr: &[f32],
     y: &[f32],
@@ -2251,7 +2130,7 @@ fn find_best_pitch(
     }
     for i in 0..max_pitch {
         if xcorr[i] > 0.0 {
-            // Scaled down before squaring so the product cannot overflow.
+            // Scaled before squaring to avoid overflow.
             let x16 = xcorr[i] * 1e-12;
             let num = x16 * x16;
             if num * best_den[1] > best_num[1] * syy {
@@ -2274,7 +2153,7 @@ fn find_best_pitch(
     }
 }
 
-/// Find the pitch period, coarsely at a quarter rate and then refined.
+/// Pitch period, coarse at quarter rate then refined.
 fn pitch_search(x_lp: &[f32], y: &[f32], len: usize, max_pitch: usize) -> usize {
     let lag = len + max_pitch;
     let x_lp4: Vec<f32> = (0..len >> 2).map(|j| x_lp[2 * j]).collect();
@@ -2305,7 +2184,6 @@ fn pitch_search(x_lp: &[f32], y: &[f32], len: usize, max_pitch: usize) -> usize 
     }
     find_best_pitch(&xcorr, y, len >> 1, max_pitch >> 1, &mut best_pitch);
 
-    // Pseudo-interpolation between the peak and its neighbours.
     let offset = if best_pitch[0] > 0 && best_pitch[0] < (max_pitch >> 1) - 1 {
         let a = xcorr[best_pitch[0] - 1];
         let b = xcorr[best_pitch[0]];
@@ -2323,7 +2201,6 @@ fn pitch_search(x_lp: &[f32], y: &[f32], len: usize, max_pitch: usize) -> usize 
     (2 * best_pitch[0] as i32 - offset) as usize
 }
 
-/// Turn the decoded, denormalised spectrum back into time.
 #[allow(clippy::too_many_arguments)]
 fn celt_synthesis(
     mdct: &mut Mdct,
@@ -2350,7 +2227,6 @@ fn celt_synthesis(
     let mut freq = vec![0.0f32; n];
 
     if cc == 2 && c == 1 {
-        // One coded channel played out of two.
         denormalise_bands(
             x, &mut freq, old_bande, start, eff_end, m, downsample, silence,
         );
@@ -2367,7 +2243,6 @@ fn celt_synthesis(
             }
         }
     } else if cc == 1 && c == 2 {
-        // Two coded channels played out of one.
         let mut freq2 = vec![0.0f32; n];
         denormalise_bands(
             x, &mut freq, old_bande, start, eff_end, m, downsample, silence,
@@ -2421,15 +2296,13 @@ fn celt_synthesis(
     }
 }
 
-/// One CELT decoder: the mode's tables, and everything that has to survive
-/// from one frame to the next.
+/// One CELT decoder: mode tables and inter-frame state.
 pub(super) struct CeltDecoder {
     mode: Mode,
-    /// How many channels are played out.
     channels: usize,
-    /// How many channels this frame actually codes, which may be fewer.
+    /// Channels this frame codes, which may be fewer.
     pub(super) stream_channels: usize,
-    /// 48000 / output rate: CELT always decodes at 48 kHz and decimates.
+    /// 48000 / output rate.
     pub(super) downsample: usize,
     pub(super) start: usize,
     pub(super) end: usize,
@@ -2462,7 +2335,6 @@ impl CeltDecoder {
             downsample: 1,
             start: 0,
             end: EFF_EBANDS,
-            // Mono never inverts the side, because there is no side.
             disable_inv: channels == 1,
             rng: 0,
             last_pitch_index: 0,
@@ -2514,13 +2386,8 @@ impl CeltDecoder {
         self.stream_channels = stream_channels;
     }
 
-    /// Conceal one lost frame.
-    ///
-    /// Two strategies: repeat the last pitch period through the LPC synthesis
-    /// filter, which holds a voiced sound together, or fill the bands with
-    /// noise at the energy the signal was decaying towards. The second is
-    /// what a long loss ends in either way, a pitch repeated for half a
-    /// second is a tone, not concealment.
+    /// Conceal one lost frame: repeat the last pitch period through LPC synthesis,
+    /// or for long losses fill bands with noise at the decaying energy.
     fn decode_lost(&mut self, n: usize, lm: usize) {
         let cc = self.channels;
         let at = DECODE_BUFFER_SIZE - n;
@@ -2535,7 +2402,6 @@ impl CeltDecoder {
             for mem in self.decode_mem.iter_mut() {
                 mem.copy_within(n..DECODE_BUFFER_SIZE + (OVERLAP >> 1), 0);
             }
-            // Decay towards the background estimate rather than to silence.
             let decay = if loss_duration == 0 { 1.5 } else { 0.5 };
             for c in 0..cc {
                 for i in start..end {
@@ -2588,8 +2454,7 @@ impl CeltDecoder {
                 self.last_pitch_index
             };
             let fade = if loss_duration == 0 { 1.0f32 } else { 0.8 };
-            // Two pitch periods, so a decaying signal can be recognised as
-            // one and not have energy added back.
+            // Two pitch periods, to detect decay.
             let exc_length = (2 * pitch_index).min(MAX_PERIOD);
 
             for c in 0..cc {
@@ -2624,7 +2489,6 @@ impl CeltDecoder {
                 exc[LPC_ORDER + MAX_PERIOD - exc_length..LPC_ORDER + MAX_PERIOD]
                     .copy_from_slice(&fir_tmp);
 
-                // Is the waveform decaying, and how fast?
                 let decay_length = exc_length >> 1;
                 let mut e1 = 1.0f32;
                 let mut e2 = 1.0f32;
@@ -2638,7 +2502,6 @@ impl CeltDecoder {
 
                 self.decode_mem[c].copy_within(n..DECODE_BUFFER_SIZE, 0);
 
-                // Repeat the last period, decaying a little more each time.
                 let extrapolation_offset = MAX_PERIOD - pitch_index;
                 let extrapolation_len = n + OVERLAP;
                 let mut attenuation = fade * decay;
@@ -2674,9 +2537,7 @@ impl CeltDecoder {
                     self.decode_mem[c][at..at + extrapolation_len].copy_from_slice(&out);
                 }
 
-                // The synthesis filter can ring. Written as a negated
-                // greater-than rather than a less-or-equal so that a NaN out
-                // of the filter fails the test and is silenced too.
+                // The synthesis filter can ring; the negated comparison also silences NaN.
                 let mut s2 = 0.0f32;
                 for i in 0..extrapolation_len {
                     let tmp = self.decode_mem[c][at + i];
@@ -2698,8 +2559,7 @@ impl CeltDecoder {
                     }
                 }
 
-                // Pre-filter the overlap the next frame will post-filter, so
-                // the two blend the way an uninterrupted stream would.
+                // Pre-filter the overlap the next frame will post-filter.
                 let mut etmp = vec![0.0f32; OVERLAP];
                 comb_filter_const(
                     &mut etmp,
@@ -2719,7 +2579,6 @@ impl CeltDecoder {
         self.loss_duration = 10000.min(loss_duration + (1 << lm));
     }
 
-    /// Decode one CELT frame, or conceal one if `dec` is `None`.
     pub(super) fn decode(
         &mut self,
         dec: Option<&mut RangeDecoder>,
@@ -2759,9 +2618,7 @@ impl CeltDecoder {
             }
         };
 
-        // Only turn the pitch-based concealment on once two packets have
-        // arrived in a row; one packet after a loss has no history to work
-        // from that the loss did not invent.
+        // Pitch concealment only after two consecutive packets.
         self.skip_plc = self.loss_duration != 0;
 
         let c = self.stream_channels;
@@ -2781,7 +2638,6 @@ impl CeltDecoder {
             false
         };
         if silence {
-            // Pretend the rest of the frame was read.
             dec.skip_to_end(len);
             tell = total_bits;
         }
@@ -2824,16 +2680,14 @@ impl CeltDecoder {
         let mut cap = [0i32; NB_EBANDS];
         init_caps(&mut cap, lm, c);
 
-        // Dynamic allocation: extra bits for bands the encoder found needed
-        // them, coded as a run of increasingly cheap flags.
+        // Dynamic allocation boosts, coded as increasingly cheap flags.
         let mut offsets = [0i32; NB_EBANDS];
         let mut dynalloc_logp = 6i32;
         let mut total_bits_frac = total_bits << BITRES;
         let mut tell_frac = dec.tell_frac() as i32;
         for i in start..end {
             let width = (c * (EBAND_5MS[i + 1] - EBAND_5MS[i]) as usize) << lm;
-            // Six bits at a time, but never more than one bit per sample nor
-            // less than an eighth.
+            // Six bits at a time, capped at one bit per sample and floored at an eighth.
             let quanta = ((width << BITRES) as i32).min((6 << BITRES).max(width as i32));
             let mut dynalloc_loop_logp = dynalloc_logp;
             let mut boost = 0i32;
@@ -3029,8 +2883,7 @@ impl CeltDecoder {
                 self.old_loge[i] = self.old_loge[i].min(self.old_bande[i]);
             }
         }
-        // The noise floor may rise by 2.4 dB a second normally; after a run
-        // of lost packets it may make up all of what it missed at once.
+        // The noise floor rises 2.4 dB/s, or catches up at once after losses.
         let max_background_increase = 160.min(self.loss_duration + (1 << lm)) as f32 * 0.001;
         for i in 0..2 * NB_EBANDS {
             self.background_loge[i] =

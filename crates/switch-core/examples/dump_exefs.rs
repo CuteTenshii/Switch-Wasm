@@ -1,7 +1,5 @@
-//! Decrypt a retail container's Program ExeFS and dump every module as a flat
-//! image plus a symbol map, at the exact addresses `boot_retail_program`
-//! lays them out at. That makes a backtrace from a real run nameable:
-//! `dump_exefs <container> <prod.keys> [title.keys] <out_dir>`.
+//! Dump a retail Program ExeFS as flat module images plus symbol maps, at
+//! `boot_retail_program` addresses: `dump_exefs <container> <prod.keys> [title.keys] <out_dir>`.
 mod common;
 
 use std::fs;
@@ -37,7 +35,6 @@ fn main() {
     for (name, nso) in title.modules() {
         let m = switch_core::nso::load_nso(&mut mem, nso, base).expect("load the module");
         let image_end = m.data.mem_addr + m.data.file_size + m.bss_size;
-        // Flat image, base..image_end, straight out of the mapped memory.
         let mut flat = Vec::with_capacity((image_end - base) as usize);
         for a in base..image_end {
             flat.push(mem.read_u8(a).unwrap_or(0));
@@ -53,7 +50,6 @@ fn main() {
             m.bss_size, image_end
         );
 
-        // Dynamic symbol table, addressed the same way the loaded image is.
         let d = &flat[..];
         let magic = 0x3044_4f4du32.to_le_bytes();
         if let Some(mod0) = d.windows(4).position(|w| w == magic) {

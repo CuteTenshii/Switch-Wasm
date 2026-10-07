@@ -1,29 +1,9 @@
 //! The block translator against the interpreter, on real homebrew:
 //! `jit_difftest <nro> [instructions] [font.ttf]`.
 //!
-//! Boots the same program twice, once with [`Cpu::set_jit_enabled`] off, once
-//! with it on: runs the same number of instructions through both, and reports
-//! every way the two machines ended up disagreeing.
-//!
-//! This is a correctness tool, not a benchmark, and it used to be both. The
-//! benchmark half reported what each engine managed per second *on this host*,
-//! and the browser is what this project runs in: a ratio between two engines
-//! measured through rustc's x86-64 backend is not the ratio between them under
-//! a browser's, which recompiles the same wasm with its own register
-//! allocator, its own inlining and a bounds check on every guest load. That
-//! number belongs to `tools/wasm_bench.mjs`, which runs the artefact the
-//! browser runs.
-//!
-//! What survives here is the part that was never about speed. The translator
-//! resolves at translation time what the interpreter re-derives per execution,
-//! so the two have to agree on every register, the flags, memory, the console
-//! and the framebuffer, and if they ever do not, the translated run is wrong
-//! however fast it was. The interpreter is the reference.
-//!
-//! The work counters below say the same thing the timing tried to, without a
-//! clock: how many blocks were translated, how often each was re-entered, and
-//! how much of the run the translator handed straight back to the interpreter
-//! because it had no op for it. Those numbers are identical on every target.
+//! Runs the same program with the JIT off and on and reports every state
+//! difference, plus translator work counters. Not a benchmark; use
+//! `tools/wasm_bench.mjs` for speed.
 mod common;
 
 use switch_core::cpu::Cpu;
@@ -39,11 +19,8 @@ fn boot(nro: &[u8], font: &Option<Vec<u8>>, jit: bool) -> Cpu {
     cpu
 }
 
-/// Run up to `want` instructions, in slices, and report how many retired.
-///
-/// Sliced because that is how the frontend drives a session, a frame's worth
-/// per call, and re-entering blocks across those calls is part of what is
-/// being checked.
+/// Run up to `want` instructions in frame-sized slices, as the frontend does,
+/// and report how many retired.
 fn drive(cpu: &mut Cpu, want: u64) -> u64 {
     const SLICE: u64 = 1_000_000;
     let mut done = 0u64;
@@ -59,8 +36,6 @@ fn drive(cpu: &mut Cpu, want: u64) -> u64 {
     done
 }
 
-/// Report every difference between the two machines rather than only the
-/// first, since a divergence in one register usually shows up in several.
 fn compare(a: &Cpu, b: &Cpu) -> usize {
     let mut bad = 0;
     let mut differs = |what: String| {
@@ -152,11 +127,7 @@ fn main() {
         per(stats.executed, stats.translated),
         stats.invalidated,
     );
-    // The share of the run the translator did not translate. Every one of
-    // these re-derived the instruction's group, form and fields on the way
-    // past, which is the work the translator exists to do once, so this is
-    // where the next block of speed is, and it reads the same under any
-    // compiler on any target.
+    // Instructions the translator handed back to the interpreter.
     println!(
         "  {} instructions fell back to the interpreter ({:.2}% of the run)",
         stats.interpreted,

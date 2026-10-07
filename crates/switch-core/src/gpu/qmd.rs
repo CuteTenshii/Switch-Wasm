@@ -1,14 +1,5 @@
-//! The Queue Meta Data a compute dispatch is described by.
-//!
-//! A launch carries almost none of its state in the class's register file:
-//! the channel writes one address and the grid, the block, the constant
-//! buffers and the shared-memory size all come out of a 256-byte structure in
-//! memory. The opposite of the 3D class, where the register file *is* the
-//! state.
-//!
-//! Field positions are transcribed from NVIDIA's generated `clb1c0qmd.h`.
-//! The class defines two QMD versions, `V00_06` and `V01_07`; they differ only
-//! in fields nothing here reads, so one parser serves both.
+//! The Queue Meta Data (QMD) a compute dispatch is described by. Field positions
+//! are from NVIDIA's `clb1c0qmd.h`; versions `V00_06` and `V01_07` share them.
 
 use crate::gpu::engine::field;
 use crate::{Error, Result};
@@ -16,49 +7,40 @@ use crate::{Error, Result};
 /// A QMD is 64 words (256 bytes) however few of them a launch fills in.
 pub const QMD_WORDS: usize = 64;
 
-/// How many constant buffers a QMD can bind. The bind slot *is* the index:
-/// entry `i` is what the shader reads as `c[i]`.
+/// Constant buffers a QMD can bind; entry `i` is `c[i]`.
 pub const CONSTANT_BUFFERS: usize = 8;
 
-/// Hardware's ceiling on threads per CTA. A block past it is a misparsed QMD,
-/// and the alternative to failing on it is a dispatch that runs for hours.
+/// Hardware's ceiling on threads per CTA.
 pub const MAX_CTA_THREADS: u32 = 1024;
 
-/// One of the QMD's bound constant buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConstantBuffer {
     pub addr: u64,
     pub size: u32,
 }
 
-/// A semaphore the launch releases when it completes, immediately, since a
-/// dispatch retires inside its own method. It still has to be written, or a
-/// guest waiting on it rather than on a syncpoint waits forever.
+/// A semaphore released when the launch completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Release {
     pub addr: u64,
     pub payload: u32,
-    /// The one-word form writes just the payload; the four-word form writes
-    /// the payload and a timestamp, as `SetReportSemaphore` does.
+    /// One word writes the payload; four words add a timestamp.
     pub one_word: bool,
 }
 
-/// A parsed launch descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Qmd {
-    /// `(major, version)`, kept because it is what says this parse applies.
     pub version: (u32, u32),
     /// Byte offset of the program within the class's program region.
     pub program_offset: u32,
-    /// The grid: how many CTAs, in each dimension.
+    /// CTAs per dimension.
     pub cta_raster: [u32; 3],
-    /// The block: how many threads per CTA, in each dimension.
+    /// Threads per CTA per dimension.
     pub cta_threads: [u32; 3],
     /// Bytes of `s[]` a CTA gets.
     pub shared_memory_size: u32,
     /// Bytes of `l[]` a thread gets.
     pub local_memory_size: u32,
-    /// Registers per thread, as the compiler allocated them.
     pub register_count: u32,
     /// How many named barriers the program uses.
     pub barrier_count: u32,
@@ -72,24 +54,18 @@ impl Qmd {
         self.cta_threads[0] * self.cta_threads[1] * self.cta_threads[2]
     }
 
-    /// Total CTAs in the grid.
     pub fn cta_count(&self) -> u64 {
         let [x, y, z] = self.cta_raster;
         u64::from(x) * u64::from(y) * u64::from(z)
     }
 
-    /// Whether this launch has any work in it at all. A zero in any dimension
-    /// is a legal launch of nothing, not an error.
+    /// A zero in any dimension is a legal empty launch.
     pub fn is_empty(&self) -> bool {
         self.cta_count() == 0 || self.threads_per_cta() == 0
     }
 
-    /// Parse the 64 words of a QMD.
     pub fn parse(words: &[u32; QMD_WORDS]) -> Result<Qmd> {
         let version = (mw(words, 580, 583), mw(words, 576, 579));
-        // The fields below sit at the same bits in both versions. Anything
-        // else is a structure this parser has never seen, and a grid read out
-        // of one launches whatever the misread said.
         if !matches!(version, (0, 6) | (1, 7)) {
             return Err(Error::Gpu(format!(
                 "qmd: version {}.{} is not a Maxwell compute QMD (expected 0.6 or 1.7)",
@@ -162,9 +138,7 @@ fn release(words: &[u32; QMD_WORDS], which: u32) -> Option<Release> {
     })
 }
 
-/// Bits `lo..=hi` of the structure: the `MW(hi:lo)` the header names a field
-/// by. Reads a word pair, because a field may straddle the boundary (every
-/// constant buffer's size does).
+/// Bits `lo..=hi` (`MW(hi:lo)`), possibly straddling a word boundary.
 fn mw(words: &[u32; QMD_WORDS], lo: u32, hi: u32) -> u32 {
     debug_assert!(hi >= lo && hi - lo < 32, "MW({hi}:{lo}) is not a u32 field");
     let word = (lo / 32) as usize;
@@ -178,8 +152,7 @@ fn mw(words: &[u32; QMD_WORDS], lo: u32, hi: u32) -> u32 {
 mod tests {
     use super::*;
 
-    /// A QMD with just the version stamped, which is the floor every other
-    /// test builds on.
+    /// A QMD with just the version stamped.
     fn blank() -> [u32; QMD_WORDS] {
         let mut words = [0u32; QMD_WORDS];
         set(&mut words, 576, 579, 6);
@@ -202,8 +175,7 @@ mod tests {
 
     #[test]
     fn a_field_that_straddles_a_word_boundary_reads_whole() {
-        // Constant buffer 0's size is MW(991:975), 15 bits into word 30 and
-        // ending in word 31.
+        // Constant buffer 0's size MW(991:975) straddles words 30 and 31.
         let mut words = blank();
         set(&mut words, 975, 991, 0x1_2345);
         assert_eq!(mw(&words, 975, 991), 0x1_2345);
@@ -234,8 +206,7 @@ mod tests {
         set(&mut words, 928 + 64, 959 + 64, 0x0000_2000);
         set(&mut words, 960 + 64, 967 + 64, 1);
         set(&mut words, 975 + 64, 991 + 64, 0x400);
-        // c2 is filled in with its valid bit clear, the way a reused QMD
-        // leaves a stale address behind.
+        // c2 has a stale address with its valid bit clear.
         set(&mut words, 928 + 128, 959 + 128, 0xDEAD_0000);
         let qmd = Qmd::parse(&words).unwrap();
         assert_eq!(qmd.constant_buffers[0], None);
@@ -298,8 +269,7 @@ mod tests {
 
     #[test]
     fn a_structure_that_is_not_a_qmd_is_refused() {
-        // Zeroed memory reads as version 0.0, what a wrong QMD address
-        // hands us.
+        // Zeroed memory reads as version 0.0.
         let err = Qmd::parse(&[0u32; QMD_WORDS]).unwrap_err();
         assert!(
             format!("{err:?}").contains("not a Maxwell compute QMD"),

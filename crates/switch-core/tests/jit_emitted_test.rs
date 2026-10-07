@@ -1,20 +1,7 @@
-//! Running a block from its emitted form rather than by walking its ops.
-//!
-//! The browser compiles emitted wasm and the core calls it; neither half of
-//! that exists on the host, so what is under test here is everything in
-//! between: when a block is written out, how what it reports is accounted for,
-//! what happens when it hands work back, and that the step budget survives it.
-//!
-//! A [`JitHost`] whose `install` answers the address of an ordinary Rust
-//! function stands in for the compiler. That is not a mock of the interface,
-//! it is the interface: an entry point is a code address in whatever sense the
-//! target has one, a table index under `wasm32` and a function address here,
-//! and the core calls it the same way either way.
-//!
-//! `fake_run` does exactly what the block's first `retired` ops do, so the run
-//! is still differential against the interpreter, whatever it reports. That is
-//! the property the whole handover rests on: a block that stops early leaves
-//! guest state as if only those instructions had run.
+//! Runs blocks from their emitted form on the host. A [`JitHost`] whose `install`
+//! returns a Rust function address stands in for the browser's compiler; the fakes
+//! do exactly what the block's first `retired` ops do, so runs stay differential
+//! against the interpreter.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -22,13 +9,7 @@ use switch_core::cpu::{set_jit_host, Cpu, Entry, JitHost, Layout, HOT, LEFT};
 
 const CODE: u32 = 0x1000;
 
-/// A loop whose body is one block: three ops and a `RET` that comes back
-/// here. `x30` is set by the block itself, so the loop needs no set-up and
-/// every iteration is the same four instructions.
-///
-/// Every op in it is one the emitter can write, which is what makes the block
-/// emittable at all, and none of them reads memory, so nothing here can hand
-/// back for a reason of its own.
+/// A loop whose body is one emittable, memory-free block: three ops and a `RET`.
 #[rustfmt::skip]
 const LOOP: &[u32] = &[
     0xD282001E, // movz x30, #0x1000
@@ -37,14 +18,8 @@ const LOOP: &[u32] = &[
     0xD65F03C0, // ret  x30
 ];
 
-/// A loop whose back edge is a conditional branch inside the block rather
-/// than its terminator: `x0` counts down and the `CBNZ` goes back to the top
-/// while it is not zero, which it never is.
-///
-/// The branch is the block's *last* instruction, so taking it retires every
-/// one of them and the `RET` below it must still not run. That is the case a
-/// count of retired instructions cannot express on its own, and the reason an
-/// emitted block says where control went rather than only how far it got.
+/// A loop whose back edge is a `CBNZ` as the block's last instruction, always
+/// taken, so the `RET` below it must never run.
 #[rustfmt::skip]
 const BRANCH_LOOP: &[u32] = &[
     0xD282001E, // movz x30, #0x1000
@@ -53,9 +28,7 @@ const BRANCH_LOOP: &[u32] = &[
     0xD65F03C0, // ret  x30
 ];
 
-/// A loop whose block follows a `B` over an instruction, so its ops are not
-/// consecutive in memory and the address of the `n`th one is not
-/// `start + 4 * n`. Assembled with clang.
+/// A block after a `B`, so op addresses are not `start + 4 * n`. Assembled with clang.
 #[rustfmt::skip]
 const JUMP_LOOP: &[u32] = &[
     0xD282001E, // movz x30, #0x1000
@@ -66,42 +39,32 @@ const JUMP_LOOP: &[u32] = &[
     0xD65F03C0, // ret  x30
 ];
 
-/// Instructions in one trip round [`BRANCH_LOOP`]: the `RET` is never reached.
+/// Instructions per trip round [`BRANCH_LOOP`]; the `RET` never runs.
 const BRANCH_TRIP: u64 = 3;
 
-/// Instructions in one trip round [`LOOP`], the `RET` included.
+/// Instructions per trip round [`LOOP`], including the `RET`.
 const TRIP: u64 = 4;
-/// Ops in its block, which is the trip without the terminator, and so what a
-/// fully retired entry reports.
+/// Ops in its block, what a fully retired entry reports.
 const OPS: u32 = 3;
 
-/// The step budget a test runs a loop for: enough trips for its block to turn
-/// [`HOT`] and then a hundred more from its emitted form, and one instruction
-/// over, so the run ends inside a block.
+/// Enough trips to turn [`HOT`] plus a hundred more, ending inside a block.
 const STEPS: u64 = (HOT as u64 + 100) * TRIP + 1;
 
-/// What `fake_run` reports, standing for a block that ran all of itself, part of
-/// itself, or none of it.
+/// What `fake_run` reports retiring.
 static RETIRE: AtomicU32 = AtomicU32::new(OPS);
-/// How many times it has been entered.
 static ENTERED: AtomicU32 = AtomicU32::new(0);
-/// How many entry points have been given back, which is what says a dropped
-/// block released the one it held.
+/// Entry points released by dropped blocks.
 static RELEASED: AtomicU32 = AtomicU32::new(0);
-/// The size of the last module handed to `install`, so a test can tell that
-/// the core emitted something rather than nothing.
+/// Size of the last module passed to `install`.
 static LAST_MODULE: AtomicUsize = AtomicUsize::new(0);
 
-/// Stands in for [`LOOP`]'s compiled block: does what its first `retired` ops
-/// do, by the same offsets emitted code would, and reports that many.
+/// Stands in for [`LOOP`]'s block: does its first `retired` ops and reports that many.
 extern "C" fn fake_run(state: usize) -> u32 {
     ENTERED.fetch_add(1, Ordering::SeqCst);
     let retired = RETIRE.load(Ordering::SeqCst);
     let regs = state + Layout::of_cpu().regs as usize;
-    // SAFETY: `state` is the address of a live `Cpu`, because that is what the
-    // core passes and this is only ever reached from there. The two writes are
-    // register-file slots at the layout's own offset, which is the whole of
-    // what this block touches.
+    // SAFETY: `state` is a live `Cpu` passed by the core; the writes are
+    // register slots at the layout's offsets.
     unsafe {
         if retired >= 1 {
             *((regs + 8 * 30) as *mut u64) = u64::from(CODE);
@@ -109,20 +72,17 @@ extern "C" fn fake_run(state: usize) -> u32 {
         if retired >= 2 {
             *(regs as *mut u64) = 0x1234;
         }
-        // The third op is a `nop`, so there is nothing to do for it.
     }
     retired
 }
 
-/// Stands in for [`BRANCH_LOOP`]'s compiled block: does all three of its ops
-/// and leaves the way the `CBNZ` does, by putting the target in the pc and
-/// reporting [`LEFT`] beside the count.
+/// Stands in for [`BRANCH_LOOP`]'s block: all three ops, then leaves via the `CBNZ`
+/// target with [`LEFT`].
 extern "C" fn fake_branch(state: usize) -> u32 {
     ENTERED.fetch_add(1, Ordering::SeqCst);
     let layout = Layout::of_cpu();
     let regs = state + layout.regs as usize;
-    // SAFETY: as `fake_run`. `pc` is a field of the same `Cpu` at the same
-    // layout's offset, and a taken branch is the one thing that writes it.
+    // SAFETY: as `fake_run`; `pc` is a field of the same `Cpu`.
     unsafe {
         *((regs + 8 * 30) as *mut u64) = u64::from(CODE);
         let x0 = (regs as *mut u64).read();
@@ -132,9 +92,7 @@ extern "C" fn fake_branch(state: usize) -> u32 {
     BRANCH_TRIP as u32 | LEFT
 }
 
-/// Stands in for [`JUMP_LOOP`]'s compiled block, retiring the first
-/// [`RETIRE`] of its four ops: the `movz x30`, the `B`, the `movz x0` and the
-/// `nop`.
+/// Stands in for [`JUMP_LOOP`]'s block, retiring the first [`RETIRE`] of its four ops.
 extern "C" fn fake_jump(state: usize) -> u32 {
     ENTERED.fetch_add(1, Ordering::SeqCst);
     let retired = RETIRE.load(Ordering::SeqCst);
@@ -151,8 +109,7 @@ extern "C" fn fake_jump(state: usize) -> u32 {
     retired
 }
 
-/// Which fake the next `install` hands back, because the two loops are not
-/// the same block and the host is one function for the whole binary.
+/// Which fake the next `install` returns.
 static EMIT_BRANCH: AtomicBool = AtomicBool::new(false);
 static EMIT_JUMP: AtomicBool = AtomicBool::new(false);
 
@@ -177,9 +134,7 @@ fn install(code: &[u8]) -> Entry {
 }
 
 fn release(entry: Entry) {
-    // Either fake, rather than whichever one is being handed out now: a block
-    // is released when it is dropped, which for the last block of a test is
-    // after the test body has finished with it.
+    // Either fake: the last block is released after the test body ends.
     assert!(
         [
             fake_run as *const (),
@@ -193,9 +148,7 @@ fn release(entry: Entry) {
     RELEASED.fetch_add(1, Ordering::SeqCst);
 }
 
-/// The counters above are one set for the whole binary and the host is
-/// installed once, so the tests take turns. A poisoned lock is a test that
-/// already failed; the rest have nothing to gain by failing too.
+/// The counters and host are process-wide, so tests take turns. Ignore poisoning.
 fn exclusive() -> MutexGuard<'static, ()> {
     static SERIAL: Mutex<()> = Mutex::new(());
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -226,7 +179,6 @@ fn running(jit: bool, program: &[u32]) -> Cpu {
     cpu
 }
 
-/// Everything the loop can be observed to have done.
 fn snapshot(cpu: &Cpu) -> (u64, u64, u32, u64, u64) {
     (
         cpu.read_x(0),
@@ -237,10 +189,8 @@ fn snapshot(cpu: &Cpu) -> (u64, u64, u32, u64, u64) {
     )
 }
 
-/// Run the loop both ways and insist the two agree down to the clock. `steps`
-/// is deliberately not a multiple of [`TRIP`], so the run ends inside a block
-/// and the budget has to survive the emitted path as exactly as it does the
-/// interpreted one.
+/// Run the loop both ways and require identical state and clock. `steps` ends
+/// inside a block to check the budget.
 fn compare(steps: u64, what: &str) {
     compare_running(LOOP, steps, what);
 }
@@ -260,16 +210,13 @@ fn compare_running(program: &[u32], steps: u64, what: &str) {
     );
 }
 
-/// A block entered enough times is written out, and from then on entering it
-/// runs the emitted form: the same computation, the same clock, the same
-/// budget.
+/// A hot block runs its emitted form with the same results.
 #[test]
 fn a_hot_block_is_emitted_and_then_run_from_its_emitted_form() {
     let _guard = exclusive();
     compare(STEPS, "a fully retiring block");
 
-    // A second run of its own, because the comparison above already drove the
-    // loop and the counters below are the binary's, not this machine's.
+    // A fresh run, since the counters are process-wide.
     ENTERED.store(0, Ordering::SeqCst);
     let mut cpu = loaded(true);
     cpu.run(STEPS).unwrap();
@@ -294,10 +241,8 @@ fn a_hot_block_is_emitted_and_then_run_from_its_emitted_form() {
     );
 }
 
-/// A block that retires only part of itself leaves guest state where those
-/// instructions left it, and the interpreter carries on from the instruction
-/// it stopped at. That is what an emitted access does when the page table
-/// cannot answer it alone.
+/// A partially retired block leaves state where those instructions left it,
+/// and the interpreter continues from there.
 #[test]
 fn a_block_that_stops_early_hands_the_rest_back() {
     let _guard = exclusive();
@@ -309,10 +254,8 @@ fn a_block_that_stops_early_hands_the_rest_back() {
     );
 }
 
-/// A block that retires *nothing* has done nothing, so the visit has to go to
-/// the interpreter: reporting no progress would leave `run_jit` entering the
-/// same block at the same pc for ever. One that keeps doing it is dropped, and
-/// gives its entry point back.
+/// A block that retires nothing goes to the interpreter; one that keeps doing
+/// it is dropped and releases its entry point.
 #[test]
 fn a_block_that_retires_nothing_stops_being_entered() {
     let _guard = exclusive();
@@ -332,8 +275,7 @@ fn a_block_that_retires_nothing_stops_being_entered() {
     );
 }
 
-/// Dropping the cache drops what was installed with it. Otherwise a table
-/// slot would be held for every block a long run ever compiled.
+/// Dropping the cache releases installed entry points.
 #[test]
 fn flushing_the_cache_releases_what_was_emitted() {
     let _guard = exclusive();
@@ -350,9 +292,7 @@ fn flushing_the_cache_releases_what_was_emitted() {
     );
 }
 
-/// Guest code that rewrites itself drops the blocks translated from it, and an
-/// emitted block is code that has already been compiled from the old bytes: it
-/// has to go with them, or the guest runs instructions it has overwritten.
+/// Self-modifying code drops emitted blocks built from the old bytes.
 #[test]
 fn overwriting_the_code_releases_its_emitted_form() {
     let _guard = exclusive();
@@ -364,8 +304,7 @@ fn overwriting_the_code_releases_its_emitted_form() {
         "nothing was emitted to invalidate"
     );
 
-    // Rewrite the `nop` and run on. The store lands on a translated page, so
-    // the block goes, and with it the emitted form built from what was there.
+    // Rewrite the `nop`, invalidating the translated page.
     cpu.mem.write_u32(CODE + 8, 0xD2800021).unwrap(); // movz x1, #1
     cpu.run(TRIP * 4).unwrap();
     assert_eq!(
@@ -376,14 +315,8 @@ fn overwriting_the_code_releases_its_emitted_form() {
     assert_eq!(cpu.read_x(1), 1, "the new instruction did not run");
 }
 
-/// A block whose branch is taken leaves through it: control goes where the
-/// branch said, the terminator underneath it does not run, and the clock
-/// counts the instructions that did.
-///
-/// [`BRANCH_LOOP`]'s branch is its last instruction, so this is also the case
-/// a count alone cannot express. A block reporting three of three retired and
-/// nothing else would fall into the `RET`, and the loop would leave through a
-/// terminator it never reached.
+/// A taken branch leaves through its target, the terminator doesn't run, and the
+/// clock counts what did.
 #[test]
 fn a_block_left_through_a_taken_branch_skips_its_terminator() {
     let _guard = exclusive();
@@ -402,9 +335,7 @@ fn a_block_left_through_a_taken_branch_skips_its_terminator() {
         "every whole trip after the first HOT reaches emitted code, of {}",
         stats.executed
     );
-    // One `sub` a trip, and the budget ends the last trip just after its
-    // one. Had the `RET` under the branch run, a trip would be four
-    // instructions rather than three and `x0` would be a quarter smaller.
+    // One `sub` per three-instruction trip.
     let subs = STEPS / BRANCH_TRIP + u64::from(STEPS % BRANCH_TRIP >= 2);
     assert_eq!(
         cpu.read_x(0),
@@ -413,8 +344,7 @@ fn a_block_left_through_a_taken_branch_skips_its_terminator() {
     );
 }
 
-/// A block that follows a `B` hands back at the right address whether it
-/// stops before the jump, just after it, or runs through to its terminator.
+/// A block after a `B` hands back at the right address wherever it stops.
 #[test]
 fn a_block_across_a_followed_branch_hands_back_where_it_stopped() {
     const JUMP_TRIP: u64 = 5;

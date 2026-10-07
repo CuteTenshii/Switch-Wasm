@@ -1,23 +1,14 @@
-/* save data
-
-   Same shape as the SD card's persistence, one store further in: entries are
-   keyed by "<save id>/<path>", so everything a title saved can be found again
-   by prefix and nothing else can see it. A console keeps saves on its NAND
-   rather than its card, which is why they live in that database. */
+// Save data persistence in the NAND database, keyed by "<save id>/<path>".
 
 import { idbApply, idbGetAll, NAND_SAVES, nandIdb, type StoredEntry } from './db';
 import { log, logStored } from './log';
 import { call, hasSession } from './rpc';
 
-// Drained but not yet stored, for the same reason the card keeps a backlog:
-// the core cannot be handed a change back, so anything IndexedDB refuses waits
-// here for the next flush rather than being lost.
+// Drained changes IndexedDB refused, retried on the next flush.
 const saveBacklog = new Map<string, StoredEntry | null>();
 let saveFlushing = false;
 
-// Put every stored save back into a fresh session, through the host entry
-// points - which do not count as guest changes, so this does not immediately
-// queue everything to be written straight back.
+// Restore every stored save through host entry points, which don't queue writes back.
 export async function saveRestore(): Promise<void> {
   let entries: [string, StoredEntry][];
   try {
@@ -27,7 +18,7 @@ export async function saveRestore(): Promise<void> {
     return;
   }
   if (!entries.length) return;
-  // Directories first, so one a title left empty survives on its own.
+  // Directories first, so empty ones survive.
   entries.sort((a, b) => (a[1].kind === b[1].kind ? 0 : a[1].kind === 'dir' ? -1 : 1));
   for (const [key, value] of entries) {
     const cut = key.indexOf('/');
@@ -40,8 +31,7 @@ export async function saveRestore(): Promise<void> {
   log('Saves: restored ' + entries.length + ' entries', 'dim');
 }
 
-// Write back what the guest changed in any save it has open. Cheap when it
-// changed nothing, which is almost every slice.
+// Write back what the guest changed in its open saves.
 export async function saveFlush(): Promise<void> {
   if (saveFlushing || !hasSession()) return;
   saveFlushing = true;

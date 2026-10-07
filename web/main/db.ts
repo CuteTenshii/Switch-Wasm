@@ -1,14 +1,11 @@
-/* The two IndexedDB databases the page keeps, and the transaction plumbing
-   they share. What each one holds is documented where it is used: the card in
-   `sdcard.ts`, the NAND and its saves in `nand.ts` and `saves.ts`. */
+// The page's IndexedDB databases and shared transaction helpers.
 
 import type { Bytes } from '../shared/protocol';
 
 export const SD_DB_NAME = 'switch-wasm-sd';
 export const SD_STORE = 'entries';
 
-/** The page's own log, kept so that a tab the browser kills does not take the
- *  account of what it was doing with it. One key, one string. */
+// The page's own log, so it survives the tab being killed.
 export const LOG_DB_NAME = 'switch-wasm-log';
 export const LOG_STORE = 'log';
 export const LOG_KEY = 'previous';
@@ -19,15 +16,12 @@ export const NAND_TITLES = 'titles';
 export const NAND_SAVES = 'saves';
 export const NAND_USERS = 'users';
 
-/** A file or directory as it is stored: a directory has no bytes, and a file
- *  the guest created empty has none either. */
 export interface StoredEntry {
   kind: 'dir' | 'file';
   data?: Bytes;
 }
 
-/** What the NAND's index says about one title. `kind` is 0 for a program and
- *  1 for a data archive, as `switch_nand_identify` reports it. */
+// `kind` is 0 for a program and 1 for a data archive.
 export interface NandEntry {
   name: string;
   kind: number;
@@ -88,8 +82,7 @@ export function nandIdb(): Promise<IDBDatabase> {
   });
 }
 
-/** Every [key, value] pair in a store. Keys and values are read in one
- *  transaction so they cannot be zipped out of step. */
+// Keys and values are read in one transaction so they stay in step.
 export function idbGetAll<T>(db: IDBDatabase, store: string): Promise<[string, T][]> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readonly');
@@ -113,7 +106,7 @@ export function idbGet<T>(db: IDBDatabase, store: string, key: string): Promise<
   });
 }
 
-/** Write a batch of [key, value] pairs; a null value deletes the key. */
+// A null value deletes the key.
 export function idbApply(
   db: IDBDatabase,
   store: string,

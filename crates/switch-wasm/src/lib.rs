@@ -1,32 +1,14 @@
-//! WASM bindings for switch-core.
-//!
-//! Compiled as a `cdylib` for `wasm32-unknown-unknown` with no external
-//! dependencies. The browser JS calls these via a raw `extern "C"` ABI:
-//! buffers flow in and out through wasm linear memory, which JS writes to and
-//! reads with a `DataView` over the exported `memory`.
-//!
-//! Design notes:
-//! * A handle is an index into a global session table, so JS never deals with
-//!   raw pointers.
-//! * Structured results (file listings, NCA info) are returned as a tiny JSON
-//!   string written into a JS-provided buffer, no JSON crate required.
-//! * Errors are captured in the session and read back via `switch_last_error`.
-//! * A memory-mapped framebuffer (like the Switch GPU's) is rendered by the
-//!   host: homebrew writes pixels to [`FB_BASE`], JS snapshots it each frame.
+//! WASM bindings for switch-core over a raw `extern "C"` ABI. Buffers cross through
+//! linear memory, handles index a global session table, structured results are
+//! hand-written JSON, and errors are read back with `switch_last_error`.
 
-// Every exported function here is `extern "C"` and takes pointers the caller
-// owns: JS allocates in wasm linear memory, passes the offset and the length,
-// and outlives the call. Marking them `unsafe fn` would say something true of
-// a Rust caller and nothing about this one (there is no Rust caller) while
-// changing the ABI's shape for no reader's benefit. The invariant is the
-// module's, and it is stated here.
+// Exports take pointers into linear memory that the JS caller owns for the call.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// A `Sync` wrapper for single-threaded interior mutability (wasm). Safer
-/// than `static mut` and not gated like `std::cell::SyncUnsafeCell`.
+/// A `Sync` wrapper for single-threaded interior mutability (wasm).
 #[repr(transparent)]
 struct SyncCell<T>(std::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for SyncCell<T> {}
@@ -55,66 +37,37 @@ use switch_core::trace::Level;
 
 /// Framebuffer base address, width, height and stride (RGBA, little-endian).
 pub use switch_core::{FB_BASE, FB_HEIGHT, FB_STRIDE, FB_WIDTH};
-/// Memory-mapped input register: JS writes an ASCII key here, homebrew polls
-/// and acknowledges (writes 0) when consumed.
+/// Memory-mapped input register: JS writes an ASCII key, homebrew acknowledges with 0.
 pub const INPUT_ADDR: u32 = switch_core::INPUT_ADDR;
 
 struct Session {
-    /// The container the frontend has open, read from the host a range at a
-    /// time. `None` until `switch_open_nsp`/`switch_open_nca`.
+    /// The open container, read from the host by range.
     container: Option<HostSource>,
-    /// Parsed file table of the last NSP.
     nsp_files: Vec<switch_core::nsp::Pfs0File>,
-    /// The update the page has added for the title in the open container, if
-    /// it has added one. Held as another host file, read only when the title
-    /// boots: an update container is as large as any other.
+    /// The update added for the open title, held as a host file until boot.
     update: Option<Update>,
-    /// The add-on content the page has added, one entry per DLC archive. Also
-    /// held as host files and read at boot, when the title id they are
-    /// numbered against is finally known.
+    /// Add-on content, one entry per DLC archive, held as host files until boot.
     dlc: Vec<Dlc>,
-    /// Keys loaded from prod.keys / title.keys, used to decrypt NCA headers.
     keys: switch_core::keys::KeySet,
-    /// The title's name, developer and icon, from the last Control NCA read.
-    /// Cached because the icon is fetched separately from the text: JS needs
-    /// its size before it can hand over a buffer to copy it into.
+    /// Control data from the last Control NCA read, cached so the icon can be fetched separately.
     control: Option<switch_core::control::Control>,
-    /// Users `switch_user_stage` has been handed and `switch_users_commit` has
-    /// not yet installed: a list goes in one user at a time, and the core
-    /// takes it whole, since half a list is not a console.
+    /// Users staged by `switch_user_stage`, installed whole by `switch_users_commit`.
     staged_users: Vec<switch_core::cpu::UserAccount>,
     cpu: Cpu,
     last_error: String,
 }
 
-// Single-threaded wasm: a std `Mutex` would abort on any reentrant `lock()`
-// (the wasm `no_threads` backend asserts), and a panic while one is held
-// leaves it locked forever. Use plain `SyncUnsafeCell`s: there is exactly one
-// "thread" (the JS event loop) and every export runs to completion before the
-// next is called, so unsynchronized access is safe.
+// Single-threaded wasm: every export runs to completion, so unsynchronized access is safe
+// (a `Mutex` would abort on reentry).
 static SESSIONS: SyncCell<Vec<Option<Session>>> = SyncCell::new(Vec::new());
 
-/// Last Rust panic message captured by the panic hook (fixed buffer, so the
-/// hook itself never allocates and can't recurse).
-///
-/// 512 bytes was too small to hold what a panic actually says: the payload,
-/// the file and line, and (for the assertions worth reporting) the values
-/// that failed the comparison.
+/// Last panic message, in a fixed buffer so the hook never allocates.
 static PANIC_MSG: SyncCell<[u8; 2048]> = SyncCell::new([0u8; 2048]);
 
-/// Whether the hook has fired since the host last looked.
-///
-/// Separate from the message because the message is *taken* by
-/// [`switch_last_error`], and the crash report the page then asks for must
-/// still know that what it is reporting is a panic and not a clean fault.
+/// Whether the hook has fired since the host last looked; outlives the taken message.
 static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The largest `n <= limit` at which `s` may be cut without splitting a
-/// character.
-///
-/// `str::floor_char_boundary` is still unstable, and this crate builds on
-/// stable. A UTF-8 continuation byte is `10xxxxxx`, so walking back off them
-/// lands on the start of the character they belong to.
+/// The largest `n <= limit` at which `s` may be cut on a char boundary.
 fn floor_char_boundary(s: &str, limit: usize) -> usize {
     if s.len() <= limit {
         return s.len();
@@ -126,8 +79,7 @@ fn floor_char_boundary(s: &str, limit: usize) -> usize {
     n
 }
 
-/// Next session-handle counter (independent of slot reuse so stale handles
-/// never alias a recycled slot).
+/// Session-handle counter, independent of slot reuse so stale handles never alias.
 static HANDLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn session(handle: u32) -> &'static mut Session {
@@ -141,11 +93,7 @@ fn session(handle: u32) -> &'static mut Session {
     unsafe { std::mem::transmute::<&mut Session, &'static mut Session>(slot) }
 }
 
-/// The session `handle` names, or `None` if it names none.
-///
-/// [`session`] panics instead, which is right for every command that cannot
-/// do anything useful without one. A crash report can: see
-/// [`switch_crash_report_json`].
+/// The session `handle` names, or `None`. See [`session`] for the panicking form.
 fn session_opt(handle: u32) -> Option<&'static mut Session> {
     // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
     let slots = unsafe { &mut *SESSIONS.get() };
@@ -165,18 +113,8 @@ fn new_handle(session: Session) -> u32 {
     id
 }
 
-/// The host read, as a `wasm-bindgen` import.
-///
-/// With the `gpu` feature the module is a wasm-bindgen module, and
-/// wasm-bindgen builds the whole import object itself: there is no seam to
-/// hand it an extra `env.host_read` through. So the import moves into its
-/// world too, and the module then declares no `env` at all.
-///
-/// `@host/files` is a bare specifier the bundler resolves (see
-/// `vite.config.ts`), because the generated glue sits in cargo's target
-/// directory and a relative path from there to `web/worker/` is not a thing
-/// worth writing down twice. `ptr` is a `u32` rather than a pointer because
-/// wasm-bindgen has no pointer type; it is the same integer either way.
+/// The host read as a `wasm-bindgen` import, since wasm-bindgen owns the import object.
+/// `@host/files` is resolved by the bundler (see `vite.config.ts`).
 #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
 #[wasm_bindgen::prelude::wasm_bindgen(raw_module = "@host/files")]
 extern "C" {
@@ -194,20 +132,12 @@ unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
 #[cfg(all(target_arch = "wasm32", not(feature = "gpu")))]
 #[link(wasm_import_module = "env")]
 extern "C" {
-    /// Read `len` bytes at `offset` of host file `file`, into wasm memory at
-    /// `ptr`, returning how many were actually read. File 0 is the open
-    /// container; the rest are system data archives the host has added.
-    ///
-    /// This is the only import the module declares. It exists because a
-    /// retail container cannot be handed over as a buffer: it is larger than
-    /// the whole wasm32 address space, so the browser keeps the file where it
-    /// is and serves ranges out of it synchronously (`FileReaderSync`, in the
-    /// worker that owns this module).
+    /// Read `len` bytes at `offset` of host file `file` into wasm memory at `ptr`, returning
+    /// the count read. File 0 is the open container; the rest are system data archives.
     fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32;
 }
 
-/// The same read, for host builds (`cargo test -p switch-wasm`), which have
-/// no JS behind them: it serves whatever [`set_host_container`] installed.
+/// Host-build stand-in serving [`set_host_container`].
 ///
 /// # Safety
 /// `ptr` must be valid for writes of `len` bytes.
@@ -216,8 +146,7 @@ unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
     if file != 0 {
         return 0; // host builds serve only the container
     }
-    // SAFETY: single-threaded wasm; see the `SESSIONS` comment. Host builds
-    // hold the test lock while they use this.
+    // SAFETY: single-threaded; host builds hold the test lock.
     let data = unsafe { &*HOST_CONTAINER.get() };
     if offset >= data.len() as u64 {
         return 0;
@@ -231,25 +160,17 @@ unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
 #[cfg(not(target_arch = "wasm32"))]
 static HOST_CONTAINER: SyncCell<Vec<u8>> = SyncCell::new(Vec::new());
 
-/// Install the bytes host builds serve as "the container the host has open",
-/// so the streaming loader can be exercised without a browser. The browser
-/// build has a real file behind `host_read` and never calls this.
+/// Install the bytes host builds serve as the open container.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn set_host_container(data: Vec<u8>) {
     // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
     unsafe { *HOST_CONTAINER.get() = data };
 }
 
-/// A [`ByteSource`] over the container the host has open.
-///
-/// Stateless and `Copy`: the size is all there is to it, since every read
-/// goes straight back out to the host, which is what lets a session hand
-/// copies of it to the file table, the ticket lookup and the RomFS chain
-/// without any of them borrowing the session.
+/// A [`ByteSource`] over a host file. `Copy`, since every read goes to the host.
 #[derive(Debug, Clone, Copy)]
 struct HostSource {
-    /// Which host file this reads: 0 is the open container, and each system
-    /// data archive the host added has its own.
+    /// 0 is the open container; each system data archive has its own.
     file: u32,
     len: u64,
 }
@@ -266,9 +187,7 @@ impl ByteSource for HostSource {
         let want = ((out.len() as u64).min(self.len - offset)) as usize;
         let mut done = 0;
         while done < want {
-            // The host reports a length in a `u32`; nothing this side asks
-            // for that much at once, but the loop is also what absorbs a
-            // short read at the host's own cache-chunk boundary.
+            // Also absorbs short reads at the host's cache-chunk boundary.
             let ask = (want - done).min(u32::MAX as usize);
             let got = unsafe {
                 host_read(
@@ -298,17 +217,11 @@ impl ByteSource for HostSource {
     }
 }
 
-/// Allocate `len` bytes of wasm linear memory for passing buffers in from JS.
-///
-/// Returns null for a request this target cannot serve, rather than trapping
-/// on the way there: `Layout` rejects any size above `isize::MAX`, 2 GiB on
-/// wasm32, and the `.unwrap()` that used to follow lowered to `unreachable`,
-/// which took the module down with `RuntimeError: unreachable executed` and
-/// nothing to say what had asked for what. Callers must check.
+/// Allocate `len` bytes of linear memory for JS. Returns null for sizes above
+/// `isize::MAX`; callers must check.
 #[no_mangle]
 pub extern "C" fn switch_alloc(len: u32) -> *mut u8 {
-    // The earliest call any host makes, and so the last chance to have a hook
-    // in place before something can panic without one.
+    // The earliest call any host makes.
     install_panic_hook();
     match Layout::from_size_align(len as usize, 1) {
         Ok(layout) => unsafe { alloc(layout) },
@@ -316,8 +229,7 @@ pub extern "C" fn switch_alloc(len: u32) -> *mut u8 {
     }
 }
 
-/// Free a buffer previously returned by `switch_alloc`. A null pointer (an
-/// allocation that was refused) frees nothing.
+/// Free a buffer from `switch_alloc`. Null frees nothing.
 #[no_mangle]
 pub extern "C" fn switch_free(ptr: *mut u8, len: u32) {
     if ptr.is_null() {
@@ -329,32 +241,21 @@ pub extern "C" fn switch_free(ptr: *mut u8, len: u32) {
     unsafe { dealloc(ptr, layout) }
 }
 
-/// Prepare the module: install the panic hook, once.
-///
-/// Worth an export of its own because the hook used to be installed by
-/// [`switch_new`], and anything that panicked before the first session,
-/// module init, a refused allocation, a `last_error` asked for with no
-/// session, trapped with nothing captured at all. A host should call this
-/// immediately after instantiating; [`switch_new`] and [`switch_alloc`] call
-/// it too, so a host that forgets is still covered from its first allocation.
+/// Install the panic hook, once. Call right after instantiating.
 #[no_mangle]
 pub extern "C" fn switch_init() {
     install_panic_hook();
     attach_jit();
 }
 
-/// Let the core run the blocks it emits. A build without the bindings to
-/// compile one has nowhere to put emitted code, and the translator goes on
-/// interpreting what it translates.
+/// Let the core run the blocks it emits, where the build can compile them.
 fn attach_jit() {
     #[cfg(all(feature = "jit", target_arch = "wasm32"))]
     jit::attach();
 }
 
-/// Surface Rust panics to the frontend, they otherwise trap silently as
-/// `unreachable` in wasm, because the release profile aborts on panic and an
-/// abort on wasm is a trap with nothing in it. The hook writes to a static
-/// buffer read back through [`switch_last_error`].
+/// Capture Rust panics into a static buffer for [`switch_last_error`], since they
+/// otherwise trap silently.
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -362,11 +263,7 @@ fn install_panic_hook() {
             let msg = format!("PANIC: {info}");
             // SAFETY: single-threaded wasm; the hook runs once per panic.
             let guard = unsafe { &mut *PANIC_MSG.get() };
-            // Truncation is by character, not by byte: cutting a message in
-            // the middle of a multi-byte character leaves the page's UTF-8
-            // `TextDecoder` a replacement character to end on, and a panic
-            // message is exactly where a path or a title name, the parts
-            // most likely to be non-ASCII: get formatted in.
+            // Truncate by character so the page's UTF-8 decoder gets a whole string.
             let n = floor_char_boundary(&msg, guard.len() - 1);
             guard[..n].copy_from_slice(&msg.as_bytes()[..n]);
             guard[n] = 0;
@@ -375,21 +272,13 @@ fn install_panic_hook() {
     });
 }
 
-/// Drop what the previous session left behind the module.
-///
-/// A session owns a whole console and freeing one takes its state with it,
-/// but the panic flag, the captured panic message and the pending trace sink
-/// are the *module's*, and nothing was clearing them. A crash report taken
-/// after a Reset therefore described a machine that no longer existed: it
-/// still said the run had panicked, `switch_last_error` still answered with
-/// the dead session's panic, and the trace still opened with lines from
-/// before the reset.
+/// Clear module-level state (panic flag, panic message, pending traces) left by
+/// the previous session.
 fn forget_the_last_session() {
     PANICKED.store(false, std::sync::atomic::Ordering::Relaxed);
     // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
     unsafe { &mut *PANIC_MSG.get() }.fill(0);
-    // Traced by the session that is going; folded into the next one's buffer
-    // it would read as something the new console had said.
+    // Drop traces the previous session left.
     let _ = switch_core::trace::take_pending();
 }
 
@@ -397,19 +286,11 @@ fn forget_the_last_session() {
 #[no_mangle]
 pub extern "C" fn switch_new() -> u32 {
     install_panic_hook();
-    // Here as well as in `switch_init`, which a host driving the module
-    // directly has no reason to call: a session that ran without this would
-    // interpret everything it translated and look, from the outside, exactly
-    // like one that simply had no emitter.
+    // Also here for hosts that never call `switch_init`.
     attach_jit();
     forget_the_last_session();
-    // The framebuffer and input pages are pre-mapped by Cpu::new, and the
-    // stack + low-memory shim are provided by bootstrap so libnx-style
-    // homebrew gets the runtime environment the real loader sets up.
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    // Horizon is the only ABI a session ever runs: the frontend loads NROs,
-    // NCAs and NSPs, all of which are real Switch programs.
     new_handle(Session {
         container: None,
         nsp_files: Vec::new(),
@@ -433,13 +314,7 @@ pub extern "C" fn switch_free_session(handle: u32) {
     }
 }
 
-/// How many message bytes fit in a `maxlen`-byte buffer that also has to hold
-/// a terminating NUL.
-///
-/// The NUL comes out of the **buffer**, not out of the message. Writing this
-/// as `len.min(maxlen).saturating_sub(1)` instead took the byte off the
-/// message every time, however much room was left: with 512 bytes free,
-/// "no container is open" reached the console as "no container is ope".
+/// Message bytes that fit in `maxlen` alongside a terminating NUL.
 fn nul_reserved(maxlen: u32) -> usize {
     (maxlen as usize).saturating_sub(1)
 }
@@ -448,7 +323,7 @@ fn nul_reserved(maxlen: u32) -> usize {
 /// Also surfaces any Rust panic captured by the panic hook.
 #[no_mangle]
 pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    // A captured panic takes priority (and doesn't need a valid handle).
+    // A captured panic takes priority and needs no valid handle.
     // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
     let panicked = unsafe { &mut *PANIC_MSG.get() };
     if panicked[0] != 0 {
@@ -478,18 +353,8 @@ pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u
     n as u32
 }
 
-/// Open the `size`-byte container the host has ready: read its file table
-/// and keep it. Returns 0 on success, -1 on error.
-///
-/// Either kind of container, an `.nsp`, or a cartridge image whose
-/// partitions flatten into the same table, so the page hands both here and
-/// everything downstream (the Program NCA scan, the Control NCA, the file
-/// list) is one path.
-///
-/// Nothing is copied into wasm memory: the file stays with the host and is
-/// read through `host_read` from here on. It has to be: a retail container
-/// runs to several gigabytes, which is more than this target can address at
-/// all, let alone allocate in one buffer.
+/// Open the `size`-byte container (NSP or XCI) the host has ready, read through
+/// `host_read`. Returns 0 on success, -1 on error.
 #[no_mangle]
 pub extern "C" fn switch_open_nsp(handle: u32, size: u64) -> i32 {
     let s = session(handle);
@@ -510,8 +375,7 @@ pub extern "C" fn switch_open_nsp(handle: u32, size: u64) -> i32 {
     }
 }
 
-/// Open the `size`-byte container the host has ready as a single standalone
-/// `.nca`: no file table, the whole container is the NCA. Returns 0.
+/// Open the host's container as a single standalone `.nca`. Returns 0.
 #[no_mangle]
 pub extern "C" fn switch_open_nca(handle: u32, size: u64) -> i32 {
     let s = session(handle);
@@ -522,22 +386,8 @@ pub extern "C" fn switch_open_nca(handle: u32, size: u64) -> i32 {
     0
 }
 
-/// Register host file `file` as a system data archive: parse it as an NCA,
-/// take its RomFS, and file it under its title id for
-/// `OpenDataStorageByDataId` to serve.
-///
-/// This is the content a title mounts that is not its own, the system's Mii
-/// and amiibo models, the shared bad-word lists. Each lives in its own NCA on
-/// a console's NAND, so the frontend hands them over one file at a time and
-/// nothing is read until a title actually asks for one.
-///
-/// A host file is not necessarily a file the user picked. The frontend's NAND
-/// keeps its content in the browser's own storage and hands it back as a
-/// handle the host reads ranges out of, which is what lets a whole firmware
-/// dump be re-registered every session for the cost of its headers.
-///
-/// Returns 0 if it was registered, -1 if the file is not a data archive this
-/// build can read.
+/// Register host file `file` as a system data archive for `OpenDataStorageByDataId`.
+/// Returns 0, or -1 if it is not a readable data archive.
 #[no_mangle]
 pub extern "C" fn switch_add_archive(handle: u32, file: u32, size: u64) -> i32 {
     let s = session(handle);
@@ -577,20 +427,9 @@ pub extern "C" fn switch_add_archive(handle: u32, file: u32, size: u64) -> i32 {
     }
 }
 
-/// Register the update container the page is holding as the update for the
-/// title it is about to run.
-///
-/// `file` is a host file index, the same way [`switch_add_archive`] takes
-/// one: an update NSP is as large as any other container and is never read
-/// through. Only its header, its file table and its ticket are read here.
-///
-/// Returns the program id the update patches, which is the *base* title's,
-/// so the page can pair the two containers by it, or 0 if the file is not an
-/// update this build can read, with the reason in `switch_last_error`.
-///
-/// The pairing is only checked when the title boots: the page may add the
-/// update before opening the base container or after, and neither order is
-/// the wrong one.
+/// Register the host's update container for the title about to run. Returns the
+/// base program id it patches, or 0 with the reason in `switch_last_error`.
+/// Pairing is checked at boot.
 #[no_mangle]
 pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
     let s = session(handle);
@@ -613,11 +452,8 @@ pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
                 .into();
         return 0;
     };
-    // An update is ticketed separately from the game it patches, so its own
-    // title key has to come out of its own container.
+    // An update carries its own ticket.
     let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &files, &src);
-    // A game is not an update, and saying so here is what keeps the page from
-    // offering to apply one container to another at random.
     if !nca.is_update() {
         s.last_error =
             "this container is a title in its own right, not an update: its RomFS is its own"
@@ -637,16 +473,7 @@ pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
     program_id
 }
 
-/// The update's own version, the way its NACP spells it for a reader
-/// ("1.0.1"), written into `buf` as UTF-8.
-///
-/// An update ships its own Control NCA, and the version in it is what a
-/// console shows beside the title once the update is installed, so it is what
-/// the page shows too, rather than the raw `v65536` in the container's name.
-///
-/// Empty when the update carries no Control NCA (legal: an update that changes
-/// only data need not restate the title's metadata) or when the session has no
-/// update at all.
+/// The update's NACP display version ("1.0.1") into `buf`, or empty.
 #[no_mangle]
 pub extern "C" fn switch_update_version(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
@@ -665,20 +492,8 @@ pub extern "C" fn switch_update_version(handle: u32, buf: *mut u8, maxlen: u32) 
     write_into(buf, maxlen, version.as_bytes())
 }
 
-/// Register a container of add-on content for the title the page has open.
-///
-/// `file` is a host file index, as [`switch_add_archive`] takes one: nothing
-/// is read but the container's header, its file table and its tickets, and
-/// each archive stays where it is until the title mounts it.
-///
-/// Returns how many pieces of add-on content the container holds, a DLC
-/// package usually carries one, but nothing says it must, or 0 if it holds
-/// none, with the reason in `switch_last_error`.
-///
-/// Which title they belong to is not settled here. An add-on content id is a
-/// base title's plus an index, and a page may add one before opening the game
-/// it goes with; the pairing is checked at boot, against the id the title
-/// actually declares.
+/// Register a container of add-on content. Returns how many pieces it holds, or 0
+/// with the reason in `switch_last_error`. Pairing is checked at boot.
 #[no_mangle]
 pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
     let s = session(handle);
@@ -690,9 +505,7 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
             return 0;
         }
     };
-    // A container with a Program NCA is a game or an update, whatever else it
-    // also holds. Saying so here is what keeps the page from offering to
-    // "add" a title to itself.
+    // A container with a Program NCA is a game or an update, not DLC.
     if switch_core::nca::find_nca_by_type(
         &files,
         &src,
@@ -724,8 +537,7 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
         {
             continue;
         }
-        // Each piece is ticketed on its own: a DLC is bought separately from
-        // the game and from every other piece of it.
+        // Each piece carries its own ticket.
         let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &files, &src);
         if nca.romfs_section_index().is_none() {
             continue;
@@ -746,11 +558,7 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
     found
 }
 
-/// The add-on content this session holds, as JSON: the content id, the index
-/// it is numbered with, and the base title it belongs to.
-///
-/// The page pairs on the base title so it can say which game a piece of
-/// content is waiting for; the title itself settles it at boot.
+/// The session's add-on content as JSON: content id, index and base title.
 #[no_mangle]
 pub extern "C" fn switch_dlc_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
@@ -774,29 +582,18 @@ pub extern "C" fn switch_dlc_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32
     write_into(buf, maxlen, &out)
 }
 
-/// Forget the add-on content this session holds, so the next boot is the
-/// title on its own.
 #[no_mangle]
 pub extern "C" fn switch_clear_dlc(handle: u32) {
     session(handle).dlc.clear();
 }
 
-/// Forget the update this session had, so the next boot is the plain title.
 #[no_mangle]
 pub extern "C" fn switch_clear_update(handle: u32) {
     session(handle).update = None;
 }
 
-/// What a firmware NCA is, without reading the whole thing.
-///
-/// The host has to sort a firmware dump into what it should keep and what it
-/// should not, and a dump is mostly metadata: reading every file to find out
-/// would mean pulling gigabytes through the page. This reads the header out of
-/// the `File` the host still holds and answers from that.
-///
-/// Writes the content type to `kind_out`, 0 program, 1 data archive, 2
-/// anything else, and returns the title id, or 0 if the file is not an NCA
-/// this build can read.
+/// Identify a firmware NCA from its header: writes the content type to `kind_out`
+/// (0 program, 1 data archive, 2 other) and returns the title id, or 0.
 #[no_mangle]
 pub extern "C" fn switch_nand_identify(
     handle: u32,
@@ -826,20 +623,12 @@ pub extern "C" fn switch_nand_identify(
     nca.title_id
 }
 
-/// Boot a Program NCA the host is holding the bytes of, a title installed on
-/// the NAND rather than one opened out of a container the user just picked.
-///
-/// This is what makes an applet launchable: the Home Menu and the Mii editor
-/// ship as bare NCAs inside firmware, so there is no NSP to open them from,
-/// and until the NAND kept them there was nothing to launch.
-///
-/// Returns the entry address, or -1 with the reason in `switch_last_error`.
+/// Boot a Program NCA from the NAND (an applet). Returns the entry address, or -1
+/// with the reason in `switch_last_error`.
 #[no_mangle]
 pub extern "C" fn switch_nand_launch(handle: u32, ptr: *const u8, len: u32) -> i64 {
     let s = session(handle);
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec();
-    // No update: what the NAND holds is system content, and the page pairs
-    // an update with a container the user picked, not with an applet.
     load_and_boot_nca(
         &s.keys,
         &mut s.cpu,
@@ -849,30 +638,20 @@ pub extern "C" fn switch_nand_launch(handle: u32, ptr: *const u8, len: u32) -> i
     )
 }
 
-/// An update container the page has added for the title it is about to run.
-///
-/// An update NSP holds no game: its Program NCA carries the patched modules
-/// in full (so an update runs by booting *its* ExeFS) and a RomFS section
-/// holding only the ranges the update changed, which reads over the base
-/// container's RomFS and nowhere else. Both files stay with the browser; this
-/// is a handle on the second one, exactly as `container` is on the first.
+/// An update container added for the title about to run. Its Program NCA holds
+/// full replacement modules and a RomFS patch over the base's.
 struct Update {
-    /// The update's Program NCA, parsed. Its program id is the *base* title's
-    /// (the `...800` update id lives only on the container's Meta NCA) so
-    /// this is what a base container is paired against.
+    /// Its program id is the base title's, which is what pairing checks.
     nca: Nca,
     src: HostSource,
     /// Where the Program NCA sits inside the update container.
     program: (u64, u64),
-    /// The update container's file table, kept for its Control NCA, an
-    /// update states its own version, and that is what the page shows.
+    /// Kept for the update's Control NCA.
     files: Vec<switch_core::nsp::Pfs0File>,
 }
 
 impl Update {
-    /// A fresh window over the update's Program NCA. Each reader wants its
-    /// own, and a [`HostSource`] is a handle rather than a buffer, so this
-    /// costs nothing.
+    /// A fresh window over the update's Program NCA.
     fn program_window(&self) -> Result<Window<HostSource>, switch_core::Error> {
         Window::new(
             self.src,
@@ -883,14 +662,7 @@ impl Update {
     }
 }
 
-/// One piece of add-on content the page has added for the title it is about
-/// to run.
-///
-/// A DLC container is nothing like an update: no Program NCA, no patch, no
-/// base to read over. It is one Data NCA with an ordinary RomFS, whose title
-/// id is the title's add-on base plus an index, and a title mounts it by
-/// that id exactly as it mounts a system data archive. All `aoc:u` adds is
-/// telling the title the index exists.
+/// One add-on content Data NCA, mounted by its title id like a system data archive.
 #[derive(Debug, Clone, Copy)]
 struct Dlc {
     content_id: u64,
@@ -905,16 +677,13 @@ impl Dlc {
     }
 }
 
-/// What the page has added beside the container being launched.
 #[derive(Default, Clone, Copy)]
 struct Added<'a> {
     update: Option<&'a Update>,
     dlc: &'a [Dlc],
 }
 
-/// Whether a title id is an add-on content id: a base title's, plus an index.
-/// The add-on offset is 0x1000 and the index is 11 bits, so `...1001` is a
-/// title's DLC #1 and `...0800` (an update) is not add-on content at all.
+/// Whether a title id is add-on content: the base plus 0x1000 and an 11-bit index.
 fn is_add_on_content_id(title_id: u64) -> bool {
     (0x1000..0x1800).contains(&(title_id & 0x1FFF))
 }
@@ -972,9 +741,8 @@ pub extern "C" fn switch_nsp_files_json(handle: u32, buf: *mut u8, maxlen: u32) 
     write_into(buf, maxlen, &out)
 }
 
-/// Read a slice of NSP file `index` starting at `file_offset` into `buf`
-/// (clamped to the file). Used to grab just an NCA header rather than the
-/// whole (potentially many-gigabyte) payload. Returns bytes copied or -1.
+/// Read a slice of NSP file `index` from `file_offset` into `buf`. Returns bytes
+/// copied or -1.
 #[no_mangle]
 pub extern "C" fn switch_read_file(
     handle: u32,
@@ -991,8 +759,7 @@ pub extern "C" fn switch_read_file(
         return 0;
     }
     let n = (maxlen as u64).min(file.len() - file_offset) as usize;
-    // SAFETY: JS allocated `maxlen` bytes at `buf` with `switch_alloc`, and
-    // `n` is no larger.
+    // SAFETY: JS allocated `maxlen` bytes at `buf`, and `n` is no larger.
     let out = unsafe { std::slice::from_raw_parts_mut(buf, n) };
     match file.read_at(file_offset, out) {
         Ok(got) => got as i64,
@@ -1003,8 +770,7 @@ pub extern "C" fn switch_read_file(
     }
 }
 
-/// Parse an NCA from `ptr`/`len` and return a JSON summary. If the session has
-/// keys loaded and the header is encrypted, it is decrypted transparently.
+/// Parse an NCA from `ptr`/`len` and return a JSON summary, decrypting with loaded keys.
 #[no_mangle]
 pub extern "C" fn switch_parse_nca(
     handle: u32,
@@ -1044,11 +810,7 @@ pub extern "C" fn switch_parse_nca(
                 out.extend_from_slice(b",\"size\":");
                 out.extend_from_slice(sec.media_size.to_string().as_bytes());
                 out.extend_from_slice(b",\"fs_type\":\"");
-                // The section entry itself carries no filesystem-type byte;
-                // that only lives in the (separately encrypted) FS header,
-                // which needs the full NCA_FULL_HEADER_SIZE-byte header to
-                // decrypt. The lightweight "inspect this NCA" path may only
-                // have the base header, in which case this is unknown.
+                // The filesystem type lives in the FS header, which needs the full header to decrypt.
                 let fs_type = match nca.fs_headers.get(i).and_then(|o| o.as_ref()) {
                     Some(fs) if sec.media_size > 0 => {
                         if fs.fs_type == 1 {
@@ -1074,15 +836,7 @@ pub extern "C" fn switch_parse_nca(
     write_into(buf, maxlen, &out)
 }
 
-/// Cache a title's control data on the session, and tell the CPU what the
-/// NACP inside it says, the save-data figures the `IApplicationFunctions`
-/// commands report back, and the id its add-on content is numbered from.
-///
-/// The NACP is the only place those exist, and it is in the Control NCA
-/// rather than the Program one, so a title launched without the control
-/// having been read gets the CPU's defaults instead. Reading it is what the
-/// page already does to show the title's name and icon, which is why this is
-/// the point they arrive.
+/// Cache control data and pass its NACP figures (save data, add-on base id) to the CPU.
 fn cache_control(s: &mut Session, control: switch_core::control::Control) {
     s.cpu
         .set_save_data_quota(switch_core::cpu::SaveDataQuota::from(&control.nacp));
@@ -1091,14 +845,8 @@ fn cache_control(s: &mut Session, control: switch_core::control::Control) {
     s.control = Some(control);
 }
 
-/// Read the title's control data (name, publisher, version and icon) from
-/// the Control NCA in the open container and cache it in the session, for
-/// `switch_control_json` and `switch_control_icon` to read back.
-///
-/// Returns 0 on success, -1 when the container has no readable Control NCA.
-/// That includes having no `prod.keys` loaded: an NCA's content type is
-/// inside its encrypted header, so without the header key none of the
-/// container's NCAs can even be identified.
+/// Read and cache the open container's Control NCA. Returns 0, or -1 when it has
+/// none readable (including when no `prod.keys` are loaded).
 #[no_mangle]
 pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
     let s = session(handle);
@@ -1113,9 +861,6 @@ pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
                 .into();
         return -1;
     };
-    // Title-key crypto: as when booting the Program NCA, the section key
-    // isn't in the header's own key area and the ticket that unlocks it
-    // ships next to the content.
     let _ =
         switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &s.nsp_files, &container);
     let Some(file) = nsp_file_source(s, index as u32) else {
@@ -1134,8 +879,7 @@ pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
     }
 }
 
-/// Same, for a container opened as a single standalone Control NCA
-/// (`switch_open_nca`) rather than as a container holding one.
+/// Same, for a container opened as a standalone Control NCA.
 #[no_mangle]
 pub extern "C" fn switch_load_control_from_nca(handle: u32) -> i32 {
     let s = session(handle);
@@ -1156,9 +900,7 @@ pub extern "C" fn switch_load_control_from_nca(handle: u32) -> i32 {
     }
 }
 
-/// The cached control data as JSON, or `{}` when none has been read. The
-/// icon itself comes from `switch_control_icon`; `icon_size` here is the
-/// buffer that needs.
+/// The cached control data as JSON, or `{}`. `icon_size` sizes `switch_control_icon`'s buffer.
 #[no_mangle]
 pub extern "C" fn switch_control_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
@@ -1236,8 +978,7 @@ pub extern "C" fn switch_control_json(handle: u32, buf: *mut u8, maxlen: u32) ->
     write_into(buf, maxlen, &out)
 }
 
-/// Copy the cached title icon into `buf`. Returns bytes copied, or -1 when
-/// no control data has been read.
+/// Copy the cached icon into `buf`. Returns bytes copied, or -1.
 #[no_mangle]
 pub extern "C" fn switch_control_icon(handle: u32, buf: *mut u8, maxlen: u32) -> i64 {
     let s = session(handle);
@@ -1293,11 +1034,7 @@ pub extern "C" fn switch_load_nro(handle: u32, ptr: *const u8, len: u32) -> i64 
     s.control = None;
     match s.cpu.boot_homebrew(data) {
         Ok(loaded) => {
-            // The NRO's own icon and name, for `switch_control_json` and
-            // `switch_control_icon` to answer with. Cached for display only,
-            // not through `cache_control`: HBL runs homebrew inside another
-            // title's process, so its NACP never governs the save data, and
-            // the figures in one are `nacptool`'s boilerplate anyway.
+            // Cached for display only: homebrew runs in another title's process.
             s.control = switch_core::control::Control::from_nro(data);
             s.cpu.out.clear();
             s.cpu.trace.clear();
@@ -1312,11 +1049,7 @@ pub extern "C" fn switch_load_nro(handle: u32, ptr: *const u8, len: u32) -> i64 
     }
 }
 
-/// Collect a title's ExeFS modules in Nintendo's required load order,
-/// `rtld`, `main`, `subsdk0..subsdk9`, `sdk`, skipping whichever of those a
-/// title doesn't have. `main` is required by every real title; the rest are
-/// common but not guaranteed (a title with no imports from `sdk` might omit
-/// it, for instance).
+/// ExeFS modules in load order (`rtld`, `main`, `subsdk0..9`, `sdk`), skipping absent ones.
 fn collect_modules<'a>(pfs0: &Pfs0, exefs: &'a [u8]) -> Vec<(&'static str, &'a [u8])> {
     const MODULE_ORDER: &[&str] = &[
         "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5",
@@ -1333,22 +1066,8 @@ fn collect_modules<'a>(pfs0: &Pfs0, exefs: &'a [u8]) -> Vec<(&'static str, &'a [
         .collect()
 }
 
-/// Shared by `switch_load_nca` and `switch_load_nca_from_nsp`: decrypt a
-/// Program NCA's ExeFS from `nca_src` (the whole, still-encrypted NCA),
-/// extract `main` and boot it. Returns entry address or -1.
-///
-/// `nca_src` is a source rather than a buffer, and is consumed: the title's
-/// RomFS outlives this call as a decrypting view of it, so the container has
-/// to stay readable for as long as the title runs. Nothing but the ExeFS is
-/// ever held in memory.
-///
-/// `added` is what the page put beside the container: an update, whose modules
-/// and patched RomFS replace this one's, and add-on content, which mounts
-/// alongside it once the title id it is numbered against is known.
-///
-/// Takes `keys`/`cpu`/`last_error` as separate borrows rather than `&mut
-/// Session` so the caller can keep reading the session's file table while
-/// this holds `&mut Cpu`.
+/// Decrypt a Program NCA's ExeFS from `nca_src`, load it and boot. Returns entry or -1.
+/// `nca_src` stays alive as the title's RomFS source. `added` holds the update and DLC.
 fn load_and_boot_nca<S: ByteSource + 'static>(
     keys: &switch_core::keys::KeySet,
     cpu: &mut Cpu,
@@ -1363,9 +1082,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
             return -1;
         }
     };
-    // An update whose title id is not this one is a mistake worth stopping
-    // for: applying it would compose two unrelated RomFS images, and ignoring
-    // it would silently launch a version the page said it was not launching.
+    // Refuse an update for a different title.
     let update = match added.update {
         Some(u) if u.nca.program_id == nca.program_id => Some(u),
         Some(u) => {
@@ -1377,8 +1094,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
         }
         None => None,
     };
-    // What boots is the update's Program NCA when there is one: an update's
-    // ExeFS is a complete replacement set of modules, not a delta.
+    // An update's ExeFS is a complete replacement set of modules.
     let program = update.map_or(&nca, |u| &u.nca);
     let exefs_index = match program.exefs_section_index() {
         Some(i) => i,
@@ -1409,10 +1125,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
             ),
         );
     }
-    // Say whether the bytes about to be executed were checked, not just that
-    // they decrypted: the master hash only vouches for the section's hash
-    // table, and a fault inside a title's own crt0 is worth chasing in the
-    // title only once the image it ran on is known to be intact.
+    // Report whether the ExeFS hash coverage was checked.
     match program.pfs0_hash_coverage(exefs_index) {
         Some((block, blocks)) => cpu.diagnostic(
             Level::Info,
@@ -1439,14 +1152,11 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
             return -1;
         }
     };
-    // `pm` reports this, and a system applet derives its own `AppletId` from
-    // it, without it every title looks like the same default program.
+    // Reported by `pm`; applets derive their `AppletId` from it.
     cpu.set_program_id(program.program_id);
 
     let modules = collect_modules(&pfs0, &exefs);
-    // Everything the ExeFS holds, next to what was actually loaded from it. A
-    // title whose `sdk` or `subsdk0` were silently left behind aborts in its
-    // own init looking exactly like a title that hit a missing service.
+    // Report what the ExeFS holds next to what was loaded.
     cpu.diagnostic(
         Level::Info,
         &format!(
@@ -1468,15 +1178,9 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
         return -1;
     }
 
-    // RomFS is optional (Meta/Control-only content, or a title with no
-    // assets of its own, has none) and a failure to decrypt it shouldn't
-    // block booting: the title just won't have its asset storage mounted.
-    // The source is handed to the CPU rather than decrypted up front: a
-    // retail RomFS is the entire game, and the guest reads it a range at a
-    // time through `IStorage` anyway.
+    // RomFS is optional and failures do not block booting; it is read by range.
     match update {
-        // An update's own RomFS holds only what it changed, indexed against
-        // the base game's: the two are only readable together.
+        // An update's RomFS is a patch, readable only over the base's.
         Some(u) => {
             let patched = u.program_window().and_then(|window| {
                 switch_core::bktr::patched_romfs_source(&u.nca, window, &nca, nca_src, keys)
@@ -1499,11 +1203,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
         }
     }
 
-    // The address space this title gets, chosen by its own manifest: a title
-    // declaring no system resource keeps the plain heap and the larger total
-    // memory, one declaring a system resource gets virtual address memory and
-    // the layout that pays for it. Must precede `boot_retail_program`,
-    // `nn::init` reads the resulting figures as soon as it runs.
+    // The address space layout from the NPDM system resource size; must precede the boot.
     let system_resource = switch_core::npdm::Npdm::system_resource_size_of(&pfs0, &exefs);
     cpu.diagnostic(
         Level::Info,
@@ -1518,23 +1218,20 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     );
     cpu.set_system_resource_size(system_resource);
 
-    // The main thread's priority, which the scheduler weighs it by against
-    // the threads it creates.
+    // Main thread priority.
     if let Some(priority) = switch_core::npdm::Npdm::main_thread_priority_of(&pfs0, &exefs) {
         cpu.set_main_thread_priority(priority);
     }
-    // And its core, which the title reads back to pick per-core state.
+    // Main thread core.
     if let Some(core) = switch_core::npdm::Npdm::main_thread_core_of(&pfs0, &exefs) {
         cpu.set_main_thread_core(core);
     }
-    // And the cores it may use at all: a system applet's are not a game's.
+    // Allowed cores.
     if let Some(mask) = switch_core::npdm::Npdm::core_mask_of(&pfs0, &exefs) {
         cpu.set_process_core_mask(mask);
     }
 
-    // And which instruction set it runs, from bit 0 of the same manifest's
-    // flags. Also before the boot: the entry ABI puts the return trampoline in
-    // a different register in each state.
+    // 32- or 64-bit, from the NPDM flags; the entry ABI differs.
     if !switch_core::npdm::Npdm::is_64_bit_of(&pfs0, &exefs) {
         cpu.diagnostic(
             Level::Info,
@@ -1545,10 +1242,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
 
     match cpu.boot_retail_program(&modules) {
         Ok(loaded) => {
-            // After the modules, not before: booting clears the diagnostic
-            // buffer, and what mounted is worth saying where it can be read.
-            // Nothing has run yet, so nothing can have asked for content that
-            // is not there.
+            // After the modules: booting clears the diagnostic buffer.
             mount_add_on_content(cpu, keys, added.dlc);
             last_error.clear();
             loaded[0].entry as i64
@@ -1560,12 +1254,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     }
 }
 
-/// Give the title the add-on content the page added for it.
-///
-/// Called once the program id is set, because that, with the NACP's own
-/// override, which arrives with the Control NCA: is what an add-on content
-/// id is numbered against. Content belonging to another title is reported and
-/// skipped rather than mounted under an id nothing will ask for.
+/// Mount the added DLC whose ids belong to this title; report and skip the rest.
 fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[Dlc]) {
     for entry in dlc {
         let romfs = entry.window().and_then(|window| {
@@ -1603,10 +1292,8 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
     }
 }
 
-/// Decrypt the open container as a standalone Program NCA (using whatever
-/// keys are loaded), extract its ExeFS `main` executable and boot it. Returns
-/// entry address or -1, check `switch_last_error` either way, since the
-/// entry can legitimately be 0 for some NSO layouts.
+/// Boot the open container as a standalone Program NCA. Returns entry or -1;
+/// check `switch_last_error`, since 0 can be a valid entry.
 #[no_mangle]
 pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
     let s = session(handle);
@@ -1620,15 +1307,8 @@ pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
     load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, container, added)
 }
 
-/// The index of the Program NCA in the open container, or -1 if it has none.
-///
-/// This is what lets a container be booted without being read through first:
-/// every file in an NSP is named after its own hash, so which one holds the
-/// title's executable is visible only in each NCA's (encrypted) header. -1
-/// therefore also covers having no `prod.keys` loaded, and `switch_last_error`
-/// says which of the two it was.
-///
-/// Hand the answer straight back to `switch_load_nca_from_nsp`.
+/// The index of the Program NCA in the open container, or -1 (including when no
+/// `prod.keys` are loaded). Pass it to `switch_load_nca_from_nsp`.
 #[no_mangle]
 pub extern "C" fn switch_program_nca_index(handle: u32) -> i32 {
     let s = session(handle);
@@ -1655,10 +1335,8 @@ pub extern "C" fn switch_program_nca_index(handle: u32) -> i32 {
     }
 }
 
-/// Decrypt NSP file `index` as a Program NCA (using whatever keys are
-/// loaded), extract its ExeFS `main` executable and boot it. Returns entry
-/// address or -1: check `switch_last_error` either way, since the entry can
-/// legitimately be 0 for some NSO layouts.
+/// Boot NSP file `index` as a Program NCA. Returns entry or -1; check
+/// `switch_last_error`, since 0 can be a valid entry.
 #[no_mangle]
 pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
     let s = session(handle);
@@ -1669,10 +1347,7 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
         return -1;
     };
 
-    // Title-key crypto: the key doesn't live in the NCA header's own key
-    // area, and scene NSP releases almost always bundle the ticket that
-    // unlocks it right next to the content, try that before falling back to
-    // whatever an external title.keys provided.
+    // Try the bundled ticket before external title.keys.
     if let Ok(nca) = Nca::parse_source(&nca_src, Some(&s.keys)) {
         let _ = switch_core::ticket::load_bundled_title_key(
             &mut s.keys,
@@ -1694,8 +1369,7 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
 pub extern "C" fn switch_load_elf(handle: u32, ptr: *const u8, len: u32) -> i64 {
     let s = session(handle);
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    // An ELF carries no control data, and what is left of the last title's
-    // would be reported as this one's.
+    // An ELF carries no control data.
     s.control = None;
     match load_elf(&mut s.cpu.mem, data) {
         Ok(elf) => {
@@ -1714,29 +1388,19 @@ pub extern "C" fn switch_load_elf(handle: u32, ptr: *const u8, len: u32) -> i64 
     }
 }
 
-/// Reset the integer registers for a clean boot and pass the loader's entry
-/// convention. The libnx "HOME BREW" crt0 detects the entry kind from its
-/// arguments: `x0 = env block ptr` with `x1 = UINT64_MAX` selects the NRO /
-/// homebrew-ABI path (which parses the env and runs `main`), while `x0 = 0`
-/// selects the NSO path (plain boot). Non-self-relocating NROs (e.g. sdl)
-/// keep the plain `x0 = 0, x1 = 1` convention.
+/// Reset the integer registers and set the entry convention: `x0 = env`,
+/// `x1 = UINT64_MAX` for the homebrew ABI, `x0 = 0` for NSO, `x0 = 0, x1 = 1` otherwise.
 fn boot_entry_regs(cpu: &mut Cpu, env_addr: u32) {
     for i in 0..=30u8 {
         cpu.set_reg(i, 0);
     }
     cpu.set_reg(0, env_addr as u64);
     cpu.set_reg(1, if env_addr != 0 { u64::MAX } else { 1 });
-    // Point LR at the exit trampoline so a direct-entered `main` that returns
-    // cleanly exits instead of branching to NULL (pc=0).
+    // LR to the exit trampoline, so a returning `main` exits.
     cpu.set_reg(30, switch_core::cpu::SELF_RETURN_TRAMPOLINE as u64);
 }
 
-/// Enable/disable the block translator (see `switch_core::cpu::jit`).
-///
-/// On by default. The host-side switch reads `SWITCH_NO_JIT` from the
-/// environment, which a browser does not have, so this is the only way a page
-/// can fall back to the plain interpreter, worth having when a title
-/// misbehaves and the question is whether translation is why.
+/// Enable/disable the block translator; the browser has no `SWITCH_NO_JIT`.
 #[no_mangle]
 pub extern "C" fn switch_set_jit(handle: u32, enabled: u32) {
     session(handle).cpu.set_jit_enabled(enabled != 0);
@@ -1767,25 +1431,11 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
     write_into(buf, maxlen, json.as_bytes())
 }
 
-/// What the installed GPU backend has been doing, as JSON.
-///
-/// `{}` while the software rasterizer has the frame: it never declines a
-/// draw and has nothing to report. A device backend answers its draw and
-/// fallback counts, every distinct reason a draw fell back, whether the
-/// software-frame latch has tripped, and where its time went.
-///
-/// Asked for rather than printed because a browser is where these matter and
-/// the browser is exactly where they could not be had: `eprintln!` goes
-/// nowhere, and the env vars that gate them natively are always empty on
-/// wasm32.
+/// The GPU backend's report as JSON, or `{}` for the software rasterizer.
 #[no_mangle]
 pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
-    // The frame count comes from here rather than the backend, which has no
-    // idea what a frame is: it sees clears and draws. Without it every
-    // reading has to be normalised by draws, and a flush costs what a frame
-    // costs however many draws went into it: a frame that only clears the
-    // screen reads the whole target back exactly like one that draws it.
+    // The frame count comes from the core; the backend only sees clears and draws.
     let frames = s.cpu.nv.gpu.frames;
     let json = s.cpu.nv.gpu.renderer_report();
     let json = match json.strip_suffix('}') {
@@ -1796,8 +1446,6 @@ pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32)
 }
 
 /// The `"audio"` member of `switch_activity_json`, with its leading comma.
-/// Sample counts run from the start of the session and the device counts
-/// from when each was opened; the page reports the differences.
 fn audio_activity_json(audio: &switch_core::cpu::AudioActivity) -> String {
     let outputs: Vec<String> = audio
         .outputs
@@ -1855,19 +1503,9 @@ fn audio_activity_json(audio: &switch_core::cpu::AudioActivity) -> String {
     )
 }
 
-/// What the session has been doing, as JSON: the counts the worker logs to
-/// the page's console once a second.
-///
-/// The GPU counts, `failures` and the counts in `audio` run from boot (or,
-/// for an audio device, from when it was opened), so the worker reports the
-/// difference between two readings. `gpu` (draws, clears, copies, blits and
-/// presents by surface), `threads` (what each ran since the last reading and
-/// what it waits on), `threadLog` (threads created, started, paused and
-/// ended), `files` (reads and writes by file) and `journal` (path
-/// operations) are taken instead: each appears in exactly one answer. Both are fitted to `maxlen` rather than truncated by
-/// [`write_into`], since an answer cut mid-string would lose everything in it
-/// when the page failed to parse it; what does not fit is counted in
-/// `gpuDropped`, `filesDropped` and `dropped` instead.
+/// The session's activity counters as JSON. Counters run from boot (the worker diffs
+/// them); the lists are taken, fitted to `maxlen`, with overflow counted in
+/// `gpuDropped`, `filesDropped` and `dropped`.
 #[no_mangle]
 pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let cpu = &mut session(handle).cpu;
@@ -1887,13 +1525,12 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
         cpu.fs_activity.failures,
     )
     .into_bytes();
-    // A few devices at most, so ahead of the lists the budget trims.
     out.extend_from_slice(audio_activity_json(&cpu.audio_activity()).as_bytes());
     let (supported, presented) = cpu.npad_styles();
     out.extend_from_slice(
         format!(",\"input\":{{\"supported\":{supported},\"presented\":{presented}}}").as_bytes(),
     );
-    // Room for the closing fields, whose width is at most five u64s' digits.
+    // Room for the closing fields.
     let budget = (maxlen as usize).saturating_sub(200);
     // Entries of the problem lists below that did not fit, summed.
     let mut problems_dropped = 0u64;
@@ -2084,10 +1721,7 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
     write_into(buf, maxlen, &out)
 }
 
-/// Whether the installed GPU backend has lost its device and wants replacing.
-///
-/// Cheap by design: the worker asks after every slice, and a JSON report
-/// parsed that often would cost more than the answer is worth.
+/// Whether the GPU backend has lost its device. Cheap; polled every slice.
 #[no_mangle]
 pub extern "C" fn switch_gpu_lost(handle: u32) -> u32 {
     let s = session(handle);
@@ -2104,14 +1738,11 @@ pub extern "C" fn switch_set_trace(handle: u32, enabled: u32) {
     }
 }
 
-/// Copy accumulated debug trace (disassembly + fault context) into `buf` and
-/// clear it. Fault context is always recorded, even with tracing disabled.
+/// Copy the debug trace (disassembly and fault context) into `buf` and clear it.
 #[no_mangle]
 pub extern "C" fn switch_drain_trace(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
-    // The rasterizer, the shader translator and the texture decoder have no
-    // `Cpu` to write to and trace into a sink instead. This is where it joins
-    // the stream the page reads.
+    // Fold in traces from components with no `Cpu`.
     s.cpu.absorb_traces();
     let n = s.cpu.trace.len().min(maxlen as usize);
     if n > 0 && !buf.is_null() {
@@ -2131,15 +1762,7 @@ pub extern "C" fn switch_dump_regs(handle: u32, buf: *mut u8, maxlen: u32) -> u3
     write_into(buf, maxlen, dump.as_bytes())
 }
 
-/// One line per guest thread: which is running, what each is blocked on, and
-/// where it stopped.
-///
-/// The counterpart to [`switch_backtrace_json`] for a stall that is about
-/// *scheduling* rather than about one call stack. A thread spinning without
-/// ever reaching a blocking syscall looks exactly like a busy program until
-/// you can see that every other thread is Runnable and none has moved, and
-/// until now that could only be seen from the command line, on the one
-/// failure a browser user hits most.
+/// One line per guest thread: state, what it is blocked on, and where it stopped.
 #[no_mangle]
 pub extern "C" fn switch_thread_dump(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
@@ -2166,40 +1789,30 @@ fn backtrace_json(cpu: &Cpu, depth: usize) -> String {
     format!("[{}]", frames.join(","))
 }
 
-/// Make every blocked thread runnable and report how many that was.
-///
-/// A debugging lever, not a fix: guests re-check their predicates in a loop,
-/// so a spurious wake degrades to a spin rather than a hang, and this answers
-/// "is this process idle because a worker it parked was never woken".
+/// Make every blocked thread runnable and return the count. A debugging lever.
 #[no_mangle]
 pub extern "C" fn switch_wake_blocked(handle: u32) -> u32 {
     session(handle).cpu.wake_all_blocked() as u32
 }
 
-/// Make every thread the guest created but never started runnable, and report
-/// how many that was. The other half of [`switch_wake_blocked`]: it answers
-/// "is this process idle because a thread it made never ran".
+/// Make every created-but-never-started thread runnable and return the count.
 #[no_mangle]
 pub extern "C" fn switch_start_created_threads(handle: u32) -> u32 {
     session(handle).cpu.start_created_threads() as u32
 }
 
-/// Turn every diagnostic channel on (nonzero) or off. The page's log level
-/// decides: channel lines are debug output.
+/// Turn every diagnostic channel on (nonzero) or off.
 #[no_mangle]
 pub extern "C" fn switch_set_trace_channels(on: u32) {
     switch_core::trace::set_all(on != 0);
 }
 
-/// What this build is, so a report can be read against the code that produced
-/// it.
 #[no_mangle]
 pub extern "C" fn switch_version(buf: *mut u8, maxlen: u32) -> u32 {
     write_into(buf, maxlen, build_version().as_bytes())
 }
 
-/// `<crate version>+<commit>`, or just the crate version where the build had
-/// no git to ask.
+/// `<crate version>+<commit>`, or just the crate version.
 fn build_version() -> String {
     let commit = env!("SWITCH_BUILD_COMMIT");
     if commit.is_empty() {
@@ -2209,10 +1822,8 @@ fn build_version() -> String {
     }
 }
 
-/// Every service command this run asked for and did not get, as JSON.
-///
-/// Two lists, because they are different claims: `unimplemented` was refused,
-/// `stubbed` was answered with nothing behind the answer.
+/// Service commands this run asked for and did not get, as JSON: `unimplemented`
+/// (refused) and `stubbed` (answered with nothing behind it).
 #[no_mangle]
 pub extern "C" fn switch_unimplemented_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
@@ -2241,19 +1852,8 @@ fn ipc_list_json(pairs: &[(String, Option<u32>)], out: &mut Vec<u8>) {
     out.push(b']');
 }
 
-/// Everything worth putting in a bug report about this run, as JSON.
-///
-/// A report used to mean whatever the person filing it had thought to keep:
-/// the page had a log they might have cleared and a "Copy all" button, and
-/// every other piece, which title, which backend, where the pc was, what the
-/// guest had asked for and not been given: had to be asked for by hand,
-/// through a different button each, *before* the state that made them worth
-/// reading was gone. Every one of those pieces already existed. This is the
-/// bundling.
-///
-/// `panicked` is the field that decides how the rest reads: a fault or
-/// `fatal:u` stopped the guest, a panic stopped the emulator, and the second
-/// is a bug here whatever the guest was doing.
+/// Everything worth putting in a bug report about this run, as JSON. `panicked`
+/// distinguishes an emulator bug from a guest fault.
 #[no_mangle]
 pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let mut out = Vec::with_capacity(16 * 1024);
@@ -2269,10 +1869,7 @@ pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u3
     out.extend_from_slice(b",\"traceMask\":");
     out.extend_from_slice(switch_core::trace::mask().to_string().as_bytes());
 
-    // Deliberately not `session`, which panics on a handle whose session has
-    // gone: a report is most wanted exactly when something has gone wrong,
-    // and one that cannot be produced without a live session is missing on
-    // the runs that need it.
+    // Not `session`, which panics on a dead handle.
     let Some(s) = session_opt(handle) else {
         out.extend_from_slice(b",\"session\":null}");
         return write_into(buf, maxlen, &out);
@@ -2300,8 +1897,7 @@ pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u3
             json_escape(&control.nacp.display_version, &mut out);
             out.extend_from_slice(b"\"}");
         }
-        // A homebrew NRO has no Control NCA, so the program id the loader
-        // settled on is all there is to name the run by.
+        // A homebrew NRO has no Control NCA; name it by program id.
         None => {
             out.extend_from_slice(format!("{{\"id\":\"{:016x}\"}}", s.cpu.program_id()).as_bytes());
         }
@@ -2366,9 +1962,7 @@ pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u3
     out.extend_from_slice(b",\"stubbed\":");
     ipc_list_json(&s.cpu.stubbed_ipc(), &mut out);
 
-    // Last, and taken rather than copied: the trace is the largest field by
-    // far, so a report that has to be truncated loses the trail before it
-    // loses anything that would have said which run it came from.
+    // Last, so truncation loses the trace first.
     s.cpu.absorb_traces();
     out.extend_from_slice(b",\"trace\":\"");
     json_escape(&String::from_utf8_lossy(&s.cpu.trace), &mut out);
@@ -2376,14 +1970,7 @@ pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u3
     write_into(buf, maxlen, &out)
 }
 
-/// What the guest last asked the rumble motors to do, packed as
-/// `(weak << 16) | strong` with each field 0..=1000.
-///
-/// Switch rumble drives two linear resonant actuators independently, which is
-/// the same shape the browser's Gamepad API exposes as `dual-rumble`: the low
-/// band maps onto `strongMagnitude` and the high band onto `weakMagnitude`.
-/// Packed into one word so the page can poll it alongside input in a single
-/// call.
+/// The last rumble request, packed as `(weak << 16) | strong`, each 0..=1000.
 #[no_mangle]
 pub extern "C" fn switch_vibration(handle: u32) -> u32 {
     let s = session(handle);
@@ -2392,9 +1979,8 @@ pub extern "C" fn switch_vibration(handle: u32) -> u32 {
     (scale(high) << 16) | scale(low)
 }
 
-/// The format of the PCM `switch_audio_pull` returns, packed as
-/// `(channels << 24) | sample_rate`. Zero until the guest opens an audio
-/// device: before that there is nothing to play and no rate to play it at.
+/// The PCM format `switch_audio_pull` returns, packed as `(channels << 24) | sample_rate`.
+/// Zero until the guest opens an audio device.
 #[no_mangle]
 pub extern "C" fn switch_audio_format(handle: u32) -> u32 {
     let (rate, channels) = session(handle).cpu.audio_format();
@@ -2404,8 +1990,7 @@ pub extern "C" fn switch_audio_format(handle: u32) -> u32 {
     (channels << 24) | (rate & 0x00ff_ffff)
 }
 
-/// Move up to `max_samples` interleaved 16-bit samples into `buf`, returning
-/// how many were written. What is pulled is gone from the queue.
+/// Move up to `max_samples` interleaved 16-bit samples into `buf`, returning the count.
 #[no_mangle]
 pub extern "C" fn switch_audio_pull(handle: u32, buf: *mut u8, max_samples: u32) -> u32 {
     let s = session(handle);
@@ -2418,9 +2003,8 @@ pub extern "C" fn switch_audio_pull(handle: u32, buf: *mut u8, max_samples: u32)
     n as u32
 }
 
-/// Framebuffer geometry. Once the guest has presented a frame through the
-/// display's buffer queue, this is the real console resolution (usually
-/// 1280x720); before that it is the memory-mapped demo framebuffer.
+/// Framebuffer geometry: the presented resolution, or the demo framebuffer's before
+/// the first present.
 #[no_mangle]
 pub extern "C" fn switch_fb_width(handle: u32) -> u32 {
     let s = session(handle);
@@ -2441,23 +2025,14 @@ pub extern "C" fn switch_fb_height(handle: u32) -> u32 {
     }
 }
 
-/// Number of frames the guest has presented. JS polls this to know when the
-/// screen changed and what resolution to size the canvas to.
+/// Number of frames the guest has presented.
 #[no_mangle]
 pub extern "C" fn switch_frame_count(handle: u32) -> u32 {
     session(handle).cpu.nv.gpu.frames as u32
 }
 
-/// Copy the current screen (RGBA8888) into `buf`. Returns bytes copied.
-///
-/// This is the scanned-out frame the guest last handed to the display, or the
-/// memory-mapped demo framebuffer when nothing has been presented yet.
-///
-/// A presented frame is always opaque. Scan-out ignores the surface's alpha,
-/// but titles leave arbitrary values there (Just Dance 2019 presents alpha 0),
-/// and Chromium's GPU canvas on macOS multiplies colour by it in
-/// `putImageData`, even on an `alpha: false` context. That dims the frame on
-/// screen while the canvas's own copy still looks right.
+/// Copy the current screen (RGBA8888) into `buf`. Returns bytes copied. Alpha is
+/// forced opaque, as scan-out ignores it.
 #[no_mangle]
 pub extern "C" fn switch_fb_snapshot(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
@@ -2493,15 +2068,8 @@ pub extern "C" fn switch_write_mem(handle: u32, addr: u32, ptr: *const u8, len: 
     }
 }
 
-// The emulated SD card.
-//
-// `Vfs` lives in memory for the life of a session, so on its own nothing the
-// guest writes survives a reload. These are the two directions a host needs to
-// back it with a real store: put files on the card before booting, and find
-// out what the guest changed so only that has to be written back.
-//
-// Paths are guest paths, a `sdmc:` prefix and any number of slashes are
-// normalized away, so "sdmc:/switch/x" and "/switch/x" are the same file.
+// The emulated SD card. Paths are guest paths; `sdmc:` and extra slashes are
+// normalized away.
 
 /// Read a UTF-8 path out of guest-supplied wasm memory.
 fn sd_path(ptr: *const u8, len: u32) -> String {
@@ -2509,10 +2077,7 @@ fn sd_path(ptr: *const u8, len: u32) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Put a file on the SD card, replacing whatever is at that path. This is the
-/// host's own load path, restoring the card from a store, or a file the user
-/// dropped in, so it is deliberately **not** reported by
-/// `switch_sd_take_changes_json`: a restored file has not changed.
+/// Put a file on the SD card. Not reported as a change: this is the host's restore path.
 #[no_mangle]
 pub extern "C" fn switch_sd_write_file(
     handle: u32,
@@ -2529,8 +2094,7 @@ pub extern "C" fn switch_sd_write_file(
     0
 }
 
-/// Create a directory on the SD card and any missing parents. Same "host load
-/// path" reasoning as `switch_sd_write_file`: not reported as a change.
+/// Create a directory and any missing parents. Not reported as a change.
 #[no_mangle]
 pub extern "C" fn switch_sd_create_dir(handle: u32, path_ptr: *const u8, path_len: u32) -> i32 {
     session(handle)
@@ -2546,8 +2110,7 @@ pub extern "C" fn switch_sd_remove(handle: u32, path_ptr: *const u8, path_len: u
     i32::from(session(handle).cpu.fs.remove(&sd_path(path_ptr, path_len)))
 }
 
-/// Size of a file on the SD card, or -1 when the path is not one (missing, or
-/// a directory).
+/// Size of a file on the SD card, or -1 when the path is not a file.
 #[no_mangle]
 pub extern "C" fn switch_sd_file_size(handle: u32, path_ptr: *const u8, path_len: u32) -> i64 {
     match session(handle).cpu.fs.size(&sd_path(path_ptr, path_len)) {
@@ -2556,10 +2119,7 @@ pub extern "C" fn switch_sd_file_size(handle: u32, path_ptr: *const u8, path_len
     }
 }
 
-/// Copy a file off the SD card into `buf`, starting at `offset`. Returns the
-/// number of bytes copied, or -1 when the path is not a file. Call
-/// `switch_sd_file_size` first to size the buffer; a file larger than `maxlen`
-/// can be pulled in slices.
+/// Copy a file off the SD card into `buf` from `offset`. Returns bytes copied, or -1.
 #[no_mangle]
 pub extern "C" fn switch_sd_read_file(
     handle: u32,
@@ -2577,23 +2137,15 @@ pub extern "C" fn switch_sd_read_file(
     }
 }
 
-/// How many paths the guest has changed and not yet had drained. Lets a host
-/// skip the JSON round trip on the overwhelmingly common "nothing changed"
-/// tick.
+/// How many paths the guest has changed and not yet drained.
 #[no_mangle]
 pub extern "C" fn switch_sd_pending_changes(handle: u32) -> u32 {
     session(handle).cpu.fs.pending_changes() as u32
 }
 
-/// Drain what the guest has changed on the SD card since the last call, as
-/// JSON: `[{"path":"/switch/a.json","kind":"file","size":12},
-/// {"path":"/switch/d","kind":"dir","size":0},
-/// {"path":"/switch/gone","kind":"deleted","size":0}]`.
-///
-/// Each entry says what is at the path *now*, so a host can store it or drop
-/// it from its store without asking again. **The drain happens even if the
-/// result does not fit in `buf`**: call `switch_sd_pending_changes` first and
-/// size the buffer, or changes will be lost.
+/// Drain the guest's SD card changes as JSON, e.g.
+/// `[{"path":"/switch/a.json","kind":"file","size":12}]`. Drains even if the
+/// result does not fit; size `buf` from `switch_sd_pending_changes`.
 #[no_mangle]
 pub extern "C" fn switch_sd_take_changes_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let changes = session(handle).cpu.fs.take_changes();
@@ -2601,10 +2153,6 @@ pub extern "C" fn switch_sd_take_changes_json(handle: u32, buf: *mut u8, maxlen:
 }
 
 /// Serialize drained [`Change`](switch_core::vfs::Change)s into `buf`.
-///
-/// Shared by the SD card and by save data, because they are the same
-/// question asked of different storage: what is at this path now, so a host
-/// can store it or drop it from its store without asking again.
 fn write_changes_json(changes: &[switch_core::vfs::Change], buf: *mut u8, maxlen: u32) -> u32 {
     let mut out = Vec::from("[");
     for (i, change) in changes.iter().enumerate() {
@@ -2617,8 +2165,6 @@ fn write_changes_json(changes: &[switch_core::vfs::Change], buf: *mut u8, maxlen
             None => "deleted",
         };
         out.extend_from_slice(b"{\"path\":\"");
-        // Guest paths can hold anything a filename can; escape what JSON
-        // cannot carry raw rather than emitting a broken document.
         for &byte in change.path.as_bytes() {
             match byte {
                 b'"' | b'\\' => {
@@ -2644,21 +2190,11 @@ fn write_changes_json(changes: &[switch_core::vfs::Change], buf: *mut u8, maxlen
 
 // save data
 //
-// The same shape as the SD card above, with a save in front of every call.
-// A console keeps saves on its NAND rather than its card, and they are the
-// only writable storage a title has that another title cannot see, so they
-// are stored separately, and a path means nothing without the save it
-// belongs to.
-//
-// A save is its id and the user it belongs to: `save_id`, then the uid as
-// `user_lo` (its first eight bytes) and `user_hi` (its last eight), each
-// little-endian, both zero for a save no user owns. See `SaveKey`.
+// A save is `save_id` plus the uid as `user_lo` (first eight bytes) and `user_hi`
+// (last eight), little-endian, both zero for a save no user owns. See `SaveKey`.
 
-/// Every save the running session has opened, as JSON:
+/// Every save the session has opened, as JSON:
 /// `["8000000000000050","0100000000001000@<32 hex digits of uid>"]`.
-///
-/// A save is created on first open, so this is also the list of what there is
-/// to persist, a host drains and stores each of these in turn.
 #[no_mangle]
 pub extern "C" fn switch_save_ids_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let mut keys = session(handle).cpu.save_keys();
@@ -2689,9 +2225,8 @@ pub extern "C" fn switch_save_pending_changes(
     session(handle).cpu.save_data_mut(key).pending_changes() as u32
 }
 
-/// Drain what the guest has changed in this save, in the same JSON as
-/// `switch_sd_take_changes_json`. **The drain happens even if the result does
-/// not fit in `buf`**, size it from `switch_save_pending_changes` first.
+/// Drain a save's changes, as `switch_sd_take_changes_json` does. Drains even if the
+/// result does not fit.
 #[no_mangle]
 pub extern "C" fn switch_save_take_changes_json(
     handle: u32,
@@ -2706,9 +2241,7 @@ pub extern "C" fn switch_save_take_changes_json(
     write_changes_json(&changes, buf, maxlen)
 }
 
-/// Put a file into a save, creating the save if this is the first thing in it.
-/// The host's own load path, so (like `switch_sd_write_file`) it is
-/// deliberately not reported as a change: a restored file has not changed.
+/// Put a file into a save, creating the save. Not reported as a change.
 #[no_mangle]
 pub extern "C" fn switch_save_write_file(
     handle: u32,
@@ -2729,8 +2262,7 @@ pub extern "C" fn switch_save_write_file(
     0
 }
 
-/// Create a directory in a save and any missing parents. Not reported as a
-/// change, for the same reason as `switch_save_write_file`.
+/// Create a directory in a save and any missing parents. Not reported as a change.
 #[no_mangle]
 pub extern "C" fn switch_save_create_dir(
     handle: u32,
@@ -2770,8 +2302,7 @@ pub extern "C" fn switch_save_file_size(
     }
 }
 
-/// Copy a file out of a save into `buf`, starting at `offset`. Returns the
-/// bytes copied, or -1 when the path is not a file.
+/// Copy a file out of a save into `buf` from `offset`. Returns bytes copied, or -1.
 #[no_mangle]
 pub extern "C" fn switch_save_read_file(
     handle: u32,
@@ -2797,8 +2328,7 @@ pub extern "C" fn switch_save_read_file(
     }
 }
 
-/// Give a fresh session a save it had in an earlier one, so a host can restore
-/// before the guest asks. Returns 0.
+/// Create a save in a fresh session so the host can restore it. Returns 0.
 #[no_mangle]
 pub extern "C" fn switch_save_create(handle: u32, save_id: u64, user_lo: u64, user_hi: u64) -> i32 {
     let key = SaveKey::from_halves(save_id, user_lo, user_hi);
@@ -2806,11 +2336,8 @@ pub extern "C" fn switch_save_create(handle: u32, save_id: u64, user_lo: u64, us
     0
 }
 
-/// Give the session the font `pl:u` serves as the shared system font, as the
-/// contents of a TrueType/OpenType file. Homebrew that draws text reads it out
-/// of pl's shared memory and hands it to FreeType, so this has to be set before
-/// the guest calls `plInitialize` for any text to appear. Returns the number of
-/// bytes taken.
+/// Set the shared system font `pl:u` serves (TTF/OTF bytes), before `plInitialize`.
+/// Returns the bytes taken.
 #[no_mangle]
 pub extern "C" fn switch_load_font(handle: u32, ptr: *const u8, len: u32) -> u32 {
     let s = session(handle);
@@ -2819,13 +2346,10 @@ pub extern "C" fn switch_load_font(handle: u32, ptr: *const u8, len: u32) -> u32
     s.cpu.shared_font_len() as u32
 }
 
-/// Feed the host gamepad state to the guest. `buttons` is a `HidNpadButton`
-/// bitfield in Horizon's order (A=1<<0, B=1<<1, X=1<<2, Y=1<<3, StickL=1<<4,
-/// StickR=1<<5, L=1<<6, R=1<<7, ZL=1<<8, ZR=1<<9, Plus=1<<10, Minus=1<<11,
-/// DpadLeft=1<<12, DpadUp=1<<13, DpadRight=1<<14, DpadDown=1<<15); sticks are
-/// -32768..32767 with positive being right and up. Written to the memory-mapped
-/// input register and, once libnx maps its hid shared memory, mirrored into the
-/// `HidSharedMemory` layout so `padUpdate` sees it.
+/// Feed gamepad state. `buttons` is a `HidNpadButton` bitfield (A=1<<0, B=1<<1,
+/// X=1<<2, Y=1<<3, StickL=1<<4, StickR=1<<5, L=1<<6, R=1<<7, ZL=1<<8, ZR=1<<9,
+/// Plus=1<<10, Minus=1<<11, DpadLeft=1<<12, DpadUp=1<<13, DpadRight=1<<14,
+/// DpadDown=1<<15); sticks are -32768..32767, positive right and up.
 #[no_mangle]
 pub extern "C" fn switch_set_input(
     handle: u32,
@@ -2840,15 +2364,8 @@ pub extern "C" fn switch_set_input(
         .set_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
 }
 
-/// Feed the host's touchscreen contacts to the guest. `ptr` points at `count`
-/// packed `u32` triples - `finger_id`, `x`, `y` - in the console's 1280x720
-/// digitizer space (`TOUCH_SCREEN_WIDTH`/`HEIGHT` in `cpu/mod.rs`), *not* in
-/// whatever resolution the guest happens to be presenting at. `count` above
-/// `TOUCH_MAX` (16) is truncated.
-///
-/// A lift is `count` = 0: the state is republished with no contacts. The guest
-/// only sees any of this once it has mapped hid's shared memory, and nothing is
-/// buffered until then, so the host has to keep calling while a finger is down.
+/// Feed touch contacts: `count` packed `u32` triples (`finger_id`, `x`, `y`) in
+/// 1280x720 digitizer space, truncated to 16. `count` 0 is a lift.
 #[no_mangle]
 pub extern "C" fn switch_set_touch(handle: u32, ptr: *const u32, count: u32) {
     let n = (count as usize).min(switch_core::cpu::TOUCH_MAX);
@@ -2864,13 +2381,7 @@ pub extern "C" fn switch_set_touch(handle: u32, ptr: *const u32, count: u32) {
     session(handle).cpu.set_touch_state(&points[..n]);
 }
 
-/// Dock or undock the console: 0 handheld, anything else docked.
-///
-/// Safe to call while a title is running, which is the point of it, a real
-/// console is docked mid-game and the title is expected to cope. What makes
-/// it cope is the pair of AM messages this queues, not the number itself: a
-/// title reads the operation mode once and lays out for it, and only goes
-/// back to ask when it is told the mode changed.
+/// Dock or undock the console (0 handheld). Queues the AM messages titles react to.
 #[no_mangle]
 pub extern "C" fn switch_set_operation_mode(handle: u32, docked: u32) {
     let mode = if docked == 0 {
@@ -2881,12 +2392,9 @@ pub extern "C" fn switch_set_operation_mode(handle: u32, docked: u32) {
     session(handle).cpu.set_operation_mode(mode);
 }
 
-// The console's users. A list is staged one user at a time and then
-// committed whole, before the title starts: a title asks who is playing once
-// and keeps the answer. A uid travels as two little-endian halves, its first
-// eight bytes then its last eight, the way a save's does.
+// The console's users: staged one at a time, committed whole before the title starts.
+// A uid travels as two little-endian halves.
 
-/// A uid out of the two halves the host passes it as.
 fn uid_from_halves(lo: u64, hi: u64) -> [u8; 16] {
     let mut uid = [0u8; 16];
     uid[..8].copy_from_slice(&lo.to_le_bytes());
@@ -2894,10 +2402,8 @@ fn uid_from_halves(lo: u64, hi: u64) -> [u8; 16] {
     uid
 }
 
-/// Add one user to the list the next `switch_users_commit` installs.
-/// `edited_at` is when the profile was last edited, as POSIX seconds, and a
-/// `picture_len` of 0 means the user has no picture and gets a made one.
-/// The picture is a baseline JPEG, which is what titles decode.
+/// Stage one user. `edited_at` is POSIX seconds; `picture_len` 0 means a generated
+/// picture. Pictures are baseline JPEG.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn switch_user_stage(
@@ -2919,11 +2425,9 @@ pub extern "C" fn switch_user_stage(
     session(handle).staged_users.push(user);
 }
 
-/// Install the staged users, with the one whose uid is given playing.
-/// Returns 0, or when the list cannot be a console's (and nothing changes):
-/// 1 for no users or more than eight, 2 for a zero uid, 3 for two users with
-/// one uid, 4 for a playing user who is not in the list. The staged list is
-/// emptied either way.
+/// Install the staged users with the given one playing. Returns 0, or (changing
+/// nothing) 1 for no users or more than eight, 2 for a zero uid, 3 for a duplicate
+/// uid, 4 for a playing user not in the list. The staged list is emptied either way.
 #[no_mangle]
 pub extern "C" fn switch_users_commit(handle: u32, current_lo: u64, current_hi: u64) -> u32 {
     use switch_core::cpu::UsersRefused;
@@ -2941,17 +2445,14 @@ pub extern "C" fn switch_users_commit(handle: u32, current_lo: u64, current_hi: 
     }
 }
 
-/// Whether the guest has edited a profile since the last call: a nonzero
-/// answer is the host's cue to read them back with `switch_users_json`.
+/// Whether the guest has edited a profile since the last call.
 #[no_mangle]
 pub extern "C" fn switch_take_profile_edits(handle: u32) -> u32 {
     u32::from(session(handle).cpu.take_profile_edits())
 }
 
-/// The users as the core holds them, guest edits included, as JSON:
-/// `[{"uid":"<32 hex digits>","nickname":"Player","editedAt":0,
-/// "pictureLen":0}]`. A picture is fetched on its own, with
-/// `switch_user_picture`, because it is too large to escape into text.
+/// The users as JSON: `[{"uid":"<32 hex digits>","nickname":"Player","editedAt":0,
+/// "pictureLen":0}]`. Pictures come from `switch_user_picture`.
 #[no_mangle]
 pub extern "C" fn switch_users_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let mut out = Vec::from("[");
@@ -2981,8 +2482,7 @@ pub extern "C" fn switch_users_json(handle: u32, buf: *mut u8, maxlen: u32) -> u
     n as u32
 }
 
-/// Copy the picture of the user with this uid into `buf`. Returns the bytes
-/// copied, 0 when the user has no picture of their own or no such user.
+/// Copy a user's picture into `buf`. Returns bytes copied, or 0.
 #[no_mangle]
 pub extern "C" fn switch_user_picture(
     handle: u32,
@@ -3007,16 +2507,12 @@ pub extern "C" fn switch_user_picture(
 }
 
 /// Set the wall-clock time `time:u`/`time:s` report, as POSIX seconds (UTC).
-/// `wasm32-unknown-unknown` has no OS clock, so without the host calling this
-/// (with `Date.now() / 1000`) the emulated RTC reads the Unix epoch.
 #[no_mangle]
 pub extern "C" fn switch_set_time(handle: u32, unix_seconds: i64) {
     session(handle).cpu.set_unix_time(unix_seconds);
 }
 
-/// Set the battery level `psm` reports. `wasm32-unknown-unknown` has no
-/// battery API of its own; the host pushes this from the browser's Battery
-/// Status API, where available.
+/// Set the battery level `psm` reports.
 #[no_mangle]
 pub extern "C" fn switch_set_battery(handle: u32, percent: u32, charging: u32) {
     session(handle)
@@ -3076,23 +2572,20 @@ pub extern "C" fn switch_get_pc(handle: u32) -> u32 {
     session(handle).cpu.get_pc()
 }
 
-/// The guest clock, in cycles of the CPU `svcGetSystemTick` is scaled from.
-///
-/// Not an instruction count: it idles forward to the earliest sleeper when
-/// every thread is blocked. [`switch_get_steps`] is the count.
+/// The guest clock in CPU cycles. It idles forward when every thread is blocked;
+/// [`switch_get_steps`] is the instruction count.
 #[no_mangle]
 pub extern "C" fn switch_get_cycles(handle: u32) -> u64 {
     session(handle).cpu.cycles
 }
 
-/// Instructions actually retired, which the guest's idle never advances.
+/// Instructions actually retired.
 #[no_mangle]
 pub extern "C" fn switch_get_steps(handle: u32) -> u64 {
     session(handle).cpu.steps
 }
 
-/// Guest RAM currently backed by host storage, in bytes, the emulated
-/// console's memory use, not the wasm heap's.
+/// Guest RAM backed by host storage, in bytes.
 #[no_mangle]
 pub extern "C" fn switch_guest_ram(handle: u32) -> u64 {
     session(handle).cpu.mem.mapped_bytes()
@@ -3100,17 +2593,7 @@ pub extern "C" fn switch_guest_ram(handle: u32) -> u64 {
 
 // ---- small JSON helpers ----
 
-/// Escape a string into a JSON string body.
-///
-/// Per **character**, not per byte. A `\uXXXX` escape in JSON names a code
-/// point, so escaping the bytes of a multi-byte character one at a time spells
-/// a different string: ® (U+00AE, UTF-8 `C2 AE`) came out as
-/// `\u00c2\u00ae`, which a parser reads back as Â®. A title's name
-/// comes straight out of its NACP and is full of characters like it, so
-/// *JUST DANCE® 2017* reached the page as *JUST DANCEÂ® 2017*.
-///
-/// Everything above ASCII is emitted as itself: a JSON document is UTF-8, and
-/// the page decodes this buffer with a UTF-8 `TextDecoder`.
+/// Escape a string into a JSON string body, per character. Non-ASCII is emitted as UTF-8.
 fn json_escape(s: &str, out: &mut Vec<u8>) {
     for c in s.chars() {
         match c {
@@ -3118,7 +2601,6 @@ fn json_escape(s: &str, out: &mut Vec<u8>) {
             '\\' => out.extend_from_slice(b"\\\\"),
             '\n' => out.extend_from_slice(b"\\n"),
             '\r' => out.extend_from_slice(b"\\r"),
-            // The rest of C0 has no shorthand and cannot appear raw.
             c if (c as u32) < 0x20 => {
                 out.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes());
             }
@@ -3137,37 +2619,22 @@ fn write_into(buf: *mut u8, maxlen: u32, data: &[u8]) -> u32 {
     n as u32
 }
 
-// These drive the entry points through `set_host_container`, which only host
-// builds have, and serialise on a `Mutex`, which a single-threaded wasm build
-// has no reason to carry. `--all-targets` for wasm32 would otherwise compile
-// them for a target that cannot run them.
+// Host builds only: these use `set_host_container` and a `Mutex`.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
-    /// The session table is a [`SyncCell`]: sound in wasm, which is
-    /// single-threaded, and *not* sound under `cargo test`, which is not. Two
-    /// tests each calling `switch_new` mutate the same `Vec` at once, and the
-    /// panic that eventually falls out crosses an `extern "C"` boundary and
-    /// aborts the whole harness rather than failing one test. Every test that
-    /// touches a session holds this for its duration.
+    /// Serializes tests: the session table is not thread-safe under `cargo test`.
     static HOST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// A session, and the lock that makes owning one exclusive.
-    ///
-    /// `switch_new` also installs a panic hook that captures the message for
-    /// `switch_last_error`, which in a test swallows the assertion. Put the
-    /// default back so failures are readable.
+    /// A session and the lock. Restores the default panic hook so failures are readable.
     fn new_session() -> (std::sync::MutexGuard<'static, ()>, u32) {
-        // A test that fails while holding the lock poisons it; the next one
-        // still needs it, and the failure has already been reported.
         let guard = HOST.lock().unwrap_or_else(|e| e.into_inner());
         let handle = switch_new();
         let _ = std::panic::take_hook();
         (guard, handle)
     }
 
-    /// Read a JSON answer out of one of the report exports.
     fn json_from(fill: impl Fn(*mut u8, u32) -> u32) -> String {
         let cap = 1024 * 1024;
         let mut buf = vec![0u8; cap];
@@ -3175,8 +2642,7 @@ mod tests {
         String::from_utf8(buf[..n as usize].to_vec()).unwrap()
     }
 
-    /// The value of a `"key":` field, as raw JSON text, enough to check a
-    /// report's shape without a parser the crate deliberately does not have.
+    /// The raw JSON text of a `"key":` field.
     fn field<'a>(json: &'a str, key: &str) -> &'a str {
         let at = json
             .find(&format!("\"{key}\":"))
@@ -3217,9 +2683,7 @@ mod tests {
 
     #[test]
     fn a_panic_message_is_cut_between_characters_not_through_one() {
-        // The page decodes this buffer as UTF-8. Cutting mid-character left it
-        // a replacement character to end on, and a panic message is exactly
-        // where a path or a title name gets formatted in.
+        // Truncation must not split a character.
         let msg = "PANIC: ⚠⚠⚠⚠";
         for limit in 0..msg.len() {
             let n = floor_char_boundary(msg, limit);
@@ -3279,8 +2743,7 @@ mod tests {
         assert_eq!(field(&again, "files"), "[]", "taken, not read");
         assert_eq!(field(&again, "journal"), "[]", "taken, not read");
 
-        // An answer too small for what is waiting stays parseable and counts
-        // what it could not carry, rather than cutting an entry in half.
+        // An answer too small stays parseable and counts what it dropped.
         let activity = &mut session(handle).cpu.fs_activity;
         activity.read(&"x".repeat(1000), 1);
         activity.record("y".repeat(1000));
@@ -3295,8 +2758,7 @@ mod tests {
 
     #[test]
     fn a_crash_report_names_the_build_even_with_no_session_behind_it() {
-        // The report is wanted exactly when something has gone wrong, and one
-        // that needs a live session is missing on the runs that need it.
+        // A report needs no live session.
         let _host = HOST.lock().unwrap_or_else(|e| e.into_inner());
         let json = json_from(|buf, cap| switch_crash_report_json(u32::MAX, buf, cap));
         assert_eq!(field(&json, "session"), "null");
@@ -3313,7 +2775,6 @@ mod tests {
 
         let json = json_from(|buf, cap| switch_crash_report_json(handle, buf, cap));
         assert_eq!(field(&json, "lastError"), "\"a fault worth reporting\"");
-        // Every section an issue is read from, present and structured.
         for key in [
             "version",
             "panicked",
@@ -3343,16 +2804,12 @@ mod tests {
 
     #[test]
     fn the_threads_a_guest_parked_can_be_released_from_the_browser() {
-        // These levers existed and were reachable only from the command line,
-        // on the failure a browser user hits most: a title that has stopped
-        // and a title that is working look the same from outside.
         let (_host, handle) = new_session();
         assert!(!json_from(|buf, cap| { switch_thread_dump(handle, buf, cap) }).is_empty());
         assert_eq!(switch_wake_blocked(handle), 0);
         assert_eq!(switch_start_created_threads(handle), 0);
 
-        // Two threads, one started; the main thread then waits forever on a
-        // zero word (WaitIfEqual), which hands the CPU to the started one.
+        // Two threads, one started; main then waits on a zero word, yielding to it.
         let cpu = &mut session(handle).cpu;
         let mut create = || {
             guest_svc(cpu, 0x08, &[0, 0x0800_1000, 0, 0x2880_0000, 44, 0]);
@@ -3386,7 +2843,7 @@ mod tests {
         assert_eq!(field(&json, "unimplemented"), "[]");
         assert_eq!(field(&json, "stubbed"), "[]");
 
-        // A request (type 4) for command 5 on a handle nothing opened.
+        // A request (type 4) for command 5 on an unopened handle.
         let cpu = &mut session(handle).cpu;
         let tls = cpu.tls_base();
         for (i, word) in [4, 8, 0, 0, 0x4943_4653, 0, 5, 0].into_iter().enumerate() {
@@ -3401,22 +2858,13 @@ mod tests {
         assert_eq!(field(&json, "stubbed"), "[]");
     }
 
-    /// Reset means a new console, and a crash report about it must not carry
-    /// the last one's.
-    ///
-    /// The panic flag, the captured panic message and the pending trace sink
-    /// are all the *module's*, not a session's, nothing frees them when a
-    /// session goes, so a report taken after a reset described a machine that
-    /// no longer existed: it still said `panicked`, `switch_last_error` still
-    /// answered with the dead session's panic, and the trace still opened with
-    /// lines from before the reset.
+    /// Reset clears module-level panic and trace state.
     #[test]
     fn a_new_session_inherits_nothing_from_the_one_before_it() {
         let (_host, first) = new_session();
 
-        // Everything a session that panicked leaves behind the module.
         PANICKED.store(true, Ordering::Relaxed);
-        // SAFETY: single-threaded under the `HOST` lock; see `SESSIONS`.
+        // SAFETY: single-threaded under the `HOST` lock.
         let planted = b"PANIC: the old session died here";
         let guard = unsafe { &mut *PANIC_MSG.get() };
         guard[..planted.len()].copy_from_slice(planted);
@@ -3466,15 +2914,12 @@ mod tests {
     #[test]
     fn save_data_round_trips_and_stays_out_of_the_sd_card() {
         const SAVE: u64 = 0x0100_0000_0000_1000;
-        // A user's uid, in the two halves the host passes it as.
         const USER_LO: u64 = 0x0706_0504_0302_0100;
         const USER_HI: u64 = 0x0f0e_0d0c_0b0a_0908;
         let key = SaveKey::from_halves(SAVE, USER_LO, USER_HI);
         let (_host, handle) = new_session();
 
-        // Restoring is the host's own load path, so it must not come back as a
-        // change: otherwise every restored file is written straight back to
-        // the store it was just read from, on the first flush.
+        // Restores are not reported as changes.
         let path = "/settings.dat";
         let body = b"saved";
         assert_eq!(
@@ -3495,8 +2940,7 @@ mod tests {
             0
         );
 
-        // Opening the save is enough to have one to persist, and it is listed
-        // under its user; the same title's shared save is another save.
+        // Opening a save is enough to list it; the shared save is a separate one.
         switch_save_create(handle, SAVE, 0, 0);
         let mut ids = [0u8; 128];
         let n = switch_save_ids_json(handle, ids.as_mut_ptr(), ids.len() as u32) as usize;
@@ -3505,9 +2949,7 @@ mod tests {
             r#"["0100000000001000","0100000000001000@000102030405060708090a0b0c0d0e0f"]"#
         );
 
-        // A guest write is a change, and it lands in the save rather than on
-        // the card: the two are different storage, and a title's save is not
-        // something the next title to mount the card should find.
+        // A guest write is a change, in the save rather than on the card.
         session(handle)
             .cpu
             .save_data_mut(key)
@@ -3537,7 +2979,6 @@ mod tests {
         );
         assert_eq!(session(handle).cpu.fs.entry_type("/settings.dat"), None);
 
-        // And reading it back is how the host gets the bytes to store.
         assert_eq!(
             switch_save_file_size(
                 handle,
@@ -3615,8 +3056,7 @@ mod tests {
             0
         );
 
-        // A list naming a player who is not in it is refused, and changes
-        // nothing.
+        // A list naming a player not in it is refused and changes nothing.
         stage(ann_lo, ann_hi, "Ann", &[]);
         assert_eq!(switch_users_commit(handle, 9, 9), 4);
         assert_eq!(session(handle).cpu.users().len(), 2);
@@ -3627,15 +3067,12 @@ mod tests {
     fn the_sd_card_round_trips_through_the_host_entry_points() {
         let (_host, handle) = new_session();
 
-        // Restoring the card is the host's own load path, so it must not come
-        // back as a change: otherwise every restored file is written straight
-        // back to the store it was just read from, on the first flush.
+        // Restores are not reported as changes.
         put(handle, "sdmc:/switch/restored.txt", b"hello");
         assert_eq!(switch_sd_pending_changes(handle), 0);
         assert_eq!(take_changes(handle), "[]");
 
-        // A guest write is. `IFile::Write` at offset 0 of a file the guest
-        // created, which is what a config save looks like.
+        // A guest write is: `IFile::Write` at offset 0 of a new file.
         {
             let cpu = &mut session(handle).cpu;
             assert!(cpu.fs.create_file("/switch/cfg.json", 0));
@@ -3650,11 +3087,10 @@ mod tests {
                 + r#"{"path":"/switch/restored.txt","kind":"deleted","size":0},"#
                 + r#"{"path":"/switch/saves","kind":"dir","size":0}]"#
         );
-        // Draining clears them: the page only ever writes back what is new.
+        // Draining clears them.
         assert_eq!(switch_sd_pending_changes(handle), 0);
         assert_eq!(take_changes(handle), "[]");
 
-        // Reading a file back out is how the page gets the bytes to store.
         let path = "/switch/cfg.json";
         assert_eq!(
             switch_sd_file_size(handle, path.as_ptr(), path.len() as u32),
@@ -3672,7 +3108,6 @@ mod tests {
         assert_eq!(n, 7);
         assert_eq!(&out[..7], br#"{"v":5}"#);
 
-        // Offsets let a large save be pulled in slices.
         let n = switch_sd_read_file(
             handle,
             path.as_ptr(),
@@ -3684,7 +3119,6 @@ mod tests {
         assert_eq!(n, 3);
         assert_eq!(&out[..3], b":5}");
 
-        // A directory is not a file, and neither is a path with nothing at it.
         let dir = "/switch";
         assert_eq!(
             switch_sd_file_size(handle, dir.as_ptr(), dir.len() as u32),
@@ -3705,8 +3139,7 @@ mod tests {
         switch_free_session(handle);
     }
 
-    /// Build a PFS0 container holding `files`, laid out the way a real `.nsp`
-    /// is: header, entry table, string table, then the payloads.
+    /// Build a PFS0: header, entry table, string table, payloads.
     fn build_nsp(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut names = Vec::new();
         let mut name_offsets = Vec::new();
@@ -3738,9 +3171,7 @@ mod tests {
         image
     }
 
-    /// The container path end to end, through the same `host_read` the
-    /// browser serves from a file on disk: nothing but the header and the
-    /// ranges actually asked for ever crosses into this side.
+    /// The container is read through `host_read` without being staged.
     #[test]
     fn a_container_is_read_through_the_host_without_being_staged() {
         let (_host, handle) = new_session();
@@ -3758,8 +3189,7 @@ mod tests {
         assert!(json.contains(r#""size":4096}"#), "{json}");
         assert!(json.contains(r#"{"name":"notes.txt""#), "{json}");
 
-        // A read is relative to the file inside the container, and stops at
-        // its end rather than running on into the next one.
+        // Reads are relative to the inner file and stop at its end.
         let mut out = vec![0u8; 32];
         let got = switch_read_file(handle, 0, 0x1000 - 8, out.as_mut_ptr(), out.len() as u32);
         assert_eq!(got, 8);
@@ -3769,14 +3199,11 @@ mod tests {
         assert_eq!(got, 5);
         assert_eq!(&out[..5], b"hello");
 
-        // Past the end of a file is nothing, and past the end of the table is
-        // an error: neither is a read of whatever happens to be next.
+        // Past a file's end is empty; past the table is an error.
         assert_eq!(switch_read_file(handle, 1, 5, out.as_mut_ptr(), 32), 0);
         assert_eq!(switch_read_file(handle, 7, 0, out.as_mut_ptr(), 32), -1);
 
-        // The payload is not an NCA, so booting it has to come back as a
-        // readable error rather than a trap, the failure this whole path
-        // replaced was a `RuntimeError: unreachable` with nothing behind it.
+        // A non-NCA payload fails with a readable error.
         assert_eq!(switch_load_nca_from_nsp(handle, 0), -1);
         let mut err = vec![0u8; 512];
         let n = switch_last_error(handle, err.as_mut_ptr(), err.len() as u32);
@@ -3786,9 +3213,7 @@ mod tests {
         switch_free_session(handle);
     }
 
-    /// A cartridge image is opened through the same entry point as an
-    /// `.nsp`, and presents the page the same file list, the whole of what
-    /// the browser needed to boot one.
+    /// A cartridge image opens through the same entry point as an `.nsp`.
     #[test]
     fn a_cartridge_image_opens_as_a_container() {
         use switch_core::nsp::testing::partition_fs;
@@ -3800,8 +3225,7 @@ mod tests {
             PartitionKind::Hfs0,
             &[("program.nca", &payload), ("meta.cnmt.nca", b"cnmt")],
         );
-        // A cartridge carries a firmware bundle beside the title, and the
-        // page must not be shown its NCAs as if they were the game's.
+        // The firmware partition's NCAs are not listed as the game's.
         let update = partition_fs(PartitionKind::Hfs0, &[("system.nca", b"firmware")]);
         let image =
             switch_core::xci::testing::cartridge(&[("update", &update), ("secure", &secure)]);
@@ -3817,8 +3241,7 @@ mod tests {
         assert!(json.contains(r#"{"name":"meta.cnmt.nca""#), "{json}");
         assert!(!json.contains("system.nca"), "{json}");
 
-        // The offsets in it are the image's own, so a read through them lands
-        // on the file and not on a partition header.
+        // Offsets are the image's own.
         let mut out = vec![0u8; 16];
         let got = switch_read_file(handle, 0, 0x700, out.as_mut_ptr(), out.len() as u32);
         assert_eq!(got, 16);
@@ -3829,8 +3252,6 @@ mod tests {
 
     #[test]
     fn a_path_json_cannot_carry_raw_is_escaped() {
-        // Guest paths hold whatever a filename can, and the page parses this
-        // with JSON.parse: one unescaped quote and the whole batch is lost.
         let (_host, handle) = new_session();
         session(handle).cpu.fs.create_file(r#"/switch/a"b\c"#, 0);
         let json = take_changes(handle);
@@ -3843,15 +3264,11 @@ mod tests {
 
     #[test]
     fn a_non_ascii_title_name_survives_the_json() {
-        // A `\uXXXX` escape names a code point, so escaping a multi-byte
-        // character one byte at a time spells something else entirely, and
-        // every retail title's name is full of them. This went out as
-        // `\u00c2\u00ae` and came back as "JUST DANCEÂ® 2017".
+        // A `\uXXXX` escape names a code point, so multi-byte characters go out raw.
         let mut out = Vec::new();
         json_escape("JUST DANCE® 2017 — 日本語", &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "JUST DANCE® 2017 — 日本語");
 
-        // What JSON genuinely cannot carry raw still goes out escaped.
         let mut out = Vec::new();
         json_escape("a\"b\\c\nd\u{7}e", &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), r#"a\"b\\c\nd\u0007e"#);
@@ -3859,11 +3276,7 @@ mod tests {
 
     #[test]
     fn an_error_message_keeps_its_last_character() {
-        // The NUL a C string needs comes out of the buffer, not out of the
-        // message. Taking it off the message instead cost every error its last
-        // byte however much room was left, so the console showed "Launch
-        // failed: no container is ope" and read as a truncated console rather
-        // than as a bug in the copy.
+        // The NUL comes out of the buffer, not the message.
         let (_host, handle) = new_session();
         const MSG: &str = "no container is open";
         session(handle).last_error = MSG.to_string();
@@ -3874,8 +3287,7 @@ mod tests {
         assert_eq!(&buf[..n as usize], MSG.as_bytes());
         assert_eq!(buf[n as usize], 0, "the copy has to stay NUL-terminated");
 
-        // A message that genuinely does not fit loses the bytes the buffer
-        // cannot hold -- and exactly those, with the NUL inside the buffer.
+        // A message that does not fit loses exactly what the buffer cannot hold.
         session(handle).last_error = MSG.to_string();
         let mut small = [0xAAu8; 8];
         let n = switch_last_error(handle, small.as_mut_ptr(), small.len() as u32);
@@ -3887,20 +3299,11 @@ mod tests {
     }
 }
 
-/// What [`crate::gpu::switch_gpu_open`] answers before the guest has opened a
-/// channel. Named because the worker matches on it to know the attempt is
-/// worth repeating rather than abandoning.
+/// What [`crate::gpu::switch_gpu_open`] answers before a channel exists; the worker retries on it.
 #[cfg(feature = "gpu")]
 pub(crate) const NO_CHANNEL_YET: &str = "the title has not opened a channel yet";
 
-/// Whether the guest has opened a 3D channel yet.
-///
-/// The backend no longer goes on a channel, so this is not about where it
-/// lands: it is about not building one before the title can use it.
-/// `requestDevice` builds a real device in the GPU process whether or not
-/// anything will draw, and wgpu's web backend frees nothing when one is
-/// dropped. The Home Menu opens its channel 11.6M steps in, which against a
-/// 1M-step run slice is eleven attempts before the twelfth lands.
+/// Whether the guest has opened a 3D channel, so a device is not built before it can be used.
 #[cfg(feature = "gpu")]
 pub(crate) fn gpu_channel_open(handle: u32) -> bool {
     session(handle)
@@ -3913,12 +3316,7 @@ pub(crate) fn gpu_channel_open(handle: u32) -> bool {
         .is_some()
 }
 
-/// Install a GPU backend on a session.
-///
-/// It goes on the session's one `Gpu`, not on a channel. A title may have
-/// several channels (Asphalt 9 opens four) and picking one of them left the
-/// device on a channel the title never drew through, which reads from outside
-/// as a device that opened and a rasterizer that kept the frame.
+/// Install a GPU backend on the session's `Gpu` (not a channel).
 #[cfg(feature = "gpu")]
 fn install_gpu(handle: u32, gpu: switch_gpu::Gpu) {
     session(handle).cpu.nv.gpu.set_renderer(Box::new(gpu));

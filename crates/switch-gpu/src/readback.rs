@@ -1,13 +1,6 @@
-//! What a surface being read back off the device is, while it is in flight.
-//!
-//! A draw renders into a device texture; guest memory is where the surface
-//! actually lives. Getting it back is three steps that cannot happen in one
-//! call on the web (copy into a staging buffer, map it, read it) and these
-//! are what a backend holds between them.
-//!
-//! The map state is an atomic rather than a wait because in a browser the
-//! callback runs from the event loop: nothing inside a time slice can make it
-//! happen, so the slice ends and the next one reads the flag.
+//! In-flight readback state for surfaces copied off the device. Copy, map and read
+//! cannot happen in one call on the web, and the map callback runs from the event
+//! loop, so its state is an atomic polled by the next slice.
 
 use switch_core::gpu::surface::SampleGrid;
 use switch_core::gpu::upload::Target;
@@ -15,26 +8,15 @@ use switch_core::gpu::upload::Target;
 use crate::Shape;
 
 /// A readback that has been asked for and not yet copied out.
-///
-/// Kept as a type because asking and collecting are the two halves a browser
-/// has to put an `await` between. See [`Gpu::write_back`], which today does
-/// both with a wait in the middle.
 #[derive(Debug)]
 pub(crate) struct Pending {
     pub(crate) staging: wgpu::Buffer,
     pub(crate) target: Target,
-    /// Bytes in one row of what the device holds. The surface's own for a
-    /// colour target; for a depth one it is the device format's, which is
-    /// not the guest's: a `Z24S8` texel is four bytes in memory and four
-    /// bytes of `f32` on the device, and a `ZF32_X24S8` texel is eight and
-    /// four.
+    /// Bytes per row on the device; for depth this is the device format's, not the guest's.
     pub(crate) row_bytes: u32,
-    /// That stride rounded up to the 256 bytes `copyTextureToBuffer` wants.
+    /// `row_bytes` rounded up to the 256 bytes `copyTextureToBuffer` wants.
     pub(crate) padded: u32,
-    /// What the map callback reported: [`MAP_WAITING`] until it runs, then
-    /// [`MAP_READY`] or [`MAP_FAILED`]. Read rather than waited on, because
-    /// on the web the callback runs from the event loop and nothing inside a
-    /// slice can make that happen.
+    /// [`MAP_WAITING`] until the map callback runs, then [`MAP_READY`] or [`MAP_FAILED`].
     pub(crate) state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
@@ -51,28 +33,19 @@ pub(crate) enum Scratch {
     Texture(wgpu::Texture),
 }
 
-/// A render target held on the device, and where in guest memory it came
-/// from.
+/// A render target held on the device, and its guest memory origin.
 #[derive(Debug)]
 pub(crate) struct Held {
     pub(crate) texture: wgpu::Texture,
     pub(crate) target: Target,
-    /// Whether anything has been drawn into it since it was uploaded. A
-    /// surface nothing touched need not be written back.
+    /// Drawn into since upload; clean surfaces need no write-back.
     pub(crate) dirty: bool,
-    /// What draws render into, when the expanded surface's own texels are
-    /// not what a draw's coverage is measured in. See [`Shape`]. Gathered
-    /// from the surface when it is made and scattered back into it before
-    /// the surface is read, so that guest memory only ever sees the expanded
-    /// form.
+    /// What draws render into when coverage is not measured in the surface's texels.
+    /// See [`Shape`].
     pub(crate) companion: Option<Companion>,
 }
 
-/// A surface's stand-in, and the grid it stands in for.
-///
-/// The grid is kept rather than read again at the end: what puts a companion
-/// back is a flush, and by then the register file has moved on to whatever
-/// the next frame is doing.
+/// A surface's stand-in, and the grid it stands in for (kept until the flush).
 #[derive(Debug)]
 pub(crate) struct Companion {
     pub(crate) shape: Shape,

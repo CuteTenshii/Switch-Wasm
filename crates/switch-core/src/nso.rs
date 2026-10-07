@@ -1,58 +1,7 @@
-//! Nintendo Switch NSO0 executable loader.
+//! NSO0 executable loader.
 //!
-//! NSO is the format Nintendo's SDK links a game's `main`/`subsdk*`/`sdk`
-//! executables into, what an NCA's ExeFS (PFS0) actually contains. Like NRO
-//! it's three segments (`.text`, `.rodata`, `.data`) loaded contiguously plus
-//! a zero-filled BSS, but each segment may be individually LZ4-compressed on
-//! disk, and there's no HBL-style external loader: the linked-in crt0
-//! (Nintendo's `rtld`) processes its own relocations and BSS zeroing itself
-//! before calling `main`, the same way a self-relocating homebrew NRO does.
-//! So this loader only places the decompressed bytes and hands off control,
-//! no MOD0/RELR handling needed here.
-//!
-//! For a regular SDK-linked module (`main`/`subsdk*`/`sdk`), execution does
-//! **not** start at `.text`+0: the first bytes there are a `ModulePtr` (`u32`
-//! reserved, `u32` offset to the `MOD0` header, then `MOD0` itself, 0x1C
-//! bytes, followed by 0xC bytes of padding to a 16-byte boundary). Confirmed
-//! against a real title's decompiled `.text` (via the project's own
-//! disassembler): everything up to offset [`NSO_ENTRY_OFFSET`] disassembles
-//! as garbage (it's data, not code), and at exactly that offset a textbook
-//! crt0 prologue begins (`sub sp, sp, #0x90` / `stp x29, x30, [...]`)
-//! followed by the same constructor-array-calling pattern (`blr` in a loop)
-//! homebrew's own crt0 runs.
-//!
-//! `rtld` itself is the exception: it has no `ModulePtr`/`MOD0` header at
-//! all: its `.text`+0 is real code, a `b` that jumps over an inline
-//! PC-relative literal used by its own base-address bootstrap (it must
-//! establish where it was loaded before it can do anything else, including
-//! locating its own `MOD0`). Jumping straight to `.text`+[`NSO_ENTRY_OFFSET`]
-//! for `rtld` skips that bootstrap, leaving its registers unset and
-//! corrupting later computations that assume it ran (confirmed by tracing a
-//! real title's `rtld` module: `x0` (its own base address) stays `0`,
-//! which turns a `bss_end - base` size computation into a bogus ~4GB byte
-//! count fed to a self-corrupting `memset` loop). [`entry_offset`] tells the
-//! two cases apart by checking for the `ModulePtr` + `MOD0` signature rather
-//! than assuming it's always present; `entry` in [`LoadedNso`] already
-//! accounts for this.
-//!
-//! Header layout (0x100 bytes):
-//!
-//! ```text
-//! 0x00  magic "NSO0"
-//! 0x04  version
-//! 0x08  reserved
-//! 0x0C  flags: bit0/1/2 = text/rodata/data compressed
-//! 0x10  .text: u32 file_offset, u32 mem_offset, u32 decompressed_size
-//! 0x1C  (module name offset, unused here)
-//! 0x20  .rodata: u32 file_offset, u32 mem_offset, u32 decompressed_size
-//! 0x2C  (module name size, unused here)
-//! 0x30  .data: u32 file_offset, u32 mem_offset, u32 decompressed_size
-//! 0x3C  .bss size (u32)
-//! 0x40  module id / build id [0x20]
-//! 0x60  .text compressed (on-disk) size (u32)
-//! 0x64  .rodata compressed size (u32)
-//! 0x68  .data compressed size (u32)
-//! ```
+//! SDK-linked modules start `.text` with a `ModulePtr`/`MOD0` header, so their
+//! entry is past it; `rtld` has no such header and starts at `.text`+0.
 
 use crate::mem::Memory;
 use crate::nro::{Segment, NRO_BASE};
@@ -60,24 +9,14 @@ use crate::nsp::read_u32;
 use crate::{Error, Result};
 
 pub const NSO0_MAGIC: u32 = 0x304f_534e; // "NSO0"
-/// Base address the image is mapped at. Reuses the homebrew NRO's base: the
-/// two loaders are mutually exclusive (a session runs one image at a time),
-/// and every other fixed address in this emulator (stack, TLS, env block) is
-/// already pinned relative to this scheme.
 pub const NSO_BASE: u32 = NRO_BASE;
 const HEADER_SIZE: usize = 0x100;
 
-/// Distance from `.text` start to the real crt0 entry point when a
-/// `ModulePtr`/`MOD0` header is present: past the `ModulePtr` (`u32`
-/// reserved + `u32` MOD0-offset, 8 bytes), the `MOD0` header itself (5 `u32`
-/// fields after the magic, 0x1C bytes total from the `ModulePtr` start), and
-/// padding out to a 16-byte boundary.
+/// Entry offset past the `ModulePtr`/`MOD0` header and its padding.
 pub const NSO_ENTRY_OFFSET: u32 = 0x30;
 
 const MOD0_MAGIC: u32 = 0x3044_4f4d; // "MOD0"
 
-/// Distance from `.text` start to the real entry point, for either module
-/// layout `.text` can have. See the module doc comment.
 fn entry_offset(text: &[u8]) -> u32 {
     if text.len() < 8 {
         return 0;
@@ -100,8 +39,6 @@ const FLAG_DATA_COMPRESSED: u32 = 1 << 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadedNso {
     pub base: u32,
-    /// `.text` start + [`NSO_ENTRY_OFFSET`]: *not* `.text` start itself
-    /// (unlike a homebrew NRO). See the module doc comment.
     pub entry: u32,
     pub text: Segment,
     pub ro: Segment,
@@ -124,12 +61,7 @@ fn read_segment(data: &[u8], at: usize) -> RawSegment {
     }
 }
 
-/// Load an NSO0 image into `mem` at `base`, decompressing any segment
-/// flagged LZ4-compressed. Returns the loaded segment layout and entry point.
-///
-/// A retail title is multiple NSO modules (`rtld`, `main`, `subsdk*`, `sdk`)
-/// sharing one address space: `base` lets a caller lay them out
-/// sequentially instead of every module claiming [`NSO_BASE`] for itself.
+/// Load an NSO0 image into `mem` at `base`, decompressing LZ4 segments.
 pub fn load_nso(mem: &mut Memory, data: &[u8], base: u32) -> Result<LoadedNso> {
     if data.len() < HEADER_SIZE {
         return Err(Error::Truncated {
@@ -187,11 +119,7 @@ pub fn load_nso(mem: &mut Memory, data: &[u8], base: u32) -> Result<LoadedNso> {
     let bss_addr = data_addr.wrapping_add(raw_data.decompressed_size);
     mem.map_zero(bss_addr, bss_size as usize)?;
 
-    // .text is never a legitimate relocation target, lock it down the same
-    // way the NRO loader does, so a wild guest write faults immediately.
     mem.mark_readonly(text_addr, ro_addr);
-    // The image is two memory states to the guest, not one: `.text`/`.rodata`
-    // static, `.data`/`.bss` mutable. See `Memory::mark_module`.
     mem.mark_module(
         (text_addr, data_addr),
         (data_addr, bss_addr.wrapping_add(bss_size)),
@@ -291,13 +219,11 @@ mod tests {
         let nso = build_nso(&text, &rodata, &data, 0x100);
         let mut mem = Memory::new();
         let loaded = load_nso(&mut mem, &nso, NSO_BASE).unwrap();
-        // No ModulePtr/MOD0 signature in this synthetic .text: entry is the
-        // raw start, same as rtld's real-world layout.
+        // No ModulePtr/MOD0 signature, so entry is the raw `.text` start.
         assert_eq!(loaded.entry, NSO_BASE);
         assert_eq!(mem.read_u32(NSO_BASE).unwrap(), 0x01);
         assert_eq!(mem.read_u32(loaded.ro.mem_addr).unwrap(), 0xDDCCBBAA);
         assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0xEFBEADDE);
-        // BSS zero-filled right after .data.
         assert_eq!(
             mem.read_u8(loaded.data.mem_addr + loaded.data.file_size)
                 .unwrap(),
@@ -316,7 +242,7 @@ mod tests {
 
     #[test]
     fn decompresses_lz4_segments() {
-        // A trivially "compressed" .text: one literal-only LZ4 sequence.
+        // One literal-only LZ4 sequence.
         let plain_text: Vec<u8> = (0..40u8).collect();
         let mut compressed = vec![0xf0u8, (plain_text.len() - 15) as u8];
         compressed.extend_from_slice(&plain_text);

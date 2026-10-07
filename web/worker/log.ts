@@ -1,9 +1,4 @@
-/* The worker's half of the page's log.
-
-   Anything the worker has to say goes to the page, which logs it on its own
-   console and mirrors it into DevTools in one place. A `console` call made
-   here would reach DevTools alone, and the two consoles would disagree about
-   what happened. */
+// Worker logging, forwarded to the page's log instead of `console`.
 
 import type { LogClass, WorkerMessage } from '../shared/protocol';
 

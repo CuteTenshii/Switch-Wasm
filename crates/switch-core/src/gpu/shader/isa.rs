@@ -1,37 +1,8 @@
 //! Maxwell (GM20B) shader instruction decoding.
 //!
-//! Bit layouts are ported from `envydis`'s `gm107.c` tables (envytools,
-//! github.com/envytools/envytools), opcode values and masks, operand bit
-//! positions, and the modifier sub-tables, transcribed row by row. The
-//! original subset was additionally verified against `uam`-compiled GLSL
-//! fixtures disassembled with `envydis -m gm107`: a solid-color fragment
-//! shader, an MVP-transform vertex shader, and a textured + vertex-color
-//! fragment shader, and those captures are still the tests below.
-//!
-//! Three facts shape this decoder:
-//!
-//! - The rasterizer's fixed-function interpolator hands the fragment shader
-//!   a linearly-interpolated `1/w` at a fixed attribute slot (`a[0x7c]` in
-//!   every fixture). `ipa pass` reads it raw. The shader then computes `w =
-//!   mufu rcp(1/w)` once and feeds it back into `ipa` (non-`pass`, the
-//!   "perspective" mode) as the multiplier for every other varying, which the
-//!   interpolator has already linearly interpolated pre-divided by `w`:
-//!   `ipa.perspective(attr/w) * w == attr`. That's the whole perspective-
-//!   correction idiom; there's no other division of labour to model.
-//! - Every instruction carries a guard predicate: a 3-bit register at
-//!   `[16, 19)` plus a negate flag at bit 19. Register 7 is `PT`, hardware's
-//!   always-true placeholder, so `0b0111` with bit 19 clear is "unpredicated".
-//!   Unlike the first version of this decoder, a real predicate is now
-//!   decoded and carried rather than making the whole instruction
-//!   unsupported, shaders with any control flow at all predicate constantly.
-//! - Maxwell has no integer-multiply instruction in the usual sense. 32-bit
-//!   multiplies come out as chains of `xmad`, which multiplies two 16-bit
-//!   halves and accumulates.
-//!
-//! An encoding this decoder doesn't recognise, or recognises with a modifier
-//! whose behaviour isn't modelled: becomes [`Op::Unimplemented`], which
-//! carries the raw bits so a real capture stays inspectable rather than
-//! silently mis-executing.
+//! Bit layouts are ported from envytools' `envydis` `gm107.c` tables. An
+//! encoding (or modifier) that isn't modelled decodes to
+//! [`Op::Unimplemented`] with its raw bits.
 
 /// `ld`/`st`'s transfer size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +41,7 @@ impl MemSize {
     }
 }
 
-/// The right-hand operand of an ALU op: a register, a slot in a bound
-/// constant buffer (`cN[offset]`), or an inline immediate.
+/// The right-hand operand of an ALU op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     Reg(u8),
@@ -79,8 +49,7 @@ pub enum Operand {
     Imm(u32),
 }
 
-/// A guard or source predicate. `reg` 7 is `PT`, hardware's always-true
-/// register, so [`Pred::ALWAYS`] is the unpredicated case.
+/// A guard or source predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pred {
     pub reg: u8,
@@ -103,8 +72,7 @@ impl Pred {
     }
 }
 
-/// A float source's sign/magnitude modifiers, applied in that order:
-/// `abs` first, then `neg`.
+/// A float source's sign/magnitude modifiers, applied in that order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FMod {
     pub neg: bool,
@@ -127,8 +95,7 @@ impl FMod {
     }
 }
 
-/// A float comparison (`tab5bb0_0`). The `u` suffixes are the unordered
-/// variants, which also compare true when either side is NaN.
+/// A float comparison (`tab5bb0_0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FCmp {
     Never,
@@ -162,8 +129,7 @@ pub enum ICmp {
     Always,
 }
 
-/// How a `set`/`setp` combines its comparison with its source predicate
-/// (`tab5bb0_1`).
+/// How a `set`/`setp` combines its comparison with its source predicate (`tab5bb0_1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoolOp {
     And,
@@ -181,8 +147,6 @@ pub enum LogicOp {
 }
 
 /// `fmul`'s pre-scale, applied to its **first** operand before the multiply.
-/// A shader uses it to fold a constant halving or doubling into a multiply it
-/// was doing anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FmulScale {
     None,
@@ -222,11 +186,6 @@ impl FmulScale {
 }
 
 /// Which halves of a source register feed a half-precision op's two lanes.
-///
-/// `F32` is the odd one out: the source is a single f32 rather than a pair of
-/// halves, and both lanes read it. Maxwell lets one operand of a half
-/// instruction be full precision, which is how a shader multiplies a `half2`
-/// by a `float` without converting anything first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HSwizzle {
     /// Lane 0 from the low half, lane 1 from the high half.
@@ -279,14 +238,12 @@ pub enum HPrecision {
     None,
     /// Flush a subnormal operand to zero.
     Ftz,
-    /// D3D9's rule: anything multiplied by zero is zero, NaN and infinity
-    /// included.
+    /// D3D9's rule.
     Fmz,
 }
 
 impl HPrecision {
-    /// The fourth encoding is hardware's "don't care", which is free to be
-    /// the plain mode.
+    /// The fourth encoding is hardware's "don't care", which is free to be the plain mode.
     fn decode(bits: u64) -> HPrecision {
         match bits {
             1 => HPrecision::Ftz,
@@ -295,12 +252,7 @@ impl HPrecision {
         }
     }
 
-    /// Whether a product one of whose operands is zero answers zero whatever
-    /// the other one is.
-    ///
-    /// Saturation already forces that answer, so hardware does not do both,
-    /// and stating it here is what keeps the interpreter and the WGSL backend
-    /// from each deciding it separately.
+    /// Whether a product one of whose operands is zero answers zero whatever the other one is.
     pub fn zeroes_products(self, sat: bool) -> bool {
         self == HPrecision::Fmz && !sat
     }
@@ -338,12 +290,7 @@ pub enum FRound {
     Trunc,
 }
 
-/// What an `xmad` adds its product to: `c` whole, one of `c`'s halves
-/// zero-extended, or `b` shifted up beside `c` (`SelectMode` in Eden's
-/// `integer_short_multiply_add`).
-///
-/// A 32-bit multiply lowers to a chain of these, and the mode is how each
-/// step says which part of the running total it is adding.
+/// What an `xmad` adds its product to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XmadC {
     Full,
@@ -357,20 +304,15 @@ pub enum XmadC {
 pub enum TexDim {
     T1d,
     T2d,
-    /// A 2D array. The third coordinate slot holds the *layer*, as an integer
-    /// in the low half of its register rather than a float: see
-    /// [`texs_encoding`].
+    /// A 2D array.
     T2dArray,
     T3d,
     TCube,
-    /// An array of cubemaps: a direction in the three coordinates, and which
-    /// cube in the layer register, counted in cubes rather than faces.
+    /// An array of cubemaps.
     TCubeArray,
 }
 
-/// `bar`'s sub-operation (`tabf0a8_0`). The reduction forms are decoded so
-/// that one can be named when it is refused: they combine a value across every
-/// lane of a warp, which a scalar interpreter has no way to see.
+/// `bar`'s sub-operation (`tabf0a8_0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BarMode {
     Sync,
@@ -382,10 +324,6 @@ pub enum BarMode {
 }
 
 /// Which lane a `shfl` reads (`ShuffleMode` in Eden's `warp_shuffle.cpp`).
-///
-/// Every mode names a source lane relative to the one executing it: an
-/// absolute index, a fixed distance below or above, or the lane whose id
-/// differs in the bits `index` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShflMode {
     Idx,
@@ -394,8 +332,6 @@ pub enum ShflMode {
     Bfly,
 }
 
-/// The shape of the image a surface instruction (`suld`/`sust`) addresses,
-/// which decides how many coordinate registers it reads and what each is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceDim {
     D1,
@@ -406,8 +342,7 @@ pub enum SurfaceDim {
     D3,
 }
 
-/// How much a raw (`.D`) surface access moves, and whether a narrow load is
-/// sign-extended.
+/// How much a raw (`.D`) surface access moves, and whether a narrow load is sign-extended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceSize {
     U8,
@@ -430,8 +365,7 @@ impl SurfaceSize {
         }
     }
 
-    /// Registers the access fills or drains, one per 32 bits and at least
-    /// one.
+    /// Registers the access fills or drains, one per 32 bits and at least one.
     pub fn words(self) -> usize {
         (self.bytes() as usize).div_ceil(4)
     }
@@ -440,10 +374,7 @@ impl SurfaceSize {
 /// What a surface instruction moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceData {
-    /// `.P`: the channels of a texel in the image's own format, converted
-    /// to and from what a register holds: a float for a float or normalized
-    /// channel, an integer for an integer one. Only the masked channels
-    /// move, into or out of consecutive registers.
+    /// `.P`.
     Formatted([bool; 4]),
     /// `.D`: the texel's bytes, uninterpreted.
     Raw(SurfaceSize),
@@ -459,8 +390,7 @@ impl SurfaceData {
     }
 }
 
-/// What a `vote` asks of its warp's predicates: whether all hold, whether
-/// any does, or whether they all agree.
+/// What a `vote` asks of its warp's predicates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoteMode {
     All,
@@ -468,8 +398,7 @@ pub enum VoteMode {
     Eq,
 }
 
-/// Which address space an atomic addresses. `atom`/`red` are global,
-/// `atoms` is shared.
+/// Which address space an atomic addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomSpace {
     Global,
@@ -492,13 +421,11 @@ pub enum AtomOp {
     Exch,
     /// Compare-and-swap: `src` is the comparand and `src + 1` the new value.
     Cas,
-    /// `safeadd`: an add the hardware may drop under contention. Nothing
-    /// here is contended, so it is an add.
+    /// `safeadd`.
     SafeAdd,
 }
 
-/// How an atomic interprets the memory it operates on
-/// (`tabed00sz`/`tabec00sz`/`tabebf8sz`).
+/// How an atomic interprets the memory it operates on (`tabed00sz`/`tabec00sz`/`tabebf8sz`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomType {
     U32,
@@ -554,11 +481,7 @@ pub enum Op {
         src: u8,
         size: MemSize,
     },
-    /// `ipa[.pass][.centroid] dst, a[offset], mul`, fixed-function
-    /// interpolation. `perspective = false` is `ipa pass`; `perspective =
-    /// true` multiplies the fetched value by `mul` (`RZ` decodes to `None`).
-    /// `centroid` samples the varying inside the primitive's covered area
-    /// rather than at the pixel centre.
+    /// `ipa[.pass][.centroid] dst, a[offset], mul`, fixed-function interpolation.
     Ipa {
         dst: u8,
         offset: u16,
@@ -569,9 +492,7 @@ pub enum Op {
     },
 
     // ---- float ALU ----
-    /// `rro dst, src`: the range reduction before a `mufu` sine, cosine or
-    /// `ex2`, which here is the identity with `src`'s negate and absolute
-    /// value applied. See the decoder's note on why.
+    /// `rro dst, src`.
     Rro {
         dst: u8,
         src: Operand,
@@ -645,10 +566,6 @@ pub enum Op {
     },
 
     // ---- half-precision ALU ----
-    // A register is a pair of halves and each of these computes both lanes at
-    // once, which is why a Unity shader (written in `half` throughout) is
-    // most of these and few of the f32 ops above. [`HSwizzle`] says where each
-    // source's two lanes come from and [`HMerge`] where the result goes.
     Hadd2 {
         dst: u8,
         a: u8,
@@ -702,9 +619,6 @@ pub enum Op {
         bf: bool,
         ftz: bool,
     },
-    /// Unlike `fsetp`, the two destination predicates are the two *lanes*, not
-    /// a result and its inverse, until `and`, which ands them together and
-    /// then writes the inverse into `p1` after all.
     Hsetp2 {
         p0: u8,
         p1: u8,
@@ -722,10 +636,6 @@ pub enum Op {
     },
 
     // ---- integer ALU ----
-    /// `cin` is `IADD.X`, which adds the carry a previous `IADD.CC` left
-    /// behind, and `cout` is that `.CC`. Together they are how a shader adds a
-    /// 64-bit number in two halves, every global-memory address a Maxwell
-    /// program computes is one of these pairs.
     Iadd {
         dst: u8,
         a: u8,
@@ -751,10 +661,7 @@ pub enum Op {
         pred: Pred,
         signed: bool,
     },
-    /// `vmnmx dst, a, b, c`: the smaller or larger of `a` and `b`, then that
-    /// against `c` by a second minimum or maximum. The video form of
-    /// `imnmx`, decoded only where both operands are whole words, which is
-    /// the one form where selecting a byte or half of each has no effect.
+    /// `vmnmx dst, a, b, c`.
     Vmnmx {
         dst: u8,
         a: u8,
@@ -764,8 +671,7 @@ pub enum Op {
         max: bool,
         /// Whether the second is a maximum rather than a minimum.
         then_max: bool,
-        /// Whether the first operation compares signed, which both operands
-        /// agree on.
+        /// Whether the first operation compares signed, which both operands agree on.
         signed: bool,
         /// Whether the second operation compares signed.
         then_signed: bool,
@@ -806,19 +712,14 @@ pub enum Op {
         cmp: ICmp,
         signed: bool,
     },
-    /// `bfi dst, insert, src, base`: splice `insert` into `base`. `src` packs
-    /// the destination field's offset in its low byte and its width in the
-    /// next: one operand carrying two numbers, which is why a shader building
-    /// a bitfield does it in one instruction rather than a shift and two masks.
+    /// `bfi dst, insert, src, base`.
     Bfi {
         dst: u8,
         insert: u8,
         src: Operand,
         base: Operand,
     },
-    /// `r2p pr, src, mask`: move bits of `src` into the predicate registers,
-    /// one per set bit of `mask`. `byte` selects which byte of `src` supplies
-    /// them.
+    /// `r2p pr, src, mask`.
     R2p {
         src: u8,
         mask: Operand,
@@ -831,8 +732,6 @@ pub enum Op {
         signed: bool,
         hi: bool,
     },
-    /// `xmad dst, a.h[ah], b.h[bh], c`, the 16x16+32 multiply-accumulate
-    /// Maxwell builds every wider integer multiply out of.
     Xmad {
         dst: u8,
         a: u8,
@@ -846,8 +745,6 @@ pub enum Op {
         psl: bool,
         mrg: bool,
     },
-    /// `pred` is the `.T`/`.Z`/`.NZ` form, which tests the result and writes a
-    /// predicate as well as (usually) discarding the value into `RZ`.
     Lop {
         dst: u8,
         a: u8,
@@ -912,8 +809,7 @@ pub enum Op {
     },
 
     // ---- conversions ----
-    /// Integer -> float. `src_bytes`/`src_signed` describe the source's
-    /// integer width; the destination is always f32 here.
+    /// Integer -> float.
     I2f {
         dst: u8,
         src: Operand,
@@ -932,20 +828,15 @@ pub enum Op {
         round: FRound,
         ftz: bool,
     },
-    /// Float -> float: a width conversion between f16 and f32, an explicit
-    /// rounding of the value, or both.
+    /// Float -> float.
     F2f {
         dst: u8,
         src: Operand,
         sm: FMod,
-        /// The rounding the instruction names, or `None` where it names none
-        /// and the value is only moved.
         round: Option<FRound>,
         sat: bool,
         ftz: bool,
-        /// Source and destination widths, 16 or 32. A 16-bit source is one
-        /// half of the operand; a 16-bit result lands in the low half of
-        /// `dst` with the rest cleared.
+        /// Source and destination widths, 16 or 32.
         src_bits: u8,
         dst_bits: u8,
         /// Which half a 16-bit source is read from. Meaningless at 32 bits.
@@ -961,9 +852,7 @@ pub enum Op {
         dst_signed: bool,
         sat: bool,
         sel: u8,
-        /// `.CC`: the condition codes take the result's zero and sign, and
-        /// carry and overflow are cleared. A compiler converts into `RZ` with
-        /// this set to ask whether a value is zero.
+        /// `.CC`.
         cc: bool,
     },
 
@@ -990,9 +879,7 @@ pub enum Op {
         op1: BoolOp,
         op2: BoolOp,
     },
-    /// `csetp.<test>.<op> p0, p1, cc, src`: `p0` is [`flow_test`] of the
-    /// condition codes combined with `src` by `op`, `p1` the same with the
-    /// test negated.
+    /// `csetp.<test>.<op> p0, p1, cc, src`.
     Csetp {
         p0: u8,
         p1: u8,
@@ -1052,8 +939,7 @@ pub enum Op {
         src: u8,
         size: MemSize,
     },
-    /// `atom`/`atoms`/`red`: a read-modify-write of one location. `red` is
-    /// this with `dst` = [`RZ`]: the same operation, its old value discarded.
+    /// `atom`/`atoms`/`red`.
     Atom {
         dst: u8,
         addr: u8,
@@ -1065,74 +951,45 @@ pub enum Op {
     },
 
     // ---- texture ----
-    /// `texs dst, coords.., handle, dim, mask`, texture sample with an
-    /// immediate handle.
-    ///
-    /// `coords` is in sample order (`u`, `v`, then the third axis) and
-    /// holds [`RZ`] in the slots `dim` does not use. `dst`/`dst2` are the
-    /// two destination registers the enabled channels are split between;
-    /// see [`texs_destinations`].
+    /// `texs dst, coords.., handle, dim, mask`, texture sample with an immediate handle.
     Texs {
         dst: u8,
         dst2: u8,
         coords: [u8; 3],
-        /// A shadow sample's reference register: the fetched depth is
-        /// compared against it and the result, not the depth, is what the
-        /// instruction returns.
+        /// A shadow sample's reference register.
         dref: Option<u8>,
         handle: u16,
         dim: TexDim,
         mask: [bool; 4],
-        /// The `.F16` form, which packs two channels into each destination
-        /// register as halves instead of giving each one a register.
         f16: bool,
     },
 
     /// `tex dst, coords.., handle, dim, mask`, the general texture sample.
-    ///
-    /// [`Op::Texs`] is a short encoding of the common cases; this is the full
-    /// one, and carries the operands that encoding has no room for. The
-    /// results land in consecutive registers from `dst`, one per set mask
-    /// bit, rather than in `texs`'s two-register split.
     Tex {
         dst: u8,
         /// The coordinate registers, `dim` of them.
         coords: [u8; 3],
-        /// An array's layer, an integer in the register *before* the
-        /// coordinates rather than after them as in `texs`.
         layer: Option<u8>,
         /// A shadow sample's reference (`.DC`).
         dref: Option<u8>,
-        /// `.AOFFI`'s register: a signed four-bit texel offset per axis,
-        /// packed into one word.
+        /// `.AOFFI`'s register.
         offset: Option<u8>,
         /// The register the `.LL`/`.LB` modes take their level or bias from.
-        /// Decoded because it decides where the operands after it sit, not
-        /// because a sampler with one mip level can use it.
         lod: Option<u8>,
         handle: u16,
-        /// A bindless sample's (`tex.b`) handle register. The handle is the
-        /// value a bound sample reads out of the constant bank at `handle`,
-        /// held in a register instead, and `handle` is then unused.
+        /// A bindless sample's (`tex.b`) handle register.
         handle_reg: Option<u8>,
         dim: TexDim,
         mask: [bool; 4],
     },
-    /// `txq dst, lod, dimension, handle, mask`: a bound texture's size at
-    /// level `lod`, as integers: width, height, depth or layers, and how many
-    /// mip levels there are, one register per set mask bit from `dst`. The
-    /// other queries `txq` has (the texture's type, sample positions, its
-    /// filter) are not decoded.
+    /// `txq dst, lod, dimension, handle, mask`.
     Txq {
         dst: u8,
         lod: u8,
         handle: u16,
         mask: [bool; 4],
     },
-    /// `tld4.<component> dst, coords.., handle, dim, mask`: gather one channel
-    /// of each of the four texels a bilinear sample at the coordinates would
-    /// blend, in the order `(u0,v1) (u1,v1) (u1,v0) (u0,v0)`, the order GL's
-    /// and WGSL's gather use. Operands sit where [`Op::Tex`]'s do.
+    /// `tld4.<component> dst, coords.., handle, dim, mask`.
     Tld4 {
         dst: u8,
         coords: [u8; 3],
@@ -1141,20 +998,13 @@ pub enum Op {
         offset: Option<u8>,
         handle: u16,
         dim: TexDim,
-        /// Which channel, after the descriptor's swizzle: 0 to 3 for red to
-        /// alpha.
+        /// Which channel, after the descriptor's swizzle.
         component: u8,
         mask: [bool; 4],
     },
 
     // ---- warp ----
-    /// `shfl.<mode> p, dst, src, index, mask`: read another lane's `src`.
-    ///
-    /// `index` selects the lane the mode's own way, and `mask` packs two
-    /// fields: a clamp in its low five bits and a segment mask at bit 8,
-    /// which together bound which lanes this one may reach. `pred` is set to
-    /// whether the lane it computed was inside that bound; a lane that was
-    /// not keeps its own value.
+    /// `shfl.<mode> p, dst, src, index, mask`.
     Shfl {
         dst: u8,
         pred: u8,
@@ -1163,22 +1013,18 @@ pub enum Op {
         mask: Operand,
         mode: ShflMode,
     },
-    /// `suld dst, [coords], handle`: read a texel of an image, the image a
-    /// texture handle names, at integer coordinates. A texel outside it
-    /// reads as zero (`.IGN`, the one clamp mode decoded).
+    /// `suld dst, [coords], handle`.
     Suld {
         dst: u8,
         /// The first coordinate register; [`SurfaceDim`] says how many follow.
         coords: u8,
-        /// A dword index into the texture bank, as `tex`'s is, when
-        /// `handle_reg` is `None`.
+        /// A dword index into the texture bank, as `tex`'s is, when `handle_reg` is `None`.
         handle: u16,
         handle_reg: Option<u8>,
         dim: SurfaceDim,
         data: SurfaceData,
     },
-    /// `sust [coords], src, handle`: write a texel, from `src` onwards. A
-    /// texel outside the image is not written.
+    /// `sust [coords], src, handle`.
     Sust {
         src: u8,
         coords: u8,
@@ -1187,22 +1033,14 @@ pub enum Op {
         dim: SurfaceDim,
         data: SurfaceData,
     },
-    /// `vote.mode dst, pred, src`: `pred` is whether `src` holds in all, any
-    /// or every-or-none of the warp's active lanes, and `dst` the ballot, a
-    /// bit per lane that holds it. Like `shfl`, a question only the warp can
-    /// answer.
+    /// `vote.mode dst, pred, src`.
     Vote {
         dst: u8,
         pred: u8,
         src: Pred,
         mode: VoteMode,
     },
-    /// `fswzadd dst, a, b, swizzle`: add `a` and `b` with a sign per lane,
-    /// the two-bit code for this one selected out of `swizzle` by `laneid`.
-    ///
-    /// It is the other half of a derivative: `shfl` fetches the neighbour's
-    /// value and this subtracts in whichever direction the lane's position in
-    /// the quad calls for.
+    /// `fswzadd dst, a, b, swizzle`.
     Fswzadd {
         dst: u8,
         a: u8,
@@ -1212,16 +1050,11 @@ pub enum Op {
     },
 
     // ---- control ----
-    /// `bra target`: `target` is an instruction's byte offset within the
-    /// program, already resolved from the pc-relative encoding.
+    /// `bra target`.
     Bra {
         target: u32,
     },
-    /// `ssy target`: push a reconvergence point.
-    /// `brx Ra, imm`: an indexed branch, which is how a `switch` lowers. The
-    /// register holds an entry a jump table in a constant bank supplied, and
-    /// the target is that entry plus this instruction's own pc-relative base,
-    /// so an interpreter, unlike a recompiler, needs no table tracking at all.
+    /// `ssy target`.
     Brx {
         base: u32,
         reg: u8,
@@ -1249,24 +1082,15 @@ pub enum Op {
         mode: BarMode,
     },
     Nop,
-    /// A barrier/fence with no effect on a scalar interpreter, kept as a
-    /// distinct op so it doesn't read as unsupported.
     Inert,
 
-    /// A bit pattern this decoder doesn't recognise, or recognises but with
-    /// an unhandled modifier. Carries the raw bits.
+    /// A bit pattern this decoder doesn't recognise, or recognises but with an unhandled modifier.
     Unimplemented {
         raw: u64,
     },
 }
 
 /// `suld`/`sust`, fields as Eden's `surface_load_store.cpp` reads them.
-///
-/// Refused, as Eden refuses them: a clamp mode other than `.IGN` (the others
-/// trap or clamp, and nothing here has done either), a raw access with the
-/// `.BA` byte-addressing bit, a formatted store that does not write all four
-/// channels, and a formatted load with no channel at all. Bit 23 is `.BA`
-/// only in the raw form: the formatted form's channel mask covers it.
 fn decode_surface(insn: u64) -> Option<Op> {
     const IGN: u64 = 0;
     if field(insn, 49, 2) != IGN {
@@ -1338,16 +1162,7 @@ fn field(insn: u64, pos: u32, len: u32) -> u64 {
     (insn >> pos) & ((1u64 << len) - 1)
 }
 
-/// Whether a control-flow instruction's condition-code test (bits 0..5) can
-/// ever be true. It is a second condition beside the predicate, and both have
-/// to hold for the branch to be taken.
-///
-/// Only the two codes that are *decidable without condition-code flags* are
-/// answered here: `F` is never true, and `FCSM_TR`, which a compiler emits
-/// to mean "not this one": is the same, matching Eden's
-/// `IREmitter::GetFlowTest`, which stubs it to false. Every other code is
-/// treated as satisfiable, which is what this interpreter did for all of them
-/// before it modelled the field at all.
+/// Whether a control-flow instruction's condition-code test (bits 0..5) can ever be true.
 fn flow_test_can_hold(insn: u64) -> bool {
     const NEVER: u64 = 0;
     const FCSM_TR: u64 = 28;
@@ -1379,8 +1194,7 @@ fn opt_reg(r: u8) -> Option<u8> {
     }
 }
 
-/// The guard predicate every instruction carries: `PRED16` at `[16, 19)`
-/// with its negate flag at bit 19.
+/// The guard predicate every instruction carries.
 fn guard(insn: u64) -> Pred {
     Pred {
         reg: reg(insn, 16, 3),
@@ -1396,8 +1210,7 @@ fn src_pred(insn: u64, pos: u32, not: u32) -> Pred {
     }
 }
 
-/// `C34_RZ_O14_20`: bank at `[34, 39)`, offset a signed 14-bit word index at
-/// `[20, 34)` scaled by 4.
+/// `C34_RZ_O14_20`.
 fn const_operand(insn: u64) -> Operand {
     Operand::Const {
         bank: reg(insn, 34, 5),
@@ -1455,9 +1268,6 @@ fn icmp(bits: u64) -> ICmp {
     }
 }
 
-/// What a condition-code test is made of, so that the interpreter, over
-/// `bool`s, and the WGSL translator, over the text of an expression, read one
-/// table and cannot disagree about it.
 pub trait FlowLogic<T> {
     fn constant(&self, value: bool) -> T;
     fn not(&self, a: T) -> T;
@@ -1466,12 +1276,6 @@ pub trait FlowLogic<T> {
     fn xor(&self, a: T, b: T) -> T;
 }
 
-/// A condition-code test, the `FlowTest` a `csetp` or a predicated branch
-/// names, over the zero, sign, carry and overflow flags. The table is Eden's
-/// `GetFlowTest` (`shader_recompiler/frontend/ir/ir_emitter.cpp`), which is
-/// where the float-flavoured ones get their odd shapes: `NEU` is `S || !Z`
-/// because a NaN leaves both set. `None` for the `CSM`/`FCSM` tests, which
-/// Eden does not implement either.
 pub fn flow_test<T: Clone>(test: u8, [z, s, c, o]: [T; 4], l: &impl FlowLogic<T>) -> Option<T> {
     Some(match test {
         0 => l.constant(false),                    // F
@@ -1526,8 +1330,7 @@ fn int_type(bits: u64) -> Option<(u8, bool)> {
     }
 }
 
-/// The `FloatFormat` a conversion names, in bits: 1 is f16 and 2 is f32.
-/// f64 (3) is not modelled, and 0 is not a format.
+/// The `FloatFormat` a conversion names, in bits.
 fn float_width(bits: u64) -> Option<u8> {
     match bits {
         1 => Some(16),
@@ -1569,10 +1372,7 @@ fn attr_size(bits: u64) -> MemSize {
     }
 }
 
-/// Where a pc-relative branch lands: the 24-bit signed word at `[20, 44)`,
-/// relative to the instruction *after* this one (envydis's `.addend = 8`).
-/// A branch's pc-relative displacement resolved to a raw byte offset, before
-/// any slot alignment.
+/// Where a pc-relative branch lands.
 fn branch_base(insn: u64, pc: u32) -> u32 {
     (pc as i64 + 8 + sfield(insn, 20, 24)) as u32
 }
@@ -1581,18 +1381,9 @@ fn branch_target(insn: u64, pc: u32) -> u32 {
     super::align_slot(branch_base(insn, pc))
 }
 
-/// Decode a single 8-byte Maxwell instruction word sitting at byte offset
-/// `pc` within its program (needed to resolve pc-relative branches). Never
-/// panics: an unrecognised or unsupported bit pattern decodes to
-/// [`Op::Unimplemented`].
 pub fn decode_at(insn: u64, pc: u32) -> Instruction {
     let op = decode_op(insn, pc);
-    // `ssy`/`pbk`/`pcnt` have no predicate: the bits every other instruction
-    // keeps its guard in belong to their branch target, and they read as zero
-    //, which is `@p0`, a predicate that is false until something sets it. So
-    // the push was skipped and the `sync`/`brk` that matched it found an empty
-    // reconvergence stack, which is where every one of the Home Menu's 222
-    // textured draws stopped.
+    // `ssy`/`pbk`/`pcnt` have no predicate.
     let pred = match op {
         Op::Ssy { .. } | Op::Pbk { .. } | Op::Pcnt { .. } => Pred::ALWAYS,
         _ => guard(insn),
@@ -1600,8 +1391,7 @@ pub fn decode_at(insn: u64, pc: u32) -> Instruction {
     Instruction { pred, op }
 }
 
-/// [`decode_at`] for a program with no branches, where the pc doesn't
-/// matter.
+/// [`decode_at`] for a program with no branches, where the pc doesn't matter.
 pub fn decode(insn: u64) -> Instruction {
     decode_at(insn, 0)
 }
@@ -1610,8 +1400,6 @@ fn decode_op(insn: u64, pc: u32) -> Op {
     let un = Op::Unimplemented { raw: insn };
     let top = |bits: u32| insn >> (64 - bits);
 
-    // Matching runs longest-mask-first, the same order envydis's table is
-    // written in, so a narrow opcode can't shadow a wide one.
     match top(16) & 0xfff8 {
         // ---- attribute space ----
         // ld a[], gm107.c 0xefd8/0xfff8
@@ -1659,8 +1447,6 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             src: reg(insn, 0, 8),
             size: mem_size(field(insn, 48, 3)),
         },
-        // ld/st s[], 0xef48/0xef58, the shared-memory pair of the local
-        // ones below and encoded identically.
         0xef48 => Op::Lds {
             dst: reg(insn, 0, 8),
             addr: reg(insn, 8, 8),
@@ -1691,8 +1477,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             dst: reg(insn, 0, 8),
             sr: reg(insn, 20, 8),
         },
-        // depbar/membar: scheduling and memory ordering, no-ops for a scalar
-        // interpreter that runs one invocation at a time.
+        // depbar/membar.
         0xf0f0 | 0xef98 => Op::Inert,
         // bar: 0xf0a8/0xfff8. The mode's bits are not contiguous.
         0xf0a8 => match (field(insn, 39, 1) << 4)
@@ -1724,8 +1509,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
         0xeb00 | 0xeb08 | 0xeb10 | 0xeb18 | 0xeb20 | 0xeb28 | 0xeb30 | 0xeb38 => {
             decode_surface(insn).unwrap_or(un)
         }
-        // red: 0xebf8/0xfff8. A global atomic whose old value is discarded,
-        // so it decodes to the same op with RZ as its destination.
+        // red.
         0xebf8 => {
             let (Some(op), Some(ty)) = (atom_op(field(insn, 23, 3)), atom_type(field(insn, 20, 3)))
             else {
@@ -1741,10 +1525,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                 space: AtomSpace::Global,
             }
         }
-        // shfl, 0xef10/0xfff8 (Eden's `maxwell.inc`,
-        // "1110 1111 0001 0---"). Both operands can be a register or an
-        // immediate, and each has its own flag saying which, the lane index
-        // five bits at 20, the clamp/segment pair thirteen at 34.
+        // shfl, 0xef10/0xfff8 (Eden's `maxwell.inc`, "1110 1111 0001 0---").
         0xef10 => {
             let index = if field(insn, 28, 1) != 0 {
                 Operand::Imm(field(insn, 20, 5) as u32)
@@ -1779,13 +1560,6 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             0xe33 if flow_test_can_hold(insn) => Op::Kil,
             0xe33 => Op::Nop,
             0xe30 if flow_test_can_hold(insn) => Op::Exit,
-            // An `exit` the flow test can never satisfy is not the end of the
-            // program, and Persona 5 Royal's vertex shaders put one in the
-            // middle of every one of theirs. Stopping the walk there dropped
-            // every instruction after it, the `ast` to `o[0x70]` among them
-            //, so every vertex came out at the default clip position, every
-            // triangle collapsed to the viewport centre, and 39,000 draws a
-            // run produced a black frame.
             0xe30 => Op::Nop,
             0xe2b if field(insn, 5, 1) == 0 => Op::Pcnt {
                 target: branch_target(insn, pc),
@@ -1799,22 +1573,16 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             0xe24 if field(insn, 5, 1) == 0 && flow_test_can_hold(insn) => Op::Bra {
                 target: branch_target(insn, pc),
             },
-            // A branch the flow test can never satisfy, like the `exit` below:
-            // taking it would send the walk somewhere the shader never goes.
+            // A branch the flow test can never satisfy, like the `exit` below.
             0xe24 if field(insn, 5, 1) == 0 => Op::Nop,
             0xe25 if field(insn, 5, 1) == 0 => {
-                // The *sum* of the base and the table entry is the target, so
-                // this is where alignment must not happen: a base that is a
-                // multiple of 32 is a real displacement, not a `sched` word to
-                // step over, and rounding it up shifts every arm of the switch
-                // one instruction along.
+                // Base plus table entry is the target, so the base is not aligned.
                 Op::Brx {
                     base: branch_base(insn, pc),
                     reg: reg(insn, 8, 8),
                 }
             }
-            // atom.cas: 0xeef0/0xfff0, whose size field is one bit because
-            // the operation is fixed.
+            // atom.cas.
             0xeef => Op::Atom {
                 dst: reg(insn, 0, 8),
                 addr: reg(insn, 8, 8),
@@ -1833,8 +1601,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
     }
 }
 
-/// The three atomics whose opcode masks are wider than a nibble: `atom`
-/// (0xed00/0xff00), `atoms` (0xec00/0xff00) and `atoms.cas` (0xee00/0xff80).
+/// The three atomics whose opcode masks are wider than a nibble.
 fn decode_memory_atomic(insn: u64) -> Option<Op> {
     match insn >> 56 {
         // atom: the op is a full nibble and the type three bits below it.
@@ -1862,8 +1629,7 @@ fn decode_memory_atomic(insn: u64) -> Option<Op> {
             },
             space: AtomSpace::Shared,
         }),
-        // atoms.cast/.cas: `cast` is a lock-and-load form nothing here
-        // models, so only the compare-and-swap arm decodes.
+        // atoms.cast/.cas.
         _ if insn >> 55 == 0x1dc => {
             if field(insn, 53, 2) != 2 {
                 return None;
@@ -1886,8 +1652,6 @@ fn decode_memory_atomic(insn: u64) -> Option<Op> {
     }
 }
 
-/// `tabed00_0`/`tabec00_0`, the same eight operations in the same order for
-/// `atom` and `atoms`, with two more that only `atom` reaches.
 fn atom_op(bits: u64) -> Option<AtomOp> {
     Some(match bits {
         0 => AtomOp::Add,
@@ -1920,14 +1684,7 @@ fn atom_type(bits: u64) -> Option<AtomType> {
 fn decode_alu(insn: u64) -> Op {
     let un = Op::Unimplemented { raw: insn };
 
-    // The three operand forms of a "normal" ALU op share a sub-opcode: the
-    // top byte selects register (0x5c..), constant (0x4c..) or immediate
-    // (0x38.., masked 0xfef8 because bit 56 belongs to the immediate) and
-    // the rest of the opcode is identical. Resolving the form once lets each
-    // op below be written once, but the form byte has to be checked too,
-    // because a *different* opcode group reuses the same low byte (0x49a0 is
-    // `ffma`, 0x4ca0 is `sel`), so anything outside this group goes to
-    // [`decode_alu_wide`].
+    // The three operand forms of a "normal" ALU op share a sub-opcode.
     let form = insn >> 48;
     let (rhs_int, rhs_float) = match form >> 8 {
         0x5c => (
@@ -1940,8 +1697,6 @@ fn decode_alu(insn: u64) -> Op {
     };
     let rhs_int = Some(rhs_int);
     let rhs_float = Some(rhs_float);
-    // The low three bits of the opcode field are modifier bits (the group's
-    // mask is 0xfff8), so they are masked off before dispatching.
     let sub = form & 0x00f8;
 
     match sub {
@@ -2003,9 +1758,7 @@ fn decode_alu(insn: u64) -> Op {
                 ftz: field(insn, 44, 1) != 0,
             }
         }
-        // r2p: move register bits into the predicate registers. Bit 40
-        // picks the destination file: `PR` (0) is the predicates, `CC` (1) the
-        // condition-code flags, which nothing here models.
+        // r2p.
         0xf0 => {
             let Some(mask) = rhs_int else { return un };
             if field(insn, 40, 1) != 0 {
@@ -2108,9 +1861,6 @@ fn decode_alu(insn: u64) -> Op {
                 2 => LogicOp::Xor,
                 _ => LogicOp::PassB,
             };
-            // The test form writes a predicate from the result as well as the
-            // register, and the register is usually `RZ`: this is how a shader
-            // asks "are any of these bits set" in one instruction.
             let pred = match field(insn, 44, 2) {
                 0 => None,
                 1 => Some((reg(insn, 48, 3), LopTest::True)),
@@ -2175,17 +1925,6 @@ fn decode_alu(insn: u64) -> Op {
             }
         }
         // rro, the range-reduction operator that precedes `mufu`.
-        //
-        // On hardware `mufu sin`/`cos`/`ex2` take an argument already folded
-        // into the range their tables cover, and `rro` is what folds it. The
-        // `mufu` here is not a table: it calls the host's `sin`, `cos` and
-        // `exp2`, which take the argument as it comes. So the fold is the
-        // identity, and modelling it as one is what makes the pair compute
-        // the function rather than something adjacent to it.
-        //
-        // The negate (45) and absolute value (49) apply to the argument, as
-        // Eden's `floating_point_range_reduction.cpp` applies them. Bit 50
-        // is no field Eden or `envydis` names, so a word with it is refused.
         0x90 => {
             let Some(src) = rhs_float else { return un };
             if field(insn, 50, 1) != 0 {
@@ -2211,8 +1950,7 @@ fn decode_alu(insn: u64) -> Op {
             }
         }
         // ---- conversions ----
-        // i2f: dst type 8..10 (must be f32), src type in tab5cb8_1, byte
-        // select at 41..43, src: neg 45/abs 49.
+        // i2f.
         0xb8 => {
             let Some(src) = rhs_int else { return un };
             if field(insn, 8, 2) != 2 {
@@ -2234,8 +1972,7 @@ fn decode_alu(insn: u64) -> Op {
                 sel: field(insn, 41, 2) as u8,
             }
         }
-        // f2i: dst type in tab5cb0_2, src type 10..12 (must be f32),
-        // rounding at 39..41.
+        // f2i.
         0xb0 => {
             let Some(src) = rhs_float else { return un };
             if field(insn, 10, 2) != 2 {
@@ -2258,8 +1995,7 @@ fn decode_alu(insn: u64) -> Op {
                 ftz: field(insn, 44, 1) != 0,
             }
         }
-        // f2f, f16 and f32 in either direction, and the rounding a
-        // same-width conversion names.
+        // f2f, f16 and f32 in either direction, and the rounding a same-width conversion names.
         0xa8 => {
             let (Some(dst_bits), Some(src_bits)) = (
                 float_width(field(insn, 8, 2)),
@@ -2269,9 +2005,6 @@ fn decode_alu(insn: u64) -> Op {
             };
             let hi = field(insn, 41, 1) != 0;
             let src = if src_bits == 16 {
-                // A half source is read out of the packed pair it sits in,
-                // and an immediate carries one half both lanes see, which is
-                // how Eden's `F2F_imm` builds `imm | (imm << 16)`.
                 match rhs_int {
                     Some(Operand::Imm(v)) => Operand::Imm((v & 0xffff) | (v << 16)),
                     Some(other) => other,
@@ -2282,18 +2015,13 @@ fn decode_alu(insn: u64) -> Op {
                 src
             };
             let round = if src_bits == dst_bits {
-                // `RoundingOp` is bits 39, 40 and 42: bit 41 sits between
-                // them and is the half selector, which is why the field is
-                // not contiguous. 0 (none) and 3 (pass) both only move.
+                // `RoundingOp` is bits 39, 40 and 42.
                 match field(insn, 39, 2) | (field(insn, 42, 1) << 3) {
                     0 | 3 => None,
                     8..=11 => Some(fround(field(insn, 39, 2))),
                     _ => return un,
                 }
             } else {
-                // Bits 39..41 are the *cast's* rounding mode here, and both
-                // renderers round a conversion to nearest-even and nothing
-                // else, so any other mode is refused rather than ignored.
                 if field(insn, 39, 2) != 0 {
                     return un;
                 }
@@ -2343,21 +2071,18 @@ fn decode_alu(insn: u64) -> Op {
     }
 }
 
-/// The ops whose opcode field is wider or narrower than the 0xfff8 group
-/// [`decode_alu`] handles.
+/// The ops whose opcode field is wider or narrower than the 0xfff8 group [`decode_alu`] handles.
 fn decode_alu_wide(insn: u64) -> Op {
     let un = Op::Unimplemented { raw: insn };
     let form = insn >> 48;
 
-    // The half-precision group first: its opcodes are spread across five
-    // different masks, none of which any arm below claims.
+    // The half-precision group first.
     if let Some(op) = decode_half(insn) {
         return op;
     }
 
     // ---- 0xfff0-masked: fsetp/isetp/iset/icmp/prmt/lop3/bfi ----
-    // Each immediate form is listed twice, as `0x36…`/`0x38…` and one above:
-    // bit 56 is the immediate's sign, not part of the opcode.
+    // Each immediate form is listed twice, as `0x36…`/`0x38…` and one above.
     match form >> 4 {
         // fsetp, cmp 48..52, ftz 47, bop 45..47.
         0x5bb | 0x4bb | 0x36b | 0x37b => {
@@ -2432,8 +2157,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 bf: field(insn, 44, 1) != 0,
             };
         }
-        // icmp: c is the third source; the operand order differs between
-        // the register and constant forms.
+        // icmp.
         0x5b4 | 0x4b4 | 0x534 | 0x364 | 0x374 => {
             let (b, c) = match form >> 4 {
                 0x5b4 => (Operand::Reg(reg(insn, 20, 8)), reg(insn, 39, 8)),
@@ -2449,9 +2173,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 signed: field(insn, 48, 1) != 0,
             };
         }
-        // bfi: `src` carries the field's offset and width packed into one
-        // operand; `base` is what the insert lands in. The four forms differ
-        // only in where those two come from.
+        // bfi.
         0x5bf | 0x4bf | 0x53f | 0x36f | 0x37f => {
             let (src, base) = match form >> 4 {
                 0x5bf => (
@@ -2531,23 +2253,12 @@ fn decode_alu_wide(insn: u64) -> Op {
         return Op::Nop;
     }
 
-    // vote.vtg: 0x50e0/0xfff8, and nothing to do. The vertex-stage vote
-    // writes neither a register nor a predicate: it tells the hardware's
-    // tessellation and stream-out fixed function about the warp, and there is
-    // no such fixed function here. Eden stubs it the same way
-    // (`shader_recompiler/frontend/maxwell/translate/impl/vote.cpp`, where
-    // `VOTE_vtg` logs and emits no IR) while implementing plain `VOTE` fully.
-    //
-    // Refusing it is not free: a refused instruction fails the whole draw, and
-    // this one sits two instructions before `exit` in Just Dance 2023's
-    // loading-screen vertex shader: every draw the title made, all 52 of
-    // them, and the frame it presented was the clear colour and nothing else.
+    // vote.vtg.
     if insn & 0xfff8_0000_0000_0000 == 0x50e0_0000_0000_0000 {
         return Op::Nop;
     }
 
-    // vote: 0x50d8/0xfff8, fields as Eden's `vote.cpp` reads them. Mode 3 is
-    // not one; Eden throws on it.
+    // vote.
     if insn & 0xfff8_0000_0000_0000 == 0x50d8_0000_0000_0000 {
         let mode = match field(insn, 48, 2) {
             0 => VoteMode::All,
@@ -2563,12 +2274,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // fswzadd: 0x50f8/0xfff8. `ndv` at 38 is a scheduling hint about
-    // divergence and has no effect here; the condition-code write at 47 is
-    // refused rather than dropped, since a shader that reads the flag would
-    // read whatever was left there. Only round-to-nearest is decoded: this
-    // is the tail of a derivative, and a rounding mode silently ignored
-    // biases every one of them.
+    // fswzadd.
     if insn & 0xfff8_0000_0000_0000 == 0x50f8_0000_0000_0000 {
         if field(insn, 47, 1) != 0 || field(insn, 39, 2) != 0 {
             return un;
@@ -2619,14 +2325,7 @@ fn decode_alu_wide(insn: u64) -> Op {
             lut: field(insn, 28, 8) as u8,
         };
     }
-    // vmnmx, 0x3a00/0xfe00. `a` and `b` each carry a byte selector and a
-    // width, `b` is a register at bit 50 and a 16-bit immediate otherwise,
-    // and the second operation is one of seven at 51 (5 min, 6 max; the rest
-    // merge or accumulate). Only two whole-word register operands of one
-    // signedness, no saturation and no condition codes are taken: that is
-    // the form Tomodachi Life's shaders use, checked field by field against
-    // `vmnmx r7, r9, r12, r7` there, and anything else is refused rather
-    // than guessed at.
+    // vmnmx, 0x3a00/0xfe00.
     if insn & 0xfe00_0000_0000_0000 == 0x3a00_0000_0000_0000 {
         const WORD: u64 = 3;
         const MIN: u64 = 5;
@@ -2688,9 +2387,6 @@ fn decode_alu_wide(insn: u64) -> Op {
     }
 
     // xmad, 16x16 multiply-accumulate, in each of its four operand forms.
-    // Which operand is which moves between them, and so do `psl`, `mrg` and
-    // the width of the select mode: the layouts are Eden's `XMAD_reg`,
-    // `_rc`, `_cr` and `_imm`.
     if insn & 0xffc0_0000_0000_0000 == 0x5b00_0000_0000_0000 {
         return decode_xmad(
             insn,
@@ -2705,9 +2401,7 @@ fn decode_alu_wide(insn: u64) -> Op {
             },
         );
     }
-    // The `rc` form multiplies by the register and adds the bank; `cr` is the
-    // other way round. Reading them the same way makes one of the two
-    // multiply by its addend.
+    // The `rc` form multiplies by the register and adds the bank; `cr` is the other way round.
     if insn & 0xff80_0000_0000_0000 == 0x5100_0000_0000_0000 {
         return decode_xmad(
             insn,
@@ -2736,11 +2430,7 @@ fn decode_alu_wide(insn: u64) -> Op {
             },
         );
     }
-    // The immediate form carries a **16-bit** `b` at 20..36 and multiplies by
-    // its low half always: there is no half selector to spend a bit on, so
-    // bit 35 belongs to the immediate and not to `bh`. A 32-bit multiply by a
-    // constant lowers to a pair of these that both multiply by the same `K`,
-    // and reading the field 20 bits wide gave the second one `K | 0x10000`.
+    // The immediate form carries a **16-bit** `b` at 20..36 and multiplies by its low half always.
     if insn & 0xfec0_0000_0000_0000 == 0x3600_0000_0000_0000 {
         return decode_xmad(
             insn,
@@ -2756,9 +2446,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         );
     }
 
-    // fset, the register-writing form of fsetp. The three operand forms
-    // share every other field, exactly as Eden's one `FSET` body serves its
-    // `_reg`, `_cbuf` and `_imm` entries.
+    // fset, the register-writing form of fsetp.
     if insn & 0xff00_0000_0000_0000 == 0x5800_0000_0000_0000
         || insn & 0xfe00_0000_0000_0000 == 0x4800_0000_0000_0000
         || insn & 0xfe00_0000_0000_0000 == 0x3000_0000_0000_0000
@@ -2792,19 +2480,9 @@ fn decode_alu_wide(insn: u64) -> Op {
 
     // ipa, a[]-relative, non-indexed.
     if insn & 0xff00_0040_0000_ff00 == 0xe000_0000_0000_ff00 {
-        // The interpolation mode (bits 54..56): 0 pass, 1 multiply,
-        // 2 constant, 3 sc. Only `multiply` changes the value, it scales the
-        // varying by the register, which is how a shader spends its
-        // `mufu rcp` on the perspective divide. The other three fetch the
-        // attribute and stop, so they decode to the same op with no
-        // multiplier, exactly as Eden's `IPA` translates them.
-        //
-        // Whether a varying is interpolated or flat is not this field's to
-        // say: the program header's pixel imap is, for every mode alike.
+        // The interpolation mode (bits 54..56).
         let mode = field(insn, 54, 2);
-        // The sample mode (`SampleMode` in Eden's decode): 0 default, 1
-        // centroid, 2 offset. Offset samples wherever a register points,
-        // which is a per-invocation position neither renderer has.
+        // The sample mode (`SampleMode` in Eden's decode).
         let sample = field(insn, 52, 2);
         if sample > 1 {
             return un;
@@ -2820,10 +2498,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // texs: the immediate-handle sample. Bit 49 is `nodep`, a scheduling
-    // hint with no effect on what the instruction computes, so it is ignored
-    // rather than decoded: refusing it cost the Home Menu 156 of its textured
-    // draws, every one of them an ordinary 2D sample.
+    // texs.
     if insn & 0xf600_0000_0000_0000 == 0xd000_0000_0000_0000 {
         let dst = reg(insn, 0, 8);
         let dst2 = reg(insn, 28, 8);
@@ -2840,8 +2515,6 @@ fn decode_alu_wide(insn: u64) -> Op {
                 handle: field(insn, 36, 13) as u16,
                 dim,
                 mask,
-                // `Precision` counts F16 as 0 and F32 as 1, so the bit
-                // being *clear* is the packed form.
                 f16: field(insn, 59, 1) == 0,
             };
         }
@@ -2860,8 +2533,7 @@ fn decode_alu_wide(insn: u64) -> Op {
     if insn >> 58 == 0b11_0010 && field(insn, 51, 3) == 0b111 {
         return decode_tld4(insn);
     }
-    // tex: the general sample, whose operands are spread over the meta
-    // register rather than packed into `texs`'s two.
+    // tex.
     if insn & 0xf800_0000_0000_0000 == 0xc000_0000_0000_0000 {
         return decode_tex(insn, false);
     }
@@ -2897,8 +2569,6 @@ fn decode_alu_wide(insn: u64) -> Op {
             bm: FMod::NONE,
             ftz: field(insn, 55, 1) != 0,
             sat: field(insn, 54, 1) != 0,
-            // `fmul32i` spends the bits a pre-scale would need on its
-            // 32-bit immediate, so it has none.
             scale: FmulScale::None,
         };
     }
@@ -2937,19 +2607,14 @@ fn decode_alu_wide(insn: u64) -> Op {
     un
 }
 
-/// The half pair an immediate form of a half-precision op carries: two halves
-/// whose low six mantissa bits the encoding has no room for, each with a sign
-/// bit of its own well away from the rest of it.
+/// The half pair an immediate form of a half-precision op carries.
 fn half_imm(insn: u64) -> u32 {
     let low = (field(insn, 20, 9) << 6) | (field(insn, 29, 1) << 15);
     let high = (field(insn, 30, 9) << 22) | (field(insn, 56, 1) << 31);
     (low | high) as u32
 }
 
-/// The second operand of a half op's constant-or-immediate pair, and where
-/// its two lanes come from. Bit 55 of the opcode picks which form it is, and
-/// the two carry their lanes differently: a constant bank holds one f32 that
-/// both lanes read, an immediate holds a packed pair.
+/// The second operand of a half op's constant-or-immediate pair, and where its two lanes come from.
 fn half_cbuf_or_imm(insn: u64, cbuf: bool) -> (Operand, HSwizzle) {
     if cbuf {
         (const_operand(insn), HSwizzle::F32)
@@ -2958,19 +2623,7 @@ fn half_cbuf_or_imm(insn: u64, cbuf: bool) -> (Operand, HSwizzle) {
     }
 }
 
-/// The half-precision group: `hadd2`, `hmul2`, `hfma2`, `hset2` and `hsetp2`,
-/// in every operand form.
-///
-/// Opcodes and field positions come from Eden's `maxwell.inc` and its
-/// `half_floating_point_*.cpp` translators. The forms differ in more than
-/// where the second operand comes from: a register form keeps `b`'s
-/// modifiers below bit 32 and a constant or immediate one puts them up at
-/// 52..57, so each is written out rather than shared.
-///
-/// Without these, "A Short Hike" lost 145 of its 295 draws, each to the first
-/// `hadd2` in its shader, and with them the two full-screen quads it
-/// composites its frame out of. A Unity shader is written in `half`
-/// throughout, so this is most of its arithmetic rather than a corner of it.
+/// The half-precision group.
 fn decode_half(insn: u64) -> Option<Op> {
     let top = insn >> 48;
     let un = || Some(Op::Unimplemented { raw: insn });
@@ -2980,8 +2633,6 @@ fn decode_half(insn: u64) -> Option<Op> {
     let asw = HSwizzle::decode(field(insn, 47, 2));
     let reg20 = Operand::Reg(reg(insn, 20, 8));
     let reg39 = Operand::Reg(reg(insn, 39, 8));
-    // Every immediate form carries the same packed pair, and every `32I` form
-    // the same full 32 bits in place of it.
     let imm = Operand::Imm(half_imm(insn));
     let imm32 = Operand::Imm(field(insn, 20, 32) as u32);
     let bsw_reg = HSwizzle::decode(field(insn, 28, 2));
@@ -3020,8 +2671,7 @@ fn decode_half(insn: u64) -> Option<Op> {
             },
             asw,
             b,
-            // An immediate form spends the bits a modifier would need on the
-            // pair's own two signs.
+            // An immediate form spends the bits a modifier would need on the pair's own two signs.
             bm: if cbuf {
                 FMod {
                     neg: field(insn, 56, 1) != 0,
@@ -3134,8 +2784,6 @@ fn decode_half(insn: u64) -> Option<Op> {
             sat: field(insn, 32, 1) != 0,
         });
     }
-    // The `rc`, `cr` and `imm` forms share every modifier position and differ
-    // only in which of `b` and `c` is the constant bank.
     if top & 0xf880 == 0x6080 || top & 0xf880 == 0x7080 || top & 0xf880 == 0x7000 {
         let (b, bsw, c, csw) = if top & 0xf880 == 0x6080 {
             (
@@ -3164,8 +2812,6 @@ fn decode_half(insn: u64) -> Option<Op> {
             a,
             asw,
             b,
-            // The immediate form spends bit 56 on the high half's sign, so it
-            // is the one form with no negate for `b`.
             bneg: top & 0xf880 != 0x7000 && field(insn, 56, 1) != 0,
             bsw,
             c,
@@ -3176,8 +2822,7 @@ fn decode_half(insn: u64) -> Option<Op> {
             sat: field(insn, 52, 1) != 0,
         });
     }
-    // hfma2_32i: the addend is the destination register, which is the only
-    // place the encoding has left to name it.
+    // hfma2_32i.
     if top & 0xfe00 == 0x2800 {
         return Some(Op::Hfma2 {
             dst,
@@ -3196,8 +2841,6 @@ fn decode_half(insn: u64) -> Option<Op> {
     }
 
     // ---- hset2 / hsetp2 ----
-    // Both read `a`'s modifiers, their source predicate and their boolean
-    // combiner from the same places, and `hset2`'s `bf` is `hsetp2`'s `and`.
     let set_am = FMod {
         neg: field(insn, 43, 1) != 0,
         abs: field(insn, 44, 1) != 0,
@@ -3232,8 +2875,6 @@ fn decode_half(insn: u64) -> Option<Op> {
         } else {
             (imm, no_mod, HSwizzle::H1H0)
         };
-        // The comparison is four bits either just above the swizzle or up
-        // among the constant form's modifiers.
         let cmp = fcmp(if register_form {
             field(insn, 35, 4)
         } else {
@@ -3269,8 +2910,6 @@ fn decode_half(insn: u64) -> Option<Op> {
             bop,
             src,
             and: flag,
-            // `hsetp2` spends its destination predicates on the bits every
-            // other form keeps `ftz` in, so its own sits down at bit 6.
             ftz: field(insn, 6, 1) != 0,
         });
     }
@@ -3294,8 +2933,7 @@ fn decode_ffma(insn: u64, b: Operand, c: Operand) -> Op {
     }
 }
 
-/// What one `xmad` form supplies. Everything else, the destination, `a`,
-/// its half and the two signedness bits: sits in the same place in all four.
+/// What one `xmad` form supplies.
 struct XmadForm {
     b: Operand,
     c: Operand,
@@ -3316,9 +2954,7 @@ fn decode_xmad(insn: u64, form: XmadForm) -> Op {
         1 => XmadC::Lo,
         2 => XmadC::Hi,
         4 => XmadC::Bcc,
-        // `csfu` folds a sign into an unsigned product. Eden does not
-        // implement it either, and a guess here is a wrong answer that looks
-        // like a right one.
+        // `csfu` folds a sign into an unsigned product.
         _ => return un,
     };
     let sign = field(insn, 48, 2);
@@ -3338,15 +2974,6 @@ fn decode_xmad(insn: u64, form: XmadForm) -> Op {
 }
 
 /// `d000_1`/`d200_1`-shared 4-bit field.
-/// A `texs`'s encoding field: which texture shape it samples, and where its
-/// coordinates come from. The two operand registers are `REG_08` (`a`) and
-/// `REG_20` (`b`), but which axes they feed differs per encoding, a 2D
-/// sample takes `(a, b)`, while one that also carries an explicit LOD takes
-/// `(a, a + 1)` and leaves `b` for the level.
-///
-/// The depth-compare encodings (4, 5, 6, 9) also name the register holding
-/// the reference the fetched depth is compared against, which is the third
-/// item of the answer.
 fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3], Option<u8>)> {
     let next = a.wrapping_add(1);
     let after_b = b.wrapping_add(1);
@@ -3359,11 +2986,9 @@ fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3], Option<u8>
         3 => (TexDim::T2d, [a, next, RZ], None),
         // 2D.DC, 2D.LZ.DC: the reference is `b`.
         4 | 6 => (TexDim::T2d, [a, next, RZ], Some(b)),
-        // 2D.LL.DC: `b` is the level, so the reference is the register
-        // after it.
+        // 2D.LL.DC.
         5 => (TexDim::T2d, [a, next, RZ], Some(after_b)),
-        // ARRAY_2D, ARRAY_2D.LZ: the layer comes from `a`, and the
-        // coordinates from `a + 1` and `b`.
+        // ARRAY_2D, ARRAY_2D.LZ.
         7 | 8 => (TexDim::T2dArray, [next, b, a], None),
         // ARRAY_2D.LZ.DC
         9 => (TexDim::T2dArray, [next, b, a], Some(after_b)),
@@ -3376,20 +3001,6 @@ fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3], Option<u8>
 }
 
 /// Which colour channels a `texs` writes.
-///
-/// The three-bit selector does not name the channels on its own: it indexes
-/// a different row depending on how many destination registers the
-/// instruction has, since each one takes at most two channels. With both
-/// present the rows are the three- and four-channel sets
-/// (`rgb`/`rga`/`rba`/`gba`/`rgba`); with only one they are the one- and
-/// two-channel sets (`r`/`g`/`b`/`a`/`rg`/`ra`/`ga`/`ba`). Reading the
-/// four-destination row for a single-destination sample turns a one-channel
-/// fetch (which is what a glyph out of an alpha atlas is) into a
-/// three-channel one landing on registers the shader is still using.
-///
-/// The last three selectors of the two-destination row are encodings this
-/// decoder does not know; they come back `None`, which makes the whole
-/// instruction [`Op::Unimplemented`] rather than a guess.
 fn decode_tex_mask(selector: u64, dst: u8, dst2: u8) -> Option<[bool; 4]> {
     const ONE_DEST: [u8; 8] = [0x1, 0x2, 0x4, 0x8, 0x3, 0x9, 0xa, 0xc];
     const TWO_DEST: [u8; 8] = [0x7, 0xb, 0xd, 0xe, 0xf, 0x0, 0x0, 0x0];
@@ -3405,26 +3016,13 @@ fn decode_tex_mask(selector: u64, dst: u8, dst2: u8) -> Option<[bool; 4]> {
     Some([bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0])
 }
 
-/// Decode `tex`, whose operands are read out of one register in a fixed order
-/// (level of detail, then texel offset, then shadow reference) each present
-/// only if its own modifier bit is set. Getting that order wrong reads a
-/// coordinate as an offset, so it is written the way Eden's
-/// `texture_fetch.cpp` walks it.
-/// `tex`, or with `bindless` `tex.b`: the same operands, except that the
-/// bindless form takes its handle from the first meta register instead of
-/// an immediate, and keeps `.AOFFI`, the level mode and `.LC` at 36, 37 and
-/// 40 where the bound form has the immediate. yuzu's `TEX_b` decodes it the
-/// same way.
 fn decode_tex(insn: u64, bindless: bool) -> Op {
     let un = Op::Unimplemented { raw: insn };
     let (aoffi_at, blod_at, lc_at) = if bindless { (36, 37, 40) } else { (54, 55, 58) };
-    // `.LC`, a level-of-detail clamp, has nothing to clamp in a sampler with
-    // one level, and saying so is better than sampling as if it were absent.
     if field(insn, lc_at, 1) != 0 {
         return un;
     }
-    // The dimensionalities `TexDim` names. 1D arrays and 3D arrays are the
-    // ones it does not.
+    // The dimensionalities `TexDim` names.
     let dim = match field(insn, 28, 3) {
         0 => TexDim::T1d,
         2 => TexDim::T2d,
@@ -3440,8 +3038,6 @@ fn decode_tex(insn: u64, bindless: bool) -> Op {
         return un; // a sample with nowhere to land
     }
     let coord = reg(insn, 8, 8);
-    // An array's layer sits in the first coordinate register and the
-    // coordinates start one along; every other dimensionality starts at it.
     let (layer, first) = match dim {
         TexDim::T2dArray | TexDim::TCubeArray => (Some(coord), coord.wrapping_add(1)),
         _ => (None, coord),
@@ -3452,11 +3048,9 @@ fn decode_tex(insn: u64, bindless: bool) -> Op {
         meta = meta.wrapping_add(1);
         r
     };
-    // The handle comes first, ahead of everything else the meta register
-    // chain carries.
+    // The handle comes first, ahead of everything else the meta register chain carries.
     let handle_reg = bindless.then(&mut take);
-    // `blod`: 0 none, 1 `.LZ`, 2 `.LB`, 3 `.LL`, 6 `.LBA`, 7 `.LLA`. Only the
-    // four that carry a register consume one; 4 and 5 are not modes at all.
+    // `blod`.
     let lod = match field(insn, blod_at, 3) {
         0 | 1 => None,
         2 | 3 | 6 | 7 => Some(take()),
@@ -3488,8 +3082,7 @@ fn texture_mask(insn: u64) -> [bool; 4] {
     [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0]
 }
 
-/// `txq`. Only the dimension query (1 at `[22, 25)`) is decoded; the level
-/// it is asked about is in the register at `[8, 16)`.
+/// `txq`.
 fn decode_txq(insn: u64) -> Op {
     const DIMENSION: u64 = 1;
     let dst = reg(insn, 0, 8);
@@ -3505,13 +3098,10 @@ fn decode_txq(insn: u64) -> Op {
     }
 }
 
-/// `tld4`, bound, of a 2D image or array: the layer and the texel offset are
-/// placed as [`decode_tex`] places them. A shadow gather (`.DC`, bit 50), the
-/// per-texel offsets of `.PTP` and a cube's gather are not decoded.
+/// `tld4`, bound, of a 2D image or array.
 fn decode_tld4(insn: u64) -> Op {
     let un = Op::Unimplemented { raw: insn };
-    // A cube's gather picks its face out of a direction first, which the
-    // gather here does not do.
+    // A cube's gather picks its face out of a direction first, which the gather here does not do.
     let dim = match field(insn, 28, 3) {
         2 => TexDim::T2d,
         3 => TexDim::T2dArray,
@@ -3549,22 +3139,11 @@ fn decode_tld4(insn: u64) -> Op {
 pub enum TexsStore {
     /// The whole register is one channel, as an `f32`.
     Float(usize),
-    /// Two channels packed as halves, low first. The second is `None` when an
-    /// odd number of channels is enabled, which hardware pads with zero.
+    /// Two channels packed as halves, low first.
     Halves(usize, Option<usize>),
 }
 
 /// Where a `texs`'s enabled colour channels land, as `(channel, register)`.
-///
-/// A `texs` has *two* destination registers, and each holds at most two
-/// channels: the first two enabled channels go to `dst` and `dst + 1`, the
-/// rest to `dst2` and `dst2 + 1`. The pair is not one run of four.
-///
-/// The distinction is invisible whenever `dst2 == dst + 2`, which is what
-/// the `tex.frag` fixture this decoder was first checked against does, so
-/// the run-of-four reading survived until a shader with `dst = $r4,
-/// dst2 = $r2` ran under it. There channels 2 and 3 landed on `$r6`/`$r7`,
-/// and `$r6` was holding the `1/w` every later `ipa` multiplies by.
 pub fn texs_destinations(dst: u8, dst2: u8, mask: [bool; 4], f16: bool) -> Vec<(u8, TexsStore)> {
     let enabled: Vec<usize> = mask
         .iter()
@@ -3586,9 +3165,6 @@ pub fn texs_destinations(dst: u8, dst2: u8, mask: [bool; 4], f16: bool) -> Vec<(
             })
             .collect();
     }
-    // Two channels to a register, `dst` then `dst2`, so four channels need
-    // two registers rather than four, and the shader reads them back with the
-    // half swizzles the `h*2` ops carry.
     enabled
         .chunks(2)
         .enumerate()
@@ -3608,8 +3184,7 @@ mod tests {
 
     #[test]
     fn decodes_the_shared_memory_pair() {
-        // ld/st s[] sit one nibble above their local counterparts and are
-        // encoded identically: a signed 24-bit byte offset off r8.
+        // ld/st s[] sit one nibble above their local counterparts and are encoded identically.
         assert_eq!(
             decode((0xef48u64 | 4) << 48 | PT | 0x20 << 20 | 5 << 8 | 3).op,
             Op::Lds {
@@ -3656,9 +3231,7 @@ mod tests {
 
     #[test]
     fn decodes_each_barrier_form() {
-        // The mode's bits are not contiguous: 0x9b at bit 32, which is what
-        // makes `sync` (0x80) and `arrive` (0x81) one bit apart and the
-        // reduction forms scattered below them.
+        // The mode's bits are not contiguous.
         let bar = |mode: u64| decode(0xf0a8u64 << 48 | mode << 32 | PT).op;
         assert_eq!(
             bar(0x80),
@@ -3701,10 +3274,6 @@ mod tests {
         assert_eq!(decode(0xf0f0u64 << 48 | PT).op, Op::Inert);
     }
 
-    /// `shfl` carries two operands that are each either a register or an
-    /// immediate, with a flag apiece saying which, and the immediates sit in
-    /// different fields from the registers, so reading the wrong one gives a
-    /// plausible lane number rather than an error.
     #[test]
     fn decodes_a_warp_shuffle_in_each_mode_and_operand_form() {
         // shfl.<mode> p0, r3, r4, 0x1, 0x1c
@@ -3741,8 +3310,7 @@ mod tests {
             );
         }
 
-        // The same instruction with both operands in registers: the lane
-        // index at 20 and the clamp/segment pair at 39.
+        // The same instruction with both operands in registers.
         assert_eq!(
             decode(0xef10u64 << 48 | 3 << 30 | 6 << 39 | 5 << 20 | PT | 4 << 8 | 3 | 2 << 48).op,
             Op::Shfl {
@@ -3782,9 +3350,6 @@ mod tests {
                 ftz: true
             }
         );
-        // A condition-code write and a rounding mode other than nearest are
-        // refused rather than dropped: both change what a later instruction
-        // reads, and this one is the tail of every derivative in the shader.
         for extra in [1u64 << 47, 1 << 39, 2 << 39] {
             assert!(
                 matches!(fswzadd(extra), Op::Unimplemented { .. }),
@@ -3814,9 +3379,7 @@ mod tests {
 
     #[test]
     fn a_shared_atomic_counts_its_offset_in_dwords() {
-        // The one place the two atomic encodings genuinely differ: `atoms`
-        // stores a dword index where `atom` stores a byte offset, so reading
-        // it as bytes divides every address by four.
+        // The one place the two atomic encodings genuinely differ.
         assert_eq!(
             decode(0xec00u64 << 48 | 8 << 52 | 3 << 30 | 7 << 20 | PT | 5 << 8 | 3).op,
             Op::Atom {
@@ -3833,8 +3396,7 @@ mod tests {
 
     #[test]
     fn red_is_an_atomic_that_discards_its_old_value() {
-        // Which is exactly RZ as the destination, so the interpreter needs no
-        // second path for it.
+        // Which is exactly RZ as the destination, so the interpreter needs no second path for it.
         assert_eq!(
             decode(0xebf8u64 << 48 | 2 << 20 | 4 << 28 | PT | 5 << 8 | 3).op,
             Op::Atom {
@@ -3879,28 +3441,16 @@ mod tests {
 
     #[test]
     fn an_atomic_operation_this_decoder_has_no_name_for_is_not_invented() {
-        // Slot 9 is unassigned in envydis's table; decoding it as one of its
-        // neighbours would silently run the wrong reduction.
         assert!(matches!(
             decode(0xed00u64 << 48 | 9 << 52 | PT).op,
             Op::Unimplemented { .. }
         ));
     }
 
-    /// `compiled::Compiled` holds these in a dense array on the strength of
-    /// an `Op` being 32 bytes; a wider one halves what a cache line carries
-    /// through the loop that runs once per covered pixel.
     #[test]
     fn an_op_still_fits_in_thirty_two_bytes() {
         assert_eq!(std::mem::size_of::<Op>(), 32);
     }
-
-    // Every raw word in the first group below was captured with `envydis -n
-    // -i -m gm107` against `uam`-compiled fixtures or a live JKSV run, and
-    // cross-checked field by field; see the module docs for provenance. The
-    // words in the second group are assembled here from the same envytools
-    // table this decoder is written against, so they check the field
-    // positions rather than an independent capture.
 
     fn op(word: u64) -> Op {
         decode(word).op
@@ -3945,11 +3495,6 @@ mod tests {
         );
     }
 
-    /// Bits 52..54 are the sample mode, and Minecraft's fragment shaders
-    /// open with `ipa.centroid`, refusing it dropped every draw of the
-    /// title, first from the backend and then from the rasterizer it fell
-    /// back to. `Offset` stays refused: it samples wherever a register
-    /// points, which is a position neither renderer has.
     #[test]
     fn decodes_the_ipa_sample_modes() {
         assert_eq!(
@@ -3968,10 +3513,7 @@ mod tests {
         assert!(matches!(op(0xe033ff87cff7ff06), Op::Unimplemented { .. }));
     }
 
-    /// Bits 54..56 are the interpolation mode. Only `multiply` reads the
-    /// register at 20; `constant` and `sc` fetch the attribute and stop.
-    /// A Short Hike's fragment shaders carry 23 distinct `ipa` constants,
-    /// and refusing them cost the backend 226 of the title's 899 draws.
+    /// Bits 54..56 are the interpolation mode.
     #[test]
     fn decodes_the_ipa_interpolation_modes() {
         let ipa = |raw| match op(raw) {
@@ -3980,8 +3522,6 @@ mod tests {
             } => (mul, perspective),
             other => panic!("not an ipa: {other:?}"),
         };
-        // pass, multiply, constant, sc, the same instruction each time, with
-        // $r3 in the multiplier field.
         assert_eq!(ipa(0xe003ff8800_37ff00), (None, false));
         assert_eq!(ipa(0xe043ff8800_37ff00), (Some(3), true));
         assert_eq!(ipa(0xe083ff8800_37ff00), (None, false));
@@ -4000,10 +3540,7 @@ mod tests {
         );
     }
 
-    /// `f2f` between the two float widths. Unity's mediump arithmetic
-    /// converts constantly, and A Short Hike carries ten distinct
-    /// half-to-half roundings, every one of them a `floor`, half the time
-    /// off the high half of the register.
+    /// `f2f` between the two float widths.
     #[test]
     fn decodes_f2f_between_half_and_single() {
         // Two of the title's own: `f2f.f16.f16.floor` off H0 and off H1.
@@ -4031,8 +3568,6 @@ mod tests {
                 ..
             }
         ));
-        // The widths come from bits 8..10 (destination) and 10..12 (source),
-        // and a conversion names no rounding of its own.
         let widths = |dst: u64, src: u64| {
             let raw = 0x5ca8_0000_0000_0000 | (dst << 8) | (src << 10);
             match op(raw) {
@@ -4048,8 +3583,7 @@ mod tests {
         assert_eq!(widths(2, 1), (16, 32, None));
         assert_eq!(widths(1, 2), (32, 16, None));
         assert_eq!(widths(2, 2), (32, 32, None));
-        // f64 is not modelled, and neither is a cast that rounds any way but
-        // to nearest.
+        // f64 is not modelled, and neither is a cast that rounds any way but to nearest.
         assert!(matches!(
             op(0x5ca8_0000_0000_0300),
             Op::Unimplemented { .. }
@@ -4060,9 +3594,7 @@ mod tests {
         ));
     }
 
-    /// `fset` against a 20-bit float immediate. The three operand forms share
-    /// every other field, so the arm only has to choose where `b` comes from.
-    /// A Short Hike compares four varyings against 0.5 this way.
+    /// `fset` against a 20-bit float immediate.
     #[test]
     fn decodes_fset_against_an_immediate() {
         assert_eq!(
@@ -4099,10 +3631,7 @@ mod tests {
         ));
     }
 
-    /// The depth-compare encodings, which name a reference register beside
-    /// their coordinates. Where that register sits depends on whether the
-    /// form also spends one on a level: `2d.ll.dc` and `array_2d.lz.dc` take
-    /// the one after `b`, the other two take `b` itself.
+    /// The depth-compare encodings, which name a reference register beside their coordinates.
     #[test]
     fn decodes_the_texs_depth_compare_forms() {
         let texs = |enc: u64| {
@@ -4145,11 +3674,7 @@ mod tests {
 
     #[test]
     fn an_exit_its_flow_test_can_never_satisfy_is_not_an_exit() {
-        // `exit` carries a condition-code test beside its predicate, and both
-        // have to hold. Persona 5 Royal's vertex shaders open with the middle
-        // word here (`EXIT.FCSM_TR`, which never fires) and every one of
-        // them writes `gl_Position` *after* it. Reading it as the end of the
-        // program left every vertex at the default clip position.
+        // `exit` carries a condition-code test beside its predicate, and both have to hold.
         assert_eq!(op(0xe3000000_0007001c), Op::Nop); // FCSM_TR
         assert_eq!(op(0xe3000000_00070000), Op::Nop); // F
         assert_eq!(op(0xe3000000_0007000f), Op::Exit); // T
@@ -4157,8 +3682,6 @@ mod tests {
         // `kil` carries the same field.
         assert_eq!(op(0xe3300000_00070000), Op::Nop);
         assert_eq!(op(0xe3300000_0007000f), Op::Kil);
-        // And so does `bra`, where taking a never-taken one would send the
-        // walk somewhere the shader never goes.
         assert_eq!(op(0xe2400fffff870000), Op::Nop);
         assert!(matches!(op(0xe2400fffff87000f), Op::Bra { .. }));
     }
@@ -4238,8 +3761,6 @@ mod tests {
 
     #[test]
     fn decodes_fadd_constant_bank_form() {
-        // Captured from a live JKSV run (real Mesa/nouveau nvc0-compiled
-        // code, not a `uam` fixture): "fadd ftz $r4 $r2 c0[0x30]".
         assert_eq!(
             op(0x4c58100000c70204),
             Op::Fadd {
@@ -4259,8 +3780,7 @@ mod tests {
 
     #[test]
     fn decodes_mov32i() {
-        // Captured from a live JKSV run: "mov32i $r0 0x3f800000" (loads the
-        // float bit pattern for 1.0).
+        // Captured from a live JKSV run.
         assert_eq!(
             op(0x0103f8000007f000),
             Op::Mov32i {
@@ -4310,10 +3830,6 @@ mod tests {
 
     #[test]
     fn decodes_tex() {
-        // Both words are Persona 5 Royal's, from the fragment shaders of the
-        // post-process chain its loading spinner is drawn by. The first
-        // samples one channel with a texel offset; the second samples three
-        // at an explicit level, which pushes its offset a register along.
         assert_eq!(
             op(0xc07a0080a0770401),
             Op::Tex {
@@ -4344,9 +3860,7 @@ mod tests {
                 mask: [true, true, true, false],
             }
         );
-        // `.LL` takes a level out of the meta register, so everything after
-        // it moves along one: reading the offset from the wrong register is
-        // how a texel offset becomes a coordinate.
+        // `.LL` takes a level out of the meta register, so everything after it moves along one.
         let ll = 0xc07a0080a0770401 | 3 << 55;
         assert!(matches!(
             op(ll),
@@ -4356,8 +3870,6 @@ mod tests {
                 ..
             }
         ));
-        // A level-of-detail clamp has nothing to clamp here, and a sample
-        // with nowhere to land is not one.
         assert!(matches!(op(ll | 1 << 58), Op::Unimplemented { .. }));
         assert!(matches!(
             op(0xc07a0080a0770401 & !(0xf << 31)),
@@ -4369,8 +3881,6 @@ mod tests {
         ));
     }
 
-    /// Nintendo Switch Sports' `i2i.cc` into the zero register and the
-    /// `csetp neu and $p0 0x1 cc 0x1` that reads it, as `envydis` spells it.
     #[test]
     fn decodes_an_i2i_cc_and_a_csetp() {
         assert!(matches!(
@@ -4395,9 +3905,6 @@ mod tests {
 
     #[test]
     fn decodes_a_txq_and_a_tld4() {
-        // Nintendo Switch Sports' own words, which `envydis` reads as
-        // `txq $r0 $r8 dimension 0x8 0x3` and
-        // `tld4 r nodep $r8 $r2 0x0 0x8 t2d 0xd`.
         assert_eq!(
             decode(0xdf48008180470800).op,
             Op::Txq {
@@ -4429,8 +3936,7 @@ mod tests {
 
     #[test]
     fn decodes_a_bindless_tex() {
-        // Tomodachi Life's `tex.b`: the handle in the first meta register,
-        // `r2`, and nothing else in the chain.
+        // Tomodachi Life's `tex.b`.
         assert_eq!(
             op(0xdeba0007a0270000),
             Op::Tex {
@@ -4446,8 +3952,6 @@ mod tests {
                 mask: [true; 4],
             }
         );
-        // `.LL` moves along to the register after the handle, and sits at
-        // bit 37 here rather than 55.
         assert!(matches!(
             op(0xdeba0007a0270000 | 3 << 37),
             Op::Tex {
@@ -4465,9 +3969,7 @@ mod tests {
 
     #[test]
     fn decodes_a_cube_array_tex() {
-        // Tomodachi Life's, the two a draw fell back on before cube arrays
-        // decoded: the cube in the register before the direction, as an
-        // array's layer is, and the second at an explicit level.
+        // Tomodachi Life's, the two a draw fell back on before cube arrays decoded.
         assert_eq!(
             op(0xc03a0087fff70400),
             Op::Tex {
@@ -4496,8 +3998,7 @@ mod tests {
 
     #[test]
     fn decodes_vmnmx_only_where_every_field_is_one_it_models() {
-        // Tomodachi Life's `vmnmx r7, r9, r12, r7`: whole unsigned words,
-        // a minimum and then a minimum against the third operand.
+        // Tomodachi Life's `vmnmx r7, r9, r12, r7`.
         const WORD: u64 = 0x3a2c03e060c70907;
         assert_eq!(
             op(WORD),
@@ -4537,13 +4038,7 @@ mod tests {
 
     #[test]
     fn decodes_texs() {
-        // tex.frag: envydis prints "texs $r2 $r0 $r0 $r1 0x1a4 t2d rgba", but
-        // envydis's print order doesn't match this ISA's real dst/coord
-        // roles: confirmed empirically (see `interp`'s module docs) by
-        // running the decoded program against known texture/colour inputs
-        // and checking the output against `texture.rgba * vColor.rgba`.
-        // The destinations are REG_00 ($r0) and REG_28 ($r2), which take two
-        // channels each; the coordinates are REG_08 ($r0) and REG_20 ($r1).
+        // tex.frag.
         assert_eq!(
             op(0xd8301a40_20170000),
             Op::Texs {
@@ -4557,9 +4052,6 @@ mod tests {
                 f16: false,
             }
         );
-        // The same word with the destinations four apart, which is where the
-        // two readings of the pair diverge: rgba lands on $r4/$r5 then
-        // $r2/$r3, never on $r6/$r7.
         assert_eq!(
             texs_destinations(4, 2, [true, true, true, true], false),
             vec![
@@ -4573,10 +4065,7 @@ mod tests {
 
     #[test]
     fn an_f16_texs_packs_two_channels_into_each_destination() {
-        // Bit 59 halves the register count: rgba lands as two packed pairs
-        // rather than four floats, which is what the `h*2` ops that read the
-        // result back are expecting. Reading it as four floats is what drew
-        // Asphalt 9's red car green.
+        // Bit 59 halves the register count.
         assert_eq!(
             texs_destinations(1, 0, [true, true, true, true], true),
             vec![
@@ -4584,8 +4073,7 @@ mod tests {
                 (0, TexsStore::Halves(2, Some(3)))
             ]
         );
-        // An odd count pads the unused half with zero rather than spilling
-        // into another register.
+        // An odd count pads the unused half with zero rather than spilling into another register.
         assert_eq!(
             texs_destinations(4, 6, [true, true, true, false], true),
             vec![
@@ -4601,9 +4089,7 @@ mod tests {
 
     #[test]
     fn the_precision_bit_is_decoded_and_its_polarity_is_backwards() {
-        // `Precision` numbers F16 as 0 and F32 as 1, so a set bit is the
-        // *unpacked* form. The captured fixture above has it set, which is
-        // why it was right to read as four floats.
+        // `Precision` numbers F16 as 0 and F32 as 1, so a set bit is the *unpacked* form.
         assert!(matches!(
             op(0xd8301a40_20170000),
             Op::Texs { f16: false, .. }
@@ -4616,8 +4102,6 @@ mod tests {
 
     #[test]
     fn a_one_destination_texs_reads_the_single_and_double_channel_masks() {
-        // Selector 0 is `rgb` when both destinations are present and plain
-        // `r` when only one is, the case an alpha-atlas glyph fetch hits.
         assert_eq!(decode_tex_mask(0, 0, 2), Some([true, true, true, false]));
         assert_eq!(decode_tex_mask(0, 0, RZ), Some([true, false, false, false]));
         assert_eq!(decode_tex_mask(3, 0, RZ), Some([false, false, false, true]));
@@ -4645,12 +4129,7 @@ mod tests {
 
     // ---- the wider instruction set ----
 
-    /// Assemble one instruction: an opcode's top 16 bits, the always-true
-    /// guard predicate, and whatever operand fields the caller sets.
-    /// The 32-bit-multiply-by-a-constant pair, as "A Short Hike" emits it.
-    /// Both halves must come out multiplying by the *same* constant: reading
-    /// the immediate as the usual 20 bits makes the second one multiply by
-    /// `K | 0x10000`, because bit 36 is `psl` and not part of the immediate.
+    /// Assemble one instruction.
     #[test]
     fn xmad_immediate_keeps_its_modifiers_where_the_register_form_does() {
         // xmad R1, R2, 0x7, RZ
@@ -4696,9 +4175,6 @@ mod tests {
         }
     }
 
-    /// The select mode says what the product is added to, and the four
-    /// operand forms disagree about which operand is which. A Short Hike
-    /// carries one `clo` and one `cbcc`.
     #[test]
     fn decodes_the_xmad_select_modes_and_operand_forms() {
         let cmode = |raw| match op(raw) {
@@ -4716,8 +4192,7 @@ mod tests {
         ] {
             assert_eq!(cmode(asm(0x5b00, &[(50, 3, mode)])), want, "mode {mode}");
         }
-        // A Short Hike's own: `xmad.clo` with a 16-bit immediate, and
-        // `xmad.cbcc` in the register form.
+        // A Short Hike's own.
         assert!(matches!(
             op(0x36247f9000180303),
             Op::Xmad {
@@ -4733,8 +4208,7 @@ mod tests {
             }
         ));
 
-        // `rc` multiplies by the register and adds the bank; `cr` is the
-        // other way round.
+        // `rc` multiplies by the register and adds the bank; `cr` is the other way round.
         let operands = |raw| match op(raw) {
             Op::Xmad { b, c, .. } => (b, c),
             other => panic!("expected xmad, got {other:?}"),
@@ -4747,9 +4221,6 @@ mod tests {
         assert_eq!(c, Operand::Reg(5));
     }
 
-    /// The condition-code test `T`, which a control-flow instruction needs in
-    /// bits 0..5 to be taken at all. Only `bra`/`exit`/`kil` read the field;
-    /// for everything else those bits are the destination register.
     const FLOW_TEST_T: u64 = 0xF;
 
     fn asm(opcode: u16, fields: &[(u32, u32, u64)]) -> u64 {
@@ -4763,9 +4234,7 @@ mod tests {
 
     #[test]
     fn a_guard_predicate_is_decoded_rather_than_rejected() {
-        // The same `exit`, guarded by `!p1`. The first version of this
-        // decoder made any predicated instruction unsupported, which is
-        // every instruction in a shader with control flow.
+        // The same `exit`, guarded by `!p1`.
         let raw = 0xe3000000_0007000f & !(0xf << 16) | (1 << 16) | (1 << 19);
         let insn = decode(raw);
         assert_eq!(insn.op, Op::Exit);
@@ -4806,8 +4275,6 @@ mod tests {
 
     #[test]
     fn decodes_isetp_and_its_predicate_destinations() {
-        // isetp.lt.and p0, pt, r1, r2, pt, cmp at 49, signed at 48,
-        // destinations at [3,6) and [0,3), source predicate at [39,42).
         let raw = asm(
             0x5b60,
             &[
@@ -4837,17 +4304,12 @@ mod tests {
 
     #[test]
     fn decodes_a_relative_branch_to_an_absolute_offset() {
-        // `bra` is pc-relative with an addend of 8, so from the instruction
-        // at 0x18 an offset of -0x10 lands at 0x10.
         let raw = asm(0xe240, &[(20, 24, (-0x10i64) as u64), (0, 5, FLOW_TEST_T)]);
         assert_eq!(decode_at(raw, 0x18).op, Op::Bra { target: 0x10 });
     }
 
     #[test]
     fn decodes_the_reconvergence_ops() {
-        // 0 + 8 + 0x18 is 0x20, which is a `sched` word rather than an
-        // instruction, so the target is the slot after it. See
-        // [`super::super::align_slot`].
         assert_eq!(
             decode_at(asm(0xe290, &[(20, 24, 0x18)]), 0).op,
             Op::Ssy { target: 0x28 }
@@ -4862,21 +4324,15 @@ mod tests {
         assert_eq!(op(asm(0x50b0, &[])), Op::Nop);
     }
 
-    /// The exact word Just Dance 2023's loading-screen vertex shader carries,
-    /// two instructions before its `exit`. It has to decode to something, or
-    /// the draw it belongs to never happens.
     #[test]
     fn a_vertex_stage_vote_is_a_nop() {
         assert_eq!(op(0x50e2_4321_1117_0000), Op::Nop);
-        // The whole 0x50e0 group, not just that encoding: the three bits the
-        // mask leaves free are the vote's operands, which nothing here reads.
+        // The whole 0x50e0 group, not just that encoding.
         for low in 0..8u64 {
             assert_eq!(op(0x50e0_0000_0000_0000 | (low << 48)), Op::Nop);
         }
     }
 
-    /// Words `envydis` reads as `rro sincos $r27 neg $r7` and `rro sincos
-    /// $r24 neg $r31`, from Echoes of Wisdom's vertex shaders.
     #[test]
     fn a_range_reduction_keeps_its_modifiers() {
         let neg = FMod {
@@ -4901,10 +4357,7 @@ mod tests {
         );
     }
 
-    /// A negative immediate sets bit 56, which moves the opcode up one:
-    /// `envydis` reads these as `isetp eq u32 and $p0 0x1 $r2 -0x1 0x1`
-    /// (Echoes of Wisdom's), `fsetp le and $p0 0x1 $r4 0xbf800000 0x1`,
-    /// `iset eq u32 and $r3 $r4 -0x1 0x1` and `iadd3 $r2 $r4 -0x7fffb $r6`.
+    /// A negative immediate sets bit 56, which moves the opcode up one.
     #[test]
     fn a_negative_immediate_does_not_change_the_opcode() {
         assert!(matches!(
@@ -4943,10 +4396,6 @@ mod tests {
         ));
     }
 
-    /// Words `envydis` reads as `sust p t2d rgba ign g[$r0] $r24 $r39`
-    /// (Echoes of Wisdom's), `suld d t2d b32 ign $r4 g[$r8] 0x40`,
-    /// `suld p a2d ra ign $r4 g[$r8] $r39` and `suld d t1d u8 ign $r0 g[$r1]
-    /// 0x3`.
     #[test]
     fn surface_accesses_decode_as_envydis_reads_them() {
         assert_eq!(
@@ -4993,8 +4442,6 @@ mod tests {
                 data: SurfaceData::Raw(SurfaceSize::U8),
             }
         );
-        // A formatted store of fewer than four channels, and a clamp mode
-        // that traps, are refused rather than half-done.
         assert!(matches!(
             op(0xeb20_1386_0077_0018),
             Op::Unimplemented { .. }
@@ -5005,8 +4452,6 @@ mod tests {
         ));
     }
 
-    /// The words `envydis` reads as `vote all $r2 0x1 0x1` (Echoes of
-    /// Wisdom's), `vote any $r5 $p5 $p4` and `vote eq $r3 $p2 not $p0`.
     #[test]
     fn a_vote_decodes_its_mode_and_both_predicates() {
         assert_eq!(
@@ -5046,16 +4491,11 @@ mod tests {
 
     #[test]
     fn a_reconvergence_push_is_never_predicated() {
-        // The bits every other instruction keeps its guard in belong to these
-        // three's branch target, and read as zero, which is `@p0`, false
-        // until something sets it. Decoded that way the push is skipped and
-        // the `sync` that matched it finds an empty stack.
         for opcode in [0xe290u16, 0xe2a0, 0xe2b0] {
             let raw = asm(opcode, &[(20, 24, 0x20)]);
             assert!(decode_at(raw, 0).pred.is_always(), "opcode {opcode:#x}");
         }
         // `bra` in the same group *is* predicated, and keeps its guard.
-        // `asm` writes PT into those bits, so clear them before setting p3.
         let bra = (asm(0xe240, &[(20, 24, 0x20), (0, 5, FLOW_TEST_T)]) & !(0x7 << 16)) | (3 << 16);
         assert_eq!(
             decode_at(bra, 0).pred,
@@ -5156,14 +4596,9 @@ mod tests {
         );
     }
 
-    /// The six half-precision encodings "A Short Hike" actually issues, taken
-    /// from the words its own draws were skipped on. Between them they cover
-    /// every operand form the group has except `hfma2`'s and the `32I`s.
     #[test]
     fn the_half_instructions_a_unity_shader_issues() {
-        // hadd2.f32 $r12 $r12 $r17: the swizzles and the merge are all F32,
-        // which is a plain float add issued on the half unit. 110 of the 145
-        // skipped draws stopped on one of these.
+        // hadd2.f32 $r12 $r12 $r17.
         assert_eq!(
             op(0x5d12800011170c0c),
             Op::Hadd2 {
@@ -5195,8 +4630,7 @@ mod tests {
                 sat: false,
             }
         );
-        // hmul2.f32 $r4 $r5 c1[0xc]: the constant form keeps `b`'s
-        // modifiers up at 52..57 rather than below 32.
+        // hmul2.f32 $r4 $r5 c1[0xc].
         assert_eq!(
             op(0x7882800400370504),
             Op::Hmul2 {
@@ -5215,8 +4649,6 @@ mod tests {
                 sat: false,
             }
         );
-        // hadd2 $r0 -$r9 (1.0, 1.0), a "one minus" through the immediate
-        // form, whose pair is two halves missing their low six mantissa bits.
         assert_eq!(
             op(0x7a02883c0f070900),
             Op::Hadd2 {
@@ -5235,8 +4667,7 @@ mod tests {
                 sat: false,
             }
         );
-        // hadd2 $r8.h0 -$rZ.h0_h0 c1[0x0]: the merging form, which keeps
-        // the half of $r8 it does not write.
+        // hadd2 $r8.h0 -$rZ.h0_h0 c1[0x0].
         assert_eq!(
             op(0x7a8508040007ff08),
             Op::Hadd2 {
@@ -5255,9 +4686,6 @@ mod tests {
                 sat: false,
             }
         );
-        // hsetp2.eq.and $p0 $pT $rZ.h0_h0 c3[0x140] $pT, the two
-        // destinations are the two lanes, and the second is `PT`, which is
-        // not writable.
         assert_eq!(
             op(0x7e85038c0507ff07),
             Op::Hsetp2 {
@@ -5281,9 +4709,6 @@ mod tests {
         );
     }
 
-    /// The forms no capture covers yet, assembled from the field positions
-    /// rather than observed, so a transcription slip in one shows up here
-    /// rather than in a frame.
     #[test]
     fn every_half_operand_form_reaches_its_op() {
         // hfma2 $r1 $r2 $r3 $r4, register form.
@@ -5329,8 +4754,6 @@ mod tests {
                 ..
             }
         ));
-        // The `32I` forms take a whole 32-bit pair, and `hfma2`'s addend is
-        // its own destination because the encoding has nowhere else to put it.
         assert!(matches!(
             op(asm(0x2c00, &[(0, 8, 1), (8, 8, 2), (20, 32, 0x3c00_3c00)])),
             Op::Hadd2 {
@@ -5359,8 +4782,6 @@ mod tests {
                 ..
             }
         ));
-        // hset2, whose register form puts its comparison at 35 and its `.bf`
-        // where every other form's merge sits.
         assert!(matches!(
             op(asm(
                 0x5d18,
@@ -5412,8 +4833,6 @@ mod tests {
         ));
     }
 
-    /// An immediate half pair is two nine-bit fields with their signs stored
-    /// a long way from the rest of them.
     #[test]
     fn an_immediate_half_pair_reassembles_both_signs() {
         // -1.0 in the low half (0xbc00) and +2.0 in the high (0x4000).

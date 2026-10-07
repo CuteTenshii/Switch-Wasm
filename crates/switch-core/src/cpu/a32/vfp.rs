@@ -1,33 +1,12 @@
-//! VFP: the floating-point coprocessor a 32-bit title does its arithmetic in.
+//! VFP, the AArch32 floating-point coprocessor.
 //!
-//! Measured across Mario Kart 8 Deluxe's eight modules, the VFP data
-//! processing, load/store and register-transfer encodings are 5% of the
-//! binary, small next to the integer core, and load-bearing: `rtld` reaches
-//! its first `vpush {d0-d7}` 8192 instructions in.
-//!
-//! # The registers are A64's, seen differently
-//!
-//! There is no separate file. AArch32's `D0`..`D31` are the low halves of
-//! AArch64's `V0`..`V15`: `D(2n)` is the bottom 64 bits of `V(n)` and
-//! `D(2n+1)` the top, and `S(2n)`/`S(2n+1)` split each `D` the same way. So
-//! [`crate::cpu::Cpu::vregs`] backs both states and a context switch already
-//! carries the floating-point state without knowing which one wrote it.
-//!
-//! # FPSCR
-//!
-//! AArch32 keeps in one register what A64 splits between `FPCR` and `FPSR`,
-//! and the halves line up: the rounding mode is bits 23:22 in both, so
-//! [`crate::cpu::bits::fpcr_rounding`] reads either. The one part with nowhere
-//! to go is FPSCR's own N/Z/C/V, which `VCMP` writes and `VMRS APSR_nzcv`
-//! copies into the condition flags: a comparison does *not* set the condition
-//! flags directly, the way A64's `FCMP` does.
+//! `D(2n)`/`D(2n+1)` are the halves of `V(n)`, so [`crate::cpu::Cpu::vregs`]
+//! backs both states. FPSCR's N/Z/C/V are kept separately for `VMRS APSR_nzcv`.
 
 use crate::cpu::Cpu;
 use crate::{Error, Result};
 
-/// Expand a VFP 8-bit immediate to a double, as `VFPExpandImm` defines it:
-/// the sign, then bit 6 inverted, then bit 6 repeated to fill the exponent,
-/// then the low six bits as the top of the mantissa.
+/// `VFPExpandImm` for a double.
 fn expand_imm_f64(imm8: u32) -> u64 {
     let sign = u64::from((imm8 >> 7) & 1) << 63;
     let top = u64::from(!(imm8 >> 6) & 1) << 62;
@@ -36,7 +15,7 @@ fn expand_imm_f64(imm8: u32) -> u64 {
     sign | top | fill | mantissa
 }
 
-/// The same for a single, whose exponent is five bits shorter.
+/// `VFPExpandImm` for a single.
 fn expand_imm_f32(imm8: u32) -> u32 {
     let sign = ((imm8 >> 7) & 1) << 31;
     let top = (!(imm8 >> 6) & 1) << 30;
@@ -46,7 +25,6 @@ fn expand_imm_f32(imm8: u32) -> u32 {
 }
 
 impl Cpu {
-    /// `Sn`, which is one quarter of a vector register.
     #[inline]
     pub(super) fn vfp_s(&self, n: u8) -> u32 {
         (self.vregs[(n >> 2) as usize] >> (32 * u32::from(n & 3))) as u32
@@ -59,7 +37,6 @@ impl Cpu {
         *slot = (*slot & !(u128::from(u32::MAX) << shift)) | (u128::from(val) << shift);
     }
 
-    /// `Dn`, which is one half of a vector register.
     #[inline]
     pub(super) fn vfp_d(&self, n: u8) -> u64 {
         (self.vregs[(n >> 1) as usize] >> (64 * u32::from(n & 1))) as u64
@@ -82,8 +59,7 @@ impl Cpu {
         f64::from_bits(self.vfp_d(n))
     }
 
-    /// `VLDR`, `VSTR`, `VLDM`, `VSTM` and the core-register pair transfers,
-    /// which all live in the coprocessor load/store space.
+    /// The coprocessor load/store space: `VLDR`, `VSTR`, `VLDM`, `VSTM`, core-pair `VMOV`.
     pub(super) fn a32_coproc_load_store(&mut self, insn: u32) -> Result<()> {
         let pre = (insn >> 24) & 1 != 0;
         let add = (insn >> 23) & 1 != 0;
@@ -95,14 +71,13 @@ impl Cpu {
         let double = (insn >> 8) & 0xF == 0xB;
         let imm8 = insn & 0xFF;
 
-        // P and W both clear is not an addressing mode at all: it is the pair
-        // of core registers moving to or from one D register (or two S).
+        // P and W both clear is the core-register pair transfer.
         if !pre && !writeback {
             return self.a32_vfp_core_pair(insn, load, double);
         }
 
         if pre && !writeback {
-            // VLDR/VSTR: a single register at base ± (imm8 * 4).
+            // VLDR/VSTR
             let offset = imm8 * 4;
             let base = self.r32(rn);
             let addr = if add {
@@ -136,13 +111,10 @@ impl Cpu {
             return Ok(());
         }
 
-        // VLDM/VSTM, and so VPUSH and VPOP: `imm8` counts *words*, so a list
-        // of doubles is half as long as it is wide.
+        // VLDM/VSTM (and VPUSH/VPOP): `imm8` counts words.
         let count = if double { imm8 / 2 } else { imm8 };
         let bytes = imm8 * 4;
         let base = self.r32(rn);
-        // The decrementing form addresses below the base; both run upwards
-        // from wherever they start.
         let mut addr = if add { base } else { base.wrapping_sub(bytes) };
         for i in 0..count as u8 {
             if double {
@@ -182,8 +154,6 @@ impl Cpu {
         Ok(())
     }
 
-    /// `VMOV` between a pair of core registers and one `D` register, or two
-    /// consecutive `S` registers.
     fn a32_vfp_core_pair(&mut self, insn: u32, load: bool, double: bool) -> Result<()> {
         let rt = ((insn >> 12) & 0xF) as u8;
         let rt2 = ((insn >> 16) & 0xF) as u8;
@@ -217,8 +187,7 @@ impl Cpu {
         Ok(())
     }
 
-    /// VFP data processing, and the single-register transfers that share its
-    /// encoding space.
+    /// VFP data processing and the single-register transfers in its space.
     pub(super) fn a32_vfp_data(&mut self, insn: u32) -> Result<()> {
         if insn & 0x10 != 0 {
             return self.a32_vfp_transfer(insn);
@@ -230,9 +199,6 @@ impl Cpu {
         let vd = ((insn >> 12) & 0xF) as u8;
         let vn = ((insn >> 16) & 0xF) as u8;
         let vm = (insn & 0xF) as u8;
-        // A double numbers its top bit last and a single numbers it first,
-        // which is the whole of the difference between the two register
-        // encodings.
         let (rd, rn, rm) = if double {
             ((d_bit << 4) | vd, (n_bit << 4) | vn, (m_bit << 4) | vm)
         } else {
@@ -245,7 +211,7 @@ impl Cpu {
                 self.a32_vfp_multiply_accumulate(insn, double, rd, rn, rm)
             }
             (0, 0b10) => {
-                // VMUL, and VNMUL which negates the product.
+                // VMUL / VNMUL
                 self.vfp_write(
                     double,
                     rd,
@@ -255,7 +221,7 @@ impl Cpu {
                 )
             }
             (0, 0b11) => {
-                // VADD and VSUB.
+                // VADD / VSUB
                 let (a, b) = self.vfp_pair(double, rn, rm);
                 let result = if negate { a - b } else { a + b };
                 self.vfp_store(double, rd, result);
@@ -271,8 +237,7 @@ impl Cpu {
         .map(|()| self.pc = self.pc.wrapping_add(4))
     }
 
-    /// The two source operands of a data-processing instruction, widened to
-    /// `f64` so one routine serves both precisions.
+    /// The two source operands, widened to `f64`.
     #[inline]
     fn vfp_pair(&self, double: bool, rn: u8, rm: u8) -> (f64, f64) {
         if double {
@@ -305,9 +270,6 @@ impl Cpu {
         Ok(())
     }
 
-    /// The multiply-accumulate family, fused and unfused. Which of the eight
-    /// it is comes from three bits: the operation group, whether the product
-    /// is negated, and whether the accumulator is.
     fn a32_vfp_multiply_accumulate(
         &mut self,
         insn: u32,
@@ -325,17 +287,15 @@ impl Cpu {
         let op2 = (insn >> 6) & 1 != 0;
         let fused = (insn >> 23) & 1 != 0;
         let (product, accumulator) = match ((insn >> 20) & 0b11, op2) {
-            // VMLA / VFMA: the accumulator and the product both as they are.
+            // VMLA / VFMA
             (0b00, false) | (0b10, false) => (a * b, acc),
-            // VMLS / VFMS: the product negated.
+            // VMLS / VFMS
             (0b00, true) | (0b10, true) => (-(a * b), acc),
-            // VNMLS / VFNMS: the accumulator negated.
+            // VNMLS / VFNMS
             (0b01, false) => (a * b, -acc),
-            // VNMLA / VFNMA: both negated.
+            // VNMLA / VFNMA
             _ => (-(a * b), -acc),
         };
-        // The fused forms round once, which is the whole point of them, so the
-        // product must not be materialised first.
         let result = if fused {
             let signed_a = if product.is_sign_negative() != (a * b).is_sign_negative() {
                 -a
@@ -350,12 +310,10 @@ impl Cpu {
         Ok(())
     }
 
-    /// The `opc1 == 1x11` corner of the data-processing space: the moves, the
-    /// one-operand arithmetic, the comparisons and the conversions.
+    /// The `opc1 == 1x11` space: moves, one-operand ops, compares, conversions.
     fn a32_vfp_extended(&mut self, insn: u32, double: bool, rd: u8, rm: u8) -> Result<()> {
         let opc2 = (insn >> 16) & 0xF;
         let opc3 = (insn >> 6) & 0b11;
-        // An even opc3 is the immediate move; everything else is an operation.
         if opc3 & 1 == 0 {
             let imm8 = ((insn >> 12) & 0xF0) | (insn & 0xF);
             if double {
@@ -366,7 +324,7 @@ impl Cpu {
             return Ok(());
         }
         match (opc2, opc3) {
-            // VMOV register, and VABS.
+            // VMOV register / VABS
             (0b0000, 0b01) => {
                 if double {
                     let v = self.vfp_d(rm);
@@ -378,8 +336,7 @@ impl Cpu {
                 Ok(())
             }
             (0b0000, _) => {
-                // Clearing the sign bit, not `f64::abs`: the sign of a NaN is
-                // architectural here.
+                // Clear the sign bit: a NaN's sign is architectural.
                 if double {
                     let v = self.vfp_d(rm) & !(1 << 63);
                     self.set_vfp_d(rd, v);
@@ -389,7 +346,7 @@ impl Cpu {
                 }
                 Ok(())
             }
-            // VNEG, which flips the sign bit for the same reason.
+            // VNEG
             (0b0001, 0b01) => {
                 if double {
                     let v = self.vfp_d(rm) ^ (1 << 63);
@@ -409,7 +366,7 @@ impl Cpu {
                 self.vfp_store(double, rd, v.sqrt());
                 Ok(())
             }
-            // VCMP and VCMPE, against another register or against zero.
+            // VCMP / VCMPE
             (0b0100 | 0b0101, _) => {
                 let a = if double {
                     self.vfp_f64(rd)
@@ -426,10 +383,7 @@ impl Cpu {
                 self.set_fpscr_flags(a, b);
                 Ok(())
             }
-            // VCVT between the two precisions. `sz` names the *operand's*
-            // width, so the destination is numbered by the other rule: a
-            // double is `D:Vd` and a single `Vd:D`, and using one rule for
-            // both sends the result to a register 16 away.
+            // VCVT between precisions: the destination uses the other width's numbering.
             (0b0111, _) => {
                 let vd = ((insn >> 12) & 0xF) as u8;
                 let d_bit = ((insn >> 22) & 1) as u8;
@@ -442,9 +396,7 @@ impl Cpu {
                 }
                 Ok(())
             }
-            // VCVT from an integer, which always arrives in an S register
-            // however wide the result is, so the operand is numbered
-            // `Vm:M` even when `sz` says double.
+            // VCVT from an integer: the operand is always an S register.
             (0b1000, _) => {
                 let sm = ((insn & 0xF) as u8) << 1 | ((insn >> 5) & 1) as u8;
                 let signed = (insn >> 7) & 1 != 0;
@@ -457,9 +409,7 @@ impl Cpu {
                 self.vfp_store(double, rd, v);
                 Ok(())
             }
-            // VCVT to an integer, which always lands in an S register. The
-            // architecture saturates rather than wrapping, which is what a
-            // float-to-int `as` cast in Rust already does.
+            // VCVT to an integer, saturating, into an S register.
             (0b1100 | 0b1101, _) => {
                 let v = if double {
                     self.vfp_f64(rm)
@@ -483,8 +433,6 @@ impl Cpu {
         }
     }
 
-    /// A comparison's result, which goes to FPSCR rather than to the condition
-    /// flags: AArch32 needs a `VMRS` to move it across.
     fn set_fpscr_flags(&mut self, a: f64, b: f64) {
         let (n, z, c, v) = if a.is_nan() || b.is_nan() {
             (0, 0, 1, 1)
@@ -498,19 +446,13 @@ impl Cpu {
         self.fpscr_nzcv = (n << 31) | (z << 30) | (c << 29) | (v << 28);
     }
 
-    /// The 8-, 16- and 32-bit transfers between a core register and the
-    /// extension registers: `VMOV` to and from an `S` register and
-    /// `VMRS`/`VMSR` with coprocessor 10, and with coprocessor 11 `VMOV` to
-    /// and from one lane of a `D` register, and `VDUP`. Bit 8 is what tells
-    /// the two halves apart; the fields above it mean different things in
-    /// each.
+    /// Core register transfers: bit 8 picks cp10 (`VMOV` S, `VMRS`/`VMSR`) or cp11 (lane `VMOV`, `VDUP`).
     fn a32_vfp_transfer(&mut self, insn: u32) -> Result<()> {
         let to_arm = (insn >> 20) & 1 != 0;
         let rt = ((insn >> 12) & 0xF) as u8;
         if (insn >> 8) & 1 != 0 {
             return self.a32_vfp_lane_transfer(insn, to_arm, rt);
         }
-        // VMSR/VMRS name a system register in the field a VMOV uses for Vn.
         if (insn >> 21) & 0b111 == 0b111 {
             let reg = (insn >> 16) & 0xF;
             if reg != 1 {
@@ -520,8 +462,7 @@ impl Cpu {
                 )));
             }
             if to_arm {
-                // Rt == 15 is `VMRS APSR_nzcv`, which is how a comparison
-                // reaches the condition flags at all.
+                // Rt == 15 is `VMRS APSR_nzcv`.
                 let fpscr = self.fpscr();
                 if rt == 15 {
                     self.nzcv = fpscr & 0xF000_0000;
@@ -547,13 +488,10 @@ impl Cpu {
         Ok(())
     }
 
-    /// `VMOV` between a core register and one lane of a `D` register, and
-    /// `VDUP` from a core register to every lane of a `D` or `Q`.
     fn a32_vfp_lane_transfer(&mut self, insn: u32, to_arm: bool, rt: u8) -> Result<()> {
         let d = (((insn >> 7) & 1) as u8) << 4 | ((insn >> 16) & 0xF) as u8;
         if !to_arm && (insn >> 23) & 1 != 0 {
-            // VDUP: B (bit 22) and E (bit 5) give the size, Q (bit 21) the
-            // register width. The Vd field sits where Vn does elsewhere.
+            // VDUP: B (bit 22) and E (bit 5) give the size, Q (bit 21) the width.
             let esize = match ((insn >> 22) & 1, (insn >> 5) & 1) {
                 (1, 0) => 8,
                 (0, 1) => 16,
@@ -574,7 +512,6 @@ impl Cpu {
             self.pc = self.pc.wrapping_add(4);
             return Ok(());
         }
-        // opc1 (bits 22:21) and opc2 (bits 6:5) give the size and the lane.
         let opc = ((insn >> 21) & 0b11) << 2 | (insn >> 5) & 0b11;
         let (esize, index) = if opc & 0b1000 != 0 {
             (8, opc & 0b111)
@@ -593,7 +530,6 @@ impl Cpu {
         let current = self.vfp_d(d);
         if to_arm {
             let raw = (current & mask) >> shift;
-            // U (bit 23) zero-extends a narrow lane; clear, it sign-extends.
             let value = if (insn >> 23) & 1 != 0 || esize == 32 {
                 raw
             } else {
@@ -608,8 +544,6 @@ impl Cpu {
         Ok(())
     }
 
-    /// FPSCR assembled from the halves A64 keeps it in, plus the comparison
-    /// flags that belong to neither.
     fn fpscr(&self) -> u32 {
         self.fpscr_nzcv | (self.fpcr & 0x07C0_0000) | (self.fpsr & 0x0000_009F)
     }
@@ -622,12 +556,7 @@ impl Cpu {
 }
 
 impl Cpu {
-    /// The ARMv8 additions to AArch32's floating point, which live in the
-    /// unconditional encoding space because they carry their own condition or
-    /// rounding mode rather than the instruction's.
-    ///
-    /// `VSEL` is 2,672 of the 2,915 such instructions in Mario Kart 8 Deluxe,
-    /// a compiler emitting branchless `min`, `max` and ternaries.
+    /// The ARMv8 unconditional-space additions: VSEL, VMAXNM/VMINNM, VRINT/VCVT with explicit rounding.
     pub(super) fn a32_vfp_v8(&mut self, insn: u32) -> Result<()> {
         let double = (insn >> 8) & 0xF == 0xB;
         let d_bit = ((insn >> 22) & 1) as u8;
@@ -643,8 +572,7 @@ impl Cpu {
         };
 
         if (insn >> 23) & 1 == 0 {
-            // VSEL, whose two condition bits name four of the sixteen
-            // conditions rather than being one of them.
+            // VSEL
             let cond = match (insn >> 20) & 0b11 {
                 0b00 => 0x0, // EQ
                 0b01 => 0x6, // VS
@@ -664,16 +592,14 @@ impl Cpu {
         }
 
         match (insn >> 20) & 0b11 {
-            // VMAXNM and VMINNM, which differ from VMAX/VMIN in returning the
-            // number when one side is a NaN.
+            // VMAXNM / VMINNM
             0b00 => {
                 let (a, b) = self.vfp_pair(double, rn, rm);
                 let minimum = (insn >> 6) & 1 != 0;
                 let result = if minimum { a.min(b) } else { a.max(b) };
                 self.vfp_store(double, rd, result);
             }
-            // VRINT and VCVT with the rounding mode in the instruction rather
-            // than in FPSCR.
+            // VRINTA/N/P/M and VCVTA/N/P/M
             0b11 => {
                 let rounding = (insn >> 16) & 0b11;
                 let v = if double {
@@ -688,7 +614,6 @@ impl Cpu {
                     _ => v.floor(),   // M
                 };
                 if (insn >> 18) & 1 != 0 {
-                    // VCVT: the result is an integer in an S register.
                     let signed = (insn >> 7) & 1 != 0;
                     let bits = if signed {
                         (rounded as i32) as u32
@@ -722,9 +647,7 @@ fn round_ties_even(v: f64) -> f64 {
     }
 }
 
-/// Name a VFP encoding for a trace, which is worth having even where the
-/// operation is not implemented: "cop p11" says nothing about what stopped a
-/// run.
+/// Name a VFP encoding for a trace.
 pub(super) fn vfp_mnemonic(insn: u32, cond: &str) -> String {
     let width = if (insn >> 8) & 0xF == 10 {
         "f32"

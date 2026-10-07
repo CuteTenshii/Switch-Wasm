@@ -1,35 +1,6 @@
-//! Which instructions a program actually runs that the block translator has
-//! no op for:
+//! Lists the instructions a program runs that the block translator has no op for,
+//! weighted by one steady frame's instruction mix:
 //! `jit_coverage <target> [prod.keys] [title.keys] [font.ttf]`.
-//!
-//! The translator resolves an instruction's group, form, fields and immediates
-//! once, at translation time, and every later execution of that block does
-//! none of it. An encoding it has no op for becomes `Op::Interpret` instead:
-//! the block still runs, but that instruction is decoded from scratch on every
-//! pass, which is the work the translator exists to remove. In a loop body
-//! entered ten thousand times, one such instruction costs ten thousand
-//! decodes.
-//!
-//! This is what `examples/bench.rs` was for, and it answered the question the
-//! wrong way round. It ran sixteen copies of one encoding in a loop, timed it
-//! on the host, and called the class untranslated when the two engines came
-//! out "within noise of each other", inferring an exact, static property of
-//! the decoder from a wall-clock measurement on a machine this emulator does
-//! not run on. [`switch_core::cpu::translates`] answers it directly, and
-//! weighting by a real frame's instruction mix says which of the gaps is worth
-//! anything.
-//!
-//! Counted per instruction, so this half necessarily runs the interpreter. The
-//! mix does not depend on which engine produced it, `examples/jit_difftest.rs`
-//! is the check that the two execute the same instructions. It measures the
-//! same property the `interpreted` counter does, over one steady frame rather
-//! than over whatever window that run was given, so the two shares only match
-//! when the windows do.
-//!
-//! The target is a homebrew `.nro` or a retail container, an `.nsp`, an
-//! `.xci` or a bare Program `.nca`, which needs its keys after it. An NRO is
-//! not the workload a retail title is, so a ranking taken from one does not
-//! transfer.
 mod common;
 
 const USAGE: &str = "jit_coverage <target> [prod.keys] [title.keys] [font.ttf]";
@@ -39,7 +10,6 @@ use std::collections::HashMap;
 use switch_core::cpu::Cpu;
 use switch_core::disasm::disassemble;
 
-/// How many distinct untranslated encodings to name.
 const ROWS: usize = 20;
 
 fn main() {
@@ -49,8 +19,7 @@ fn main() {
     cpu.bootstrap();
     program.boot(&mut cpu);
 
-    // Two frames of startup, so what follows is a steady-state frame. Nothing
-    // is sampled here, so it runs through the block translator.
+    // Two frames of startup, so what follows is a steady-state frame.
     common::run_to(&mut cpu, u64::MAX, |cpu| cpu.nv.gpu.frames >= 2);
 
     let mut seen: HashMap<u32, u64> = HashMap::new();
@@ -94,9 +63,7 @@ fn main() {
         );
     }
 
-    // Rolled up the way `examples/hotspots.rs` reports the mix, so the two
-    // tables can be read against each other: hot group with a large share
-    // untranslated is where a new op pays for itself.
+    // Rolled up the way `examples/hotspots.rs` reports the mix.
     let mut by_top = [(0u64, 0u64); 256];
     for (&insn, &count) in &seen {
         let top = ((insn >> 24) & 0xFF) as usize;

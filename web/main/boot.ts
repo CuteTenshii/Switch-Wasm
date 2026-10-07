@@ -1,10 +1,5 @@
-/* Booting from the stage: the Open buttons, and dropping a file on it.
-
-   Anything the emulator can boot is accepted here, homebrew and retail alike.
-   A `.nro` or `.elf` is an executable this loads directly; a `.nsp`, `.xci`
-   or `.nca` is a container the title has to be found inside first, which is
-   `container.ts`'s job. Which of those a file is comes from its header, not
-   its name - see `filetype.ts`. */
+// Booting from the stage: the Open buttons and file drops. Executables load
+// directly; containers go to `container.ts`. The format comes from the header.
 
 import type { ControlInfo } from '../shared/protocol';
 import { bootContainer } from './container';
@@ -48,25 +43,17 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
   log('Loaded ' + file.name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
   const title = await homebrewTitle(file.name);
   setRunning(title);
-  // The loading screen was opened on the file name, before there was anything
-  // else to call this; it stays up until the first frame, so it gets the rest.
   loadIdentity(title.name, runningIconUrl());
   noteBooted();
   setState('loaded');
-  // Uncover the emulated screen now, but keep the loading screen over it:
-  // homebrew can run for a long time (or fault) before it presents anything,
-  // and a blank stage reads as dead. `display.renderFb` takes the screen down
-  // as soon as there is a real frame under it.
+  // The loading screen stays over it until `display.renderFb` has a real frame.
   showScreen();
   awaitFirstFrame();
   await updatePc();
   return true;
 }
 
-/* What an NRO says it is, out of the asset section appended after its image:
-   the icon and name a home menu would show for it, which beat the file name
-   the page has been calling it until now. An ELF has none of that, and
-   neither does homebrew built without an icon - both keep the file name. */
+// An NRO's icon and name from its asset section, falling back to the file name.
 async function homebrewTitle(filename: string): Promise<RunningTitle> {
   let info: ControlInfo;
   try {
@@ -90,15 +77,12 @@ async function homebrewTitle(filename: string): Promise<RunningTitle> {
 async function bootFile(file: File): Promise<void> {
   const verdict = await classify(file, ['nro', 'elf', 'pfs0', 'xci', 'nca']);
   if (!verdict.ok) {
-    // Not a fault: nothing was loaded, and whatever is running stays running
-    // under the message until it is dismissed.
+    // Not a fault: whatever is running keeps running.
     failLoad(verdict.why);
     log(verdict.why, 'err');
     return;
   }
-  // A title gets a console of its own. Booting used to load straight into
-  // whatever was already running, which left the outgoing title's guest RAM
-  // mapped underneath the new one. See `recycleSession`.
+  // A title gets a fresh console. See `recycleSession`.
   try {
     beginLoad(file.name, 'replacing the running session');
     setRunning(null);
@@ -110,8 +94,6 @@ async function bootFile(file: File): Promise<void> {
     return;
   }
   if (verdict.format === 'pfs0' || verdict.format === 'xci' || verdict.format === 'nca') {
-    // A container fills the Files panel on its way past, so what was opened
-    // and what was found in it stay inspectable after the title has started.
     await bootContainer(file, verdict.format);
     return;
   }

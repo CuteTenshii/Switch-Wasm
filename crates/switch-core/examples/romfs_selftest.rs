@@ -1,52 +1,19 @@
-//! Read a title's RomFS twice and check it said the same thing both times:
+//! Read a title's RomFS ranges in different ways and check the bytes agree:
 //! `romfs_selftest <container> <prod.keys> [title.keys] [samples]`.
 //!
-//! A RomFS is served through a stack, `HostSource` → the NCA window →
-//! AES-CTR → the compression layer and its block cache, and every layer of
-//! it answers a *range*. Nothing verifies what comes out: the ExeFS is
-//! hash-checked against the NCA header, but full IVFC verification of a RomFS
-//! is not implemented (`nca.rs` says so), so a byte that decrypts or
-//! decompresses wrongly is served to the guest and believed. It surfaces as a
-//! title behaving oddly hundreds of millions of instructions later, with
-//! nothing anywhere near the reader to say the bytes were wrong.
-//!
-//! There is no reference image to compare against, but a correct reader has
-//! a property that does not need one: **the bytes of a range do not depend on
-//! how the range was asked for**. Read it whole, read it in pieces, read the
-//! pieces backwards, read something far away in between, read it again: a
-//! stack with a block boundary off by one, a cache that keys on the wrong
-//! thing, or a decompressor that carries state between calls disagrees with
-//! itself, and that disagreement is a real bug in every case. That is the
-//! whole test.
-//!
-//! Ranges are drawn where such a bug would show first: at each file's first
-//! and last bytes, and straddling the compression layer's block boundaries,
-//! `CACHED_BLOCKS` is 4, so a window a few blocks wide also makes the cache
-//! evict while the sample is still being read.
-//!
-//! `SEED=<n>` picks the sample set: a failing run names its seed, and that
-//! seed reproduces it exactly. `WINDOW=<hex>` is how many bytes each sample
-//! compares (default 0x9000, a little over two 16 KiB blocks).
-//!
-//! `INJECT=1` puts a deliberate boundary bug in front of the real reader and
-//! expects to be told about it. A consistency test that has never failed is
-//! indistinguishable from one that cannot fail, and "the RomFS is fine" is
-//! exactly the kind of answer that has to be worth something: run it once
-//! with the canary and the same command reports what a real bug would look
-//! like.
+//! `SEED=<n>` picks the sample set, `WINDOW=<hex>` the bytes per sample
+//! (default 0x9000), and `INJECT=1` adds a deliberate boundary bug that the
+//! test must report.
 mod common;
 
 use switch_core::source::ByteSource;
 
 const USAGE: &str = "romfs_selftest <container> <prod.keys> [title.keys] [samples]";
 
-/// The block size the compression layer's LZ4 entries usually cover. Only a
-/// hint for where to aim a sample: the table is the authority and it is not
-/// visible from out here, so samples straddle this *and* every file boundary.
+/// Usual LZ4 block size of the compression layer; only a hint for sampling.
 const BLOCK_HINT: u64 = 0x1_0000;
 
-/// xorshift64*, so a seed names a sample set exactly. Sampling has to be
-/// reproducible or a failure cannot be shown to anyone else.
+/// xorshift64*, so a seed reproduces a sample set exactly.
 struct Rng(u64);
 
 impl Rng {
@@ -66,11 +33,8 @@ impl Rng {
     }
 }
 
-/// A reader with a bug of the shape this test exists to find: a short read
-/// that starts on a block boundary comes back with its first byte wrong,
-/// which is what a cache keyed on the wrong thing or an entry lookup off by
-/// one does. A whole-window read is unaffected, so only reading the range
-/// both ways finds it.
+/// Canary reader: a short read starting on a block boundary gets its first
+/// byte wrong.
 #[derive(Debug)]
 struct Flaky<S>(S);
 
@@ -88,25 +52,20 @@ impl<S: ByteSource> ByteSource for Flaky<S> {
     }
 }
 
-/// One range to check, and why it was picked, a failure reports the reason,
-/// because "the first byte of a file" and "across a block boundary" send you
-/// to different code.
 struct Sample {
     at: u64,
     len: u64,
     why: String,
 }
 
-/// Where the two readings first differ.
 struct Mismatch {
     at: u64,
     whole: u8,
     piecewise: u8,
 }
 
-/// Compare `reference` against the same range read in `chunk`-sized pieces,
-/// optionally back to front, and optionally with a distant read between every
-/// piece to make the block cache evict.
+/// Compare `reference` against the range read in `chunk`-sized pieces,
+/// optionally reversed and with evicting far reads in between.
 fn read_piecewise(
     source: &dyn ByteSource,
     at: u64,
@@ -125,9 +84,7 @@ fn read_piecewise(
         let end = (start + chunk).min(len);
         source.read_exact_at(at + start, &mut out[start as usize..end as usize])?;
         if let Some(far) = thrash {
-            // Deliberately ignored: the point is the side effect on the cache,
-            // and a far read that lands past the end of the image is not a
-            // failure of the sample being taken.
+            // Only the cache side effect matters.
             let _ = source.read_at(far, &mut scratch);
         }
     }
@@ -146,9 +103,7 @@ fn first_difference(reference: &[u8], other: &[u8], at: u64) -> Option<Mismatch>
         })
 }
 
-/// The ranges to check, drawn where a range-addressed stack goes wrong: the
-/// edges of what the guest asks for, and the edges of what the layers below
-/// store.
+/// Ranges at file edges and around compression block boundaries.
 fn samples(image: &common::romfs::Image, window: u64, wanted: usize, rng: &mut Rng) -> Vec<Sample> {
     let mut out = Vec::new();
     if image.files.is_empty() {
@@ -168,9 +123,6 @@ fn samples(image: &common::romfs::Image, window: u64, wanted: usize, rng: &mut R
         let picks = [
             (file.start, "a file's first bytes"),
             (end.saturating_sub(window), "a file's last bytes"),
-            // Straddling the boundary the compression layer most likely has an
-            // entry edge on, and a boundary inside the file wherever the
-            // sample lands.
             (
                 (file.start + BLOCK_HINT) & !(BLOCK_HINT - 1),
                 "across a block boundary",
@@ -181,10 +133,7 @@ fn samples(image: &common::romfs::Image, window: u64, wanted: usize, rng: &mut R
             if out.len() == wanted {
                 break;
             }
-            // A range past this file is still a range the stack must serve
-            // consistently, but a sample that says "a file's last bytes" and
-            // reads the next file's is a confusing thing to report, so the
-            // window is trimmed to the file it was drawn from.
+            // Trim the window to the file it was drawn from.
             let limit = window.min(end.saturating_sub(at).max(1));
             if let Some((at, len)) = clamp(at, limit) {
                 out.push(Sample {
@@ -223,9 +172,7 @@ fn main() {
         image.data_offset
     );
 
-    // Before reading a byte: a file whose extent leaves the image is a
-    // metadata or geometry fault rather than a reader one, and it would
-    // otherwise turn up as an unreadable sample and be blamed on the stack.
+    // A file extending past the image is a metadata fault, not a reader one.
     let overrunning: Vec<&common::romfs::Entry> = image
         .files
         .iter()
@@ -254,10 +201,6 @@ fn main() {
                 continue;
             }
         };
-        // Chunk sizes that put a boundary everywhere it can be: inside a
-        // machine word, either side of a page, and a whole page, plus the
-        // orders and the eviction that a stateful stack disagrees with itself
-        // over.
         let far = (sample.at + image.len / 2) % image.len;
         let readings: [(&str, u64, bool, Option<u64>); 8] = [
             ("1-byte pieces", 1, false, None),
@@ -270,9 +213,7 @@ fn main() {
             ("the whole range again", sample.len.max(1), false, None),
         ];
         for (how, chunk, backwards, thrash) in readings {
-            // A one-byte walk over a wide window is thousands of reads; the
-            // narrow chunk sizes are what catch an off-by-one, so they run on
-            // the first part of the range rather than not at all.
+            // One-byte walks only cover the start of the range.
             let len = if chunk < 8 {
                 sample.len.min(0x800)
             } else {
@@ -308,7 +249,7 @@ fn main() {
         compared as f64 / (1024.0 * 1024.0),
     );
     if canary {
-        // The canary inverts the verdict: what is being checked is the test.
+        // The canary inverts the verdict.
         println!(
             "{}",
             match failures {

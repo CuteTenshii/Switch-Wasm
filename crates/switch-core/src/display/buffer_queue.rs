@@ -1,15 +1,5 @@
-//! `IGraphicBufferProducer`, the buffer queue between an app and the
-//! compositor.
-//!
-//! The app registers each of its swapchain images with
-//! `SET_PREALLOCATED_BUFFER`, then loops: `DEQUEUE_BUFFER` to get a slot it may
-//! render into, and `QUEUE_BUFFER` to hand the finished image to the display.
-//! Queuing is what makes a frame appear, so that transaction is where the
-//! emulator scans the image out.
-//!
-//! The Switch's version of this interface is Android's, with one extra
-//! command (`SET_PREALLOCATED_BUFFER`) and Nvidia's `NvGraphicBuffer` in place
-//! of a gralloc handle.
+//! `IGraphicBufferProducer`, the buffer queue between an app and the compositor.
+//! Android's interface plus `SET_PREALLOCATED_BUFFER`, with `NvGraphicBuffer` handles.
 
 use crate::display::parcel::{ParcelReader, ParcelWriter};
 use crate::gpu::{Crop, DisplayBuffer};
@@ -26,20 +16,16 @@ pub const CONNECT: u32 = 10;
 pub const DISCONNECT: u32 = 11;
 pub const SET_PREALLOCATED_BUFFER: u32 = 14;
 
-/// Maximum number of buffer slots, as Android defines it.
 pub const MAX_SLOTS: usize = 64;
 
 /// `NvMultiFence`: a count followed by four `{ id, value }` fences.
 const MULTI_FENCE_SIZE: usize = 4 + 4 * 8;
 
-/// Offset of the `NvGraphicBuffer` fields inside the flattened blob. The blob
-/// starts with ten words (`magic, width, height, stride, format, usage, pid,
-/// refcount, numFds, numInts`), then carries the `NvGraphicBuffer` from just
-/// past its 12-byte `NativeHandle` header.
+/// `NvGraphicBuffer` fields start after ten header words, past its 12-byte `NativeHandle`.
 const BLOB_INTS_OFFSET: usize = 40;
 const NATIVE_HANDLE_SIZE: usize = 12;
 
-/// Field offsets within `NvGraphicBuffer` (see libnx `graphic_buffer.h`).
+/// Field offsets within `NvGraphicBuffer` (libnx `graphic_buffer.h`).
 const GB_NVMAP_ID: usize = 0x10;
 const GB_PLANES: usize = 0x40;
 /// Field offsets within `NvSurface`.
@@ -51,17 +37,7 @@ const PLANE_PITCH: usize = 0x14;
 const PLANE_OFFSET: usize = 0x1C;
 const PLANE_BLOCK_HEIGHT_LOG2: usize = 0x24;
 
-/// Byte offsets inside the flattened `QueueBufferInput`
-/// (`{ s64 timestamp, s32 isAutoTimestamp, Rect crop, s32 scalingMode,
-/// u32 transform, u32 stickyTransform, ... }`).
-///
-/// `crop` is the window of the surface that is the frame, and `transform` is
-/// how the image is stored versus how it is to be shown. Discarding the pair
-/// drew every Minecraft frame upside down and gave A Short Hike a 1080p
-/// screen with its 720p frame in the corner.
-///
-/// `scalingMode` is not read: it says how the crop maps onto the layer, and
-/// the frame goes to a canvas that scales it to the window either way.
+/// Byte offsets inside the flattened `QueueBufferInput`.
 const INPUT_CROP_OFFSET: usize = 12;
 const INPUT_TRANSFORM_OFFSET: usize = 32;
 
@@ -72,19 +48,16 @@ const QUERY_FORMAT: i32 = 2;
 const QUERY_MIN_UNDEQUEUED_BUFFERS: i32 = 3;
 const QUERY_CONSUMER_RUNNING_BEHIND: i32 = 9;
 
-/// Android status codes the producer returns.
+/// Android status codes.
 const STATUS_OK: i32 = 0;
 const STATUS_NO_MEMORY: i32 = -12;
 const STATUS_BAD_VALUE: i32 = -22;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SlotState {
-    /// No buffer registered.
     #[default]
     Empty,
-    /// Registered and available to be dequeued.
     Free,
-    /// Handed to the app to render into.
     Dequeued,
 }
 
@@ -92,9 +65,7 @@ enum SlotState {
 struct Slot {
     state: SlotState,
     buffer: Option<DisplayBuffer>,
-    /// The flattened `NvGraphicBuffer` this slot was registered with, kept
-    /// verbatim because `REQUEST_BUFFER` has to hand the very same bytes back
-    /// -- see the note there.
+    /// Kept verbatim: `REQUEST_BUFFER` hands the same bytes back.
     blob: Option<Vec<u8>>,
 }
 
@@ -102,19 +73,16 @@ struct Slot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     None,
-    /// The app queued a finished frame: scan this buffer out.
     Present(DisplayBuffer),
 }
 
 #[derive(Debug)]
 pub struct BufferQueue {
     slots: [Slot; MAX_SLOTS],
-    /// Default geometry reported by `CONNECT`/`QUERY` before any buffer is
-    /// registered.
+    /// Geometry reported before any buffer is registered.
     pub width: u32,
     pub height: u32,
     pub connected: bool,
-    /// Frames queued since boot.
     pub queued: u64,
 }
 
@@ -126,10 +94,6 @@ impl Default for BufferQueue {
 
 impl BufferQueue {
     pub fn new() -> BufferQueue {
-        // An undocked console, which is what one is until something docks it,
-        // and the size comes from there rather than from a pair of literals,
-        // because a queue that disagrees with the display is a title drawing
-        // at the wrong scale. `Cpu::set_operation_mode` moves it.
         let (width, height) = crate::cpu::OperationMode::Handheld.display_size();
         BufferQueue {
             slots: std::array::from_fn(|_| Slot::default()),
@@ -140,20 +104,12 @@ impl BufferQueue {
         }
     }
 
-    /// Set the geometry a caller is told about before it has dequeued
-    /// anything, `QUERY_WIDTH`/`QUERY_HEIGHT` and the default in a dequeue
-    /// reply. It is the display's size, so docking the console moves it.
-    ///
-    /// Only the default: `DequeueBuffer` and a queued buffer both overwrite
-    /// these with the size the guest actually asked for, and that one is not
-    /// the dock's to change underneath it.
+    /// Only the default; dequeued and queued buffers report their own size.
     pub fn set_default_size(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
     }
 
-    /// Handle one binder transaction. `request` is the raw incoming parcel;
-    /// the returned parcel is what the caller writes into the reply buffer.
     pub fn transact(&mut self, code: u32, request: &[u8]) -> (Vec<u8>, Action) {
         let mut r = ParcelReader::new(request);
         r.skip_interface_token();
@@ -162,22 +118,7 @@ impl BufferQueue {
 
         match code {
             REQUEST_BUFFER => {
-                // Hand back the flattened `GraphicBuffer` registered in this
-                // slot: `{ nonNull, [buffer], result }`.
-                //
-                // This used to answer `nonNull = 0` with success, on the
-                // reasoning that the app preallocated the buffer and so
-                // already has it. It does -- but its `Surface` caches buffers
-                // per slot and only trusts that cache for a slot it has
-                // requested before, so the first request for each slot is
-                // answered out of an empty cache. "A Short Hike" believed the
-                // success, took the null buffer that came with it, and
-                // dereferenced it: `NvWsi`'s swapchain reads the fence out of
-                // `buffer + 0x60` the instant `dequeueBuffer` returns. That
-                // read lands in the soft-mapped low pages instead of faulting,
-                // so the failure surfaced a long way from here -- the WSI
-                // thread locked a `nn::os::MutexType` at address 0xc7,
-                // deadlocked, and no frame was ever drawn.
+                // `{ nonNull, [buffer], result }`; the app's `Surface` needs the buffer even though it preallocated it.
                 let slot = r.read_i32();
                 let blob = usize::try_from(slot)
                     .ok()
@@ -189,9 +130,7 @@ impl BufferQueue {
                         w.write_flattened(blob);
                         w.write_i32(STATUS_OK);
                     }
-                    // Nothing is registered in that slot, which is what
-                    // Android reports as a bad slot index rather than as an
-                    // empty success.
+                    // Android reports an empty slot as a bad index.
                     None => {
                         w.write_i32(0);
                         w.write_i32(STATUS_BAD_VALUE);
@@ -214,8 +153,7 @@ impl BufferQueue {
                 match self.acquire_free_slot() {
                     Some(slot) => {
                         w.write_i32(slot as i32);
-                        // No fence: the previous frame is already scanned out,
-                        // so the app may render into the slot immediately.
+                        // No fence: the slot can be rendered into immediately.
                         w.write_i32(1);
                         w.write_flattened(&[0u8; MULTI_FENCE_SIZE]);
                         w.write_i32(STATUS_OK);
@@ -252,7 +190,6 @@ impl BufferQueue {
             CANCEL_BUFFER => {
                 let slot = r.read_i32();
                 self.release(slot);
-                // The reply parcel carries no content.
             }
             QUERY => {
                 let what = r.read_i32();
@@ -291,7 +228,6 @@ impl BufferQueue {
                 } else {
                     self.clear(slot);
                 }
-                // The reply parcel carries no content.
             }
             _ => {
                 w.write_i32(STATUS_BAD_VALUE);
@@ -317,8 +253,7 @@ impl BufferQueue {
         Some(index)
     }
 
-    /// Mark a dequeued slot as presented. Because scan-out happens
-    /// immediately, the slot goes straight back to free.
+    /// Scan-out is immediate, so the slot goes straight back to free.
     fn queue(&mut self, slot: i32, transform: u32, crop: Crop) -> Option<DisplayBuffer> {
         let index = usize::try_from(slot).ok()?;
         let entry = self.slots.get_mut(index)?;
@@ -348,15 +283,12 @@ impl BufferQueue {
         }
     }
 
-    /// Decode the flattened `NvGraphicBuffer` a `SET_PREALLOCATED_BUFFER`
-    /// carries and register it in `slot`.
     fn set_preallocated(&mut self, slot: i32, blob: &[u8]) {
         let index = match usize::try_from(slot) {
             Ok(index) if index < MAX_SLOTS => index,
             _ => return,
         };
-        // `field(x)` addresses the NvGraphicBuffer by its own offsets, which
-        // the blob stores from just past the NativeHandle header.
+        // Addresses the `NvGraphicBuffer` by its own offsets.
         let field = |offset: usize| -> u32 {
             read_u32(blob, BLOB_INTS_OFFSET + offset - NATIVE_HANDLE_SIZE)
         };
@@ -372,7 +304,7 @@ impl BufferQueue {
             layout: plane(PLANE_LAYOUT),
             block_height_log2: plane(PLANE_BLOCK_HEIGHT_LOG2),
             color_format,
-            // The producer names both per queued frame, not per slot.
+            // Set per queued frame, not per slot.
             transform: 0,
             crop: Crop::ALL,
         };
@@ -414,8 +346,7 @@ mod tests {
         w.finish()
     }
 
-    /// Wrap `body` (already-serialized payload words) into a request parcel
-    /// that starts with the interface token.
+    /// Prefixes `body` with the interface token.
     fn request(body: &[u8]) -> Vec<u8> {
         let tok = token();
         let payload_len = read_u32(&tok, 0) as usize;
@@ -434,8 +365,6 @@ mod tests {
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
 
-    /// Build the flattened NvGraphicBuffer blob a real
-    /// `SET_PREALLOCATED_BUFFER` carries.
     fn graphic_buffer_blob(nvmap_id: u32, width: u32, height: u32, offset: u32) -> Vec<u8> {
         let mut blob = vec![0u8; BLOB_INTS_OFFSET + 0x150 - NATIVE_HANDLE_SIZE];
         let mut put = |off: usize, value: u32| {
@@ -486,14 +415,6 @@ mod tests {
     #[test]
     fn request_buffer_hands_back_the_buffer_registered_in_the_slot() {
         // `REQUEST_BUFFER` is `{ nonNull, [flattened GraphicBuffer], result }`.
-        // Answering `nonNull = 0` with success -- on the reasoning that the
-        // app preallocated the buffer and so already has it -- is a lie the
-        // caller believes: its `Surface` caches buffers per slot and asks for
-        // each slot once, so the first ask comes out of an empty cache and it
-        // takes the null. "A Short Hike" then read the fence out of
-        // `buffer + 0x60`, which with the low pages soft-mapped does not
-        // fault; its swapchain thread went on to lock a `nn::os::MutexType` at
-        // address 0xc7, deadlocked there, and the title never drew a frame.
         let mut q = BufferQueue::new();
         preallocate(&mut q, 0, 7, 0x1000);
         let expected = graphic_buffer_blob(7, 1280, 720, 0x1000);
@@ -505,8 +426,7 @@ mod tests {
         assert_eq!(r.read_flattened(), Some(&expected[..]));
         assert_eq!(r.read_i32(), STATUS_OK);
 
-        // A slot nothing was ever registered in is a bad slot index, not an
-        // empty success -- the caller has to be able to tell those apart.
+        // An empty slot is a bad index, not an empty success.
         let (reply, _) = q.transact(REQUEST_BUFFER, &request(&words(&[5])));
         let mut r = ParcelReader::new(&reply);
         assert_eq!(r.read_i32(), 0);

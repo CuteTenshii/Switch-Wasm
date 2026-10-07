@@ -1,15 +1,8 @@
-/* rumble
-
-   Switch rumble drives two linear resonant actuators independently, and the
-   Gamepad API's "dual-rumble" effect is the same shape: the guest's low band
-   becomes strongMagnitude, its high band weakMagnitude. Only Chromium-family
-   browsers implement vibrationActuator, so this is best-effort and silent
-   where it is missing. */
+// Map guest rumble to the Gamepad API "dual-rumble" effect (Chromium only).
 
 import { call } from './rpc';
 
-/** What the browsers that have one actually expose - `reset` is Chromium's,
- *  and the effect type is a string the spec has renamed more than once. */
+// The actuator shape browsers expose; `reset` is Chromium's.
 interface DualRumbleActuator {
   playEffect?(type: string, params: {
     duration: number;
@@ -33,9 +26,7 @@ export async function pullVibration(pad: Gamepad | undefined): Promise<void> {
     if (strong === 0 && weak === 0) {
       await actuator.reset?.();
     } else {
-      // Outlive the poll interval so a held rumble is continuous rather than
-      // a stutter, but stay short enough that it stops promptly when the
-      // guest lets go.
+      // Outlive the poll interval so a held rumble stays continuous.
       await actuator.playEffect('dual-rumble', {
         duration: 120,
         strongMagnitude: strong,
@@ -43,6 +34,6 @@ export async function pullVibration(pad: Gamepad | undefined): Promise<void> {
       });
     }
   } catch {
-    // A browser that advertises the actuator but refuses the effect.
+    // The actuator exists but refuses the effect.
   }
 }

@@ -1,20 +1,6 @@
-// Check that the browser build really runs the blocks it emits:
+// Check that the browser build runs the blocks it emits, against the
+// interpreter, on small guest loops:
 //   node tools/jit_wasm_check.mjs [switch_wasm_bg.wasm]
-//
-// The host tests cover when a block is emitted, how what it reports is
-// accounted for and what happens when it hands work back, with a Rust
-// function standing in for the compiler. None of that says the *browser* half
-// works, and the browser half is where everything target-specific is: the
-// field offsets an emitted block reaches guest state by are wasm32's and not
-// the host's, a page-table entry is four bytes there and eight here, and an
-// entry point is a slot in the module's function table rather than an address.
-//
-// So this runs the artefact `make wasm` produces, under the same engine the
-// site does, over a guest loop small enough to be written out in full. The
-// loop runs twice, once with the translator on and once off, and the two have
-// to agree on every register and on the clock. `emitted` and `enteredEmitted`
-// from the stats say the emitted form was reached at all — without them the
-// comparison would pass on a build that quietly interpreted everything.
 //
 // Needs `make wasm` to have been run.
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -26,9 +12,7 @@ const root = join(here, '..');
 const out = join(root, 'target/wasm32-unknown-unknown/debug');
 const wasmPath = process.argv[2] || join(out, 'switch_wasm_bg.wasm');
 
-// The glue's one bare specifier is `@host/files`, which the frontend build
-// aliases and node cannot resolve. Nothing here reads a host file — the guest
-// program is handed over whole — so it is pointed at a shim that refuses.
+// Node cannot resolve `@host/files`, so point it at a shim that refuses.
 const shim =
   'data:text/javascript,'
   + encodeURIComponent('export const hostRead = () => 0;');
@@ -44,19 +28,10 @@ const init = (await import(pathToFileURL(glue).href)).default;
 const api = await init({ module_or_path: readFileSync(wasmPath) });
 
 const BASE = 0x04000000;
-/** Where the writable segment goes, for the program that touches memory. */
 const DATA = BASE + 0x1000;
 
-// Two loops, each one block the emitter can write whole: a handful of ops and
-// a `RET` back to the top. `adr` puts the loop's own address in x30, so
-// nothing outside the loop has to be set up, and every trip is the same
-// instructions.
-//
-// The second one exists because guest memory is where the two targets differ
-// most. An emitted access walks the page table itself — shift the address
-// down twelve, load the entry, test it for null, read or write at the offset
-// — and a page-table entry is four bytes under wasm32 against eight here, so
-// the host tests cannot reach the arithmetic this does.
+// Each program is one block the emitter can write whole; `adr` puts the loop's
+// own address in x30.
 const PROGRAMS = [
   {
     name: 'arithmetic',
@@ -67,8 +42,7 @@ const PROGRAMS = [
       0xd503201f, // nop
       0xd65f03c0, // ret  x30
     ],
-    // What the loop leaves behind, so a run that quietly did nothing is not
-    // mistaken for one that agreed.
+    // Expected state after the run, so a run that did nothing cannot pass.
     expect: { 0: 0x1234n },
   },
   {
@@ -94,17 +68,7 @@ const PROGRAMS = [
       0x54ffffa1, // b.ne #-0xc          -> back to BASE
       0xd65f03c0, // ret  x30
     ],
-    // The third program, because a block that runs through a branch is a
-    // different shape from one that does not: it reports where control went
-    // as well as how far it got, and the target it names is one this build
-    // computed rather than one the interpreter chose. The `cmp` is folded
-    // into the `b.ne`, so this covers the fused pair as well, which is the
-    // commonest thing compiled code puts in front of a branch.
-    //
-    // x0 counts up past 100 and never matches again, so the branch is taken
-    // on every trip but the hundredth: 99 trips of four instructions, one of
-    // five (the `ret` under the branch runs, and goes back to the top), then
-    // 900 more of four, which is 4001 exactly.
+    // x0 passes 100 and never matches again: 4001 steps end with x0 = 1000.
     expect: { 0: 1000n },
   },
   {
@@ -119,20 +83,11 @@ const PROGRAMS = [
       0x91000463, // add  x3, x3, #1     -> the taken path, x0 even
       0xd65f03c0, // ret  x30
     ],
-    // The loop above branches to its own first instruction, which is where
-    // the interpreter already stood, so a block that reported leaving but
-    // wrote the target nowhere would still land in the right place. This one
-    // branches somewhere else, so the target an emitted block names is the
-    // only thing that can put control there.
-    //
-    // Either path is five instructions and comes back to the top, so 4001
-    // steps is 800 whole trips and one instruction over: x0 counted every
-    // trip, x2 and x3 the odd and even halves.
+    // Either path is five instructions: 4001 steps is 800 trips plus one.
     expect: { 0: 800n, 2: 400n, 3: 400n },
   },
 ];
 
-/** `program` as the smallest ELF the core's loader accepts. */
 function elf(program) {
   const code = new Uint8Array(program.code.length * 4);
   const cv = new DataView(code.buffer);
@@ -173,8 +128,7 @@ function elf(program) {
     flags: 5, // R+X
   });
   if (program.data) {
-    // Zero-filled and writable: the store's target. Not part of the file, so
-    // filesz is zero and the loader maps it blank.
+    // Zero-filled and writable: the store's target.
     segment(1, { offset: body, vaddr: DATA, filesz: 0, memsz: 0x1000, flags: 6 });
   }
   file.set(code, body);
@@ -207,7 +161,6 @@ function readJson(fill) {
 
 const STEPS = 4001n;
 
-/** Run `program` for [`STEPS`] instructions, with the translator as asked. */
 function run(program, jit) {
   const handle = api.switch_new();
   api.switch_set_jit(handle, jit ? 1 : 0);
@@ -252,8 +205,6 @@ for (const program of PROGRAMS) {
     check(`x${i}`, interpreted.regs[i], translated.regs[i]);
   }
 
-  // The loop has to have done its work in both runs. Without this a build
-  // that faulted on the first instruction would agree with itself perfectly.
   for (const [reg, want] of Object.entries(program.expect)) {
     if (interpreted.regs[reg] !== want) {
       failed = true;

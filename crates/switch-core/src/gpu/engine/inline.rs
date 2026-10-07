@@ -1,9 +1,4 @@
-//! KEPLER_INLINE_TO_MEMORY_B (class 0xA140).
-//!
-//! Uploads data that travels *inside* the pushbuffer straight into memory,
-//! deko3d uses it for small buffer updates where a DMA round-trip would cost
-//! more than the words themselves. The 3D class implements the same methods,
-//! and deko3d sends them on the 3D subchannel, so the channel routes both.
+//! KEPLER_INLINE_TO_MEMORY_B (class 0xA140): uploads pushbuffer data straight into memory.
 
 use crate::gpu::engine::{field, Registers};
 use crate::gpu::exec::ExecCtx;
@@ -22,15 +17,12 @@ pub const SET_ORIGIN_SAMPLES_Y: u32 = 0x6B;
 pub const LAUNCH_DMA: u32 = 0x6C;
 pub const LOAD_INLINE_DATA: u32 = 0x6D;
 
-/// The method range this class owns.
 pub const METHOD_RANGE: std::ops::RangeInclusive<u32> = LINE_LENGTH_IN..=LOAD_INLINE_DATA;
 
 #[derive(Debug, Default)]
 pub struct EngineInline {
     pub regs: Registers,
-    /// Bytes written since the last `LaunchDma`.
     written: u32,
-    /// Uploads by destination: see [`crate::gpu::activity`].
     pub activity: crate::gpu::activity::GpuActivity,
 }
 

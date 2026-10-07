@@ -1,16 +1,11 @@
-//! `time`: the console's clocks, and the calendar arithmetic behind them.
-//!
-//! `wasm32-unknown-unknown` has no OS clock, so everything here is derived
-//! from what the host last set (`Cpu::set_unix_time`) and from `cycles`.
+//! `time`: the console's clocks and calendar arithmetic, derived from the
+//! host-set Unix time (`Cpu::set_unix_time`) and `cycles`.
 
 use super::Cpu;
 use crate::Result;
 
-/// Proleptic-Gregorian day count (days since 1970-01-01) to (year, month,
-/// day). Howard Hinnant's `civil_from_days`
-/// (<http://howardhinnant.github.io/date_algorithms.html>), the standard
-/// integer algorithm for this, no `chrono` dependency needed for the one
-/// calendar conversion `ITimeZoneService` requires.
+/// Days since 1970-01-01 to (year, month, day), after Howard Hinnant's
+/// `civil_from_days`.
 pub(super) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = z.div_euclid(146097);
@@ -38,15 +33,10 @@ pub(super) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 }
 
 impl Cpu {
-    /// `ITimeServiceManager` (`time:s`/`time:u`/`time:a`/`time:r`): hands out
-    /// the system/steady clocks and the timezone service.
+    /// `ITimeServiceManager` (`time:s`/`time:u`/`time:a`/`time:r`).
     ///
-    /// Its own commands (`GetStandardUserSystemClock` and friends) share
-    /// command ids with `ConvertToDomain`/`QueryPointerBufferSize`, which
-    /// arrive as a Control request (message type 5) rather than a normal
-    /// one (the same distinction `vi_request` makes for `vi:m`) so the control
-    /// path has to be checked first or a domain conversion would be read as
-    /// `GetStandardUserSystemClock`.
+    /// Its command ids overlap `ConvertToDomain`/`QueryPointerBufferSize`, so
+    /// Control requests must be checked first.
     pub(super) fn time_request(
         &mut self,
         tls: u32,
@@ -72,9 +62,7 @@ impl Cpu {
         const GET_STANDARD_STEADY_CLOCK_RTC_VALUE: u32 = 51;
         const IS_STANDARD_USER_SYSTEM_CLOCK_AUTOMATIC_CORRECTION_ENABLED: u32 = 100;
         match cmd_id {
-            // GetStandardUserSystemClock / GetStandardNetworkSystemClock /
-            // GetStandardLocalSystemClock: there is no network time sync or
-            // per-region offset here, so all three hand out the same clock.
+            // All three system clocks are the same clock.
             Some(GET_STANDARD_USER_SYSTEM_CLOCK)
             | Some(GET_STANDARD_NETWORK_SYSTEM_CLOCK)
             | Some(GET_STANDARD_LOCAL_SYSTEM_CLOCK) => {
@@ -89,7 +77,6 @@ impl Cpu {
                 self.reply_with_interface(tls, handle, "time:timezone")?;
                 Ok(())
             }
-            // -> u64, the RTC reading the steady clock is seeded from.
             Some(GET_STANDARD_STEADY_CLOCK_RTC_VALUE) => self.write_ipc_response(
                 tls,
                 0,
@@ -97,8 +84,7 @@ impl Cpu {
                 &(self.steady_clock_seconds() as u64).to_le_bytes(),
                 &[],
             ),
-            // -> bool. The host pushes wall-clock time directly
-            // (`Cpu::set_unix_time`), so it is always "corrected".
+            // Always "corrected": the host pushes wall-clock time.
             Some(IS_STANDARD_USER_SYSTEM_CLOCK_AUTOMATIC_CORRECTION_ENABLED) => {
                 self.write_ipc_response(tls, 0, &[], &[1u8], &[])
             }
@@ -106,10 +92,8 @@ impl Cpu {
         }
     }
 
-    /// `ISystemClock`: wall-clock time, as POSIX seconds. The value comes
-    /// straight from [`Cpu::set_unix_time`]: there is no persisted offset or
-    /// network sync here, so `SetCurrentTime`/`SetSystemClockContext` are
-    /// accepted but don't change what a later read sees.
+    /// `ISystemClock`: POSIX seconds from [`Cpu::set_unix_time`]; setters are
+    /// accepted but have no effect.
     pub(super) fn time_system_clock_request(
         &mut self,
         tls: u32,
@@ -120,16 +104,12 @@ impl Cpu {
         const GET_SYSTEM_CLOCK_CONTEXT: u32 = 2;
         const SET_SYSTEM_CLOCK_CONTEXT: u32 = 3;
         match cmd_id {
-            // -> s64 PosixTime
             Some(GET_CURRENT_TIME) => {
                 let posix = self.unix_time();
                 self.write_ipc_response(tls, 0, &[], &posix.to_le_bytes(), &[])
             }
             Some(SET_CURRENT_TIME) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // -> SystemClockContext { s64 offset; SteadyClockTimePoint
-            // timestamp }. The offset is left at 0 (the steady clock's own
-            // value already reads as seconds-since-boot) and the timestamp
-            // mirrors GetCurrentTimePoint.
+            // -> SystemClockContext { s64 offset; SteadyClockTimePoint timestamp }
             Some(GET_SYSTEM_CLOCK_CONTEXT) => {
                 let mut raw = [0u8; 0x20];
                 raw[0x08..0x10].copy_from_slice(&self.steady_clock_seconds().to_le_bytes());
@@ -140,7 +120,6 @@ impl Cpu {
         }
     }
 
-    /// `ISteadyClock`: a monotonic clock unrelated to wall time.
     pub(super) fn time_steady_clock_request(
         &mut self,
         tls: u32,
@@ -151,16 +130,12 @@ impl Cpu {
         const IS_RTC_RESET_DETECTED: u32 = 101;
         const GET_SETUP_RESULT_VALUE: u32 = 102;
         match cmd_id {
-            // -> SteadyClockTimePoint { s64 value; u8 source_id[0x10] }. The
-            // source id is left zeroed: nothing here ever compares two time
-            // points' ids, only their values.
+            // -> SteadyClockTimePoint { s64 value; u8 source_id[0x10] }
             Some(GET_CURRENT_TIME_POINT) => {
                 let mut raw = [0u8; 0x18];
                 raw[..8].copy_from_slice(&self.steady_clock_seconds().to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            // -> u64, the same RTC reading GetCurrentTimePoint's value is
-            // seeded from.
             Some(GET_RTC_VALUE) => self.write_ipc_response(
                 tls,
                 0,
@@ -168,10 +143,7 @@ impl Cpu {
                 &(self.steady_clock_seconds() as u64).to_le_bytes(),
                 &[],
             ),
-            // -> bool. There is no real RTC to lose power and reset here.
             Some(IS_RTC_RESET_DETECTED) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-            // -> Result, as a raw u32. The RTC "setup" at boot always
-            // succeeds.
             Some(GET_SETUP_RESULT_VALUE) => {
                 self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
             }
@@ -179,18 +151,13 @@ impl Cpu {
         }
     }
 
-    /// Seconds since this `Cpu` started, for the steady clock. Instructions
-    /// retired stands in for elapsed wall time, the same arbitrary scale
-    /// `svcGetSystemTick`'s `cycles * 1000` already uses, since only
-    /// monotonicity matters here, not the rate.
+    /// Retired cycles stand in for elapsed time; only monotonicity matters.
     fn steady_clock_seconds(&self) -> i64 {
         (self.cycles / 1_000_000) as i64
     }
 
-    /// `ITimeZoneService`: there is no bundled TZif database, so every
-    /// conversion resolves against UTC, and the one zone this console can be
-    /// in is the one `set:sys` stores as its location name. The two services
-    /// read the same field so that they cannot name different places.
+    /// `ITimeZoneService`: every conversion is UTC, and the zone name is the
+    /// one `set:sys` stores.
     pub(super) fn time_timezone_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         const LOCATION_NAME: &[u8] = super::settings::DEVICE_TIME_ZONE;
         const GET_DEVICE_LOCATION_NAME: u32 = 0;
@@ -202,9 +169,6 @@ impl Cpu {
         const TO_POSIX_TIME: u32 = 201;
         const TO_POSIX_TIME_WITH_MY_RULE: u32 = 202;
         match cmd_id {
-            // -> LocationName (0x24 bytes, NUL-padded), out of the system
-            // settings so that a zone set through `set:sys` is the zone this
-            // reports. What it converts against is still UTC either way.
             Some(GET_DEVICE_LOCATION_NAME) => {
                 let raw = self.system_settings().device_time_zone_location_name;
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
@@ -212,7 +176,6 @@ impl Cpu {
             Some(GET_TOTAL_LOCATION_NAME_COUNT) => {
                 self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[])
             }
-            // LoadLocationNameList(u32 index) -> (u32 count, buffer<LocationName[]>)
             Some(LOAD_LOCATION_NAME_LIST) => {
                 if let Some(&(addr, size)) = self.ipc_buffers(tls).1.first() {
                     if size >= LOCATION_NAME.len() as u32 {
@@ -223,22 +186,13 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[])
             }
-            // LoadTimeZoneRule(LocationName) -> TimeZoneRule. The rule blob's
-            // contents are never read back: ToCalendarTime(WithMyRule) below
-            // always resolves against UTC regardless of which rule a caller
-            // loaded, so there's nothing to fill the receive buffer with.
+            // The rule is never used, since conversions are always UTC.
             Some(LOAD_TIME_ZONE_RULE) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // ToCalendarTime(s64, TimeZoneRule buffer) /
-            // ToCalendarTimeWithMyRule(s64): both resolve against UTC; the
-            // incoming rule buffer (TO_CALENDAR_TIME only) is ignored.
             Some(TO_CALENDAR_TIME) | Some(TO_CALENDAR_TIME_WITH_MY_RULE) => {
                 let posix = self.mem.read_u64(self.ipc_request_data(tls)).unwrap_or(0) as i64;
                 self.write_ipc_response(tls, 0, &[], &Self::to_calendar_time(posix), &[])
             }
-            // ToPosixTime(CalendarTime, rule buffer) /
-            // ToPosixTimeWithMyRule(CalendarTime): both resolve against UTC
-            // and, since there's no DST to make a wall-clock time ambiguous,
-            // always report exactly one match.
+            // Always exactly one match: there is no DST.
             Some(TO_POSIX_TIME) | Some(TO_POSIX_TIME_WITH_MY_RULE) => {
                 let data = self.ipc_request_data(tls);
                 let posix = Self::from_calendar_time(
@@ -260,11 +214,8 @@ impl Cpu {
         }
     }
 
-    /// `{ CalendarTime, CalendarAdditionalInfo }` for a POSIX time, assuming
-    /// UTC: `CalendarTime { u16 year; u8 month, day, hour, minute, second,
-    /// pad; }` (8 bytes) followed by `CalendarAdditionalInfo { u32
-    /// day_of_week, day_of_year; u8 name[8]; u32 utc_offset_seconds; u8 dst,
-    /// pad[3]; }` (0x18 bytes), 0x20 bytes total.
+    /// `CalendarTime` (8 bytes) then `CalendarAdditionalInfo` (0x18 bytes) for
+    /// a POSIX time, in UTC.
     pub(super) fn to_calendar_time(posix: i64) -> [u8; 0x20] {
         let days = posix.div_euclid(86400);
         let secs_of_day = posix.rem_euclid(86400);
@@ -285,7 +236,7 @@ impl Cpu {
         raw
     }
 
-    /// Inverse of [`Cpu::to_calendar_time`], assuming UTC.
+    /// Inverse of [`Cpu::to_calendar_time`], in UTC.
     pub(super) fn from_calendar_time(
         year: u16,
         month: u8,
@@ -307,7 +258,6 @@ mod tests {
     #[test]
     fn civil_days_round_trip_the_epoch_and_a_leap_day() {
         use crate::cpu::time::{civil_from_days, days_from_civil};
-        // 1970-01-01 is day 0 by definition, and was a Thursday.
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         for &(y, m, d) in &[
@@ -338,7 +288,6 @@ mod tests {
         assert_eq!(u32::from_le_bytes(epoch[8..12].try_into().unwrap()), 4); // Thursday
         assert_eq!(u32::from_le_bytes(epoch[12..16].try_into().unwrap()), 0);
 
-        // The well-known "1 billion seconds" moment: 2001-09-09 01:46:40 UTC.
         let billion = Cpu::to_calendar_time(1_000_000_000);
         assert_eq!(&billion[0..2], &2001u16.to_le_bytes()[..]);
         assert_eq!(billion[2], 9);

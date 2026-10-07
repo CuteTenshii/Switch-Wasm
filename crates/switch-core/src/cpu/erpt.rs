@@ -1,24 +1,10 @@
-//! `erpt`: the error-report journal.
-//!
-//! Every process on a real console files context records here as it runs, and
-//! the crash reporter turns them into reports. Both halves are real: a
-//! submitted context is journalled, a report is filed from the journal, and
-//! `erpt:r` reads back exactly what was filed, because a caller that files a
-//! report and cannot then find it concludes the journal is broken.
+//! `erpt`: the error-report journal (`erpt:c`, `erpt:r`, `erpt:manager`).
 
 use super::Cpu;
 use crate::trace::Level;
 use crate::Result;
 
-/// One category's worth of context `erpt` is holding, as the caller submitted
-/// it.
-///
-/// The journal keeps at most one record per category: a module submitting
-/// `ThermalInfo` every few seconds is *replacing* the record that is there,
-/// not appending to a log. `fields` is the array data the entry's fields index
-/// into, which is stored alongside because a field naming a string is useless
-/// without it. Neither is interpreted: `erpt` collects context, it does not
-/// read it.
+/// The latest context record for one category, with its field array data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ErrorContext {
     category: u32,
@@ -26,12 +12,7 @@ pub(super) struct ErrorContext {
     fields: Vec<u8>,
 }
 
-/// One error report filed through `erpt:c`.
-///
-/// The body is the journal as it stood the moment the report was created,
-/// which is what a real `erpt` writes out: as msgpack, where this keeps the
-/// raw `ContextEntry` records, since nothing on either side of it here parses
-/// one.
+/// One error report filed through `erpt:c`: a snapshot of the journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ErrorReport {
     id: [u8; ERPT_ID_SIZE],
@@ -43,7 +24,6 @@ pub(super) struct ErrorReport {
     attachments: Vec<[u8; ERPT_ID_SIZE]>,
 }
 
-/// One attachment, submitted ahead of the report that will claim it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ErrorReportAttachment {
     id: [u8; ERPT_ID_SIZE],
@@ -53,55 +33,40 @@ pub(super) struct ErrorReportAttachment {
     data: Vec<u8>,
 }
 
-/// What one `IReport` or `IAttachment` object has open, and how far through it
-/// the caller has read.
-///
-/// `Read` takes no offset, a caller drains a report by calling it until it
-/// answers zero, so the cursor belongs to the object, not to the request.
+/// An open `IReport` or `IAttachment` and its read cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ErrorReportReader {
     id: [u8; ERPT_ID_SIZE],
     offset: usize,
 }
 
-/// `nn::erpt::ContextEntry`: a version, a field count, the category, twenty
-/// 0x10-byte fields, and the array buffer they index.
+/// `nn::erpt::ContextEntry`
 const ERPT_CONTEXT_ENTRY_SIZE: usize = 0x160;
 
 const ERPT_CONTEXT_CATEGORY: usize = 0x8;
 
 const ERPT_FIELD_ENTRY_SIZE: usize = 0x10;
 
-/// `nn::erpt::ReportId` and `AttachmentId`: twenty bytes holding a sixteen-byte
-/// UUID. Only those sixteen are ever compared, which is why the tail stays
-/// zero rather than being filled with more random.
+/// `nn::erpt::ReportId` / `AttachmentId`: a 16-byte UUID in a 20-byte field.
 const ERPT_ID_SIZE: usize = 0x14;
 
 pub(super) const ERPT_UUID_SIZE: usize = 0x10;
 
-/// `nn::erpt::ReportMetaData`, the opaque blob whoever files a report attaches
-/// to it.
+/// `nn::erpt::ReportMetaData`
 const ERPT_META_SIZE: usize = 0x20;
 
-/// `nn::erpt::ReportInfo` and the `ReportList` of fifty that `GetReportList`
-/// fills: a count, four bytes of padding, then the array.
+/// `nn::erpt::ReportInfo`; `ReportList` is a count, 4 bytes padding, then the array.
 const ERPT_REPORT_INFO_SIZE: usize = 0x70;
 
 const ERPT_REPORT_COUNT_MAX: usize = 50;
 
-/// `nn::erpt::AttachmentInfo` and the `AttachmentList` of five, laid out the
-/// same way.
+/// `nn::erpt::AttachmentInfo`
 const ERPT_ATTACHMENT_INFO_SIZE: usize = 0x58;
 
 const ERPT_ATTACHMENTS_PER_REPORT: usize = 5;
 
 const ERPT_ATTACHMENT_NAME_MAX: usize = 0x20;
 
-/// The caps a real `erpt` enforces on what a caller may hand over:
-/// `AttachmentSizeMax`, `ArrayBufferSizeMax`, and the size `GetReportSizeMax`
-/// reports. `ERPT_CONTEXT_ENTRIES_MAX` is this implementation's own, context
-/// is submitted a category at a time, and the cap only stops a nonsense buffer
-/// size asking for an unbounded read.
 const ERPT_ATTACHMENT_SIZE_MAX: u32 = 512 * 1024;
 
 const ERPT_ARRAY_BUFFER_MAX: u32 = 96 * 1024;
@@ -110,21 +75,15 @@ const ERPT_REPORT_SIZE_MAX: u32 = 0x3FF4F;
 
 const ERPT_CONTEXT_ENTRIES_MAX: u32 = 64;
 
-/// `nn::erpt::MultipleCategoryContextEntry`: a version and a count, then
-/// parallel arrays of sixteen category ids, field counts and array-buffer
-/// counts, and four fields per category behind them.
+/// `nn::erpt::MultipleCategoryContextEntry` layout.
 const ERPT_MULTI_CATEGORY_MAX: usize = 0x10;
 
 const ERPT_MULTI_CATEGORIES: usize = 0x8;
 
-/// `erpt` (module 147) description 8: nothing is filed under the id the caller
-/// asked for. Reporting success instead would leave a caller reading a report
-/// that does not exist.
+/// `erpt` (module 147) description 8: no report or attachment with that id.
 const ERPT_NOT_FOUND: u32 = 147 | (8 << 9);
 
-/// `nn::erpt::CategoryId`, so a filed report says what it is about rather than
-/// listing numbers. A category this table predates prints as its number, which
-/// is still the answer.
+/// `nn::erpt::CategoryId` names.
 const ERPT_CATEGORIES: [&str; 157] = [
     "Test",
     "ErrorInfo",
@@ -287,23 +246,6 @@ const ERPT_CATEGORIES: [&str; 157] = [
 
 impl Cpu {
     /// `erpt:c`, "nn::erpt::sf::IContext", the error-report collector.
-    ///
-    /// A console keeps a running journal of *context*: one record per category
-    /// (`ErrorInfo`, `ApplicationInfo`, `ThermalInfo`, `GpuCrashInfo`) that
-    /// whichever module owns it keeps current by resubmitting. When something
-    /// goes wrong, whoever noticed calls one of the `CreateReport` commands and
-    /// the journal as it stands at that instant is written out as a report, for
-    /// the error-report transfer to upload later.
-    ///
-    /// That makes this the second account a guest ever gives of why it is
-    /// unhappy ([`Cpu::fatal_request`] is the first) and a far more detailed
-    /// one, which is why a report being filed is a diagnostic. The generic
-    /// fallback answered `SubmitContext` with a fabricated object id and threw
-    /// every one of those records away.
-    ///
-    /// Nothing is uploaded and nothing reaches the SYSTEM partition: the
-    /// journal lives as long as the session does, which is what
-    /// [`Cpu::erpt_manager_request`]'s statistics describe.
     pub(super) fn erpt_context_request(
         &mut self,
         tls: u32,
@@ -314,15 +256,12 @@ impl Cpu {
             return Ok(());
         }
         match cmd_id {
-            // SubmitContext(ContextEntry[], FieldList).
+            // SubmitContext
             Some(0) => {
                 self.erpt_submit_context(tls, 0, 1);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // CreateReportV0(ReportType, ContextEntry[], FieldList,
-            // ReportMetaData), and the 11.0.0 and 17.0.0 revisions of it that
-            // add option words after the type. All three file the journal
-            // together with the context the caller brought along.
+            // CreateReportV0 and its 11.0.0 and 17.0.0 revisions.
             Some(1) | Some(11) | Some(12) => {
                 let categories = self.erpt_submit_context(tls, 0, 1);
                 let report_type = self.ipc_arg_u32(tls, 0);
@@ -333,9 +272,7 @@ impl Cpu {
                 self.erpt_create_report(report_type, meta, &categories, &[]);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // CreateReportWithAttachments(ReportType, ContextEntry[],
-            // FieldList, AttachmentId[]): the same report, claiming the
-            // attachments `SubmitAttachment` filed ahead of it.
+            // CreateReportWithAttachments
             Some(10) => {
                 let categories = self.erpt_submit_context(tls, 0, 1);
                 let report_type = self.ipc_arg_u32(tls, 0);
@@ -359,10 +296,7 @@ impl Cpu {
                 self.erpt_create_report(report_type, Vec::new(), &categories, &ids);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // SubmitAttachment(name, data) -> the AttachmentId the report that
-            // will own it names. The id is the server's to assign, so a bare
-            // success left the caller holding whatever its out-parameter was
-            // initialized to and naming that in `CreateReportWithAttachments`.
+            // SubmitAttachment -> AttachmentId
             Some(9) => {
                 let name = match self.ipc_input_buffer(tls, 0) {
                     Some((addr, size)) => {
@@ -384,33 +318,17 @@ impl Cpu {
                 });
                 self.write_ipc_response(tls, 0, &[], &id, &[])
             }
-            // SubmitMultipleCategoryContext(MultipleCategoryContextEntry,
-            // FieldList): several categories in one call, their ids in an
-            // array of sixteen at the head of the struct. It arrives as a
-            // buffer rather than in the payload, being far too large for one.
+            // SubmitMultipleCategoryContext
             Some(6) => {
                 self.erpt_submit_multiple_context(tls);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // SetInitialLaunchSettingsCompletionTime(SteadyClockTimePoint) and
-            // ClearInitialLaunchSettingsCompletionTime: when the console
-            // finished its first-boot setup, which is context for a report
-            // rather than something anything here reads back.
+            // Set/ClearInitialLaunchSettingsCompletionTime
             Some(2) | Some(3) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // Four commands that were renumbered at 21.0.0: through 20.5.0
-            // these were UpdatePowerOnTime, UpdateAwakeTime,
-            // UpdateApplicationLaunchTime and ClearApplicationLaunchTime, and
-            // afterwards CreateReportWithAdditionalContext,
-            // SubmitMultipleContext and the running-application registration.
-            // Every one of them answers with a bare `Result` and nothing else,
-            // so the reply is the same either way; what differs is only
-            // whether a report is filed, and filing one nobody asked for would
-            // put an empty report in the journal.
+            // Renumbered at 21.0.0; all reply with a bare `Result` either way.
             Some(4) | Some(5) | Some(7) | Some(8) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // RegisterRunningApplet / UnregisterRunningApplet /
-            // UpdateAppletSuspendedDuration, and the forced-shutdown detector
-            // a clean shutdown invalidates on its way out. Nothing here loses
-            // power without warning.
+            // UpdateAppletSuspendedDuration / forced-shutdown detector
             Some(20) | Some(21) | Some(22) | Some(30) => {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
@@ -418,11 +336,7 @@ impl Cpu {
         }
     }
 
-    /// Fold the `ContextEntry` array in input buffer `entries`, and the field
-    /// data in input buffer `fields` that they index, into the journal.
-    ///
-    /// Returns the categories the submission carried, in the order they
-    /// arrived, for the report a `CreateReport` in the same request will file.
+    /// Journal the `ContextEntry` array and its field data; returns the categories submitted.
     fn erpt_submit_context(&mut self, tls: u32, entries: u32, fields: u32) -> Vec<u32> {
         let array = match self.ipc_input_buffer(tls, entries) {
             Some((addr, size)) => {
@@ -457,15 +371,7 @@ impl Cpu {
         categories
     }
 
-    /// The same, for `SubmitMultipleCategoryContext`'s single struct: a
-    /// version, a category count, then parallel arrays of sixteen category
-    /// ids, field counts and array-buffer counts, and sixty-four fields four
-    /// to a category.
-    ///
-    /// Each category is unpacked into a `ContextEntry` of its own, so the
-    /// journal holds one shape of record whichever command filled it and a
-    /// report is a plain array of them. Storing the struct itself under every
-    /// category it names would put sixteen copies of it in the next report.
+    /// The same for `SubmitMultipleCategoryContext`, unpacked into one entry per category.
     fn erpt_submit_multiple_context(&mut self, tls: u32) {
         let Some((addr, size)) = self.ipc_input_buffer(tls, 0) else {
             return;
@@ -506,8 +412,7 @@ impl Cpu {
         }
     }
 
-    /// File one context record, replacing the one the journal already holds
-    /// for that category.
+    /// File one context record, replacing the category's existing one.
     fn erpt_record_context(&mut self, record: ErrorContext) {
         match self
             .erpt_contexts
@@ -519,12 +424,7 @@ impl Cpu {
         }
     }
 
-    /// Write the journal out as a report, and say so.
-    ///
-    /// `categories` are the ones the caller submitted along with the report,
-    /// which is what the report is *about*: the rest of the journal is the
-    /// state the console happened to be in. The oldest report goes when the
-    /// journal is full, the way a console's does.
+    /// Write the journal out as a report about `categories`, dropping the oldest when full.
     fn erpt_create_report(
         &mut self,
         report_type: u32,
@@ -580,9 +480,7 @@ impl Cpu {
         self.erpt_signal_report_created();
     }
 
-    /// Fire the event `IManager::GetEvent` handed out. A report really was
-    /// just filed, so unlike every other event these services hand out, this
-    /// one describes something that happens.
+    /// Fire the event `IManager::GetEvent` handed out.
     fn erpt_signal_report_created(&mut self) {
         let events: Vec<u64> = self
             .service_events
@@ -595,10 +493,7 @@ impl Cpu {
         }
     }
 
-    /// A fresh `ReportId` or `AttachmentId`: a version-4 UUID in the first
-    /// sixteen bytes of twenty. The last four stay zero because that is what
-    /// they are on a console: the id is a `util::Uuid` in a twenty-byte
-    /// field, and every comparison `erpt` makes is over the sixteen.
+    /// A fresh `ReportId` or `AttachmentId`: a v4 UUID in the first 16 of 20 bytes.
     fn erpt_new_id(&mut self) -> [u8; ERPT_ID_SIZE] {
         let mut id = [0u8; ERPT_ID_SIZE];
         id[..8].copy_from_slice(&self.next_random_u64().to_le_bytes());
@@ -608,16 +503,14 @@ impl Cpu {
         id
     }
 
-    /// Whether two ids name the same report or attachment: the sixteen bytes
-    /// of UUID, not the twenty of the field holding it, which is what a real
-    /// `erpt` compares and all a caller has to have filled in.
+    /// Compares only the 16 UUID bytes.
     fn erpt_same_id(a: &[u8], b: &[u8]) -> bool {
         a.len() >= ERPT_UUID_SIZE
             && b.len() >= ERPT_UUID_SIZE
             && a[..ERPT_UUID_SIZE] == b[..ERPT_UUID_SIZE]
     }
 
-    /// A report id in the grouped form a UUID is written in, for diagnostics.
+    /// A report id formatted as a UUID, for diagnostics.
     fn erpt_id_text(id: &[u8]) -> String {
         let hex: String = id
             .iter()
@@ -634,8 +527,7 @@ impl Cpu {
         )
     }
 
-    /// `nn::erpt::ReportType`. `Any` is a filter rather than a kind, and only
-    /// `GetReportList` is ever handed one.
+    /// `nn::erpt::ReportType`; `Any` is only a `GetReportList` filter.
     fn erpt_report_type_name(report_type: u32) -> &'static str {
         match report_type {
             0 => "visible",
@@ -645,7 +537,6 @@ impl Cpu {
         }
     }
 
-    /// The name of an `nn::erpt::CategoryId`.
     fn erpt_category_name(category: u32) -> String {
         let name = match category {
             1000 => "TestNx",
@@ -661,13 +552,7 @@ impl Cpu {
         }
     }
 
-    /// `erpt:r`, "nn::erpt::sf::ISession", and the three interfaces it opens
-    /// onto the journal `erpt:c` fills.
-    ///
-    /// All three of its commands are object getters, so the generic fallback's
-    /// fabricated object id ended every one of them at its first call. Nothing
-    /// but the error-report transfer and the settings screen behind it opens
-    /// this at all.
+    /// `erpt:r`, "nn::erpt::sf::ISession".
     pub(super) fn erpt_session_request(
         &mut self,
         tls: u32,
@@ -683,7 +568,7 @@ impl Cpu {
             "erpt:attachment" => self.erpt_reader_request(tls, handle, cmd_id, true),
             "erpt:manager" => self.erpt_manager_request(tls, handle, cmd_id),
             _ => match cmd_id {
-                // OpenReport / OpenManager / OpenAttachment.
+                // OpenReport / OpenManager / OpenAttachment
                 Some(0) => self
                     .reply_with_interface(tls, handle, "erpt:report")
                     .map(|_| ()),
@@ -698,9 +583,7 @@ impl Cpu {
         }
     }
 
-    /// `IReport` and `IAttachment`. The two interfaces are the same six
-    /// commands over two different journals, and the object holds the cursor
-    /// its `Read` advances.
+    /// `IReport` and `IAttachment`, the same commands over two journals.
     fn erpt_reader_request(
         &mut self,
         tls: u32,
@@ -715,7 +598,7 @@ impl Cpu {
         };
         let key = self.ipc_object_key(tls, handle);
         match cmd_id {
-            // Open(ReportId / AttachmentId).
+            // Open(ReportId / AttachmentId)
             Some(0) => {
                 let id = self.read_bytes(self.ipc_request_data(tls), ERPT_ID_SIZE as u32);
                 if self.erpt_body(&id, attachment).is_none() {
@@ -733,8 +616,7 @@ impl Cpu {
                 );
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // Read -> as much as is left into the output buffer, and how many
-            // bytes that was. A caller reads until this answers zero.
+            // Read: returns 0 once drained.
             Some(1) => {
                 let Some(reader) = self.erpt_readers.get(&key).cloned() else {
                     return self.write_ipc_response(tls, ERPT_NOT_FOUND, &[], &[], &[]);
@@ -749,10 +631,7 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
             }
-            // SetFlags / GetFlags. The one flag that matters is Transmitted,
-            // which the transfer sets once it has uploaded a report; it is
-            // stored and read back rather than acted on, since nothing here
-            // uploads anything.
+            // SetFlags / GetFlags
             Some(2) => {
                 let flags = self.ipc_arg_u32(tls, 0);
                 let Some(reader) = self.erpt_readers.get(&key).cloned() else {
@@ -772,14 +651,12 @@ impl Cpu {
                 };
                 self.write_ipc_response(tls, 0, &[], &flags.to_le_bytes(), &[])
             }
-            // Close: the object stays alive and may be opened again.
+            // Close: the object may be opened again.
             Some(4) => {
                 self.erpt_readers.remove(&key);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // GetSize -> s64. A caller sizes the buffer it passes `Read` from
-            // this, so answering zero for an open report is what makes the
-            // whole read loop skip.
+            // GetSize -> s64
             Some(5) => {
                 let Some(reader) = self.erpt_readers.get(&key).cloned() else {
                     return self.write_ipc_response(tls, ERPT_NOT_FOUND, &[], &[], &[]);
@@ -794,8 +671,6 @@ impl Cpu {
         }
     }
 
-    /// The bytes behind one report or attachment id, or `None` if nothing is
-    /// filed under it.
     fn erpt_body(&self, id: &[u8], attachment: bool) -> Option<Vec<u8>> {
         if attachment {
             let held = self
@@ -826,8 +701,7 @@ impl Cpu {
         }
     }
 
-    /// Store the flags a caller set, reporting whether anything was there to
-    /// set them on.
+    /// Store a caller's flags; false if nothing is filed under the id.
     fn erpt_set_flags(&mut self, id: &[u8], attachment: bool, flags: u32) -> bool {
         let held = if attachment {
             self.erpt_attachments
@@ -849,14 +723,10 @@ impl Cpu {
         }
     }
 
-    /// `IManager`, the journal as a whole: what is in it, what it costs, and
-    /// an event for a report arriving in it.
+    /// `IManager`: report lists, storage statistics and the new-report event.
     fn erpt_manager_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         match cmd_id {
-            // GetReportList(out ReportList, ReportType filter). The count is
-            // the buffer's own first word rather than an out-parameter, and
-            // the whole structure is written so a caller that reads past the
-            // count reads zeros rather than its own stack.
+            // GetReportList(out ReportList, ReportType filter); the count is in the buffer.
             Some(0) => {
                 let filter = self.ipc_arg_u32(tls, 0);
                 let mut list = vec![0u8; 8 + ERPT_REPORT_COUNT_MAX * ERPT_REPORT_INFO_SIZE];
@@ -881,21 +751,18 @@ impl Cpu {
                 self.write_output_buffer(tls, 0, &list);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // GetEvent -> the event a newly filed report signals, through the
-            // copy list: the server keeps its own.
+            // GetEvent
             Some(1) => {
                 let event = self.kept_event("erpt:report-created", handle);
                 self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
             }
-            // CleanupReports: everything the journal holds goes, attachments
-            // with it: an attachment outliving its report is what the real
-            // cleanup exists to prevent.
+            // CleanupReports, including attachments.
             Some(2) => {
                 self.erpt_reports.clear();
                 self.erpt_attachments.clear();
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // DeleteReport(ReportId), and the attachments it owns.
+            // DeleteReport(ReportId) and its attachments.
             Some(3) => {
                 let id = self.read_bytes(self.ipc_request_data(tls), ERPT_ID_SIZE as u32);
                 self.erpt_reports
@@ -904,9 +771,7 @@ impl Cpu {
                     .retain(|held| !Self::erpt_same_id(&held.owner, &id));
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // GetStorageUsageStatistics -> what the journal is costing. All of
-            // it is derived from what is actually held, and nothing has ever
-            // been transmitted, so every report in it is still waiting.
+            // GetStorageUsageStatistics
             Some(4) => {
                 let mut stats = [0u8; 0x38];
                 let journal = self.erpt_journal_id();
@@ -942,9 +807,7 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &stats, &[])
             }
-            // GetAttachmentList(out AttachmentList, ReportId) -> how many were
-            // written. Command 5 through 19.0.1 and 6 from 20.0.0; the two are
-            // the same command, so both ids answer it.
+            // GetAttachmentList(out AttachmentList, ReportId): command 5 through 19.0.1, 6 from 20.0.0.
             Some(5) | Some(6) => {
                 let id = self.read_bytes(self.ipc_request_data(tls), ERPT_ID_SIZE as u32);
                 let mut list =
@@ -970,16 +833,12 @@ impl Cpu {
                 self.write_output_buffer(tls, 0, &list);
                 self.write_ipc_response(tls, 0, &[], &(count as u32).to_le_bytes(), &[])
             }
-            // PopNotifiableErrorCodes -> the error codes the Home Menu should
-            // put in front of the user. The struct leads with its own count,
-            // so zeroing the buffer is the empty list.
+            // PopNotifiableErrorCodes: the struct leads with its count, so zeros are empty.
             Some(7) => {
                 self.zero_output_buffer(tls, 0);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // GetReportSizeMax -> the size a caller allocates its read buffer
-            // from, which is a property of the format rather than of anything
-            // held.
+            // GetReportSizeMax
             Some(10) => {
                 self.write_ipc_response(tls, 0, &[], &ERPT_REPORT_SIZE_MAX.to_le_bytes(), &[])
             }
@@ -987,9 +846,7 @@ impl Cpu {
         }
     }
 
-    /// The journal's own id, made on the first ask. It identifies this run of
-    /// the journal to whoever is reading reports out of it, so it has to stay
-    /// the same for as long as the journal does.
+    /// The journal's id, created on first use and stable for the session.
     fn erpt_journal_id(&mut self) -> [u8; ERPT_UUID_SIZE] {
         if let Some(id) = self.erpt_journal_id {
             return id;
@@ -1007,9 +864,7 @@ mod tests {
     use crate::cpu::ipc::testing::*;
     use crate::cpu::Cpu;
 
-    /// One `nn::erpt::ContextEntry`. Only the category is read out of it; the
-    /// twenty fields behind it are the caller's, and `marker` stands in for
-    /// them so a replaced record can be told from the one it replaced.
+    /// A `ContextEntry` with `category` and a `marker` byte in its first field.
     fn erpt_context_entry(category: u32, marker: u8) -> Vec<u8> {
         let mut entry = vec![0u8; super::ERPT_CONTEXT_ENTRY_SIZE];
         entry[super::ERPT_CONTEXT_CATEGORY..super::ERPT_CONTEXT_CATEGORY + 4]
@@ -1018,8 +873,6 @@ mod tests {
         entry
     }
 
-    /// Submit one category of context on an `erpt:c` session, from a context
-    /// buffer the caller has already mapped.
     fn erpt_submit(cpu: &mut Cpu, buffer: u32, category: u32, marker: u8) {
         let entry = erpt_context_entry(category, marker);
         write_send_buffer_request(cpu, 0, &[], &[(buffer, entry.len() as u32), (0, 0)]);
@@ -1031,11 +884,6 @@ mod tests {
 
     #[test]
     fn erpt_journals_one_context_record_per_category() {
-        // The journal is a picture of *now*, not a log: a module resubmitting
-        // its own category is replacing the record that is already there.
-        // SubmitContext is `erpt:c`'s command 0, so the generic fallback
-        // answered it with a fabricated object id and dropped every record a
-        // report would have been built out of.
         const CONTEXT: u32 = 0x4000;
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
@@ -1072,9 +920,6 @@ mod tests {
         cpu.register_service_handle(9, "erpt:c");
         erpt_submit(&mut cpu, CONTEXT, 16, 0x11);
 
-        // CreateReportV0(ReportType_Visible, ContextEntry[], FieldList,
-        // ReportMetaData): the context it brings joins the journal, and the
-        // whole journal is what gets written out.
         let entry = erpt_context_entry(1, 0x22);
         for (index, &byte) in entry.iter().enumerate() {
             cpu.mem.write_u8(CONTEXT + index as u32, byte).unwrap();
@@ -1105,7 +950,6 @@ mod tests {
             "ApplicationInfo and ErrorInfo"
         );
 
-        // erpt:r opens an IReport onto the same journal.
         cpu.register_service_handle(10, "erpt:r");
         marshal(&mut cpu, false, 0, &[]);
         cpu.erpt_session_request(TLS, 10, Some(0)).unwrap();
@@ -1130,14 +974,11 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), size, "Read");
         assert_eq!(cpu.read_bytes(OUT, size), report.body);
 
-        // Read takes no offset, so the cursor is the object's: a caller drains
-        // a report by calling it until it answers zero.
         write_map_buffer_request(&mut cpu, 1, &[], OUT, size, false);
         cpu.erpt_session_request(TLS, object, Some(1)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "already drained");
 
-        // IManager::GetReportList puts its count in the buffer's own header
-        // rather than in the reply, and ReportType_Any (2) matches both kinds.
+        // ReportType_Any (2) matches both kinds.
         marshal(&mut cpu, false, 1, &[]);
         cpu.erpt_session_request(TLS, 10, Some(1)).unwrap();
         let manager = u64::from(cpu.mem.read_u32(TLS + 0x0C).unwrap());
@@ -1157,9 +998,6 @@ mod tests {
 
     #[test]
     fn erpt_will_not_open_a_report_it_does_not_hold() {
-        // Answering success would hand the caller an IReport onto nothing:
-        // GetSize says zero and Read says zero, so the transfer concludes the
-        // report it just listed is empty rather than that it asked wrongly.
         let mut cpu = request(false, 0, &[0xAAu8; super::ERPT_ID_SIZE]);
         cpu.register_service_handle(9, "erpt:report");
         cpu.erpt_session_request(TLS, 9, Some(0)).unwrap();
@@ -1180,9 +1018,6 @@ mod tests {
         cpu.mem.map_zero(OUT, 0x1000).unwrap();
         cpu.register_service_handle(9, "erpt:c");
 
-        // SubmitAttachment(name, data) -> an AttachmentId. The id is the
-        // server's to assign, so a bare success left the caller naming
-        // whatever its out-parameter happened to hold.
         for (index, &byte) in b"log.bin\0".iter().enumerate() {
             cpu.mem.write_u8(NAME + index as u32, byte).unwrap();
         }
@@ -1201,7 +1036,6 @@ mod tests {
             0xDEAD_BEEFu32.to_le_bytes().to_vec()
         );
 
-        // CreateReportWithAttachments(ReportType, ..., AttachmentId[]).
         for (index, &byte) in id.iter().enumerate() {
             cpu.mem.write_u8(IDS + index as u32, byte).unwrap();
         }
@@ -1216,7 +1050,6 @@ mod tests {
         assert_eq!(report.report_type, 1, "Invisible");
         assert_eq!(cpu.erpt_attachments[0].owner.to_vec(), report.id.to_vec());
 
-        // IManager::GetAttachmentList(out, ReportId) finds it by its owner.
         cpu.register_service_handle(10, "erpt:manager");
         write_map_buffer_request(&mut cpu, 6, &report.id, OUT, 0x200, false);
         cpu.erpt_session_request(TLS, 10, Some(6)).unwrap();
@@ -1230,9 +1063,6 @@ mod tests {
 
     #[test]
     fn the_manager_event_fires_because_a_report_really_is_filed() {
-        // Every other event these services hand out describes something that
-        // does not happen on this console. This one does: `erpt` signals it
-        // when a report lands in the journal, and the transfer waits on it.
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.register_service_handle(9, "erpt:c");

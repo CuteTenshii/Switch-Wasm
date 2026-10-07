@@ -1,25 +1,11 @@
-//! Boot a real game from its container, an `.nsp`, an `.xci` or a bare
-//! Program `.nca`: find the Program NCA, decrypt the ExeFS, load every module
-//! and run it. The CLI equivalent of the browser's panel "Launch" button,
-//! useful for debugging without a browser.
+//! Boot an `.nsp`, `.xci` or Program `.nca` from the command line.
 //!
 //! Usage: cargo run -p switch-core --example boot_nsp -- <container> <prod.keys> [title.keys] [max_steps]
 //!
-//! `PROFILE=<interval>` samples the pc every `interval` steps and reports
-//! where the run spent itself, by thread and by 4 KiB page. A title that runs
-//! for billions of instructions without reaching a frame is not stuck
-//! anywhere a backtrace can be taken; it is *somewhere*, and this is what
-//! says where.
-//!
-//! `SHOT=<out.ppm>` writes whatever was presented last.
-//!
-//! `PRESS=<buttons>@<interval>` taps buttons every `interval` steps, such as
-//! `PRESS=A@500000000`, or `PRESS=A+DOWN@300000000` for two at once. Much of
-//! what a title does only happens once someone gets it past a title screen or
-//! a menu, which a run with no input never does.
-//!
-//! `DUMP=`, `TRAP_WRITE=`, `TRAP_READ=` and `WATCH_PC=` are the debugging
-//! knobs every runner here shares. See [`common::Debug`] for their spelling.
+//! `PROFILE=<interval>` samples the pc by thread, page and caller.
+//! `SHOT=<out.ppm>` writes the last presented frame.
+//! `PRESS=<buttons>@<interval>` taps buttons periodically, e.g. `PRESS=A+DOWN@300000000`.
+//! `DUMP=`, `TRAP_WRITE=`, `TRAP_READ=` and `WATCH_PC=` are described in [`common::Debug`].
 mod common;
 
 use common::{Flow, Pace};
@@ -28,12 +14,10 @@ use switch_core::cpu::Cpu;
 
 const USAGE: &str = "boot_nsp <container> <prod.keys> [title.keys] [max_steps]";
 
-/// How long a `PRESS=` tap holds its buttons down: three frames of the 1.02
-/// GHz CPU at 60 Hz. A title that samples its pad once a frame misses a press
-/// shorter than a frame, and one that waits for a release needs one.
+/// Three frames at 1.02 GHz and 60 Hz, so a once-per-frame pad poll sees the press.
 const PRESS_HOLD: u64 = 3 * 17_000_000;
 
-/// The buttons `PRESS=` names, in Horizon's `HidNpadButton` order.
+/// In Horizon's `HidNpadButton` order.
 const BUTTONS: [(&str, u64); 16] = [
     ("A", 1 << 0),
     ("B", 1 << 1),
@@ -53,9 +37,7 @@ const BUTTONS: [(&str, u64); 16] = [
     ("DOWN", 1 << 15),
 ];
 
-/// `PRESS=`'s buttons and interval, or `None` when it is unset. Exits with
-/// a message on a spelling it cannot read, rather than running without the
-/// input that was asked for.
+/// Exits on an unreadable spelling rather than running without the input.
 fn press_from_env() -> Option<(u64, u64)> {
     let raw = std::env::var("PRESS").ok()?;
     let fail = |why: &str| -> ! {
@@ -80,7 +62,6 @@ fn press_from_env() -> Option<(u64, u64)> {
     Some((mask, interval))
 }
 
-/// Where `PROFILE=` found the run: by thread, by page, and by return address.
 fn report_profile(
     pages: &BTreeMap<(u64, u32), u64>,
     callers: &BTreeMap<(u64, u32), u64>,
@@ -132,11 +113,7 @@ fn main() {
     let mut cpu = Cpu::new();
     cpu.bootstrap();
 
-    // The title's save-data quota, which `IApplicationFunctions::GetSaveDataSize`
-    // reports. It is declared in the NACP, and the NACP is in the *Control*
-    // NCA rather than the Program one booted below, so it has to be read
-    // separately, and a container without one leaves the CPU's default in
-    // place rather than reporting a size this title never asked for.
+    // The save-data quota comes from the Control NCA's NACP.
     match title.control() {
         Ok(control) => {
             let quota = switch_core::cpu::SaveDataQuota::from(&control.nacp);
@@ -151,9 +128,6 @@ fn main() {
                 quota.cache_storage_size_max,
             );
             cpu.set_save_data_quota(quota);
-            // The id this title's DLC is numbered from, when its NACP names
-            // one rather than leaving it to be derived. Before the boot, which
-            // is where add-on content gets mounted.
             cpu.set_add_on_content_base_id(control.nacp.add_on_content_base_id);
         }
         Err(e) => println!("no control data ({e}): using default save sizes"),
@@ -175,21 +149,13 @@ fn main() {
     let mut debug = common::Debug::from_env();
     debug.arm(&mut cpu);
     let profile = common::env_u64("PROFILE", 0);
-    // Samples per (thread handle, pc page). A page rather than an address
-    // because a hot loop is a run of instructions, not one of them, and one
-    // bucket per instruction turns a profile into a list.
     let mut pages: BTreeMap<(u64, u32), u64> = BTreeMap::new();
-    // The same samples keyed by the return address instead. The hot page of a
-    // run that spends itself in `memcpy` says nothing on its own, every
-    // caller in the process shares it, and for a leaf like that the link
-    // register *is* the caller.
+    // Keyed by return address, which names the caller of a hot leaf like `memcpy`.
     let mut callers: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     let mut sampled = 0u64;
     let press = press_from_env();
     let mut held = false;
-    // Sampling and the watchpoints both read the machine between two
-    // instructions. With neither armed the run goes through the block
-    // translator, which is the engine the frontend uses.
+    // Without sampling or watchpoints the run uses the block translator, like the frontend.
     let pace = if debug.stepwise() || profile > 0 {
         Pace::Instructions
     } else {
@@ -198,8 +164,7 @@ fn main() {
     let run = common::drive(&mut cpu, pace, max_steps, |cpu, done| {
         debug.tick(cpu, done);
         if let Some((buttons, interval)) = press {
-            // The first tap waits a whole interval: a press during boot
-            // lands before anything is reading the pad.
+            // The first tap waits a whole interval so it does not land during boot.
             let down = done >= interval && done % interval < PRESS_HOLD;
             if down != held {
                 held = down;
@@ -218,13 +183,7 @@ fn main() {
     common::report(&cpu, &run);
     debug.report();
     debug.stop_state(&cpu);
-    // A run that stops on its step budget rather than on a fault has almost
-    // always stopped making progress, and where each *thread* is says more
-    // about why than where the one running thread is.
     print!("{}", cpu.thread_dump());
-    // The same threads as the browser's console names them: what each one
-    // is called, what it is waiting on, and the calls it is waiting in. The
-    // dump above says which thread is blocked; this says on what.
     let (threads, _, _) = cpu.take_thread_report();
     for thread in threads {
         println!(

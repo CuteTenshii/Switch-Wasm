@@ -1,5 +1,4 @@
-//! Boot an NRO and print what it wrote to the console:
-//! `boot_nx <path.nro>`.
+//! Boot an NRO and print its console output: `boot_nx <path.nro>`.
 mod common;
 
 use common::{Flow, Pace};

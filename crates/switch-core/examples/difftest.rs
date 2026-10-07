@@ -1,12 +1,5 @@
-//! Run a raw AArch64 instruction stream and dump the vector registers, so the
-//! same bytes can be compared against real ARM semantics under qemu-aarch64.
-//!
-//! `tools/difftest.py` drives this: it assembles a list of instructions, runs
-//! them under qemu, runs the identical bytes here, and reports the first
-//! register that differs. This is how the TRN1/TRN2 lane mix-up behind
-//! hbmenu's JPEG decode was found.
-//!
-//! Usage: `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`
+//! Runs a raw AArch64 instruction stream and dumps the vector registers, for
+//! comparison against qemu-aarch64 by `tools/difftest.py`.
 mod common;
 
 use common::{Flow, Pace};
@@ -19,8 +12,7 @@ fn main() {
     let inputs = common::read(common::arg(2, USAGE));
     let out = common::arg(3, USAGE);
     const CODE: u32 = 0x1000;
-    // Must match the test ELF's .data address: the program computes its own
-    // scratch pointer with adrp/add against it.
+    // Must match the test ELF's .data address.
     let inputs_addr = common::hex(&common::arg(4, USAGE));
     const OUTPUT: u32 = 0x2_0000;
     let mut cpu = Cpu::new();
@@ -28,23 +20,18 @@ fn main() {
     cpu.mem.map(CODE, &code).unwrap();
     cpu.mem.map_zero(inputs_addr, inputs.len() + 4096).unwrap();
     cpu.mem.map(inputs_addr, &inputs).unwrap();
-    // One dump per instruction under test, sized from the program rather than
-    // fixed: the buffer used to hold 128 of them, and a longer list did not
-    // fail -- it silently stopped comparing at 128 and reported everything
-    // past that as "the emulator ran short".
+    // One dump per instruction under test.
     let capacity = (code.len() / 4 + 1) * 512;
     cpu.mem.map_zero(OUTPUT, capacity).unwrap();
     cpu.set_reg(0, inputs_addr as u64);
     cpu.set_reg(1, OUTPUT as u64);
     cpu.set_pc(CODE);
     cpu.set_reg(9, OUTPUT as u64);
-    // The scalar harness keeps its pointers in x26..x28 instead, so seed both;
-    // whichever the program uses, the other set is simply unread.
+    // The scalar harness uses x26..x28 instead, so seed both.
     cpu.set_reg(26, OUTPUT as u64);
     cpu.set_reg(27, inputs_addr as u64);
     cpu.set_reg(28, OUTPUT as u64);
-    // Stepwise: the high-water mark has to be read between instructions,
-    // since it is what says how much of the output buffer the program filled.
+    // Stepwise so the high-water mark can be read between instructions.
     let mut high_water = OUTPUT as u64;
     let run = common::drive(
         &mut cpu,

@@ -1,6 +1,4 @@
-/* switch-wasm - application shell.
-   The screen is the product: it gets the whole viewport, and every tool lives
-   in a drawer that is closed by default. */
+/* switch-wasm application shell. */
 
 :root {
   --bg: #07080c;
@@ -77,9 +75,7 @@ body {
   font-size: 14px;
 }
 
-/* What is running, between the brand and the controls that act on it. The one
-   part of the bar whose width is the title's to decide, so it is also the only
-   one allowed to shrink. */
+/* Current title; the only part of the bar allowed to shrink. */
 .running {
   display: flex;
   align-items: center;
@@ -96,8 +92,7 @@ body {
   background: var(--chrome-hi);
   object-fit: cover;
 }
-/* Name over version, the way a console's own home menu stacks them. Both lines
-   fit the 48px bar only at a line height tighter than the page's. */
+/* Name over version; needs a tighter line height to fit the 48px bar. */
 .running-meta {
   display: flex;
   flex-direction: column;
@@ -188,8 +183,6 @@ body {
 }
 .btn .glyph { font-size: 11px; }
 
-/* A secondary action next to a primary one - present, but not competing with
-   it for the eye until it is pointed at. */
 .btn.ghost {
   background: none;
   border-color: transparent;
@@ -206,8 +199,7 @@ body {
   color: var(--red);
 }
 
-/* Chrome that is only an icon: no frame until it is hovered, so it reads as
-   part of the surface it sits on rather than as a button parked on it. */
+/* Icon-only chrome: no frame until hovered. */
 .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -230,8 +222,6 @@ body {
   color: var(--text);
 }
 
-/* Keyboard focus has to be visible on every control, including the ones with
-   no border of their own to thicken. */
 .btn:focus-visible,
 .icon-btn:focus-visible,
 .tab:focus-visible,
@@ -243,8 +233,7 @@ body {
   outline-offset: 2px;
 }
 
-/* A hidden control must stay hidden inside a flex row, which sets `display` on
-   its children. */
+/* Keep hidden controls hidden inside flex rows. */
 [hidden] { display: none !important; }
 
 .select {
@@ -316,16 +305,11 @@ body {
   display: block;
   width: 100%;
   height: 100%;
-  /* Letterbox: the guest picks the resolution, the stage is whatever shape
-     the window is. */
   object-fit: contain;
   background: #000;
-  /* The frame is a 720p photograph, not pixel art: nearest-neighbour at the
-     fractional scale a window gives it stair-steps every thin feature. */
+  /* Smooth scaling: the frame is not pixel art. */
   image-rendering: auto;
-  /* The canvas is the console's touchscreen: a drag across it is a finger, not
-     a page scroll or a pinch-zoom, and a double-tap is two taps. Without this
-     the browser swallows the gesture before pointermove ever fires. */
+  /* The canvas is a touchscreen: no browser scroll, zoom or double-tap handling. */
   touch-action: none;
   user-select: none;
 }
@@ -392,12 +376,7 @@ body {
   visibility: visible;
 }
 
-/* loading screen
-
-   The state chip says *that* something is loading; this says what, on the
-   surface the eye is already on. It shares the idle overlay's ground so that
-   handing over from one to the other is a crossfade rather than a scene
-   change. */
+/* loading screen */
 
 .loading {
   position: absolute;
@@ -447,8 +426,7 @@ body {
   background: #1a2033;
   overflow: hidden;
 }
-/* Indeterminate by default: almost nothing here can say how far along it is,
-   and a bar that fills at a rate nobody measured is a lie with a shape. */
+/* Indeterminate by default. */
 .loading-bar span {
   position: absolute;
   top: 0;
@@ -464,8 +442,7 @@ body {
   from { transform: translateX(-110%); }
   to   { transform: translateX(300%); }
 }
-/* A step with a known count is a real proportion, so the bar stops sweeping
-   and fills. The width is set inline, which is why it is absent here. */
+/* Known progress: width is set inline. */
 .loading.is-determinate .loading-bar span {
   animation: none;
   transform: none;
@@ -477,8 +454,7 @@ body {
   font-size: 13px;
   color: var(--muted);
 }
-/* Holds its line whether or not there is anything on it, so the phase above
-   does not shift every time a detail appears and goes. */
+/* Reserves its line so the phase above does not shift. */
 .loading-detail {
   min-height: 1.45em;
   font-family: var(--mono);
@@ -494,9 +470,7 @@ body {
 }
 .loading.is-error .loading-phase { color: var(--red); }
 
-/* A run-time fault owns the stage because continuing is impossible, while the
-   console and report remain reachable around it. The translucent ground keeps
-   the last guest frame as context without asking it to carry readable text. */
+/* Run-time fault overlay; the translucent ground keeps the last frame visible. */
 .crash {
   position: absolute;
   z-index: 2;
@@ -582,8 +556,6 @@ body {
 
 /* side panel */
 
-/* A drawer, not a second window: one head, one scrolling body, and a grip on
-   the seam it shares with the stage. */
 .panel {
   position: relative;
   flex: 0 0 var(--panel-w);
@@ -611,8 +583,7 @@ body.panel-open .panel {
   }
 }
 
-/* The seam is draggable, so the panel is as wide as the log being read needs
-   it to be. Its hit area straddles the border; only the border lights up. */
+/* Draggable seam; the hit area straddles the border. */
 .panel-grip {
   position: absolute;
   top: 0;
@@ -640,8 +611,6 @@ body.panel-open .panel {
   box-shadow: 0 0 8px rgb(110 168 255 / 50%);
 }
 .panel-grip:focus-visible { outline: none; }
-/* Dragging must not select the text the pointer sweeps over, and the cursor
-   has to survive leaving the 9px grip. */
 body.resizing {
   cursor: col-resize;
   user-select: none;
@@ -706,8 +675,7 @@ body.resizing {
   overflow: auto;
 }
 .tabpanel.is-active { display: flex; }
-/* The log owns its own scrollback, so the tab around it must not add a second
-   scrollbar next to it. */
+/* The log scrolls itself; avoid a second scrollbar. */
 .tabpanel[data-panel="console"] { overflow: hidden; }
 
 .debug-groups {
@@ -769,8 +737,7 @@ body.resizing {
   list-style: none;
 }
 .section-head::-webkit-details-marker { display: none; }
-/* A chevron drawn from two borders, so it turns with the disclosure instead of
-   being swapped for a different glyph. */
+/* Chevron drawn from two borders, so it rotates with the disclosure. */
 .section-head::before {
   content: "";
   flex: none;
@@ -943,11 +910,8 @@ body.resizing {
 }
 .debug-timings tbody td { color: var(--text); }
 
-/* console
-
-   The log sits on its own near-black ground rather than the panel's, so its
-   chrome (markers, scrollbar, empty note) is a few greys darker than --muted,
-   which is calibrated against the lighter --chrome-hi. */
+/* console */
+/* The log's near-black ground needs chrome greys darker than --muted. */
 
 .console {
   flex: 1 1 auto;
@@ -958,8 +922,6 @@ body.resizing {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: auto;
-  /* A log that has scrolled to its end should stop there, not hand the wheel
-     to the page behind it. */
   overscroll-behavior: contain;
   font-family: var(--mono);
   font-size: 12px;
@@ -971,8 +933,6 @@ body.resizing {
 }
 .console::-webkit-scrollbar { width: 10px; }
 .console::-webkit-scrollbar-thumb {
-  /* Drawn inside a transparent border so the thumb reads as a floating bar
-     rather than a full-height gutter. */
   background: #2a3145;
   background-clip: content-box;
   border: 3px solid transparent;
@@ -981,20 +941,15 @@ body.resizing {
 .console::-webkit-scrollbar-thumb:hover { background-color: #39415a; }
 .console::selection, .console ::selection { background: var(--accent-dim); }
 
-/* Nothing has run yet. Without this the panel opens on a black rectangle that
-   reads as a log which failed to load rather than one with nothing in it. */
+/* Empty-log note. */
 .console:empty::before {
   content: "Nothing logged yet.";
-  /* Lined up with the text column of a real entry, not with its marker. */
+  /* Aligned with an entry's text column, not its marker. */
   padding-left: 16px;
   color: #4f586e;
 }
 
-/* One entry per row, each with a severity marker in a gutter of its own. The
-   marker is positioned rather than prepended so that a wrapped line - and
-   every line of a register dump, which arrives as a single multi-line entry -
-   aligns under the text instead of under the marker. It is also why the marker
-   is CSS: `Copy all` reads textContent, which pseudo-elements stay out of. */
+/* Markers are positioned so wrapped lines align, and drawn in CSS so `Copy all` skips them. */
 .console div {
   position: relative;
   padding: 1px 6px 1px 22px;
@@ -1010,10 +965,7 @@ body.resizing {
   color: #3f4860;
   font-weight: 600;
 }
-/* How many times in a row an entry has been said, shown only once it is more
-   than once. `attr()` for the same reason the marker above is CSS: the count
-   is not part of what was said, so `Copy all` and the saved log carry it as a
-   trailing `(xN)` rather than finding it in the middle of the text. */
+/* Repeat count via `attr()`, so copied text carries it as a trailing `(xN)`. */
 .console div[data-repeat]::after {
   content: "\d7" attr(data-repeat);
   margin-left: 8px;
@@ -1026,11 +978,8 @@ body.resizing {
   vertical-align: 1px;
 }
 
-/* Reading a long log means following one entry across the panel's width. */
 .console div:hover { background: rgb(255 255 255 / 3.5%); }
 
-/* A fault is the one entry that has to be findable in a screenful of trace, so
-   it takes a tinted row and a rule down its edge, not just red text. */
 .console .err {
   color: var(--red);
   border-left-color: var(--red);
@@ -1041,9 +990,6 @@ body.resizing {
   color: var(--red);
 }
 
-/* A warning is a thing that was answered wrongly or not at all, and it is
-   what a later fault usually turns out to have been caused by. Amber and no
-   tint: findable while scrolling past, without competing with the fault. */
 .console .warn {
   color: var(--amber);
   border-left-color: #5c4718;
@@ -1107,10 +1053,7 @@ body.resizing {
 
 /* list rows */
 
-/* The NAND's installed programs. A system applet ships as a bare NCA with no
-   container around it, so these rows are the only way to start one - which is
-   why each is a row that says what it launches, not one more small button in a
-   wrap of identical small buttons. */
+/* The NAND's installed programs; the only way to start a system applet. */
 .nand-titles {
   display: flex;
   flex-direction: column;
@@ -1191,7 +1134,6 @@ body.resizing {
   flex: none;
   color: var(--muted);
 }
-/* Only an .nca can be inspected, so only those rows offer to be. */
 .nsp-list li.clickable { cursor: pointer; }
 .nsp-list li.clickable:hover {
   background: var(--chrome-hi);
@@ -1217,10 +1159,6 @@ body.resizing {
   border-top: 1px solid var(--border);
 }
 
-/* What is paired with the open title - its update, its add-on content - or
-   what the page is waiting for. An accent edge because each line is a
-   statement about what Launch will do, not one more field of the container's
-   metadata. */
 .paired-note { border-left: 3px solid var(--accent); }
 
 #nsp-result {
@@ -1230,9 +1168,7 @@ body.resizing {
 }
 #nsp-result:empty { display: none; }
 
-/* The title's own identity - icon, name, publisher - above the container's
-   file list, the way a home menu would show it. Wraps rather than using a
-   fixed icon column so a title with no icon doesn't leave a hole. */
+/* Title identity above the file list; wraps so a missing icon leaves no hole. */
 .title-card {
   display: flex;
   flex-wrap: wrap;
@@ -1346,8 +1282,6 @@ body.resizing {
   border-radius: var(--radius);
   background: var(--chrome-hi);
 }
-/* The playing profile is the one a title will start as, so it is the one
-   the eye should land on. */
 .profile-row.is-playing { border-color: var(--accent-dim); }
 .profile-picture {
   display: inline-flex;
@@ -1424,8 +1358,7 @@ body.resizing {
     border-left: none;
     border-top: 1px solid var(--border);
   }
-  /* The seam is horizontal here and the sheet's height is the media query's to
-     decide, so there is nothing to drag. */
+  /* No drag on the horizontal seam; the media query sets the height. */
   .panel-grip { display: none; }
   body.panel-open .panel {
     animation-name: sheet-in;
@@ -1443,9 +1376,7 @@ body.resizing {
     }
   }
   .transport .btn span:not(.glyph) { display: none; }
-  /* Only where the icon is left to say which title it is: homebrew launched
-     from a file has no icon, and a bare rule with nothing beside it names
-     nothing at all. */
+  /* Only for titles with no icon to identify them. */
   .running.has-icon .running-meta { display: none; }
   .running { padding-left: 8px; }
   .running-icon {
@@ -1478,8 +1409,7 @@ body.resizing {
 
 @media (prefers-reduced-motion: reduce) {
   body.panel-open .panel { animation: none; }
-  /* A bar that sweeps for the whole of a boot is exactly the motion this
-     query is asking to be spared; it becomes a dim full-width rule instead. */
+  /* Reduced motion: a dim full-width rule instead of a sweep. */
   .loading-bar span {
     animation: none;
     width: 100%;

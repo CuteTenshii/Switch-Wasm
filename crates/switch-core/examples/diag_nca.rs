@@ -1,8 +1,5 @@
-//! Ad-hoc diagnostic for debugging real-world NCA decryption against a real
-//! `prod.keys`/`title.keys`, prints the fields `Nca::parse_source`
-//! derives (key index, generation, FS header layout) without needing the
-//! actual section key to be present, so a "missing key" case still reports
-//! everything else for sanity-checking.
+//! Prints the header fields `Nca::parse_source` derives for an NCA, even when
+//! the section key is missing.
 //!
 //! Usage: cargo run -p switch-core --example diag_nca -- <path.nca> <prod.keys> [title.keys]
 mod common;
@@ -13,8 +10,6 @@ const USAGE: &str = "diag_nca <path.nca> <prod.keys> [title.keys]";
 
 fn main() {
     let args = common::container_args(USAGE);
-    // Off disk rather than into memory: the NCA being diagnosed is often the
-    // Program one, which is the whole game.
     let src = FileSource::open(&args.container).expect("open nca");
     println!(
         "file size: {} bytes ({:.1} KiB)",

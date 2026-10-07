@@ -1,13 +1,5 @@
-//! The CELT layer's constant tables, as RFC 6716 fixes them.
-//!
-//! Every one of these is normative: an encoder coded its symbols against the
-//! same numbers, so a single wrong entry desynchronises the range decoder and
-//! the rest of the frame is noise. They are transcribed rather than derived
-//! for that reason, even where a generating formula exists.
-//!
-//! Only the 48 kHz / 960-sample mode is here, because it is the only mode
-//! Opus itself uses: every other frame size is that mode with a smaller
-//! `LM`.
+//! CELT's normative constant tables from RFC 6716, transcribed rather than
+//! derived. Only the 48 kHz / 960 mode; smaller frames use a smaller `LM`.
 
 pub(super) const WINDOW120: [f32; 120] = [
     6.7286966e-05,
@@ -329,10 +321,8 @@ pub(super) const ORDERY_TABLE: [usize; 30] = [
     1, 0, 3, 0, 2, 1, 7, 0, 4, 3, 6, 1, 5, 2, 15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2, 10, 5,
 ];
 
-/// Where each row of [`PVQ_U_DATA`] starts. `PVQ_U_ROW[min(n,k)]` indexed by
-/// `max(n,k)` is `U(n,k)`, the number of PVQ codewords with the pulses split
-/// a particular way; the rows are ragged and overlap, so the offsets are part
-/// of the table rather than a stride.
+/// Row offsets into [`PVQ_U_DATA`]: `PVQ_U_ROW[min(n,k)]` indexed by `max(n,k)`
+/// is `U(n,k)`. Rows are ragged and overlap.
 pub(super) const PVQ_U_ROW: [usize; 15] = [
     0, 176, 351, 525, 698, 870, 1041, 1131, 1178, 1207, 1226, 1240, 1248, 1254, 1257,
 ];
@@ -346,14 +336,10 @@ pub(super) const SPREAD_ICDF: [u8; 4] = [25, 23, 2, 0];
 /// Which of the three postfilter tap sets is in use.
 pub(super) const TAPSET_ICDF: [u8; 3] = [2, 1, 0];
 
-/// The two-bit fallback for a coarse energy delta when the frame has run out
-/// of room for the Laplace model.
+/// Two-bit coarse energy fallback when the Laplace model doesn't fit.
 pub(super) const SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
 
-/// Collapse masks under one Hadamard recombination, and its inverse. A
-/// recombination halves the number of blocks a band is split into, so the
-/// per-block "this block has energy" bits have to be folded together the same
-/// way the samples are.
+/// Collapse masks under one Hadamard recombination, and its inverse.
 pub(super) const BIT_INTERLEAVE_TABLE: [u8; 16] = [0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3];
 
 pub(super) const BIT_DEINTERLEAVE_TABLE: [u8; 16] = [

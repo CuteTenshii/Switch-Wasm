@@ -1,6 +1,4 @@
-//! NEON/AdvSIMD: the vector instruction subset compiled homebrew uses
-//! (three-same integer ops, logicals, permutes, compares, shifts and the
-//! element moves libnx's string and memory routines are built from).
+//! NEON/AdvSIMD instruction decode and execution.
 
 use super::bits::*;
 use super::crypto::poly_mul;
@@ -8,26 +6,13 @@ use super::Cpu;
 use crate::{Error, Result};
 
 impl Cpu {
-    /// Minimal SIMD data-processing for the vector registers, just enough for
-    /// the libnx `memset`/`memcpy` hot path (Phase 1 keeps NEON out of scope).
-    ///
-    /// Handled forms (fixed bits `[30:23] == 10_011100`, `[22:20] == 000`):
-    /// * `DUP <Vd>.<T>, <Rn>`: replicate the low element of a GPR across the
-    ///   vector (`bits[15:10] == 000011`).
-    /// * `MOV <Xd>, <Vn>.D[<m>]` (UMOV), copy a 64-bit lane to a GPR
-    ///   (`bits[15:10] == 001111`, 64-bit lane form `imm5 == 01000 | m`).
     pub(super) fn try_simd(&mut self, insn: u32) -> Result<bool> {
-        // ---- AES and SHA ----
-        // The three-register SHA forms share bits[28:21] with the scalar DUP
-        // below, so the crypto group has to get first look at the encoding.
+        // AES and SHA: decoded before scalar DUP, which shares bits[28:21].
         if self.try_crypto(insn)? {
             return Ok(true);
         }
 
-        // ---- narrowing shifts (SHRN / RSHRN / SQSHRN / ...) ----
-        // bits[31]=0, bits[28:24]=01111, bit23=0. These share the group with
-        // MOVI (bits[28:23]=011110), so they must be checked first; the
-        // opcode lives in bits[15:11] and the shift in bits[22:16].
+        // Narrowing shifts (SHRN/RSHRN/SQSHRN/...), checked before MOVI.
         if ((insn >> 31) & 1) == 0
             && ((insn >> 24) & 0x1F) == 0b01111
             && ((insn >> 23) & 1) == 0
@@ -39,14 +24,9 @@ impl Cpu {
                 let u = (insn >> 29) & 1;
                 let rd = (insn & 0x1F) as u8;
                 let rn = ((insn >> 5) & 0x1F) as u8;
-                // The destination element size comes from `immh` (bits[22:19]),
-                // not bit22 alone: 0001 narrows to bytes, 001x to halfwords,
-                // 01xx to words. Reading one bit made every form but the
-                // byte-destination one fall through as unimplemented
-                // (`shrn v2.4h, v18.4s, #16`).
+                // Destination element size comes from all of `immh`, not bit22.
                 let immh = (insn >> 19) & 0xF;
-                // `immh == 0` is MOVI sharing this space, so fall through to it
-                // rather than reporting the instruction as unimplemented.
+                // `immh == 0` is MOVI.
                 let dest_esize = match immh {
                     0b0001 => Some(8u32),
                     0b0010 | 0b0011 => Some(16),
@@ -86,12 +66,7 @@ impl Cpu {
             }
         }
 
-        // ---- shift by immediate (SSHR/USHR/SHL/SLI/SRI/SSHLL/...) ----
-        // Vector: `0 Q U 011110 immh immb opcode 1 Rn Rd` (the same group as
-        // MOVI and the narrowing shifts; `immh` is zero only for MOVI, and the
-        // narrowing opcodes are handled above). Scalar: `01 U 111110 …`, which
-        // differs only in bit28 and always works on one 64-bit lane,
-        // `ushr d30, d31, #32` = 0x7f6007fe.
+        // Shift by immediate (SSHR/USHR/SHL/SLI/SRI/SSHLL/...), vector and scalar.
         let scalar_shift = ((insn >> 30) & 0b11) == 0b01 && ((insn >> 23) & 0x3F) == 0b111110;
         let vector_shift = ((insn >> 31) & 1) == 0 && ((insn >> 23) & 0x3F) == 0b011110;
         if (vector_shift || scalar_shift) && ((insn >> 10) & 1) == 1 && ((insn >> 19) & 0xF) != 0 {
@@ -109,9 +84,7 @@ impl Cpu {
                     0b0100..=0b0111 => 32,
                     _ => 64,
                 };
-                // SCVTF / UCVTF and FCVTZS / FCVTZU with a fixed-point
-                // operand, whose fraction bits are encoded the way the other
-                // opcodes encode a right shift.
+                // SCVTF/UCVTF and FCVTZS/FCVTZU with fixed-point fraction bits.
                 if matches!(opcode, 0b11100 | 0b11111) {
                     if vector_shift && !q && esize == 64 {
                         return Err(Error::Cpu(format!(
@@ -141,10 +114,7 @@ impl Cpu {
             }
         }
 
-        // MOVI/MVNI (modified immediate): bits[28:23] == 011110, bits[22:19]==0.
-        // The 8-bit immediate is NOT contiguous: `abcdefgh` sits at bits 18:16
-        // (a:b:c) and 9:5 (d:e:f:g:h), with bits 15:12 = cmode, bit 29 = op
-        // (0 = MOVI, 1 = MVNI/bitwise). Cross-checked against QEMU.
+        // MOVI/MVNI: imm8 is split across bits 18:16 and 9:5, cmode in 15:12, op in bit29.
         if ((insn >> 31) & 1) == 0
             && ((insn >> 23) & 0x3F) == 0b011110
             && ((insn >> 19) & 0b1111) == 0b0000
@@ -155,7 +125,6 @@ impl Cpu {
             let imm8 = (((insn >> 16) & 0b111) << 5) | ((insn >> 5) & 0x1F);
             let cmode = (insn >> 12) & 0b1111;
             let imm64 = simd_imm_const(imm8, cmode, op);
-            // q=0 writes only the low 64 bits (upper half cleared).
             self.vregs[rd as usize] = if q == 1 {
                 imm64 as u128 | ((imm64 as u128) << 64)
             } else {
@@ -164,12 +133,7 @@ impl Cpu {
             return Ok(true);
         }
 
-        // ---- permute (ZIP/UZP/TRN) ----
-        // bit31=0, q=bit30, bits[29:24]=001110, bit21=0, opcode in bits[15:10]
-        // (UZP1/TRN1/ZIP1 = 000110/001010/001110, UZP2/TRN2/ZIP2 = 010110/
-        // 011010/011110). The copy-group guard above must not swallow these.
-        // bit29 has to be 0: with it set the same bits are EXT, and
-        // `ext v3.8b, v4.8b, v5.8b, #3` was being executed as `uzp1`.
+        // Permute (ZIP/UZP/TRN); bit29 set would be EXT.
         let perm = (insn >> 10) & 0b111111;
         if ((insn >> 31) & 1) == 0
             && ((insn >> 29) & 1) == 0
@@ -189,10 +153,7 @@ impl Cpu {
             return Ok(true);
         }
 
-        // ---- three different (widening / narrowing) ----
-        // `0 Q U 01110 size 1 Rm opcode(4) 00 Rn Rd`: the results are twice
-        // (or half) the source width. Distinguished from three-same by
-        // bits[11:10] = 00.
+        // Three different (widening/narrowing): bits[11:10] = 00.
         if ((insn >> 31) & 1) == 0
             && ((insn >> 24) & 0x1F) == 0b01110
             && ((insn >> 21) & 1) == 1
@@ -205,8 +166,7 @@ impl Cpu {
             let opcode = (insn >> 12) & 0xF;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let rd = (insn & 0x1F) as u8;
-            // PMULL/PMULL2 is the one form with a 64-bit source element, so it
-            // is decoded before the size check the rest of the group needs.
+            // PMULL has a 64-bit source element, so it precedes the size check.
             if opcode == 0b1110 && u == 0 {
                 let half = if q { 64 } else { 0 };
                 let a = (self.vregs[rn as usize] >> half) as u64;
@@ -227,7 +187,6 @@ impl Cpu {
             let esize = 8u32 << size;
             let wide = esize * 2;
             let elements = 128 / wide;
-            // The `2` variants (Q=1) read the top half of their narrow sources.
             let half = if q { elements * esize } else { 0 };
             let signed = u == 0;
             let narrow = |v: u128, base: u32, i: u32| {
@@ -243,9 +202,7 @@ impl Cpu {
             let d_reg = self.vregs[rd as usize];
             let mut out: u128 = 0;
             match opcode {
-                // ADDHN / SUBHN (and the rounding variants): both operands are
-                // already wide and the result is narrow, into the Q-selected
-                // half of Vd.
+                // ADDHN/SUBHN and rounding variants: wide operands, narrow result.
                 0b0100 | 0b0110 => {
                     let subtract = opcode == 0b0110;
                     let rounding = u == 1;
@@ -275,7 +232,6 @@ impl Cpu {
             }
             for i in 0..elements {
                 let b = narrow(b_reg, half, i);
-                // The W forms take Vn at the destination width already.
                 let a = if matches!(opcode, 0b0001 | 0b0011) {
                     let raw = ((a_reg >> (wide * i)) & elem_mask(wide)) as u64;
                     if signed {
@@ -315,14 +271,7 @@ impl Cpu {
             return Ok(true);
         }
 
-        // ---- by-element multiplies (scalar x indexed element) ----
-        // `01 U 11111 size L M Rm opcode(4) H 0 Rn Rd`: one lane of Vn times
-        // one selected lane of Vm, with the result written as a *scalar* --
-        // the bottom element, everything above it zeroed. The vector form
-        // below is the same arithmetic across every lane, and differs only in
-        // bits[28:24], 01111 against 11111.
-        //
-        // `fmul s3, s4, v3.s[0]` = 0x5f839083.
+        // By-element multiplies, scalar: result in the bottom lane, rest zeroed.
         if ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 24) & 0x1F) == 0b11111
             && ((insn >> 10) & 1) == 0
@@ -336,9 +285,7 @@ impl Cpu {
             let h = (insn >> 11) & 1;
             let rn = ((insn >> 5) & 0x1F) as usize;
             let rd = (insn & 0x1F) as usize;
-            // The index is spread over H:L:M, exactly as in the vector form: a
-            // halfword element can only come from the low 16 vector registers,
-            // because M is part of the index rather than of Rm.
+            // Index is H:L:M; halfword elements only use v0-v15.
             let (esize, index, rm) = match size {
                 0b01 => (16u32, (h << 2) | (l << 1) | m, rm_low as usize),
                 0b10 => (32, (h << 1) | l, ((m << 4) | rm_low) as usize),
@@ -352,18 +299,12 @@ impl Cpu {
             let lane =
                 |reg: usize, bits: u32| -> u64 { (self.vregs[reg] & elem_mask(bits)) as u64 };
 
-            // Saturate to a signed field of `bits`, which every form here but
-            // the floating-point four ends with.
             let sat = |value: i128, bits: u32| -> u64 {
                 let max = (1i128 << (bits - 1)) - 1;
                 let min = -(1i128 << (bits - 1));
                 (value.clamp(min, max) as u64) & (elem_mask(bits) as u64)
             };
-            // `2 * a * b`, the doubling every saturating form in this group is
-            // built on. Only the most negative input squared can overflow it.
             let doubled = signed(a, esize) * signed(elem, esize) * 2;
-            // ...and its high half, rounded or truncated back to the source
-            // width.
             let high_half = |rounding: bool| -> i128 {
                 let product = if rounding {
                     doubled + (1i128 << (esize - 1))
@@ -374,8 +315,7 @@ impl Cpu {
             };
 
             let (value, width) = match key {
-                // FMLA / FMLS / FMUL / FMULX. Half precision is out of scope
-                // here for the same reason it is in the vector form.
+                // FMLA / FMLS / FMUL / FMULX (no half precision).
                 0x01 | 0x05 | 0x09 | 0x19 => {
                     if esize == 16 {
                         return Ok(false);
@@ -402,8 +342,7 @@ impl Cpu {
                         if key == 0x05 {
                             x = -x;
                         }
-                        // Fused at the source width: FMLA rounds once, so
-                        // widening to f64 and back would round twice.
+                        // Fused at source width to round once.
                         let r = match key {
                             0x01 | 0x05 => x.mul_add(y, acc),
                             0x19 => fmulx(f64::from(x), f64::from(y)) as f32,
@@ -413,11 +352,9 @@ impl Cpu {
                     };
                     (bits, esize)
                 }
-                // SQDMULL: the doubled product, kept at twice the width.
+                // SQDMULL
                 0x0b => (sat(doubled, esize * 2), esize * 2),
-                // SQDMLAL / SQDMLSL: the same, accumulated into the wide
-                // destination. Both saturations are real -- the product is
-                // clamped before the accumulate and the sum after it.
+                // SQDMLAL / SQDMLSL: product and sum both saturate.
                 0x03 | 0x07 => {
                     let wide = esize * 2;
                     let acc = signed(lane(rd, wide), wide);
@@ -429,10 +366,9 @@ impl Cpu {
                     };
                     (sat(sum, wide), wide)
                 }
-                // SQDMULH / SQRDMULH: the doubled product's high half, the
-                // second rounded rather than truncated.
+                // SQDMULH / SQRDMULH
                 0x0c | 0x0d => (sat(high_half(key == 0x0d), esize), esize),
-                // SQRDMLAH / SQRDMLSH: SQRDMULH accumulated into Rd.
+                // SQRDMLAH / SQRDMLSH
                 0x1d | 0x1f => {
                     let acc = signed(lane(rd, esize), esize);
                     let product = high_half(true);
@@ -450,17 +386,11 @@ impl Cpu {
                     )))
                 }
             };
-            // A scalar destination: the result at the bottom, everything above
-            // it zeroed.
             self.vregs[rd] = u128::from(value) & elem_mask(width);
             return Ok(true);
         }
 
-        // ---- by-element multiplies (vector x indexed element) ----
-        // `0 Q U 01111 size L M Rm opcode(4) H 0 Rn Rd`: every lane of Vn times
-        // one selected lane of Vm. Shares bits[28:24] with MOVI and the
-        // immediate shifts, which all have bit10 = 1.
-        // `smull2 v19.4s, v18.8h, v0.h[2]` = 0x4f60a253.
+        // By-element multiplies, vector.
         if ((insn >> 31) & 1) == 0 && ((insn >> 24) & 0x1F) == 0b01111 && ((insn >> 10) & 1) == 0 {
             let q = (insn >> 30) & 1 == 1;
             let u = (insn >> 29) & 1;
@@ -472,8 +402,7 @@ impl Cpu {
             let h = (insn >> 11) & 1;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let rd = (insn & 0x1F) as u8;
-            // The index is spread over H:L:M, and a halfword element can only
-            // come from the low 16 vector registers (M is part of the index).
+            // Index is H:L:M; halfword elements only use v0-v15.
             let (esize, index, rm) = match size {
                 0b01 => (16u32, (h << 2) | (l << 1) | m, rm_low as u8),
                 0b10 => (32, (h << 1) | l, ((m << 4) | rm_low) as u8),
@@ -484,8 +413,7 @@ impl Cpu {
             let elem = ((self.vregs[rm as usize] >> (index * esize)) & elem_mask(esize)) as u64;
             let widening = matches!(key, 0x02 | 0x06 | 0x0a | 0x12 | 0x16 | 0x1a);
             if widening {
-                // SMULL/UMULL and the accumulating forms: `Q` selects which half
-                // of Vn is read, and the destination lanes are twice as wide.
+                // SMULL/UMULL and accumulating forms: `Q` selects the Vn half, lanes widen.
                 let signed = u == 0;
                 let dest_esize = esize * 2;
                 let elements = 128 / dest_esize;
@@ -517,7 +445,6 @@ impl Cpu {
                 self.vregs[rd as usize] = out;
                 return Ok(true);
             }
-            // Same-width forms.
             match key {
                 // MUL / MLA / MLS
                 0x08 | 0x10 | 0x14 => {
@@ -582,14 +509,8 @@ impl Cpu {
         }
     }
 
-    /// The rest of the AdvSIMD decode, split out so the by-element group above
-    /// can `return` without nesting everything below it.
     fn try_simd_rest(&mut self, insn: u32) -> Result<bool> {
-        // ---- EXT (vector extract) ----
-        // `0 Q 101110 00 0 Rm 0 imm4 0 Rn Rd`: take `datasize` bits out of the
-        // concatenation Vm:Vn starting `imm4` bytes in. Shares bits[28:24] with
-        // three-same, but has bit10 = 0.
-        // `ext v31.16b, v31.16b, v31.16b, #8` = 0x6e1f43ff.
+        // EXT: bytes from Vm:Vn starting at imm4.
         if ((insn >> 31) & 1) == 0
             && ((insn >> 24) & 0x3F) == 0b101110
             && ((insn >> 22) & 0b11) == 0
@@ -621,11 +542,7 @@ impl Cpu {
             return Ok(true);
         }
 
-        // ---- two-register misc (Advanced SIMD) ----
-        // `0 Q U 01110 size 10000 opcode(5) 10 Rn Rd`: the one-operand vector
-        // ops, REV/CLS/CLZ/CNT/NOT/RBIT/ABS/NEG, the compares against zero,
-        // the narrowing and lengthening moves, and the whole FP rounding and
-        // integer<->float convert set. `scvtf v28.4s, v31.4s` = 0x4e21dbfc.
+        // Two-register misc (vector).
         if ((insn >> 31) & 1) == 0
             && ((insn >> 24) & 0x1F) == 0b01110
             && ((insn >> 17) & 0x1F) == 0b10000
@@ -633,8 +550,7 @@ impl Cpu {
         {
             return self.simd_two_reg_misc(insn, false);
         }
-        // Scalar FP three-same: `01 U 11110 sz 1 Rm opcode(5) 1 Rn Rd`, one
-        // lane of the vector group above. `fabd d31, d0, d31` = 0x7effd41f.
+        // Scalar FP three-same.
         if ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 24) & 0x1F) == 0b11110
             && ((insn >> 21) & 1) == 1
@@ -643,10 +559,7 @@ impl Cpu {
         {
             return self.simd_fp_three_same(insn, true);
         }
-        // Scalar integer three-same, the variable shifts: same encoding, an
-        // opcode below the FP ones. SSHL and SRSHL are doubleword-only; the
-        // saturating pair carries its own element size because saturation
-        // needs to know the width.
+        // Scalar integer three-same: variable shifts.
         if ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 24) & 0x1F) == 0b11110
             && ((insn >> 21) & 1) == 1
@@ -668,12 +581,7 @@ impl Cpu {
             self.vregs[(insn & 0x1F) as usize] = u128::from(v);
             return Ok(true);
         }
-        // Scalar pairwise: `01 U 11110 size 11000 opcode 10 Rn Rd`, the two
-        // lanes of Vn reduced into one, the rest of Vd cleared. ADDP on a
-        // doubleword pair; FADDP, FMAXP, FMINP, FMAXNMP and FMINNMP on a
-        // single or double pair, U set, bit 22 the size and bit 23 choosing
-        // the minimum. Tomodachi Life's `fmaxp s0, v0.2s` = 0x7e30f800
-        // stopped the run, and nothing in the group had been decoded.
+        // Scalar pairwise: ADDP, FADDP, FMAXP, FMINP, FMAXNMP, FMINNMP.
         if ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 24) & 0x1F) == 0b11110
             && ((insn >> 17) & 0x1F) == 0b11000
@@ -710,8 +618,7 @@ impl Cpu {
                 u128::from(r.to_bits())
             } else {
                 let lane = |i: u32| f32::from_bits((a >> (32 * i)) as u32);
-                // Widened and narrowed back, as the vector pairwise forms
-                // compute singles, so the two agree on every sum.
+                // Computed via widening to match the vector pairwise forms.
                 let Some(r) = op(f64::from(lane(0)), f64::from(lane(1))) else {
                     return Ok(false);
                 };
@@ -719,10 +626,7 @@ impl Cpu {
             };
             return Ok(true);
         }
-        // Scalar integer three-same, the compares and ADD/SUB: the vector
-        // group's opcodes on one doubleword, the only size these have as
-        // scalars, with the rest of the register zeroed. Tomodachi Life's
-        // `cmeq d4, d19, d4` = 0x7ee48e64 stopped the run.
+        // Scalar integer three-same: compares and ADD/SUB on one doubleword.
         if ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 24) & 0x1F) == 0b11110
             && ((insn >> 21) & 1) == 1
@@ -749,9 +653,7 @@ impl Cpu {
             self.vregs[(insn & 0x1F) as usize] = u128::from(v);
             return Ok(true);
         }
-        // The same group's scalar forms: `01 U 11110 size 10000 opcode(5) 10`.
-        // One lane, and the rest of the register is zeroed.
-        // `ucvtf s13, s13` = 0x7e21d9ad.
+        // Two-register misc, scalar forms.
         if ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 24) & 0x1F) == 0b11110
             && ((insn >> 17) & 0x1F) == 0b10000
@@ -760,24 +662,11 @@ impl Cpu {
             return self.simd_two_reg_misc(insn, true);
         }
 
-        // ---- integer three-same / compare / logical (Advanced SIMD) ----
-        // bit31=0 with bits[29:24]=001110 (signed group, bit29=0) or 011110
-        // (unsigned group, bit29=1). The opcode is in bits[15:11] with
-        // bit10=1; the only bit10=0 form handled here is CMEQ #0.
+        // Integer three-same / compare / logical (vector).
         let grp = (insn >> 24) & 0x1F;
-        // Vector three-same always has bits[28:24] == 01110 (bit28=0);
-        // bits[28:24] == 11110 is the scalar-FP group, handled by try_fp.
-        // Copy group (DUP/INS/UMOV/SMOV, 0{q}{op} 0111 0000): q (bit30) and
-        // **op (bit29)** are both free, and bit20 is part of imm5 (so it may
-        // be set for 64-bit lanes). What separates the group from three-same
-        // is bit21 == 0, not bit29, matching on bits[29:21] here excluded
-        // every `op == 1` encoding, i.e. the whole of INS (element), which
-        // then fell through to the three-same decoder and was executed as an
-        // unrelated arithmetic op. See [`Cpu::try_simd_copy`].
+        // Copy group (DUP/INS/UMOV/SMOV) is told apart from three-same by bit21 == 0.
         let copy_group = ((insn >> 21) & 0xFF) == 0b01110000 && ((insn >> 31) & 1) == 0;
         if ((insn >> 31) & 1) == 0 && grp == 0b01110 && !copy_group {
-            // (copy_group == the DUP/MOV/INS encodings, which also live in the
-            // 0x4e group with bits[23:21] == 000 and are handled below.)
             let q = (insn >> 30) & 1 == 1;
             let rd = (insn & 0x1F) as u8;
             let rn = ((insn >> 5) & 0x1F) as u8;
@@ -792,25 +681,18 @@ impl Cpu {
                 2 => 32,
                 _ => 64,
             };
-            // AdvSIMD across lanes: `0 Q U 01110 size 11000 opcode 10 Rn Rd`
-            //, a horizontal reduce across a vector into a single scalar
-            // lane. Shares bits[28:24] with three-same, but bits[21:17] are
-            // the fixed group selector 11000 rather than a free Rm, and
-            // bit10 = 0 where three-same always has bit10 = 1.
-            // `smaxv s28, v28.4s` = 0x4eb0ab9c.
+            // Across lanes (SMAXV etc.): bits[21:17] = 11000, bit10 = 0.
             if b10 == 0 && ((insn >> 17) & 0x1F) == 0b11000 {
                 return self.simd_across_lanes(insn);
             }
-            // Opcodes from 0b11000 up in the three-same group are the FP ops,
-            // where bits[23:22] are `a`:`sz` rather than an element size.
+            // Opcodes from 0b11000 up are FP.
             if b10 == 1 && ((insn >> 21) & 1) == 1 && op >= 0b11000 {
                 return self.simd_fp_three_same(insn, false);
             }
             if b10 == 1 {
                 match op {
                     0b00000 => {
-                        // SHADD (signed group) / UHADD (unsigned group):
-                        // halving add, (a+b) >> 1.
+                        // SHADD / UHADD
                         self.simd_elem(rd, rn, rm, q, esize, |a, b| {
                             if u == 0 {
                                 ((a as i128 + b as i128) >> 1) as u64
@@ -856,9 +738,7 @@ impl Cpu {
                         });
                         return Ok(true);
                     }
-                    // The variable-shift family. The opcode's low two bits
-                    // are the saturating and rounding flags: SSHL/USHL,
-                    // SQSHL/UQSHL, SRSHL/URSHL, SQRSHL/UQRSHL.
+                    // Variable shifts: opcode low bits are the saturate and round flags.
                     0b01000..=0b01011 => {
                         let saturating = op & 1 == 1;
                         let rounding = op & 0b10 != 0;
@@ -984,14 +864,12 @@ impl Cpu {
                         return Ok(true);
                     }
                     0b10011 if u == 0 => {
-                        // MUL: lanewise multiply (PMUL, the U=1 form, is
-                        // polynomial and only defined for 8-bit lanes).
+                        // MUL (PMUL, U=1, is 8-bit polynomial)
                         self.simd_elem(rd, rn, rm, q, esize, |a, b| a.wrapping_mul(b));
                         return Ok(true);
                     }
                     0b10110 => {
-                        // SQDMULH (signed group) / SQRDMULH (unsigned group):
-                        // the doubled high half of the product, saturated.
+                        // SQDMULH / SQRDMULH
                         let rounding = u == 1;
                         self.simd_elem(rd, rn, rm, q, esize, move |a, b| {
                             let a = sext_u64(a, esize) as i64 as i128;
@@ -1042,8 +920,7 @@ impl Cpu {
                         return Ok(true);
                     }
                     0b00011 => {
-                        // Bitwise logicals (the selector lives in bits[23:21];
-                        // it doubles as `sz`, so no sz guard here).
+                        // Bitwise logicals: selector in bits[23:21].
                         let sub = (insn >> 21) & 0b111;
                         let a = self.vregs[rn as usize];
                         let b = self.vregs[rm as usize];
@@ -1055,12 +932,7 @@ impl Cpu {
                             (0, 0b101) => a | b,  // ORR
                             (0, 0b111) => a | !b, // ORN
                             (1, 0b001) => a ^ b,  // EOR
-                            // The insert/select trio differ only in which
-                            // register is the mask: BSL selects with Vd, BIT
-                            // and BIF with Vm (BIF taking Vn where the mask bit
-                            // is clear). Getting the mask wrong made newlib's
-                            // vectorised `strchr` miss the ':' in
-                            // "romfs:/assets.zip".
+                            // BSL masks with Vd; BIT and BIF with Vm.
                             (1, 0b011) => (a & d) | (b & !d), // BSL
                             (1, 0b101) => (a & b) | (d & !b), // BIT
                             (1, 0b111) => (a & !b) | (d & b), // BIF
@@ -1095,26 +967,14 @@ impl Cpu {
             )));
         }
 
-        // ---- scalar copy: DUP (element) ----
-        // `01 0 11110000 imm5 0 0000 1 Rn Rd`. The scalar copy group holds
-        // exactly one instruction -- lifting one lane of a vector into a
-        // scalar register, which is what `mov s1, v0.s[1]` assembles to -- and
-        // it differs from the vector copy group below only in bits[28:21],
-        // 1111 0000 against 0111 0000. So it has to be matched before that
-        // check rejects it.
-        //
-        // Unlike the vector `DUP` further down, the destination is a *scalar*:
-        // the lane is written at the bottom and the rest of the register is
-        // zeroed, rather than the lane being replicated across it.
-        // `dup s1, v0.s[1]` = 0x5e0c0401.
+        // Scalar DUP (element): lane to the bottom, rest zeroed. Matched before the vector copy group.
         if ((insn >> 21) & 0xFF) == 0b11110000
             && ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 10) & 0b111111) == 0b000001
         {
             let imm5 = (insn >> 16) & 0x1F;
             let lsb = imm5.trailing_zeros();
-            // imm5 == 0, and any imm5 whose lowest set bit is above bit 3, is
-            // reserved rather than a 128-bit element.
+            // Reserved imm5 encodings.
             if imm5 == 0 || lsb > 3 {
                 return Ok(false);
             }
@@ -1127,36 +987,20 @@ impl Cpu {
             return Ok(true);
         }
 
-        // ---- copy / element moves, and table lookup ----
-        // bits[28:21] == 0111 0000 (bit21 = 0 is what separates this whole
-        // space from three-same/three-different/two-reg-misc); bit30 is Q and
-        // bit29 is `op`, both free. EXT and the ZIP/UZP/TRN permutes share the
-        // bit21 = 0 space but are matched earlier in `try_simd`/`try_simd_rest`,
-        // so they never reach here.
+        // Copy / element moves and table lookup (bits[28:21] == 0111 0000).
         if ((insn >> 21) & 0xFF) != 0b01110000 || ((insn >> 31) & 1) != 0 {
             return Ok(false);
         }
         let op = (insn >> 29) & 1;
 
-        // TBL / TBX: `0 Q 001110 00 0 Rm 0 len op 00 Rn Rd`. Rebuild a vector
-        // by picking bytes out of a table held in `len+1` consecutive vector
-        // registers, one index per byte of `Vm`, how a compiler spells an
-        // arbitrary byte shuffle when no fixed permute (ZIP/UZP/TRN/EXT)
-        // matches. It shares bits[28:21] with the copy group below, so it has
-        // to be split off first: the copy encodings all set bit10, where
-        // table lookup has bit15 = 0 and bits[11:10] = 00. Table lookup has no
-        // `op` bit of its own (bits[29:24] are fixed at 001110) so it is
-        // only ever the `op == 0` half.
-        // `tbl v31.16b, {v29.16b}, v28.16b` = 0x4e1c03bf.
+        // TBL / TBX: split off from the copy group by bits[11:10] = 00.
         if op == 0 && ((insn >> 15) & 1) == 0 && ((insn >> 10) & 0b11) == 0 {
             let q = (insn >> 30) & 1 == 1;
             let rd = (insn & 0x1F) as usize;
             let rn = ((insn >> 5) & 0x1F) as usize;
             let rm = ((insn >> 16) & 0x1F) as usize;
             let len = ((insn >> 13) & 0b11) as usize + 1;
-            // The only difference between the two: for an index past the end
-            // of the table TBL writes zero, TBX leaves the destination byte
-            // alone (so a second lookup can fill in what the first missed).
+            // Out-of-range index: TBL writes zero, TBX keeps Vd.
             let keep_on_miss = (insn >> 12) & 1 == 1;
             let indices = self.vregs[rm].to_le_bytes();
             let mut out = self.vregs[rd].to_le_bytes();
@@ -1164,15 +1008,12 @@ impl Cpu {
             for (i, slot) in out.iter_mut().enumerate().take(lanes) {
                 let idx = indices[i] as usize;
                 if idx < len * 16 {
-                    // The table wraps past v31, so {v30, v31, v0, v1} is a
-                    // legal four-register table.
+                    // The table wraps past v31.
                     *slot = self.vregs[(rn + idx / 16) % 32].to_le_bytes()[idx % 16];
                 } else if !keep_on_miss {
                     *slot = 0;
                 }
             }
-            // The 8-byte form zeroes the top half like every other AdvSIMD
-            // `Q == 0` encoding, including TBX.
             out[lanes..].fill(0);
             self.vregs[rd] = u128::from_le_bytes(out);
             return Ok(true);
@@ -1184,19 +1025,7 @@ impl Cpu {
         let imm5 = (insn >> 16) & 0x1F;
 
         if op == 1 {
-            // INS <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>]: move one lane to
-            // another lane, the only `op == 1` encoding in the copy group.
-            // `imm5` gives the element size and the *destination* index the
-            // same way UMOV/SMOV/INS-general do; `imm4` gives the *source*
-            // index, shifted down by the same `lsb` (imm4<3:size>).
-            //
-            // This is how a compiler assembles a short string in a register
-            // without touching memory: libnx's `smEncodeName` builds the
-            // 8-byte `SmServiceName` with one `ldr b<n>, [str, #i]` per
-            // character and then a chain of `ins v31.b[i], v<n>.b[0]`.
-            // Without this, every such name reached `sm::GetService` as
-            // eight zero bytes: Checkpoint asked for `ns:am2`, got a session
-            // bound to "", and panicked once it used it.
+            // INS (element): imm5 gives size and destination index, imm4 the source index.
             if q == 0 || imm5 == 0 || ((insn >> 15) & 1) != 0 || ((insn >> 10) & 1) == 0 {
                 return Ok(false);
             }
@@ -1211,17 +1040,14 @@ impl Cpu {
             let val = (self.vregs[rn as usize] >> (src_index * esize)) & mask;
             let shift = dst_index * esize;
             let v = self.vregs[rd as usize];
-            // INS leaves every other lane of Vd alone, including the top
-            // half, which is why there is no `Q == 0` zeroing here.
+            // INS leaves other lanes, including the top half, untouched.
             self.vregs[rd as usize] = (v & !(mask << shift)) | (val << shift);
             return Ok(true);
         }
 
         match (insn >> 10) & 0b111111 {
             0b000111 => {
-                // INS <Vd>.<T>[<index>], <Rn>, insert a GPR lane. Same
-                // imm5 → (esize, index) scheme as UMOV/SMOV: esize = 8<<ctz,
-                // index = imm5 >> (ctz+1).
+                // INS (general): esize = 8 << ctz(imm5), index = imm5 >> (ctz + 1).
                 let lsb = imm5.trailing_zeros();
                 if lsb > 3 {
                     return Ok(false);
@@ -1236,9 +1062,7 @@ impl Cpu {
                 Ok(true)
             }
             0b000011 if imm5 != 0 => {
-                // DUP <Vd>.<T>, <Rn>: element size is `8 << ctz(imm5)` (imm5 =
-                // 1/2/4/8 for 8/16/32/64-bit; the low bits hold the element
-                // index, which the general-register form ignores).
+                // DUP (general): esize = 8 << ctz(imm5).
                 let esize = 8u32 << imm5.trailing_zeros();
                 let elements = if q == 1 { 128 / esize } else { 64 / esize };
                 let val = (self.read_zr(rn) as u128) & ((1u128 << esize) - 1);
@@ -1250,8 +1074,7 @@ impl Cpu {
                 Ok(true)
             }
             0b000001 if imm5 != 0 => {
-                // DUP <Vd>.<T>, <Vn>.<Ts>[<index>]: replicate one lane of a
-                // vector, rather than a GPR. `dup v1.4s, v0.s[0]` = 0x4e040401.
+                // DUP (element)
                 let lsb = imm5.trailing_zeros();
                 if lsb > 3 {
                     return Ok(false);
@@ -1278,8 +1101,7 @@ impl Cpu {
                 Ok(true)
             }
             0b001011 => {
-                // SMOV <Xd/Wd>, <Vn>.B/H/S[<index>], extract a lane,
-                // sign-extended (8/16-bit → Wd, 32-bit → Xd).
+                // SMOV: sign-extended lane extract.
                 let lsb = imm5.trailing_zeros();
                 let esize = 8u32 << lsb;
                 let index = imm5 >> (lsb + 1);
@@ -1293,18 +1115,9 @@ impl Cpu {
         }
     }
 
-    // scalar floating point
-    //
-    // The scalar FP subset hbmenu's UI/drawing code needs: FMOV, the common
-    // arithmetic (FADD/FSUB/FMUL/FDIV/FNMUL/FMAX/FMIN/FMAXNM/FMINNM), the
-    // unary ops (FABS/FNEG/FSQRT/FRINTx/FCVT between single and double),
-    // fused multiply-add (FMADD/FMSUB/FNMADD/FNMSUB), compares (FCMP/
-    // FCMPE/FCCMP), FCSEL, and the integer<->float conversions. NaN, infinity
-    // and rounding come straight from Rust's IEEE f32/f64 (round-to-nearest,
-    // the FPCR default); FP exception flags are not modelled.
+    // Scalar floating point. FP exception flags are not modelled.
 
-    /// Element-wise SIMD binary op over `esize`-bit lanes (little-endian lane
-    /// order), `q` selects 128-bit vs 64-bit registers.
+    /// Element-wise binary op over `esize`-bit lanes; `q` selects 128 vs 64 bits.
     pub(super) fn simd_elem<F: Fn(u64, u64) -> u64>(
         &mut self,
         rd: u8,
@@ -1324,7 +1137,6 @@ impl Cpu {
         self.vregs[rd as usize] = out;
     }
 
-    /// [`Cpu::simd_elem`] over an explicit lane count, for the scalar forms.
     pub(super) fn simd_elem_n<F: Fn(u64, u64) -> u64>(
         &mut self,
         rd: u8,
@@ -1344,13 +1156,6 @@ impl Cpu {
     }
 
     /// ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2 over `esize`-bit lanes.
-    ///
-    /// The three families place their results differently, and conflating them
-    /// scrambles a matrix transpose: TRN takes the even (or odd) elements of
-    /// *both* operands and interleaves them, ZIP interleaves one half of each,
-    /// and UZP packs every other element of Vn into the low half of the result
-    /// and Vm's into the high half. `trn1` picking Vm's odd elements is what
-    /// left hbmenu's NEON JPEG decoder (its icon) spinning.
     pub(super) fn simd_permute(&mut self, rd: u8, rn: u8, rm: u8, q: bool, esize: u32, op: u32) {
         let lanes = if q { 128 / esize } else { 64 / esize };
         let half = lanes / 2;
@@ -1393,8 +1198,7 @@ impl Cpu {
         self.vregs[rd as usize] = out;
     }
 
-    /// Lanewise SIMD op that also reads the destination lane, for the
-    /// accumulating forms (MLA/MLS, SABA/UABA).
+    /// Lanewise op that also reads the destination lane (MLA/MLS, SABA/UABA).
     pub(super) fn simd_elem_acc<F: Fn(u64, u64, u64) -> u64>(
         &mut self,
         rd: u8,
@@ -1420,8 +1224,7 @@ impl Cpu {
         self.vregs[rd as usize] = out;
     }
 
-    /// Pairwise SIMD binary op (ADDP/SMAXP/UMAXP): the destination's first
-    /// half pairs up Vn's lanes, the second half Vm's.
+    /// Pairwise op: low half pairs Vn's lanes, high half Vm's.
     pub(super) fn simd_pairwise<F: Fn(u64, u64) -> u64>(
         &mut self,
         rd: u8,
@@ -1447,16 +1250,12 @@ impl Cpu {
         }
         self.vregs[rd as usize] = out;
     }
-    /// Signed `a >= b` for `bits`-wide lanes.
     pub(super) fn sge(a: u64, b: u64, bits: u32) -> bool {
         let shift = 64 - bits;
         ((a << shift) as i64) >= ((b << shift) as i64)
     }
 
-    /// AdvSIMD across lanes (integer forms): `0 Q U 01110 size 11000
-    /// opcode(5) 10 Rn Rd`. A horizontal reduce over every lane of Vn into
-    /// a single scalar written to Vd, zeroing the rest of the register,
-    /// SADDLV/UADDLV, SMAXV/UMAXV, SMINV/UMINV and ADDV.
+    /// Across lanes, integer forms: reduce Vn into one scalar lane.
     fn simd_across_lanes(&mut self, insn: u32) -> Result<bool> {
         let q = (insn >> 30) & 1 == 1;
         let u = (insn >> 29) & 1;
@@ -1464,12 +1263,7 @@ impl Cpu {
         let opcode = (insn >> 12) & 0x1F;
         let rn = ((insn >> 5) & 0x1F) as u8;
         let rd = (insn & 0x1F) as u8;
-        // FMAXNMV / FMINNMV (0b01100) and FMAXV / FMINV (0b01111): the
-        // single-precision forms, U set, bit 23 choosing the minimum, and
-        // four lanes the only arrangement there is. They reduce in pairs,
-        // (0 op 1) op (2 op 3), which is the architecture's order and the
-        // one a NaN's position can tell apart. Tomodachi Life's
-        // `fmaxnmv s0, v0.4s` = 0x6e30c800 stopped the run.
+        // FMAXNMV / FMINNMV / FMAXV / FMINV: reduced in pairs, (0 op 1) op (2 op 3).
         if u == 1 && matches!(opcode, 0b01100 | 0b01111) {
             if !q || (insn >> 22) & 1 != 0 {
                 return Ok(false); // two lanes, or doubles: unallocated
@@ -1534,9 +1328,7 @@ impl Cpu {
                 best as u128
             }
             0b11011 => {
-                // ADDV: sum of all lanes wrapped to the element size, unlike
-                // SADDLV/UADDLV there is no widening, and U is always 0 (a
-                // same-width wraparound sum doesn't care about signedness).
+                // ADDV: wrapping sum, no widening.
                 let mut sum: u128 = 0;
                 for i in 0..lanes {
                     sum = sum.wrapping_add(elem(i) as u128);
@@ -1549,14 +1341,7 @@ impl Cpu {
         Ok(true)
     }
 
-    /// SCVTF / UCVTF (`to_int` false) and FCVTZS / FCVTZU (`to_int` true) on
-    /// `lanes` lanes of `esize` bits, each a fixed-point number with `fbits`
-    /// fraction bits. `fcvtzs v0.4s, v0.4s, #15` is how Just Dance 2023 turns
-    /// float samples into Q15 before narrowing them to 16 bits.
-    ///
-    /// Each lane converts as the scalar [`Cpu::fp_fixed_conv`] does: toward
-    /// zero and saturating into an integer, NaN to 0; to nearest into a float.
-    /// Lanes past `lanes` are cleared, as for any AdvSIMD result.
+    /// Fixed-point SCVTF/UCVTF (`to_int` false) and FCVTZS/FCVTZU (`to_int` true).
     #[allow(clippy::too_many_arguments)]
     fn simd_fixed_convert(
         &mut self,
@@ -1609,12 +1394,7 @@ impl Cpu {
         Ok(())
     }
 
-    /// AdvSIMD shift-by-immediate.
-    ///
-    /// The encoding packs the element size into `immh` and the shift amount
-    /// into `immh:immb`: a right shift is `2*esize - imm`, a left shift is
-    /// `imm - esize`. `opcode` selects the operation, `u` its signed/unsigned
-    /// (or, for SHL, its insert) variant.
+    /// Shift by immediate: right shift is `2*esize - imm`, left is `imm - esize`.
     pub(super) fn simd_shift_imm(
         &mut self,
         rd: u8,
@@ -1633,8 +1413,7 @@ impl Cpu {
         let src = self.vregs[rn as usize];
         let dst = self.vregs[rd as usize];
 
-        // Widening left shift (SSHLL/USHLL, and SXTL/UXTL when the shift is 0):
-        // the destination lanes are twice as wide, taken from one half of Vn.
+        // SSHLL/USHLL (and SXTL/UXTL): widen from one half of Vn.
         if opcode == 0b10100 {
             let shift = imm - esize;
             let wide = 2 * esize;
@@ -1717,9 +1496,7 @@ impl Cpu {
         Ok(())
     }
 
-    /// Lanewise unary op over `lanes` lanes of `esize` bits each, on the raw
-    /// lane bits so the same helper serves the integer and floating-point
-    /// forms. A scalar form is the same thing with one lane.
+    /// Lanewise unary op on raw lane bits.
     pub(super) fn simd_lane_unary_n<F: Fn(u64) -> u64>(
         &mut self,
         rd: u8,
@@ -1738,12 +1515,7 @@ impl Cpu {
         self.vregs[rd as usize] = out;
     }
 
-    /// AdvSIMD two-register misc: `0 Q U 01110 size 10000 opcode(5) 10 Rn Rd`.
-    ///
-    /// The FP forms are identified by `(U, size<1>, opcode)` together, e.g.
-    /// opcode 11101 is SCVTF with `U=0, size<1>=0` but FRECPE with
-    /// `U=0, size<1>=1`, and their element size is `size<0>` (0 = single,
-    /// 1 = double). The integer forms use `size` as the element size instead.
+    /// Two-register misc. FP forms are keyed by `(U, size<1>, opcode)`.
     fn simd_two_reg_misc(&mut self, insn: u32, scalar: bool) -> Result<bool> {
         let q = (insn >> 30) & 1 == 1;
         let u = (insn >> 29) & 1;
@@ -1752,7 +1524,6 @@ impl Cpu {
         let rn = ((insn >> 5) & 0x1F) as u8;
         let rd = (insn & 0x1F) as u8;
         let esize = 8u32 << size;
-        // A scalar form is one lane; the vector forms fill the register.
         let lanes = |esize: u32| {
             if scalar {
                 1
@@ -1763,12 +1534,9 @@ impl Cpu {
             }
         };
 
-        // Integer forms first: opcodes below 0b01100 plus the narrowing and
-        // lengthening moves. The lane-shuffling and width-changing ones have no
-        // scalar form.
+        // Integer forms.
         match (u, opcode) {
-            // REV64 / REV32 / REV16: reverse groups of bytes within a
-            // container of 64/32/16 bits.
+            // REV64 / REV32 / REV16
             (0, 0b00000) | (1, 0b00000) | (0, 0b00001) => {
                 if scalar {
                     return Ok(false);
@@ -1804,7 +1572,6 @@ impl Cpu {
                 self.simd_lane_unary_n(rd, rn, lanes(esize), esize, move |v| {
                     let shifted = v << (64 - esize);
                     if signed {
-                        // CLS counts the sign bits after the first one.
                         let inverted = if shifted >> 63 == 1 {
                             !shifted
                         } else {
@@ -1844,8 +1611,7 @@ impl Cpu {
                 }
                 return Ok(true);
             }
-            // SADDLP / UADDLP and SADALP / UADALP: add adjacent lanes into
-            // double-width lanes, accumulating into Vd for the ADALP forms.
+            // SADDLP / UADDLP and SADALP / UADALP
             (_, 0b00010) | (_, 0b00110) => {
                 if scalar {
                     return Ok(false);
@@ -1913,8 +1679,7 @@ impl Cpu {
                 });
                 return Ok(true);
             }
-            // XTN / SQXTN / UQXTN / SQXTUN: narrow to half-width lanes (Q
-            // targets the high half). `size` is the destination width here.
+            // XTN / SQXTN / UQXTN / SQXTUN: `size` is the destination width.
             (0, 0b10010) => {
                 self.simd_shrn(rd, rn, q, esize, 0, false, false, false, false);
                 return Ok(true);
@@ -1957,8 +1722,7 @@ impl Cpu {
                 self.vregs[rd as usize] = out;
                 return Ok(true);
             }
-            // FCVTL / FCVTN: half <-> single (size 00) and single <-> double
-            // (size 01). Q selects which half of the narrow vector is used.
+            // FCVTL / FCVTN: half <-> single and single <-> double.
             (0, 0b10111) if size <= 0b01 => {
                 if scalar {
                     return Ok(false);
@@ -1988,8 +1752,7 @@ impl Cpu {
                 let src = self.vregs[rn as usize];
                 let mut narrowed: u128 = 0;
                 if size == 0b00 {
-                    // Promoting to double before narrowing is exact, so the
-                    // half is rounded once rather than once per step.
+                    // Via double so the half is rounded once.
                     for i in 0..4u32 {
                         let bits = ((src >> (32 * i)) & 0xFFFF_FFFF) as u32;
                         let h = f64_to_f16(f64::from(f32::from_bits(bits)));
@@ -2012,15 +1775,13 @@ impl Cpu {
             _ => {}
         }
 
-        // The FP forms: `(U, size<1>, opcode)` selects the operation and
-        // `size<0>` the element width.
+        // FP forms.
         let double = size & 1 == 1;
         if double && !q && !scalar {
             return Ok(false); // a single 64-bit lane isn't a vector form
         }
         let key = (u << 6) | ((size >> 1) << 5) | opcode;
         let esize = if double { 64 } else { 32 };
-        // Comparisons against zero produce a lane mask rather than a float.
         if matches!(key, 0x2c | 0x2d | 0x2e | 0x6c | 0x6d) {
             self.simd_lane_unary_n(rd, rn, lanes(esize), esize, move |v| {
                 let a = if double {
@@ -2099,11 +1860,7 @@ impl Cpu {
                 });
                 Ok(true)
             }
-            // FSQRT, the FRINTx family and the reciprocal estimates. FRECPE
-            // and FRSQRTE are the architecture's 8-bit estimates, in
-            // `fp::recip_estimate_bits` / `fp::rsqrt_estimate_bits`: they used
-            // to be a division and a reciprocal square root here, which is a
-            // different number in every low bit.
+            // FSQRT, FRINTx and the reciprocal estimates.
             0x7f | 0x18 | 0x19 | 0x38 | 0x39 | 0x58 | 0x59 | 0x79 | 0x3d | 0x7d => {
                 let mode = fpcr_rounding(self.fpcr);
                 self.simd_lane_unary_n(rd, rn, lanes(esize), esize, move |v| {
@@ -2170,10 +1927,7 @@ impl Cpu {
         }
     }
 
-    /// AdvSIMD three-same, floating-point: `0 Q U 01110 a sz 1 Rm opcode(5) 1
-    /// Rn Rd` for opcodes from 0b11000 up. `a` (bit23) picks between the pairs
-    /// that share an opcode (FADD/FSUB, FMAX/FMIN, ...) and `sz` (bit22) the
-    /// element width.
+    /// Three-same, floating point (opcode >= 0b11000).
     fn simd_fp_three_same(&mut self, insn: u32, scalar: bool) -> Result<bool> {
         let q = (insn >> 30) & 1 == 1;
         let u = (insn >> 29) & 1;
@@ -2195,7 +1949,6 @@ impl Cpu {
             64 / esize
         };
         let key = (u << 6) | (a << 5) | opcode;
-        // Arithmetic and the min/max family, over the raw lane bits.
         let arith = |x: f64, y: f64| -> f64 {
             match key {
                 0x1a => x + y,            // FADD
@@ -2312,10 +2065,7 @@ impl Cpu {
         }
     }
 
-    /// Shift-right-and-narrow a vector (SHRN/RSHRN and the saturating forms).
-    /// Every `2*dest_esize`-bit lane of `Vn` is shifted right by `shift`
-    /// (optionally rounding) and narrowed to `dest_esize` bits; `Q=1` targets
-    /// the high half (`SHRN2`), `Q=0` the low half.
+    /// SHRN/RSHRN and saturating forms; `Q=1` targets the high half.
     pub(super) fn simd_shrn(
         &mut self,
         rd: u8,

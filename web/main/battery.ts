@@ -1,12 +1,4 @@
-/* host battery
-
-   Feeds the Switch's psm (power management) service. Only Chromium exposes
-   the Battery Status API (Firefox and Safari never shipped it, over privacy
-   concerns), so elsewhere the emulated battery just stays at the wasm
-   default (full, charging). Event-driven rather than polled: battery level
-   changes far slower than the 16ms input tick, and the level/charging state
-   is cached worker-side so a freshly created session (including after
-   "reset") picks it up without this having to fire again. */
+// Host battery state for the psm service (Chromium only, via the Battery Status API).
 
 import { call } from './rpc';
 

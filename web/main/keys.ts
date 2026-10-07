@@ -1,8 +1,4 @@
-/* keys
-
-   Keys are persisted in localStorage so they survive page reloads (they're
-   just text; they never leave the browser). */
-
+// Key files, persisted in localStorage.
 import { $, pickedFile } from './dom';
 import { readKeysFile } from './filetype';
 import { log } from './log';
@@ -15,7 +11,6 @@ let prodKeysText = localStorage.getItem(KEYS_STORE.prod) || '';
 let titleKeysText = localStorage.getItem(KEYS_STORE.title) || '';
 let restoredKeys = Boolean(prodKeysText || titleKeysText);
 
-/** Whether there is anything to hand a new session. */
 export function hasKeys(): boolean {
   return Boolean(prodKeysText || titleKeysText);
 }
@@ -39,9 +34,7 @@ export function updateKeysState(): void {
   setNote('keys-badge', parts.length ? parts.length + ' loaded' : 'none', parts.length > 0);
 }
 
-// Anything picked here is persisted and used to decrypt with, so a file that
-// is not keys is refused rather than stored: the alternative is every later
-// NCA failing to open with nothing pointing back at this.
+// Refuse files that are not keys rather than persisting them.
 async function acceptKeys(e: Event, which: 'prod' | 'title'): Promise<void> {
   const file = pickedFile(e);
   (e.target as HTMLInputElement).value = '';

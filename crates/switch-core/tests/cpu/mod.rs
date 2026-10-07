@@ -1,10 +1,6 @@
-//! The scaffolding the CPU test files share: a core to run code on, and the
-//! A64 encoders they assemble with.
+//! Shared CPU test scaffolding: a core to run code on and A64 encoders.
 //!
-//! Encodings were verified against QEMU's `a64.decode` where a doubt existed.
-//!
-//! Each test crate compiles the whole of this module and uses the piece it
-//! needs, which is what `dead_code` is doing here.
+//! Each test crate uses only part of this module, hence `dead_code`.
 #![allow(dead_code)]
 
 pub use switch_core::cpu::Cpu;
@@ -16,7 +12,6 @@ pub fn cpu_at(pc: u32) -> Cpu {
     cpu
 }
 
-/// Little helper for assembling a small program in memory then running it.
 pub fn exec(code: &[u32], max: u64) -> Cpu {
     let mut cpu = cpu_at(0x1000);
     let mut bytes = Vec::with_capacity(code.len() * 4);
@@ -181,11 +176,7 @@ pub fn msr_nzcv() -> u32 {
     0xD51B4200 | 31
 }
 
-/// `movk x9, #(THREAD_TLS_BASE >> 16), lsl #16`, the second half of building
-/// a guest thread's own TLS address, after `mov x9, #stride` supplies the low
-/// word. Assembled from the constant rather than written out, because the two
-/// starvation tests below reach into thread 1's TLS block by address and a
-/// hand-written `movk` goes on pointing at wherever the block used to be.
+/// `movk x9, #(THREAD_TLS_BASE >> 16), lsl #16`, derived from the constant.
 pub fn movk_x9_tls_high() -> u32 {
     0xf2a0_0000 | ((switch_core::cpu::THREAD_TLS_BASE >> 16) << 5) | 9
 }
@@ -231,10 +222,7 @@ pub fn cmeq16(rd: u32, rn: u32, rm: u32) -> u32 {
 
 // UHADD <Vd>.16B, <Vn>.16B, <Vm>.16B
 pub fn uhadd16(rd: u32, rn: u32, rm: u32) -> u32 {
-    // bit21 is what separates three-same from the copy/permute/table space,
-    // every other helper here sets it, and this one used to leave it clear.
-    // The decoder ignored bit21, so the malformed encoding still reached
-    // UHADD; it is really an INS (element) opcode.
+    // Sets bit21 (three-same); with it clear this would be an INS (element).
     (1u32 << 30)
         | (1u32 << 29)
         | (0b1110 << 24)
@@ -308,9 +296,7 @@ pub fn fadd_d(rd: u32, rn: u32, rm: u32) -> u32 {
 
 // Horizon IPC reply synthesis
 
-/// A domain request carrying raw arguments after the CmifInHeader. The reply
-/// overwrites the request in TLS, so the payload has to go in before the
-/// request runs rather than by re-running it.
+/// A domain request with raw arguments after the CmifInHeader, written before it runs.
 pub fn ipc_request_with_payload(
     cpu: &mut Cpu,
     handle: u64,
@@ -319,8 +305,7 @@ pub fn ipc_request_with_payload(
     payload: &[u8],
 ) {
     build_ipc_request(cpu, 4, Some(object_id), cmd);
-    // No buffer descriptors, so the data area starts at 0x10: the domain
-    // header, then the CmifInHeader at 0x20, then the arguments at 0x30.
+    // No buffer descriptors: domain header at 0x10, CmifInHeader at 0x20, args at 0x30.
     let tls = cpu.tls_base();
     for (i, &b) in payload.iter().enumerate() {
         cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
@@ -328,10 +313,7 @@ pub fn ipc_request_with_payload(
     run_ipc_request(cpu, handle);
 }
 
-/// Drive one IPC request at `handle` and return the CPU. The request is built
-/// in the guest's own TLS buffer the way `libnx` marshals a CMIF message:
-/// hipc header, an optional `CmifDomainInHeader`, then the `SFCI` in-header
-/// carrying the command id.
+/// Drive one CMIF request at `handle`, marshalled in TLS as libnx does.
 pub fn ipc_request(cpu: &mut Cpu, handle: u64, msg_type: u32, object_id: Option<u32>, cmd: u32) {
     build_ipc_request(cpu, msg_type, object_id, cmd);
     run_ipc_request(cpu, handle);
@@ -367,9 +349,8 @@ pub fn run_ipc_request(cpu: &mut Cpu, handle: u64) {
     cpu.set_pc(pc);
 }
 
-/// A bootstrapped Horizon CPU with `appletOE` already bound to a handle and
-/// converted to a domain, plus the object ids of the `IApplicationProxy` and
-/// `ICommonStateGetter` opened through it.
+/// A Horizon CPU with `appletOE` as a domain, plus the `IApplicationProxy`
+/// and `ICommonStateGetter` object ids.
 pub fn applet_chain() -> (Cpu, u64, u32, u32) {
     const APPLET: u64 = 0x1000;
     let mut cpu = cpu_at(0x1000);
@@ -405,15 +386,12 @@ pub fn ipc_request_with_buffer(
     for i in (0..0x100u32).step_by(4) {
         cpu.mem.write_u32(tls + i, 0).unwrap();
     }
-    // hdr1: type 4 (Request), one buffer, send buffers count in bits 23:20,
-    // receive buffers in 27:24. Either way it is one 12-byte descriptor, so
-    // the aligned data area lands at 0x20.
+    // hdr1: type 4 (Request), one buffer; send count in bits 23:20, receive in 27:24.
     cpu.mem
         .write_u32(tls, 4 | (1 << if recv { 24 } else { 20 }))
         .unwrap();
     cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
-    // HipcBufferDescriptor: size, address, then the high bits (all zero for a
-    // 32-bit guest address).
+    // HipcBufferDescriptor: size, address, then the high bits.
     cpu.mem.write_u32(tls + 0x08, len).unwrap();
     cpu.mem.write_u32(tls + 0x0c, buf).unwrap();
     cpu.mem.write_u32(tls + 0x10, 0).unwrap();
@@ -557,10 +535,7 @@ pub fn f64b(x: f64) -> u128 {
     u128::from(x.to_bits())
 }
 
-/// Marshal a non-domain request (an `SFCI` header straight after the hipc
-/// header) with `payload` as its arguments, and send it. `nnSdk` keeps
-/// `audout` as a plain session rather than converting it to a domain, so this
-/// is the shape those commands actually arrive in.
+/// Send a non-domain request (`SFCI` right after the hipc header), as `audout` uses.
 pub fn ipc_request_plain(cpu: &mut Cpu, handle: u64, cmd: u32, payload: &[u8]) {
     build_ipc_request(cpu, 4, None, cmd);
     let tls = cpu.tls_base();
@@ -601,10 +576,8 @@ pub fn ipc_request_plain_with_buffer(
     run_ipc_request(cpu, handle);
 }
 
-/// A request whose out buffer is marshalled the way `nnSdk`'s `...Auto`
-/// commands marshal one: a real receive-static ("pointer") descriptor beside
-/// the null map-alias descriptor the caller fills in for the form it did not
-/// use. A server that reads only the map-alias one finds address 0.
+/// A request with an `...Auto` out buffer: a receive-static descriptor beside a
+/// null map-alias one.
 pub fn ipc_request_auto_recv(
     cpu: &mut Cpu,
     handle: u64,
@@ -618,8 +591,8 @@ pub fn ipc_request_auto_recv(
     for i in (0..0x100u32).step_by(4) {
         cpu.mem.write_u32(tls + i, 0).unwrap();
     }
-    // One receive buffer, declared both ways: bits 27:24 count the map-alias
-    // descriptors and bits 13:10 encode a single receive-static as 2.
+    // One receive buffer declared both ways: map-alias count in bits 27:24, a
+    // receive-static in bits 13:10 (encoded as 2).
     cpu.mem.write_u32(tls, 4 | (1 << 24)).unwrap();
     cpu.mem.write_u32(tls + 4, 9 | (2 << 10)).unwrap();
     // tls+8 is the map-alias descriptor, and it stays zeroed.
@@ -634,9 +607,7 @@ pub fn ipc_request_auto_recv(
     run_ipc_request(cpu, handle);
 }
 
-/// The section strides of a `RequestUpdateAudioRenderer` **input**, from
-/// libnx's `audren.h`. They are not the reply's: an input entry and the output
-/// entry describing the same object are different sizes.
+/// Section strides of a `RequestUpdateAudioRenderer` input, from libnx's `audren.h`.
 pub const AUDREN_IN_HEADER: usize = 0x40;
 pub const AUDREN_IN_BEHAVIOR: usize = 0x10;
 pub const AUDREN_IN_CHANNEL: usize = 0x70;
@@ -649,12 +620,10 @@ pub const AUDREN_IN_PERF: usize = 0x10;
 pub const PCM_INT16: u8 = 2;
 pub const PCM_ADPCM: u8 = 6;
 
-/// One renderer frame in the emulated cycles that are this machine's only
-/// clock: 5 ms of a 1.02 GHz CPU.
+/// One renderer frame in emulated cycles: 5 ms of a 1.02 GHz CPU.
 pub const AUDREN_FRAME_CYCLES: u64 = 1_020_000_000 / 200;
 
-/// One `RequestUpdateAudioRenderer` input buffer, built the way `audrvUpdate`
-/// builds it: a header declaring the size of every section, then the sections.
+/// One `RequestUpdateAudioRenderer` input buffer, built as `audrvUpdate` does.
 pub struct AudrenUpdate {
     pub data: Vec<u8>,
     pub channels_at: usize,
@@ -683,8 +652,7 @@ impl AudrenUpdate {
         };
         update.put(0x00, u32::from_le_bytes(*b"REV9"));
         update.put(0x04, AUDREN_IN_BEHAVIOR as u32);
-        // No mempools: guest memory is the renderer's memory here, so a voice
-        // plays out of a buffer whether or not a pool was attached over it.
+        // No mempools: guest memory is the renderer's memory here.
         update.put(0x08, 0);
         update.put(0x0c, voices_sz as u32);
         update.put(0x10, channels_sz as u32);
@@ -765,8 +733,8 @@ impl AudrenUpdate {
         let at = self.sinks_at;
         self.data[at] = 1; // AudioRendererSinkType_Device
         self.data[at + 1] = 1; // is_used
-                               // The union sits past the type, the node id and three reserved words,
-                               // and a device sink's name fills the 0x100 bytes at the top of it.
+                               // The union follows type, node id and three reserved words; the sink name
+                               // fills its top 0x100 bytes.
         let sink = at + 0x20;
         self.put(sink + 0x100, inputs.len() as u32);
         for (i, &input) in inputs.iter().enumerate() {
@@ -774,9 +742,7 @@ impl AudrenUpdate {
         }
     }
 
-    /// Write it where the guest would have and send it as `RequestUpdate-
-    /// AudioRenderer`, which takes the input and the reply as map-alias
-    /// buffers in that order.
+    /// Send it as `RequestUpdateAudioRenderer` (input, then reply, as map-alias buffers).
     pub fn send(&self, cpu: &mut Cpu, renderer: u64, at: u32, out: u32, out_len: u32) {
         for (i, &b) in self.data.iter().enumerate() {
             cpu.mem.write_u8(at + i as u32, b).unwrap();
@@ -801,9 +767,8 @@ pub fn audren_open(cpu: &mut Cpu, manager: u64, voices: u32, sinks: u32, mix_buf
     u64::from(cpu.mem.read_u32(cpu.tls_base() + 0x0c).unwrap())
 }
 
-/// A renderer with one voice, one final mix of two buffers and a stereo device
-/// sink (the smallest arrangement that actually plays) plus the manager and
-/// renderer handles.
+/// A renderer with one voice, a two-buffer final mix and a stereo device sink,
+/// plus the manager and renderer handles.
 pub fn audren_stereo(cpu: &mut Cpu) -> u64 {
     const AUDREN: u64 = 0xB100;
     cpu.register_service_handle(AUDREN, "audren:u");
@@ -812,9 +777,7 @@ pub fn audren_stereo(cpu: &mut Cpu) -> u64 {
     renderer
 }
 
-/// Build an IPC request carrying one map-alias send buffer *and* one
-/// map-alias receive buffer, the shape `IHOSBinderDriver::TransactParcel`
-/// arrives in, and run it.
+/// Run a request with one map-alias send and one receive buffer (`TransactParcel`'s shape).
 pub fn ipc_request_plain_with_both_buffers(
     cpu: &mut Cpu,
     handle: u64,
@@ -845,8 +808,7 @@ pub fn ipc_request_plain_with_both_buffers(
     run_ipc_request(cpu, handle);
 }
 
-/// One `IGraphicBufferProducer` request parcel: the interface token every
-/// transaction starts with, followed by `body`.
+/// One `IGraphicBufferProducer` request parcel: the interface token, then `body`.
 pub fn binder_parcel(body: &[u8]) -> Vec<u8> {
     const NAME: &str = "android.gui.IGraphicBufferProducer";
     let mut payload = Vec::new();
@@ -886,10 +848,7 @@ pub fn crc32(rd: u32, rn: u32, rm: u32, castagnoli: bool, sz: u32) -> u32 {
     sf | 0b11010110 << 21 | (rm << 16) | (0b010 << 13) | (c << 12) | (sz << 10) | (rn << 5) | rd
 }
 
-/// A minimal but well-formed NRO image: three 0x1000-byte segments and a
-/// 0x1000-byte BSS, with the "NRO0" header at the offset a real NRO keeps it
-/// (0x10, behind the entry branch and the `MOD0` pointer). Each segment is
-/// filled with a distinct byte so the test can tell what landed where.
+/// A minimal NRO: three 0x1000-byte segments and BSS, each filled with a distinct byte.
 pub fn test_nro_image() -> Vec<u8> {
     const SEGMENT: u32 = 0x1000;
     let mut nro = vec![0u8; 3 * SEGMENT as usize];
@@ -916,8 +875,7 @@ pub fn test_nro_image() -> Vec<u8> {
     nro
 }
 
-/// A bootstrapped CPU with `ldr:ro` bound to a handle and the image above
-/// already in guest memory at `NRO_SOURCE`, ready to be loaded.
+/// A CPU with `ldr:ro` bound and the image above at `NRO_SOURCE`.
 pub fn ldr_ro_session() -> (Cpu, u64) {
     const LDR_RO: u64 = 0x2000;
     let mut cpu = cpu_at(0x1000);
@@ -928,13 +886,11 @@ pub fn ldr_ro_session() -> (Cpu, u64) {
     (cpu, LDR_RO)
 }
 
-/// Where `ldr_ro_session` puts the caller's copy of the NRO, and the BSS
-/// buffer it passes alongside it.
+/// Guest addresses of the caller's NRO copy and its BSS buffer.
 pub const NRO_SOURCE: u64 = 0x1000_0000;
 pub const NRO_BSS: u64 = 0x1010_0000;
 
-/// Marshal an `ldr:ro` request: the `u64` pid placeholder every command on the
-/// interface opens with, then `args`.
+/// Marshal an `ldr:ro` request: the `u64` pid placeholder, then `args`.
 pub fn ldr_ro_request(cpu: &mut Cpu, handle: u64, cmd: u32, args: &[u64]) {
     build_ipc_request(cpu, 4, None, cmd);
     let data = cpu.tls_base() + 0x20;
@@ -1011,8 +967,7 @@ pub fn scalar_shift_reg(u: u32, size: u32, op: u32, rd: u32, rn: u32, rm: u32) -
 
 // FPCR and FPSR
 
-// `1101010100 L op0 op1 CRn CRm op2 Rt`: op0 is bits[20:19], so it does not
-// fit in the 0xD53 prefix. `mrs x0, fpcr` is 0xD53B4400.
+// `1101010100 L op0 op1 CRn CRm op2 Rt`. `mrs x0, fpcr` is 0xD53B4400.
 pub fn sysreg_move(read: bool, rt: u32, op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
     0b1101010100 << 22
         | u32::from(read) << 21
@@ -1036,10 +991,7 @@ pub fn fdiv_d(rd: u32, rn: u32, rm: u32) -> u32 {
     0x1E << 24 | 1 << 22 | 1 << 21 | (rm << 16) | 0b0001 << 12 | 0b10 << 10 | (rn << 5) | rd
 }
 
-/// Run one program through both engines and assert they agree with the value
-/// the architecture calls for. The translator and the interpreter share these
-/// helpers, so a decode bug in one is a decode bug in both, which is exactly
-/// how the two below survived.
+/// Run one program through both engines and check the architectural value.
 pub fn both_engines(setup: &[(u8, u64)], code: &[u32]) -> (Cpu, Cpu) {
     let mut out = Vec::new();
     for jit in [true, false] {

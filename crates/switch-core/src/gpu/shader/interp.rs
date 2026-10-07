@@ -1,25 +1,6 @@
-//! Executing decoded Maxwell instructions.
-//!
-//! [`Invocation`] is one shader invocation, one vertex or one fragment,
-//! run to completion on a scalar machine: 255 general-purpose 32-bit
-//! registers, seven predicate registers, a program counter, and the
-//! reconvergence stack `ssy`/`sync` and `pbk`/`brk` push onto.
-//!
-//! Being scalar is what makes control flow simple here. Real hardware runs a
-//! warp of 32 invocations in lockstep and needs an execution mask to handle
-//! threads that take different branches; one invocation at a time just
-//! follows its own branches, so `ssy`/`sync` reduce to an ordinary
-//! push/pop of a return address.
-//!
-//! The register file is untyped, exactly as on hardware: a register holds 32
-//! bits and the instruction decides whether they are a float, a signed
-//! integer or a bit pattern. That matters, a shader routinely computes an
-//! address with integer ops in the same registers it later loads floats
-//! into.
-//!
-//! [`Invocation`] is deliberately rasterizer-oblivious: it doesn't know
-//! whether it's a vertex or fragment shader, or where `attr_in`/constants
-//! came from, which is what makes it independently testable.
+//! Executes decoded Maxwell instructions. [`Invocation`] is one vertex or
+//! fragment run to completion on a scalar machine (255 untyped 32-bit GPRs, seven
+//! predicates, the `ssy`/`pbk` reconvergence stack), so divergence needs no mask.
 
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::compiled::{Compiled, NO_TARGET};
@@ -33,26 +14,16 @@ use super::isa::{
 };
 use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 
-/// What everything the interpreter runs per instruction returns.
-///
-/// The error is boxed because [`Error`] is 56 bytes, which is too big to come
-/// back in registers: a `Result<u32, Error>` is written to the stack through a
-/// hidden pointer, and an operand read returns one of those *per source, per
-/// instruction, per covered pixel*. That was 8% of a Home Menu frame. Boxed,
-/// the whole `Result` is a register pair, and nothing allocates until a draw
-/// is about to stop. `?` converts an [`Error`] into one on its own.
+/// Boxed so the `Result` fits in a register pair: [`Error`] is 56 bytes and this
+/// is returned per operand per pixel.
 pub type ShaderResult<T> = std::result::Result<T, Box<Error>>;
 
-/// A shader fault, boxed for [`ShaderResult`].
 fn fault(message: String) -> Box<Error> {
     Box::new(Error::Gpu(message))
 }
 
-/// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is whatever the
-/// ISA's `Operand::Const` carries, for real programs that's a constant-buffer
-/// *bind slot* (`Bind[]`'s index, not a raw GPU address), so a real source
-/// still needs its own way to turn that into bytes; see [`MemoryConstants`].
-/// Reads are fallible because a real one touches guest memory.
+/// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is a bind slot,
+/// not an address; see [`MemoryConstants`].
 pub trait ConstantSource {
     fn read_const(&self, bank: u8, offset: u16) -> ShaderResult<u32>;
 }
@@ -63,32 +34,20 @@ impl ConstantSource for HashMap<(u8, u16), f32> {
     }
 }
 
-/// Reads `cN[offset]` straight out of GPU memory. `bindings` resolves a bank
-/// index to the `(address, size)` a real constant buffer was bound to,
-/// `Engine3D::bound_constbuf` for the real integration, anything else for
-/// tests, so this module stays decoupled from `engine::threed`.
+/// Reads `cN[offset]` from GPU memory; `bindings` resolves a bank to `(address, size)`.
 pub struct MemoryConstants<'a, 'b> {
     pub ctx: &'a ExecCtx<'b>,
     pub bindings: &'a dyn Fn(u8) -> Option<(u64, u32)>,
-    /// Values already read, shared across the draw. See [`ConstCache`].
+    /// See [`ConstCache`].
     pub cache: &'a std::cell::RefCell<ConstCache>,
 }
 
-/// How many distinct constants [`ConstCache`] holds. Direct-mapped, so this is
-/// a power of two and the index is the low bits of the key.
+/// Direct-mapped, so a power of two.
 const CONST_CACHE_SLOTS: usize = 512;
 
-/// The constants a draw has already read.
-///
-/// A constant buffer cannot change while a draw is running, the GPU processes
-/// methods in order, and a draw is one method, so every pixel of a draw reads
-/// the same handful of values out of the same buffers, and each read otherwise
-/// costs a bank lookup, a bounds check, a GPU address translation and a guest
-/// memory access. Shading a full-screen quad paid that 921 600 times per
-/// constant.
+/// Constants already read this draw; a buffer can't change mid-draw.
 pub struct ConstCache {
-    /// `(key, value)`, where the key packs bank and offset. `u32::MAX` is
-    /// empty: a real key is at most `31 << 16 | 0xffff`.
+    /// `(key, value)`, key packing bank and offset; `u32::MAX` is empty.
     slots: Box<[(u32, u32); CONST_CACHE_SLOTS]>,
 }
 
@@ -137,27 +96,15 @@ impl ConstantSource for MemoryConstants<'_, '_> {
     }
 }
 
-/// Reads `ldg`'s global memory straight out of the channel's address space.
-///
-/// A Maxwell shader addresses global memory by full 64-bit GPU virtual
-/// address, which it builds itself out of a constant-buffer pair with
-/// `iadd.cc`/`iadd.x`, so there is nothing to bind and no window to set up.
-/// Translating the address is the whole implementation, and it is the same
-/// translation every other GPU read goes through.
-///
-/// A draw's stages borrow the context shared, since the pixel loop needs it
-/// mutably between shading steps, so a store (or an atomic) is held in
-/// `stores`, in order, and landed by the draw once the step is done. A read
-/// sees the stores before it, as it would on hardware; see
-/// [`MemoryGlobal::land`].
+/// `ldg`'s global memory, by 64-bit GPU virtual address. Stores (and atomics)
+/// queue in `stores` and land after each shading step; see [`MemoryGlobal::land`].
 pub struct MemoryGlobal<'a, 'b> {
     pub ctx: &'a ExecCtx<'b>,
     pub stores: &'a std::cell::RefCell<Vec<(u64, u32)>>,
 }
 
 impl MemoryGlobal<'_, '_> {
-    /// Write out the stores a shading step made, oldest first, so a later
-    /// one to the same word wins.
+    /// Write out queued stores oldest first, so a later one to the same word wins.
     pub fn land(ctx: &mut ExecCtx, stores: &std::cell::RefCell<Vec<(u64, u32)>>) -> Result<()> {
         for (addr, value) in stores.borrow_mut().drain(..) {
             ctx.write_u32(addr, value)?;
@@ -187,19 +134,13 @@ impl GlobalMemory for MemoryGlobal<'_, '_> {
     }
 }
 
-/// Resolves a `texs` sample. `handle` is the packed `imageId | samplerId <<
-/// 20` value a real one reads out of the driver's reserved constant bank
-/// (see `gpu::texture`'s module docs), [`Invocation::execute`] does that
-/// read itself via [`ConstantSource`] before calling this, so this trait only
-/// needs to turn a resolved handle plus UVs into a colour.
+/// Resolves a `texs` sample. `handle` is the packed `imageId | samplerId << 20`,
+/// already read via [`ConstantSource`] by [`Invocation::execute`].
 pub trait TextureSource {
-    /// Sample `handle` at `(u, v)` of array layer `layer`, 0 for everything
-    /// that is not a 2D array.
+    /// Sample `handle` at `(u, v)` of array layer `layer` (0 if not an array).
     fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]>;
 
-    /// Sample a 3D image, whose third coordinate is normalized rather than a
-    /// layer index. Defaulted, like the two below, so that a source with
-    /// none of them stays a one-method implementation.
+    /// Sample a 3D image, whose third coordinate is normalized.
     fn sample_3d(&self, handle: u32, _u: f32, _v: f32, _w: f32) -> ShaderResult<[f32; 4]> {
         Err(fault(format!(
             "shader: 3D sample of handle {handle:#x} with no 3D source bound"
@@ -213,8 +154,7 @@ pub trait TextureSource {
         )))
     }
 
-    /// Sample cube `cube` of a cube array, in the direction the three
-    /// coordinates give.
+    /// Sample cube `cube` of a cube array in the given direction.
     fn sample_cube_array(
         &self,
         handle: u32,
@@ -228,30 +168,22 @@ pub trait TextureSource {
         )))
     }
 
-    /// One texel of `handle` in normalized coordinates, `(1/width,
-    /// 1/height)`.
-    ///
-    /// A `tex.aoffi`'s offset is in texels and this sampler takes normalized
-    /// coordinates, so the offset has to be scaled by this before it is
-    /// added. Hardware adds it after the coordinate is scaled *and* clamped
-    /// per axis; adding it beforehand differs only where a sample would land
-    /// outside the image, and only for the wrap modes that do not clamp.
+    /// One texel in normalized coordinates, `(1/width, 1/height)`, for scaling
+    /// `tex.aoffi` offsets (added before clamping, unlike hardware).
     fn texel_step(&self, handle: u32) -> ShaderResult<(f32, f32)> {
         Err(fault(format!(
             "shader: texel offset on handle {handle:#x} with no texture source bound"
         )))
     }
 
-    /// `handle`'s width, height, depth or layer count, and mip level count,
-    /// at level 0.
+    /// Width, height, depth or layer count, and mip level count, at level 0.
     fn dimensions(&self, handle: u32) -> ShaderResult<[u32; 4]> {
         Err(fault(format!(
             "shader: size query of handle {handle:#x} with no texture source bound"
         )))
     }
 
-    /// Channel `component` of the four texels a bilinear sample at `(u, v)`
-    /// of layer `layer` blends: see [`crate::gpu::texture::gather_with`].
+    /// Channel `component` of a bilinear footprint; see [`crate::gpu::texture::gather_with`].
     fn gather(
         &self,
         handle: u32,
@@ -265,9 +197,7 @@ pub trait TextureSource {
         )))
     }
 
-    /// A shadow sample: how `reference` compares against the depth there,
-    /// as `[c, c, c, 1.0]`. Defaulted to an error so that a source with no
-    /// depth textures behind it stays a one-method implementation.
+    /// A shadow sample as `[c, c, c, 1.0]`.
     fn sample_compare(
         &self,
         handle: u32,
@@ -281,10 +211,7 @@ pub trait TextureSource {
         )))
     }
 
-    /// The registers `suld` reads from texel `at` (`x`, `y`, and the layer
-    /// or slice) of the image `handle` names. Defaulted, like
-    /// [`TextureSource::surface_store`], because only a compute dispatch
-    /// binds images a shader can address this way.
+    /// The registers `suld` reads from texel `at` (x, y, layer or slice).
     fn surface_load(
         &self,
         handle: u32,
@@ -310,8 +237,7 @@ pub trait TextureSource {
     }
 }
 
-/// No texture backend at all: every `texs` is an error. Correct for vertex
-/// shading and for tests that don't exercise `texs`.
+/// No texture backend: every `texs` is an error.
 pub struct NoTextures;
 
 impl TextureSource for NoTextures {
@@ -322,27 +248,19 @@ impl TextureSource for NoTextures {
     }
 }
 
-/// Samples a texture out of the real TIC/TSC descriptor pools in GPU memory.
+/// Samples from the TIC/TSC descriptor pools in GPU memory.
 pub struct MemoryTextures<'a, 'b> {
     pub ctx: &'a ExecCtx<'b>,
     pub tex_header_pool: u64,
     pub tex_sampler_pool: u64,
-    /// The descriptors already parsed for this draw, keyed by handle.
-    ///
-    /// A TIC and a TSC are eight `u32` reads through the GPU address space
-    /// that decode to the same thing for every pixel of a draw, so parsing
-    /// them per sample was pure repetition: a full-screen textured quad paid
-    /// for it 921 600 times. The cache lives in the caller so that this
-    /// struct can still be rebuilt per fragment, it borrows `ctx`, which
-    /// the pixel loop needs mutably between shading calls.
+    /// Descriptors parsed this draw, keyed by handle. Owned by the caller so this
+    /// struct can be rebuilt per fragment.
     pub descriptors: &'a std::cell::RefCell<crate::IdMap<u32, crate::gpu::texture::Descriptors>>,
-    /// Decoded compressed blocks, shared by every fragment of the draw for the
-    /// same reason `descriptors` is.
+    /// Decoded compressed blocks, shared across the draw.
     pub blocks: &'a std::cell::RefCell<crate::gpu::texture::BlockCache>,
 }
 
 impl MemoryTextures<'_, '_> {
-    /// The TIC/TSC pair `handle` resolves to, parsed once per draw.
     fn descriptors_for(&self, handle: u32) -> ShaderResult<crate::gpu::texture::Descriptors> {
         if let Some(d) = self.descriptors.borrow().get(&handle).copied() {
             return Ok(d);
@@ -379,7 +297,7 @@ impl TextureSource for MemoryTextures<'_, '_> {
         ))
     }
 
-    // One level, because that is all either renderer gives a texture.
+    // One level, all either renderer gives a texture.
     fn dimensions(&self, handle: u32) -> ShaderResult<[u32; 4]> {
         let texture = self.descriptors_for(handle)?.texture;
         Ok([texture.width, texture.height, texture.layers.max(1), 1])
@@ -471,14 +389,8 @@ impl TextureSource for MemoryTextures<'_, '_> {
     }
 }
 
-/// A shader's global (`ldg`/`stg`/`atom`) address space. Optional: a program
-/// that never issues one doesn't need a backend, and a program that does
-/// without one gets an error naming the address rather than a silent zero.
-///
-/// Writes take `&self` because a compute dispatch shares one of these across
-/// every thread of the grid while the interpreter holds it, the backend owns
-/// whatever interior mutability that needs. They default to an error so that
-/// a read-only source stays a one-method implementation.
+/// A shader's global (`ldg`/`stg`/`atom`) address space. Writes take `&self`
+/// since a dispatch shares it across threads; they default to an error.
 pub trait GlobalMemory {
     fn read_u32(&self, addr: u64) -> ShaderResult<u32>;
 
@@ -500,56 +412,34 @@ pub trait GlobalMemory {
     }
 }
 
-/// A CTA's shared memory (`s[]`). Every thread of one CTA sees the same
-/// bytes, which is the entire point of it, so the scheduler owns it and hands
-/// each thread a reference.
+/// A CTA's shared memory (`s[]`), owned by the scheduler.
 pub type SharedMemory = std::cell::RefCell<Vec<u8>>;
 
-/// What `s2r` reads.
-///
-/// Zero for every field is right for a draw: a vertex or fragment invocation
-/// has no thread or CTA identity, which is what this returned before compute
-/// gave the registers meaning.
+/// What `s2r` reads; all zero for a draw.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpecialRegs {
-    /// This invocation's lane within its warp, which of a fragment quad's
-    /// four pixels it is shading, and the one thing a warp shuffle is
-    /// relative to. Zero for anything run on its own, which is what every
-    /// caller but the quad shader and a cooperative dispatch does.
+    /// Lane within the warp (a fragment quad's pixel); what shuffles are relative to.
     pub lane: u32,
-    /// This thread's position in its CTA.
     pub tid: [u32; 3],
-    /// This CTA's position in the grid.
     pub ctaid: [u32; 3],
-    /// Bytes of shared memory the CTA was given.
     pub shared_size: u32,
-    /// Bytes of local memory the thread was given.
     pub local_size: u32,
-    /// Whether window y grows upward, which is what `SR_Y_DIRECTION` reports
-    /// as -1.0 rather than +1.0. Follows `SET_WINDOW_ORIGIN_MODE`.
+    /// Window y grows upward, so `SR_Y_DIRECTION` reads -1.0. Follows `SET_WINDOW_ORIGIN_MODE`.
     pub y_negate: bool,
 }
 
 impl SpecialRegs {
-    /// `SR_TID`/`SR_NTID`, the forms that pack all three dimensions into one
-    /// register. Compilers emit the per-dimension registers instead, and the
-    /// packing here has not been confirmed against hardware, so reading one
-    /// is refused rather than answered with a layout that might be wrong.
+    /// `SR_TID`/`SR_NTID` packed forms: refused, as the packing is unconfirmed.
     const PACKED: [u8; 2] = [0x20, 0x28];
 
-    /// The value of special register `sr`, or `None` if this doesn't model it
-    ///, which the caller answers with zero, as every one of them was
-    /// answered before.
+    /// The value of special register `sr`, or `None` if not modelled (read as zero).
     pub fn read(&self, sr: u8) -> Option<u32> {
         Some(match sr {
             0x00 => self.lane,
             0x21..=0x23 => self.tid[(sr - 0x21) as usize],
             0x25..=0x27 => self.ctaid[(sr - 0x25) as usize],
             0x32 => self.shared_size,
-            // `SR_Y_DIRECTION` is a float, and the sign is the whole content:
-            // a shader that derives a screen-space direction multiplies by it,
-            // so the zero every unmodelled special register used to read
-            // collapsed that direction to nothing rather than reversing it.
+            // `SR_Y_DIRECTION` is a float sign.
             0x12 => {
                 if self.y_negate {
                     (-1.0f32).to_bits()
@@ -563,33 +453,25 @@ impl SpecialRegs {
     }
 }
 
-/// The upper bound on instructions one invocation may execute. A shader with
-/// a loop whose exit condition this interpreter gets wrong must fail rather
-/// than hang the emulator.
+/// Instruction cap per invocation, so a mis-executed loop fails instead of hanging.
 const MAX_STEPS: usize = 1 << 20;
 
-/// How many bytes of per-thread local scratch (`l[]`) an invocation gets.
 const LOCAL_MEMORY_BYTES: usize = 1024;
 
-/// Everything an invocation can read that isn't its own registers.
 pub struct Env<'a> {
     pub consts: &'a dyn ConstantSource,
     pub textures: &'a dyn TextureSource,
     pub memory: Option<&'a dyn GlobalMemory>,
-    /// The CTA's shared memory, for the `lds`/`sts`/`atoms` a compute
-    /// dispatch issues. A draw has none.
+    /// The CTA's shared memory; a draw has none.
     pub shared: Option<&'a SharedMemory>,
     pub special: SpecialRegs,
-    /// Which constant bank a `texs`'s immediate indexes for its texture
-    /// handle: `TexCbIndex`, which the driver programs (see
-    /// [`crate::gpu::engine::threed::Engine3D::tex_cb_index`]).
+    /// The constant bank `texs` handles come from: `TexCbIndex`
+    /// ([`crate::gpu::engine::threed::Engine3D::tex_cb_index`]).
     pub tex_cb_index: u8,
 }
 
 impl<'a> Env<'a> {
-    /// An environment whose `texs` handles come from nouveau's bank, which
-    /// is what the fixtures in this module's tests are captured from. A real
-    /// draw uses [`Env::with_tex_cb_index`] with the register's value.
+    /// Uses nouveau's texture bank, as the fixtures do; see [`Env::with_tex_cb_index`].
     pub fn new(consts: &'a dyn ConstantSource, textures: &'a dyn TextureSource) -> Env<'a> {
         Env::with_tex_cb_index(consts, textures, crate::gpu::texture::NOUVEAU_TEX_CB_INDEX)
     }
@@ -610,25 +492,10 @@ impl<'a> Env<'a> {
     }
 }
 
-/// Per-vertex/per-fragment machine state.
 #[derive(Debug)]
-/// The `a[]` attribute space, a shader's interpolated inputs on the way in,
-/// its outputs on the way out: addressed by the byte offset the ISA uses
-/// (`a[0x7c]` is offset `0x7c`).
-///
-/// Flat rather than a map, because a fragment shader runs *once per covered
-/// pixel*: the `HashMap<u16, f32>` this replaces cost a hash per component
-/// plus a heap allocation on each invocation's first insert, and those
-/// together were most of the time in a shaded pixel. `ld`/`st`/`ipa` address
-/// `a[]` with a ten-bit field, so the whole space is `0x000..0x400`, 256
-/// words, and an offset past that (only reachable by adding an indexing
-/// register) is outside attribute space entirely: it reads zero and a write
-/// to it is dropped.
-///
-/// The written-mask is what makes "never written" distinguishable from
-/// "written zero", which matters for outputs: a vertex shader that leaves
-/// `clip.w` alone must get the default 1.0, not 0.0. It also makes
-/// [`Attributes::clear`] a 32-byte wipe instead of a 1 KiB one.
+/// The `a[]` attribute space, flat and addressed by byte offset (`0x000..0x400`).
+/// Offsets past it read zero and drop writes. The written-mask distinguishes
+/// "unwritten" from zero (unwritten `clip.w` defaults to 1.0).
 #[derive(Clone)]
 pub struct Attributes {
     words: [f32; Attributes::WORDS],
@@ -636,16 +503,13 @@ pub struct Attributes {
 }
 
 impl Attributes {
-    /// `a[]` is a ten-bit byte address, one `f32` per word.
     const WORDS: usize = 0x400 / 4;
 
-    /// The value at `offset`, or 0.0 if nothing wrote it: what a read of an
-    /// absent key gave before.
+    /// The value at `offset`, or 0.0 if unwritten.
     pub fn get(&self, offset: u16) -> f32 {
         self.written(offset).unwrap_or(0.0)
     }
 
-    /// The value at `offset`, or `None` if nothing wrote it.
     pub fn written(&self, offset: u16) -> Option<f32> {
         let word = offset as usize / 4;
         if word >= Self::WORDS || self.written[word / 64] & (1 << (word % 64)) == 0 {
@@ -663,8 +527,7 @@ impl Attributes {
         self.written[word / 64] |= 1 << (word % 64);
     }
 
-    /// Forget everything. Only the mask has to be cleared: a stale word is
-    /// unreachable once it reads as unwritten.
+    /// Only the mask needs clearing.
     pub fn clear(&mut self) {
         self.written = [0; Self::WORDS / 64];
     }
@@ -680,54 +543,42 @@ impl Default for Attributes {
 }
 
 pub struct Invocation {
-    /// 256 rather than 255 so `RZ` has a slot of its own: indexing by a `u8`
-    /// is then provably in bounds, which takes the check *and* the branch off
-    /// the hottest read in the interpreter. The slot is kept at zero.
+    /// 256 so `RZ` has a slot (kept zero) and `u8` indexing needs no bounds check.
     gpr: [u32; 256],
-    /// `p0`..`p6`. `p7` is `PT`, which always reads true and can't be
-    /// written, so it isn't stored.
+    /// `p0`..`p6`; `p7` is `PT`, always true.
     pred: [bool; 7],
-    /// `a[]` input and output.
     pub attr_in: Attributes,
     pub attr_out: Attributes,
-    /// The carry `iadd.cc` leaves behind and `iadd.x` reads. One flag, not one
-    /// per thread lane: this interpreter runs a single invocation at a time.
+    /// The carry `iadd.cc` sets and `iadd.x` reads.
     carry: bool,
-    /// The other three condition codes, zero, sign and overflow, which a
-    /// `.CC` instruction sets and `csetp` tests. See [`isa::flow_test`].
+    /// Zero, sign and overflow condition codes; see [`isa::flow_test`].
     zero: bool,
     sign: bool,
     overflow: bool,
-    /// Set by `kil`: this fragment must not be written.
+    /// Set by `kil`.
     pub discarded: bool,
     /// `ssy`/`pbk`/`pcnt` push a resume address; `sync`/`brk`/`cont` pop it.
     stack: Vec<u32>,
     local: Vec<u8>,
-    /// How much `l[]` this invocation gets. A dispatch sets it from the QMD.
+    /// Size of `l[]`; a dispatch sets it from the QMD.
     local_bytes: usize,
-    /// Where execution is. In the struct rather than in [`Invocation::resume`]
-    /// because a `bar` suspends an invocation mid-program and the scheduler
-    /// resumes it once every other thread of the CTA has arrived.
+    /// Kept here so a `bar` can suspend mid-program.
     pc: usize,
-    /// Instructions retired, against [`MAX_STEPS`]. Spans suspensions, or a
-    /// program that loops around a barrier would get a fresh budget each time.
+    /// Instructions retired against [`MAX_STEPS`], across suspensions.
     steps: usize,
     /// Texture results not yet landed; see `run_texs`.
     pending: Vec<(usize, u8, u32)>,
-    /// The shuffle or vote this invocation is suspended on, waiting for the
-    /// rest of its warp to reach one too. See [`resolve_warp`].
+    /// The shuffle or vote awaiting the rest of the warp; see [`resolve_warp`].
     exchange: Option<Exchange>,
 }
 
-/// A question an invocation cannot answer from its own registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Exchange {
     Shuffle(Shuffle),
     Vote(Vote),
 }
 
-/// A `vote` with its source predicate read, waiting for the rest of the
-/// warp's.
+/// A `vote` with its source predicate read, waiting for the warp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Vote {
     mode: VoteMode,
@@ -736,12 +587,7 @@ struct Vote {
     holds: bool,
 }
 
-/// A `shfl` that has been decoded and had its operands read, and is waiting
-/// for the lane it names to be readable.
-///
-/// The operands are resolved here rather than at resolution time because
-/// only the invocation can read its own registers and constants; what is
-/// left is a question about lanes, which only the warp can answer.
+/// A decoded `shfl` with operands read, waiting for its source lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shuffle {
     mode: ShflMode,
@@ -752,15 +598,13 @@ pub struct Shuffle {
     mask: u32,
 }
 
-/// Why an invocation stopped running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Halt {
     /// It ran to `exit`, or `kil` discarded it.
     Exited,
     /// It reached a `bar` and is waiting for the rest of its CTA.
     Barrier,
-    /// It reached a `shfl` or a `vote` and is waiting for the rest of its
-    /// warp, which [`resolve_warp`] releases it from.
+    /// It reached a `shfl` or `vote`; [`resolve_warp`] releases it.
     Warp,
 }
 
@@ -792,10 +636,7 @@ impl Invocation {
         Self::default()
     }
 
-    /// Put this invocation back to its initial state so one of them can serve
-    /// a whole draw. Building a fresh `Invocation` per fragment meant a 1 KiB
-    /// register-file wipe and two map allocations for every covered pixel;
-    /// this is the same state, without the allocations.
+    /// Reset to the initial state so one invocation can serve a whole draw.
     pub fn reset(&mut self) {
         self.gpr = [0; 256];
         self.pred = [false; 7];
@@ -810,7 +651,6 @@ impl Invocation {
         self.exchange = None;
     }
 
-    /// Give this invocation `bytes` of `l[]`, as a launch's QMD asks for.
     pub fn set_local_bytes(&mut self, bytes: usize) {
         self.local_bytes = bytes.max(LOCAL_MEMORY_BYTES);
         self.local.clear();
@@ -830,8 +670,7 @@ impl Invocation {
 
     pub fn set_reg(&mut self, r: u8, v: u32) {
         self.gpr[r as usize] = v;
-        // Cheaper than not writing it: a store that is always taken beats a
-        // branch that is almost never taken.
+        // An unconditional store is cheaper than a branch.
         self.gpr[RZ as usize] = 0;
     }
 
@@ -849,7 +688,6 @@ impl Invocation {
         }
     }
 
-    /// Whether a guard or source predicate holds.
     fn holds(&self, p: Pred) -> bool {
         self.pred(p.reg) != p.negate
     }
@@ -868,11 +706,7 @@ impl Invocation {
         Ok(f32::from_bits(self.operand(op, env)?))
     }
 
-    /// Execute `program` from its entry point until it exits.
-    ///
-    /// A `bar` has no meaning outside a CTA, so one reached here is an error
-    /// rather than a suspension. See [`Invocation::resume`], which is what a
-    /// compute dispatch drives instead.
+    /// Execute `program` until it exits; a `bar` is an error (see [`Invocation::resume`]).
     pub fn execute(&mut self, program: &Compiled, env: &Env) -> Result<()> {
         self.begin();
         match self.resume(program, env)? {
@@ -890,7 +724,7 @@ impl Invocation {
         }
     }
 
-    /// Put execution back at the entry point, leaving the register file alone.
+    /// Back to the entry point, keeping registers.
     pub fn begin(&mut self) {
         self.pc = 0;
         self.steps = 0;
@@ -898,20 +732,16 @@ impl Invocation {
         self.exchange = None;
     }
 
-    /// Run until the program exits or reaches a barrier, continuing from
-    /// wherever the last call stopped.
+    /// Run until exit or a barrier, continuing from the last stop.
     pub fn resume(&mut self, program: &Compiled, env: &Env) -> Result<Halt> {
         if program.is_empty() {
             return Err(Error::Gpu("shader: executing an empty program".into()));
         }
-        // Moved out for the duration so the loop can hold `&mut self`; put
-        // back before every return, since a barrier may suspend with texture
-        // results still in flight.
+        // Moved out so the loop can hold `&mut self`; restored before every return.
         let mut pending = std::mem::take(&mut self.pending);
         let out = self.run(program, env, &mut pending);
         self.pending = pending;
-        // The boundary of the boxed error: everything below runs per
-        // instruction and pays for `Error`'s size, everything above does not.
+        // Unbox at the boundary; everything below is per instruction.
         out.map_err(|boxed| *boxed)
     }
 
@@ -923,9 +753,7 @@ impl Invocation {
     ) -> ShaderResult<Halt> {
         let mut pc = self.pc;
         let mut steps = self.steps;
-        // Sliced to one length so the bounds check on each is the same check
-        // the loop already makes: the two indexed reads per instruction were
-        // 7% of a Home Menu frame as `Vec` accesses through `&self`.
+        // Sliced to one length so one bounds check covers both reads.
         let len = program.len();
         let ops = &program.ops()[..len];
         let preds = &program.preds()[..len];
@@ -943,9 +771,7 @@ impl Invocation {
                     "shader: did not terminate within {MAX_STEPS} instructions"
                 )));
             }
-            // Guarded: a texture result is pending for a handful of steps out
-            // of a program, and `Vec::retain` is a real call even over an
-            // empty vector, one per instruction, per covered pixel.
+            // `retain` is a real call even when empty.
             if !pending.is_empty() {
                 pending.retain(|&(due, reg, val)| {
                     if due == pc {
@@ -957,21 +783,13 @@ impl Invocation {
                 });
             }
 
-            // The guard first, out of its own dense array: an instruction
-            // whose predicate is false never touches the 32-byte operation.
             if !self.holds(preds[pc]) {
                 pc += 1;
                 continue;
             }
             let op = ops[pc];
 
-            // Anything that moves the pc other than by one flushes the
-            // deferred texture writes first: their landing place was found by
-            // scanning forward in program order, which a jump invalidates.
-            //
-            // The target is already an index: resolving it used to mean a
-            // binary search over the program's byte offsets on every taken
-            // branch, which the lowering does once instead.
+            // A jump flushes deferred texture writes, placed assuming program order.
             self.pc = pc;
             let jump = |index: u32, pending: &mut Vec<(usize, u8, u32)>, inv: &mut Self| {
                 for (_, reg, val) in pending.drain(..) {
@@ -997,8 +815,7 @@ impl Invocation {
                     self.discarded = true;
                     return Ok(Halt::Exited);
                 }
-                // The pc moves past the barrier before suspending, so the
-                // resume lands after it rather than on it.
+                // Advance past the barrier before suspending.
                 Op::Bar { mode } => match mode {
                     BarMode::Sync | BarMode::Arrive => {
                         self.pc = pc + 1;
@@ -1012,11 +829,7 @@ impl Invocation {
                         )))
                     }
                 },
-                // Like a barrier, and for the same reason: the pc moves
-                // past it before suspending, so the resume lands after the
-                // shuffle rather than on it. The deferred texture writes stay
-                // deferred: nothing has jumped, so where they land is still
-                // the place the lowering found.
+                // Advance past it like a barrier; deferred texture writes stay deferred.
                 Op::Shfl {
                     dst,
                     pred,
@@ -1056,8 +869,7 @@ impl Invocation {
                     pc = jump(program.target(pc), pending, self)?;
                     continue;
                 }
-                // The one branch whose target is not known until it runs: it
-                // is a register value, so it still costs a lookup.
+                // The target is a register value, so it needs a lookup.
                 Op::Brx { base, reg } => {
                     let at = super::align_slot(base.wrapping_add(self.reg(reg)));
                     let index = program.index_of(at).map(|i| i as u32).unwrap_or(NO_TARGET);
@@ -1133,7 +945,6 @@ impl Invocation {
         }
     }
 
-    /// Everything that isn't control flow or a texture fetch.
     fn run_alu(&mut self, op: Op, env: &Env) -> ShaderResult<()> {
         match op {
             // ---- attribute space ----
@@ -1161,11 +972,7 @@ impl Invocation {
                     self.attr_out.set(base + i as u16 * 4, v);
                 }
             }
-            // `centroid` is not read here, and that is exact rather than a
-            // gap: this rasterizer shades one invocation per *sample*, at
-            // that sample's own centre, and an invocation only runs where
-            // its sample is covered. The centroid of the area this
-            // invocation covers is therefore where it is already sampling.
+            // `centroid` is exact as-is: shading is per covered sample at its centre.
             Op::Ipa {
                 dst,
                 offset,
@@ -1213,9 +1020,7 @@ impl Invocation {
                 sat,
                 scale,
             } => {
-                // The pre-scale multiplies the *first* operand, before the
-                // multiply proper, a constant halving or doubling folded into
-                // a multiply the shader was doing anyway.
+                // The pre-scale applies to the first operand.
                 let x = flush(self.reg_f32(a), ftz) * scale.factor();
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
                 self.set_reg_f32(dst, saturate(x * y, sat));
@@ -1246,8 +1051,7 @@ impl Invocation {
             } => {
                 let x = am.apply(flush(self.reg_f32(a), ftz));
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
-                // The predicate selects which end: true picks the minimum,
-                // which is why `fmnmx ... !pt` is the compiler's `max`.
+                // True picks the minimum, so `fmnmx ... !pt` is `max`.
                 let v = if self.holds(pred) { x.min(y) } else { x.max(y) };
                 self.set_reg_f32(dst, v);
             }
@@ -1270,10 +1074,7 @@ impl Invocation {
                 };
                 self.set_reg_f32(dst, saturate(v, sat));
             }
-            // The signs are a property of *which pixel of the quad this
-            // is*: two lanes of a derivative subtract and the other two add,
-            // which is how one instruction serves both halves of a
-            // difference without a branch.
+            // Signs depend on the lane's position in the quad.
             Op::Fswzadd {
                 dst,
                 a,
@@ -1323,10 +1124,7 @@ impl Invocation {
             }
 
             // ---- half-precision ----
-            // Both lanes are computed in f32 and rounded once, at the merge,
-            // which is what a half instruction does: it rounds its result,
-            // not its arithmetic. So [`HMerge::F32`], whose result is a float,
-            // rounds nowhere, even where one of its sources was a half.
+            // Lanes are computed in f32 and rounded at the merge; [`HMerge::F32`] never rounds.
             Op::Hadd2 {
                 dst,
                 a,
@@ -1406,7 +1204,6 @@ impl Invocation {
                 );
                 let mut lanes = [x[0].mul_add(y[0], z[0]), x[1].mul_add(y[1], z[1])];
                 for lane in 0..2 {
-                    // A zeroed product leaves the addend, not zero.
                     if fmz_zeroes(prec, sat, x[lane], y[lane]) {
                         lanes[lane] = z[lane];
                     }
@@ -1432,8 +1229,7 @@ impl Invocation {
                 let x = half_source(self.reg(a), am, asw, ftz);
                 let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
                 let s = self.holds(src);
-                // Each lane's answer fills its own half of the register:
-                // 1.0h with `.bf`, all ones without.
+                // 1.0h with `.bf`, all ones without, per half.
                 let taken = if bf { 0x3C00u32 } else { 0xFFFF };
                 let mut out = 0u32;
                 if combine(bop, float_compare(cmp, x[0], y[0]), s) {
@@ -1485,10 +1281,8 @@ impl Invocation {
             } => {
                 let x = ineg_if(self.reg(a), aneg);
                 let y = ineg_if(self.operand(b, env)?, bneg);
-                // Widened, so the carry out is the bit that falls off the top.
-                // A negated operand is already two's-complement here, so a
-                // subtraction carries exactly when it does not borrow, which
-                // is the convention `iadd.x` expects on the high half.
+                // Widened so the carry is bit 32. A negated operand is two's complement,
+                // so subtraction carries when it doesn't borrow, as `iadd.x` expects.
                 let sum = u64::from(x) + u64::from(y) + u64::from(cin && self.carry);
                 self.set_reg(dst, sum as u32);
                 if cout {
@@ -1605,8 +1399,7 @@ impl Invocation {
                 };
                 let mut v = product.wrapping_add(cv);
                 if mrg {
-                    // `.mrg` replaces the result's high half with `b`'s low
-                    // one rather than adding anything there.
+                    // `.mrg` replaces the high half with `b`'s low half.
                     v = (v & 0xffff) | (raw_b << 16);
                 }
                 self.set_reg(dst, v);
@@ -1667,9 +1460,7 @@ impl Invocation {
                 let base = self.operand(base, env)?;
                 let offset = src & 0xff;
                 let count = (src >> 8) & 0xff;
-                // Hardware's edge cases, not tidiness: an offset past the word
-                // leaves the base alone, and a width that would run off the end
-                // is clamped to what is left rather than wrapping.
+                // An offset past the word leaves the base alone; an overlong width is clamped.
                 let v = if offset >= 32 {
                     base
                 } else {
@@ -1797,8 +1588,7 @@ impl Invocation {
                 inv,
             } => {
                 let v = inv_if(self.operand(b, env)?, inv);
-                // The highest set bit, counting from bit 0; for a signed
-                // search the sign bits at the top don't count.
+                // Highest set bit; a signed search ignores leading sign bits.
                 let v = if signed && (v as i32) < 0 { !v } else { v };
                 let idx = if v == 0 {
                     0xffff_ffff
@@ -1887,8 +1677,7 @@ impl Invocation {
                 };
                 let x = saturate(x, sat);
                 if dst_bits == 16 {
-                    // The half lands in the low half and the rest is cleared,
-                    // which is `PackFloat2x16` against a zero.
+                    // The half lands in the low half, the rest cleared.
                     self.set_reg(dst, u32::from(f32_to_f16(x)));
                 } else {
                     self.set_reg_f32(dst, x);
@@ -1942,9 +1731,7 @@ impl Invocation {
                          layout is not confirmed"
                     )));
                 }
-                // A register this doesn't model still reads zero, which is
-                // what every one of them read before compute gave the thread
-                // and CTA registers meaning.
+                // An unmodelled register reads zero.
                 self.set_reg(dst, env.special.read(sr).unwrap_or(0));
             }
             Op::Psetp {
@@ -2131,18 +1918,15 @@ impl Invocation {
         Ok(())
     }
 
-    /// `ld`/`st a[r + imm]`: the index register holds a byte offset, and `RZ`
-    /// (the common case) contributes nothing.
+    /// `ld`/`st a[r + imm]`: the index register is a byte offset.
     fn attr_index(&self, idx: u8) -> u16 {
         self.reg(idx) as u16
     }
 
-    /// A 64-bit address held in a register pair.
     fn reg64(&self, r: u8) -> u64 {
         u64::from(self.reg(r)) | (u64::from(self.reg(r.wrapping_add(1))) << 32)
     }
 
-    /// A value `width` bytes wide, from `r` and the register after it.
     fn reg_wide(&self, r: u8, width: usize) -> u64 {
         if width == 8 {
             self.reg64(r)
@@ -2158,7 +1942,6 @@ impl Invocation {
         }
     }
 
-    /// The bytes a store of `size` moves, taken from `src` upwards.
     fn store_value(&self, src: u8, size: MemSize) -> ([u8; 16], usize) {
         let mut out = [0u8; 16];
         for i in 0..size.regs() as usize {
@@ -2168,9 +1951,7 @@ impl Invocation {
         (out, size.bytes() as usize)
     }
 
-    /// `atom`/`atoms`/`red`: read one location, combine, write back, and hand
-    /// the *old* value to `dst`. Nothing here runs two threads at once, so
-    /// the read-modify-write is atomic by construction.
+    /// `atom`/`atoms`/`red`: read-modify-write, old value to `dst`.
     #[allow(clippy::too_many_arguments)]
     fn run_atom(
         &mut self,
@@ -2190,8 +1971,7 @@ impl Invocation {
             AtomType::U64 | AtomType::S64 => 8usize,
             _ => 4usize,
         };
-        // `cas` compares against `src` and stores the register after it;
-        // every other operation takes the one operand.
+        // `cas` compares against `src` and stores the register after it.
         let operand = self.reg_wide(src, width);
         let stored = self.reg_wide(src.wrapping_add((width / 4) as u8), width);
 
@@ -2232,15 +2012,9 @@ impl Invocation {
         Ok(())
     }
 
-    /// Real Maxwell issues `texs` asynchronously: the compiler interleaves
-    /// unrelated instructions between the fetch and its first real consumer,
-    /// relying on the texture unit's latency to hide them, and those
-    /// instructions still see whatever the destination registers held
-    /// before the fetch. A synchronous write at the `texs` itself breaks
-    /// that (see `gpu::texture`'s module docs for how this was caught
-    /// against real content), so each destination's value is queued and
-    /// applied immediately before the instruction that first reads it,
-    /// or flushed at the next branch or at `exit`, whichever comes first.
+    /// `texs` results are deferred: compiled code reads the destinations' old values
+    /// between the fetch and its first consumer. Each is landed just before its first
+    /// reader, or at the next branch or `exit`.
     fn run_texs(
         &mut self,
         program: &Compiled,
@@ -2259,16 +2033,13 @@ impl Invocation {
         else {
             unreachable!("run_texs called with {op:?}");
         };
-        // The bindless handle lives in the driver's reserved constant bank,
-        // indexed by the shader's own immediate. See `gpu::texture`'s
-        // module docs and `texture::handle_offset`.
+        // The bindless handle lives in the driver's constant bank; see `texture::handle_offset`.
         let handle = env
             .consts
             .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
         let u = self.reg_f32(coords[0]);
         let v = self.reg_f32(coords[1]);
-        // An array's layer is an integer in the low half of its register, not
-        // a float like the coordinates beside it.
+        // An array layer is an integer in the low half of its register.
         let layer = match dim {
             TexDim::T2dArray => self.reg(coords[2]) & 0xffff,
             _ => 0,
@@ -2278,12 +2049,11 @@ impl Invocation {
                 env.textures
                     .sample_compare(handle, u, v, layer, self.reg_f32(reg))?
             }
-            // A 3D image's third coordinate is normalized like the other two,
-            // where an array's is the layer number.
+            // A 3D image's third coordinate is normalized.
             (None, TexDim::T3d) => env
                 .textures
                 .sample_3d(handle, u, v, self.reg_f32(coords[2]))?,
-            // A cubemap's three are a direction, and the face comes out of it.
+            // A cubemap's three are a direction.
             (None, TexDim::TCube) => {
                 env.textures
                     .sample_cube(handle, u, v, self.reg_f32(coords[2]))?
@@ -2294,11 +2064,8 @@ impl Invocation {
         Ok(())
     }
 
-    /// The general `tex`. It differs from [`Self::run_texs`] in where its
-    /// operands sit, the level of detail, the texel offset and the shadow
-    /// reference come out of one register in that order, and an array's layer
-    /// sits *before* the coordinates rather than after them, not in what it
-    /// samples.
+    /// The general `tex`: LOD, offset and shadow reference share one register, and
+    /// an array's layer comes before the coordinates.
     fn run_tex(
         &mut self,
         program: &Compiled,
@@ -2320,8 +2087,7 @@ impl Invocation {
         else {
             unreachable!("run_tex called with {op:?}");
         };
-        // A bindless sample holds in a register the value a bound one reads
-        // out of the driver's constant bank.
+        // A bindless sample holds the handle in a register.
         let handle = match handle_reg {
             Some(reg) => self.reg(reg),
             None => env
@@ -2329,15 +2095,12 @@ impl Invocation {
                 .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?,
         };
         let mut u = self.reg_f32(coords[0]);
-        // A 1D image has one coordinate, and the register after it belongs to
-        // something else.
+        // A 1D image has one coordinate.
         let mut v = match dim {
             TexDim::T1d => 0.0,
             _ => self.reg_f32(coords[1]),
         };
         // `.AOFFI` packs a signed four-bit offset per axis into one register.
-        // Persona 5 Royal's blur taps are one texel apart and every one of
-        // them read the same texel without this.
         if let Some(reg) = offset {
             let packed = self.reg(reg);
             let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
@@ -2368,9 +2131,7 @@ impl Invocation {
         Ok(())
     }
 
-    /// `txq`: the size of the texture at the level the `lod` register names,
-    /// as integers carried in the channels a sample's floats would be. The
-    /// depth or layer count is level 0's: an array's layers do not shrink.
+    /// `txq`: texture size at the `lod` register's level, as integers; layers don't shrink.
     fn run_txq(
         &mut self,
         program: &Compiled,
@@ -2393,8 +2154,7 @@ impl Invocation {
         Ok(())
     }
 
-    /// `tld4`: one channel of the four texels a bilinear sample would blend,
-    /// with `.AOFFI` moving the footprint as it moves a `tex`'s.
+    /// `tld4`: one channel of a bilinear footprint, offset by `.AOFFI`.
     fn run_tld4(
         &mut self,
         program: &Compiled,
@@ -2434,9 +2194,7 @@ impl Invocation {
         Ok(())
     }
 
-    /// A surface instruction's handle: its register's value when it is
-    /// bindless, and otherwise the word of the texture bank its immediate
-    /// names, which is where a bound `tex` reads its handle too.
+    /// A surface instruction's handle: from its register if bindless, else the texture bank.
     fn surface_handle(&self, handle: u16, handle_reg: Option<u8>, env: &Env) -> ShaderResult<u32> {
         match handle_reg {
             Some(reg) => Ok(self.reg(reg)),
@@ -2446,9 +2204,7 @@ impl Invocation {
         }
     }
 
-    /// A surface instruction's `x`, `y` and layer or slice, from the
-    /// registers `dim` gives it. An array's layer is the low half of its
-    /// register, as Eden reads it.
+    /// A surface instruction's x, y and layer (low half of its register).
     fn surface_coords(&self, coords: u8, dim: SurfaceDim) -> [u32; 3] {
         let at = |i: u8| self.reg(coords.wrapping_add(i));
         match dim {
@@ -2460,8 +2216,7 @@ impl Invocation {
         }
     }
 
-    /// Queue a sample's channels into the destination registers worked out at
-    /// decode time, each due right before the first instruction that reads it.
+    /// Queue a sample's channels, each due before the first instruction that reads it.
     fn land_texture(
         &self,
         program: &Compiled,
@@ -2472,8 +2227,7 @@ impl Invocation {
         for &(reg, store, due) in program.texs_writes(pc) {
             let raw = match store {
                 isa::TexsStore::Float(channel) => color[channel].to_bits(),
-                // Low half first. An odd channel count pads with zero, which
-                // is what hardware leaves in the unused half.
+                // Low half first; an odd channel count pads with zero.
                 isa::TexsStore::Halves(low, high) => {
                     let pack = |c: Option<usize>| {
                         u32::from(f32_to_f16(c.map_or(0.0, |channel| color[channel])))
@@ -2487,9 +2241,7 @@ impl Invocation {
     }
 }
 
-/// Work out, for every `texs` in `insns`, where each of its results lands.
-/// Called once per decode, and once per lowering; see
-/// [`super::Program::texs_writes`] for why it is not done per invocation.
+/// Where each `texs` result in `ops` lands; see [`super::Program::texs_writes`].
 pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
     let mut out = Vec::new();
     for (pc, op) in ops.iter().enumerate() {
@@ -2501,14 +2253,11 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
                 f16,
                 ..
             } => isa::texs_destinations(dst, dst2, mask, f16),
-            // `tex` has no two-register split and no packed-halves form: its
-            // channels land in consecutive registers from `dst`, one per set
-            // mask bit, as whole floats.
+            // `tex` channels land in consecutive registers from `dst`, one per mask bit.
             Op::Tex { dst, mask, .. } | Op::Txq { dst, mask, .. } | Op::Tld4 { dst, mask, .. } => {
                 consecutive_destinations(dst, mask)
             }
-            // A surface load lands the same way; a raw one's words are its
-            // first channels.
+            // A surface load lands the same way.
             Op::Suld { dst, data, .. } => consecutive_destinations(dst, data.channels()),
             _ => continue,
         };
@@ -2524,8 +2273,7 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
     out
 }
 
-/// One register per set `mask` bit, consecutive from `dst`, each holding
-/// its channel as a whole word.
+/// One register per set `mask` bit, consecutive from `dst`.
 fn consecutive_destinations(dst: u8, mask: [bool; 4]) -> Vec<(u8, isa::TexsStore)> {
     mask.iter()
         .enumerate()
@@ -2535,12 +2283,8 @@ fn consecutive_destinations(dst: u8, mask: [bool; 4]) -> Vec<(u8, isa::TexsStore
         .collect()
 }
 
-/// Where `reg`'s pending write should land: right before the first later
-/// instruction that reads it (the real dependency point), or dropped
-/// entirely if something overwrites it first. A program that never touches
-/// it again lands it before the last instruction, so a shader that hands a
-/// `texs` result straight to its output register still ends with the value
-/// hardware would eventually have written.
+/// Where `reg`'s pending write lands: before its next reader, `None` if overwritten
+/// first, or before the last instruction if never touched.
 fn first_use_after(ops: &[Op], start: usize, reg: u8) -> Option<usize> {
     for (idx, op) in ops.iter().enumerate().skip(start) {
         if reads(op).contains(&reg) {
@@ -2560,8 +2304,7 @@ fn operand_reg(op: Operand) -> Option<u8> {
     }
 }
 
-/// The destination register, where a half op's merge mode keeps half of what
-/// is already in it and so reads it back.
+/// The destination, when a half op's merge mode reads it back.
 fn half_merge_reads(dst: u8, merge: HMerge) -> Option<u8> {
     match merge {
         HMerge::MrgH0 | HMerge::MrgH1 if dst != RZ => Some(dst),
@@ -2569,7 +2312,7 @@ fn half_merge_reads(dst: u8, merge: HMerge) -> Option<u8> {
     }
 }
 
-/// Registers `op` reads as a source (never [`RZ`], which is always zero).
+/// Registers `op` reads (never [`RZ`]).
 fn reads(op: &Op) -> Vec<u8> {
     let mut out: Vec<u8> = match *op {
         Op::St { src, size, idx, .. } => {
@@ -2592,8 +2335,7 @@ fn reads(op: &Op) -> Vec<u8> {
             v.extend(operand_reg(c));
             v
         }
-        // A merging half op keeps the half of its destination it does not
-        // write, which makes the destination a source as well.
+        // A merging half op also reads its destination.
         Op::Hfma2 {
             dst,
             a,
@@ -2682,9 +2424,7 @@ fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Texs { coords, .. } => coords.to_vec(),
-        // Every register the instruction reads its operands from. Leaving a
-        // sample out made an earlier sample's queued result land after the
-        // sample that read it.
+        // Every operand register, so earlier queued samples land first.
         Op::Tex {
             coords,
             layer,
@@ -2774,7 +2514,6 @@ impl isa::FlowLogic<bool> for BoolLogic {
     }
 }
 
-/// Registers `op` writes as a destination.
 pub(super) fn writes(op: &Op) -> Vec<u8> {
     match *op {
         Op::Ld { dst, size, .. }
@@ -2843,12 +2582,9 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
     }
 }
 
-/// `fswzadd`'s two multipliers per two-bit swizzle code, the constant
-/// tables Eden's GLSL backend emits as `FSWZ_A`/`FSWZ_B`
-/// (`glsl_emit_context.cpp`).
+/// `fswzadd`'s multipliers per swizzle code (Eden's `FSWZ_A`/`FSWZ_B`).
 const FSWZ_SIGNS: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (0.0, -1.0)];
 
-/// The registers a surface instruction's coordinates occupy.
 fn surface_coord_regs(coords: u8, dim: SurfaceDim) -> Vec<u8> {
     let count = match dim {
         SurfaceDim::D1 | SurfaceDim::Buffer1d => 1,
@@ -2858,9 +2594,7 @@ fn surface_coord_regs(coords: u8, dim: SurfaceDim) -> Vec<u8> {
     (0..count).map(|i| coords.wrapping_add(i)).collect()
 }
 
-/// How many registers a surface store reads its value from: all four
-/// channels for a formatted store, which the decoder only accepts whole,
-/// and a register per 32 bits for a raw one.
+/// Source registers of a surface store: four for formatted, one per 32 bits for raw.
 fn surface_source_words(data: SurfaceData) -> usize {
     match data {
         SurfaceData::Formatted(_) => 4,
@@ -2868,28 +2602,12 @@ fn surface_source_words(data: SurfaceData) -> usize {
     }
 }
 
-/// How many lanes a warp shuffle is bounded by on hardware. A fragment quad
-/// is four of them and a CTA's threads are grouped into warps of this many;
-/// either way the clamp and segment mask a `shfl` carries are written against
-/// this width, so the arithmetic below has to be done in it.
+/// Hardware warp width, which `shfl` clamps and segment masks are written against.
 pub const WARP_LANES: usize = 32;
 
-/// Complete every shuffle and vote the lanes of one warp are suspended on.
-///
-/// `warp` is the warp in lane order, so an invocation's index is its lane,
-/// and it holds at most [`WARP_LANES`] of them. Every source is read before
-/// any destination is written: these are exchanges between the lanes of one
-/// instruction, so no lane may see another's result.
-///
-/// A shuffle to a lane the clamp allows but this warp does not hold (a quad
-/// is four lanes of a hardware warp's thirty-two) reads as the requesting
-/// lane's own value, which is what an inactive lane gives on hardware. The
-/// predicate still reports what the clamp said, since that is a property of
-/// the lane numbers rather than of who is running.
-///
-/// A vote is counted over the lanes that reached it, which are the active
-/// lanes at that instruction: one that has exited, or waits elsewhere, is
-/// not in the ballot, as a lane masked off by divergence is not on hardware.
+/// Complete every shuffle and vote a warp (in lane order) is suspended on, reading
+/// all sources before writing. A shuffle to a lane the clamp allows but the warp
+/// lacks reads the caller's own value. Votes count only lanes that reached them.
 pub fn resolve_warp(warp: &mut [Invocation]) {
     let requests: Vec<Option<Exchange>> = warp
         .iter_mut()
@@ -2934,20 +2652,12 @@ pub fn resolve_warp(warp: &mut [Invocation]) {
     }
 }
 
-/// Which lane `shuffle` reads when `lane` executes it, and whether that lane
-/// was within the bound its clamp and segment mask describe.
-///
-/// The clamp bounds the lanes this one may reach and the segment mask splits
-/// the warp into independent groups; every mode composes them the same way,
-/// differing only in where it looks. Signed, because a lane below the segment
-/// (`shfl.up` at its bottom) must read as out of bounds rather than wrapping
-/// around to the top of the warp.
+/// Which lane `shuffle` reads from `lane`, and whether it was within bounds.
 fn shuffle_source(shuffle: Shuffle, lane: u32) -> (u32, bool) {
     let clamp = (shuffle.mask & 0x1f) as i32;
     let segment = ((shuffle.mask >> 8) & 0x1f) as i32;
     let lane = lane as i32;
     let index = shuffle.index as i32;
-    // The bottom of this lane's segment, and how far up it may reach.
     let floor = lane & segment;
     let ceiling = floor | (clamp & !segment);
     let (from, in_bounds) = match shuffle.mode {
@@ -2955,8 +2665,7 @@ fn shuffle_source(shuffle: Shuffle, lane: u32) -> (u32, bool) {
             let from = (index & !segment) | floor;
             (from, from <= ceiling)
         }
-        // `up` is the one mode the bound holds from below: it reads towards
-        // the bottom of the segment, so it is the floor it must not cross.
+        // `up` is bounded from below by the segment floor.
         ShflMode::Up => {
             let from = lane - index;
             (from, from >= ceiling)
@@ -2993,14 +2702,10 @@ fn saturate(v: f32, sat: bool) -> f32 {
     }
 }
 
-/// The smallest half that is not subnormal, which is what a half
-/// instruction's `.ftz` flushes towards zero.
+/// The smallest normal half, the `.ftz` threshold.
 const SMALLEST_NORMAL_HALF: f32 = 6.103_515_6e-5;
 
-/// One source of a half-precision op: its two lanes, flushed and modified.
-///
-/// The modifier comes second, exactly as it does for `fadd`, `abs` of a
-/// flushed subnormal is a flushed subnormal, not a subnormal made positive.
+/// One half-op source: its two lanes, flushed, then modified.
 fn half_source(bits: u32, m: FMod, sw: HSwizzle, ftz: bool) -> [f32; 2] {
     let mut lanes = half_lanes(bits, sw);
     for lane in lanes.iter_mut() {
@@ -3009,7 +2714,6 @@ fn half_source(bits: u32, m: FMod, sw: HSwizzle, ftz: bool) -> [f32; 2] {
     lanes
 }
 
-/// A source register's two lanes, widened to f32.
 fn half_lanes(bits: u32, sw: HSwizzle) -> [f32; 2] {
     let low = f16_to_f32(bits as u16);
     let high = f16_to_f32((bits >> 16) as u16);
@@ -3017,14 +2721,12 @@ fn half_lanes(bits: u32, sw: HSwizzle) -> [f32; 2] {
         HSwizzle::H1H0 => [low, high],
         HSwizzle::H0H0 => [low, low],
         HSwizzle::H1H1 => [high, high],
-        // Not a pair at all: one f32 that both lanes read.
+        // One f32 that both lanes read.
         HSwizzle::F32 => [f32::from_bits(bits); 2],
     }
 }
 
-/// `.ftz` against whichever precision the lane actually came from: an f32
-/// operand of a half instruction is still an f32, and flushing it at the
-/// half threshold would swallow four orders of magnitude of real numbers.
+/// `.ftz` at the threshold of the lane's actual precision.
 fn half_flush(v: f32, sw: HSwizzle, ftz: bool) -> f32 {
     if !ftz {
         return v;
@@ -3039,7 +2741,6 @@ fn half_flush(v: f32, sw: HSwizzle, ftz: bool) -> f32 {
     }
 }
 
-/// Write a half-precision op's two lanes into `dst`'s current value.
 fn half_pack(dst: u32, lanes: [f32; 2], merge: HMerge) -> u32 {
     let half = |v: f32| u32::from(f32_to_f16(v));
     match merge {
@@ -3050,9 +2751,7 @@ fn half_pack(dst: u32, lanes: [f32; 2], merge: HMerge) -> u32 {
     }
 }
 
-/// Whether `.fmz` forces this lane's product to zero: D3D9's rule that
-/// anything times zero is zero, NaN and infinity included. Whether the mode
-/// applies at all is [`HPrecision::zeroes_products`].
+/// Whether `.fmz` zeroes this lane's product (D3D9: anything times zero is zero).
 fn fmz_zeroes(prec: HPrecision, sat: bool, a: f32, b: f32) -> bool {
     prec.zeroes_products(sat) && (a == 0.0 || b == 0.0)
 }
@@ -3090,7 +2789,7 @@ fn apply_round(v: f32, round: FRound) -> f32 {
     }
 }
 
-/// A `set`'s register result: all-ones as a bit mask, or 1.0f with `.bf`.
+/// A `set` result: all-ones, or 1.0f with `.bf`.
 fn set_result(r: bool, bf: bool) -> u32 {
     match (r, bf) {
         (false, _) => 0,
@@ -3147,8 +2846,7 @@ fn int_compare(cmp: ICmp, a: u32, b: u32, signed: bool) -> bool {
     }
 }
 
-/// `lop3`'s truth table: bit `n` of `lut` is the result for the input
-/// combination whose bits are `(a, b, c)` read as a 3-bit number.
+/// `lop3`'s truth table: bit `n` of `lut` is the result for inputs `(a, b, c)` = n.
 fn lop3(a: u32, b: u32, c: u32, lut: u8) -> u32 {
     let mut out = 0u32;
     for i in 0..8u32 {
@@ -3199,7 +2897,6 @@ fn truncate(v: u32, bytes: u8) -> u32 {
     }
 }
 
-/// One 16-bit half of a register, as `xmad` reads it.
 fn half(v: u32, high: bool, signed: bool) -> u32 {
     let h = if high { v >> 16 } else { v & 0xffff };
     if signed {
@@ -3208,8 +2905,7 @@ fn half(v: u32, high: bool, signed: bool) -> u32 {
         h
     }
 }
-/// A load narrower than a register: the raw bytes, sign-extended for the
-/// signed forms. `None` means `size` moves whole registers instead.
+/// A sub-register load, sign-extended for signed forms; `None` for whole registers.
 fn narrow_load(
     size: MemSize,
     mut byte: impl FnMut(usize) -> ShaderResult<u8>,
@@ -3230,9 +2926,7 @@ fn narrow_load(
     }))
 }
 
-/// The registers a load of `size` from byte-addressed scratch produces. Past
-/// the end reads zero, which is what an out-of-range local access gave before
-/// sub-word sizes were honoured.
+/// Registers from byte-addressed scratch; past the end reads zero.
 fn read_scratch(bytes: &[u8], base: usize, size: MemSize) -> [u32; 4] {
     let mut out = [0u32; 4];
     if let Ok(Some(raw)) = narrow_load(size, |i| Ok(bytes.get(base + i).copied().unwrap_or(0))) {
@@ -3249,8 +2943,7 @@ fn read_scratch(bytes: &[u8], base: usize, size: MemSize) -> [u32; 4] {
     out
 }
 
-/// Write `value` into byte-addressed scratch, growing it to `cap` first. A
-/// store that would run past the end is dropped rather than growing it.
+/// Write to scratch, growing to `cap`; stores past it are dropped.
 fn write_scratch(bytes: &mut Vec<u8>, cap: usize, base: usize, value: &[u8]) {
     if bytes.len() < cap {
         bytes.resize(cap, 0);
@@ -3261,7 +2954,6 @@ fn write_scratch(bytes: &mut Vec<u8>, cap: usize, base: usize, value: &[u8]) {
     }
 }
 
-/// The [`MemSize`] that moves `width` bytes as whole registers.
 fn wide_size(width: usize) -> MemSize {
     if width == 8 {
         MemSize::B64
@@ -3287,7 +2979,6 @@ fn unpack(value: u64, width: usize) -> [u8; 8] {
     out
 }
 
-/// What an atomic leaves in memory, given what was there.
 fn atom_apply(op: AtomOp, ty: AtomType, old: u64, b: u64, stored: u64) -> ShaderResult<u64> {
     let wide = matches!(ty, AtomType::U64 | AtomType::S64);
     let trim = |v: u64| if wide { v } else { v & 0xFFFF_FFFF };
@@ -3312,8 +3003,7 @@ fn atom_apply(op: AtomOp, ty: AtomType, old: u64, b: u64, stored: u64) -> Shader
                 old
             }
         }
-        // Wrapping counters: `inc` rolls to zero once it reaches the operand,
-        // `dec` rolls back up to it. Both are unsigned however the type reads.
+        // `inc` wraps to zero at the operand, `dec` back up to it; both unsigned.
         AtomOp::Inc => {
             if old >= b {
                 0
@@ -3342,7 +3032,7 @@ fn atom_apply(op: AtomOp, ty: AtomType, old: u64, b: u64, stored: u64) -> Shader
     })
 }
 
-/// `x < y` under the atomic's type, which is what `min`/`max` turn on.
+/// `x < y` under the atomic's type.
 fn atom_less(ty: AtomType, x: u64, y: u64) -> bool {
     match ty {
         AtomType::F32 => f32::from_bits(x as u32) < f32::from_bits(y as u32),
@@ -3364,8 +3054,7 @@ mod tests {
         HashMap::new()
     }
 
-    /// Build a straight-line program out of unpredicated ops, at the byte
-    /// offsets a real 32-byte-block layout would put them at.
+    /// A straight-line program at real 32-byte-block byte offsets.
     fn prog(ops: &[Op]) -> Compiled {
         let mut p = crate::gpu::shader::Program::default();
         for (i, &op) in ops.iter().enumerate() {
@@ -3377,9 +3066,7 @@ mod tests {
     }
     use std::cell::RefCell;
 
-    /// Records the `(handle, u, v)` it was asked to sample and always
-    /// returns the same colour, so a test can check both what the
-    /// interpreter computed and what it fed the texture backend.
+    /// Records what it was asked to sample and returns a fixed colour.
     struct RecordingTextures {
         calls: RefCell<Vec<(u32, f32, f32, u32)>>,
         color: [f32; 4],
@@ -3392,8 +3079,7 @@ mod tests {
         }
     }
 
-    /// A flat byte-addressed global address space, so the memory ops can be
-    /// checked without a GPU address space under them.
+    /// A flat byte-addressed global memory.
     #[derive(Default)]
     struct FlatMemory {
         bytes: RefCell<Vec<u8>>,
@@ -3434,9 +3120,6 @@ mod tests {
 
     #[test]
     fn sr_y_direction_reads_a_sign_and_never_a_zero() {
-        // A shader multiplies a screen-space direction by this. Answering the
-        // zero an unmodelled special register gets does not flip anything --
-        // it deletes it.
         let up = SpecialRegs {
             y_negate: false,
             ..SpecialRegs::default()
@@ -3464,8 +3147,7 @@ mod tests {
                 Op::S2r { dst: 2, sr: 0x25 },
                 Op::S2r { dst: 3, sr: 0x27 },
                 Op::S2r { dst: 4, sr: 0x32 },
-                // Not modelled, and still zero rather than an error: that is
-                // what every one of these read before compute existed.
+                // Unmodelled: zero, not an error.
                 Op::S2r { dst: 5, sr: 0x1d },
                 Op::Exit,
             ]),
@@ -3493,9 +3175,7 @@ mod tests {
 
     #[test]
     fn a_global_store_narrower_than_a_word_touches_only_its_own_bytes() {
-        // The byte and halfword forms used to load a whole word, and had no
-        // store at all. A kernel writing a byte array would have scribbled
-        // over three of its neighbours.
+        // Byte and halfword loads and stores must not touch neighbours.
         let memory = FlatMemory::with(16);
         memory.write_u32(0, 0xAABB_CCDD).unwrap();
         let consts = no_consts();
@@ -3609,19 +3289,17 @@ mod tests {
         assert_eq!(atom_apply(Or, u32s, 0b110, 0b011, 0).unwrap(), 0b111);
         assert_eq!(atom_apply(Xor, u32s, 0b110, 0b011, 0).unwrap(), 0b101);
         assert_eq!(atom_apply(Exch, u32s, 5, 3, 0).unwrap(), 3);
-        // A signed minimum is the whole reason the type is carried.
         let negative = (-4i32) as u32 as u64;
         assert_eq!(
             atom_apply(Min, AtomType::S32, negative, 3, 0).unwrap(),
             negative
         );
         assert_eq!(atom_apply(Min, u32s, negative, 3, 0).unwrap(), 3);
-        // `inc` wraps to zero at the operand, `dec` wraps back up to it.
         assert_eq!(atom_apply(Inc, u32s, 2, 4, 0).unwrap(), 3);
         assert_eq!(atom_apply(Inc, u32s, 4, 4, 0).unwrap(), 0);
         assert_eq!(atom_apply(Dec, u32s, 0, 4, 0).unwrap(), 4);
         assert_eq!(atom_apply(Dec, u32s, 3, 4, 0).unwrap(), 2);
-        // `cas` stores the register after its comparand, and only on a match.
+        // `cas` stores the register after its comparand, only on a match.
         assert_eq!(atom_apply(Cas, u32s, 5, 5, 9).unwrap(), 9);
         assert_eq!(atom_apply(Cas, u32s, 5, 4, 9).unwrap(), 5);
         let one = 1.0f32.to_bits().into();
@@ -3656,8 +3334,7 @@ mod tests {
 
     #[test]
     fn a_barrier_in_a_draw_is_an_error_rather_than_a_silent_no_op() {
-        // It used to decode to `Inert`, which is right for `membar` and wrong
-        // for this: outside a CTA there is nothing to synchronise with.
+        // Outside a CTA a barrier is an error.
         let consts = no_consts();
         let env = Env::new(&consts, &NoTextures);
         let err = Invocation::new()
@@ -3674,9 +3351,7 @@ mod tests {
         assert!(format!("{err:?}").contains("no CTA"), "got {err:?}");
     }
 
-    /// Four lanes exchanging a register is the whole point of a quad: this
-    /// is `dFdx`'s fetch, where each lane reads the value its horizontal
-    /// neighbour holds at the same instruction.
+    /// `dFdx`'s fetch: each lane reads its horizontal neighbour.
     #[test]
     fn a_shuffle_suspends_until_the_rest_of_its_warp_can_answer_it() {
         let consts = no_consts();
@@ -3693,8 +3368,7 @@ mod tests {
             Op::Exit,
         ]);
 
-        // `begin` rather than `reset`: the seeded registers are the values
-        // the lanes are exchanging.
+        // `begin`, not `reset`, to keep the seeded registers.
         let mut warp: [Invocation; 4] = std::array::from_fn(|_| Invocation::new());
         for (lane, invocation) in warp.iter_mut().enumerate() {
             invocation.set_reg(0, 10 + lane as u32);
@@ -3710,7 +3384,7 @@ mod tests {
             assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Exited);
         }
 
-        // `bfly 1` pairs the lanes whose numbers differ in the low bit.
+        // `bfly 1` pairs lanes differing in the low bit.
         assert_eq!(warp.each_ref().map(|lane| lane.reg(1)), [11, 10, 13, 12]);
         assert!(
             warp.iter().all(|lane| lane.pred(0)),
@@ -3718,9 +3392,7 @@ mod tests {
         );
     }
 
-    /// A lane the clamp puts out of reach keeps its own value, and says so in
-    /// the predicate. `shfl.up` at the bottom of a segment is the case that
-    /// happens: there is nothing below it to read.
+    /// An out-of-clamp lane keeps its own value and clears the predicate.
     #[test]
     fn a_shuffle_that_reaches_past_its_segment_keeps_the_lane_s_own_value() {
         let consts = no_consts();
@@ -3753,9 +3425,7 @@ mod tests {
         assert!(warp[1].pred(0));
     }
 
-    /// `rro` passes its argument through with its modifiers applied, so
-    /// `rro` then `mufu.sin` is the sine of the negated argument, and a
-    /// negated zero keeps its sign.
+    /// `rro` applies modifiers, so a negated zero keeps its sign through `mufu.sin`.
     #[test]
     fn a_range_reduction_applies_its_negate_and_absolute_value() {
         let consts = no_consts();
@@ -3802,9 +3472,7 @@ mod tests {
         assert_eq!(invocation.reg(4), (-0.0f32).to_bits());
     }
 
-    /// Three of four lanes hold the predicate: `all` says no, `any` yes,
-    /// `eq` no, and each lane gets the same ballot. A lane that exited
-    /// before the vote is not in it.
+    /// Three of four lanes hold the predicate; an exited lane isn't counted.
     #[test]
     fn a_vote_answers_from_the_lanes_that_reached_it() {
         let consts = no_consts();
@@ -3842,7 +3510,7 @@ mod tests {
             assert!(warp.iter().all(|lane| lane.pred(2) == verdict), "{mode:?}");
         }
 
-        // Only lanes 0 and 2 reach this vote, and both hold p0.
+        // Only lanes 0 and 2 reach this vote.
         let program = prog(&[
             Op::Vote {
                 dst: 1,
@@ -3887,15 +3555,13 @@ mod tests {
         assert!(format!("{err:?}").contains("another lane"), "got {err:?}");
     }
 
-    /// The other half of a derivative: which sign each lane adds with is a
-    /// property of where it sits in the quad, and `sr0` is how a shader asks
-    /// where that is.
+    /// Each lane's `fswzadd` sign depends on its quad position.
     #[test]
     fn the_per_lane_add_takes_its_signs_from_the_lane_it_runs_on() {
         let consts = no_consts();
         let program = prog(&[
             Op::S2r { dst: 5, sr: 0x00 },
-            // 0xe4 is the identity swizzle: lane n takes code n.
+            // 0xe4 is the identity swizzle.
             Op::Fswzadd {
                 dst: 0,
                 a: 1,
@@ -3906,7 +3572,7 @@ mod tests {
             Op::Exit,
         ]);
 
-        // (-a - b), (a - b), (-a + b), (0 - b), the four codes in order.
+        // (-a - b), (a - b), (-a + b), (0 - b).
         for (lane, expected) in [-4.0f32, 2.0, -2.0, -1.0].into_iter().enumerate() {
             let mut env = Env::new(&consts, &NoTextures);
             env.special.lane = lane as u32;
@@ -3964,9 +3630,7 @@ mod tests {
 
     #[test]
     fn a_hand_written_alu_program_produces_the_expected_registers() {
-        // r2 = r0 * r1; r3 = r2 * r1 + r0. Register-register forms only, so
-        // no constant source is exercised: this is purely the interpreter's
-        // execute loop, independent of the decoder and of any real shader.
+        // r2 = r0 * r1; r3 = r2 * r1 + r0.
         let program = prog(&[
             Op::Fmul {
                 dst: 2,
@@ -4000,9 +3664,7 @@ mod tests {
         assert_eq!(inv.reg_f32(3), 20.0);
     }
 
-    /// A program with real byte offsets, so branch targets resolve. Each
-    /// entry is `(op, predicate)`; offsets follow the 32-byte block layout
-    /// (slot 0 of every block is a `sched` word, so it is skipped).
+    /// A program at real byte offsets so branch targets resolve; slot 0 of each block is `sched`.
     fn prog_at(entries: &[(Op, Pred)]) -> Compiled {
         let mut p = crate::gpu::shader::Program::default();
         let mut offset = crate::gpu::shader::ENTRY_OFFSET;
@@ -4050,7 +3712,6 @@ mod tests {
         let mut inv = Invocation::new();
         inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
             .unwrap();
-        // p0 starts false.
         assert_eq!(inv.reg_f32(1), 1.0);
         assert_eq!(inv.reg(2), 0, "a false guard must skip the write");
         assert_eq!(inv.reg_f32(3), 3.0);
@@ -4058,9 +3719,7 @@ mod tests {
 
     #[test]
     fn isetp_then_a_predicated_branch_takes_the_right_path() {
-        // if (r0 < r1) r2 = 10 else r2 = 20, the shape every `if` in a real
-        // shader compiles to, and the whole reason the decoder had to stop
-        // treating a predicated instruction as unsupported.
+        // if (r0 < r1) r2 = 10 else r2 = 20
         let program = prog_at(&[
             (
                 Op::Isetp {
@@ -4088,7 +3747,7 @@ mod tests {
             (Op::Mov32i { dst: 2, imm: 20 }, Pred::ALWAYS), // else, at 0x30
             (Op::Exit, Pred::ALWAYS),                 // at 0x38
         ]);
-        // Offset 0x20 is a `sched` control word, not an instruction slot.
+        // Offset 0x20 is a `sched` word.
         let offsets: Vec<u32> = (0..program.len()).map(|i| program.offset(i)).collect();
         assert_eq!(offsets, vec![0x08, 0x10, 0x18, 0x28, 0x30, 0x38]);
 
@@ -4193,9 +3852,7 @@ mod tests {
 
     #[test]
     fn integer_ops_use_the_registers_as_integers_not_floats() {
-        // The register file is untyped; the same bits are an address here
-        // and a float three instructions later, so an integer op must not
-        // round-trip through f32.
+        // An integer op must not round-trip through f32.
         let program = prog_at(&[
             (
                 Op::Mov32i {
@@ -4250,9 +3907,9 @@ mod tests {
 
     #[test]
     fn lop3_evaluates_its_truth_table() {
-        // lut 0xe8 is majority(a, b, c): true where at least two inputs are.
+        // lut 0xe8 is majority(a, b, c).
         assert_eq!(lop3(0b1100, 0b1010, 0b0110, 0xe8), 0b1110);
-        // lut 0xf0 is "just a", 0xcc "just b", 0xaa "just c".
+        // lut 0xf0 is a, 0xcc b, 0xaa c.
         assert_eq!(lop3(0xdead, 0xbeef, 0x1234, 0xf0), 0xdead);
         assert_eq!(lop3(0xdead, 0xbeef, 0x1234, 0xcc), 0xbeef);
         assert_eq!(lop3(0xdead, 0xbeef, 0x1234, 0xaa), 0x1234);
@@ -4345,15 +4002,13 @@ mod tests {
         inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
             .unwrap();
 
-        // dst=RZ: the write to r255 is discarded, not aliased to some slot.
+        // dst=RZ discards the write.
         assert_eq!(inv.reg_f32(2), 0.0 * 3.0 + 7.0);
     }
 
     #[test]
     fn texs_resolves_its_handle_from_the_driver_constant_bank_and_writes_the_masked_channels() {
-        // tex.frag's real shape, with the roles `isa`'s `decodes_texs` test
-        // documents: the destinations are REG_00 and REG_28, the coordinates
-        // REG_08 and REG_20.
+        // tex.frag: destinations REG_00 and REG_28, coordinates REG_08 and REG_20.
         let program = prog(&[
             Op::Texs {
                 dst: 2,
@@ -4373,9 +4028,7 @@ mod tests {
 
         let mut consts = HashMap::new();
         let handle = 7u32 | (2u32 << 20); // imageId=7, samplerId=2
-                                          // The immediate 0x20 is a dword index, so the handle is 0x80 bytes in
-                                          //: putting it at 0x20 instead is what made every draw in a page of
-                                          // text resolve to the same texture.
+                                          // 0x20 is a dword index: byte 0x80.
         consts.insert(
             (crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x80),
             f32::from_bits(handle),
@@ -4405,11 +4058,8 @@ mod tests {
 
     #[test]
     fn solid_color_fragment_shader_reproduces_the_perspective_corrected_color() {
-        // solid.frag: `oColor = vColor;`, a fixture from the same envydis
-        // capture `isa`'s module docs cite, run end to end through the real
-        // decoder. The rasterizer normally supplies attr_in already divided
-        // by clip-w plus 1/w itself at a[0x7c]; we inject that directly here
-        // since Stage 3 is scoped to the interpreter, not vertex fetch.
+        // solid.frag (`oColor = vColor;`) through the real decoder, with attr_in
+        // already divided by clip-w and 1/w at a[0x7c].
         let w = 2.0f32;
         let color = [0.25f32, 0.5, 0.75, 1.0];
 
@@ -4425,7 +4075,7 @@ mod tests {
         inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
             .unwrap();
 
-        // Fragment output RT0 is registers r0-r3.
+        // Fragment output RT0 is r0-r3.
         assert_eq!(inv.reg_f32(0), color[0]);
         assert_eq!(inv.reg_f32(1), color[1]);
         assert_eq!(inv.reg_f32(2), color[2]);
@@ -4434,11 +4084,7 @@ mod tests {
 
     #[test]
     fn mvp_vertex_shader_transforms_a_known_position_via_a_fake_constant_buffer() {
-        // mvp.vert: `gl_Position = uMVP * aPosition; vColor = aColor;`, the
-        // Stage 0 fixture cited in `isa`'s module docs, run end to end
-        // through the real decoder with a hand-picked matrix standing in for
-        // a real bound constant buffer (real GPU-memory wiring is
-        // `MemoryConstants`, exercised separately below).
+        // mvp.vert (`gl_Position = uMVP * aPosition; vColor = aColor;`) through the real decoder.
         let mut bytes = block(
             (0xfc20070f, 0x081f8441),
             (0x0807ff00, 0xefd9ff80), // ld b128 $r0 a[0x80] 0x0
@@ -4483,8 +4129,7 @@ mod tests {
         ));
         let program = Compiled::new(&decode_program(&bytes).unwrap());
 
-        // A std140 mat4 is column-major: column c's four rows sit at bytes
-        // [c*16, c*16+16). m[row][col] is the usual math notation.
+        // A std140 mat4 is column-major.
         let m: [[f32; 4]; 4] = [
             [2.0, 0.0, 0.0, 1.0],
             [0.0, 1.0, 0.0, 2.0],
@@ -4524,7 +4169,6 @@ mod tests {
         assert_eq!(inv.attr_out.get(0x78), expected[2]);
         assert_eq!(inv.attr_out.get(0x7c), expected[3]);
 
-        // vColor = aColor passthrough.
         assert_eq!(inv.attr_out.get(0x80), color[0]);
         assert_eq!(inv.attr_out.get(0x84), color[1]);
         assert_eq!(inv.attr_out.get(0x88), color[2]);
@@ -4585,14 +4229,8 @@ mod tests {
 
     #[test]
     fn textured_fragment_shader_multiplies_the_real_sample_by_vertex_colour() {
-        // tex.frag in full (the same real capture `isa`'s module docs and
-        // `decodes_texs`'s test cite): `oColor = texture(uTex, vTexCoord) *
-        // vColor;`. This is also the test that caught `texs`'s real
-        // dst/coordinate roles (see `isa::decodes_texs`'s doc comment),
-        // with a solid vertex colour of (1,1,1,1) the expected output is
-        // exactly the sampled texture colour, letting a wrong register
-        // mapping surface immediately as a wrong result instead of a
-        // plausible-looking wash of white.
+        // tex.frag (`oColor = texture(uTex, vTexCoord) * vColor;`). With a white vertex
+        // colour the output is exactly the sampled colour.
         let mut bytes = block(
             (0xe1a0070f, 0x003c0401),
             (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
@@ -4661,11 +4299,7 @@ mod tests {
 
     #[test]
     fn an_f16_texs_lands_its_channels_packed_as_halves() {
-        // Asphalt 9's splash shader: `texs` in the packed form, whose result
-        // the `h*2` ops after it read back as half pairs. Landing four floats
-        // in four registers instead left every colour after the sample being
-        // read as a pair of halves of an f32 bit pattern -- a red car came out
-        // green.
+        // Asphalt 9's splash shader: packed `texs`, read back as half pairs by `h*2` ops.
         let sample = [0.25f32, 0.5, 0.75, 1.0];
         struct StubTex([f32; 4]);
         impl TextureSource for StubTex {
@@ -4717,7 +4351,7 @@ mod tests {
         inv.execute(&program, &Env::new(&no_consts, &StubTex(sample)))
             .unwrap();
 
-        // Two registers, not four: r1 holds (r, g) and r0 holds (b, a).
+        // r1 holds (r, g) and r0 holds (b, a).
         assert_eq!(inv.reg(1), halves(sample[0], sample[1]));
         assert_eq!(inv.reg(0), halves(sample[2], sample[3]));
     }
@@ -4774,7 +4408,6 @@ mod tests {
         assert_eq!(inv.reg(4), halves(0.75, 0.0));
     }
 
-    /// Pack two f32s into the pair of halves a register holds.
     fn halves(low: f32, high: f32) -> u32 {
         u32::from(f32_to_f16(low)) | (u32::from(f32_to_f16(high)) << 16)
     }
@@ -4820,9 +4453,7 @@ mod tests {
         assert_eq!(lanes(inv.reg(0)), [1.5, -2.0]);
     }
 
-    /// Every swizzle but `H1_H0` reads one lane twice, and `F32` reads the
-    /// register as a single float rather than as a pair at all, which is how
-    /// a shader multiplies a `half2` by a `float`.
+    /// Every swizzle but `H1_H0` reads one lane twice; `F32` reads one float.
     #[test]
     fn a_half_swizzle_chooses_which_lanes_a_source_offers() {
         let a = halves(1.0, 2.0);
@@ -4840,9 +4471,7 @@ mod tests {
         assert_eq!(lanes(inv.reg(5)), [11.0, 12.0]);
     }
 
-    /// `hadd2.f32` (swizzles and merge all `F32`) is a plain float add
-    /// issued on the half unit, and it is what most of "A Short Hike"'s
-    /// skipped draws stopped on.
+    /// `hadd2.f32` is a plain float add on the half unit.
     #[test]
     fn a_half_op_in_f32_mode_is_an_ordinary_float_op() {
         let inv = run_half(
@@ -4852,8 +4481,7 @@ mod tests {
         assert_eq!(f32::from_bits(inv.reg(0)), 3.75);
     }
 
-    /// A merging write leaves the other half of the destination alone, which
-    /// also makes the destination one of the instruction's sources.
+    /// A merging write keeps the other half and reads the destination.
     #[test]
     fn a_merging_half_op_keeps_the_half_it_does_not_write() {
         let inv = run_half(
@@ -4925,8 +4553,7 @@ mod tests {
         assert_eq!(lanes(inv.reg(0)), [9.0, 14.0]);
     }
 
-    /// `.fmz` is D3D9's rule that anything times zero is zero, infinity and
-    /// NaN included, which an ordinary multiply answers with a NaN.
+    /// `.fmz`: anything times zero is zero, including infinity and NaN.
     #[test]
     fn fmz_makes_anything_times_zero_zero() {
         let hmul = |prec| Op::Hmul2 {
@@ -4948,9 +4575,7 @@ mod tests {
         assert_eq!(lanes(fmz.reg(0)), [0.0, 6.0]);
     }
 
-    /// `hsetp2` writes one predicate per lane, unlike `fsetp`'s result and
-    /// its inverse, until `.h_and`, which ands the lanes and then does write
-    /// the inverse.
+    /// `hsetp2` writes one predicate per lane; `.h_and` ands them and writes the inverse.
     #[test]
     fn hsetp2_writes_one_predicate_per_lane_until_h_and() {
         let setp = |and| Op::Hsetp2 {
@@ -4968,7 +4593,6 @@ mod tests {
             and,
             ftz: false,
         };
-        // Lane 0 compares true, lane 1 false.
         let operands = [(1, halves(5.0, 1.0)), (2, halves(2.0, 8.0))];
         let split = run_half(&operands, &[setp(false)]);
         assert!(split.pred(0) && !split.pred(1));
@@ -4976,7 +4600,6 @@ mod tests {
         assert!(!anded.pred(0) && anded.pred(1));
     }
 
-    /// `hset2` puts each lane's answer in its own half of the register.
     #[test]
     fn hset2_fills_each_half_with_its_own_lane() {
         let set = |bf| Op::Hset2 {
@@ -4995,13 +4618,11 @@ mod tests {
         };
         let operands = [(1, halves(5.0, 1.0)), (2, halves(2.0, 8.0))];
         assert_eq!(run_half(&operands, &[set(false)]).reg(0), 0x0000_FFFF);
-        // `.bf` answers with 1.0h rather than a mask.
+        // `.bf` answers 1.0h.
         assert_eq!(run_half(&operands, &[set(true)]).reg(0), halves(1.0, 0.0));
     }
 
-    /// `tex.aoffi` is a *texel* offset and the sampler takes normalized
-    /// coordinates, so the offset has to be scaled by the level's size. Every
-    /// tap of Persona 5 Royal's blur read the same texel without it.
+    /// `tex.aoffi` offsets are in texels, scaled by the level's size.
     #[test]
     fn a_tex_texel_offset_moves_the_sample_by_one_texel() {
         fn word(lo: u32, hi: u32) -> [u8; 8] {
@@ -5010,8 +4631,7 @@ mod tests {
             out[4..].copy_from_slice(&hi.to_le_bytes());
             out
         }
-        // One of the title's own: `tex.aoffi $r1 $r4 $r7 0x8 t2d r`, then
-        // `exit`. Coordinates in $r4/$r5, the packed offset in $r7.
+        // `tex.aoffi $r1 $r4 $r7 0x8 t2d r`; coordinates in $r4/$r5, offset in $r7.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&word(0, 0)); // sched
         bytes.extend_from_slice(&word(0xa0770401, 0xc07a0080));
@@ -5019,7 +4639,6 @@ mod tests {
         bytes.extend_from_slice(&word(0, 0));
         let program = Compiled::new(&super::super::decode_program(&bytes).unwrap());
 
-        /// A 64x32 image whose sample reports where it was asked to look.
         struct Probe(std::cell::Cell<(f32, f32)>);
         impl TextureSource for Probe {
             fn sample(&self, _h: u32, u: f32, v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
@@ -5039,7 +4658,7 @@ mod tests {
             ),
             f32::from_bits(1),
         );
-        // +1 texel in x, -1 in y: each axis is a signed four-bit field.
+        // +1 texel in x, -1 in y.
         for (packed, want) in [
             (0x00u32, (0.5, 0.5)),
             (0x01, (0.5 + 1.0 / 64.0, 0.5)),
@@ -5055,8 +4674,7 @@ mod tests {
         }
     }
 
-    /// Tomodachi Life's `tex` of a cube array: the direction in the three
-    /// registers after the cube, and every channel landing from `$r0`.
+    /// `tex` of a cube array: direction after the cube, channels from `$r0`.
     #[test]
     fn a_cube_array_tex_samples_the_cube_its_layer_register_names() {
         fn word(lo: u32, hi: u32) -> [u8; 8] {
@@ -5072,7 +4690,6 @@ mod tests {
         bytes.extend_from_slice(&word(0, 0));
         let program = Compiled::new(&super::super::decode_program(&bytes).unwrap());
 
-        /// Reports the direction and the cube it was asked for.
         struct Probe(std::cell::Cell<(f32, f32, f32, u32)>);
         impl TextureSource for Probe {
             fn sample(&self, _h: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
@@ -5103,7 +4720,7 @@ mod tests {
         );
         let probe = Probe(std::cell::Cell::new((0.0, 0.0, 0.0, 0)));
         let mut inv = Invocation::new();
-        // The cube is an integer in the low half; the high half is not it.
+        // The cube is the low half.
         inv.set_reg(4, 0x0001_0003);
         inv.set_reg_f32(5, -1.0);
         inv.set_reg_f32(6, 0.5);
@@ -5113,10 +4730,7 @@ mod tests {
         assert_eq!([0, 1, 2, 3].map(|r| inv.reg_f32(r)), [0.25, 0.5, 0.75, 1.0]);
     }
 
-    /// The idiom Nintendo Switch Sports tests a value with: convert it into
-    /// the zero register only to set the condition codes, then `csetp.neu`
-    /// them, which Eden spells `S || !Z` and which is "not zero" for an
-    /// integer.
+    /// Convert into RZ to set condition codes, then `csetp.neu` ("not zero").
     #[test]
     fn csetp_neu_after_an_i2i_cc_asks_whether_the_value_was_zero() {
         let program = [
@@ -5134,8 +4748,7 @@ mod tests {
         }
     }
 
-    /// `txq`'s answer at a level: the width and height halved once per level
-    /// and never below one, whatever the shift, as whole integers.
+    /// `txq` halves width and height per level, never below one.
     #[test]
     fn txq_reports_the_size_at_the_level_it_is_asked_about() {
         struct Sized;
@@ -5148,8 +4761,7 @@ mod tests {
                 Ok([100, 50, 3, 1])
             }
         }
-        // Nintendo Switch Sports' `txq $r0 $r8 dimension 0x8 0x3`: width and
-        // height of slot 8 at the level in `r8`, into `r0` and `r1`.
+        // `txq $r0 $r8 dimension 0x8 0x3`
         let txq = isa::decode(0xdf48008180470800).op;
         let mut consts = no_consts();
         consts.insert(
@@ -5167,8 +4779,7 @@ mod tests {
         }
     }
 
-    /// A bindless `tex.b` samples whatever handle its register holds, where a
-    /// bound `tex` reads one out of the driver's constant bank.
+    /// A bindless `tex.b` samples the handle in its register.
     #[test]
     fn a_bindless_tex_samples_the_handle_its_register_holds() {
         struct Probe(std::cell::Cell<u32>);
@@ -5193,8 +4804,7 @@ mod tests {
         assert_eq!([0, 1, 2, 3].map(|r| inv.reg_f32(r)), [0.25, 0.5, 0.75, 1.0]);
     }
 
-    /// `vmnmx` as Tomodachi Life uses it, a minimum of three words, and the
-    /// signed form, which orders the same bits the other way round.
+    /// `vmnmx` minimum of three words, signed and unsigned.
     #[test]
     fn vmnmx_takes_the_minimum_then_compares_with_the_third_operand() {
         let run = |word: u64, regs: [(u8, u32); 3]| run_half(&regs, &[isa::decode(word).op]).reg(7);
@@ -5206,9 +4816,7 @@ mod tests {
         assert_eq!(run(signed, [(9, u32::MAX), (12, 2), (7, 9)]), u32::MAX);
     }
 
-    /// A half instruction's `.ftz` flushes at the *half* threshold, four
-    /// orders of magnitude above an f32's, but only for lanes that are
-    /// halves.
+    /// A half `.ftz` flushes at the half threshold, only for half lanes.
     #[test]
     fn ftz_flushes_a_subnormal_half_but_not_a_small_float() {
         let subnormal = f16_to_f32(0x0001);
@@ -5223,7 +4831,7 @@ mod tests {
         );
         assert_eq!(lanes(inv.reg(0)), [0.0, 1.0]);
 
-        // The same instruction reading an f32 lane leaves that value alone.
+        // An f32 lane is left alone.
         let mut add = hadd2(0, 1, 2, HSwizzle::F32, HSwizzle::F32, HMerge::F32);
         let Op::Hadd2 { ftz, .. } = &mut add else {
             unreachable!()

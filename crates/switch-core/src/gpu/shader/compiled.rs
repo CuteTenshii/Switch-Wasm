@@ -1,74 +1,40 @@
-//! A decoded [`Program`] lowered for execution.
-//!
-//! [`Program`] is what the binary says: instructions paired with the byte
-//! offsets they were decoded from. That is the right shape for reading a
-//! shader and the wrong one for running it, because a fragment shader runs
-//! once per covered pixel (a full-screen quad runs it 921 600 times) and
-//! everything the interpreter re-derives on the way is re-derived that many
-//! times.
-//!
-//! This does it once. A branch's target stops being a byte offset that has to
-//! be binary-searched for on every taken branch and becomes an index; the
-//! deferred texture writes stop being looked up by a linear scan; and every
-//! constant the draw's bound banks can supply is read out of guest memory once
-//! and folded into an immediate, rather than going back through the constant
-//! cache on every operand evaluation.
-//!
-//! It is also the shape a shader translator wants, constants folded, control
-//! flow resolved, so the same lowering serves both.
+//! A decoded [`Program`] lowered for execution: branch targets resolved to
+//! indices, `texs` writes indexed, and bound constant-bank operands folded
+//! into immediates.
 
 use super::interp::{texs_writes_for, ConstantSource};
 use super::isa::{Op, Operand, Pred};
 use super::{Program, TexsWrites};
 
-/// A branch target that is not an index into [`Compiled::insns`]: either the
-/// instruction is not a branch, or its target was never decoded. The second
-/// case stays an error raised where the branch is *taken*, exactly as it was
-/// when targets were resolved there.
+/// No resolved target: not a branch, or the target was never decoded (an
+/// error raised when the branch is taken).
 pub const NO_TARGET: u32 = u32::MAX;
 
 pub struct Compiled {
-    /// The operations, with foldable constants already resolved.
-    ///
-    /// Held apart from the predicates rather than as `Vec<Instruction>`
-    /// because an `Op` is 32 bytes and an `Instruction` is 40: at 40 the array
-    /// straddles cache lines and holds 1.6 instructions per line instead of
-    /// 2, and this is walked once per instruction per covered pixel.
+    /// The operations, with foldable constants resolved. Kept apart from the
+    /// predicates so each `Op` stays 32 bytes, two per cache line.
     ops: Vec<Op>,
-    /// The guard on each operation, in its own dense array.
     preds: Vec<Pred>,
-    /// Where each instruction's branch goes, as an index into `insns`, or
-    /// [`NO_TARGET`].
+    /// Branch targets as indices into `insns`, or [`NO_TARGET`].
     targets: Vec<u32>,
-    /// The byte offset each instruction came from. Needed for error messages,
-    /// and for `brx`, whose target is a register value and so is only known
-    /// while running.
+    /// Source byte offsets, for errors and `brx`.
     offsets: Vec<u32>,
-    /// Where each `texs`'s results land, by instruction index.
     texs_writes: Vec<TexsWrites>,
-    /// The generic varying slots this program interpolates.
     interpolated_slots: Vec<usize>,
-    /// Where each `brx` can go, by the index of the `brx` itself, resolved
-    /// from the byte offsets the decoder recorded.
+    /// Each `brx`'s possible targets, keyed by the `brx` index.
     indirect: std::collections::HashMap<usize, Vec<u32>>,
-    /// The Shader Program Header, when the program had one.
     header: Option<super::ProgramHeader>,
 }
 
 impl Compiled {
-    /// Lower `program` without a constant source. Constants stay as they were
-    /// and are read through [`super::interp::Env`] as before.
+    /// Lower `program` without folding constants.
     pub fn new(program: &Program) -> Compiled {
         Compiled::lower(program, None)
     }
 
-    /// Lower `program`, folding every constant the draw's bound banks can
-    /// supply.
-    ///
-    /// Sound because a constant buffer cannot change while a draw runs: the
-    /// GPU processes methods in order, and a draw is one method. A bank that
-    /// is unbound, or an offset past the end of one, is left alone so that the
-    /// error still surfaces from the instruction that reads it.
+    /// Lower `program`, folding every constant the draw's bound banks supply.
+    /// Constant buffers cannot change during a draw; unbound banks and
+    /// out-of-range offsets stay unfolded so the error surfaces at runtime.
     pub fn with_constants(program: &Program, consts: &dyn ConstantSource) -> Compiled {
         Compiled::lower(program, Some(consts))
     }
@@ -121,7 +87,6 @@ impl Compiled {
         compiled
     }
 
-    /// The Shader Program Header, when this program was preceded by one.
     pub fn header(&self) -> Option<super::ProgramHeader> {
         self.header
     }
@@ -134,24 +99,21 @@ impl Compiled {
         self.ops.is_empty()
     }
 
-    /// The operation at `index`.
     #[inline]
     pub fn op(&self, index: usize) -> Op {
         self.ops[index]
     }
 
-    /// The guard on the operation at `index`.
     #[inline]
     pub fn pred(&self, index: usize) -> Pred {
         self.preds[index]
     }
 
-    /// Every operation, in order, for the passes that only look at opcodes.
     pub fn ops(&self) -> &[Op] {
         &self.ops
     }
 
-    /// Every guard, in order. Always as long as [`Compiled::ops`].
+    /// Always as long as [`Compiled::ops`].
     pub fn preds(&self) -> &[Pred] {
         &self.preds
     }
@@ -162,34 +124,27 @@ impl Compiled {
         self.targets.get(index).copied().unwrap_or(NO_TARGET)
     }
 
-    /// The byte offset instruction `index` was decoded from, what an error
-    /// message names, since that is the address in the shader binary.
+    /// The shader-binary byte offset of instruction `index`, for errors.
     pub fn offset(&self, index: usize) -> u32 {
         self.offsets.get(index).copied().unwrap_or(0)
     }
 
-    /// The index of the instruction at `byte_offset`, if it was decoded.
-    ///
-    /// Only `brx` needs this: every other branch had its target resolved when
-    /// this was built.
+    /// The index of the instruction at `byte_offset`; only `brx` needs it.
     pub fn index_of(&self, byte_offset: u32) -> Option<usize> {
         self.offsets.binary_search(&byte_offset).ok()
     }
 
-    /// Where the `brx` at `index` can go, as indices, the arms of the switch
-    /// it lowers, which nothing on the instruction itself names.
+    /// The targets of the `brx` at `index`, as indices.
     pub fn indirect_targets(&self, index: usize) -> Option<&[u32]> {
         self.indirect.get(&index).map(|t| t.as_slice())
     }
 
-    /// The generic varying slots this program's `ipa`s read, ascending: see
-    /// [`super::interpolated_slots`].
+    /// See [`super::interpolated_slots`].
     pub fn interpolated_slots(&self) -> &[usize] {
         &self.interpolated_slots
     }
 
-    /// The deferred register writes the `texs` at `index` produces: see
-    /// [`Program::texs_writes`].
+    /// See [`Program::texs_writes`].
     pub fn texs_writes(&self, index: usize) -> &[(u8, super::isa::TexsStore, usize)] {
         self.texs_writes
             .iter()
@@ -199,9 +154,7 @@ impl Compiled {
     }
 }
 
-/// The byte offset an instruction branches to, for the forms whose target is
-/// known statically. `brx` is absent on purpose: its target is a register
-/// value plus a base, so there is nothing to resolve here.
+/// The static byte target of a branch; `brx` targets are registers, so it is absent.
 fn branch_target(op: Op) -> Option<u32> {
     match op {
         Op::Bra { target } | Op::Ssy { target } | Op::Pbk { target } | Op::Pcnt { target } => {
@@ -211,13 +164,9 @@ fn branch_target(op: Op) -> Option<u32> {
     }
 }
 
-/// Replace every constant-bank operand whose value this draw already knows
-/// with that value.
-///
-/// Missing a variant here costs a fold, not correctness: the operand stays a
-/// `Const` and is read through the constant source exactly as it was.
+/// Replace constant-bank operands this draw already knows with their values.
+/// A missed variant only loses a fold.
 fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
-    /// Resolve one operand, or leave it as it is.
     fn value(operand: Operand, consts: &dyn ConstantSource) -> Operand {
         match operand {
             Operand::Const { bank, offset } => match consts.read_const(bank, offset) {
@@ -764,8 +713,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             hi,
         },
 
-        // Everything else carries no constant-bank operand: `ldc`'s bank is
-        // indexed by a register, so its value is not known until it runs.
+        // `ldc`'s bank is register-indexed, so it cannot be folded.
         other => other,
     }
 }
@@ -778,8 +726,7 @@ mod tests {
     use crate::Error;
     use std::collections::HashMap;
 
-    /// A straight-line program at the byte offsets a real 32-byte-block
-    /// layout would put it at.
+    /// A straight-line program at 32-byte-block byte offsets.
     fn program(ops: &[Op]) -> Program {
         let mut p = Program::default();
         let mut offset = crate::gpu::shader::ENTRY_OFFSET;
@@ -791,7 +738,7 @@ mod tests {
         p
     }
 
-    /// A constant source that has nothing, the way an unbound bank behaves.
+    /// A constant source with nothing bound.
     struct Unbound;
     impl ConstantSource for Unbound {
         fn read_const(&self, bank: u8, _offset: u16) -> ShaderResult<u32> {
@@ -826,8 +773,7 @@ mod tests {
 
     #[test]
     fn a_constant_that_cannot_be_read_is_left_for_the_instruction_to_fail_on() {
-        // Folding must not swallow the error: an unbound bank has to still be
-        // reported from the instruction that reads it, naming that bank.
+        // An unbound bank must still be reported from the reading instruction.
         let b = Operand::Const { bank: 5, offset: 0 };
         let p = program(&[Op::Mov { dst: 0, src: b }]);
         let compiled = Compiled::with_constants(&p, &Unbound);
@@ -836,9 +782,7 @@ mod tests {
 
     #[test]
     fn folding_cannot_change_what_a_program_computes() {
-        // The whole justification for folding is that it is invisible, so
-        // check that directly: the same program, run both ways, must leave
-        // the same registers behind.
+        // Folding must be invisible: both ways leave the same registers.
         let consts: HashMap<(u8, u16), f32> =
             [((0, 0), 3.0f32), ((0, 4), 0.5f32)].into_iter().collect();
         let ops = [
@@ -884,8 +828,6 @@ mod tests {
 
     #[test]
     fn a_branch_target_becomes_an_index() {
-        // Resolved once here rather than binary-searched on every taken
-        // branch, which is most of what this lowering is for.
         let p = program(&[
             Op::Nop,
             Op::Bra {
@@ -901,8 +843,7 @@ mod tests {
 
     #[test]
     fn a_branch_to_an_offset_that_was_never_decoded_is_reported_when_taken() {
-        // Not at lowering: a program may carry a branch that no path reaches,
-        // and refusing to lower it would refuse shaders that run fine.
+        // Unreachable bad branches must not stop lowering.
         let p = program(&[Op::Bra { target: 0x1234 }]);
         let compiled = Compiled::new(&p);
         assert_eq!(compiled.target(0), NO_TARGET);

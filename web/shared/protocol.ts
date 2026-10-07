@@ -1,75 +1,52 @@
-/* The contract between the page and the worker that hosts the emulator.
+// The page/worker command contract; both TypeScript builds check against it.
 
-   Both sides compile against this: the page's `call('run', slice)` is checked
-   against the handler the worker actually implements, and a handler that
-   returns the wrong shape is a build error rather than a `undefined is not a
-   function` somewhere in the run loop. */
-
-/** Byte payloads always own a plain ArrayBuffer: they are either read from a
- *  File or sliced out of wasm memory, and saying so is what lets one be
- *  handed straight to ImageData, Blob or a transfer list. */
+// Byte payloads own a plain ArrayBuffer, so they can go to ImageData, Blob or a transfer.
 export type Bytes = Uint8Array<ArrayBuffer>;
 
-/** One path the guest touched, as `switch_sd_take_changes_json` reports it. */
+// One path the guest touched, from `switch_sd_take_changes_json`.
 export interface FsChange {
   kind: 'file' | 'dir' | 'deleted';
   path: string;
 }
 
-/** Guest RAM is the emulated console's own memory use; `wasm` is what the
- *  worker's linear memory costs the browser. */
+// `wasm` is the worker's linear memory size.
 export interface RamUsage {
   guest: number;
   wasm: number;
 }
 
-/** What the block translator has been doing. `executed` counts blocks
- *  entered, so `executed / translated` is how much each translation paid for
- *  itself; `invalidated` counts blocks dropped because the guest wrote over
- *  the code they came from. */
-/** What the installed GPU backend has been doing. `backend` is absent while
- *  the software rasterizer has the frame: it never declines a draw, so it has
- *  nothing to report. The timings are milliseconds over the whole run and are
- *  present whenever a device is. */
+// GPU backend counters; `backend` is absent while the software rasterizer has the frame.
+// Timings are milliseconds over the whole run.
 export interface GpuReport {
   backend?: 'device';
-  /** Frames presented. Flush is a per-frame cost, one readback of the scanout
-   *  surface, so this is what its timing has to be divided by, not draws. */
+  // Frames presented; flush is a per-frame cost.
   frames?: number;
   drawn?: number;
   fallbacks?: number;
   pipelines?: number;
   modules?: number;
-  /** Surfaces the backend is holding on the device. Every flush writes back
-   *  all of them, so this growing is the flush time growing. */
+  // Surfaces held on the device; every flush writes them all back.
   held?: number;
   evicted?: number;
   pending?: number;
-  /** Bytes lifted out of guest memory by `Uploads::of`, by category. Textures
-   *  dominate: 96.5% of them, deswizzled from block-linear on every draw. */
+  // Bytes lifted from guest memory by `Uploads::of`, by category.
   read?: { textures: number; vertex: number; constants: number; index: number };
-  /** Texture reads served from already-deswizzled bytes, against those that
-   *  had to be read out of guest memory again. */
+  // Texture reads served from cached deswizzled bytes vs re-read from guest memory.
   textureHits?: number;
   textureMisses?: number;
-  /** Whether the rasterizer has the frames after a fallback. It lets go once
-   *  every draw of enough frames in a row could have run on the device. */
+  // The rasterizer holds frames after a fallback until enough in a row could run on the device.
   softwareFrame?: boolean;
-  /** How many times the software-frame latch has let go. */
+  // Times the software-frame latch let go.
   unlatched?: number;
   gaveUp?: boolean;
-  /** Why the device was lost, when it was. */
   lostBecause?: string | null;
-  /** Every distinct reason a draw fell back, in the order first seen. */
+  // Distinct fallback reasons, in first-seen order.
   reasons?: string[];
-  /** What the device itself rejected, which is not the same as a fallback:
-   *  the backend only learns of a rejection when it next asks, so a frame can
-   *  count as 100% device and still be wrong. `deviceErrorCount` includes the
-   *  repeats; `deviceErrors` holds each distinct message once. */
+  // Device-side errors, learned late, so a frame can be 100% device and still wrong.
+  // `deviceErrorCount` includes repeats.
   deviceErrorCount?: number;
   deviceErrors?: string[];
-  /** Milliseconds over the whole run, by phase. Nested because `modules` is
-   *  both a count above and a phase here. */
+  // Milliseconds per phase.
   times?: {
     translate: number;
     upload: number;
@@ -77,39 +54,28 @@ export interface GpuReport {
     pipeline: number;
     encode: number;
     flush: number;
-    /** The three phases `flush` is made of. `flushAsk` encodes the copies off
-     *  every held surface, `flushWait` waits for the maps, ~0 in a browser,
-     *  where `poll` cannot do anything and the wait moves to the slice
-     *  boundary, and `flushLand` writes the mappings through the page table
-     *  into guest memory. They sum to roughly `flush`. */
+    // `flush` phases: `flushAsk` encodes copies, `flushWait` waits for maps (~0 in a
+    // browser), `flushLand` writes into guest memory.
     flushAsk?: number;
     flushWait?: number;
     flushLand?: number;
   };
 }
 
-/** One service command a title asked for and did not get. `cmd` is null when
- *  the request carried no command id to name. */
+// A refused service command; `cmd` is null without a command id.
 export interface IpcGap {
   iface: string;
   cmd: number | null;
 }
 
-/** What a title asked for and did not get, in two lists because they are
- *  different claims: `unimplemented` was refused outright, `stubbed` was
- *  answered with nothing behind the answer. */
+// `unimplemented` was refused; `stubbed` answered with nothing behind it.
 export interface IpcGaps {
   unimplemented: IpcGap[];
   stubbed: IpcGap[];
 }
 
-/** Everything worth putting in a bug report about one run.
- *
- *  `panicked` is what decides how the rest reads: a fault or `fatal:u` stopped
- *  the guest, a panic stopped the emulator, and the second is a bug in the
- *  emulator whatever the guest was doing. `session` is null when the report
- *  was asked for after the session had gone -- which is a report worth having
- *  anyway, since it still names the build. */
+// Everything for a bug report about one run. `panicked` means an emulator bug;
+// `session` is null if requested after the session ended.
 export interface CrashReport {
   version: string;
   panicked: boolean;
@@ -145,30 +111,25 @@ export interface JitStats {
   executed: number;
   linked: number;
   invalidated: number;
-  /** Blocks compiled to wasm and called directly. Zero when the build has
-   *  nowhere to put emitted code. */
+  // Blocks compiled to wasm; zero when the build can't emit code.
   emitted?: number;
-  /** Block entries that ran that compiled code instead of the op walk. */
+  // Block entries that ran compiled code.
   enteredEmitted?: number;
 }
 
-/** What a firmware NCA is, without reading it: kind 0 is a program, 1 a data
- *  archive, 2 anything else. */
+// Firmware NCA kind: 0 program, 1 data archive, 2 other.
 export interface NandIdentity {
   id: string;
   kind: number;
 }
 
-/** One piece of add-on content the session holds, as `switch_dlc_json`
- *  reports it: its own content id, the base title it belongs to, and the index
- *  the title knows it by. */
+// Add-on content from `switch_dlc_json`.
 export interface DlcEntry {
   id: string;
   title_id: string;
   index: number;
 }
 
-/** A file inside the open PFS0 container. */
 export interface NspFile {
   name: string;
   size: number;
@@ -180,8 +141,7 @@ export interface NcaSection {
   size: number;
 }
 
-/** `switch_parse_nca`'s JSON. `error` is set instead of the rest when the
- *  header could not be read - an encrypted CDN header with no keys loaded. */
+// `switch_parse_nca`'s JSON; `error` replaces the rest if the header can't be read.
 export interface NcaInfo {
   error?: string;
   title_id: string;
@@ -198,8 +158,7 @@ export interface AgeRating {
   age: number;
 }
 
-/** The NACP, as `switch_control_json` renders it. Every field past the name is
- *  optional in practice: most titles set only a handful. */
+// The NACP from `switch_control_json`; fields past the name are often absent.
 export interface ControlInfo {
   name: string;
   publisher?: string;
@@ -225,22 +184,18 @@ export interface ControlInfo {
   isbn?: string;
 }
 
-/** Every command the worker answers, with the types the *page* sees: a
- *  handler that fails by returning `{ error }` shows up here as the value it
- *  returns on success, because the message loop turns that into a rejection. */
-/** A user account as the page keeps it and the core is handed it. */
 export interface UserRecord {
-  /** The `AccountUid`, 32 hex digits in the order its bytes sit in memory. */
+  // The `AccountUid`: 32 hex digits in memory byte order.
   uid: string;
   nickname: string;
-  /** When the profile was last edited, as POSIX seconds; 0 for never. */
+  // Last edit time in POSIX seconds; 0 for never.
   editedAt: number;
-  /** A baseline JPEG, or null for the plain picture the core makes. */
+  // A baseline JPEG, or null for the core's default picture.
   picture: Bytes | null;
 }
 
 export interface Commands {
-  // Quoted: unquoted, `new()` in an interface is a construct signature.
+  // Quoted, since unquoted `new()` is a construct signature.
   // eslint-disable-next-line @stylistic/quote-props
   'new'(): number;
   free_session(): number;
@@ -327,19 +282,17 @@ export interface Commands {
   save_create_dir(id: string, path: string): number;
   save_read_file(id: string, path: string): Bytes | null;
 
-  /** Install `users` in the session, with `current` playing. 0, or the code
-   *  `switch_users_commit` refused the list with. */
+  // Install `users` with `current` playing; 0 or `switch_users_commit`'s error code.
   users_set(users: UserRecord[], current: string): number;
-  /** Whether the guest has edited a profile since the last call. */
+  // Whether the guest edited a profile since the last call.
   users_take_edits(): boolean;
-  /** The users as the session holds them, guest edits included. */
+  // The users as the session holds them, including guest edits.
   users_read(): UserRecord[];
 }
 
 export type CommandName = keyof Commands;
 
-/** What the worker implements: the same signatures, plus the option of
- *  reporting failure as `{ error }` instead of a value. */
+// The worker's implementation: same signatures, or `{ error }` on failure.
 export type CommandHandlers = {
   [K in CommandName]: (
     ...args: Parameters<Commands[K]>
@@ -352,14 +305,10 @@ export interface CallRequest {
   args: unknown[];
 }
 
-/** How loudly the page's log shows a line, and which `console` method mirrors
- *  it into DevTools: `err` and `warn` as named, `ok` as `info`, `dim` as
- *  `debug`, and none at all as `log`. */
+// Log level; DevTools mirrors `err`/`warn` as named, `ok` as info, `dim` as debug, none as log.
 export type LogClass = 'err' | 'warn' | 'ok' | 'dim';
 
-/** `log` is the worker saying something unasked. It goes through the page's
- *  log rather than the worker's own `console`, so the page's console and
- *  DevTools carry the same lines. */
+// `log` is unprompted worker output, routed through the page's log.
 export type WorkerMessage =
   | { type: 'ready'; error?: string }
   | { type: 'log'; text: string; cls?: LogClass }

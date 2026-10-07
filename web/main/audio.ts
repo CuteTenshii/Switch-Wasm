@@ -1,37 +1,23 @@
-/* audio
-
-   `audout` hands the guest's PCM over interleaved, at whatever rate and
-   channel count it opened the device with. Each pump takes everything that has
-   queued up since the last one and schedules it as a single buffer, butted up
-   against the end of the previous one, so a continuous stream stays
-   continuous. The emulator rarely runs a retail title in real time, so
-   underruns are the normal case: the cursor simply restarts a little ahead of
-   `currentTime` rather than trying to stretch anything to cover the gap.
-
-   What the page did with the samples goes to the log, once a second at most:
-   how much it played and how much silence it left between buffers, and the
-   two ways it can play nothing at all, a browser without Web Audio and a
-   context the autoplay policy keeps suspended until the user interacts. */
+// Schedules the guest's PCM back to back; underruns restart slightly ahead of
+// `currentTime`. Playback stats go to the log at most once a second.
 
 import { log } from './log';
 import { call } from './rpc';
 
 let audioCtx: AudioContext | null = null;
 let audioCursor = 0;
-// One second of 48 kHz stereo, matching the cap the core queues.
+// One second of 48 kHz stereo, matching the core's queue cap.
 const AUDIO_MAX_PULL = 96000;
 
 const REPORT_EVERY_MS = 1000;
 
-/** What was played since the last report, in seconds, and the gaps between
- *  buffers: each one a stretch of silence the page left because the next
- *  samples arrived after the previous ones had finished. */
+// Played seconds and gaps since the last report.
 let played = 0;
 let gaps = 0;
 let silence = 0;
 let reportedAt = 0;
 let lastFormat = '';
-/** Warnings already given, so a state that persists is said once. */
+// Warnings already given, so a persisting state is reported once.
 let saidSuspended = false;
 let saidUnsupported = false;
 
@@ -60,7 +46,7 @@ function reportPlayback(): void {
 
 export async function pumpAudio(): Promise<void> {
   const packed = await call('audio_format');
-  if (!packed) return; // nothing has opened an audio device yet
+  if (!packed) return;
   const rate = packed & 0x00ffffff;
   const channels = packed >>> 24;
   if (!rate || !channels) return;
@@ -81,8 +67,7 @@ export async function pumpAudio(): Promise<void> {
     log(`[audio] page: playing ${format} through a ${audioCtx.sampleRate} Hz output`);
     lastFormat = format;
   }
-  // Autoplay policy: a context created before the first gesture starts
-  // suspended and stays silent until resumed.
+  // Autoplay policy: a context created before a gesture starts suspended.
   if (audioCtx.state === 'suspended') await audioCtx.resume();
   if (audioCtx.state === 'suspended') {
     if (!saidSuspended) {
@@ -106,8 +91,6 @@ export async function pumpAudio(): Promise<void> {
   const src = audioCtx.createBufferSource();
   src.buffer = buffer;
   src.connect(audioCtx.destination);
-  // Schedule a little ahead of now so a late buffer is not clipped, then keep
-  // every later one flush against its predecessor.
   const start = Math.max(audioCtx.currentTime + 0.05, audioCursor);
   if (audioCursor && start > audioCursor) {
     gaps++;

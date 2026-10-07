@@ -1,27 +1,10 @@
-//! The inverse MDCT the CELT layer synthesises through, and the complex FFT
-//! underneath it.
-//!
-//! CELT does not run an IMDCT directly. It pre-rotates the spectrum by
-//! `exp(-i·2π(k+1/8)/N)`, runs a *forward* complex FFT of `N/4` points over
-//! the result, post-rotates, and then mirrors the two ends into each other,
-//! which is where the time-domain alias cancellation that makes overlapping
-//! blocks reconstruct exactly comes from. Doing it that way costs one
-//! quarter-length complex transform instead of a real transform of length
-//! `N`.
-//!
-//! The FFT here is an ordinary mixed-radix Cooley-Tukey, not the
-//! bit-reversal-in-the-caller arrangement the reference uses. The reference
-//! folds the permutation into the pre-rotation to keep the transform
-//! in-place; writing the pre-rotation in natural order and letting the
-//! recursion do its own reordering computes the same spectrum, and is a great
-//! deal easier to be sure of.
+//! CELT's inverse MDCT, computed through an `N/4`-point forward complex FFT
+//! with pre- and post-rotation.
 
 use core::f32::consts::PI;
 
-/// A complex value, as `(re, im)`.
 type Cpx = (f32, f32);
 
-/// A forward complex FFT of one fixed size, with its twiddles.
 pub(super) struct Fft {
     n: usize,
     /// `exp(-i·2πk/n)` for `k` in `0..n`.
@@ -39,15 +22,11 @@ impl Fft {
         Fft { n, twiddles }
     }
 
-    /// `out[k] = sum_j input[j] · exp(-i·2πjk/n)`, unscaled.
     fn forward(&self, input: &[Cpx], out: &mut [Cpx]) {
         self.recurse(input, 0, 1, out, self.n, 1);
     }
 
-    /// One decimation-in-time level: split `n` into `p` interleaved
-    /// sub-transforms of `m = n/p` points, then combine them with a `p`-point
-    /// DFT. `stride` walks the input, `fstride` is `self.n / n`, how far one
-    /// step of this level's twiddle moves in the full table.
+    /// One decimation-in-time level; `fstride` is the twiddle step for this level.
     fn recurse(
         &self,
         input: &[Cpx],
@@ -64,8 +43,6 @@ impl Fft {
         let p = radix(n);
         let m = n / p;
         if m == 1 {
-            // The leaves are single points, so gathering them here saves a
-            // call per point, which at these sizes is most of the calls.
             for q in 0..p {
                 out[q] = input[offset + q * stride];
             }
@@ -81,10 +58,7 @@ impl Fft {
                 );
             }
         }
-        // `W_n^(q·j)` gathers the sub-transforms; `W_p^(q·t)` is the p-point
-        // DFT across them. Both come out of the same table: the second is the
-        // first with a step of `n/p`. The gather index is always inside the
-        // table (`q·j·fstride < p·m·fstride = self.n`) so it needs no wrap.
+        // `W_n^(q·j)` gathers the sub-transforms; `W_p^(q·t)` is `W_n` with step `n/p`.
         match p {
             2 => self.butterfly2(out, m, fstride),
             4 => self.butterfly4(out, m, fstride),
@@ -113,8 +87,7 @@ impl Fft {
             let t3 = csub(s1, s3);
             out[j] = cadd(t0, t2);
             out[2 * m + j] = csub(t0, t2);
-            // The odd outputs differ by a quarter turn, which for a forward
-            // transform is a multiply by -i and by +i.
+            // Odd outputs differ by a multiply by -i and +i.
             out[m + j] = (t1.0 + t3.1, t1.1 - t3.0);
             out[3 * m + j] = (t1.0 - t3.1, t1.1 + t3.0);
         }
@@ -138,19 +111,15 @@ impl Fft {
     }
 }
 
-/// The largest radix [`radix`] will pick, which bounds the combine scratch.
 const MAX_RADIX: usize = 5;
 
-/// The factor to split `n` by. Four before two, because one radix-4 level
-/// costs less than two radix-2 ones.
+/// Radix-4 is preferred over two radix-2 levels.
 fn radix(n: usize) -> usize {
     for p in [4, 2, 3, 5] {
         if n % p == 0 {
             return p;
         }
     }
-    // Every size CELT asks for factors into 2, 3 and 5; a prime that does not
-    // is still handled correctly, just as one slow level.
     n
 }
 
@@ -166,16 +135,12 @@ fn csub(a: Cpx, b: Cpx) -> Cpx {
     (a.0 - b.0, a.1 - b.1)
 }
 
-/// The inverse MDCT for every block size one mode uses. `shift` selects the
-/// size: `n >> shift` points in, half that many out.
+/// Inverse MDCT for every block size of one mode, selected by `shift`.
 pub(super) struct Mdct {
     n: usize,
-    /// Scratch for one transform, kept so a frame of eight short blocks does
-    /// not allocate twice per block.
     spectrum: Vec<Cpx>,
     transformed: Vec<Cpx>,
-    /// Per shift, `cos(2π(i+1/8)/N)` for `i` in `0..N/2`. The eighth-sample
-    /// offset is what makes the transform its own inverse across the overlap.
+    /// Per shift, `cos(2π(i+1/8)/N)` for `i` in `0..N/2`.
     trig: Vec<Vec<f32>>,
     ffts: Vec<Fft>,
 }
@@ -203,12 +168,8 @@ impl Mdct {
         }
     }
 
-    /// Transform `input`, `n>>shift` halved, taken every `stride` values,
-    /// into `out`, windowing the first `overlap` samples against what is
-    /// already there.
-    ///
-    /// `out[..overlap/2]` must hold the tail of the previous block: the
-    /// mirroring step at the end is the overlap-add, not a separate pass.
+    /// `out[..overlap/2]` must hold the tail of the previous block; the final
+    /// mirroring step is the overlap-add.
     pub(super) fn backward(
         &mut self,
         input: &[f32],
@@ -230,15 +191,12 @@ impl Mdct {
             let x2 = input[(half - 1 - 2 * i) * stride];
             let yr = x2 * trig[i] + x1 * trig[quarter + i];
             let yi = x1 * trig[i] - x2 * trig[quarter + i];
-            // Real and imaginary are swapped because this is a forward FFT
-            // standing in for an inverse one.
+            // Swapped because a forward FFT stands in for an inverse one.
             spectrum[i] = (yi, yr);
         }
         let transformed = &mut self.transformed[..quarter];
         self.ffts[shift].forward(spectrum, transformed);
 
-        // Post-rotate, walking in from both ends so the two halves land
-        // de-shuffled without a second buffer.
         for i in 0..(quarter + 1) >> 1 {
             let (im0, re0) = transformed[i];
             let (t0, t1) = (trig[i], trig[quarter + i]);

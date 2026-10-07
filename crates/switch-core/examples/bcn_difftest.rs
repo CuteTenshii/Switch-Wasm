@@ -1,31 +1,7 @@
-//! Compare the BC decoders against an independent implementation:
+//! Compare the BC decoders against `bcdec.h` reference output:
 //! `bcn_difftest <vectors.bin> [blocks] [astc_vectors.bin]`.
 //!
-//! The codecs in `gpu/bcn.rs` are transcriptions of a specification, and the
-//! failure mode of a transcription is a table entry that is wrong in a way no
-//! rendered frame localises. This checks them the only way that really
-//! settles it: against a second implementation, over thousands of random
-//! blocks.
-//!
-//! The fixture is produced by a throwaway C harness around `bcdec.h`
-//! (<https://github.com/iOrange/bcdec>, public domain), which writes one
-//! record per block, sixteen input bytes then the reference's decoded
-//! texels, for each codec in turn:
-//!
-//! ```c
-//! #define BCDEC_IMPLEMENTATION
-//! #include "bcdec.h"
-//! // for each codec: fill 16 random bytes, decode, fwrite(input, 16) then
-//! // fwrite(output, texel_bytes * 16), 4000 blocks each, in the order
-//! // BC1, BC2, BC3, BC7 (RGBA), then BC4 (R), then BC5 (RG).
-//! ```
-//!
-//! BC7 is expected to agree exactly. BC1, BC2 and BC3 are expected to agree
-//! to within one part in 255: their 5:6:5 endpoints can be expanded to eight
-//! bits either by replicating the high bits, which is what this decoder and
-//! the BPTC endpoint rule both do, or by rounding, which is what `bcdec`
-//! does for those three. Both readings sit inside the tolerance S3TC allows,
-//! and no two vendors agreed on it either.
+//! BC7 must match exactly; BC1-3 within 1/255 (endpoint expansion differs).
 mod common;
 
 use std::env;
@@ -36,8 +12,7 @@ fn main() {
         1,
         "bcn_difftest <vectors.bin> [blocks] [astc_vectors.bin]",
     ));
-    // Codec, how many channels the reference wrote per texel, and how this
-    // decoder's channels line up with them. BC6H's are floats; the rest bytes.
+    // Codec, reference channels per texel, and this decoder's channel mapping.
     struct Group {
         codec: Codec,
         channels: usize,
@@ -208,13 +183,8 @@ fn main() {
     }
 }
 
-/// The ASTC fixture is grouped by footprint: each group opens with its block
-/// width, height and count as three little-endian i32, then that many records
-/// of sixteen input bytes and one RGBA8 texel per texel of the footprint.
-///
-/// The reference emits bytes from its own float pipeline as
-/// `clamp(v * 65536 + 0.5, 0, 65535) >> 8`, so the comparison applies exactly
-/// that to this decoder's output rather than rounding some other way.
+/// ASTC fixture: per footprint, width/height/count as LE i32, then records.
+/// Matches the reference rounding: `clamp(v * 65536 + 0.5, 0, 65535) >> 8`.
 fn compare_astc(data: &[u8]) -> bool {
     let word = |at: usize| i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
     let mut at = 0usize;

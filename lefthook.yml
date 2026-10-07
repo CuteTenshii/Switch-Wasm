@@ -1,27 +1,14 @@
-# Git hooks. `bun install` installs them, through the lefthook package's own
-# postinstall, which Bun trusts by default. A clone that still has
-# `core.hooksPath` set from the old `.githooks` directory needs
-# `git config --unset core.hooksPath` first: lefthook will not install over it.
-# `git commit --no-verify` skips them.
-#
-# The same checks CI's lint job runs, so what would fail the pipeline fails
-# here first. They read the working tree rather than the staged blobs: cargo
-# cannot build from the index, and a diff against content that is staged but
-# not on disk is more confusing than the partial-staging case it would catch.
+# Pre-commit hooks mirroring CI's lint job, installed by `bun install`.
+# They check the working tree, not the index. Unset a leftover
+# `core.hooksPath` first, or lefthook won't install.
 pre-commit:
   piped: true
   jobs:
-    # CI's own check rather than `rustfmt` on the staged files: a file that
-    # only reaches the crate through `include!`, like the generated ASTC
-    # tables, is formatted by a bare rustfmt and never by cargo fmt.
     - name: rustfmt
       glob: "*.rs"
       run: cargo fmt --all --check
       fail_text: "Not rustfmt-clean: run `cargo fmt --all`."
 
-    # The whole workspace and every target, not only the staged crates: a
-    # change to switch-core is what breaks a lint in switch-wasm, and the test
-    # and example targets are where most of the warnings live. Warm, about 9 s.
     - name: clippy
       glob: "*.rs"
       run: cargo clippy --workspace --all-targets -- -D warnings
@@ -37,8 +24,7 @@ pre-commit:
       run: bun run stylelint
       fail_text: "Stylelint errors: run `bunx stylelint 'web/**/*.css' --fix`."
 
-    # Vite does not type-check, so without this a type error first shows up
-    # in CI.
+    # Vite does not type-check.
     - name: typecheck
       glob: "*.ts"
       run: bun run typecheck

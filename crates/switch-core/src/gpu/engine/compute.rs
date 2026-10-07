@@ -1,15 +1,6 @@
-//! MAXWELL_COMPUTE_B (class 0xB1C0).
-//!
-//! Almost none of a launch is in this register file. Writing the QMD's address
-//! (shifted right by 8) to `SendPcasA` and then `SendSignalingPcasB` starts it,
-//! and everything about the grid comes out of the [`crate::gpu::qmd`] in
-//! memory. What is here is the state a QMD refers to rather than carries: the
-//! program region its offset is relative to, and the descriptor pools its
-//! textures are drawn from.
-//!
-//! Method numbers are from NVIDIA's generated `clb1c0.h`. The pools and the
-//! program region sit at the same methods as the 3D class's, which is why
-//! [`crate::gpu::texture`] serves both unchanged.
+//! MAXWELL_COMPUTE_B (class 0xB1C0). Launches come from the QMD in memory;
+//! this holds the program region and texture pools, at the 3D class's methods.
+//! Method numbers are from NVIDIA's `clb1c0.h`.
 
 use crate::gpu::engine::Registers;
 use crate::gpu::exec::ExecCtx;
@@ -17,9 +8,7 @@ use crate::Result;
 
 const SEND_PCAS_A: u32 = 0x0AD;
 
-/// The launch trigger. Public because the channel flushes the 3D backend
-/// before one: a dispatch reads and writes guest memory that a GPU-resident
-/// render target may still be holding.
+/// The launch trigger; the channel flushes the 3D backend before it.
 pub const SEND_SIGNALING_PCAS_B: u32 = 0x0AF;
 
 const SET_TEX_SAMPLER_POOL: u32 = 0x557;
@@ -27,10 +16,9 @@ const SET_TEX_HEADER_POOL: u32 = 0x55D;
 const SET_PROGRAM_REGION: u32 = 0x582;
 const SET_BINDLESS_TEXTURE: u32 = 0x982;
 
-/// A dispatch the engine was asked to run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Dispatch {
-    /// GPU address of the QMD (already un-shifted).
+    /// GPU address of the QMD, already un-shifted.
     pub qmd_addr: u64,
 }
 
@@ -39,13 +27,9 @@ pub struct EngineCompute {
     pub regs: Registers,
     pub last_dispatch: Option<Dispatch>,
     pub dispatches: u64,
-    /// The inline upload this class carries at the same methods the 3D
-    /// class and `KEPLER_INLINE_TO_MEMORY_B` do, 0x60 to 0x6D. It is how a
-    /// driver writes a QMD just before launching it: The Legend of Zelda:
-    /// Echoes of Wisdom uploads every one of its QMDs this way, and without
-    /// it each launch read the blank memory the QMD was meant to fill.
+    /// Inline upload at 0x60..0x6D, which drivers use to write QMDs before launch.
     pub inline: crate::gpu::engine::inline::EngineInline,
-    /// Dispatches refused, by reason: see [`crate::gpu::activity`].
+    /// Dispatches refused, by reason.
     pub activity: crate::gpu::activity::GpuActivity,
 }
 
@@ -60,7 +44,6 @@ impl EngineCompute {
         }
     }
 
-    /// Base a QMD's `program_offset` is measured from.
     pub fn program_region(&self) -> u64 {
         self.regs.iova(SET_PROGRAM_REGION)
     }
@@ -73,8 +56,7 @@ impl EngineCompute {
         self.regs.iova(SET_TEX_SAMPLER_POOL)
     }
 
-    /// Which constant bank a `texs`'s immediate indexes for its handle,
-    /// `SetBindlessTexture`, the compute class's `TexCbIndex`.
+    /// `SetBindlessTexture`: the constant bank a `texs` handle indexes.
     pub fn tex_cb_index(&self) -> u8 {
         self.regs.field(SET_BINDLESS_TEXTURE, 0, 4) as u8
     }
@@ -97,11 +79,7 @@ impl EngineCompute {
         Ok(())
     }
 
-    /// Run the launch, or report why it did not run.
-    ///
-    /// A refused dispatch is counted rather than propagated, exactly as a
-    /// refused draw is: one kernel the interpreter cannot follow should cost
-    /// that kernel, not the pushbuffer it arrived in.
+    /// Run the launch, or count the refusal instead of failing the pushbuffer.
     fn dispatch_or_log(&mut self, ctx: &mut ExecCtx) {
         if let Err(e) = crate::gpu::compute::dispatch(self, ctx) {
             ctx.stats.dispatches_skipped += 1;
@@ -122,8 +100,6 @@ mod tests {
     use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
     use crate::mem::Memory;
 
-    /// An inline upload sent on the compute class lands in memory, which is
-    /// how a driver writes the QMD it is about to launch.
     #[test]
     fn an_inline_upload_on_the_compute_class_reaches_memory() {
         use crate::gpu::engine::inline::{
@@ -185,8 +161,7 @@ mod tests {
             })
         );
         assert_eq!(engine.dispatches, 1);
-        // The QMD is at an address nothing has mapped, so the launch is
-        // refused, and counted, rather than taking the pushbuffer with it.
+        // The QMD is unmapped, so the launch is refused and counted.
         assert_eq!(stats.dispatches_skipped, 1);
     }
 }

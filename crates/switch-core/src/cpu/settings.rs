@@ -1,38 +1,25 @@
-//! The console's settings services: `set`/`set:sys` (system settings and the
-//! firmware version), `lbl` (the backlight), `notif` (scheduled alarms) and
-//! `pctl` (parental controls).
+//! Settings services: `set`/`set:sys`, `lbl`, `notif` and `pctl`.
 //!
-//! These are **stored, not answered**. One caller writes a setting and another
-//! reads it back, so a value that is not kept is a setting that silently
-//! reverts, which is a different bug from one that is simply unimplemented.
-//!
-//! `set:sys` is stored twice over: [`SystemSettings`] is what the running
-//! console reads, and it lives in system save data
-//! ([`SYSTEM_SETTINGS_SAVE`]), which the host writes back to the browser and
-//! restores into the next session. A setting that does not survive a reload
-//! is the same bug one step further out.
+//! Settings are stored, not answered: [`SystemSettings`] persists in system
+//! save data ([`SYSTEM_SETTINGS_SAVE`]) so writes read back across sessions.
 
 use super::Cpu;
 use crate::trace::Level;
 use crate::Result;
 
 /// Language codes in `SetLanguage` order, as NUL-padded ASCII in a `u64`.
-///
-/// One table for the whole module: `set` lists these and maps an index to
-/// one, and the console's own language is an entry in it that `set:sys`'s
-/// `SetLanguageCode` can replace.
 const LANGUAGE_CODES: [&str; 18] = [
     "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB",
     "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR",
 ];
 
-/// The language a console with no stored setting boots in (`SetLanguage_ENUS`).
+/// `SetLanguage_ENUS`.
 const DEFAULT_LANGUAGE: usize = 1;
 
-/// `SetRegion_USA`, the region that goes with it.
+/// `SetRegion_USA`.
 const DEFAULT_REGION: u32 = 1;
 
-/// One language code, packed the way `nn::settings::LanguageCode` is.
+/// Packed like `nn::settings::LanguageCode`.
 fn language_code(index: usize) -> u64 {
     let mut packed = [0u8; 8];
     let name = LANGUAGE_CODES[index.min(LANGUAGE_CODES.len() - 1)].as_bytes();
@@ -40,48 +27,19 @@ fn language_code(index: usize) -> u64 {
     u64::from_le_bytes(packed)
 }
 
-/// The system version `set:sys` reports, as major/minor/micro.
-///
-/// libnx seeds `hosversionGet` from this and branches on it everywhere, so the
-/// number is load-bearing rather than decorative.
-///
-/// It sat at 12.1.0 for a long time, chosen to clear the gates the services
-/// here implement (6.0.0 for `acc`'s qualified-user list) while staying below
-/// the ones they did not: 17.0.0, where `ts` moves its measurement onto a
-/// per-device `ISession`. Both of those are now implemented: `ts` routes
-/// `OpenSession` to `ts:session-internal`/`ts:session-external`, and `acc`
-/// answers `ListQualifiedUsers`. The ceiling the old number was avoiding is
-/// gone, and staying under it meant claiming to be four years older than the
-/// titles being run: Tomodachi Life alone reaches for `am` and `hid`
-/// commands added in 18.0.0 and 20.0.0.
-///
-/// So this reports the current firmware. Nothing here implements everything a
-/// 22.5.0 console does, and it never did at 12.1.0 either: the number says
-/// which side of a feature gate to take, not what is finished behind it.
+/// The firmware version `set:sys` reports; libnx's `hosversionGet` branches on it.
 const FIRMWARE_VERSION: (u8, u8, u8) = (22, 5, 0);
 
-/// Where the console keeps what `set:sys` serves.
-///
-/// System save data `8000000000000050` is the id hardware files these under,
-/// and the id a guest mounting them through `fsp-srv` would name. Putting
-/// them there rather than in a store of this service's own is what makes them
-/// persist: the host already writes back every save it has been handed and
-/// restores them into the next session, so a setting written here survives a
-/// reload with no plumbing of its own.
+/// System save data `8000000000000050`, where hardware keeps these settings.
 pub(super) const SYSTEM_SETTINGS_SAVE: super::SaveKey =
     super::SaveKey::shared(0x8000_0000_0000_0050);
 
-/// The file inside that save. Eden writes `settings` in the same place;
-/// nothing on the guest side reads the name, but agreeing costs nothing.
 const SYSTEM_SETTINGS_FILE: &str = "/settings";
 
-/// What a stored block starts with. A file that does not open with these is
-/// one this build cannot read, a newer layout, or something else entirely,
-/// and the defaults are used rather than a half-parsed console.
+/// A file without this magic is ignored in favour of the defaults.
 const SYSTEM_SETTINGS_MAGIC: &[u8; 8] = b"swsetsys";
 const SYSTEM_SETTINGS_VERSION: u32 = 1;
 
-/// The widths of the settings blocks a caller hands over whole.
 const TV_SETTINGS_SIZE: usize = 0x20;
 const NOTIFICATION_SETTINGS_SIZE: usize = 0x18;
 const SLEEP_SETTINGS_SIZE: usize = 0xc;
@@ -94,34 +52,19 @@ const CLOCK_SOURCE_ID_SIZE: usize = 0x10;
 const EULA_VERSION_SIZE: usize = 0x30;
 const ACCOUNT_NOTIFICATION_SETTINGS_SIZE: usize = 0x18;
 
-/// How many `nn::settings::system::AudioOutputModeTarget`s there are: None,
-/// Hdmi, Speaker, Headphone, and the two unnamed ones after them. Each keeps
-/// its own mode, which is the entire point of the target argument.
+/// `AudioOutputModeTarget`s: None, Hdmi, Speaker, Headphone and two unnamed.
 const AUDIO_OUTPUT_TARGETS: usize = 6;
 
-/// `AudioOutputMode_ch_2`, stereo, what this console's mixer produces, on
-/// every output it could produce it on.
+/// `AudioOutputMode_ch_2` (stereo).
 const AUDIO_OUTPUT_STEREO: u32 = 1;
 
-/// The system settings, as one block.
-///
-/// Every field is something a caller can write and read back. Before this
-/// existed each was a constant in the command table, and the ~40 `Set*`
-/// commands beside them all fell through to the stub: the settings applet
-/// wrote a colour set, a nickname or a keyboard layout, was told it had
-/// worked, and read back the constant it would have got anyway.
-///
-/// The defaults are what those constants said, so a console that has never
-/// been through the settings applet answers exactly as it used to.
+/// The `set:sys` settings block. Every field can be written and read back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct SystemSettings {
-    /// The console's language, as the packed `nn::settings::LanguageCode`
-    /// `set`'s `GetLanguageCode` reports, and the region beside it.
+    /// Packed `nn::settings::LanguageCode`, with the region beside it.
     pub(super) language_code: u64,
     region: u32,
-    /// `KeyboardLayout`, which the software keyboard lays out its keys from.
-    /// Kept separate from the language: hardware lets them disagree, and the
-    /// applet that changes one does not touch the other.
+    /// Independent of the language, as on hardware.
     pub(super) keyboard_layout: u32,
     color_set: u32,
     account_settings: u32,
@@ -135,16 +78,13 @@ pub(super) struct SystemSettings {
     touch_screen_mode: u32,
     quest_flag: u8,
     vibration_master_volume: f32,
-    /// One mode per `AudioOutputModeTarget`, indexed by it.
     audio_output_mode: [u32; AUDIO_OUTPUT_TARGETS],
     lock_screen: bool,
     console_information_upload: bool,
     automatic_application_download: bool,
     speaker_auto_mute: bool,
     usb30_enable: bool,
-    /// The two radios. `nfc:sys` and `btm:sys` answer out of these rather
-    /// than out of state of their own: the switch in the settings applet and
-    /// the switch a service reads are one switch.
+    /// `nfc:sys` and `btm:sys` read the radio switches from here.
     pub(super) nfc_enable: bool,
     pub(super) bluetooth_enable: bool,
     wireless_lan_enable: bool,
@@ -152,10 +92,7 @@ pub(super) struct SystemSettings {
     battery_percentage: bool,
     field_testing: bool,
     user_clock_automatic_correction: bool,
-    /// The blocks a caller hands over whole and reads back whole. Their
-    /// fields belong to the caller, so they are stored as the bytes they
-    /// arrived as rather than picked apart into something this console would
-    /// have to put back together.
+    /// Caller-defined blocks stored as raw bytes.
     tv_settings: [u8; TV_SETTINGS_SIZE],
     notification_settings: [u8; NOTIFICATION_SETTINGS_SIZE],
     sleep_settings: [u8; SLEEP_SETTINGS_SIZE],
@@ -168,8 +105,7 @@ pub(super) struct SystemSettings {
     network_clock_context: [u8; SYSTEM_CLOCK_CONTEXT_SIZE],
     external_steady_clock_source_id: [u8; CLOCK_SOURCE_ID_SIZE],
     external_steady_clock_internal_offset: i64,
-    /// The agreements this console has accepted and the per-account
-    /// notification overrides: two lists a caller replaces wholesale.
+    /// Lists a caller replaces wholesale.
     eula_versions: Vec<[u8; EULA_VERSION_SIZE]>,
     account_notification_settings: Vec<[u8; ACCOUNT_NOTIFICATION_SETTINGS_SIZE]>,
 }
@@ -178,10 +114,7 @@ impl Default for SystemSettings {
     fn default() -> SystemSettings {
         // `EulaVersion { u32 version; SystemRegionCode region;
         // EulaVersionClockType clock_type; pad[4]; SystemClockContext; }`.
-        // A console that has accepted none has not finished first-time setup,
-        // and the Home Menu hands over to `starter` for that, which nothing
-        // here can launch. When it was accepted is not tracked, so the clock
-        // context stays zero; callers gate on the version and the region.
+        // With none accepted the Home Menu launches `starter`, which is unsupported.
         const EULA_VERSION: u32 = 0x1_0000;
         const EULA_STEADY_CLOCK: u32 = 1;
         let mut eula = [0u8; EULA_VERSION_SIZE];
@@ -189,10 +122,7 @@ impl Default for SystemSettings {
         eula[0x04..0x08].copy_from_slice(&DEFAULT_REGION.to_le_bytes());
         eula[0x08..0x0c].copy_from_slice(&EULA_STEADY_CLOCK.to_le_bytes());
 
-        // `TvSettings`: CEC and burn-in prevention on, resolution and RGB
-        // range Auto, no colour transform. The tail past the first four words
-        // is what the reply padding used to leave stale, two floats, so a
-        // NaN gamma was a reachable answer rather than merely a wrong one.
+        // `TvSettings`: CEC and burn-in prevention on, resolution and RGB range Auto.
         const ALLOWS_CEC: u32 = 1 << 2;
         const PREVENTS_SCREEN_BURN_IN: u32 = 1 << 3;
         const HDMI_CONTENT_TYPE_GAME: u32 = 4;
@@ -202,8 +132,7 @@ impl Default for SystemSettings {
         tv[0x18..0x1c].copy_from_slice(&1.0f32.to_le_bytes());
         tv[0x1c..0x20].copy_from_slice(&0.5f32.to_le_bytes());
 
-        // `NotificationSettings { flags; volume; start_time; stop_time; }`,
-        // quiet from nine in the evening to nine in the morning.
+        // `NotificationSettings { flags; volume; start_time; stop_time; }`, quiet 21:00 to 09:00.
         const ENABLES_NEWS: u32 = 1 << 8;
         const INCOMING_LAMP: u32 = 1 << 9;
         const VOLUME_HIGH: u32 = 2;
@@ -213,18 +142,14 @@ impl Default for SystemSettings {
         notification[0x08..0x0c].copy_from_slice(&9u32.to_le_bytes());
         notification[0x10..0x14].copy_from_slice(&21u32.to_le_bytes());
 
-        // `SleepSettings { flags; handheld_plan; console_plan; }`. Both plans
-        // are `Never` (5), and the zero the stub used to leave was not a
-        // duration but a plan *index*, it said "sleep after one minute".
-        // Nothing here dims a screen this emulator does not own.
+        // `SleepSettings { flags; handheld_plan; console_plan; }`, both plans `Never` (5).
         const SLEEP_NEVER: u32 = 5;
         let mut sleep = [0u8; SLEEP_SETTINGS_SIZE];
         sleep[0x04..0x08].copy_from_slice(&SLEEP_NEVER.to_le_bytes());
         sleep[0x08..0x0c].copy_from_slice(&SLEEP_NEVER.to_le_bytes());
 
         // `InitialLaunchSettings { InitialLaunchFlag; pad[4]; timestamp; }`.
-        // The flags say the console has been through first-time setup; a
-        // console that has not is one the Home Menu will not draw a menu for.
+        // First-time setup is marked complete so the Home Menu draws.
         const LAUNCH_COMPLETION: u32 = 1;
         const LAUNCH_USER_ADDITION: u32 = 1 << 8;
         const LAUNCH_TIMESTAMP: u32 = 1 << 16;
@@ -236,37 +161,31 @@ impl Default for SystemSettings {
         let mut nick_name = [0u8; DEVICE_NICK_NAME_SIZE];
         nick_name[..DEVICE_NICK_NAME.len()].copy_from_slice(DEVICE_NICK_NAME);
 
-        // The one zone there is: `time` has no TZif database to resolve any
-        // other, so a name here that it cannot convert against would be a
-        // console whose clock disagrees with its own settings screen.
+        // `time` has no TZif database, so UTC is the only zone.
         let mut location = [0u8; LOCATION_NAME_SIZE];
         location[..DEVICE_TIME_ZONE.len()].copy_from_slice(DEVICE_TIME_ZONE);
 
         SystemSettings {
             language_code: language_code(DEFAULT_LANGUAGE),
             region: DEFAULT_REGION,
-            // `KeyboardLayout_EnglishUs`. Zero is `Japanese`, a real layout,
-            // but not this console's.
+            // `KeyboardLayout_EnglishUs`.
             keyboard_layout: 1,
-            // `ColorSet_BasicWhite`, the light theme this menu is drawn in.
+            // `ColorSet_BasicWhite`.
             color_set: 0,
             account_settings: 0,
             applet_launch_flags: 0,
             chinese_traditional_input_method: 0,
-            // `ErrorReportSharePermission_NotConfirmed`, which is the truth:
-            // nothing has asked.
+            // `ErrorReportSharePermission_NotConfirmed`.
             error_report_share_permission: 0,
-            // `PrimaryAlbumStorage_Nand`. There is no album on the card here.
+            // `PrimaryAlbumStorage_Nand`.
             primary_album_storage: 0,
             push_notification_activity_mode_on_sleep: 0,
-            // `PlatformRegion_Global`, which has no zero. See the command.
+            // `PlatformRegion_Global`.
             platform_region: 1,
             panel_crc_mode: 0,
-            // `TouchScreenMode_Standard`. The zero the stub left is `Stylus`,
-            // which is a real mode and the wrong one for a console driven by
-            // a finger on a browser canvas.
+            // `TouchScreenMode_Standard`.
             touch_screen_mode: 1,
-            // `QuestFlag_Retail`; a kiosk unit runs a different Home Menu.
+            // `QuestFlag_Retail`.
             quest_flag: 0,
             vibration_master_volume: 1.0,
             audio_output_mode: [AUDIO_OUTPUT_STEREO; AUDIO_OUTPUT_TARGETS],
@@ -275,19 +194,12 @@ impl Default for SystemSettings {
             automatic_application_download: false,
             speaker_auto_mute: false,
             usb30_enable: false,
-            // No reader is attached, so nothing scans; the switch still reads
-            // back off, which is what a console with NFC turned off says.
             nfc_enable: false,
-            // A console boots with its Bluetooth radio on: that is how it
-            // finds the Joy-Cons it is already paired to.
             bluetooth_enable: true,
-            // And with wireless on: there is a network stack behind this one.
             wireless_lan_enable: true,
             auto_update_enable: false,
             battery_percentage: false,
             field_testing: false,
-            // Nothing here corrects a clock against a network time server, so
-            // saying it does would be a console that never catches up.
             user_clock_automatic_correction: false,
             tv_settings: tv,
             notification_settings: notification,
@@ -307,32 +219,18 @@ impl Default for SystemSettings {
     }
 }
 
-/// What this console calls itself, until something renames it.
 const DEVICE_NICK_NAME: &[u8] = b"switch-wasm";
 
-/// The zone `time` resolves every calendar conversion against.
+/// The zone `time` resolves calendar conversions against.
 pub(super) const DEVICE_TIME_ZONE: &[u8] = b"UTC";
 
-/// The `Uuid` every Mii made on this console is stamped with, ASCII, so a
-/// Mii dumped out of here says where it came from. Eden's is the same trick
-/// ("Eden Default UID").
-///
-/// Fixed rather than generated: a Mii made in one session has to still be
-/// this console's in the next, and a fresh id each boot would disown all of
-/// them. Nothing here has been observed reading it.
+/// The `Uuid` Miis made on this console are stamped with; fixed so they stay this console's.
 const MII_AUTHOR_ID: [u8; 0x10] = [
     0x73, 0x77, 0x69, 0x74, 0x63, 0x68, 0x2d, 0x77, 0x61, 0x73, 0x6d, 0x00, 0x00, 0x00, 0x00, 0x01,
 ];
 
-/// `HomeMenuScheme`: the main, back, sub, bezel and extra colours the Home
-/// Menu tints itself with, as ARGB.
-///
-/// These are **not measured from hardware**. They are Eden's, which its own
-/// `GetHomeMenuScheme` marks stubbed, a dark grey on grey with white
-/// accents. What matters here is that the five words are a coherent scheme
-/// and that `extra` is opaque black rather than a colour picked to look like
-/// something: a menu that draws with these gets a plausible theme, and one
-/// that draws with the stale reply padding gets whatever was in TLS.
+/// `HomeMenuScheme` ARGB colours (main, back, sub, bezel, extra), taken from
+/// Eden's stub rather than hardware.
 const HOME_MENU_SCHEME: [u32; 5] = [
     0xff32_3232,
     0xff32_3232,
@@ -341,23 +239,12 @@ const HOME_MENU_SCHEME: [u32; 5] = [
     0xff00_0000,
 ];
 
-/// The firmware's settings items, as `GetSettingsItemValue` serves them.
-///
-/// These are not the settings above: nothing writes them, and they are not
-/// per-console. They are the compiled-in constants firmware components read
-/// out of `set:sys` instead of hard-coding, a heap reservation, a clock
-/// interval, whether the platform has a rail, and a component that cannot
-/// read one does not carry on with a default of its own.
-///
-/// The set is Eden's, minus its `hid_debug` block: `hid` here is emulated
-/// rather than the sysmodule those items configure, so answering them would
-/// be describing a component that is not running.
+/// The firmware's settings items for `GetSettingsItemValue`. Eden's set,
+/// minus `hid_debug` since `hid` is emulated rather than the sysmodule.
 fn settings_item(category: &str, name: &str) -> Option<Vec<u8>> {
     let value = match (category, name) {
-        // `hbloader`, which reads how much heap to leave an applet.
         ("hbloader", "applet_heap_size") => 0u64.to_le_bytes().to_vec(),
         ("hbloader", "applet_heap_reservation_size") => 0x860_0000u64.to_le_bytes().to_vec(),
-        // `time`'s intervals and the year an unset clock starts at.
         ("time", "notify_time_to_fs_interval_seconds") => 600i32.to_le_bytes().to_vec(),
         ("time", "standard_network_clock_sufficient_accuracy_minutes") => {
             43_200i32.to_le_bytes().to_vec()
@@ -367,15 +254,12 @@ fn settings_item(category: &str, name: &str) -> Option<Vec<u8>> {
         }
         ("time", "standard_steady_clock_test_offset_minutes") => 0i32.to_le_bytes().to_vec(),
         ("time", "standard_user_clock_initial_year") => 2023i32.to_le_bytes().to_vec(),
-        // What the platform is wired with: a Joy-Con rail, and the
-        // microcontroller behind it.
         ("hid", "has_rail_interface") => vec![1],
         ("hid", "has_sio_mcu") => vec![1],
         ("mii", "is_db_test_mode_enabled") => vec![0],
         // Read by `GetDebugModeFlag` as well as by name.
         ("settings_debug", "is_debug_mode_enabled") => vec![0],
-        // Whether the error applet closes itself. It does not: an error that
-        // vanishes before it is read is one nobody can report.
+        // The error applet does not close itself.
         ("err", "applet_auto_close") => vec![0],
         _ => return None,
     };
@@ -383,13 +267,8 @@ fn settings_item(category: &str, name: &str) -> Option<Vec<u8>> {
 }
 
 impl SystemSettings {
-    /// The stored form: a header, then one record per setting.
-    ///
-    /// Each record is tagged with the `set:sys` command id that carries the
-    /// setting, so the tags need no namespace of their own and a record can
-    /// be traced back to the command that wrote it. A reader keeps its
-    /// default for a tag that is absent and skips one it does not know, so a
-    /// build that adds a setting still reads a file written before it.
+    /// A header, then records tagged with the `set:sys` command id that carries
+    /// each setting. Readers skip unknown tags and keep defaults for missing ones.
     fn serialize(&self) -> Vec<u8> {
         fn record(out: &mut Vec<u8>, tag: u32, bytes: &[u8]) {
             out.extend_from_slice(&tag.to_le_bytes());
@@ -478,9 +357,7 @@ impl SystemSettings {
         out
     }
 
-    /// Read a block back, or `None` when the bytes are not one this build
-    /// wrote: in which case the caller keeps the defaults rather than a
-    /// console assembled out of whatever the file did contain.
+    /// `None` when the bytes are not a block this build wrote.
     fn parse(stored: &[u8]) -> Option<SystemSettings> {
         const HEADER: usize = 0x10;
         if stored.len() < HEADER || &stored[..8] != SYSTEM_SETTINGS_MAGIC {
@@ -495,8 +372,7 @@ impl SystemSettings {
             let tag = u32::from_le_bytes(stored[at..at + 4].try_into().ok()?);
             let len = u32::from_le_bytes(stored[at + 4..at + 8].try_into().ok()?) as usize;
             at += 8;
-            // A record that runs past the end is a truncated file: what has
-            // been read so far stands, and there is nothing after it.
+            // A truncated record ends the read; earlier records stand.
             let Some(value) = stored.get(at..at + len) else {
                 break;
             };
@@ -506,9 +382,7 @@ impl SystemSettings {
         Some(settings)
     }
 
-    /// One record back into its field. A value of the wrong width is left
-    /// out: the default is a setting this console can answer with, and a
-    /// half-written block is not.
+    /// A value of the wrong width is skipped, keeping the default.
     fn restore(&mut self, tag: u32, value: &[u8]) {
         fn u32_at(value: &[u8]) -> Option<u32> {
             Some(u32::from_le_bytes(value.get(..4)?.try_into().ok()?))
@@ -626,42 +500,29 @@ impl SystemSettings {
                     .map(|raw| raw as i32)
                     .unwrap_or(self.panel_crc_mode)
             }
-            // A record this build has no field for: a setting added later,
-            // read back by a build that has it again.
+            // A setting from a newer build.
             _ => {}
         }
     }
 }
 
-/// `lbl`'s view of the panel backlight: everything a caller set, kept so
-/// that it reads back.
-///
-/// None of it reaches a panel: there is no PWM behind this and the host
-/// decides its own window brightness. What matters is that the settings
-/// agree with each other, because the system settings applet writes one and
-/// then reads the *other*: it sets a brightness and asks what is applied to
-/// the backlight, and a console that answers those two independently is a
-/// console whose brightness slider does not move.
+/// `lbl`'s backlight state. Nothing reaches a panel, but the settings must
+/// agree: the settings applet sets a brightness and reads the applied one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Backlight {
-    /// The brightness setting, 0.0–1.0, and the copy `SaveCurrentSetting`
-    /// took of it for `LoadCurrentSetting` to put back.
+    /// The brightness, 0.0 to 1.0, and the copy `SaveCurrentSetting` took.
     setting: f32,
     saved: f32,
-    /// The separate brightness VR mode runs at.
+    /// The brightness used in VR mode.
     vr_setting: f32,
-    /// Whether the panel is lit at all. This is not a brightness of zero:
-    /// `SwitchBacklightOff` leaves the setting alone, and the applet that
-    /// turns the screen off expects to find its slider where it left it.
+    /// Separate from brightness: `SwitchBacklightOff` leaves the setting alone.
     on: bool,
     dimming: bool,
     auto_brightness: bool,
     vr_mode: bool,
-    /// The ambient light sensor's last reading, in lux. There is no sensor
-    /// here, so this is only ever what `SetAmbientLightSensorValue` put there.
+    /// Only ever what `SetAmbientLightSensorValue` stored.
     lux: f32,
-    /// The three-point mappings and the reflection delay. Nothing reads these
-    /// but their own getters, which is the entire reason they are stored.
+    /// Stored only so their getters read them back.
     brightness_mapping: [f32; 3],
     lux_mapping: [f32; 3],
     reflection_delay: f32,
@@ -674,8 +535,6 @@ impl Default for Backlight {
             saved: 1.0,
             vr_setting: 1.0,
             on: true,
-            // A retail console dims an idle screen and does not use the light
-            // sensor unless the user turns auto-brightness on.
             dimming: true,
             auto_brightness: false,
             vr_mode: false,
@@ -687,13 +546,8 @@ impl Default for Backlight {
     }
 }
 
-/// One alarm `notif` has been asked to keep, as the caller gave it.
-///
-/// The setting is the caller's own 0x40-byte `nn::notification::AlarmSetting`
-/// with the id the system assigned written into it, and the parameter is the
-/// opaque blob a title attaches for its own use when the alarm fires. Both
-/// come back verbatim, which is the whole contract: `notif` stores these, it
-/// does not interpret them.
+/// One `notif` alarm: the caller's `AlarmSetting` (with its assigned id) and
+/// opaque parameter, both returned verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AlarmSetting {
     id: u16,
@@ -706,22 +560,13 @@ const ALARM_SETTING_SIZE: usize = 0x40;
 
 const ALARM_SETTING_ID: usize = 0;
 
-/// The largest `ApplicationParameter` an alarm may carry.
 const ALARM_PARAMETER_MAX: u32 = 0x400;
 
 impl Cpu {
     pub(super) fn set_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        // The control interface every session carries, which has to be
-        // answered before the service's own table is consulted, and `set`
-        // is the case that shows why. It has a command **3** of its own,
-        // `GetAvailableLanguageCodeCount`, so without this the two collided:
-        // `nnSdk` opened the session, asked how large a pointer buffer it may
-        // send through, and was told 18, the number of language codes this
-        // console has. It will not marshal a command whose buffer does not
-        // fit, so Just Dance 2017 closed the session again without ever
-        // sending a settings command and aborted inside
-        // `nn::settings::LanguageCode::Make`, 660 million instructions in.
+        // Control requests first: `set` has its own command 3, which collided
+        // with `QueryPointerBufferSize`.
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
@@ -732,22 +577,13 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, "set:control", cmd_id),
             };
         }
-        // How many of the codes the pre-4.0.0 pair of commands reports. The cap is
-        // that command's own 15-entry array, not the twelve languages that
-        // predate 4.0.0: `nn::settings::detail::MakeLanguageCode` asks command
-        // 1 for 15 codes and indexes the answer by `SetLanguage` directly, so
-        // reporting twelve aborted Minecraft on `fr-CA` (13). Only `zh-Hans`,
-        // `zh-Hant` and `pt-BR` are out of the legacy pair's reach.
+        // The pre-4.0.0 commands use a 15-entry array indexed by `SetLanguage`.
         const LEGACY_LANGUAGE_CODES: usize = 15;
 
         let code = language_code;
 
         match cmd_id {
-            // GetRegionCode -> SetRegion, and GetLanguageCode -> the packed
-            // code. Both come out of the stored system settings rather than
-            // out of a constant: `set:sys`'s SetRegionCode and SetLanguageCode
-            // write those two fields, and a console that answers here from a
-            // constant is one whose language reverts the moment it is read.
+            // GetRegionCode -> SetRegion, GetLanguageCode -> packed code, from the stored settings.
             Some(4) => {
                 let region = self.system_settings().region;
                 self.write_ipc_response(tls, 0, &[], &region.to_le_bytes(), &[])
@@ -756,27 +592,14 @@ impl Cpu {
                 let raw = self.system_settings().language_code.to_le_bytes();
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            // MakeLanguageCode(SetLanguage) -> u64 code. This one is a lookup
-            // in the table above and not a question about this console, so it
-            // answers for whichever language it was handed.
+            // MakeLanguageCode(SetLanguage) -> u64 code.
             Some(2) => {
                 let language = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
                 let index = (language as usize).min(LANGUAGE_CODES.len() - 1);
                 self.write_ipc_response(tls, 0, &[], &code(index).to_le_bytes(), &[])
             }
-            // GetAvailableLanguageCodes (1 = pre-4.0.0) and
-            // GetAvailableLanguageCodes2 (5 = current): fill the out buffer
-            // with the codes and return how many were written. The only
-            // difference between them is how the buffer arrives, 1 offers a
-            // receive-static ("pointer") one, 5 a map-alias one, and
-            // `ipc_output_buffer` takes either.
-            //
-            // 1 was left to the catch-all, which answers with success and no
-            // data at all: `nn::settings::LanguageCode::Make` read the count
-            // back as zero, found no code for the language it had been asked
-            // for, and aborted. That is where Just Dance 2017 stopped once it
-            // had a RomFS to read: it is a pre-4.0.0 title, and 1 is the only
-            // one of the two it knows.
+            // GetAvailableLanguageCodes (1 = pre-4.0.0, receive-static buffer) and
+            // GetAvailableLanguageCodes2 (5, map-alias buffer) -> count written.
             Some(1) | Some(5) => {
                 let available = match cmd_id {
                     Some(1) => LEGACY_LANGUAGE_CODES,
@@ -794,10 +617,8 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &(written as u32).to_le_bytes(), &[])
             }
-            // GetAvailableLanguageCodeCount (3 = pre-4.0.0, 6 = current). Each
-            // has to agree with the command that fills the buffer beside it: a
-            // count larger than what `GetAvailableLanguageCodes` writes is a
-            // caller indexing past the codes it was given.
+            // GetAvailableLanguageCodeCount (3 = pre-4.0.0, 6 = current); must
+            // match what the fill command writes.
             Some(3) | Some(6) => {
                 let total = match cmd_id {
                     Some(3) => LEGACY_LANGUAGE_CODES,
@@ -805,11 +626,7 @@ impl Cpu {
                 } as u32;
                 self.write_ipc_response(tls, 0, &[], &total.to_le_bytes(), &[])
             }
-            // GetDeviceNickName -> the console's name, 0x80 bytes into a
-            // buffer. The same field `set:sys`'s Get/SetDeviceNickName serves,
-            // so the name the settings applet last wrote is the one a title
-            // reads here. Answered with an empty success, the caller read
-            // whatever its own buffer already held as the console's name.
+            // GetDeviceNickName -> 0x80 bytes, the same field `set:sys` serves.
             Some(11) => {
                 let name = self.system_settings().device_nick_name;
                 self.write_output_buffer(tls, 0, &name);
@@ -826,14 +643,7 @@ impl Cpu {
         }
     }
 
-    /// The system settings, loaded the first time anything asks for them.
-    ///
-    /// They live in save data, and a save is only in a session once the host
-    /// has restored it, which happens after the session is built and before
-    /// a title runs. Reading them lazily is what makes that ordering
-    /// irrelevant: the first command to touch a setting finds whatever the
-    /// last session left, and a console that has never had one written finds
-    /// the defaults.
+    /// Loaded lazily, since the host restores saves after the session is built.
     pub(super) fn system_settings(&mut self) -> &mut SystemSettings {
         if self.system_settings.is_none() {
             let stored = self
@@ -847,12 +657,7 @@ impl Cpu {
             .expect("filled in immediately above")
     }
 
-    /// Change a setting and write the block back to the save it lives in, so
-    /// the host's next flush carries it out to storage.
-    ///
-    /// The whole block goes back rather than the one field that changed: it
-    /// is a few hundred bytes, and a partial write is a file that has to be
-    /// merged with what was already there before it can be read.
+    /// Edit a setting and write the whole block back to its save.
     pub(super) fn store_system_settings(&mut self, edit: impl FnOnce(&mut SystemSettings)) {
         edit(self.system_settings());
         let blob = self.system_settings().serialize();
@@ -860,25 +665,12 @@ impl Cpu {
             .guest_write_file(SYSTEM_SETTINGS_FILE, blob);
     }
 
-    /// `set:sys`, the console's system settings.
-    ///
-    /// Two kinds of command live here. The `Get*`/`Set*` pairs are the
-    /// service proper: they read and write [`SystemSettings`], which is
-    /// stored in save data and so survives the session. The rest describe
-    /// hardware this console does not have a choice about, its firmware
-    /// version, its model, its serial, and answer with constants.
-    ///
-    /// The pairs are what this service is *for*. Before they were stored,
-    /// every setter fell through to the stub: the settings applet wrote a
-    /// value, was told it had worked, and read back the constant beside it.
+    /// `set:sys`. `Get*`/`Set*` pairs read and write [`SystemSettings`]; the
+    /// rest (firmware version, model, serial) are constants.
     pub(super) fn set_sys_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
-        // Every setter is the same three steps: read the argument, put it in
-        // the block, write the block back out to the save, and answers with
-        // nothing. Spelled out forty times over, the shape is what a reader
-        // has to check rather than what the setter actually stores.
         macro_rules! stored {
             ($field:ident = $value:expr) => {{
                 let value = $value;
@@ -888,9 +680,9 @@ impl Cpu {
         }
         match cmd_id {
             // ---- the settings themselves, setter then getter ----
-            // SetLanguageCode(u64) / `set`'s GetLanguageCode reads it back.
+            // SetLanguageCode(u64); `set`'s GetLanguageCode reads it back.
             Some(0) => stored!(language_code = self.ipc_arg_u64(tls, 0)),
-            // SetRegionCode(SystemRegionCode), likewise read back by `set`.
+            // SetRegionCode(SystemRegionCode); read back by `set`.
             Some(57) => stored!(region = self.ipc_arg_u32(tls, 0)),
             // Get/SetLockScreenFlag(bool).
             Some(7) => {
@@ -898,9 +690,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(8) => stored!(lock_screen = self.ipc_arg_u8(tls, 0) != 0),
-            // Get/SetExternalSteadyClockSourceId(Uuid): which clock the
-            // steady clock is counting from. Nothing here reads it but its
-            // own getter, which is why it has to be kept.
+            // Get/SetExternalSteadyClockSourceId(Uuid).
             Some(13) => {
                 let id = self.system_settings().external_steady_clock_source_id;
                 self.write_ipc_response(tls, 0, &[], &id, &[])
@@ -908,10 +698,7 @@ impl Cpu {
             Some(14) => {
                 stored!(external_steady_clock_source_id = self.request_block(tls))
             }
-            // Get/SetUserSystemClockContext(SystemClockContext) and the
-            // network one below: the offset and epoch a clock reading is
-            // interpreted against. `time` keeps its own; these are the copies
-            // the settings service files for whoever asks it instead.
+            // Get/SetUserSystemClockContext(SystemClockContext) and the network one below.
             Some(15) => {
                 let context = self.system_settings().user_clock_context;
                 self.write_ipc_response(tls, 0, &[], &context, &[])
@@ -928,13 +715,8 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &flags.to_le_bytes(), &[])
             }
             Some(18) => stored!(account_settings = self.ipc_arg_u32(tls, 0)),
-            // GetEulaVersions -> s32 count, with the agreements themselves in
-            // an output buffer; SetEulaVersions replaces the list from an
-            // input one. A console that has accepted none has not finished
-            // first-time setup, and the Home Menu hands over to `starter` for
-            // that, which nothing here can launch. The count has to be what
-            // *fits*: naming an entry the caller has nowhere to read is worse
-            // than reporting a short list.
+            // GetEulaVersions -> s32 count plus an output buffer (clamped to what
+            // fits); SetEulaVersions replaces the list.
             Some(21) => {
                 let eula: Vec<u8> = self.system_settings().eula_versions.concat();
                 let count = self.write_whole_entries(tls, &eula, EULA_VERSION_SIZE) as i32;
@@ -945,8 +727,7 @@ impl Cpu {
                 self.store_system_settings(|settings| settings.eula_versions = eula);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // Get/SetColorSetId -> ColorSet, the light or dark theme the Home
-            // Menu draws itself in.
+            // Get/SetColorSetId -> ColorSet.
             Some(23) => {
                 let color_set = self.system_settings().color_set;
                 self.write_ipc_response(tls, 0, &[], &color_set.to_le_bytes(), &[])
@@ -964,18 +745,13 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(28) => stored!(automatic_application_download = self.ipc_arg_u8(tls, 0) != 0),
-            // Get/SetNotificationSettings -> NotificationSettings, 0x18
-            // bytes: wider than the four padding words a reply zeroes, so
-            // before this was answered `stop_time` was whatever the caller's
-            // own request had left in TLS, a quiet period ending at an
-            // arbitrary hour.
+            // Get/SetNotificationSettings -> NotificationSettings, 0x18 bytes.
             Some(29) => {
                 let settings = self.system_settings().notification_settings;
                 self.write_ipc_response(tls, 0, &[], &settings, &[])
             }
             Some(30) => stored!(notification_settings = self.request_block(tls)),
-            // Get/SetAccountNotificationSettings: a count and a buffer of
-            // per-account overrides, the same shape as the EULA pair.
+            // Get/SetAccountNotificationSettings: a count and a buffer, like the EULA pair.
             Some(31) => {
                 let overrides: Vec<u8> = self
                     .system_settings()
@@ -993,35 +769,22 @@ impl Cpu {
                 });
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // Get/SetVibrationMasterVolume(float). `hid`'s rumble is scaled
-            // by this on hardware; here it is a setting the applet's slider
-            // moves and reads back.
+            // Get/SetVibrationMasterVolume(float).
             Some(35) => {
                 let volume = self.system_settings().vibration_master_volume;
                 self.write_ipc_response(tls, 0, &[], &volume.to_le_bytes(), &[])
             }
             Some(36) => stored!(vibration_master_volume = self.ipc_arg_f32(tls, 0)),
-            // GetSettingsItemValueSize / GetSettingsItemValue: the firmware's
-            // own key/value table, addressed by a category and a name in two
-            // pointer buffers. This is not a settings *pair*: nothing writes
-            // it, but it is the part of `set:sys` system components read
-            // rather than the settings applet, and it is answered from a
-            // table rather than stubbed because a caller that asks for an
-            // item reads the size it is given and then that many bytes.
+            // GetSettingsItemValueSize / GetSettingsItemValue: the firmware's key/value table.
             Some(37) | Some(38) => self.set_sys_item_request(tls, cmd_id == Some(38)),
-            // Get/SetTvSettings -> TvSettings, 0x20 bytes. Past the padding
-            // again: `tv_gama` and `contrast_ratio` are floats, so a NaN
-            // gamma used to be a reachable answer and not merely a wrong one.
+            // Get/SetTvSettings -> TvSettings, 0x20 bytes.
             Some(39) => {
                 let settings = self.system_settings().tv_settings;
                 self.write_ipc_response(tls, 0, &[], &settings, &[])
             }
             Some(40) => stored!(tv_settings = self.request_block(tls)),
             // GetAudioOutputMode(AudioOutputModeTarget) /
-            // SetAudioOutputMode(target, mode). Each output keeps its own
-            // mode, so the target is which one is being asked about, a
-            // service that answered them all alike would report the
-            // headphones set to whatever was last chosen for the dock.
+            // SetAudioOutputMode(target, mode); each target keeps its own mode.
             Some(43) => {
                 let target = self.ipc_arg_u32(tls, 0) as usize;
                 let mode = self
@@ -1042,25 +805,19 @@ impl Cpu {
                 });
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // Get/SetSpeakerAutoMuteFlag(bool): whether the speakers cut out
-            // when something is plugged into the headphone socket.
+            // Get/SetSpeakerAutoMuteFlag(bool).
             Some(45) => {
                 let flag = u8::from(self.system_settings().speaker_auto_mute);
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(46) => stored!(speaker_auto_mute = self.ipc_arg_u8(tls, 0) != 0),
-            // Get/SetQuestFlag -> QuestFlag, a u8. Zero is Retail; a kiosk
-            // unit runs a different Home Menu entirely.
+            // Get/SetQuestFlag -> QuestFlag (u8, 0 = Retail).
             Some(47) => {
                 let flag = self.system_settings().quest_flag;
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(48) => stored!(quest_flag = self.ipc_arg_u8(tls, 0)),
-            // Get/SetDeviceTimeZoneLocationName(LocationName): the zone the
-            // console is set to. `time` reports the same name from the same
-            // field, so the two services cannot disagree about where this
-            // console is, though `time` still converts against UTC, having
-            // no TZif database to resolve any other zone with.
+            // Get/SetDeviceTimeZoneLocationName(LocationName); `time` reports the same field.
             Some(53) => {
                 let name = self.system_settings().device_time_zone_location_name;
                 self.write_ipc_response(tls, 0, &[], &name, &[])
@@ -1075,9 +832,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(61) => stored!(user_clock_automatic_correction = self.ipc_arg_u8(tls, 0) != 0),
-            // GetDebugModeFlag -> bool, which real `set:sys` answers out of
-            // the settings-item table rather than from a field of its own.
-            // This one does the same, so the two cannot disagree.
+            // GetDebugModeFlag -> bool, answered from the settings-item table as hardware does.
             Some(62) => {
                 let debug = settings_item("settings_debug", "is_debug_mode_enabled")
                     .and_then(|value| value.first().copied())
@@ -1096,11 +851,8 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(66) => stored!(usb30_enable = self.ipc_arg_u8(tls, 0) != 0),
-            // Get/SetNfcEnableFlag(bool) and Get/SetBluetoothEnableFlag(bool).
-            // `nfc:sys` and `btm:sys` answer their own "is it on" commands out
-            // of these same two fields: the switch in the settings applet and
-            // the switch a service reads are one switch, and a console that
-            // kept them apart is one whose radio turns itself back on.
+            // Get/SetNfcEnableFlag(bool) and Get/SetBluetoothEnableFlag(bool),
+            // shared with `nfc:sys` and `btm:sys`.
             Some(69) => {
                 let flag = u8::from(self.system_settings().nfc_enable);
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
@@ -1111,9 +863,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(89) => stored!(bluetooth_enable = self.ipc_arg_u8(tls, 0) != 0),
-            // Get/SetSleepSettings -> SleepSettings, 0xc bytes. The plans are
-            // *indices* rather than durations, so the zeroes the stub left
-            // said "sleep after one minute" rather than "do not sleep".
+            // Get/SetSleepSettings -> SleepSettings, 0xc bytes.
             Some(71) => {
                 let settings = self.system_settings().sleep_settings;
                 self.write_ipc_response(tls, 0, &[], &settings, &[])
@@ -1125,18 +875,13 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(74) => stored!(wireless_lan_enable = self.ipc_arg_u8(tls, 0) != 0),
-            // Get/SetInitialLaunchSettings -> InitialLaunchSettings. The
-            // flags say whether the console has been through first-time
-            // setup, and the Home Menu will not draw a menu for one that has
-            // not: it waits to hand over to `starter` instead.
+            // Get/SetInitialLaunchSettings -> InitialLaunchSettings.
             Some(75) => {
                 let settings = self.system_settings().initial_launch_settings;
                 self.write_ipc_response(tls, 0, &[], &settings, &[])
             }
             Some(76) => stored!(initial_launch_settings = self.request_block(tls)),
             // Get/SetDeviceNickName: 0x80 bytes through a buffer either way.
-            // This is the name the console calls itself on a local network
-            // and in the settings applet's own title bar.
             Some(77) => {
                 let name = self.system_settings().device_nick_name;
                 self.write_output_buffer(tls, 0, &name);
@@ -1159,8 +904,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(100) => stored!(battery_percentage = self.ipc_arg_u8(tls, 0) != 0),
-            // SetExternalSteadyClockInternalOffset(s64) / Get. Note which way
-            // round these two are: the setter has the lower id.
+            // SetExternalSteadyClockInternalOffset(s64) / Get; the setter has the lower id.
             Some(105) => {
                 stored!(external_steady_clock_internal_offset = self.ipc_arg_u64(tls, 0) as i64)
             }
@@ -1179,7 +923,6 @@ impl Cpu {
                 stored!(push_notification_activity_mode_on_sleep = self.ipc_arg_u32(tls, 0) as i32)
             }
             // Get/SetErrorReportSharePermission -> ErrorReportSharePermission.
-            // Zero is NotConfirmed, which is the truth: nothing has asked.
             Some(124) => {
                 let permission = self.system_settings().error_report_share_permission;
                 self.write_ipc_response(tls, 0, &[], &permission.to_le_bytes(), &[])
@@ -1191,17 +934,14 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &flags.to_le_bytes(), &[])
             }
             Some(127) => stored!(applet_launch_flags = self.ipc_arg_u32(tls, 0)),
-            // Get/SetKeyboardLayout -> KeyboardLayout. Zero is `Japanese`, a
-            // real layout but not this console's, and the software keyboard
-            // reads this to lay out its keys.
+            // Get/SetKeyboardLayout -> KeyboardLayout.
             Some(136) => {
                 let layout = self.system_settings().keyboard_layout;
                 self.write_ipc_response(tls, 0, &[], &layout.to_le_bytes(), &[])
             }
             Some(137) => stored!(keyboard_layout = self.ipc_arg_u32(tls, 0)),
-            // Get/SetDeviceTimeZoneLocationUpdatedTime and the same pair for
-            // the clock's automatic correction: a SteadyClockTimePoint each,
-            // saying when the setting beside it last moved.
+            // Get/SetDeviceTimeZoneLocationUpdatedTime and the automatic
+            // correction pair: a SteadyClockTimePoint each.
             Some(150) => {
                 let when = self.system_settings().device_time_zone_updated_time;
                 self.write_ipc_response(tls, 0, &[], &when, &[])
@@ -1220,19 +960,13 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &method.to_le_bytes(), &[])
             }
             Some(171) => stored!(chinese_traditional_input_method = self.ipc_arg_u32(tls, 0)),
-            // Get/SetPlatformRegion -> s32 PlatformRegion, which is Global
-            // (1) or Terra (2) (the Chinese console) and has no zero. So
-            // the generic empty-success reply left the caller reading a value
-            // that is not a member of the enum, and `nn::settings` aborts on
-            // that: the error applet took an svcBreak with no message here,
-            // one command into its own start.
+            // Get/SetPlatformRegion -> s32, Global (1) or Terra (2); there is no zero.
             Some(183) => {
                 let region = self.system_settings().platform_region;
                 self.write_ipc_response(tls, 0, &[], &region.to_le_bytes(), &[])
             }
             Some(184) => stored!(platform_region = self.ipc_arg_u32(tls, 0) as i32),
-            // Get/SetTouchScreenMode -> TouchScreenMode. Standard, not the
-            // Stylus its zero means.
+            // Get/SetTouchScreenMode -> TouchScreenMode.
             Some(187) => {
                 let mode = self.system_settings().touch_screen_mode;
                 self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
@@ -1252,17 +986,7 @@ impl Cpu {
             Some(204) => stored!(panel_crc_mode = self.ipc_arg_u32(tls, 0) as i32),
 
             // ---- what this console has no choice about ----
-            // GetFirmwareVersion / GetFirmwareVersion2 -> a
-            // `SetSysFirmwareVersion` in an output buffer.
-            //
-            // This is not cosmetic. libnx's `__appInit` seeds `hosversionGet`
-            // from it, and everything version-gated downstream branches on
-            // that: which `acc` commands exist, which `ts` interface carries
-            // the temperature, which audio-renderer revision is negotiated.
-            // The generic empty-success answer left the caller reading its own
-            // uninitialized buffer as the version, NX-Fetch reported "Horizon
-            // OS 115.119.105", which is the ASCII of `switch-wasm user`, the
-            // uid this emulator had left in that same buffer earlier.
+            // GetFirmwareVersion / GetFirmwareVersion2 -> `SetSysFirmwareVersion` in a buffer.
             Some(3) | Some(4) => {
                 let version = Self::firmware_version();
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
@@ -1274,10 +998,7 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // GetBatteryLot -> SetSysBatteryLot { char lot[0x18] } and
-            // GetSerialNumber -> SetSysSerialNumber { char number[0x18] }.
-            // Both are burned in at manufacturing and unique per console;
-            // these are fixed placeholders, not real numbers.
+            // GetBatteryLot / GetSerialNumber -> char[0x18] placeholders.
             Some(67) | Some(68) => {
                 const BATTERY_LOT: &[u8] = b"0000000000000000";
                 const SERIAL: &[u8] = b"XAW00000000000";
@@ -1290,29 +1011,17 @@ impl Cpu {
                 raw[..text.len()].copy_from_slice(text);
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            // GetProductModel -> u32 ProductModel, which starts at 1 (Nx).
-            // Zero is not a model, so the generic empty-success reply sat
-            // outside the enum the same way GetPlatformRegion's did.
+            // GetProductModel -> u32 ProductModel, starting at 1 (Nx).
             Some(79) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
-            // GetMiiAuthorId -> the Uuid every Mii made on this console is
-            // stamped with. It has to be the same one every session or a Mii
-            // made yesterday is not this console's today, so it is fixed
-            // rather than generated, and it is stored with the settings for
-            // exactly the reason the settings are stored.
+            // GetMiiAuthorId -> Uuid.
             Some(90) => {
                 let id = MII_AUTHOR_ID;
                 self.write_ipc_response(tls, 0, &[], &id, &[])
             }
             // GetRebootlessSystemUpdateVersion -> { u32 version;
-            // reserved[0x1c]; char display_version[0x20]; }. No update has
-            // been applied over the running firmware, which is version zero
-            // and an empty display string.
+            // reserved[0x1c]; char display_version[0x20]; }, all zero.
             Some(149) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x40], &[]),
-            // GetHomeMenuScheme -> HomeMenuScheme, the five colours the Home
-            // Menu tints itself with, and GetHomeMenuSchemeModel -> u32,
-            // which scheme a console of this model uses. Zero for the model
-            // is the standard one; the colours are a plausible scheme rather
-            // than a measured one. See [`HOME_MENU_SCHEME`].
+            // GetHomeMenuScheme -> HomeMenuScheme, and GetHomeMenuSchemeModel -> u32 (0).
             Some(174) => {
                 let mut scheme = Vec::with_capacity(0x14);
                 for color in HOME_MENU_SCHEME {
@@ -1332,20 +1041,12 @@ impl Cpu {
         }
     }
 
-    /// `GetSettingsItemValueSize` (37) and `GetSettingsItemValue` (38): the
-    /// firmware's key/value table, addressed by a category and a name that
-    /// arrive as two separate input buffers.
-    ///
-    /// An item this console does not have is refused rather than answered
-    /// with a zero: a caller reads the size back and then that many bytes, so
-    /// a fabricated success hands it a value it never stored. The refusal
-    /// names what was asked for, which is the only way to find out what a
-    /// title wanted.
+    /// `GetSettingsItemValueSize` (37) and `GetSettingsItemValue` (38). Unknown
+    /// items are refused, since callers read back the size and then that many bytes.
     fn set_sys_item_request(&mut self, tls: u32, with_value: bool) -> Result<()> {
-        /// `nn::settings::ResultSettingsItemNotFound`, module 105,
-        /// description 11, as Atmosphère's `settings_results.hpp` names it.
+        /// `nn::settings::ResultSettingsItemNotFound`.
         const SETTINGS_ITEM_NOT_FOUND: u32 = 105 | (11 << 9);
-        /// `nn::settings::SettingItemName`, the width of each name buffer.
+        /// `nn::settings::SettingItemName`.
         const NAME_SIZE: u32 = 0x48;
 
         let name_at = |cpu: &Cpu, index: u32| -> String {
@@ -1361,9 +1062,7 @@ impl Cpu {
             self.warn_missing_settings_item(&category, &name);
             return self.write_ipc_response(tls, SETTINGS_ITEM_NOT_FOUND, &[], &[], &[]);
         };
-        // The size reported is the item's own, not how much of it fit: a
-        // caller sizes its buffer from command 37 and would read the
-        // difference as a short item rather than as a buffer it undersized.
+        // The item's full size, not how much fit.
         let size = value.len() as u64;
         if with_value {
             self.write_output_buffer(tls, 0, &value);
@@ -1371,9 +1070,7 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
     }
 
-    /// Say once which settings item was asked for and not found. Once per
-    /// item rather than per call: `nnSdk` retries, and the interesting part
-    /// is the name.
+    /// Warn once per item name, since `nnSdk` retries.
     fn warn_missing_settings_item(&mut self, category: &str, name: &str) {
         if self
             .missing_settings_items
@@ -1386,13 +1083,8 @@ impl Cpu {
         }
     }
 
-    /// Write as many whole `size`-byte entries as the request's first output
-    /// buffer has room for, and say how many that was.
-    ///
-    /// A partial entry is not one. The caller reads the count and stops
-    /// there, so the bytes past it are bytes it never looks at, and it sized
-    /// that buffer itself, so a list that does not fit is a list it asked for
-    /// less of.
+    /// Write as many whole `size`-byte entries as the first output buffer fits,
+    /// and return how many.
     fn write_whole_entries(&mut self, tls: u32, entries: &[u8], size: usize) -> usize {
         let room = self.ipc_output_buffer(tls, 0).map_or(0, |(addr, len)| {
             if addr == 0 {
@@ -1406,8 +1098,7 @@ impl Cpu {
         count
     }
 
-    /// A fixed-width struct out of a request's raw data, the shape every
-    /// `Set*` that takes a settings block arrives in.
+    /// A fixed-width block from a request's raw data.
     fn request_block<const N: usize>(&self, tls: u32) -> [u8; N] {
         let mut block = [0u8; N];
         let data = self.ipc_request_data(tls);
@@ -1420,8 +1111,7 @@ impl Cpu {
         block
     }
 
-    /// A fixed-width struct out of a request's first input buffer, for the
-    /// setters whose argument is too wide to travel in the raw data.
+    /// A fixed-width block from a request's first input buffer.
     fn input_block<const N: usize>(&self, tls: u32) -> [u8; N] {
         let mut block = [0u8; N];
         if let Some((addr, size)) = self.ipc_input_buffer(tls, 0) {
@@ -1433,9 +1123,7 @@ impl Cpu {
         block
     }
 
-    /// The list of fixed-width entries in a request's first input buffer,
-    /// what `SetEulaVersions` and `SetAccountNotificationSettings` replace
-    /// their whole list from. A trailing partial entry is not one.
+    /// Whole fixed-width entries from a request's first input buffer.
     fn request_list<const N: usize>(&self, tls: u32) -> Vec<[u8; N]> {
         let Some((addr, size)) = self.ipc_input_buffer(tls, 0) else {
             return Vec::new();
@@ -1446,9 +1134,7 @@ impl Cpu {
         self.read_bytes(addr, size).as_chunks::<N>().0.to_vec()
     }
 
-    /// `SetSysFirmwareVersion`, the 0x100-byte block `set:sys` reports the
-    /// system version in: the numeric version, then the platform, the build
-    /// hash, and the two display strings the settings applet shows.
+    /// `SetSysFirmwareVersion`: version, platform, build hash and display strings.
     fn firmware_version() -> [u8; 0x100] {
         let mut version = [0u8; 0x100];
         version[0] = FIRMWARE_VERSION.0;
@@ -1475,21 +1161,9 @@ impl Cpu {
         version
     }
 
-    /// `pctl` and its aliases (`pctl:s`, `pctl:a`, `pctl:r`): parental
-    /// controls, reported as **switched off**.
-    ///
-    /// There is nobody to restrict here, no accounts, no PIN, no play timer,
-    /// no linked guardian, so "off" is not a placeholder, it is the true
-    /// state of this console. That makes every answer determinate: a
-    /// permission check succeeds (a real denial is an error `Result`, not a
-    /// `false`), an "is this restricted" query is `false`, and an "is this
-    /// still allowed" query is `true`. Note which way round those go, the two
-    /// families read in opposite directions, and a blanket `false` would have
-    /// reported free communication as *unavailable*.
-    ///
-    /// A retail title asks for this early: "A Short Hike" opens all four
-    /// aliases before it touches the filesystem, and `nnSdk` will not start an
-    /// application it believes is restricted.
+    /// `pctl` and its aliases: parental controls, switched off. Permission
+    /// checks succeed, "is restricted" queries are false and "is allowed"
+    /// queries are true.
     pub(super) fn pctl_request(
         &mut self,
         tls: u32,
@@ -1523,9 +1197,7 @@ impl Cpu {
         };
         match iface.as_str() {
             // IParentalControlServiceFactory::CreateService /
-            // CreateServiceWithoutInitialize. The difference is whether the
-            // returned interface arrives already initialized; with no settings
-            // to load, both hand back the same thing.
+            // CreateServiceWithoutInitialize.
             "pctl:factory" => match cmd_id {
                 Some(0) | Some(1) => {
                     self.reply_with_interface(tls, handle, "pctl:service")?;
@@ -1536,74 +1208,44 @@ impl Cpu {
             "pctl:service" => match cmd_id {
                 // Initialize.
                 Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // The permission checks: CheckFreeCommunicationPermission,
-                // ConfirmLaunchApplicationPermission,
-                // ConfirmResumeApplicationPermission,
-                // ConfirmSnsPostPermission,
-                // ConfirmSystemSettingsPermission,
-                // ConfirmStereoVisionPermission, ConfirmShowNewsPermission,
-                // EndFreeCommunication,
-                // ResetConfirmedStereoVisionPermission.
-                //
-                // These answer with a bare `Result`: success *is* "permitted",
-                // and a restriction shows up as an error the caller checks for
-                // by value. Nothing is restricted, so they all succeed.
+                // CheckFreeCommunicationPermission, ConfirmLaunchApplicationPermission,
+                // ConfirmResumeApplicationPermission, ConfirmSnsPostPermission,
+                // ConfirmSystemSettingsPermission, ConfirmStereoVisionPermission,
+                // ConfirmShowNewsPermission, EndFreeCommunication,
+                // ResetConfirmedStereoVisionPermission: success means permitted.
                 Some(1001..=1005) | Some(1013) | Some(1016) | Some(1017) | Some(1064) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // IsRestrictionTemporaryUnlocked /
-                // IsRestrictedSystemSettingsEntered / IsRestrictionEnabled /
-                // IsPlayTimerEnabled / IsRestrictedByPlayTimer: "is something
-                // restricting you", all false.
+                // IsRestrictionTemporaryUnlocked / IsRestrictedSystemSettingsEntered /
+                // IsRestrictionEnabled / IsPlayTimerEnabled / IsRestrictedByPlayTimer.
                 Some(1006) | Some(1010) | Some(1031) | Some(1453) | Some(1455) => {
                     self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[])
                 }
-                // IsFreeCommunicationAvailable / IsStereoVisionPermitted: "is
-                // something still allowed", the opposite sense, so both true.
+                // IsFreeCommunicationAvailable / IsStereoVisionPermitted.
                 Some(1018) | Some(1065) => {
                     self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[])
                 }
-                // IsPairingActive / IsPlayTimerAlarmDisabled: no guardian is
-                // paired and there is no timer to sound an alarm. The second
-                // reads the other way round again: "disabled" is the
-                // unrestricted answer, so it is true where the first is false.
+                // IsPairingActive -> false; IsPlayTimerAlarmDisabled -> true.
                 Some(1403) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 Some(1458) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
                 // GetRestrictedFeatures / GetSafetyLevel /
-                // GetFreeCommunicationApplicationListCount / GetPinCodeLength
-                // / GetAccountState / GetPostEventInterval: nothing set, no
-                // list, no PIN, no linked account, zero in every one of them.
+                // GetFreeCommunicationApplicationListCount / GetPinCodeLength /
+                // GetAccountState / GetPostEventInterval.
                 Some(1012) | Some(1032) | Some(1039) | Some(1206) | Some(1424) | Some(1426) => {
                     self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
                 }
-                // GetCurrentSettings -> nn::pctl::RestrictionSettings: a
-                // rating age, and the two "may not post / may not talk" flags.
-                // Nothing is restricted here, and an age of -1 is how that is
-                // said: any rating passes it.
+                // GetCurrentSettings -> RestrictionSettings; rating age -1 passes everything.
                 Some(1035) => self.write_ipc_response(tls, 0, &[], &[0xffu8, 0, 0], &[]),
-                // GenerateInquiryCode -> char[0x20], the "%02d%08llu" of 11
-                // and eight digits a guardian reads out to have a forgotten
-                // PIN reset. No PIN is set here, so the digits are a fixed
-                // placeholder; the width and the format are not.
+                // GenerateInquiryCode -> char[0x20] ("%02d%08llu"), a fixed placeholder.
                 Some(1204) => {
                     const INQUIRY_CODE: &[u8] = b"1100000000";
                     let mut code = [0u8; 0x20];
                     code[..INQUIRY_CODE.len()].copy_from_slice(INQUIRY_CODE);
                     self.write_ipc_response(tls, 0, &[], &code, &[])
                 }
-                // The event getters: GetPinCodeChangedEvent (1207),
-                // GetSynchronizationEvent (1432),
-                // GetPlayTimerEventToRequestSuspension (1457) and
-                // GetUnlinkedEvent (1473).
-                //
-                // Each is a **copy** handle, and each stays unsignalled for
-                // the life of the process: the PIN never changes, there is no
-                // guardian account to synchronise with, no timer to ask for a
-                // suspension and no link to break. A caller waits on all four
-                // forever, which is the correct thing for it to do. Refusing
-                // instead is what took the Home Menu down: `nnSdk` aborts on
-                // an unknown command id rather than carry on without the
-                // handle.
+                // GetPinCodeChangedEvent, GetSynchronizationEvent,
+                // GetPlayTimerEventToRequestSuspension, GetUnlinkedEvent: copy
+                // handles, never signalled. `nnSdk` aborts if these are refused.
                 Some(1207) | Some(1432) | Some(1457) | Some(1473) => {
                     let name = match cmd_id {
                         Some(1207) => "pctl:pin-changed",
@@ -1614,30 +1256,17 @@ impl Cpu {
                     let h = self.alloc_event(name, true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // GetPlayTimerRemainingTime -> s32. There is no timer running
-                // (1453 says so), and a timer that is not running has no
-                // deadline: zero here would read as *time is up*, which is the
-                // restricted answer 1455 already denies.
+                // GetPlayTimerRemainingTime -> s32; zero would mean time is up.
                 Some(1454) => self.write_ipc_response(tls, 0, &[], &i32::MAX.to_le_bytes(), &[]),
-                // GetPlayTimerRemainingTimeDisplayInfo -> 0x18 bytes, whose
-                // fields nobody has named: Eden's `parental_control_service.cpp`
-                // records the width and writes none of it. Zeroed, like the
-                // settings block below, rather than guessed at field by field.
+                // GetPlayTimerRemainingTimeDisplayInfo -> 0x18 undocumented bytes.
                 Some(1459) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x18], &[]),
-                // GetPlayTimerSettings: an unset settings block. Zeroed and
-                // sized past `nn::pctl::PlayTimerSettings` so that a wider
-                // struct still reads as unset rather than as reply padding,
-                // a reply may be longer than the caller needs, never shorter.
+                // GetPlayTimerSettings: zeroed, sized past the struct.
                 Some(1456) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x40], &[]),
-                // The 18.0.0+ id for the same thing, which turned 1456 into
-                // the `Old` form. Its block widened to 0x44 bytes in 21.0.0,
-                // and that is the width answered here for the reason above.
+                // 18.0.0+ id for the same; 0x44 bytes since 21.0.0.
                 Some(145601) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x44], &[]),
                 // StartPlayTimer / StopPlayTimer / RequestPostEvents /
                 // ClearUnlinkedEvent / DisableFeaturesForReset /
-                // NotifyApplicationDownloadStarted /
-                // NotifyNetworkProfileCreated: void, and there is no state
-                // here for any of them to change.
+                // NotifyApplicationDownloadStarted / NotifyNetworkProfileCreated.
                 Some(1046..=1048) | Some(1425) | Some(1451) | Some(1452) | Some(1474) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
@@ -1647,20 +1276,8 @@ impl Cpu {
         }
     }
 
-    /// `lbl`, "nn::lbl::detail::ILblController", the panel backlight.
-    ///
-    /// This is one interface with no sub-objects, and almost all of it is a
-    /// setter/getter pair over [`Backlight`]. That is the whole reason it
-    /// needs an implementation at all: the generic fallback answered
-    /// `LoadCurrentSetting` with a fabricated object id, and every getter
-    /// beside it with a value that had nothing to do with what the matching
-    /// setter had just been told.
-    ///
-    /// The one thing this console genuinely does not have is the ambient
-    /// light sensor, so `IsAmbientLightSensorAvailable` and
-    /// `IsAutoBrightnessControlSupported` say no, and a caller that believes
-    /// them never turns auto-brightness on, which is the state the rest of
-    /// the answers here describe.
+    /// `lbl` (`nn::lbl::detail::ILblController`): setter/getter pairs over
+    /// [`Backlight`]. No ambient light sensor, so no auto-brightness.
     pub(super) fn lbl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         /// `LblBacklightSwitchStatus`.
         const BACKLIGHT_DISABLED: u32 = 0;
@@ -1669,9 +1286,7 @@ impl Cpu {
             return Ok(());
         }
         match cmd_id {
-            // SaveCurrentSetting / LoadCurrentSetting: the applet stashes the
-            // brightness before it changes it for a preview, and puts it back
-            // when the user backs out.
+            // SaveCurrentSetting / LoadCurrentSetting.
             Some(0) => {
                 self.backlight.saved = self.backlight.setting;
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -1689,13 +1304,9 @@ impl Cpu {
                 let value = self.backlight.setting;
                 self.write_ipc_response(tls, 0, &[], &value.to_bits().to_le_bytes(), &[])
             }
-            // ApplyCurrentBrightnessSettingToBacklight: there is no panel to
-            // apply it to, and the setting is already what
-            // GetBrightnessSettingAppliedToBacklight reports.
+            // ApplyCurrentBrightnessSettingToBacklight.
             Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // GetBrightnessSettingAppliedToBacklight -> what the backlight is
-            // actually running at, which is the setting while the panel is on
-            // and nothing at all while it is off.
+            // GetBrightnessSettingAppliedToBacklight: the setting while on, zero while off.
             Some(5) => {
                 let applied = if self.backlight.on {
                     self.backlight.setting
@@ -1704,8 +1315,7 @@ impl Cpu {
                 };
                 self.write_ipc_response(tls, 0, &[], &applied.to_bits().to_le_bytes(), &[])
             }
-            // SwitchBacklightOn / SwitchBacklightOff, each taking the fade
-            // time to get there. Nothing fades, so the switch is immediate.
+            // SwitchBacklightOn / SwitchBacklightOff(fade time); the switch is immediate.
             Some(6) | Some(7) => {
                 self.backlight.on = cmd_id == Some(6);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -1736,16 +1346,12 @@ impl Cpu {
                 let enabled = u8::from(self.backlight.auto_brightness);
                 self.write_ipc_response(tls, 0, &[], &[enabled], &[])
             }
-            // SetAmbientLightSensorValue(float lux). There is no sensor, so
-            // the only lux this console ever sees is the one a debug caller
-            // injects here.
+            // SetAmbientLightSensorValue(float lux).
             Some(15) => {
                 self.backlight.lux = self.ipc_arg_f32(tls, 0);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // GetAmbientLightSensorValue -> { u32 over_limit, float lux }.
-            // Over-limit means the reading saturated, which an absent sensor
-            // never does.
             Some(16) => {
                 let mut raw = Vec::with_capacity(8);
                 raw.extend_from_slice(&0u32.to_le_bytes());
@@ -1753,10 +1359,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
             // SetBrightnessReflectionDelayLevel(float, float) /
-            // GetBrightnessReflectionDelayLevel(float) -> float: how long the
-            // panel takes to follow a change. The getter takes a float of its
-            // own that selects which level it is asking about; there is one
-            // level here, so it is ignored.
+            // GetBrightnessReflectionDelayLevel(float) -> float; one level, selector ignored.
             Some(17) => {
                 self.backlight.reflection_delay = self.ipc_arg_f32(tls, 0);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -1766,9 +1369,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &level.to_bits().to_le_bytes(), &[])
             }
             // SetCurrentBrightnessMapping(float, float, float) / Get, and the
-            // same pair for the ambient light sensor's mapping. These are the
-            // curve the firmware drives the panel through; nothing here reads
-            // them but their own getters.
+            // ambient light sensor's mapping pair.
             Some(19) | Some(21) => {
                 let mut mapping = [0.0f32; 3];
                 for (index, value) in mapping.iter_mut().enumerate() {
@@ -1793,9 +1394,7 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            // IsAmbientLightSensorAvailable, and the 7.0.0+
-            // IsAutoBrightnessControlSupported that follows from it: no
-            // sensor, so neither.
+            // IsAmbientLightSensorAvailable / IsAutoBrightnessControlSupported [7.0.0+].
             Some(23) | Some(29) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
             // SetCurrentBrightnessSettingForVrMode(float) / Get.
             Some(24) => {
@@ -1806,8 +1405,7 @@ impl Cpu {
                 let value = self.backlight.vr_setting;
                 self.write_ipc_response(tls, 0, &[], &value.to_bits().to_le_bytes(), &[])
             }
-            // EnableVrMode / DisableVrMode / IsVrModeEnabled. `am`'s
-            // SetVrModeEnabled is the caller.
+            // EnableVrMode / DisableVrMode / IsVrModeEnabled.
             Some(26) | Some(27) => {
                 self.backlight.vr_mode = cmd_id == Some(26);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -1820,18 +1418,8 @@ impl Cpu {
         }
     }
 
-    /// `notif:s` / `notif:a`, "nn::notification::server::INotificationServices"
-    /// and the application-facing interface beside it: the alarms a title
-    /// asks the system to wake it for, and the notifications the Home Menu
-    /// shows.
-    ///
-    /// The alarm store is real. A caller registers an `AlarmSetting`, is
-    /// given the id the system filed it under, and lists, reloads and deletes
-    /// it by that id, a round trip a fabricated success cannot fake, because
-    /// the id it hands back names nothing and the list that follows disagrees
-    /// with it. What is *not* modelled is an alarm ever firing: they are
-    /// scheduled against a clock the console keeps while it sleeps, and this
-    /// console does not sleep.
+    /// `notif:s` / `notif:a`: a real alarm store (register, list, reload,
+    /// delete by id). Alarms never fire.
     pub(super) fn notif_request(
         &mut self,
         tls: u32,
@@ -1847,8 +1435,7 @@ impl Cpu {
             return Ok(());
         }
         let iface = self.ipc_interface(tls, handle, root);
-        // INotificationSystemEventAccessor: GetSystemEvent, the one command
-        // it has. The event fires when a notification is posted.
+        // INotificationSystemEventAccessor::GetSystemEvent.
         if iface == "notif:event-accessor" {
             return match cmd_id {
                 Some(0) => {
@@ -1859,10 +1446,8 @@ impl Cpu {
             };
         }
         match cmd_id {
-            // RegisterAlarmSetting(AlarmSetting, ApplicationParameter) -> the
-            // id the system filed it under. The id is the server's to assign,
-            // and it is written back into the stored copy so the listing
-            // agrees with what the caller was told.
+            // RegisterAlarmSetting(AlarmSetting, ApplicationParameter) -> id,
+            // also written into the stored copy.
             Some(500) => {
                 let setting = self
                     .ipc_input_buffer(tls, 0)
@@ -1883,8 +1468,7 @@ impl Cpu {
                 });
                 self.write_ipc_response(tls, 0, &[], &id.to_le_bytes(), &[])
             }
-            // UpdateAlarmSetting(AlarmSetting, ApplicationParameter): the
-            // setting carries the id of the alarm it replaces.
+            // UpdateAlarmSetting(AlarmSetting, ApplicationParameter), by the setting's id.
             Some(510) => {
                 let setting = self
                     .ipc_input_buffer(tls, 0)
@@ -1905,8 +1489,7 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // ListAlarmSettings -> the settings themselves in an output
-            // buffer, and how many were written.
+            // ListAlarmSettings -> settings in a buffer, and the count.
             Some(520) => {
                 let mut entries = Vec::new();
                 for alarm in &self.notif_alarms {
@@ -1916,9 +1499,7 @@ impl Cpu {
                 let count = (written as usize / ALARM_SETTING_SIZE) as i32;
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
             }
-            // LoadApplicationParameter(AlarmSettingId) -> the blob the title
-            // attached, and its real length. A caller reads the length, not
-            // the buffer size, so this has to be the *stored* size.
+            // LoadApplicationParameter(AlarmSettingId) -> blob and its stored length.
             Some(530) => {
                 let id = self.ipc_arg_u32(tls, 0) as u16;
                 let parameter = self
@@ -1936,26 +1517,20 @@ impl Cpu {
                 self.notif_alarms.retain(|alarm| alarm.id != id);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // 1000 is two different commands: `notif:a`'s Initialize, which
-            // takes a pid and answers with nothing, and `notif:s`'s
-            // GetNotificationCount, which answers with a number. Answering
-            // the wrong one hands a void command a count, or a count nothing.
+            // 1000 is `notif:a`'s Initialize (void) but `notif:s`'s GetNotificationCount.
             Some(1000) if root == "notif:a" => self.write_ipc_response(tls, 0, &[], &[], &[]),
             Some(1000) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
             // ListNotifications -> entries into a buffer, and how many.
             Some(1010) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
             // DeleteNotification / ClearNotifications: nothing is queued.
             Some(1020) | Some(1030) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // GetNotificationSendingNotifier ->
-            // INotificationSystemEventAccessor, which holds the event that
-            // fires when a notification is posted.
+            // GetNotificationSendingNotifier -> INotificationSystemEventAccessor.
             Some(1040) => {
                 self.reply_with_interface(tls, handle, "notif:event-accessor")?;
                 Ok(())
             }
             // SetNotificationPresentationSetting /
-            // GetNotificationPresentationSetting(NotificationChannel) -> a
-            // 0x10-byte setting. All zero is "present it the default way".
+            // GetNotificationPresentationSetting(NotificationChannel) -> 0x10 bytes.
             Some(1500) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             Some(1510) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
             // GetAlarmSetting(AlarmSettingId) -> the 0x40-byte setting.
@@ -1971,21 +1546,16 @@ impl Cpu {
             }
             // SetAlarmSettingIsMuted(AlarmSettingId, bool).
             Some(2010) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // IsAlarmSettingDeletable(AlarmSettingId) -> bool. Every alarm
-            // registered here belongs to the caller and can go.
+            // IsAlarmSettingDeletable(AlarmSettingId) -> bool.
             Some(2020) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
-            // RegisterAppletResourceUserId / UnregisterAppletResourceUserId:
-            // which applet an alarm belongs to. There is one process here.
+            // RegisterAppletResourceUserId / UnregisterAppletResourceUserId.
             Some(8000) | Some(8010) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // GetCurrentTime -> the PosixTime the alarms are scheduled
-            // against, which has to be the same clock `time` reports or an
-            // alarm set for "an hour from now" lands in the wrong century.
+            // GetCurrentTime -> PosixTime, the same clock `time` reports.
             Some(8999) => {
                 let now = self.unix_time();
                 self.write_ipc_response(tls, 0, &[], &now.to_le_bytes(), &[])
             }
-            // GetAlarmSettingNextNotificationTime(AlarmSettingId) -> whether
-            // the alarm is scheduled, and when. Nothing here schedules one.
+            // GetAlarmSettingNextNotificationTime(AlarmSettingId) -> unscheduled.
             Some(9000) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
             _ => self.unimplemented_command(tls, &iface, cmd_id),
         }
@@ -1999,11 +1569,7 @@ mod tests {
 
     #[test]
     fn set_sys_reports_a_platform_region_that_is_in_the_enum() {
-        // `nn::settings::PlatformRegion` is Global (1) or Terra (2) -- the
-        // Chinese console -- and has no zero. The generic empty-success reply
-        // left the caller reading a value that is in neither, and
-        // `nn::settings` aborts on that with no message: it is where the
-        // error applet took an svcBreak, one command into its own start.
+        // `PlatformRegion` is Global (1) or Terra (2) and has no zero.
         let mut cpu = request(false, 183, &[]);
         cpu.set_sys_request(TLS, Some(183)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
@@ -2013,9 +1579,6 @@ mod tests {
 
     #[test]
     fn set_sys_reports_an_accepted_eula() {
-        // A console that has accepted no agreement has not finished
-        // first-time setup, and the Home Menu hands over to `starter` for
-        // that -- which nothing here can launch.
         const BUFFER: u32 = 0x4000;
         const ENTRY: u32 = 0x30;
 
@@ -2027,8 +1590,7 @@ mod tests {
         assert_ne!(cpu.mem.read_u32(BUFFER).unwrap(), 0, "a version was set");
         assert_eq!(cpu.mem.read_u32(BUFFER + 4).unwrap(), 1, "SetRegion_USA");
 
-        // A buffer with no room for an entry gets a count of zero, not one
-        // naming an entry the caller has nowhere to read.
+        // No room for an entry gives a count of zero.
         write_map_buffer_request(&mut cpu, 21, &[], BUFFER, ENTRY - 1, false);
         cpu.set_sys_request(TLS, Some(21)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "nothing fits");
@@ -2048,12 +1610,7 @@ mod tests {
 
     #[test]
     fn set_sys_fills_the_settings_blocks_that_outrun_the_reply_padding() {
-        // A reply zeroes four padding words, which covers an out parameter up
-        // to 16 bytes. `TvSettings` is 0x20 and `NotificationSettings` 0x18,
-        // so past that a caller read the tail of its own request back --
-        // `tv_gama` and `contrast_ratio` are floats, so a NaN gamma was
-        // reachable and not merely a wrong number. The scribble is where
-        // those tails land.
+        // Replies zero only 16 bytes of padding; the scribble catches wider blocks left stale.
         const STALE: u8 = 0xa5;
 
         let mut cpu = request(false, 39, &[]);
@@ -2114,10 +1671,7 @@ mod tests {
 
     #[test]
     fn set_sys_answers_the_enums_whose_zero_is_wrong() {
-        // `ProductModel` starts at 1, so zero is outside it -- the same shape
-        // as GetPlatformRegion above. `KeyboardLayout`'s zero is `Japanese`,
-        // a real layout but not the one a console reporting en-US everywhere
-        // else should hand the software keyboard.
+        // `ProductModel` starts at 1; `KeyboardLayout`'s zero is `Japanese`.
         let mut cpu = request(false, 79, &[]);
         cpu.set_sys_request(TLS, Some(79)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
@@ -2134,11 +1688,7 @@ mod tests {
 
     #[test]
     fn set_sys_sleeps_never_rather_than_at_an_arbitrary_hour() {
-        // The one setting here whose zero is actively wrong. `SleepSettings`
-        // is { SleepFlag; HandheldSleepPlan; ConsoleSleepPlan }, and the plans
-        // are *indices* rather than durations, so the zeroes the empty-success
-        // stub left behind said "sleep after one minute", not "do not sleep".
-        // Nothing here dims a screen this emulator does not own.
+        // The sleep plans are indices, so zero would mean "sleep after one minute".
         const NEVER: u32 = 5;
         let mut cpu = request(false, 71, &[]);
         cpu.set_sys_request(TLS, Some(71)).unwrap();
@@ -2178,10 +1728,6 @@ mod tests {
 
     #[test]
     fn set_sys_reports_a_real_firmware_version_into_its_pointer_buffer() {
-        // libnx seeds `hosversionGet` from this, and everything version-gated
-        // branches on it. Answering with an empty success left the caller
-        // reading its own stale buffer: NX-Fetch showed "Horizon OS
-        // 115.119.105", the ASCII of the uid this emulator had left there.
         const BUFFER: u32 = 0x4000;
         let mut cpu = request_with_recv_static(3, &[], BUFFER, 0x100);
         cpu.mem.map_zero(BUFFER, 0x200).unwrap();
@@ -2205,9 +1751,6 @@ mod tests {
 
     #[test]
     fn set_sys_reads_back_what_its_setters_were_given() {
-        // The whole point of the service. Every one of these used to fall
-        // through to the stub: the caller was told the write had worked and
-        // then read back the constant that had always been there.
         const COLOR_SET: u32 = 24;
         const KEYBOARD_LAYOUT: u32 = 137;
         const LOCK_SCREEN: u32 = 8;
@@ -2257,10 +1800,6 @@ mod tests {
 
     #[test]
     fn set_sys_keeps_a_settings_block_whole_past_the_reply_padding() {
-        // `TvSettings` is 0x20 bytes, wider than the four padding words a
-        // reply zeroes, and every byte of it belongs to the caller. A setter
-        // that reads only the first four words is one whose contrast ratio
-        // reverts.
         const SET_TV_SETTINGS: u32 = 40;
         let mut block = [0u8; 0x20];
         block[0x00..0x04].copy_from_slice(&1u32.to_le_bytes()); // Allows4k
@@ -2283,9 +1822,6 @@ mod tests {
 
     #[test]
     fn set_sys_keeps_one_audio_mode_per_output() {
-        // The target argument is which output is being asked about. A service
-        // that answered them all alike would report the headphones set to
-        // whatever was last chosen for the dock.
         const SET: u32 = 44;
         const GET: u32 = 43;
         const HEADPHONE: u32 = 3;
@@ -2317,8 +1853,7 @@ mod tests {
 
     #[test]
     fn set_sys_replaces_the_eula_list_from_the_buffer_it_was_handed() {
-        // SetEulaVersions is not "add one": it is the list, and a console
-        // handed two agreements has two rather than three.
+        // SetEulaVersions replaces the list.
         const SET: u32 = 22;
         const GET: u32 = 21;
         const ENTRY: u32 = 0x30;
@@ -2328,7 +1863,6 @@ mod tests {
         let mut cpu = request(false, SET, &[]);
         cpu.mem.map_zero(IN, 0x200).unwrap();
         cpu.mem.map_zero(OUT, 0x200).unwrap();
-        // Two agreements, distinguishable by their version words.
         cpu.mem.write_u32(IN, 0x2_0000).unwrap();
         cpu.mem.write_u32(IN + ENTRY, 0x3_0000).unwrap();
         write_map_buffer_request(&mut cpu, SET, &[], IN, 2 * ENTRY, true);
@@ -2344,8 +1878,7 @@ mod tests {
 
     #[test]
     fn the_device_nick_name_set_sys_was_given_reads_back_through_both_services() {
-        // 0x80 bytes each way, through a buffer rather than the raw data:
-        // the setter reading the raw data would store the descriptor words.
+        // Through a buffer, not the raw data, which would store the descriptor words.
         const SET: u32 = 78;
         const SYS_GET: u32 = 77;
         const SET_GET: u32 = 11;
@@ -2386,10 +1919,7 @@ mod tests {
 
     #[test]
     fn a_setting_survives_the_session_that_wrote_it() {
-        // The settings live in system save data `8000000000000050`, which the
-        // host writes back to the browser and restores into the next session.
-        // A colour set chosen in the settings applet that reverted on a
-        // reload would be the same bug the stub had, one step further out.
+        // The settings persist through system save data `8000000000000050`.
         const SET_COLOR_SET: u32 = 24;
         const GET_COLOR_SET: u32 = 23;
 
@@ -2399,7 +1929,6 @@ mod tests {
         let save = cpu
             .save_data(super::SYSTEM_SETTINGS_SAVE)
             .expect("the setter files the settings in their save");
-        // The write is queued for the host, or it never leaves the tab.
         assert!(save.pending_changes() > 0, "the host is told to persist it");
         let stored = save
             .file(super::SYSTEM_SETTINGS_FILE)
@@ -2427,16 +1956,13 @@ mod tests {
 
     #[test]
     fn settings_that_were_never_stored_keep_their_defaults() {
-        // A stored block names the settings it was written with and no more,
-        // so a build that adds one reads a file written before it existed.
-        // The rest of the console has to come back as its default rather than
-        // as a zero.
+        // A block from an older build restores the missing settings as defaults.
         let settings = super::SystemSettings {
             color_set: 1,
             ..Default::default()
         };
         let mut stored = settings.serialize();
-        // Drop the last record, as a build that did not have it would.
+        // Drop the last record, as an older build would.
         stored.truncate(stored.len() - 8);
         let read = super::SystemSettings::parse(&stored).expect("a block this build wrote");
         assert_eq!(read.color_set, 1, "what was stored");
@@ -2453,9 +1979,6 @@ mod tests {
 
     #[test]
     fn the_language_set_sys_is_given_is_the_one_set_reports() {
-        // `set:sys`'s SetLanguageCode and `set`'s GetLanguageCode are two
-        // halves of one setting, and they used to be a setter that dropped
-        // its argument and a getter that answered with a constant.
         const SET_LANGUAGE_CODE: u32 = 0;
         const SET_REGION_CODE: u32 = 57;
         const REGION_EUROPE: u32 = 2;
@@ -2474,8 +1997,6 @@ mod tests {
         cpu.set_request(TLS, 9, Some(4)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), REGION_EUROPE);
 
-        // MakeLanguageCode is a lookup rather than a question about this
-        // console, so it still answers for whichever language it was handed.
         write_request(&mut cpu, 2, &0u32.to_le_bytes());
         cpu.set_request(TLS, 9, Some(2)).unwrap();
         assert_eq!(
@@ -2486,9 +2007,6 @@ mod tests {
 
     #[test]
     fn the_nfc_switch_is_one_switch() {
-        // `set:sys`'s NfcEnableFlag and `nfc:sys`'s IsNfcEnabled are the same
-        // setting asked about by two services. Kept apart, a reader turned off
-        // in the settings applet is one `nfc` still reports as on.
         const SET_NFC_ENABLE_FLAG: u32 = 70;
         const IS_NFC_ENABLED: u32 = 403;
 
@@ -2499,8 +2017,7 @@ mod tests {
         cpu.nfc_request(TLS, 9, Some(IS_NFC_ENABLED)).unwrap();
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1, "nfc:sys sees it");
 
-        // And the other way round: `nfc:sys`'s own setter writes the setting
-        // the settings applet reads.
+        // And `nfc:sys`'s setter writes the setting the settings applet reads.
         write_request(&mut cpu, 500, &[0]);
         cpu.nfc_request(TLS, 9, Some(500)).unwrap();
         write_request(&mut cpu, 69, &[]);
@@ -2510,9 +2027,6 @@ mod tests {
 
     #[test]
     fn set_sys_serves_a_settings_item_and_refuses_one_it_has_not_got() {
-        // The firmware's key/value table. A caller reads the size back and
-        // then that many bytes, so an item this console does not have has to
-        // be refused rather than answered with a zero it would read as one.
         const SIZE_OF: u32 = 37;
         const VALUE_OF: u32 = 38;
         const CATEGORY: u32 = 0x4000;
@@ -2546,7 +2060,6 @@ mod tests {
             "the reservation hbloader reads"
         );
 
-        // An item that is not in the table.
         write_name(&mut cpu, NAME, "applet_heap_size_in_bananas");
         write_buffer_request(&mut cpu, VALUE_OF, &[], &names, &[(OUT, 8)]);
         cpu.set_sys_request(TLS, Some(VALUE_OF)).unwrap();
@@ -2567,11 +2080,7 @@ mod tests {
 
     #[test]
     fn set_writes_the_language_codes_into_a_pointer_buffer() {
-        // `GetAvailableLanguageCodes`, the pre-4.0.0 form: the codes come back
-        // through a receive-static buffer rather than a map-alias one, and the
-        // count beside them is what a caller indexes with. Answered with no
-        // data at all, the count read as zero and `nn::settings::LanguageCode::
-        // Make` aborted rather than return a code it had not been given.
+        // The pre-4.0.0 form fills a receive-static buffer.
         const BUFFER: u32 = 0x4000;
         let mut cpu = request_with_recv_static(1, &[], BUFFER, 0x80);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
@@ -2586,20 +2095,13 @@ mod tests {
         assert_eq!(&cpu.read_bytes(BUFFER, 2), b"ja");
         assert_eq!(&cpu.read_bytes(BUFFER + 8, 5), b"en-US");
         assert_eq!(&cpu.read_bytes(BUFFER + 13 * 8, 5), b"fr-CA");
-        // And nothing past the fifteen it reported: this command's array stops
-        // there, so `zh-Hans` is only ever reachable through the 4.0.0 pair.
+        // Nothing past the fifteen it reported.
         assert_eq!(cpu.read_bytes(BUFFER + 15 * 8, 8), vec![0u8; 8]);
     }
 
     #[test]
     fn set_answers_the_pointer_buffer_size_and_not_its_language_count() {
-        // Control command 3 is `QueryPointerBufferSize`; `set`'s own command 3
-        // is `GetAvailableLanguageCodeCount`. Answering the first with the
-        // second told `nnSdk` a session would take 18 bytes, which is smaller
-        // than anything `nn::settings` sends, so it stopped before sending.
-        // Answered before dispatch, so the request goes in through the
-        // syscall rather than to `set_request`: that interception is what the
-        // collision now depends on.
+        // Control command 3 is `QueryPointerBufferSize`, not `set`'s own command 3.
         let mut cpu = control_request(3);
         cpu.tpidr = u64::from(TLS);
         cpu.register_service_handle(9, "set");

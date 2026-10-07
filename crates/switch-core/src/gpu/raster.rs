@@ -1,18 +1,7 @@
-//! Vertex fetch, primitive assembly, rasterization, and the fragment-shader
-//! integration that turns coverage into real pixels.
-//!
-//! [`draw`] is the top-level entry point `Engine3D::draw_arrays`/
-//! `draw_elements` call. Everything it calls is independently testable
-//! against synthetic inputs, which is how each earlier stage validated its
-//! own piece before this stage wired them together.
-//!
-//! Coverage is per *sample* and shading is per *pixel*, which is what makes
-//! this multisampling rather than rendering the whole frame at the sample
-//! grid's resolution. See [`crate::gpu::surface::SampleGrid`] for how a
-//! sample becomes a texel. The sample mask and alpha-to-coverage narrow that
-//! coverage; `MultisampleCoverageToColor` and the target-independent
-//! rasterization `SetMultisampleRasterEnable` turns on are not implemented,
-//! and content that switches either on will draw as though it had not.
+//! The software rasterizer: vertex fetch, primitive assembly, rasterization
+//! and fragment shading. Coverage is per sample and shading per pixel (see
+//! [`crate::gpu::surface::SampleGrid`]). `MultisampleCoverageToColor` and
+//! `SetMultisampleRasterEnable` are not implemented.
 
 use crate::gpu::engine::threed::{
     BlendTarget, CullState, DepthState, DepthTarget, Engine3D, RenderTarget, ScissorRect,
@@ -28,10 +17,8 @@ use crate::gpu::shader::{decode_program_from_memory, wgsl, Op, Program};
 use crate::gpu::surface::{f16_to_f32, ColorFormat, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
 
-/// The `DkPrimitive` topologies this rasterizer assembles (deko3d.h,
-/// devkitPro/libnx, MIT). Point and line topologies are recognised so a draw
-/// that uses them is reported as such rather than as an unknown number;
-/// nothing here rasterizes them yet.
+/// The `DkPrimitive` topologies (deko3d.h). Points and lines are recognised
+/// but not rasterized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Primitive {
     Points,
@@ -65,13 +52,7 @@ impl Primitive {
 }
 
 /// Break a `count`-vertex draw into triangles, as vertex-ordinal triples.
-///
-/// `TriangleStrip` alternates the first two indices of odd triangles so
-/// every triangle in the strip winds the same way, which matters once
-/// back-face culling is on. `Quads`/`QuadStrip`/`Polygon` fan out into
-/// triangles the way the fixed-function pipeline does. Point and line
-/// topologies produce nothing: they need their own rasterization, and
-/// silently turning them into triangles would draw the wrong thing.
+/// Strips keep a consistent winding; point and line topologies produce nothing.
 pub fn assemble(primitive: Primitive, count: u32) -> Vec<[u32; 3]> {
     match primitive {
         Primitive::Points | Primitive::Lines | Primitive::LineLoop | Primitive::LineStrip => {
@@ -127,8 +108,7 @@ pub struct ScreenVertex {
     pub y: f32,
 }
 
-/// Inclusive-exclusive pixel bounds: `[x0, x1) x [y0, y1)`, a resolved
-/// viewport/scissor intersection.
+/// Inclusive-exclusive pixel bounds `[x0, x1) x [y0, y1)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bounds {
     pub x0: u32,
@@ -137,11 +117,8 @@ pub struct Bounds {
     pub y1: u32,
 }
 
-/// Rasterize one triangle to the pixels it covers, using the standard
-/// top-left fill rule: a pixel's center is covered if it's strictly inside,
-/// or lies exactly on a "top" or "left" edge. That tie-break is what keeps
-/// two triangles sharing an edge from double-covering or gapping the pixels
-/// along it. No fragment shading or depth test yet: this is coverage only.
+/// Rasterize one triangle to the pixels it covers, under the top-left fill
+/// rule. Coverage only.
 pub fn rasterize_triangle(
     v0: ScreenVertex,
     v1: ScreenVertex,
@@ -155,11 +132,7 @@ pub fn rasterize_triangle(
 }
 
 /// Like [`rasterize_triangle`], but also returns each covered pixel's
-/// barycentric weights (`w0, w1, w2`, summing to 1, one per vertex). These
-/// are screen-space-linear, not perspective-corrected, the shader's own
-/// `ipa`/`mufu rcp` sequence does that correction (see `isa`'s module
-/// docs), so the caller feeds these straight in as the linearly-interpolated
-/// `attr/w` and `1/w` values a real Maxwell rasterizer would hand it.
+/// screen-space barycentric weights; the shader does perspective correction.
 pub fn rasterize_triangle_weighted(
     v0: ScreenVertex,
     v1: ScreenVertex,
@@ -181,13 +154,8 @@ pub fn rasterize_triangle_weighted(
     out
 }
 
-/// The samples alpha-to-coverage leaves for a fragment of this alpha.
-///
-/// Hardware dithers the mask so that neighbouring pixels of equal alpha keep
-/// *different* samples. Keeping a fixed prefix instead gives every pixel the
-/// same fraction of its samples, which is the same average coverage, the
-/// difference only shows in the spatial noise of the dither, and a resolve
-/// averages that away.
+/// The samples alpha-to-coverage leaves for a fragment of this alpha: a fixed
+/// prefix rather than hardware's dither, which averages the same.
 fn alpha_coverage(alpha: f32, count: u32) -> u32 {
     let kept = (alpha.clamp(0.0, 1.0) * count as f32).round() as u32;
     if kept >= count {
@@ -205,20 +173,14 @@ fn is_top_left(a: ScreenVertex, b: ScreenVertex) -> bool {
     (a.y == b.y && a.x > b.x) || (a.y > b.y)
 }
 
-/// A triangle prepared for coverage queries: its edge functions, the top-left
-/// tie-break each edge falls under, and the winding fix-up, all resolved once.
-///
-/// Multisampling is why this is a type rather than a loop: a pixel is asked
-/// about once per sample, at a different point each time, and re-deriving the
-/// winding and the fill rule for every one of them would be both slower and a
-/// chance for the samples of one pixel to disagree about the triangle.
+/// A triangle prepared for coverage queries: edge functions, top-left
+/// tie-breaks and winding fix-up, resolved once for all samples.
 #[derive(Debug, Clone, Copy)]
 pub struct TriangleSetup {
     v0: ScreenVertex,
     v1: ScreenVertex,
     v2: ScreenVertex,
-    /// The caller's winding was clockwise, so `w1` and `w2` swap back on the
-    /// way out of [`TriangleSetup::weights_from`].
+    /// The caller's winding was clockwise, so `w1` and `w2` swap back.
     clockwise: bool,
     area: f32,
     /// Whether each of the edges `v0-v1`, `v1-v2`, `v2-v0` is a top or left
@@ -233,19 +195,9 @@ impl TriangleSetup {
         if signed_area == 0.0 {
             return None;
         }
-        // Wind the triangle counter-clockwise before applying the fill rule,
-        // swapping the weights back on the way out.
-        //
-        // The top-left tie-break only assigns an on-edge point to exactly one
-        // of the two triangles sharing that edge when they *walk the edge in
-        // opposite directions*, which is true of consistently-wound geometry
-        // and false when a quad is emitted as one counter-clockwise and one
-        // clockwise triangle, as SDL's does. There both triangles walk the
-        // shared diagonal the same way, so they agree on `is_top_left` and the
-        // points exactly on it belong to both or, when the answer is `false`,
-        // to neither. JKSV's save tiles are 128x128 quads whose diagonal runs
-        // at exactly 45 degrees, so pixel centres land on it, and every tile
-        // came out with a one-pixel gap straight through it.
+        // Wind counter-clockwise before applying the fill rule, so two triangles
+        // sharing an edge always walk it in opposite directions (SDL's quads mix
+        // windings).
         let clockwise = signed_area < 0.0;
         let (v1, v2) = if clockwise { (v2, v1) } else { (v1, v2) };
         Some(TriangleSetup {
@@ -273,8 +225,7 @@ impl TriangleSetup {
         )
     }
 
-    /// The three edge functions at `(px, py)`, in `v0-v1`, `v1-v2`, `v2-v0`
-    /// order, the same order as `top_left`.
+    /// The three edge functions at `(px, py)`, in `top_left` order.
     fn edges(&self, px: f32, py: f32) -> [f32; 3] {
         [
             edge(self.v0, self.v1, px, py),
@@ -283,9 +234,7 @@ impl TriangleSetup {
         ]
     }
 
-    /// `w0` is opposite `v0` (edge `v1-v2`), and so on. The counter-clockwise
-    /// rewind in `new` moved the caller's `v1` and `v2`, so their weights swap
-    /// back here.
+    /// `w0` is opposite `v0` (edge `v1-v2`), and so on.
     fn weights_from(&self, e: [f32; 3]) -> [f32; 3] {
         let (w0, w1, w2) = (e[1] / self.area, e[2] / self.area, e[0] / self.area);
         if self.clockwise {
@@ -295,19 +244,13 @@ impl TriangleSetup {
         }
     }
 
-    /// Barycentric weights at `(px, py)` whether or not it is covered.
-    ///
-    /// This is where a fragment shader runs. The default interpolation
-    /// qualifier evaluates at the pixel centre even for a partially covered
-    /// pixel whose centre falls outside the triangle, where the weights come
-    /// out extrapolated: that is the behaviour, not a rounding slip.
+    /// Barycentric weights at `(px, py)` whether or not it is covered: pixel
+    /// centre evaluation extrapolates on partially covered pixels.
     pub fn weights(&self, px: f32, py: f32) -> [f32; 3] {
         self.weights_from(self.edges(px, py))
     }
 
-    /// Weights at `(px, py)`, or `None` where the fill rule leaves it
-    /// uncovered: a point is covered if it is strictly inside, or lies exactly
-    /// on a "top" or "left" edge.
+    /// Weights at `(px, py)`, or `None` where the fill rule leaves it uncovered.
     pub fn coverage(&self, px: f32, py: f32) -> Option<[f32; 3]> {
         let e = self.edges(px, py);
         let inside = |value: f32, top_left: bool| value > 0.0 || (top_left && value == 0.0);
@@ -318,8 +261,7 @@ impl TriangleSetup {
 }
 
 /// `DkVtxAttribSize`'s component count and per-component bit width
-/// (deko3d.h). Only the shapes this fetcher decodes are listed; anything
-/// else is a clear "unsupported" error rather than a guess.
+/// (deko3d.h), for the shapes this fetcher decodes.
 fn attrib_shape(size: u32) -> Option<(u32, u32)> {
     match size {
         0x01 => Some((4, 32)), // 4x32
@@ -338,8 +280,6 @@ fn attrib_shape(size: u32) -> Option<(u32, u32)> {
     }
 }
 
-/// `DkVtxAttribType` (deko3d.h): `Float = 7`, `Unorm = 2`.
-/// `DkVtxAttribType`, as Eden's `VertexAttribute::Type` names them.
 /// Size `0x30`: four fields packed 10-10-10-2 into one word, red lowest.
 const ATTRIB_SIZE_10_10_10_2: u32 = 0x30;
 
@@ -352,19 +292,11 @@ const ATTRIB_TYPE_USCALED: u32 = 5;
 const ATTRIB_TYPE_SSCALED: u32 = 6;
 const ATTRIB_TYPE_FLOAT: u32 = 7;
 
-/// What a "fixed" attribute reads as: the `vec4` default every graphics API
-/// hands a vertex input the draw supplies no data for.
+/// What a "fixed" attribute (no data supplied) reads as.
 const ATTRIB_DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-/// Fetch one vertex's worth of a single attribute out of GPU memory,
-/// returning it padded to 4 components (`0,0,0,1` for the ones the format
-/// doesn't carry, the usual `vec4` default). `is_bgra` swaps the first and
-/// third component after decoding, matching a packed-colour attribute
-/// declared BGRA instead of RGBA. A "fixed" attribute has no buffer behind
-/// it and reads [`ATTRIB_DEFAULT`] outright.
-/// A 10-10-10-2 attribute, one word: red in bits 0-9, green in 10-19, blue
-/// in 20-29 and alpha in the top two. `wgsl::unpack_1010102` is the same
-/// arithmetic for a device, which is given the word and nothing else.
+/// A 10-10-10-2 attribute: red in bits 0-9, green 10-19, blue 20-29, alpha
+/// the top two. `wgsl::unpack_1010102` must match.
 fn fetch_1010102(
     attrib: VertexAttrib,
     array: VertexArray,
@@ -406,22 +338,19 @@ fn sext_u32(value: u32, bits: u32) -> i32 {
     ((value << (32 - bits)) as i32) >> (32 - bits)
 }
 
+/// Fetch one vertex's attribute from GPU memory, padded to 4 components with
+/// [`ATTRIB_DEFAULT`]. `is_bgra` swaps the first and third components.
 pub fn fetch_attribute(
     attrib: VertexAttrib,
     array: VertexArray,
     vertex_index: u32,
     ctx: &ExecCtx,
 ) -> Result<[f32; 4]> {
-    // A "fixed" attribute is not backed by a vertex buffer at all -- it is
-    // the shader reading an input this draw binds nothing to, which is a
-    // well-defined thing to do rather than a gap in this rasterizer. Erroring
-    // dropped the whole draw, and with it every attribute that *was* bound.
+    // A "fixed" attribute reads the default; the draw binds nothing to it.
     if attrib.is_fixed {
         return Ok(ATTRIB_DEFAULT);
     }
-    // A disabled buffer is different: the attribute claims to be fetched from
-    // an array the draw never turned on, so some piece of state has been read
-    // wrong. Say so instead of inventing a value.
+    // A disabled buffer means state was misread; refuse rather than invent.
     if !array.enabled {
         return Err(Error::Gpu(format!(
             "raster: attribute reads from disabled vertex buffer {}",
@@ -441,16 +370,11 @@ pub fn fetch_attribute(
     let addr = array.start + vertex_index as u64 * array.stride as u64 + attrib.offset as u64;
 
     let mut out = ATTRIB_DEFAULT;
-    // An integer attribute's missing `w` is the integer one, not the float:
-    // its slot carries bits, and WebGPU (like the Vulkan Eden draws through)
-    // fills an integer input's `w` with 1 of the input's own type.
+    // An integer attribute's missing `w` is integer 1, as WebGPU fills it.
     if matches!(attrib.ty, ATTRIB_TYPE_SINT | ATTRIB_TYPE_UINT) && components < 4 {
         out[3] = f32::from_bits(1);
     }
-    // Past the array's limit, the last valid byte, a fetch reads zeros:
-    // what hardware does, and what `upload` pads a device's copy of the
-    // array with. Every format reads zero bits as zero, so the attribute is
-    // the defaults with its own components cleared.
+    // Past the array's limit a fetch reads zeros, as on hardware.
     let bytes = u64::from(components * bits / 8);
     if array.limit != 0 && addr + bytes > array.limit + 1 {
         for value in out.iter_mut().take(components as usize) {
@@ -477,9 +401,7 @@ pub fn fetch_attribute(
                 };
             }
         }
-        // The 16-bit shapes, read as one packed value the way the 8-bit ones
-        // are: `read_pixel` translates the address once for the whole
-        // attribute rather than once per component.
+        // 16-bit shapes are read as one packed value, translating the address once.
         (ATTRIB_TYPE_FLOAT, 16) => {
             let packed = ctx.read_pixel(addr, components * 2)?;
             for c in 0..components {
@@ -513,8 +435,7 @@ pub fn fetch_attribute(
                 out[c as usize] = f32::from_bits(u32::from((packed >> (c * 16)) as u16));
             }
         }
-        // The 8-bit shapes read only the attribute's own bytes: a one-byte
-        // attribute at the end of a mapping has nothing after it to read.
+        // 8-bit shapes read only their own bytes; nothing may follow a mapping's end.
         (ATTRIB_TYPE_UNORM, 8) => {
             let packed = ctx.read_pixel(addr, components)? as u32;
             for c in 0..components {
@@ -526,16 +447,11 @@ pub fn fetch_attribute(
             let packed = ctx.read_pixel(addr, components)? as u32;
             for c in 0..components {
                 let byte = ((packed >> (c * 8)) & 0xff) as u8 as i8;
-                // -128 and -127 both mean -1: the negative side has one more
-                // step than the positive, and every API maps both onto it.
+                // -128 and -127 both mean -1.
                 out[c as usize] = (byte as f32 / 127.0).max(-1.0);
             }
         }
-        // An integer attribute is not a number the shader averages, it is a
-        // value it indexes or masks with, so the slot carries its *bits*,
-        // the same way `shade_vertex` hands over `vertex_id` and
-        // `instance_id`. Converting it to a float instead would read back as
-        // whatever that float's bit pattern happened to be.
+        // Integer attributes carry their bits, not a converted float.
         (ATTRIB_TYPE_SINT, 8) => {
             let packed = ctx.read_pixel(addr, components)? as u32;
             for c in 0..components {
@@ -562,45 +478,24 @@ pub fn fetch_attribute(
     Ok(out)
 }
 
-/// The `a[]` offset `gl_Position`/clip position lands at, and the fixed
-/// interpolated-`1/w` slot: both established in Stage 0's recon (see
-/// `isa`'s module docs) and already load-bearing in `shader::interp`'s
-/// tests.
+/// The `a[]` offset of the clip position, and the fixed interpolated-`1/w` slot.
 const CLIP_POS_OFFSET: u16 = 0x70;
 const INV_W_OFFSET: u16 = 0x7c;
-/// Generic varying `i`'s `a[]` slot: `VARYING_BASE + i * VARYING_STRIDE`.
-/// This is the same numeric convention on both sides of the interpolator,
-/// a vertex shader's output slot `i` is the fragment shader's input slot
-/// `i`, because they're literally the same fixed-function wires.
+/// Generic varying `i`'s `a[]` slot, the same for vertex outputs and
+/// fragment inputs.
 const VARYING_BASE: u16 = 0x80;
 const VARYING_STRIDE: u16 = 0x10;
 
 /// `gl_InstanceID`'s and `gl_VertexID`'s slots in a vertex shader's `a[]`
-/// input space. They are integers, not floats: the shader shifts and adds
-/// them, so the register has to hold the value's *bits*, not its numeric
-/// value as an `f32`.
+/// input space, holding integer bits.
 const INSTANCE_ID_OFFSET: u16 = 0x2f8;
 const VERTEX_ID_OFFSET: u16 = 0x2fc;
-/// How many generic varying slots get fetched/interpolated: the whole of
-/// Maxwell's generic attribute space, `a[0x80]..a[0x280)`.
-///
-/// This used to be four, on the reasoning that colour, texcoord and a spare
-/// is all a 2D UI needs. It is not: the Home Menu's panel shaders interpolate
-/// slots 4, 5 and 6, and a slot past the end reads as zero rather than
-/// failing. Those zeros became the denominator of a normalising `rcp`, which
-/// returned infinity, and a `0 * inf` later turned every one of the panel's
-/// pixels into a NaN that encoded as black.
-///
-/// Interpolating all 32 for every pixel would cost far more than the four
-/// did, so [`Program::interpolated_slots`] narrows it back down to the ones
-/// the fragment shader actually reads.
+/// How many generic varying slots exist: Maxwell's `a[0x80]..a[0x280)`.
+/// [`Program::interpolated_slots`] narrows it to what the shader reads.
 const NUM_VARYINGS: usize = 32;
-/// Real Maxwell guarantees at least this many vertex attributes; scanning a
-/// fixed range means vertex fetch doesn't need the shader to declare how
-/// many it reads.
+/// Vertex attribute slots scanned, so shaders need not declare a count.
 const MAX_VERTEX_ATTRIBS: u32 = 16;
-/// One vertex after the vertex shader ran: clip-space position plus every
-/// generic varying, ready for the perspective divide and interpolation.
+/// One vertex after the vertex shader: clip position and every varying.
 #[derive(Clone, Copy)]
 struct ShadedVertex {
     clip: [f32; 4],
@@ -624,9 +519,7 @@ fn shade_vertex(
     inv.attr_in
         .set(INSTANCE_ID_OFFSET, f32::from_bits(instance_id));
     for (i, attrib) in attribs.iter().enumerate() {
-        // size 0 isn't a valid DkVtxAttribSize, it's what an unconfigured
-        // `VertexAttribState` slot reads back as, so it means "not used"
-        // rather than "unsupported format".
+        // Size 0 is an unconfigured slot: unused, not unsupported.
         if attrib.size == 0 {
             continue;
         }
@@ -634,9 +527,7 @@ fn shade_vertex(
         if !array.enabled {
             continue;
         }
-        // A non-zero divisor makes the array instanced: every `divisor`
-        // instances advance it by one element, and the vertex ordinal does
-        // not move it at all.
+        // A nonzero divisor advances the array once per `divisor` instances.
         let element = instance_id
             .checked_div(array.divisor)
             .unwrap_or(vertex_index);
@@ -670,14 +561,9 @@ fn shade_vertex(
     Ok(ShadedVertex { clip, varyings })
 }
 
-/// Clip position to window space: perspective-divide, then apply the
-/// viewport transform the guest programmed, `window = ndc * scale +
-/// translate` per axis. Whether that flips y is the transform's business
-/// (see [`Engine3D::viewport_transform`]), not a convention baked in here.
-///
-/// Also returns `1/w` and the window-space depth. Both are affine in screen
-/// space, so they interpolate with plain (not perspective-corrected)
-/// barycentrics.
+/// Clip position to window space: perspective divide, then the guest's
+/// viewport transform. Also returns `1/w` and window depth, both affine in
+/// screen space.
 fn to_screen(clip: [f32; 4], vt: ViewportTransform) -> (ScreenVertex, f32, f32) {
     let inv_w = 1.0 / clip[3];
     let screen = ScreenVertex {
@@ -691,21 +577,8 @@ fn to_screen(clip: [f32; 4], vt: ViewportTransform) -> (ScreenVertex, f32, f32) 
     )
 }
 
-/// `DEPTH_TEST_FUNC` carries **either** numbering, and hardware takes both.
-///
-/// Homebrew going through Mesa's GL driver writes the literal OpenGL enum,
-/// `GL_NEVER`(0x0200)`..=GL_ALWAYS`(0x0207): confirmed by dumping a live
-/// JKSV capture's registers, which is why only those were decoded here. A
-/// title that came through a D3D-shaped path writes the one-based numbering
-/// instead, and Maxwell's register documents both: Eden's `ComparisonOp`
-/// (`maxwell_3d.h`) lists `Never_D3D = 1 ..= Always_D3D = 8` beside
-/// `Never_GL = 0x200 ..= Always_GL = 0x207`.
-///
-/// Decoding only one of them was not a draw that failed loudly. The
-/// unrecognised half fell into `Always`, so Just Dance 2019's `LessEqual`
-/// (`4`) became "the depth test passes" and every fragment it should have
-/// hidden was drawn. The GPU backend, which refuses what it cannot express,
-/// turned the same value into a fallback for *every* draw in the title.
+/// `DEPTH_TEST_FUNC` takes either the GL enums (`0x200..=0x207`, as Mesa
+/// writes) or the D3D numbering (`1..=8`, as Eden's `ComparisonOp` lists).
 fn depth_test_passes(func: u32, new: f32, old: f32) -> bool {
     match func {
         1 | 0x0200 => false,
@@ -719,20 +592,11 @@ fn depth_test_passes(func: u32, new: f32, old: f32) -> bool {
     }
 }
 
-/// `BLEND_FUNC_*`'s real hardware type is `G80_BLEND_FACTOR`
-/// (`nv_3ddefs.xml`): literal OpenGL blend-factor enum values (`0x4000`+ for
-/// the plain factors, `0xc000`+ for the constant-colour ones), not deko3d's
-/// simplified `DkBlendFactor` numbering. See [`depth_test_passes`]'s doc
-/// comment for how that was confirmed. `SrcColor`/`DstColor` are genuinely
-/// per-channel; the rest just broadcast a scalar.
+/// `BLEND_FUNC_*` values: the GL blend-factor enums (`G80_BLEND_FACTOR`,
+/// `0x4000`+, `0xc000`+ for constant colour) or the D3D numbering.
 fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> [f32; 4] {
     match code {
-        // The D3D numbering. Both numberings name the same set of factors and
-        // the hardware takes either; which one a register holds is down to
-        // whose driver wrote it. Mesa (JKSV) writes the GL enum straight
-        // through, deko3d and nvn write this one, the Home Menu blends every
-        // one of its draws `SrcAlpha`/`OneMinusSrcAlpha`, which fell through
-        // to `One`/`One` here and turned its whole UI into `src + dst`.
+        // The D3D numbering (deko3d, nvn).
         0x01 => [0.0; 4],                  // Zero
         0x02 => [1.0; 4],                  // One
         0x03 => src,                       // SrcColor
@@ -763,8 +627,7 @@ fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> 
         0xc003 => [constant[3]; 4],          // ConstantAlpha
         0xc004 => [1.0 - constant[3]; 4],    // OneMinusConstantAlpha
 
-        // SrcAlphaSaturate, in both numberings. Alpha's factor is 1, not the
-        // saturated value the colour channels get.
+        // SrcAlphaSaturate, in both numberings. Alpha's factor is 1.
         0x0b | 0x4308 => {
             let f = src[3].min(1.0 - dst[3]);
             [f, f, f, 1.0]
@@ -774,11 +637,8 @@ fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> 
     }
 }
 
-/// `BLEND_EQUATION_*`'s real hardware type is `gl_blend_equation`
-/// (`nv_3ddefs.xml`): literal `GL_FUNC_ADD`(0x8006)`..=GL_FUNC_REVERSE_
-/// SUBTRACT`(0x800b), not deko3d's simplified 1-5 `DkBlendOp` numbering.
-/// `BLEND_EQUATION_*` in the D3D numbering the same register also takes,
-/// see [`blend_factor`].
+/// `BLEND_EQUATION_*` values: the GL enums (`GL_FUNC_ADD` 0x8006 ..=
+/// `GL_FUNC_REVERSE_SUBTRACT` 0x800b) or the D3D numbering.
 fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
     match op {
         0x2 | 0x800a => src - dst,    // FuncSubtract
@@ -789,28 +649,13 @@ fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
     }
 }
 
-/// The shader's output colour as the blend unit sees it.
-///
-/// Blending into a **fixed-point** render target clamps the incoming colour
-/// into the range that target can store first: GL says so for a fixed-point
-/// colour buffer, and it is what the ROP does. A float target takes the
-/// colour as it is.
-///
-/// The range is the target's own, `[0, 1]` for UNORM and `[-1, 1]` for
-/// SNORM. What this really settles is **NaN**,
-/// which clamps to zero here and is otherwise indestructible: every blend
-/// factor is a multiply, and `NaN * 0` is `NaN`, so a NaN source survives even
-/// a source alpha of zero and lands in the framebuffer as an opaque black
-/// pixel. That is not a hypothetical, the Album applet's image shaders
-/// normalise a weighted sum of samples by dividing by the total alpha, and a
-/// fully transparent texel makes that `rcp(0)`, an infinity, and then
-/// `0 * inf`. Every icon it drew came out inside a black box.
+/// The shader's output colour as the blend unit sees it: clamped to the
+/// range of a fixed-point target (NaN to zero), unchanged for a float one.
 fn source_color(color: [f32; 4], format: ColorFormat) -> [f32; 4] {
     let Some((low, high)) = format.source_clamp() else {
         return color;
     };
-    // A NaN is floored at zero rather than at the bottom of the range, which
-    // for a SNORM target would be an opaque -1.0 rather than nothing.
+    // NaN floors at zero, not at the SNORM bottom of -1.
     color.map(|c| if c.is_nan() { 0.0 } else { c.clamp(low, high) })
 }
 
@@ -831,11 +676,8 @@ fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) 
     out
 }
 
-/// Put one fragment's interpolated inputs in place, ready to run.
-///
-/// `inv` is threaded in rather than created here so that a draw allocates one
-/// invocation instead of one per covered pixel, a full-screen quad covers
-/// 921 600 of them.
+/// Put one fragment's interpolated inputs in place; `inv` is reused across
+/// the draw.
 fn seed_fragment(
     inv: &mut Invocation,
     program: &Compiled,
@@ -858,13 +700,8 @@ fn seed_fragment(
 }
 
 /// The colour an invocation that has run to `exit` leaves behind, or `None`
-/// if `kil` discarded the fragment.
-///
-/// Which register holds which component is the program header's business: a
-/// program that leaves a component to the driver still spends a register on
-/// it, and one that writes nothing to a target spends none at all. A program
-/// with no header, `uam`/deko3d builds, and this module's own fixtures,
-/// keeps the plain `r0..r3`.
+/// if `kil` discarded it. The program header maps registers to components;
+/// headerless programs use `r0..r3`.
 fn fragment_color(inv: &Invocation, program: &Compiled) -> Option<[f32; 4]> {
     if inv.discarded {
         return None;
@@ -880,8 +717,7 @@ fn fragment_color(inv: &Invocation, program: &Compiled) -> Option<[f32; 4]> {
     Some(std::array::from_fn(|component| {
         match header.fragment_output_reg(0, component as u32) {
             Some(reg) => inv.reg_f32(reg),
-            // Nothing wrote it: colour reads zero and alpha opaque, which is
-            // what a blend against it expects rather than a stale register.
+            // Unwritten: colour zero, alpha opaque.
             None => (component == 3) as u32 as f32,
         }
     }))
@@ -910,20 +746,9 @@ fn quad_pixel(x: u32, y: u32, lane: usize) -> (u32, u32) {
     (x + lane as u32 % 2, y + lane as u32 / 2)
 }
 
-/// Shade a 2x2 quad of pixels in lock-step.
-///
-/// A warp shuffle reads a register belonging to another invocation, so the
-/// four pixels have to reach it together: each lane runs to its next shuffle,
-/// and only once every lane that is still going has arrived does the exchange
-/// happen and all of them go on. Lanes whose pixel the triangle misses are
-/// shaded anyway and their colour thrown away, they exist so that the
-/// covered lanes have a neighbour to difference against, which is the whole
-/// reason a derivative can be computed at all.
-///
-/// Lanes that diverge, one at a shuffle, another somewhere else entirely,
-/// are answered from wherever the other lane happens to be. Hardware answers
-/// them from an inactive lane, which is to say with a value the shader is not
-/// entitled to rely on either.
+/// Shade a 2x2 quad in lock-step so warp shuffles can read neighbours.
+/// Uncovered lanes run as helpers; diverged lanes read wherever the other
+/// lane is.
 fn shade_quad(
     lanes: &mut [Invocation; QUAD],
     program: &Compiled,
@@ -966,13 +791,8 @@ fn shade_quad(
     }))
 }
 
-/// The per-pixel half of a draw: which samples of a pixel a triangle covers
-/// and passes the depth test at, and what a shaded colour does to the
-/// targets.
-///
-/// Held apart from the loop over pixels because there are two such loops, a
-/// shader containing a warp shuffle is walked in 2x2 quads instead of pixel
-/// by pixel, and they do exactly this to every pixel they reach.
+/// The per-pixel half of a draw, shared by the pixel and quad walks: sample
+/// coverage, depth test, and target writes.
 struct Fragments {
     grid: SampleGrid,
     sample_mask: u32,
@@ -988,17 +808,8 @@ struct Fragments {
 }
 
 impl Fragments {
-    /// Which samples of pixel `(x, y)` this triangle covers and the depth
-    /// test lets through, and the interpolated depth at each of them.
-    ///
-    /// Coverage and depth are per sample; shading is not. That split is what
-    /// multisampling buys over rendering the whole frame at the sample grid's
-    /// resolution: the edges get every sample's worth of coverage, but the
-    /// fragment shader still runs once for the pixel.
-    /// `sample_z` is filled for the samples the returned mask names, and left
-    /// alone for the rest, so the caller may reuse one buffer across pixels
-    /// without clearing it. [`Fragments::write`] reads exactly the samples the
-    /// mask names, and alpha-to-coverage only narrows that mask.
+    /// Which samples of pixel `(x, y)` this triangle covers and the depth test
+    /// passes, with each one's depth in `sample_z` (others left alone).
     fn coverage(
         &self,
         tri: &TriangleSetup,
@@ -1032,8 +843,7 @@ impl Fragments {
         Ok(covered)
     }
 
-    /// Put a shaded pixel into the targets, for every sample of it still
-    /// covered.
+    /// Put a shaded pixel into the targets, for every sample still covered.
     fn write(
         &self,
         (x, y): (u32, u32),
@@ -1045,8 +855,7 @@ impl Fragments {
     ) -> Result<()> {
         tally.shaded(color);
 
-        // Alpha-to-coverage narrows the mask *after* shading, since it is the
-        // shaded alpha it turns into coverage.
+        // Alpha-to-coverage narrows the mask after shading.
         let mut covered = covered;
         if self.alpha_to_coverage {
             covered &= alpha_coverage(color[3], self.grid.count());
@@ -1066,10 +875,7 @@ impl Fragments {
                     let bytes = dt.format.bytes;
                     let dva = dt.addr + dt.layout.offset(tx * bytes, ty, dt.width * bytes) as u64;
                     let z = sample_z[sample as usize];
-                    // A packed depth-stencil pixel holds a stencil byte this
-                    // draw is not writing. Read it back and merge rather than
-                    // flattening it to zero: the extra read is only for the
-                    // formats that actually share the pixel.
+                    // Merge into a packed depth-stencil pixel's stencil byte.
                     let value = if dt.format.packs_stencil() {
                         dt.format.with_depth(ctx.read_pixel(dva, bytes)?, z)
                     } else {
@@ -1079,15 +885,11 @@ impl Fragments {
                 }
             }
 
-            // A depth-only pass shaded the fragment for its `kil` and its
-            // alpha coverage, and has nowhere to put the colour that came out
-            // of it: either because no colour target is bound or because the
-            // write mask closed every channel.
+            // A depth-only pass: no colour target, or every channel masked.
             if let Some(rt) = self.rt.filter(|_| self.writes_any_channel) {
                 let bpp = rt.format.bytes_per_pixel;
                 let va = rt.addr + rt.texel_offset(tx, ty) as u64;
-                // Blending and a masked channel both need what the target
-                // already holds, so read it once for both.
+                // Blending and masking both need the existing value.
                 let dst = if self.blend_target.enabled || !self.writes_all_channels {
                     Some(rt.format.decode(ctx.read_pixel(va, bpp)?)?)
                 } else {
@@ -1113,12 +915,8 @@ impl Fragments {
     }
 }
 
-/// Build the environment a fragment shader runs under and hand it to `f`.
-///
-/// Every source in it borrows the execution context immutably, and the pixel
-/// loop needs that context mutably to write what comes out, so the
-/// environment cannot outlive one shading step, which is what the callback is
-/// for.
+/// Build the environment a fragment shader runs under and hand it to `f`,
+/// so it cannot outlive one shading step.
 fn with_fragment_env<T>(
     engine: &Engine3D,
     ctx: &ExecCtx,
@@ -1147,24 +945,8 @@ fn with_fragment_env<T>(
     f(&mut env)
 }
 
-/// Whether `cull` throws this triangle away.
-///
-/// Facing is judged by the winding the triangle has where it lands: in window
-/// space, as memory holds the target, after the viewport transform and
-/// whatever mirror it carries. That is Eden's rule (`SetFrontFaceEXT` on
-/// the guest's front face, reversed by `SetWindowOrigin`'s FlipY and by
-/// nothing else, with Vulkan judging it in framebuffer space), and y points
-/// down here, so a counter-clockwise triangle has a negative area under the
-/// formula below.
-///
-/// Judging it in NDC instead gives the same answer through a viewport that
-/// mirrors y, which is every nnSdk title's main pass, and the opposite
-/// through one that does not. Echoes of Wisdom's offscreen post-processing
-/// runs through the latter with front=CCW, FlipY and back-face culling, and
-/// every full-screen quad of it was thrown away, which left its frame black.
-///
-/// A zero-area triangle covers no pixels either way; reporting it culled
-/// saves the walk.
+/// Whether `cull` throws this triangle away, judged by its winding in window
+/// space (y down) after the viewport transform, as Eden does.
 fn culls(cull: CullState, v: [ScreenVertex; 3]) -> bool {
     if !cull.enabled {
         return false;
@@ -1196,9 +978,7 @@ fn read_index(ctx: &ExecCtx, base: u64, format: u32, i: u32) -> Result<u32> {
     })
 }
 
-/// A vertex after clipping: clip-space position plus its varyings, which
-/// interpolate linearly in clip space (that's what makes clipping able to
-/// produce new vertices at all).
+/// A vertex after clipping: clip-space position plus varyings.
 #[derive(Debug, Clone, Copy)]
 struct ClipVertex {
     clip: [f32; 4],
@@ -1224,14 +1004,8 @@ impl ClipVertex {
     }
 }
 
-/// Clip a triangle against the near plane (`w > epsilon`).
-///
-/// This is not an optimisation. A vertex at or behind the eye has `w <= 0`,
-/// and the perspective divide by it sends the projected position to infinity
-/// or flips it to the wrong side of the screen, one off-screen vertex
-/// smears a triangle across the whole framebuffer. Clipping first replaces
-/// the offending vertices with real ones on the plane, so the rasterizer
-/// only ever sees geometry that projects.
+/// Clip a triangle against the near plane (`w > epsilon`), so nothing
+/// behind the eye is divided by.
 fn clip_near(tri: [ClipVertex; 3]) -> Vec<[ClipVertex; 3]> {
     /// Far enough from zero that the reciprocal stays finite.
     const NEAR_W: f32 = 1e-6;
@@ -1263,13 +1037,10 @@ fn clip_near(tri: [ClipVertex; 3]) -> Vec<[ClipVertex; 3]> {
         .collect()
 }
 
-/// Run `engine.last_draw` for real: fetch vertices, shade them, clip,
-/// rasterize, shade covered pixels, and write real colour into the bound
-/// render target.
+/// Run `engine.last_draw` into the bound render targets.
 pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let call = engine.last_draw;
-    // Logical target 0, through whatever slot RenderTargetControl maps it onto
-    //: the same resolution a clear does.
+    // Logical target 0, mapped through RenderTargetControl as a clear is.
     let rt = engine.render_target(engine.render_target_slot(0))?;
 
     let vs_binding = engine
@@ -1300,16 +1071,8 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let sample_mask = engine.sample_mask();
     let alpha_to_coverage = engine.alpha_to_coverage();
     let depth = engine.depth_target()?;
-    // The scissor, the viewport and this draw's bounds are all in pixels;
-    // a target's width and height are texels, which differ on a multisampled
-    // one.
-    //
-    // A depth-only pass binds no colour target, so the extent comes from
-    // whichever target the draw does have. Just Dance 2017 runs every pass
-    // that way, it binds its Z24S8 surface as colour target 0, which is a
-    // depth surface and so no colour target at all, and does its work in the
-    // depth buffer. Requiring a colour target here cost it every one of its
-    // 1870 draws.
+    // Draw bounds are in pixels, target sizes in texels. A depth-only pass
+    // takes its extent from whichever target is bound.
     let Some((target_width, target_height)) = crate::gpu::engine::threed::draw_extent(
         rt.map(|rt| (rt.width, rt.height)),
         depth.map(|dt| (dt.width, dt.height)),
@@ -1335,9 +1098,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let depth_state = engine.depth_state();
     let blend_target = engine.blend_target(0);
     let blend_constant = engine.blend_constant();
-    // Which channels this draw is allowed into. A mask with nothing set is a
-    // draw that writes depth and no colour at all, which is a real pass rather
-    // than a mistake, so it is resolved once here, not per pixel.
+    // A mask with nothing set writes depth only.
     let color_mask = engine.color_mask(engine.render_target_slot(0));
     let writes_all_channels = color_mask == [true; 4];
     let writes_any_channel = color_mask.iter().any(|&channel| channel);
@@ -1350,10 +1111,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     };
     let instance_id = engine.instance_id();
     let primitive = Primitive::from_raw(call.primitive)?;
-    // A point or line topology assembles into nothing, and "nothing" is
-    // indistinguishable on screen from a draw that worked and covered no
-    // pixels. Say so, so it lands in `draws_skipped` and the trace, rather
-    // than a whole line-drawn UI reporting a clean frame.
+    // Report point and line topologies rather than silently drawing nothing.
     if matches!(
         primitive,
         Primitive::Points | Primitive::Lines | Primitive::LineLoop | Primitive::LineStrip
@@ -1364,11 +1122,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     }
     let triangles = assemble(primitive, call.count);
     let mut tally = DrawTally::new(&fs_program);
-    // One shaded vertex per *index*, cached: an indexed mesh reuses vertices
-    // heavily, and re-running the vertex shader for each reference is the
-    // single most expensive thing this loop can do. Keyed by an index the
-    // guest minted, so it wants `crate::IdHasher` rather than a hash built to
-    // resist a key being chosen to collide.
+    // Vertex shading is cached per index.
     let mut cache: crate::IdMap<u32, ShadedVertex> = crate::IdMap::default();
     // One fragment invocation for the whole draw, reset per pixel.
     let mut fragment = Invocation::new();
@@ -1385,18 +1139,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         writes_any_channel,
         alpha_to_coverage,
     };
-    // Parsed TIC/TSC pairs, and the compressed blocks they decode to, shared
-    // by every fragment of this draw.
+    // Parsed TIC/TSC pairs and decoded blocks, shared by the draw.
     let descriptors = std::cell::RefCell::new(crate::IdMap::default());
     let blocks = std::cell::RefCell::new(crate::gpu::texture::BlockCache::default());
-    // A constant buffer cannot change while a draw runs, so each stage reads
-    // every constant it uses from memory once rather than once per invocation.
     let vs_const_cache = std::cell::RefCell::new(crate::gpu::shader::interp::ConstCache::default());
     let fs_const_cache = std::cell::RefCell::new(crate::gpu::shader::interp::ConstCache::default());
-    // Lower both programs for this draw: branch targets resolved to indices,
-    // and every constant the bound banks can supply folded into an immediate.
-    // Both are things the interpreter would otherwise redo per invocation, and
-    // a fragment shader runs once per covered pixel.
+    // Lower both programs: resolve branch targets, fold bound constants.
     let vs_program = {
         let consts = MemoryConstants {
             ctx: &*ctx,
@@ -1413,23 +1161,17 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         };
         Compiled::with_constants(&fs_program, &consts)
     };
-    // A shader that reads a register belonging to another lane has to be run
-    // the way hardware runs it: four pixels of a quad in lock-step, helper
-    // lanes and all. Nothing else is, because those helpers are work no other
-    // draw has to do and this is a draw's innermost loop.
+    // Shaders with warp shuffles run in 2x2 quads.
     let mut quad: Option<Box<[Invocation; QUAD]>> = fs_program
         .ops()
         .iter()
         .any(|op| matches!(op, Op::Shfl { .. } | Op::Fswzadd { .. }))
         .then(|| Box::new(std::array::from_fn(|_| Invocation::new())));
 
-    // `TRACE_PIPELINE=1`: the fixed-function state this draw runs under, as
-    // a GPU backend would have to describe it, or what stopped it being
-    // describable, which is the more useful half.
+    // `TRACE_PIPELINE=1`: this draw's fixed-function state, or why it is
+    // not describable.
     if crate::trace::enabled(crate::trace::Trace::Pipeline) {
-        // What the viewport was resolved *from* as well as what it resolved
-        // to: `Viewport::flip_y` is the sign of a scale the window origin may
-        // already have flipped, and the two are not the same claim.
+        // `Viewport::flip_y` and the window origin are separate claims.
         crate::traceln!(
             "[pipe] {:?} {:?} clip_height={}",
             engine.viewport_transform(),
@@ -1441,16 +1183,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             Err(e) => crate::traceln!("[pipe] undescribable: {e}"),
         }
     }
-    // `TRACE_UPLOAD=1`: how many bytes of guest memory this draw would have
-    // to be handed to a device, which is the number that decides whether
-    // uploading per draw is affordable at all.
+    // `TRACE_UPLOAD=1`: the guest bytes this draw would upload to a device.
     if crate::trace::enabled(crate::trace::Trace::Upload) {
         match crate::gpu::pipeline::Pipeline::of(engine)
             .map_err(|e| Error::Gpu(format!("pipeline: {e}")))
             .and_then(|p| {
-                // The texture slots are the shaders' business, not the
-                // register file's, and the two stages index *different*
-                // constant buffers with the same slot.
+                // The two stages index different constant buffers per slot.
                 let mut slots: Vec<(ShaderStage, crate::gpu::texture::TextureSlot)> = Vec::new();
                 for (stage, program) in [
                     (ShaderStage::VertexB, &vs_program),
@@ -1496,8 +1234,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
 
             Err(e) => crate::traceln!("[up] cannot resolve: {e:?}"),
         }
-        // The other direction: what a backend holding its surfaces on the
-        // device has to hand back before the guest looks at them.
+        // The other direction: what a device-side backend must hand back.
         match crate::gpu::upload::Targets::of(engine) {
             Ok(targets) => crate::traceln!(
                 "[rt] {} bytes back: colour {:?}, depth {:?}",
@@ -1512,10 +1249,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             Err(e) => crate::traceln!("[rt] cannot resolve: {e:?}"),
         }
     }
-    // `TRACE_CFG=1`: what each shader's control flow looks like to a
-    // translator. Structured control flow is what any shading language wants
-    // and what Maxwell's reconvergence stack does not have, so this is the
-    // measurement that says how hard translating a given shader would be.
+    // `TRACE_CFG=1`: each shader's control flow, as a translator sees it.
     if crate::trace::enabled(crate::trace::Trace::Cfg) {
         for (stage, addr, program) in [
             ("vs", vs_binding.addr, &vs_program),
@@ -1527,21 +1261,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             );
         }
     }
-    // `TRACE_WGSL=1`: whether each shader can be translated, and what it
-    // needs bound. `TRACE_WGSL=dir` writes each complete module to
-    // `dir/<stage>_<addr>.wgsl` instead, which is how the emitted text gets
-    // in front of a real shader compiler: nothing in this crate can parse
-    // WGSL, so `naga --validate` on those files is the only thing that says
-    // whether a translation is one.
-    // Asked as a flag first: this one wants the *value*, and reading it per
-    // draw would put the environment scan back in the path everything else
-    // here was just taken out of.
+    // `TRACE_WGSL=1`: whether each shader translates. `TRACE_WGSL=dir`
+    // writes each module to `dir/<stage>_<addr>.wgsl` for `naga --validate`.
     if crate::trace::enabled(crate::trace::Trace::Wgsl) {
-        // A directory to write the modules into, or nothing for the summary.
-        // Nothing is what a browser always has -- the channel is ticked on a
-        // page, and there is no environment to name a directory in -- and
-        // taking the write branch there meant one failed `std::fs::write` per
-        // shader per draw, reported as a diagnostic each time.
+        // No directory in a browser, so only the summary there.
         let where_to = match std::env::var("TRACE_WGSL").unwrap_or_default() {
             dir if dir.is_empty() || dir == "1" => None,
             dir => Some(dir),
@@ -1559,8 +1282,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 }
             };
             let mut layout = Layout::of(&translated, stage);
-            // Neither correction is anything the program says; both come out
-            // of the draw's viewport transform.
+            // Both corrections come from the viewport transform.
             if let Ok(pipeline) = crate::gpu::pipeline::Pipeline::of(engine) {
                 layout.flip_y = pipeline.viewport.flip_y;
                 layout.depth_minus_one_to_one = pipeline.viewport.depth_minus_one_to_one();
@@ -1708,10 +1430,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                             },
                         )?;
                         MemoryGlobal::land(ctx, &global_stores)?;
-                        // `kil` discards the fragment: no colour, and no depth
-                        // write either, which is why the depth store waits
-                        // until after shading rather than happening with the
-                        // test.
+                        // `kil` skips the depth write too, so it waits for shading.
                         let Some(color) = color else {
                             tally.killed += 1;
                             continue;
@@ -1722,14 +1441,8 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 continue;
             };
 
-            // The quad walk: the same work, in the 2x2 groups a warp shuffle
-            // needs. It starts at the even pixel at or below the bounding
-            // box's corner, since which pixels share a quad is a property of
-            // the grid rather than of the triangle. Pixels outside the box are
-            // never sampled: they are outside the scissor as well, and a
-            // depth test there would read a target this draw has no business
-            // touching, but they are still shaded, as the neighbours the
-            // covered lanes difference against.
+            // The quad walk, aligned to even pixels. Pixels outside the box
+            // are shaded as helpers but never tested or written.
             let mut sample_z = [[0.0f32; MAX_SAMPLES]; QUAD];
             for y in ((min_y & !1)..max_y).step_by(2) {
                 for x in ((min_x & !1)..max_x).step_by(2) {
@@ -1796,19 +1509,14 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     Ok(())
 }
 
-/// Per-draw fragment accounting for `TRACE_DRAW=1`.
-///
-/// A draw that runs to completion and leaves the framebuffer looking exactly
-/// as it did before is indistinguishable, from the outside, from a draw that
-/// never ran. This says which stage the fragments died at.
+/// Per-draw fragment accounting for `TRACE_DRAW=1`: which stage fragments died at.
 struct DrawTally {
     enabled: bool,
     fs_len: usize,
     triangles: u64,
     culled: u64,
     degenerate: u64,
-    /// Triangles whose box holds no pixel of the target: off it entirely,
-    /// or placed by a position that is not a finite number.
+    /// Triangles whose box holds no pixel of the target (off it, or non-finite).
     outside: u64,
     nonfinite: u64,
     uncovered: u64,
@@ -1945,9 +1653,7 @@ mod tests {
 
     #[test]
     fn a_right_triangle_covers_exactly_its_staircase_of_pixels() {
-        // (0,0)-(4,0)-(0,4): a clean, hand-verifiable case, the covered set
-        // is the classic staircase, with the top-left rule resolving the
-        // shared hypotenuse/edges so nothing doubles up or gaps.
+        // (0,0)-(4,0)-(0,4): the classic staircase.
         let covered = rasterize_triangle(
             ScreenVertex { x: 0.0, y: 0.0 },
             ScreenVertex { x: 4.0, y: 0.0 },
@@ -1969,11 +1675,8 @@ mod tests {
 
     #[test]
     fn a_quad_split_into_two_oppositely_wound_triangles_is_watertight() {
-        // The six vertices SDL emits for an 8x8 quad: v0,v1,v2 counter-
-        // clockwise and v1,v2,v3 clockwise, so both triangles walk the shared
-        // diagonal in the *same* direction. The diagonal runs at exactly 45
-        // degrees, which puts pixel centres right on it: the case that left
-        // a one-pixel gap through every one of JKSV's save tiles.
+        // SDL's 8x8 quad: mixed windings, a 45-degree shared diagonal with
+        // pixel centres on it.
         let (a, b) = (
             ScreenVertex { x: 0.0, y: 0.0 },
             ScreenVertex { x: 8.0, y: 0.0 },
@@ -2083,9 +1786,8 @@ mod tests {
         assert_eq!(v, [1.0, 2.0, 3.0, 4.0]);
     }
 
-    /// A 10-10-10-2 attribute, one word read four ways. Red is all ones,
-    /// green the largest positive ten-bit value, blue zero, and alpha `10`,
-    /// which as a signed two-bit field is -2 and so clamps to -1.
+    /// Red all ones, green the largest positive ten-bit value, blue zero, and
+    /// alpha `10` (-2, clamped to -1).
     #[test]
     fn fetch_attribute_unpacks_10_10_10_2() {
         let (mut mem, vmm, base) = harness();
@@ -2134,9 +1836,6 @@ mod tests {
         );
     }
 
-    /// A fetch past the array's limit reads zeros, the way hardware does and
-    /// the way a device's copy of the array is padded, rather than whatever
-    /// memory follows the array.
     #[test]
     fn fetch_attribute_past_the_limit_reads_zeros() {
         let (mut mem, vmm, base) = harness();
@@ -2225,11 +1924,6 @@ mod tests {
         assert_eq!(v, [1.0, 0x80 as f32 / 255.0, 0x40 as f32 / 255.0, 0.0]);
     }
 
-    /// An integer attribute carries its bits, not its magnitude: the slot is
-    /// read back as an integer by the shader, the same way `shade_vertex`
-    /// hands over `vertex_id`. Just Dance 2019 binds a signed-byte attribute
-    /// (`size 0xa type 3`), and every draw that read one was dropped: 6,480 of
-    /// 6,844 in a 400-frame run.
     #[test]
     fn fetch_attribute_unpacks_the_eight_bit_integer_and_normalised_types() {
         let (mut mem, vmm, base) = harness();
@@ -2295,10 +1989,6 @@ mod tests {
         assert_eq!(snorm[3], -1.0 / 127.0);
     }
 
-    /// Minecraft's every draw reads `4x16` halves (`size 0x3 type 7`), and
-    /// with no shape for them all 110 of a frame's 110 draws were dropped,
-    /// by the backend, which had no vertex format to build a pipeline from,
-    /// and then by the rasterizer it fell back to.
     #[test]
     fn fetch_attribute_unpacks_the_sixteen_bit_types() {
         let (mut mem, vmm, base) = harness();
@@ -2309,8 +1999,7 @@ mod tests {
             .enumerate()
             .fold(0u64, |acc, (i, &h)| acc | u64::from(h) << (i * 16));
         vmm.write_u64(&mut mem, base, packed).unwrap();
-        // The signed pattern, eight bytes on: 0x8000 is -32768, the one value
-        // both ends of the range map onto -1, and 0x7FFF is +1 exactly.
+        // The signed pattern eight bytes on: 0x8000 is -1, as is 0x8001; 0x7FFF is +1.
         vmm.write_u64(&mut mem, base + 8, 0x0001_7FFF_8000_8001)
             .unwrap();
         let mut stats = Default::default();
@@ -2342,8 +2031,7 @@ mod tests {
         };
 
         assert_eq!(fetch(0x03, ATTRIB_TYPE_FLOAT, 0), [1.0, -2.0, 0.5, 65504.0]);
-        // A shape that carries fewer than four components pads the rest
-        // `(0, 0, 0, 1)`, which is what WebGPU hands a `vec4<f32>` too.
+        // Fewer than four components pads `(0, 0, 0, 1)`.
         assert_eq!(fetch(0x0f, ATTRIB_TYPE_FLOAT, 0), [1.0, -2.0, 0.0, 1.0]);
         assert_eq!(fetch(0x05, ATTRIB_TYPE_FLOAT, 0), [1.0, -2.0, 0.5, 1.0]);
         assert_eq!(fetch(0x1b, ATTRIB_TYPE_FLOAT, 0), [1.0, 0.0, 0.0, 1.0]);
@@ -2383,15 +2071,12 @@ mod tests {
         assert_eq!(snorm[3], 1.0 / 32767.0);
     }
 
-    /// Echoes of Wisdom's `1x8` and `2x8` integer attributes (sizes `0x1d`
-    /// and `0x18`, type 4), which neither renderer fetched, so over five
-    /// thousand draws a frame were dropped outright. A narrow integer
-    /// attribute's `w` is the integer one, and a scaled one is its value.
+    /// Narrow integer attributes (sizes `0x1d` and `0x18`): `w` is integer
+    /// one, and a scaled one is its value.
     #[test]
     fn fetch_attribute_unpacks_the_narrow_eight_bit_shapes() {
         let (mut mem, vmm, base) = harness();
-        // The attribute sits in the last bytes of the mapping, so reading a
-        // whole word for it would fault.
+        // At the mapping's end, so a whole-word read would fault.
         let at = base + 0xffd;
         // 0x80, 0x7f, 0xff in the three bytes from `at`.
         vmm.write_u32(&mut mem, at - 1, 0xff7f_8000).unwrap();
@@ -2471,10 +2156,7 @@ mod tests {
 
     #[test]
     fn a_fixed_attribute_reads_the_vec4_default_instead_of_failing_the_draw() {
-        // JKSV leaves attribute 2 marked fixed on draws whose shader never
-        // reads it. Erroring dropped those draws entirely -- including its
-        // full-screen background quad, which then left the previous frame's
-        // chrome showing through.
+        // A fixed attribute the shader never reads must not drop the draw.
         let (mut mem, vmm, base) = harness();
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
@@ -2493,8 +2175,7 @@ mod tests {
             ty: ATTRIB_TYPE_FLOAT,
             is_bgra: false,
         };
-        // Deliberately a disabled array: a fixed attribute is not fetched
-        // from one at all, so the buffer's state must not matter.
+        // A disabled array: a fixed attribute is not fetched from it.
         let array = VertexArray {
             enabled: false,
             stride: 0,
@@ -2508,13 +2189,9 @@ mod tests {
         );
     }
 
-    // -- Full-pipeline integration: vertex fetch -> vertex shading ->
-    // rasterization -> fragment shading -> real pixel write, over the same
-    // engine `switch-gpu` is checked against.
+    // Full-pipeline integration tests.
 
-    /// [`Harness`] taken apart into the three pieces these tests borrow
-    /// separately: they hold an [`ExecCtx`] across a whole run of reads,
-    /// which a method on the harness cannot hand out.
+    /// [`Harness`] split into the pieces these tests borrow separately.
     fn pipeline_harness() -> (Memory, AddressSpace, Engine3D) {
         pipeline_harness_with(solid_fragment_shader())
     }
@@ -2529,9 +2206,7 @@ mod tests {
         let (mut mem, vmm, engine) = pipeline_harness();
         let vbuf_addr = engine.vertex_array(0).start;
         let color = [0.2f32, 0.4, 0.6, 1.0];
-        // Screen (0,0)-(16,0)-(0,8): covers the whole 16x8 target's upper
-        // triangle half. clip.w = 1 everywhere (no projection), so NDC and
-        // clip are the same.
+        // Screen (0,0)-(16,0)-(0,8), w = 1: the upper triangle half.
         write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
         write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
         write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
@@ -2549,8 +2224,7 @@ mod tests {
 
         let rt = engine.render_target(0).unwrap().unwrap();
         let expected = rt.format.encode(color).unwrap();
-        // (2,2) and (0,0) are inside the covered half; (12,6) is in the
-        // untouched half and must still read as the mapping's initial zero.
+        // (12,6) is in the untouched half.
         assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
         assert_eq!(
             ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64)
@@ -2564,21 +2238,12 @@ mod tests {
         );
     }
 
-    /// A shader that reads its neighbour's register gets the neighbour, not
-    /// its own value: the four pixels of a quad run in lock-step so that the
-    /// shuffle has something to read.
-    ///
-    /// This is what Checkpoint's antialiased text is drawn with, a coverage
-    /// differenced against the pixel beside it. Run one pixel at a time,
-    /// every lane reads whatever it holds itself and the difference is zero,
-    /// which is why the text came out as solid blocks.
+    /// A warp shuffle reads the neighbouring lane's register.
     #[test]
     fn a_shuffling_fragment_shader_reads_the_pixel_beside_it() {
         let (mut mem, vmm, engine) = pipeline_harness_with(derivative_fragment_shader());
         let vbuf_addr = engine.vertex_array(0).start;
-        // Red ramps from 0 at the left edge of the 16-pixel target to 1 at
-        // the right, so it is exactly `(x + 0.5) / 16` at each pixel centre
-        // and the difference between neighbours is 1/16 everywhere.
+        // Red is `(x + 0.5) / 16`, so neighbours differ by 1/16.
         write_vertex(
             &mut mem,
             &vmm,
@@ -2624,16 +2289,14 @@ mod tests {
         };
         let close = |got: f32, want: f32| (got - want).abs() < 1.0 / 255.0;
 
-        // Lane 0 of the quad reads lane 1, which is half a pixel further
-        // along the ramp in each direction.
+        // Lane 0 reads lane 1, half a pixel further along in each direction.
         let left = pixel(&mut ctx, 0, 0);
         assert!(close(left[0], 1.0 / 16.0), "dFdx at (0,0): {left:?}");
         assert!(
             close(left[1], 1.5 / 16.0),
             "the neighbour's own value: {left:?}"
         );
-        // Lane 1 differences the other way, and a negative colour clamps at
-        // zero on the way into an unorm target.
+        // Lane 1 differences the other way; negative clamps to zero.
         let right = pixel(&mut ctx, 1, 0);
         assert!(close(right[0], 0.0), "dFdx at (1,0): {right:?}");
         assert!(
@@ -2644,11 +2307,6 @@ mod tests {
 
     /// The colour write mask keeps the channels it turns off, and a mask with
     /// nothing set writes no colour at all.
-    ///
-    /// "A Short Hike" turns alpha off for a third of its draws and turns
-    /// every channel off for one of them. Writing all four regardless is how
-    /// a title's own opacity gets overwritten with whatever its shader left
-    /// in alpha.
     #[test]
     fn a_masked_channel_keeps_what_the_target_already_held() {
         let full = [0.2f32, 0.4, 0.6, 0.25];
@@ -2705,8 +2363,7 @@ mod tests {
         }
     }
 
-    /// A guest that never writes the mask registers must still draw. Zero is
-    /// the register file's initial value and would mean "no channels".
+    /// Zero mask registers (never written) must still draw.
     #[test]
     fn an_unwritten_write_mask_lets_every_channel_through() {
         assert_eq!(Engine3D::new().color_mask(0), [true; 4]);
@@ -2715,10 +2372,7 @@ mod tests {
 
     #[test]
     fn a_multisampled_edge_covers_some_samples_of_a_pixel_and_not_others() {
-        // The same 16x8 surface, read as 8x4 pixels of 2x2 samples. The
-        // triangle's hypotenuse runs from (8,0) to (0,4) in pixels, so it
-        // crosses pixel (7, 0): the one pixel a single-sample rasterizer has
-        // to call either wholly covered or wholly empty.
+        // 8x4 pixels of 2x2 samples; the hypotenuse crosses pixel (7, 0).
         let (mut mem, vmm, mut engine) = pipeline_harness();
         engine.regs.set(0x300, 8 << 16); // viewport width, in pixels
         engine.regs.set(0x301, 4 << 16); // viewport height, in pixels
@@ -2750,8 +2404,7 @@ mod tests {
         for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
             assert_ne!(texel(&ctx, x, y), 0, "texel ({x}, {y}) of a covered pixel");
         }
-        // Pixel (7, 0) straddles the edge. Only the sample at the top left of
-        // it (texel (14, 0)) falls inside the triangle.
+        // Pixel (7, 0) straddles the edge; only texel (14, 0) is inside.
         assert_ne!(texel(&ctx, 14, 0), 0, "the covered sample of pixel (7, 0)");
         for (x, y) in [(15, 0), (14, 1), (15, 1)] {
             assert_eq!(texel(&ctx, x, y), 0, "texel ({x}, {y}) is outside the edge");
@@ -2766,9 +2419,7 @@ mod tests {
         }
     }
 
-    /// The 16x8 target read as 8x4 pixels of 2x2 samples, with a triangle
-    /// that wholly covers pixel (0, 0) so the only thing under test is which
-    /// of that pixel's four samples get written.
+    /// 8x4 pixels of 2x2 samples, pixel (0, 0) wholly covered.
     fn multisampled_harness() -> (Memory, AddressSpace, Engine3D) {
         let (mut mem, vmm, mut engine) = pipeline_harness();
         engine.regs.set(0x300, 8 << 16); // viewport width, in pixels
@@ -2831,8 +2482,7 @@ mod tests {
         };
         draw(&engine, &mut ctx).unwrap();
 
-        // Half of four samples is two, so the pixel is half covered even
-        // though the triangle covers all of it.
+        // Half alpha keeps two of four samples.
         let rt = engine.render_target(0).unwrap().unwrap();
         let texel = |ctx: &ExecCtx, x: u32, y: u32| {
             ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64)
@@ -2856,10 +2506,7 @@ mod tests {
         assert_eq!(alpha_coverage(1.0, 16), u32::MAX);
     }
 
-    /// RenderTargetControl lets a guest address its targets in an order other
-    /// than the one it bound them in. A clear honoured that mapping and a draw
-    /// did not, so a frame could be cleared on one surface and drawn on
-    /// another; this pins the two to the same answer.
+    /// A draw honours RenderTargetControl's mapping, as a clear does.
     #[test]
     fn a_draw_follows_the_render_target_control_mapping() {
         let (mut mem, vmm, mut engine) = pipeline_harness();
@@ -2914,9 +2561,7 @@ mod tests {
 
     #[test]
     fn an_indexed_draw_reads_its_vertices_through_the_index_buffer() {
-        // The same covered half as the direct draw above, but the vertices
-        // are stored in the reverse order and an index buffer puts them
-        // back. Unity and every other real engine draws this way.
+        // The same half, vertices reversed and put back by an index buffer.
         let (mut mem, vmm, mut engine) = pipeline_harness();
         let vbuf_addr = engine.vertex_array(0).start;
         let color = [0.2f32, 0.4, 0.6, 1.0];
@@ -2980,9 +2625,7 @@ mod tests {
         let (mut mem, vmm, mut engine) = pipeline_harness();
         let vbuf_addr = engine.vertex_array(0).start;
         let color = [0.2f32, 0.4, 0.6, 1.0];
-        // Through the harness's viewport, which mirrors y, this lands in
-        // window space across the top and then down to the bottom-left:
-        // clockwise, so the back face when front is CCW.
+        // Clockwise in window space through the mirroring viewport: the back face.
         write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
         write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
         write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
@@ -3018,11 +2661,7 @@ mod tests {
         );
     }
 
-    /// A face is judged by its winding in window space, y down, whatever
-    /// the viewport did to get it there. Both full-screen quads below are
-    /// real: Tomodachi Life composites through a viewport that mirrors y,
-    /// Echoes of Wisdom post-processes through one that does not, and both
-    /// draw under back-face culling with the winding their front face names.
+    /// A face is judged by its winding in window space, whatever the viewport did.
     #[test]
     fn a_face_is_judged_by_its_winding_in_window_space() {
         let cull = |front_ccw| CullState {
@@ -3051,10 +2690,7 @@ mod tests {
 
     #[test]
     fn a_triangle_crossing_the_near_plane_is_clipped_not_projected() {
-        // One vertex behind the eye. Dividing by its w would throw the
-        // projected position to the far side of the screen and smear the
-        // triangle across the whole target; clipping replaces it with real
-        // vertices on the plane first.
+        // One vertex behind the eye.
         let far = ClipVertex {
             clip: [-1.0, 1.0, 0.0, 1.0],
             varyings: [[0.0; 4]; NUM_VARYINGS],
@@ -3095,8 +2731,6 @@ mod tests {
             assemble(Primitive::QuadStrip, 4),
             vec![[0, 1, 2], [2, 1, 3]]
         );
-        // Point and line topologies need their own rasterization; turning
-        // them into triangles would draw something that isn't there.
         assert!(assemble(Primitive::Lines, 6).is_empty());
         assert!(assemble(Primitive::Points, 6).is_empty());
     }
@@ -3166,12 +2800,7 @@ mod tests {
 
     #[test]
     fn a_fixed_point_target_clamps_the_blend_source_and_a_float_one_does_not() {
-        // A NaN is what this is really for. Every blend factor is a multiply
-        // and `NaN * 0` is `NaN`, so a NaN source colour survives a source
-        // alpha of zero and reaches the framebuffer as opaque black, which is
-        // what put a black box around every icon the Album applet drew. A
-        // fixed-point target clamps it to zero before the blend unit ever sees
-        // it; a float target stores what it is given.
+        // A NaN source must not reach a fixed-point target through a zero alpha.
         let unorm = ColorFormat::from_raw(0xD5).unwrap(); // RGBA8Unorm
         let float = ColorFormat::from_raw(0xCA).unwrap(); // RGBA16Float
         let color = [f32::NAN, 2.0, -1.0, 0.5];
@@ -3180,8 +2809,7 @@ mod tests {
         assert!(through[0].is_nan());
         assert_eq!(&through[1..], &[2.0, -1.0, 0.5]);
 
-        // And the whole of it: a transparent NaN over an opaque background
-        // leaves the background alone rather than blacking it out.
+        // A transparent NaN leaves an opaque background alone.
         let target = BlendTarget {
             enabled: true,
             equation_rgb: 0x8006, // FuncAdd
@@ -3196,10 +2824,7 @@ mod tests {
         assert_eq!(blend(target, [0.0; 4], src, dst), dst);
     }
 
-    /// A vertex shader's stores land in guest memory, and a load after one
-    /// sees it before it has landed. Echoes of Wisdom's visibility boxes
-    /// write their results from the vertex stage, and every such draw was
-    /// refused while the stage could only read.
+    /// A vertex shader's stores land in guest memory, visible to later loads.
     #[test]
     fn a_vertex_shader_stores_to_global_memory() {
         use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
@@ -3269,11 +2894,7 @@ mod tests {
 
     #[test]
     fn a_vertex_shader_reads_its_vertex_and_instance_ids() {
-        // The Home Menu draws each UI element as one instance of a unit quad
-        // and finds that element by `gl_InstanceID`, so a vertex shader that
-        // reads zero for it draws every element on top of the first.
-        // Both are integers: what has to reach the register is the value's
-        // bit pattern, not its numeric value converted to a float.
+        // `gl_InstanceID` and `gl_VertexID` reach the register as integer bits.
         use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
 
         let mut program = Program::default();
@@ -3430,10 +3051,7 @@ mod tests {
 
     #[test]
     fn the_same_blend_state_composites_the_same_in_either_numbering() {
-        // The Home Menu writes its blend state in the D3D numbering, which
-        // this understood as "unrecognised" and therefore `One`/`One`, every
-        // one of its draws came out as `src + dst`, which put 2.0 in the
-        // alpha channel and washed its dark separator lines to white.
+        // The D3D blend numbering.
         let gl = BlendTarget {
             enabled: true,
             equation_rgb: 0x8006,
@@ -3515,10 +3133,7 @@ mod tests {
 
     #[test]
     fn a_depth_only_pass_draws_without_a_colour_target() {
-        // Just Dance 2017 runs every pass this way: its Z24S8 surface bound
-        // as colour target 0, which is a depth surface and so not a colour
-        // target at all, and the work done in the depth buffer. The draw has
-        // to happen and its colour has to go nowhere.
+        // A depth surface bound as colour target 0: the draw must still write depth.
         let (mut mem, vmm, mut engine) = pipeline_harness();
         let vbuf_addr = engine.vertex_array(0).start;
         let rt_addr = engine.regs.iova(0x200);
@@ -3600,9 +3215,7 @@ mod tests {
         engine.regs.set(0x4C3, 0x0201); // DepthTestFunc = GL_LESS
 
         {
-            // Clear depth to 1.0 (far) first, as real content always does,
-            // an unwritten (zeroed) depth buffer would otherwise read as the
-            // nearest possible value and reject every draw.
+            // Clear depth to 1.0 first; a zeroed buffer rejects every draw.
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
             let mut ctx = ExecCtx {
@@ -3654,8 +3267,7 @@ mod tests {
         let expected = rt.format.encode(near).unwrap();
         assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
 
-        // Drawing the far triangle a third time must not overwrite the
-        // nearer surface already there.
+        // A third far draw must not overwrite the nearer surface.
         write_vertex(ctx.mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.5, 1.0], far);
         write_vertex(ctx.mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.5, 1.0], far);
         write_vertex(ctx.mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.5, 1.0], far);

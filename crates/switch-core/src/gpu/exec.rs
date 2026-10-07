@@ -1,15 +1,11 @@
 //! Execution context handed to the engines while a channel's pushbuffer runs.
-//!
-//! Bundles everything an engine can touch, guest memory through the channel's
-//! GPU address space, the host1x syncpoints, and the frame statistics, so the
-//! engines never need a reference back to the whole GPU.
 
 use crate::gpu::syncpt::Host1x;
 use crate::gpu::vmm::AddressSpace;
 use crate::mem::Memory;
 use crate::{Error, Result};
 
-/// Counters describing what the GPU has done, for the frontend and for tests.
+/// Counters describing what the GPU has done.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuStats {
     /// GPFIFO submissions processed.
@@ -18,9 +14,7 @@ pub struct GpuStats {
     pub methods: u64,
     /// `ClearBuffers` operations executed.
     pub clears: u64,
-    /// Of those, the depth clears that wrote nothing because the bytes were
-    /// already the ones the last identical clear put there. See
-    /// `Engine3D::clear_depth_stencil`.
+    /// Depth clears skipped because the target already held the cleared bytes.
     pub clears_elided: u64,
     /// Draw calls seen (`VertexBegin`/`DrawArrays`/`DrawElements`).
     pub draws: u64,
@@ -28,23 +22,13 @@ pub struct GpuStats {
     pub copies: u64,
     /// Macros executed by the MME.
     pub macros: u64,
-    /// Method writes that hit a register with no implemented behaviour. These
-    /// are still stored in the register file, so state stays coherent.
+    /// Method writes to registers with no implemented behaviour.
     pub inert_methods: u64,
     /// Compute dispatches launched.
     pub dispatches: u64,
-    /// Dispatches that did not run, an unparseable QMD, or a kernel using an
-    /// instruction the interpreter does not decode. Counted for the same
-    /// reason `draws_skipped` is: a kernel that never ran leaves memory
-    /// holding whatever was there, and nothing on screen says so.
+    /// Dispatches that did not run (bad QMD or undecodable kernel).
     pub dispatches_skipped: u64,
-    /// Draws the rasterizer refused, almost always because the shader used an
-    /// instruction the interpreter does not decode.
-    ///
-    /// Counted because the symptom otherwise carries no information: the draw
-    /// is dropped, the render target keeps whatever was in it, and the frame
-    /// is presented black with nothing to say why. `draws` minus this is what
-    /// actually reached the framebuffer.
+    /// Draws the rasterizer refused, usually due to an undecodable shader.
     pub draws_skipped: u64,
 }
 
@@ -74,14 +58,8 @@ impl ExecCtx<'_> {
         self.vmm.write_u64(self.mem, gpu_va, value)
     }
 
-    /// Read `len` bytes of a surface's raw pixel, little-endian. The GPU VA is
-    /// translated once for the whole pixel rather than once per byte: a blit
-    /// touches every pixel of a 1280x720 surface, and a per-byte translation
-    /// meant millions of address-space lookups per frame.
+    /// Read `len` bytes of a surface's raw pixel, little-endian.
     pub fn read_pixel(&self, gpu_va: u64, len: u32) -> Result<u128> {
-        // One access per machine word rather than per byte, which is
-        // `Memory::read_le`, the same walk `Gpu::present` needs, so it lives
-        // there rather than here.
         self.mem.read_le(self.pixel_addr(gpu_va, len)?, len)
     }
 
@@ -91,17 +69,7 @@ impl ExecCtx<'_> {
         self.mem.write_le(cpu, len, value)
     }
 
-    /// Write `count` consecutive pixels of `unit` bytes with the same value,
-    /// translating the GPU address **once** for the whole run.
-    ///
-    /// The address translation is what a clear spends itself on. A 720p target
-    /// at 2x2 samples is 3.7 million texels, a title that clears three
-    /// attachments does that three times a frame, and Just Dance 2019 pays it
-    /// on frames that carry no draw at all, so a per-texel translation was
-    /// the most expensive thing in a frame with nothing in it.
-    ///
-    /// A run that would leave its own mapping is not a run: that falls back to
-    /// one translation each rather than write past the end of it.
+    /// Write `count` consecutive `unit`-byte pixels with the same value.
     pub fn fill_pixels(&mut self, gpu_va: u64, unit: u32, value: u128, count: u32) -> Result<()> {
         let bytes = u64::from(unit) * u64::from(count);
         let cpu = match self.vmm.translate(gpu_va) {
@@ -116,13 +84,7 @@ impl ExecCtx<'_> {
         self.mem.fill_le(cpu, unit, value, count)
     }
 
-    /// [`ExecCtx::fill_pixels`] for a write that owns only the `mask` bits of
-    /// each pixel, leaving the rest as it found them.
-    ///
-    /// What a depth clear needs against a format that packs stencil beside
-    /// depth: the value is uniform across the run even though the write is
-    /// partial, so the run still costs one translation rather than two per
-    /// texel. A mask covering the whole pixel is a fill, and takes that path.
+    /// [`ExecCtx::fill_pixels`] that only writes the `mask` bits of each pixel.
     pub fn merge_pixels(
         &mut self,
         gpu_va: u64,
@@ -154,13 +116,7 @@ impl ExecCtx<'_> {
         self.mem.merge_le(cpu, unit, value, mask, count)
     }
 
-    /// The CPU address of a whole `len`-byte span, if one mapping holds all
-    /// of it.
-    ///
-    /// A render target usually is one mapping, and answering so is what lets
-    /// a read or a write of the whole surface cost one address translation
-    /// instead of one per texel. `None` means it is not, and the caller walks
-    /// it the slow way.
+    /// The CPU address of a `len`-byte span, if one mapping holds all of it.
     pub fn span(&self, gpu_va: u64, len: u64) -> Option<u32> {
         match self.vmm.translate(gpu_va) {
             Some((cpu, left)) if left >= len => Some(cpu),
@@ -168,18 +124,14 @@ impl ExecCtx<'_> {
         }
     }
 
-    /// Copy a mapped span out of guest memory in one walk.
     pub fn read_span(&self, cpu: u32, out: &mut [u8]) -> Result<()> {
         self.mem.read_into(cpu, out)
     }
 
-    /// Put a mapped span back in one walk.
     pub fn write_span(&mut self, cpu: u32, bytes: &[u8]) -> Result<()> {
         self.mem.write_from(cpu, bytes)
     }
 
-    /// Where a pixel's `len` bytes live in guest memory. A pixel never spans two
-    /// mappings, so one translation covers all of it.
     fn pixel_addr(&self, gpu_va: u64, len: u32) -> Result<u32> {
         match self.vmm.translate(gpu_va) {
             Some((cpu, left)) if left >= u64::from(len) => Ok(cpu),
@@ -190,10 +142,6 @@ impl ExecCtx<'_> {
         }
     }
 
-    /// Read a contiguous run of a surface in **one** address translation.
-    ///
-    /// A run that would leave its own mapping is not a run, and falls back to
-    /// a byte at a time: the same bargain [`ExecCtx::fill_pixels`] makes.
     pub fn read_run(&self, gpu_va: u64, out: &mut [u8]) -> Result<()> {
         if let Some(cpu) = self.span(gpu_va, out.len() as u64) {
             return self.read_span(cpu, out);
@@ -204,7 +152,6 @@ impl ExecCtx<'_> {
         Ok(())
     }
 
-    /// [`ExecCtx::read_run`] backwards: put a contiguous run back in one walk.
     pub fn write_run(&mut self, gpu_va: u64, bytes: &[u8]) -> Result<()> {
         if let Some(cpu) = self.span(gpu_va, bytes.len() as u64) {
             return self.write_span(cpu, bytes);

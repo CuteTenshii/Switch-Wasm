@@ -1,9 +1,5 @@
-//! Running a block: the loop over its ops, the conditional exits it may
-//! leave through, and the terminator it ends on.
-//!
-//! Every arm here does what the interpreter's decoder would have done once it
-//! finished decoding, in most cases by calling the very same helper, so the
-//! two engines are one computation with two front ends.
+//! Running a block: its ops, its conditional exits, and its terminator. Each
+//! arm does what the interpreter would, mostly through the same helpers.
 
 use super::cache::JitStats;
 use super::decode::translate;
@@ -15,66 +11,30 @@ use crate::cpu::loadstore::{Acc, PairKind, Wb};
 use crate::cpu::{Cpu, Layout, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use std::rc::Rc;
 
-/// How many times a block is entered before it is written out as wasm.
-///
-/// Emitting and compiling a block costs far more than interpreting it a few
-/// times, and most blocks a program translates are entered once or twice and
-/// then never again: a threshold is what keeps that work on the code a run
-/// actually spends its time in. A hot loop crosses it in the first
-/// microseconds it runs.
-///
-/// Every emitted block is a module of its own, and V8 gives each its own code
-/// region, so the count matters beyond compile time: entering thousands of
-/// scattered modules through one indirect call costs more in stalls than
-/// their bodies save. At 16, a Just Dance 2019 run emitted 7,990 blocks and
-/// ran 4% slower per frame than interpreting them all; at 512 it emits 1,185,
-/// which still take 97% of the entries the 7,990 did, and beats the
-/// interpreter.
+/// Entries before a block is emitted as wasm.
 pub const HOT: u32 = 512;
 
-/// How many times an emitted block may hand back at its very first
-/// instruction before it is dropped and the block goes back to the
-/// interpreter for good.
-///
-/// Handing back at instruction zero retires nothing, so the visit is pure
-/// loss: the emitted code ran, decided it could not, and the interpreter did
-/// the block anyway. One or two of those are ordinary, the first touch of a
-/// soft-mapped page allocates it and every later access finds it, but a block
-/// whose first instruction *always* needs the full path, a store to a
-/// watched page in a loop, would pay that toll forever.
+/// Hand-backs at a block's first instruction before its emitted form is dropped.
 const MAX_MISSES: u16 = 8;
 
-/// Where a branch inside a block sends control.
 #[derive(Clone, Copy)]
 enum Taken {
-    /// Not taken: on to the following instruction.
     No,
     /// Taken, out of the block; `self.pc` holds the target.
     Leave,
-    /// A branch the translator followed: always taken, and the block's ops go
-    /// on at the target.
+    /// A followed branch: the block's ops go on at the target.
     Follow(u32),
 }
 
-/// What one visit to a block's emitted form did.
 #[derive(Clone, Copy)]
 struct Emitted {
-    /// Leading instructions of the block it retired.
     retired: usize,
-    /// Whether it left through a branch it took, having put where control
-    /// went in `pc`, rather than stopping on an instruction for the
-    /// interpreter to pick up. The two differ in where control is and in
-    /// whether the block's terminator still runs.
+    /// Whether it left through a taken branch, with the target in `pc`.
     left: bool,
 }
 
-/// Where the straight-line stretch of ops being executed starts, in the block's
-/// body and in guest memory, so the address of any op in it can be worked out
-/// from where the op is.
-///
-/// Only three arms and the fault path ever need that address, and carrying it
-/// through the loop instead cost every op a reload, an add and a spill under
-/// V8, which keeps it on the stack.
+/// Where the straight-line stretch being executed starts, in the block body
+/// and in guest memory, so any op's address can be derived.
 #[derive(Clone, Copy)]
 struct Here {
     first: usize,
@@ -90,7 +50,6 @@ impl Here {
         }
     }
 
-    /// The guest address of `op`, which has to be one of the stretch's ops.
     #[inline(always)]
     fn pc_of(self, op: &Op) -> u32 {
         let index = (op as *const Op as usize - self.first) / std::mem::size_of::<Op>();
@@ -98,22 +57,19 @@ impl Here {
     }
 }
 
-/// The operand an addition needs to compute a subtraction. `carry` is 1
-/// exactly when the instruction subtracts, so it doubles as the mask that
-/// inverts the operand: no branch, and nothing left to decide at run time.
+/// The operand that makes an addition a subtraction; `carry` doubles as the
+/// inversion mask.
 #[inline(always)]
 fn invert_if(v: u64, carry: u8) -> u64 {
     v ^ 0u64.wrapping_sub(u64::from(carry))
 }
 
 impl Cpu {
-    /// Whether [`Cpu::run`] goes through the translator.
     pub fn jit_enabled(&self) -> bool {
         self.jit_enabled
     }
 
-    /// Turn the translator on or off. Turning it off drops the cache, so a
-    /// caller that switches back gets a translator with no stale state.
+    /// Turning the translator off drops the cache.
     pub fn set_jit_enabled(&mut self, on: bool) {
         if !on {
             self.jit.clear();
@@ -121,56 +77,39 @@ impl Cpu {
         self.jit_enabled = on;
     }
 
-    /// What the translator has been doing since the CPU was created.
     pub fn jit_stats(&self) -> JitStats {
         self.jit.stats()
     }
 
-    /// Drop every translated block. Callers that rewrite guest code behind
-    /// [`crate::mem::Memory`]'s back need this; ordinary guest stores are
-    /// noticed on their own.
+    /// Drop every translated block, for callers that rewrite guest code
+    /// behind [`crate::mem::Memory`]'s back.
     pub fn jit_flush(&mut self) {
         self.jit.clear();
     }
 
-    /// [`Cpu::run`] over translated blocks.
-    ///
-    /// The step budget is honoured exactly. A block whose remaining
-    /// instructions do not fit is entered anyway and left part-way through,
-    /// with `pc` on the instruction that would have come next: the block is
-    /// a cache, not a unit of execution, so stopping inside one is no
-    /// different from stopping between two interpreted instructions.
+    /// [`Cpu::run`] over translated blocks. The step budget is exact: a block
+    /// that does not fit is left part-way through.
     pub(in crate::cpu) fn run_jit(&mut self, max_steps: u64) -> Result<RunReport> {
         let mut steps = 0u64;
-        // The block last executed, kept across iterations. A loop that branches
-        // back to its own head (which is most of what a hot loop is) then
-        // costs neither the cache lookup nor the reference count, because the
-        // handle is moved out and back rather than cloned.
+        // The last block, moved out and back so a self-loop skips lookup and refcount.
         let mut held: Option<Rc<Block>> = None;
         // Block entries counted in locals and committed once, on the way out.
         let mut executed = 0u64;
         let mut linked = 0u64;
         while steps < max_steps && !self.halted {
-            // The scheduler's preemption point. The interpreter takes it
-            // between any two instructions; here it is between blocks, which
-            // is the same thing at the scale of a 20,000-instruction slice.
+            // Preemption point, between blocks.
             if self.slice_used >= TIME_SLICE {
                 self.slice_used = 0;
                 self.yield_thread();
             }
             self.sweep_timed_waits();
             let pc = self.pc;
-            // A store that landed on translated code makes every cached handle
-            // suspect, so all three fast paths below are off until
-            // `jit_block_at` has drained the dirty list.
+            // A store to translated code disables the fast paths until
+            // `jit_block_at` drains the dirty list.
             let stale = self.mem.has_dirty_code();
             let block = match held.take() {
                 Some(block) if block.start == pc && !stale => block,
-                // Where this block went last time. A block boundary falls every
-                // 6.1 instructions on a retail frame, and the overwhelming
-                // majority of them lead somewhere they have led before, so this
-                // is the difference between a hash lookup per six instructions
-                // and a pointer that is already in hand.
+                // Where this block went last time.
                 Some(previous) => match previous.successor(pc).filter(|_| !stale) {
                     Some(next) => {
                         linked += 1;
@@ -185,8 +124,7 @@ impl Cpu {
                 None => self.jit_block_at(pc),
             };
             executed += 1;
-            // Straight on to a linked successor without going back through
-            // the selector above, while nothing it checks has changed.
+            // Straight on to a linked successor while nothing it checks has changed.
             let mut block = block;
             loop {
                 let ran = match self.exec_block(&block, max_steps - steps) {
@@ -227,10 +165,8 @@ impl Cpu {
         })
     }
 
-    /// The block entered at `pc`, translating it if this is the first visit.
-    ///
-    /// Drains the pages guest stores have landed on first, so a block is never
-    /// handed out after the instructions behind it have changed.
+    /// The block entered at `pc`, translating it on first visit. Drains dirty
+    /// code pages first so a stale block is never handed out.
     fn jit_block_at(&mut self, pc: u32) -> Rc<Block> {
         if self.mem.has_dirty_code() {
             let dirty = self.mem.dirty_code_pages();
@@ -248,54 +184,32 @@ impl Cpu {
         block
     }
 
-    /// Run at most `budget` of a block's instructions, reporting how many
-    /// retired.
-    ///
-    /// `self.pc` tracks the instruction being executed throughout, exactly as
-    /// it does in the interpreter, so a fault inside a block reports the same
-    /// address and the same register state an interpreted one would.
-    ///
-    /// Inlined into [`Cpu::run_jit`], so that walking from block to block is
-    /// one loop rather than a call per block. A retail frame enters a block
-    /// every six to ten instructions, and as a call each entry paid this
-    /// function's whole prologue (a 384-byte frame under V8) and then reloaded
-    /// everything the caller already held in registers. Inlining it took a
-    /// Just Dance 2019 frame in the wasm build from 240 ms to 229 ms, while
-    /// the host's cycle count did not move: the two targets are not related
-    /// by a constant.
+    /// Run at most `budget` of a block's instructions, returning how many
+    /// retired. `self.pc` tracks the current instruction, so faults match the
+    /// interpreter.
     #[inline(always)]
     fn exec_block(&mut self, block: &Block, budget: u64) -> Result<u64> {
         let body = (block.ops.len() as u64).min(budget) as usize;
         let mut i = 0usize;
         let mut pc = block.start;
         let mut next_exit = 0usize;
-        // Where the straight-line run being executed began, by address and by
-        // index. A block that follows a `B` is several runs, and the
-        // index of the instruction at `pc` is only `pc - start` within one.
+        // Start of the current straight-line run, by address and index.
         let mut run_pc = block.start;
         let mut run_i = 0usize;
-        // The emitted form, when there is one, replaces the walk over the ops
-        // and nothing else: it leaves guest state exactly where the loop below
-        // would have, so the terminator and the accounting under both are the
-        // same code.
+        // The emitted form replaces only the op walk; the terminator and accounting are shared.
         if let Some(done) = self.enter_emitted(block, budget) {
             i = done.retired;
             let at;
             (at, run_pc, run_i) = self.follow_runs(block, i);
             if done.left {
-                // The branch put its target in `pc` itself, and the
-                // terminator does not run: control has already gone
-                // somewhere else, which is what `Taken::Leave` does below.
+                // The branch set `pc`; the terminator does not run.
                 self.retire_runs(run_pc, run_i, i);
                 return Ok(i as u64);
             }
             pc = at;
         } else {
             loop {
-                // Run straight through to the next conditional branch, or to the
-                // end of what the budget allows. Taking the segment as a slice
-                // keeps this the same bounds-check-free walk it was when a block
-                // had no interior exits at all.
+                // Run to the next conditional branch or the end of the budget.
                 let stop = match block.exits.get(next_exit) {
                     Some(branch) if (branch.at as usize) < body => branch.at as usize,
                     _ => body,
@@ -304,11 +218,8 @@ impl Cpu {
                 let here = Here::new(segment, pc);
                 for op in segment {
                     if let Err(e) = self.exec_op(op, here) {
-                        // The clock, the step counter, the trail and `pc` are all
-                        // settled here rather than maintained per instruction:
-                        // nothing inside a block reads any of them, and a fault is
-                        // the only thing that ever does. The faulting instruction
-                        // counts, exactly as it does in the interpreter.
+                        // Clock, steps, trail and `pc` are settled only on a fault;
+                        // the faulting instruction counts.
                         let pc = here.pc_of(op);
                         let at = run_i + (pc.wrapping_sub(run_pc) / 4) as usize;
                         self.retire_runs(run_pc, run_i, at + 1);
@@ -326,12 +237,8 @@ impl Cpu {
                 let exit = &branch.exit;
                 let span = branch.span as usize;
                 if i + span > body {
-                    // The budget splits a fused exit. Run the instructions of it
-                    // that fit and stop on the next, which is a valid entry point
-                    // with their effects already applied. Doing nothing here
-                    // instead would return no progress at all when the exit
-                    // starts the block, and [`Cpu::run_jit`] would spin on it
-                    // forever.
+                    // The budget splits a fused exit: run what fits and stop, so
+                    // progress is never zero.
                     if i < body {
                         let fit = body - i;
                         self.apply_compare(exit, fit);
@@ -345,24 +252,19 @@ impl Cpu {
                 match self.take_exit(exit) {
                     Taken::No => {}
                     Taken::Leave => {
-                        // The branch is the last instruction of this visit, and
                         // `take_exit` has already put the target in `pc`.
                         self.retire_runs(run_pc, run_i, i);
                         return Ok(i as u64);
                     }
                     Taken::Follow(target) => {
-                        // Where the block would have ended before it followed the
-                        // branch, and so where a store to translated code has to
-                        // be noticed: the ops past here may be the very ones it
-                        // overwrote. Leave the way the branch would have as a
-                        // terminator, and `run_jit` drops what went stale.
+                        // Leave as a terminator would, so `run_jit` notices a store
+                        // to the translated code past here.
                         if self.mem.has_dirty_code() {
                             self.pc = target;
                             self.retire_runs(run_pc, run_i, i);
                             return Ok(i as u64);
                         }
-                        // The block goes on at the target. The run that ends here
-                        // goes into the trail now, while its start is still known.
+                        // Record the ending run in the trail while its start is known.
                         self.push_run(run_pc, (i - run_i) as u32);
                         pc = target;
                         run_pc = target;
@@ -379,19 +281,12 @@ impl Cpu {
                 self.pc = pc;
                 self.record_run(pc, 1);
                 let result = self.exec_term(term, pc, budget - ran);
-                // After the terminator, not before, and whether or not it
-                // faulted, which is what `step_inner` does. An `SVC` is the
-                // one instruction that reads the clock while it runs, so
-                // retiring it early made the JIT hand every syscall a tick the
-                // interpreter had not spent yet: sdl-hello ended 1 cycle apart
-                // between the two engines, because a sleep deadline is
-                // computed from the value the syscall saw.
+                // After the terminator, faulted or not, as `step_inner` does:
+                // an `SVC` reads the clock.
                 self.retire();
                 match result {
                     Ok(folded) => {
-                        // The instructions of a PLT stub the terminator ran as
-                        // well, which retire exactly as if they had run on
-                        // their own.
+                        // Instructions of a folded PLT stub.
                         self.cycles += folded;
                         self.steps += folded;
                         ran += 1 + folded;
@@ -402,56 +297,30 @@ impl Cpu {
                     }
                 }
             }
-            // Either the budget ran out inside the block, or it covered the
-            // body of a block that has no terminator. Both leave `pc` on the
-            // next instruction to run.
+            // Budget ran out, or the block has no terminator; `pc` is next.
             _ => self.pc = pc,
         }
         Ok(ran)
     }
 
-    /// Run `block`'s emitted form and report how many of its leading
-    /// instructions it retired, or `None` when this visit belongs to the
-    /// interpreter after all.
-    ///
-    /// Guest state on the way out is exactly what those instructions left. An
-    /// emitted access that needs more than the page table hands back *before*
-    /// writing anything, so the instruction it stopped on has not half
-    /// happened and the interpreter picks it up whole, which is the handover
-    /// [`Cpu::exec_block`] already makes when a step budget runs out inside a
-    /// block.
-    ///
-    /// A block that ran through a branch and took it reports that too, and
-    /// has put the target in `pc`: where control went is not derivable from
-    /// how much it retired, and a branch on the block's last instruction
-    /// retires all of it without reaching the terminator.
-    ///
-    /// Progress is what the arms below are really about. An emitted block that
-    /// retires nothing has done nothing, so this hands the visit back to the
-    /// interpreter rather than reporting zero: [`Cpu::run_jit`] would
-    /// otherwise enter the same block at the same pc forever. A taken branch
-    /// is always progress, because the branch itself retires.
+    /// Run `block`'s emitted form, returning how many leading instructions it
+    /// retired, or `None` to hand this visit to the interpreter. Emitted code
+    /// hands back before writing anything, and a visit that retires nothing
+    /// is handed back so `run_jit` cannot spin.
     #[inline(always)]
     fn enter_emitted(&mut self, block: &Block, budget: u64) -> Option<Emitted> {
         let Code::Ready { entry, misses } = block.code.get() else {
             self.warm(block);
             return None;
         };
-        // The step budget stays exact by entering only a block that fits in
-        // what is left of it. Emitted code stops where it decides to and not
-        // where it is told to, so a block that overruns is interpreted this
-        // visit and the budget ends inside it as precisely as ever.
+        // Only enter a block that fits the remaining budget.
         if block.ops.len() as u64 > budget {
             return None;
         }
         self.jit.entered_emitted += 1;
         let state = self as *mut Cpu;
-        // SAFETY: `entry` is what `host::install` answered for this very
-        // block and nothing has released it, because only `Block::drop_code`
-        // does and that takes `Code::Ready` away with it. `state` is a live
-        // `Cpu`: it is this one, borrowed for the call. What runs is a module
-        // this build emitted against `Layout::of_cpu`, so every offset it
-        // reaches is a field of that type.
+        // SAFETY: `entry` came from `host::install` for this block and is only
+        // released by `Block::drop_code`; it was emitted against `Layout::of_cpu`.
         let answer = unsafe { host::enter(entry, state) };
         let left = answer & LEFT != 0;
         let retired = (answer & !LEFT) as usize;
@@ -465,9 +334,7 @@ impl Cpu {
             }
             return None;
         }
-        // Progress of any size ends a run of misses, and a run that ended is
-        // not a run: a page allocated on first touch made the block decline
-        // once and never will again.
+        // Any progress resets the miss count.
         if misses != 0 {
             block.code.set(Code::Ready { entry, misses: 0 });
         }
@@ -477,9 +344,8 @@ impl Cpu {
         })
     }
 
-    /// The address of `block`'s `i`th instruction across the `B`s it follows,
-    /// with the start of the run holding it by address and index. Each run
-    /// before that one goes into the trail, as the op walk puts them there.
+    /// The address of `block`'s `i`th instruction across followed `B`s, with
+    /// the start of its run. Earlier runs go into the trail.
     #[inline(always)]
     fn follow_runs(&mut self, block: &Block, i: usize) -> (u32, u32, usize) {
         let (mut run_pc, mut run_i) = (block.start, 0usize);
@@ -497,8 +363,7 @@ impl Cpu {
         (run_pc.wrapping_add(4 * (i - run_i) as u32), run_pc, run_i)
     }
 
-    /// Count a visit to a block with no emitted form, and write it out once it
-    /// has had [`HOT`] of them.
+    /// Count a visit to an unemitted block and emit it after [`HOT`] visits.
     #[inline(always)]
     fn warm(&mut self, block: &Block) {
         if let Code::Cold(seen) = block.code.get() {
@@ -511,19 +376,8 @@ impl Cpu {
         }
     }
 
-    /// Write `block` out as wasm and hand it to the host, so that later visits
-    /// run the emitted form.
-    ///
-    /// Whatever the answer, the block is left in a state that never asks
-    /// again: an emitter that refused this block will refuse it next time too,
-    /// and a host that could not compile the module is not going to compile
-    /// the same bytes later.
-    ///
-    /// That includes a build with nowhere to put emitted code at all, which is
-    /// every host build and any browser build whose embedder never named a
-    /// [`crate::cpu::JitHost`]. The embedder names one before the first guest
-    /// instruction runs, so a block reaching this that early enough to see no
-    /// host is a block that would not have been emitted anyway.
+    /// Emit `block` as wasm and install it. Whatever the outcome, the block
+    /// never asks again.
     #[cold]
     #[inline(never)]
     fn install(&mut self, block: &Block) {
@@ -546,10 +400,8 @@ impl Cpu {
         block.code.set(Code::Ready { entry, misses: 0 });
     }
 
-    /// Account for the `ran` instructions a visit to a block retired: the clock
-    /// and the step counter for all of them, and the trail for the ones in
-    /// the run that began at index `run_i`, address `run_pc`. The runs before
-    /// it went into the trail as the branches ending them were followed.
+    /// Account for `ran` retired instructions: clock and steps for all, trail
+    /// for those in the run starting at `run_i`/`run_pc`.
     #[inline(always)]
     fn retire_runs(&mut self, run_pc: u32, run_i: usize, ran: usize) {
         self.cycles += ran as u64;
@@ -559,8 +411,7 @@ impl Cpu {
         }
     }
 
-    /// The first `fit` instructions of a fused exit, short of its branch, for
-    /// the one case that cannot run all of it: a step budget that ends inside.
+    /// The first `fit` instructions of a fused exit, when the budget ends inside it.
     #[inline(always)]
     fn apply_compare(&mut self, exit: &Exit, fit: usize) {
         let (a, b, carry, sf) = match *exit {
@@ -601,15 +452,13 @@ impl Cpu {
                 carry,
                 sf,
             ),
-            // Nothing else spans more than one instruction.
             _ => return,
         };
         let (result, c, v) = Cpu::add_carry_overflow(a, b, u64::from(carry), sf);
         self.set_nzcv_from_alu(result, sf, c, v);
     }
 
-    /// The update [`Exit::UpdateCmpImm`] folds in: an `ADD`/`SUB` of a
-    /// constant that sets no flags.
+    /// The flagless `ADD`/`SUB` immediate [`Exit::UpdateCmpImm`] folds in.
     #[inline(always)]
     fn apply_step(&mut self, rd: u8, source: u8, step: PackedImm) {
         let carry = step.carry();
@@ -617,13 +466,8 @@ impl Cpu {
         self.add_sub_pre(rd, source, rhs, carry, false, step.sf());
     }
 
-    /// Evaluate a branch inside a block, and say where control goes: on to
-    /// the following instruction, out of the block with `self.pc` on the
-    /// target, or on inside the block at a target the translator followed.
-    ///
-    /// One match for all of it. Asking first whether the branch was a
-    /// followed one and only then evaluating it was two jumps on the kind of
-    /// every exit, and cost 6% of a Just Dance 2019 frame in the wasm build.
+    /// Evaluate a branch inside a block: fall through, leave with `self.pc` on
+    /// the target, or continue at a followed target.
     #[inline(always)]
     fn take_exit(&mut self, exit: &Exit) -> Taken {
         let (taken, target) = match *exit {
@@ -684,26 +528,13 @@ impl Cpu {
         }
     }
 
-    /// Execute one body op. Every arm does what the interpreter's decoder
-    /// would have done once it finished decoding.
-    ///
-    /// **By reference, and it has to stay that way.** Taking an [`Op`] by
-    /// value makes the compiler load the whole 16 bytes before the `match`,
-    /// and it then splits them into every field any arm could want and hoists
-    /// the lot above the jump table: nine loads and six shifts, fifteen
-    /// instructions run on the way to every arm to serve the one that needed
-    /// them. Behind a reference each arm loads only its own fields, and the
-    /// dispatch is the tag, the table and the jump. Nothing else about this
-    /// changed and hbmenu retired 7.3% fewer host instructions. The same trap
-    /// is why [`Cpu::take_exit`], [`Cpu::apply_compare`] and
-    /// [`Cpu::exec_term`] take references too.
+    /// Execute one body op. Takes `&Op` on purpose: by value, the compiler
+    /// hoists every arm's field loads above the jump table.
     #[inline(always)]
     fn exec_op(&mut self, op: &Op, here: Here) -> Result<()> {
         match *op {
             Op::Nop => {}
-            // The arms that re-enter the interpreter are the only ones
-            // that need `pc` in the register file: `execute` resolves
-            // PC-relative forms from it, and every fault message names it.
+            // Only arms that re-enter the interpreter need `pc` set.
             Op::Interpret { insn } => {
                 let pc = here.pc_of(op);
                 self.pc = pc;
@@ -808,9 +639,7 @@ impl Cpu {
                 opc,
                 sf,
             } => {
-                // Rd == 31 is SP for AND/ORR/EOR and the zero register only
-                // for ANDS, one of the few places the two differ, and one
-                // the translator has already settled into `rd`.
+                // Rd == 31 is SP here and XZR for ANDS; the translator settled it in `rd`.
                 self.logical(rd, rn, imm, opc, sf);
             }
             Op::LogicalShifted {
@@ -829,9 +658,7 @@ impl Cpu {
                     u32::from(sa),
                     sf,
                 );
-                // `BIC`/`ORN`/`EON` invert the *shifted* operand, not the
-                // register: `ir.Not(ShiftReg(...))` in dynarmic, and the same
-                // order in the ARM ARM's pseudocode.
+                // `BIC`/`ORN`/`EON` invert the shifted operand.
                 let b = if invert { !b & Cpu::mask(sf) } else { b };
                 self.logical(rd, rn, b, opc, sf);
             }
@@ -1031,19 +858,8 @@ impl Cpu {
         Ok(())
     }
 
-    /// [`Cpu::load_store_imm`] for an access that needs nothing but the page
-    /// table, which is nearly all of them, with `op` run again in full by
-    /// [`Cpu::exec_op_slow`] when it needs more. `acc` is a constant for
-    /// every variant that has one built in, so their accesses are each their
-    /// own code with no match left to run.
-    ///
-    /// The fast path makes no calls, and that is the point of it. V8 stores a
-    /// value that is still needed after a call to the stack where it is
-    /// computed, whether or not the call is made, and every page-table miss or
-    /// fault here used to be a call made halfway through the access: a load
-    /// paid six such stores on the way past, for a slow path it almost never
-    /// took. The fallback starts the instruction over instead, which it can
-    /// because the fast path changes nothing until it has decided to finish.
+    /// [`Cpu::load_store_imm`] when the page table suffices, else [`Cpu::exec_op_slow`]
+    /// reruns `op`. The fast path makes no calls and changes nothing before committing.
     #[inline(always)]
     fn load_store_fast(
         &mut self,
@@ -1064,9 +880,7 @@ impl Cpu {
         Ok(())
     }
 
-    /// [`Cpu::access`] through [`crate::mem::Memory::peek`] and
-    /// [`crate::mem::Memory::poke`], saying whether it could. Declining leaves
-    /// memory and the registers as they were.
+    /// [`Cpu::access`] via `peek`/`poke`; declining leaves all state unchanged.
     #[inline(always)]
     fn access_fast(&mut self, addr: u32, rt: u8, acc: Acc) -> bool {
         let mem = &self.mem;
@@ -1103,9 +917,7 @@ impl Cpu {
         }
     }
 
-    /// Run a load or store op through the full memory path: the page-table
-    /// misses, watchpoints, protection and code-page reports the fast arms
-    /// leave to it, and every fault. Only ever handed an op whose fast path
+    /// A load or store through the full memory path, for ops whose fast path
     /// declined before changing anything.
     #[cold]
     #[inline(never)]
@@ -1165,9 +977,7 @@ impl Cpu {
         }
     }
 
-    /// A single-register load or store with an immediate offset. The variants
-    /// that have their access built in pass it here as a constant, so each of
-    /// them compiles to its own access with no match left to run.
+    /// A single-register immediate-offset load or store; `acc` is often a constant.
     #[inline(always)]
     fn load_store_imm(&mut self, rt: u8, rn: u8, acc: Acc, wb: Wb, offset: i64) -> Result<()> {
         let base = self.reg_at(rn);
@@ -1179,10 +989,9 @@ impl Cpu {
         Ok(())
     }
 
-    /// Execute the instruction a block ends on, leaving `self.pc` wherever
-    /// control goes next, and report how many instructions it retired beyond
-    /// its own: those of a folded PLT stub, and otherwise none. `room` is how
-    /// many the step budget has left for, the terminator included.
+    /// Execute a block's terminator, leaving `self.pc` on the next target, and
+    /// return extra instructions retired (a folded PLT stub). `room` is the
+    /// remaining budget, terminator included.
     #[inline(always)]
     fn exec_term(&mut self, term: &Term, pc: u32, room: u64) -> Result<u64> {
         match *term {
@@ -1198,17 +1007,13 @@ impl Cpu {
             }
             Term::Br { rn } => self.pc = self.read_zr(rn) as u32,
             Term::Blr { rn, ret_pc } => {
-                // Read the target before linking: `blr x30` is a
-                // return-and-relink, and writing x30 first makes it jump to
-                // itself.
+                // Read the target first: `blr x30` would otherwise jump to itself.
                 let target = self.read_zr(rn) as u32;
                 self.write_zr(30, u64::from(ret_pc));
                 self.pc = target;
             }
             Term::Ret { rn } => {
-                // A return to address 0 is homebrew's exit path; the boot
-                // model routes it through the exit trampoline instead of
-                // fetching from NULL.
+                // A return to 0 is homebrew's exit; route it through the trampoline.
                 let target = self.read_zr(rn) as u32;
                 self.pc = if target == 0 {
                     SELF_RETURN_TRAMPOLINE
@@ -1217,9 +1022,7 @@ impl Cpu {
                 };
             }
             Term::Svc { imm, next } => {
-                // Retire the SVC before dispatching it: a syscall that
-                // switches threads installs the incoming thread's PC, and the
-                // outgoing one has to resume after its own SVC.
+                // Retire the SVC first: a thread switch installs the next thread's PC.
                 self.pc = next;
                 self.syscall(imm)?;
             }
@@ -1236,18 +1039,9 @@ impl Cpu {
         Ok(0)
     }
 
-    /// Run the PLT stub at `stub`, which jumps through the GOT slot `got`,
-    /// once the branch to it has been taken. Leaves `x16` and `x17` as the
-    /// stub would and `pc` on the function it reaches, and reports the four
-    /// instructions it retired.
-    ///
-    /// When the budget cannot fit all four, or reading the slot takes more
-    /// than the page table, it does nothing but leave `pc` on the stub: the
-    /// stub then runs as a block of its own, stops where the budget says and
-    /// reads the slot, watchpoint, fault and all, exactly as it did before it
-    /// was folded. Handing it that case rather than reading the slot in full
-    /// keeps this path free of calls; see [`Cpu::load_store_fast`] for why
-    /// that is worth having.
+    /// Run the PLT stub at `stub` (jumping through GOT slot `got`) and return
+    /// its four instructions. If the budget or the slot read needs more than
+    /// the fast path, leave `pc` on the stub to run as its own block.
     #[inline(always)]
     fn through_plt(&mut self, got: u32, stub: u32, room: u64) -> u64 {
         const STUB: u64 = 4;

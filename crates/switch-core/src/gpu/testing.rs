@@ -1,16 +1,5 @@
-//! A drawable engine, for tests that need one.
-//!
-//! The software rasterizer is the reference every other path must agree with,
-//! and agreeing is something only a *comparison* establishes. That needs both
-//! renderers driven over the same [`Engine3D`], which lives here rather than
-//! in `raster`'s own test module, because `switch-gpu` is a separate crate and
-//! cannot reach into one. The same reason `ipc::testing` exists.
-//!
-//! It is the smallest complete draw: a 16x8 pitch-linear RGBA8 target, two
-//! real shaders decoded from captured SASS, and a vertex array of three
-//! positions and three colours. Everything a test varies, the multisample
-//! mode, the sample mask, the depth state, it varies by writing the register
-//! the guest would have written.
+//! A minimal drawable engine shared by the software and wgpu renderer tests:
+//! a 16x8 pitch-linear RGBA8 target, two captured shaders, and a three-vertex array.
 
 use crate::gpu::engine::threed::{DrawCall, Engine3D};
 use crate::gpu::exec::{ExecCtx, GpuStats};
@@ -19,13 +8,11 @@ use crate::gpu::syncpt::Host1x;
 use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
 use crate::mem::Memory;
 
-/// Two instruction words, as the eight bytes a shader binary holds.
 pub fn word(low: u32, high: u32) -> [u8; 8] {
     (((high as u64) << 32) | low as u64).to_le_bytes()
 }
 
-/// One 32-byte scheduling block: the sched word and the three instructions it
-/// schedules.
+/// One 32-byte scheduling block: the sched word and three instructions.
 pub fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     out.extend_from_slice(&word(sched.0, sched.1));
@@ -35,14 +22,9 @@ pub fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> 
     out
 }
 
-/// `gl_Position = aPosition; vColor = aColor;`, composed from the same real,
-/// oracle-verified `ld`/`st` b128 attribute-space words `mvp.vert`'s fixture
-/// uses (see `isa`'s module docs), so no bit-level guessing is needed for a
-/// passthrough.
+/// `gl_Position = aPosition; vColor = aColor;`
 pub fn passthrough_vertex_shader() -> Vec<u8> {
-    // Sched words are placeholders reused from mvp.vert's real capture,
-    // never all-zero, since `decode_program_from_memory` treats an all-zero
-    // first word as "this binary has a Mesa header".
+    // Sched words are never all-zero: an all-zero first word means a Mesa header.
     let mut bytes = block(
         (0xfc20070f, 0x081f8441),
         (0x0807ff00, 0xefd9ff80), // ld b128 $r0 a[0x80] 0x0  (aPosition)
@@ -58,8 +40,7 @@ pub fn passthrough_vertex_shader() -> Vec<u8> {
     bytes
 }
 
-/// `oColor = vColor;`, the same real capture `isa`'s module docs and
-/// `shader::interp`'s tests use.
+/// `oColor = vColor;`
 pub fn solid_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
         (0xe1a0070f, 0x00240401),
@@ -82,14 +63,7 @@ pub fn solid_fragment_shader() -> Vec<u8> {
     bytes
 }
 
-/// `oColor.r = vColor.r - vColor.r of the pixel beside me`, which is a
-/// horizontal derivative: the `ipa` chain of [`solid_fragment_shader`] up to
-/// the first component, then a `shfl.bfly` reading the lane whose number
-/// differs in the low bit and a subtract.
-///
-/// The result lands in `r0`, the neighbour's own value stays in `r1`, and
-/// `r3` is still the `w` the interpolation needed, so the colour written is
-/// `(dFdx, neighbour, 0, 1)`.
+/// `oColor = (dFdx(vColor.r), neighbour, 0, 1)` via `shfl.bfly`.
 pub fn derivative_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
         (0xe1a0070f, 0x00240401),
@@ -106,11 +80,7 @@ pub fn derivative_fragment_shader() -> Vec<u8> {
     bytes
 }
 
-/// `oColor = texture(bindless, vColor.xy)`: the `ipa` chain of
-/// [`solid_fragment_shader`] for the first two components, the handle loaded
-/// from `c3[0x10]`, and Tomodachi Life's own `tex.b`, which samples at
-/// `(r0, r1)` with the handle in `r2` and writes all four channels from
-/// `r0`. The words are checked against `envydis`.
+/// `oColor = texture(bindless, vColor.xy)`, handle from `c3[0x10]`.
 pub fn bindless_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
         (0xe1a0070f, 0x00240401),
@@ -133,12 +103,7 @@ pub fn bindless_fragment_shader() -> Vec<u8> {
     bytes
 }
 
-/// `oColor = textureGather(texture, vColor.xy, component)`: the `ipa` chain
-/// of [`bindless_fragment_shader`], then a bound `tld4` of the red (0) or
-/// green (1) channel from texture slot 4 into `r0`..`r3`. Slot 4 is the word
-/// at 0x10 of the texture bank, so with `TexCbIndex` set to
-/// [`BINDLESS_HANDLE_BANK`] it reads the handle [`Harness::bindless_texture`]
-/// leaves there. The words are checked against `envydis`.
+/// `oColor = textureGather(texture, vColor.xy, component)` from bound slot 4.
 pub fn gather_fragment_shader(component: u32) -> Vec<u8> {
     let tld4_high = 0xc83a0047 | (component & 3) << 24;
     let mut bytes = block(
@@ -156,10 +121,7 @@ pub fn gather_fragment_shader(component: u32) -> Vec<u8> {
     bytes
 }
 
-/// `oColor = textureOffset(texture, vColor.xy, ivec2(1, -1))`: the `ipa`
-/// chain, the offset loaded as an immediate, and a bound `tex.aoffi` of
-/// slot 4, which reads the texture [`gather_fragment_shader`] does. The
-/// words are checked against `envydis`.
+/// `oColor = textureOffset(texture, vColor.xy, ivec2(1, -1))` from slot 4.
 pub fn offset_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
         (0xe1a0070f, 0x00240401),
@@ -182,10 +144,7 @@ pub fn offset_fragment_shader() -> Vec<u8> {
     bytes
 }
 
-/// `oColor = texture(shadowMap, vec3(vColor.xy, 0.5))`: the `ipa` chain, the
-/// reference loaded as an immediate, and a bound `tex.dc` of slot 4, which
-/// reads the texture [`gather_fragment_shader`] does and compares 0.5
-/// against it. The words are checked against `envydis`.
+/// `oColor = texture(shadowMap, vec3(vColor.xy, 0.5))` from slot 4.
 pub fn shadow_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
         (0xe1a0070f, 0x00240401),
@@ -208,24 +167,17 @@ pub fn shadow_fragment_shader() -> Vec<u8> {
     bytes
 }
 
-/// The bank and offset [`bindless_fragment_shader`] loads its handle from.
 pub const BINDLESS_HANDLE_BANK: u32 = 3;
 pub const BINDLESS_HANDLE_OFFSET: u32 = 0x10;
 
-/// The width and height of the image [`Harness::bindless_texture`] binds.
 pub const BINDLESS_TEXTURE_SIZE: u32 = 8;
 
-/// The texel [`Harness::bindless_texture`] stores at `(x, y)`, as the
-/// little-endian word of its RGBA8 bytes: every texel distinct, so a draw
-/// that reads the wrong one or the wrong image cannot come out equal.
+/// Distinct RGBA8 texel at `(x, y)` of [`Harness::bindless_texture`].
 pub fn bindless_texel(x: u32, y: u32) -> u32 {
     let (r, g, b) = (x * 30 + 10, y * 30 + 10, (y * 8 + x) * 3);
     r | g << 8 | b << 16 | 0xff << 24
 }
 
-/// The register the multisample mode lives in, and the ones a test that
-/// varies coverage reaches for. Named because a test that writes `0x574`
-/// says nothing about what it is doing.
 pub const MULTISAMPLE_ENABLE: u32 = 0x54D;
 pub const MULTISAMPLE_CONTROL: u32 = 0x54F;
 pub const MULTISAMPLE_MODE: u32 = 0x574;
@@ -234,11 +186,7 @@ pub const DEPTH_TEST_ENABLE: u32 = 0x4B3;
 pub const DEPTH_WRITE_ENABLE: u32 = 0x4BA;
 pub const DEPTH_TEST_FUNC: u32 = 0x4C3;
 
-/// Write one vertex of the array [`Harness`] lays out: a `vec4` position at
-/// offset 0 and a `vec4` colour at offset 16, stride 32.
-///
-/// Free-standing as well as a method because a caller that already holds the
-/// memory and the address space apart cannot also borrow a whole harness.
+/// Write one vertex: `vec4` position at offset 0, `vec4` colour at 16, stride 32.
 pub fn write_vertex(
     mem: &mut Memory,
     vmm: &AddressSpace,
@@ -258,25 +206,20 @@ pub fn write_vertex(
     }
 }
 
-/// A memory, an address space and an engine set up to issue one draw.
 pub struct Harness {
     pub mem: Memory,
     pub vmm: AddressSpace,
     pub engine: Engine3D,
     pub host1x: Host1x,
     pub stats: GpuStats,
-    /// Where the mapping starts, which is also the colour target's address.
+    /// Mapping start, also the colour target's address.
     pub base: u64,
 }
 
-/// How wide the target is, in texels.
 pub const TARGET_WIDTH: u32 = 16;
-/// How tall the target is, in texels.
 pub const TARGET_HEIGHT: u32 = 8;
 
 impl Harness {
-    /// The 16x8 RGBA8 target, both shaders, and a three-vertex array, with
-    /// nothing drawn yet.
     pub fn new() -> Harness {
         Harness::with_fragment_shader(solid_fragment_shader())
     }
@@ -327,7 +270,6 @@ impl Harness {
         // Viewport 0: x=0, y=0, w=16, h=8.
         engine.regs.set(0x300, TARGET_WIDTH << 16);
         engine.regs.set(0x301, TARGET_HEIGHT << 16);
-        // SetProgramRegion.
         engine.regs.set(0x582, (base >> 32) as u32);
         engine.regs.set(0x583, base as u32);
         // SetProgram[VertexB] (StageId 1): enabled, offset 0x200.
@@ -368,10 +310,6 @@ impl Harness {
         }
     }
 
-    /// Issue the draw through `renderer`.
-    ///
-    /// The two halves are borrowed separately because a renderer wants the
-    /// engine and the memory at once, and they are fields of the same thing.
     pub fn draw_with(&mut self, renderer: &mut dyn Renderer) -> crate::Result<()> {
         let engine = &self.engine;
         let mut ctx = ExecCtx {
@@ -384,7 +322,6 @@ impl Harness {
         renderer.draw(engine, &mut ctx)
     }
 
-    /// Clear the colour target through `renderer`.
     pub fn clear_with(
         &mut self,
         renderer: &mut dyn Renderer,
@@ -401,8 +338,7 @@ impl Harness {
         renderer.clear_color(engine, &mut ctx, 0, 0, channels)
     }
 
-    /// Clear the depth surface through `renderer`, to the value in
-    /// `ClearDepth` (0x364).
+    /// Clear the depth surface to `ClearDepth` (0x364).
     pub fn clear_depth_with(&mut self, renderer: &mut dyn Renderer) -> crate::Result<()> {
         let engine = &self.engine;
         let mut ctx = ExecCtx {
@@ -415,9 +351,7 @@ impl Harness {
         renderer.clear_depth_stencil(engine, &mut ctx, true, false)
     }
 
-    /// Ask `renderer` for whatever it is holding, until it has handed it all
-    /// back. A backend that keeps its surfaces on a device answers
-    /// [`Flush::Pending`] while a readback is in flight.
+    /// Flush `renderer` until it reports nothing pending.
     pub fn flush_with(&mut self, renderer: &mut dyn Renderer) {
         for _ in 0..64 {
             let mut ctx = ExecCtx {
@@ -446,7 +380,6 @@ impl Harness {
         }
     }
 
-    /// Where the vertex array starts.
     pub fn vertices(&self) -> u64 {
         self.engine.vertex_array(0).start
     }
@@ -456,20 +389,16 @@ impl Harness {
         write_vertex(&mut self.mem, &self.vmm, base, index, pos, color);
     }
 
-    /// The three vertices of a triangle covering the upper-left half of the
-    /// target, all of one colour.
+    /// A one-colour triangle covering the upper-left half of the target.
     pub fn triangle(&mut self, color: [f32; 4]) {
         self.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], color);
         self.write_vertex(1, [1.0, 1.0, 0.0, 1.0], color);
         self.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], color);
     }
 
-    /// Read the target as it stands, texel by texel, left to right and top to
-    /// bottom. What a comparison between two renderers compares.
+    /// Read the target texel by texel, row-major.
     pub fn target(&mut self) -> Vec<u32> {
         let addr = self.base;
-        // A depth-only pass has no colour surface, and there is nothing to
-        // read rather than nothing to say about it.
         let Some(rt) = self.engine.render_target(0).unwrap() else {
             return Vec::new();
         };
@@ -484,8 +413,7 @@ impl Harness {
         out
     }
 
-    /// Read the target as a multisampled surface: `samples_x` by `samples_y`
-    /// texels per pixel, and every one of them separate.
+    /// Read the target as `samples_x` by `samples_y` separate texels per pixel.
     pub fn texel(&mut self, x: u32, y: u32) -> u32 {
         let addr = self.base;
         let width = self.engine.render_target(0).unwrap().unwrap().width;
@@ -494,12 +422,7 @@ impl Harness {
             .unwrap()
     }
 
-    /// Move the colour attribute onto vertex array 1, stepped once per
-    /// instance, and put `colours[instance]` in it.
-    ///
-    /// An instanced array is what the upload path reads a single element of,
-    /// the one this instance reaches, so a backend has to bind that element
-    /// as though every instance read it.
+    /// Move the colour attribute to instanced vertex array 1, filled with `colours`.
     pub fn instanced_colour(&mut self, instance: u32, colours: &[[f32; 4]]) {
         let addr = self.base + 0x800;
         for (i, colour) in colours.iter().enumerate() {
@@ -522,17 +445,12 @@ impl Harness {
         self.engine.set_instance_id(instance);
     }
 
-    /// Bind a `Z24S8` depth surface beside the colour one, the same extent,
-    /// and turn the depth test on.
-    ///
-    /// It goes after the colour target in the same mapping, which is why the
-    /// harness maps more than it needs for one surface.
+    /// Bind a `Z24S8` depth surface after the colour target and enable the depth test.
     pub fn depth_target(&mut self, func: u32) {
         self.depth_target_sized(func, TARGET_WIDTH, TARGET_HEIGHT);
     }
 
-    /// [`Harness::depth_target`] with an extent of its own, which a title may
-    /// make smaller than the colour target it is drawn beside.
+    /// [`Harness::depth_target`] with its own extent.
     pub fn depth_target_sized(&mut self, func: u32, width: u32, height: u32) {
         let addr = self.base + 0x1000;
         self.engine.regs.set(0x3F8, (addr >> 32) as u32);
@@ -546,8 +464,7 @@ impl Harness {
         self.engine.regs.set(DEPTH_TEST_FUNC, func);
     }
 
-    /// Read the depth surface as it stands, texel by texel: nothing, for a
-    /// draw that has none.
+    /// Read the depth surface texel by texel, empty if none is bound.
     pub fn depth(&mut self) -> Vec<u32> {
         let addr = self.base + 0x1000;
         let Some(target) = self.engine.depth_target().unwrap() else {
@@ -565,14 +482,8 @@ impl Harness {
         out
     }
 
-    /// Bind an 8x8 pitch-linear RGBA8 image where a bindless handle in
-    /// fragment bank [`BINDLESS_HANDLE_BANK`] names it, for
-    /// [`bindless_fragment_shader`] to sample.
-    ///
-    /// The handle is image 1 and sampler 1 rather than 0 and 0, so a backend
-    /// that reads a zero handle from the wrong place samples an empty
-    /// descriptor instead of this one. The sampler is the nearest texel with
-    /// its edges clamped.
+    /// Bind an 8x8 RGBA8 image for [`bindless_fragment_shader`] as image 1 and sampler 1,
+    /// so a backend reading a zero handle samples the wrong descriptor.
     pub fn bindless_texture(&mut self) {
         let header_pool = self.base + 0x1400;
         let sampler_pool = self.base + 0x1480;
@@ -608,8 +519,7 @@ impl Harness {
         self.engine.regs.set(0x55E, header_pool as u32);
         self.engine.regs.set(0x557, (sampler_pool >> 32) as u32);
         self.engine.regs.set(0x558, sampler_pool as u32);
-        // Select the constant buffer, then bind it to the fragment stage's
-        // bind slot (4) as the bank the shader reads.
+        // Bind the constant buffer to the fragment stage's slot 4.
         let mut ctx = ExecCtx {
             mem: &mut self.mem,
             vmm: &self.vmm,
@@ -627,9 +537,7 @@ impl Harness {
         }
     }
 
-    /// Turn the target into a `samples_x` by `samples_y` multisampled one,
-    /// which on Maxwell means the *pixel* extent shrinks and the surface
-    /// stays the size it was.
+    /// Multisample the target: on Maxwell the pixel extent shrinks, the surface does not.
     pub fn multisample(&mut self, mode: u32, samples_x: u32, samples_y: u32) {
         self.engine.regs.set(MULTISAMPLE_ENABLE, 1);
         self.engine.regs.set(MULTISAMPLE_MODE, mode);

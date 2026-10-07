@@ -1,15 +1,11 @@
-/** Element lookup and construction.
- *
- *  `$` throws instead of returning null: every id it is asked for is in
- *  index.html, so a miss is markup that no longer matches the code, and
- *  saying so once beats fifty null checks that would never fire. */
+// Element lookup and construction. `$` throws on a missing id.
 export function $<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
   if (!node) throw new Error('index.html has no #' + id);
   return node as T;
 }
 
-/** Create an element with a class and text, avoiding innerHTML entirely. */
+// Create an element with a class and text, without innerHTML.
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className?: string | null,
@@ -21,7 +17,6 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-/** The file a change/drop event carries, or null. */
 export function pickedFile(e: Event): File | null {
   const input = e.target as HTMLInputElement;
   return input.files?.[0] || null;

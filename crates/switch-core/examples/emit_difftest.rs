@@ -1,20 +1,6 @@
-//! The emitted wasm against the interpreter, on real guest code:
-//! `emit_difftest <target> [prod.keys] [title.keys] [font.ttf]`.
+//! Differential test of emitted wasm blocks against the interpreter on real guest code.
 //!
-//! `jit_difftest` runs the two engines side by side because both are in this
-//! binary. The emitter's output is not: it is a wasm module, and nothing in
-//! `switch-core` can run one (the crate has no dependencies, and on the host
-//! there is no engine at all). So the comparison is split in two.
-//!
-//! This half finds real blocks the emitter can write, records the guest state
-//! going in, steps the **interpreter** over exactly those instructions, and
-//! records the state coming out. It writes each module beside its case, and
-//! `tools/emit_difftest.mjs` runs them under V8 and reports any register or
-//! NZCV that came out different.
-//!
-//! The blocks are the ones a title actually executes, not encodings chosen
-//! here: a difference the emitter has only shows up on the operand values and
-//! flag states real code produces.
+//! This half records cases; `tools/emit_difftest.mjs` runs the modules under V8.
 //!
 //! ```text
 //! cargo run --release --example emit_difftest -- <nro> [-- <outdir>]
@@ -30,7 +16,7 @@ use std::fmt::Write as _;
 use switch_core::cpu::{defers, Cpu, Layout, Refused, DISCARD_SLOT};
 use switch_core::disasm::disassemble;
 
-/// Where the harness puts guest state in the memory it hands a module.
+/// Guest state offset in the module's memory.
 const REGS_AT: u32 = 0;
 const NZCV_AT: u32 = 4096;
 const READ_WATCH_LO_AT: u32 = 4100;
@@ -41,11 +27,10 @@ const READONLY_LO_AT: u32 = 4116;
 const READONLY_HI_AT: u32 = 4120;
 const WATCHED_AT: u32 = 4124;
 const PAGES_AT: u32 = 4128;
-/// Where the guest `pc` is, which a taken branch writes on its way out.
+/// Guest `pc` offset, written by a taken branch.
 const PC_AT: u32 = 4132;
 
-/// Where the page table goes, and how much memory that needs: one four-byte
-/// entry per 4 KiB of the guest's 4 GiB.
+/// Page table offset: one four-byte entry per 4 KiB page.
 const TABLE_AT: u32 = 0x0010_0000;
 const TABLE_BYTES: u32 = (1 << 20) * 4;
 
@@ -63,14 +48,12 @@ const LAYOUT: Layout = Layout {
     pc: PC_AT,
 };
 
-/// How many encodings to name in the refusal report.
+/// Encodings listed in the refusal report.
 const ROWS: usize = 20;
 
-/// How many distinct block entry points to try.
 const CANDIDATES: usize = 4000;
 
-/// Instructions to run before sampling, so the addresses are code the title
-/// really reaches rather than its loader.
+/// Instructions to run before sampling, to skip the loader.
 const WARMUP: u64 = 40_000_000;
 
 fn main() {
@@ -81,10 +64,7 @@ fn main() {
     cpu.bootstrap();
     program.boot(&mut cpu);
 
-    // Collect addresses the guest actually branches to. Sampling the pc every
-    // instruction would give mostly mid-block addresses, which are legal entry
-    // points but over-represent the middle of long runs; taking it once per
-    // slice spreads the sample over the whole frame instead.
+    // Sample the pc once per slice to get branch targets, not mid-block addresses.
     let mut seen: BTreeSet<u32> = BTreeSet::new();
     common::drive(&mut cpu, Pace::Instructions, WARMUP, |cpu, steps| {
         if steps % 97 == 0 {
@@ -100,13 +80,10 @@ fn main() {
     let mut manifest = String::new();
     let mut cases = 0usize;
     let mut refused_flow = 0usize;
-    // Cases whose block ran through a conditional branch and took it, which
-    // are the ones that check control flow was written.
     let mut branched = 0usize;
     let mut refused_long = 0usize;
     let mut skipped_fault = 0usize;
-    // The encodings that took a block out of the emitted path, by how many
-    // blocks each one cost. This is the list that says what to write next.
+    // Encodings that kept a block off the emitted path, by blocks lost.
     let mut unwritable: HashMap<u32, u64> = HashMap::new();
 
     for &pc in seen.iter() {
@@ -128,32 +105,16 @@ fn main() {
                 continue;
             }
         };
-        // How much of the block will run. A title's guest memory is hundreds
-        // of megabytes and the harness hands a module a bare buffer, so every
-        // page here is unmapped and every access hands its instruction back:
-        // the block runs as far as its first one and reports that. Which is
-        // still the whole of most blocks, and it is real code with real
-        // operands, which is what this half is for. What a *mapped* access
-        // does is `emit_selftest`'s to check, against a window it owns.
+        // No guest memory is mapped, so a block runs up to its first memory access.
         let whole = path.len() - 1;
         let ops = (0..whole)
             .find(|&i| cpu.mem.read_u32(path[i]).is_ok_and(defers))
             .unwrap_or(whole);
-        // A block of one op is nearly always a lone `MOV`; it would pass
-        // without saying anything about the operand handling.
         if ops < 2 {
             continue;
         }
 
-        // Where the interpreter stops, which is the answer the module has to
-        // agree with. It runs one instruction at a time and watches the pc:
-        // as long as control stays on the block's next instruction, the
-        // block is running straight through, and the step where it does not
-        // is a conditional branch the block ran through and took.
-        //
-        // Asked of the interpreter rather than worked out from the block,
-        // because whether a branch is taken depends on the registers this
-        // case starts from, and those are whatever the title had.
+        // Step the interpreter until control leaves the straight-line path.
         let before = cpu.reg_slots();
         let nzcv_before = cpu.nzcv();
         cpu.set_pc(pc);
@@ -199,18 +160,12 @@ fn main() {
         for v in after {
             let _ = write!(manifest, " {v:016x}");
         }
-        // No window is mapped, so nothing this block did can have reached
-        // guest memory and the delta is empty. The marker is still owed: it
-        // is what separates the two snapshots from it.
+        // Empty delta, but the marker is still required.
         manifest.push_str(" !");
         manifest.push('\n');
         cases += 1;
     }
 
-    // No `page` lines, so every page-table entry stays zero and an emitted
-    // access finds nothing at its address. No watchpoints and no protected
-    // ranges either, which leaves all three disarmed, and no `watched_at`
-    // bitmap, which is a `Memory` nothing is caching a page of.
     let header = format!(
         "regs_at {REGS_AT}\n\
          nzcv_at {NZCV_AT}\n\
@@ -243,9 +198,7 @@ fn main() {
          {refused_long} for length"
     );
 
-    // Ranked by blocks cost rather than by how often the encoding runs: one
-    // instruction with no emitter takes its whole block with it, so this is
-    // what writing that one op would buy.
+    // Ranked by blocks lost, not by execution count.
     let mut ranked: Vec<(u64, u32)> = unwritable.iter().map(|(&i, &n)| (n, i)).collect();
     ranked.sort_by_key(|&(count, insn)| (std::cmp::Reverse(count), insn));
     println!("--- encodings that cost the most blocks ---");
@@ -256,8 +209,6 @@ fn main() {
     println!("now run: node tools/emit_difftest.mjs {out_dir}");
 }
 
-/// How many register slots a case carries, taken from the snapshot itself so
-/// the manifest and the reader cannot disagree about the width.
 fn before_len() -> usize {
     Cpu::new().reg_slots().len()
 }

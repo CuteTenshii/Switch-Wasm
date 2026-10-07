@@ -1,9 +1,4 @@
-//! The emulated SD card.
-//!
-//! A path-addressed in-memory filesystem behind the `fsp-srv` service, so the
-//! guest's `opendir`/`readdir`/`open`/`read` see a real, consistent tree
-//! instead of a fixed reply. Hosts populate it: the browser frontend adds the
-//! files the user drops in, and tests build small trees inline.
+//! The emulated SD card: a path-addressed in-memory filesystem behind `fsp-srv`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,36 +22,22 @@ enum Node {
 
 #[derive(Debug, Default)]
 pub struct Vfs {
-    /// Normalized absolute paths (`/`, `/switch`, `/switch/app.nro`) to nodes.
+    /// Normalized absolute paths to nodes.
     nodes: BTreeMap<String, Node>,
-    /// Paths the **guest** has created, written, resized or deleted since the
-    /// host last drained them ([`Vfs::take_changes`]).
-    ///
-    /// This is what lets a host persist the card without writing all of it
-    /// back on every tick: the emulated SD card lives in memory, and the only
-    /// thing a store outside the session needs to hear about is what changed.
-    /// Host-side edits ([`Vfs::write_file`]) deliberately do **not** land here
-    ///: that is the host loading the card *from* its store, and marking those
-    /// would write every file straight back where it came from.
+    /// Paths the guest changed since [`Vfs::take_changes`]; host writes are not recorded.
     changed: BTreeSet<String>,
 }
 
-/// What happened to a path, as [`Vfs::take_changes`] reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     pub path: String,
-    /// `ENTRY_TYPE_FILE`, `ENTRY_TYPE_DIR`, or `None` when it was deleted.
+    /// `ENTRY_TYPE_FILE`, `ENTRY_TYPE_DIR`, or `None` when deleted.
     pub kind: Option<u8>,
     pub size: u64,
 }
 
 impl Vfs {
-    /// An SD card with just the root and the `/switch` directory homebrew
-    /// menus expect to exist.
-    /// A filesystem with nothing in it but its root. Save data starts this
-    /// way: a console creates the save empty and the title lays out whatever
-    /// it wants inside, so seeding it with directories nobody asked for would
-    /// invent structure the guest then has to work around.
+    /// Just the root, as save data starts.
     pub fn empty() -> Vfs {
         let mut vfs = Vfs {
             nodes: BTreeMap::new(),
@@ -66,6 +47,7 @@ impl Vfs {
         vfs
     }
 
+    /// The root and the `/switch` directory homebrew menus expect.
     pub fn new() -> Vfs {
         let mut vfs = Vfs {
             nodes: BTreeMap::new(),
@@ -76,15 +58,8 @@ impl Vfs {
         vfs
     }
 
-    /// Normalize a guest path: strip any `device:` prefix, resolve the `.`
-    /// and `..` components, collapse repeated slashes, and guarantee a
-    /// leading slash and no trailing one.
-    ///
-    /// Resolving those components is not cosmetic. A guest builds paths by
-    /// joining, so `.` and `..` arrive in them constantly, and treating them
-    /// as ordinary names creates directories called `.`: `hb-appstore` left
-    /// a tree of `/switch/.`, `/switch/./.get`, `/switch/./.get/packages`
-    /// behind it, none of which it could find again by any other spelling.
+    /// Normalize a guest path: strip a `device:` prefix, resolve `.` and `..`,
+    /// collapse slashes, leading slash and no trailing one.
     pub fn normalize(path: &str) -> String {
         let without_device = match path.split_once(":/") {
             Some((_, rest)) => rest,
@@ -93,13 +68,9 @@ impl Vfs {
         let mut parts: Vec<&str> = Vec::new();
         for part in without_device.split('/') {
             match part {
-                // An empty component is a leading, trailing or doubled slash,
-                // and `.` is the directory you are already in. Neither names
-                // anything. Note this is an exact match: `.get` is a perfectly
-                // ordinary name that happens to start with a dot.
+                // Exact match: `.get` is an ordinary name.
                 "" | "." => {}
-                // `..` goes up, and stops at the root rather than above it,
-                // a guest does not get out of its own filesystem by asking.
+                // `..` stops at the root.
                 ".." => {
                     parts.pop();
                 }
@@ -137,7 +108,7 @@ impl Vfs {
         }
     }
 
-    /// Add (or replace) a file, creating its parent directories.
+    /// Add or replace a file as the host, creating its parents; not recorded as a change.
     pub fn write_file(&mut self, path: &str, data: Vec<u8>) {
         let path = Self::normalize(path);
         if let Some(parent) = Self::parent_of(&path) {
@@ -146,15 +117,7 @@ impl Vfs {
         self.nodes.insert(path, Node::File(data));
     }
 
-    /// Create an empty file of `size` bytes, failing if anything is already
-    /// at `path`.
-    ///
-    /// Unlike [`Vfs::write_file`], which is the *host* putting a file on the
-    /// card and may replace what is there: this is the guest's `CreateFile`,
-    /// and it must not truncate: `fsdev` opens an existing file by calling
-    /// `CreateFile`, expecting "already exists", and then opening it. Losing
-    /// that distinction silently emptied a file every time the guest reopened
-    /// it.
+    /// The guest's `CreateFile`: fails if anything is at `path`, never truncates.
     pub fn create_file(&mut self, path: &str, size: u64) -> bool {
         let path = Self::normalize(path);
         if self.nodes.contains_key(&path) {
@@ -169,14 +132,7 @@ impl Vfs {
         true
     }
 
-    /// [`Vfs::write_file`], recorded as a change so a host that persists this
-    /// storage writes the new contents out.
-    ///
-    /// This is the path for a *service* that keeps its state in a save,
-    /// `set:sys` and its system settings, rather than the host staging a
-    /// file the guest is about to read. The distinction is which side the
-    /// write has to travel: [`Vfs::write_file`] is a value coming back from
-    /// the store and must not be queued straight back into it.
+    /// [`Vfs::write_file`] recorded as a change, for services persisting state in a save.
     pub fn guest_write_file(&mut self, path: &str, data: Vec<u8>) {
         let path = Self::normalize(path);
         if let Some(parent) = Self::parent_of(&path) {
@@ -186,8 +142,7 @@ impl Vfs {
         self.changed.insert(path);
     }
 
-    /// [`Vfs::create_dir`], recording every directory it had to make so a host
-    /// can persist an empty one the guest created.
+    /// [`Vfs::create_dir`], recording every directory it made.
     pub fn guest_create_dir(&mut self, path: &str) {
         let path = Self::normalize(path);
         let mut current = String::from("/");
@@ -204,11 +159,7 @@ impl Vfs {
         self.create_dir(&path);
     }
 
-    /// Drain the paths the guest has changed since this was last called.
-    ///
-    /// Each is reported with what is at it *now*, so a host can store the file
-    /// or delete it from its store without a second lookup. A path that was
-    /// created and deleted between two drains is reported once, as deleted.
+    /// Drain the guest's changed paths, each with its current state.
     pub fn take_changes(&mut self) -> Vec<Change> {
         std::mem::take(&mut self.changed)
             .into_iter()
@@ -224,14 +175,11 @@ impl Vfs {
             .collect()
     }
 
-    /// How many paths are waiting to be drained, without draining them.
     pub fn pending_changes(&self) -> usize {
         self.changed.len()
     }
 
-    /// Write `data` at `offset`, growing the file (zero-filling any gap) when
-    /// it runs past the end. Returns how many bytes were written, or `None`
-    /// when the path is not a file.
+    /// Write at `offset`, growing and zero-filling. `None` when not a file.
     pub fn write(&mut self, path: &str, offset: u64, data: &[u8]) -> Option<usize> {
         let Some(Node::File(contents)) = self.nodes.get_mut(&Self::normalize(path)) else {
             return None;
@@ -246,7 +194,7 @@ impl Vfs {
         Some(data.len())
     }
 
-    /// Resize a file, zero-filling any growth. Returns whether it was one.
+    /// Resize a file, zero-filling growth. Returns whether it was a file.
     pub fn set_size(&mut self, path: &str, size: u64) -> bool {
         match self.nodes.get_mut(&Self::normalize(path)) {
             Some(Node::File(contents)) => {
@@ -321,8 +269,7 @@ impl Vfs {
         Some(out)
     }
 
-    /// Read up to `buf.len()` bytes of a file starting at `offset`. Returns
-    /// how many bytes were read, or `None` when the path is not a file.
+    /// Read from `offset`. `None` when not a file.
     pub fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
         let data = self.file(path)?;
         let start = (offset as usize).min(data.len());
@@ -338,9 +285,6 @@ mod tests {
 
     #[test]
     fn normalize_strips_the_device_and_resolves_dot_components() {
-        // Guests build paths by joining, so `.` and `..` turn up in them all
-        // the time. `hb-appstore` asked for "sdmc:/switch/./.get/packages" and
-        // got a directory literally called "." with ".get" inside it.
         for (path, want) in [
             ("", "/"),
             ("sdmc:/", "/"),
@@ -351,10 +295,8 @@ mod tests {
             ("sdmc:/switch/./.get/packages", "/switch/.get/packages"),
             ("/switch//a///b/", "/switch/a/b"),
             ("/switch/a/../b", "/switch/b"),
-            // A leading dot is part of a name, not a component of its own.
             ("/.get", "/.get"),
             ("/...", "/..."),
-            // `..` stops at the root rather than climbing past it.
             ("/../../etc", "/etc"),
             ("/switch/../..", "/"),
         ] {
@@ -430,7 +372,6 @@ mod tests {
         let mut buf = [0u8; 4];
         assert_eq!(vfs.read("/data.bin", 4, &mut buf), Some(4));
         assert_eq!(buf, [4, 5, 6, 7]);
-        // A read past the end returns a short count rather than failing.
         assert_eq!(vfs.read("/data.bin", 14, &mut buf), Some(2));
         assert_eq!(vfs.read("/data.bin", 99, &mut buf), Some(0));
         assert_eq!(vfs.read("/missing", 0, &mut buf), None);
@@ -448,9 +389,7 @@ mod tests {
 
     #[test]
     fn create_file_refuses_to_truncate_what_is_already_there() {
-        // `fsdev` opens an existing file by calling `CreateFile` first and
-        // expecting it to fail, so a create that quietly emptied the file
-        // lost the contents on every reopen.
+        // `fsdev` reopens a file by calling `CreateFile` and expecting failure.
         let mut vfs = Vfs::new();
         assert!(vfs.create_file("/switch/cfg.json", 0));
         assert_eq!(vfs.size("/switch/cfg.json"), Some(0));
@@ -458,10 +397,8 @@ mod tests {
 
         assert!(!vfs.create_file("/switch/cfg.json", 0), "already exists");
         assert_eq!(vfs.file("/switch/cfg.json"), Some(&b"{}"[..]));
-        // A directory in the way counts as "already there" too.
         assert!(!vfs.create_file("/switch", 0));
 
-        // The size argument is the file's initial length, zero-filled.
         assert!(vfs.create_file("/switch/blank.bin", 4));
         assert_eq!(vfs.file("/switch/blank.bin"), Some(&[0u8; 4][..]));
     }
@@ -470,20 +407,16 @@ mod tests {
     fn writing_past_the_end_grows_the_file() {
         let mut vfs = Vfs::new();
         vfs.write_file("/data.bin", vec![1, 2, 3, 4]);
-        // Overwrite in place.
         assert_eq!(vfs.write("/data.bin", 1, &[9, 9]), Some(2));
         assert_eq!(vfs.file("/data.bin"), Some(&[1, 9, 9, 4][..]));
-        // Past the end: the file grows to fit.
         assert_eq!(vfs.write("/data.bin", 4, &[5, 6]), Some(2));
         assert_eq!(vfs.file("/data.bin"), Some(&[1, 9, 9, 4, 5, 6][..]));
-        // A gap between the end and the write is zero-filled rather than
         // left holding whatever the allocation had.
         assert_eq!(vfs.write("/data.bin", 8, &[7]), Some(1));
         assert_eq!(
             vfs.file("/data.bin"),
             Some(&[1, 9, 9, 4, 5, 6, 0, 0, 7][..])
         );
-        // Neither a directory nor a missing path is writable.
         assert_eq!(vfs.write("/switch", 0, &[1]), None);
         assert_eq!(vfs.write("/nope", 0, &[1]), None);
     }
@@ -503,13 +436,11 @@ mod tests {
     #[test]
     fn only_guest_writes_are_reported_as_changes() {
         let mut vfs = Vfs::new();
-        // The host restoring the card is not a change: reporting it would
-        // write every file straight back to the store it just came from.
+        // Host restores are not changes.
         vfs.write_file("/switch/restored.txt", b"x".to_vec());
         vfs.create_dir("/switch/olddir");
         assert_eq!(vfs.pending_changes(), 0);
 
-        // Everything the guest does is.
         assert!(vfs.create_file("/switch/cfg.json", 0));
         vfs.write("/switch/cfg.json", 0, b"{}").unwrap();
         vfs.guest_create_dir("/switch/app/data");
@@ -532,20 +463,17 @@ mod tests {
             ]
         );
 
-        // Draining clears them, so a host only ever writes back what is new.
         assert_eq!(vfs.pending_changes(), 0);
         assert!(vfs.take_changes().is_empty());
 
-        // A path written twice between drains is reported once, with the
-        // state it ended up in.
+        // A path written twice is reported once, in its final state.
         vfs.write("/switch/cfg.json", 0, b"ab").unwrap();
         vfs.write("/switch/cfg.json", 2, b"cd").unwrap();
         let changes = vfs.take_changes();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].size, 4);
 
-        // ...including one created and then deleted, which is reported as the
-        // deletion it ended as.
+        // Created then deleted is reported as deleted.
         vfs.create_file("/switch/tmp", 0);
         vfs.remove("/switch/tmp");
         let changes = vfs.take_changes();

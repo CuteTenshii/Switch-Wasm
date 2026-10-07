@@ -1,15 +1,8 @@
-//! Reading an NCA section whose data is stored compressed.
+//! An NCA section stored as LZ4 blocks plus a [`crate::bucket`] table.
 //!
-//! A modern title's RomFS section is usually not the image the guest mounts:
-//! it is a run of LZ4 blocks plus a [`crate::bucket`] tree saying which block
-//! covers which range of the decompressed image. `nn::fssystem` stacks this
-//! layer directly on top of the hash one, so the offsets here are relative to
-//! the image, the RomFS past its IVFC levels, or the ExeFS past its hash
-//! table, and not to the section.
-//!
+//! Offsets are relative to the image the hash layer exposes, not the section.
 //! An entry is `u64 virtual offset, u64 physical offset, u8 kind, u32
-//! physical size`, and covers everything up to the next entry's virtual
-//! offset. The FS header locates the table in `CompressionInfo` at 0x178.
+//! physical size`; the table is located by `CompressionInfo` at 0x178.
 
 use crate::bucket;
 use crate::nca::{BktrTable, BKTR_MAGIC};
@@ -19,19 +12,14 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-/// Stored uncompressed, and so readable from any offset within the entry.
 const KIND_NONE: u8 = 0;
 /// Stored not at all: the range reads as zeroes.
 const KIND_ZEROS: u8 = 1;
-/// One LZ4 block per entry, decompressed whole.
 const KIND_LZ4: u8 = 3;
 
-/// How many decompressed blocks to keep. The guest reads a mounted RomFS in
-/// small pieces through `IStorage`, so without this every read of a 64 KiB
-/// block decompresses it again.
+/// Decompressed blocks kept, since the guest reads RomFS in small pieces.
 const CACHED_BLOCKS: usize = 4;
 
-/// One range of the decompressed image, and where its bytes actually are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Entry {
     virt: u64,
@@ -58,24 +46,17 @@ impl bucket::Entry for Entry {
     }
 }
 
-/// A compressed section, addressed as the image it decompresses to.
 pub struct CompressedStorage<S> {
     /// The image as stored: compressed data first, then the table.
     inner: S,
     entries: Vec<Entry>,
-    /// Where the data ends and the table begins: nothing may read past it.
     data_end: u64,
-    /// Size of the decompressed image.
     len: u64,
     cache: RefCell<VecDeque<(usize, Rc<[u8]>)>>,
 }
 
 impl<S: ByteSource> CompressedStorage<S> {
-    /// Read the table out of `inner` and index it.
-    ///
-    /// `table` is the FS header's `CompressionInfo`, whose offsets are
-    /// relative to `inner`, which must therefore be the image the hash layer
-    /// exposes, not the whole section.
+    /// Read the table out of `inner` (the hash layer's image) and index it.
     pub fn new(inner: S, table: BktrTable) -> Result<CompressedStorage<S>, Error> {
         if table.magic != BKTR_MAGIC {
             return Err(Error::Nca(format!(
@@ -108,7 +89,6 @@ impl<S: ByteSource> CompressedStorage<S> {
         Ok(storage)
     }
 
-    /// Check every entry once, so a read never has to.
     fn validate(&self) -> Result<(), Error> {
         for (i, entry) in self.entries.iter().enumerate() {
             let next = self.entries.get(i + 1).map_or(self.len, |e| e.virt);
@@ -141,8 +121,6 @@ impl<S: ByteSource> CompressedStorage<S> {
         Ok(())
     }
 
-    /// The decompressed block entry `index` holds, from the cache when it is
-    /// still there.
     fn block(&self, index: usize, virtual_size: usize) -> Result<Rc<[u8]>, Error> {
         if let Some((_, block)) = self.cache.borrow().iter().find(|(i, _)| *i == index) {
             return Ok(Rc::clone(block));
@@ -178,8 +156,6 @@ impl<S: ByteSource> ByteSource for CompressedStorage<S> {
         }
         let want = ((out.len() as u64).min(self.len - offset)) as usize;
         let mut done = 0;
-        // One read spans as many entries as it has to: a guest asking for a
-        // page of a directory table crosses block boundaries constantly.
         while done < want {
             let at = offset + done as u64;
             let index = bucket::index_of(&self.entries, at);
@@ -207,8 +183,6 @@ impl<S: ByteSource> ByteSource for CompressedStorage<S> {
     }
 }
 
-/// Entries are the bulk of this and dumping them helps nobody: what a reader
-/// wants is the shape.
 impl<S> std::fmt::Debug for CompressedStorage<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompressedStorage")
@@ -219,16 +193,13 @@ impl<S> std::fmt::Debug for CompressedStorage<S> {
     }
 }
 
-/// A fixture that writes the on-disk form this module reads, for its own
-/// tests and for [`crate::nca`]'s, which needs a compressed section inside a
-/// synthetic NCA.
+/// Fixture writing the on-disk form, also used by [`crate::nca`]'s tests.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
     use crate::bucket::Entry as _;
 
-    /// An LZ4 block that is nothing but literals, which is a valid block and
-    /// the one shape a test can write without a compressor.
+    /// An all-literals LZ4 block, writable without a compressor.
     pub(crate) fn lz4_literals(data: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         if data.len() < 15 {
@@ -246,17 +217,13 @@ pub(crate) mod testing {
         out
     }
 
-    /// What one entry of the fixture describes: its kind and the bytes it
-    /// stands for once decompressed.
     pub(crate) enum Block {
         Raw(Vec<u8>),
         Zeros(usize),
         Lz4(Vec<u8>),
     }
 
-    /// Build an image the reader can open: the physical data, then the table
-    /// describing it. Returns the stored form, the image it stands for, and
-    /// the `CompressionInfo` that locates the table.
+    /// Returns the stored form, the image it stands for, and its `CompressionInfo`.
     pub(crate) fn build(blocks: &[Block]) -> (Vec<u8>, Vec<u8>, BktrTable) {
         let mut data = Vec::new();
         let mut plain = Vec::new();
@@ -290,8 +257,7 @@ pub(crate) mod testing {
             entry[0x10] = kind;
             entry[0x14..0x18].copy_from_slice(&phys_size.to_le_bytes());
             entries.push(entry);
-            // The physical stream stays 0x10-aligned, which is what the
-            // format requires of anything that has to be decompressed.
+            // The physical stream stays 0x10-aligned, as the format requires.
             let aligned = data.len().next_multiple_of(0x10);
             data.resize(aligned, 0);
         }
@@ -334,8 +300,6 @@ mod tests {
         let storage = CompressedStorage::new(SliceSource(&image), table).expect("open");
         assert_eq!(storage.len(), plain.len() as u64);
 
-        // Whole-image, then ranges that start and end inside each kind of
-        // block and across the boundaries between them.
         let mut all = vec![0u8; plain.len()];
         assert_eq!(storage.read_at(0, &mut all).unwrap(), plain.len());
         assert_eq!(all, plain);

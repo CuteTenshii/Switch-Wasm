@@ -1,20 +1,12 @@
-//! BC7 (`BPTC_UNORM`): 16 bytes of LDR RGBA in one of eight modes.
-//!
-//! Every mode packs the same fields in the same order, partition, rotation,
-//! index selection, endpoints, P-bits, then indices, and differs only in how
-//! many bits each gets and which are present at all. [`MODES`] is that table,
-//! so the decoder below is one path rather than eight.
+//! BC7 (`BPTC_UNORM`): 16 bytes of LDR RGBA in one of eight modes, driven by [`MODES`].
 
 use super::{anchor, interpolate, BitReader, Block, PARTITIONS_2, PARTITIONS_3};
 
-/// One row of the BPTC specification's mode table.
 struct Mode {
-    /// Number of subsets the block is partitioned into.
     subsets: u32,
     partition_bits: u32,
     rotation_bits: u32,
-    /// Whether the mode carries the bit that swaps the colour and alpha index
-    /// sets.
+    /// Whether the mode can swap the colour and alpha index sets.
     index_selection: bool,
     colour_bits: u32,
     alpha_bits: u32,
@@ -126,8 +118,7 @@ const MODES: [Mode; 8] = [
     },
 ];
 
-/// Left-justify an endpoint channel to eight bits, replicating its high bits
-/// into the vacated low ones.
+/// Left-justify an endpoint channel to eight bits by replicating its high bits.
 fn unquantize(value: u32, bits: u32) -> u32 {
     if bits >= 8 {
         return value;
@@ -138,9 +129,7 @@ fn unquantize(value: u32, bits: u32) -> u32 {
 
 pub fn decode_bc7(block: &[u8]) -> Block {
     let mut reader = BitReader::new(block);
-    // The mode is a unary prefix: `m` zeroes then a one. All-zero is not a
-    // mode, and the specification makes such a block transparent black rather
-    // than an error.
+    // Unary mode prefix; all-zero decodes as transparent black.
     let mut mode_index = 0;
     while mode_index < 8 && reader.read_bit() == 0 {
         mode_index += 1;
@@ -158,8 +147,7 @@ pub fn decode_bc7(block: &[u8]) -> Block {
         0
     };
 
-    // Endpoints are stored channel-major: every endpoint's red, then every
-    // green, then blue, then alpha.
+    // Endpoints are stored channel-major.
     let endpoint_count = (2 * mode.subsets) as usize;
     let mut endpoints = [[0u32; 4]; 6];
     for channel in 0..3 {
@@ -175,8 +163,6 @@ pub fn decode_bc7(block: &[u8]) -> Block {
         };
     }
 
-    // A P-bit is one more low bit of precision, either per endpoint or shared
-    // by the two endpoints of a subset.
     if mode.endpoint_p_bits || mode.shared_p_bits {
         let mut p = [0u32; 6];
         if mode.endpoint_p_bits {
@@ -220,8 +206,7 @@ pub fn decode_bc7(block: &[u8]) -> Block {
         }
     };
 
-    // Both index sets are stored in texel order, and the anchor texel of each
-    // subset spends one fewer bit because its high bit is known to be zero.
+    // Each subset's anchor texel index omits its high bit.
     let mut primary = [0u32; 16];
     for (texel, slot) in primary.iter_mut().enumerate() {
         let subset = subset_of(texel);
@@ -235,8 +220,6 @@ pub fn decode_bc7(block: &[u8]) -> Block {
     let mut secondary = [0u32; 16];
     if mode.index_bits_2 > 0 {
         for (texel, slot) in secondary.iter_mut().enumerate() {
-            // The second index set has a single subset, so only texel 0 is an
-            // anchor however the block is partitioned.
             let bits = if texel == 0 {
                 mode.index_bits_2 - 1
             } else {
@@ -274,9 +257,6 @@ pub fn decode_bc7(block: &[u8]) -> Block {
         } else {
             255
         };
-        // Rotation moves alpha back into the channel it was swapped with at
-        // encode time, which is how a mode with one index set can still track
-        // a channel that correlates poorly with the other three.
         if rotation != 0 {
             rgba.swap(3, (rotation - 1) as usize);
         }
@@ -289,10 +269,6 @@ pub fn decode_bc7(block: &[u8]) -> Block {
 mod tests {
     use super::*;
 
-    /// Every BC7 mode spends the block's 128 bits exactly: that is what makes
-    /// the format self-delimiting. Adding up the table is therefore a check on
-    /// all eight rows at once, and it catches a mistyped field width that no
-    /// individual decode would localise.
     #[test]
     fn every_mode_accounts_for_all_128_bits() {
         for (index, mode) in MODES.iter().enumerate() {
@@ -317,8 +293,6 @@ mod tests {
         }
     }
 
-    /// A mode with two index sets is the only kind that can select between
-    /// them, and only a single-subset mode has the spare bits to carry two.
     #[test]
     fn only_single_subset_modes_carry_a_second_index_set() {
         for (index, mode) in MODES.iter().enumerate() {

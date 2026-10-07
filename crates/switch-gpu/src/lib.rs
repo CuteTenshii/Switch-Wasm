@@ -1,50 +1,11 @@
-//! A GPU backend for switch-core's 3D engine.
+//! A `wgpu` backend for switch-core's 3D engine, behind
+//! [`switch_core::gpu::renderer::Renderer`]. The software rasterizer is the reference;
+//! any draw this cannot express runs there instead.
 //!
-//! [`switch_core::gpu::renderer::Renderer`] is the seam this plugs into, and
-//! [`switch_core::gpu::renderer::Software`] is what it has to agree with.
-//! That is the whole shape of the thing: the software rasterizer is the
-//! reference, this is the fast path, and any draw this cannot express runs on
-//! the reference instead. A backend that guessed at a draw it did not
-//! understand would produce a frame nobody could check.
-//!
-//! # Why this is a crate of its own
-//!
-//! `switch-core` has no dependencies at all: its Wasm bindings are
-//! hand-rolled and its display path is `putImageData`. `wgpu` brings a few
-//! hundred crates. Keeping it out here means the core stays what it is, and
-//! the trait is the only thing the two share.
-//!
-//! # A draw never blocks
-//!
-//! A render target lives in guest memory, so the obvious arrangement is to
-//! read the surface in, render, and write it back per draw. That is what this
-//! did first, and it was byte-identical to the rasterizer, and it cannot work
-//! in a browser: reading a texture back means waiting on a promise, and a
-//! blocking wait there is not slow but deadlocked, because the event loop
-//! that would resolve it cannot run.
-//!
-//! So a surface stays on the device once it is there, across every draw that
-//! targets it, and goes back to guest memory only at
-//! [`Renderer::flush`], which the engine calls before `present`, the one
-//! reader that always matters. Draws encode and return. The waiting happens
-//! at the frame boundary, which in a browser is exactly where a worker is
-//! free to await.
-//!
-//! That is not only a portability change. It is the same change that turns
-//! eighty-eight round trips a frame into one.
+//! Surfaces stay on the device across draws and return to guest memory only at
+//! [`Renderer::flush`], so no draw ever waits on the device.
 
-/// What to ask a device for: the compressed texture families this adapter
-/// actually has, and nothing else.
-///
-/// A Switch title's textures are block-compressed, and WebGPU hands those out
-/// only on request: `DeviceDescriptor::default()` asks for none of them, so
-/// the first BC1 texture threw. Masking against the adapter keeps the request
-/// itself from failing on hardware that lacks a family, and
-/// [`device_texture_format`] turns whatever is still missing into a fallback
-/// rather than a crash.
-/// Whether a device with `features` can blend into a `format` target. The
-/// 32-bit float formats blend only with `float32-blendable`; every other
-/// colour format a draw is given here blends in core WebGPU.
+/// Whether a device with `features` can blend into a `format` target.
 fn can_blend(format: wgpu::TextureFormat, features: wgpu::Features) -> bool {
     let float32 = matches!(
         format,
@@ -59,50 +20,19 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
     let wanted = wgpu::Features::TEXTURE_COMPRESSION_BC
         | wgpu::Features::TEXTURE_COMPRESSION_ASTC
         | wgpu::Features::TEXTURE_COMPRESSION_ETC2
-        // `R16Unorm` and its wider siblings, which a title samples as an
-        // ordinary texture and WebGPU does not offer. Asked for the same way
-        // the compressed formats are: taken where an adapter has it, and
-        // widened to a 32-bit float where it does not: see
-        // `convert::sampled_texture_format`, and `FLOAT32_FILTERABLE` below,
-        // which is what that route needs and this one does not.
+        // `R16Unorm` and friends, widened to a 32-bit float where missing; see `convert::sampled_texture_format`.
         | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
-        // A widened `R16Unorm` is an `r32float`, and a 32-bit float format
-        // is filterable only with this. Without it a texture the guest
-        // sampled bilinearly would be bound beside a filtering sampler the
-        // device rejects, so it gates the widening rather than decorating
-        // it. Unlike the feature above this one *is* WebGPU's, and a browser
-        // offers it.
+        // Needed to filter a widened `r32float`.
         | wgpu::Features::FLOAT32_FILTERABLE
-        // WGSL's quad operations, which are what a warp shuffle is: a `shfl`
-        // reads another lane of the 2x2 quad, and `quadSwapX`/`Y`/`Diagonal`
-        // are exactly that. Without them the draw is the rasterizer's.
+        // WGSL quad operations, for warp shuffles.
         | wgpu::Features::SUBGROUP
-        // Without this a device offers the sample counts the WebGPU spec
-        // guarantees (one and four) whatever the adapter underneath it can
-        // do. Maxwell's multisample modes are two, four, eight and sixteen,
-        // so asking for it is the difference between `2x1` and `4x2` being
-        // multisampled by the device and being rendered the long way round.
-        // It does not exist on the web, where four is all there is; see
-        // `Gpu::samples_supported`, which asks whichever source is telling
-        // the truth on this device.
+        // Lets the device use the adapter's real sample counts instead of only one and four.
         | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
-        // `rg11b10ufloat` is sampleable everywhere and *renderable* only with
-        // this. It is the HDR colour target Tomodachi Life draws its whole
-        // frame into, and without it that draw falls back -- which used to
-        // hand the rasterizer every frame for the rest of the session.
+        // Makes `rg11b10ufloat` renderable.
         | wgpu::Features::RG11B10UFLOAT_RENDERABLE
-        // Blending into a 32-bit float target, which WebGPU makes optional.
-        // Tomodachi Life blends into an `rgba32float` one, and a device
-        // without this rejects the pipeline: see `Gpu::render`, which hands
-        // such a draw to the rasterizer where it is missing.
+        // Blending into 32-bit float targets.
         | wgpu::Features::FLOAT32_BLENDABLE;
-    // A constant bank is bound as a storage buffer, and WebGPU guarantees
-    // only eight of those per stage. Maxwell has eighteen banks and a shader
-    // is free to read nine, which `create_pipeline_layout` then rejects
-    // outright, so the draw is lost to a limit rather than to anything it
-    // asked the device to do. Raised to whatever the adapter really has,
-    // which is the mechanism the specification provides for exactly this;
-    // asking for more than that would fail device creation instead.
+    // Raise the storage buffer limit to the adapter's: a shader may read more than the guaranteed eight banks.
     let required_limits = wgpu::Limits {
         max_storage_buffers_per_shader_stage: wgpu::Limits::default()
             .max_storage_buffers_per_shader_stage
@@ -116,8 +46,6 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
     }
 }
 
-/// The `wgpu` this was built against, so a caller that has to name a device
-/// type does not have to guess at a matching version.
 mod builtin;
 mod convert;
 mod readback;
@@ -144,23 +72,17 @@ use convert::{
 use readback::{Companion, Held, Pending, Scratch, MAP_FAILED, MAP_READY, MAP_WAITING};
 use stats::{json_string, DeviceErrors, Times, UploadBytes};
 
-/// The memory a `ldg` reads, resolved from the descriptor its address was
-/// built out of.
+/// The memory a `ldg` reads, resolved from its descriptor.
 struct GlobalUpload {
     stage: ShaderStage,
     slot: u32,
     bytes: Vec<u8>,
 }
 
-/// How much of a mapping one `ldg` buffer may take. A shader indexes from a
-/// descriptor and nothing in the program says how far it reaches, so the
-/// upload runs to the end of the mapping the descriptor points into, and
-/// stops here, well inside `maxStorageBufferBindingSize`, rather than moving
-/// a mapping's worth of memory for a draw that reads a few words of it.
+/// Upper bound on one `ldg` buffer, since the program does not say how far it reads.
 const MAX_GLOBAL: u64 = 8 << 20;
 
-/// Keep the leftmost `window` texels of each row of a linear image whose rows
-/// are `stride` texels wide.
+/// Keep the leftmost `window` texels of each `stride`-texel row.
 fn crop_rows(rows: Vec<u8>, stride: usize, window: usize, unit: usize) -> Vec<u8> {
     if window >= stride {
         return rows;
@@ -184,16 +106,10 @@ enum Red {
 /// `copyTextureToBuffer` wants each row of the destination aligned.
 const COPY_ALIGNMENT: u32 = 256;
 
-/// Where a module's textures start binding; see
-/// `switch_core::gpu::shader::wgsl`.
+/// Where a module's textures start binding; see `switch_core::gpu::shader::wgsl`.
 const TEXTURE_BINDING: u32 = 32;
 
-/// What a vertex attribute the draw supplies no buffer for reads.
-///
-/// Two vectors, because the rasterizer has two answers. A *fixed* attribute
-/// is the `vec4` default every graphics API hands an unsupplied input, which
-/// is `raster::ATTRIB_DEFAULT`; a slot the register file never configured is
-/// not fetched at all and stays at the zero its attribute space starts with.
+/// What an unsupplied vertex attribute reads: the fixed `vec4` default, or zero for an unconfigured slot.
 const ATTRIBUTE_DEFAULTS: [u8; 32] = {
     let mut bytes = [0u8; 32];
     let one = 1.0f32.to_le_bytes();
@@ -206,23 +122,15 @@ const ATTRIBUTE_DEFAULTS: [u8; 32] = {
 const ABSENT_ATTRIBUTE: u64 = 0;
 const DEFAULT_ATTRIBUTE: u64 = 16;
 
-/// Which shape a surface's companion has, and so which pass moves values
-/// between it and the expanded surface guest memory holds.
+/// The shape of a surface's companion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Shape {
-    /// A device multisample texture of `n` samples, one pixel per texel of
-    /// its own. What a draw with per-sample coverage renders into when the
-    /// adapter offers that sample count.
+    /// A device multisample texture of `n` samples.
     Multisampled(u32),
-    /// One sample per pixel, at the pixel centre, `AntiAliasEnable` off over
-    /// a surface that still has a tile of texels per pixel. A device's
-    /// multisampling cannot be told to test coverage there, so the draw is
-    /// rendered at pixel resolution and every texel of the tile takes the
-    /// answer.
+    /// One sample per pixel at the centre (`AntiAliasEnable` off); every texel of the tile takes the result.
     PerPixel,
 }
 
-/// What a clear pipeline is built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ClearKey {
     color: Option<wgpu::TextureFormat>,
@@ -237,8 +145,7 @@ enum Resource {
     Sampler(u32, wgpu::Sampler),
 }
 
-/// Write a draw's two WGSL modules under `dir`, named by their hash, so the
-/// exact source a title makes can be compiled somewhere other than here.
+/// Write a draw's two WGSL modules under `dir`, named by hash.
 fn dump_wgsl(dir: &str, vs: &str, fs: &str) {
     let _ = std::fs::create_dir_all(dir);
     for (what, src) in [("vs", vs), ("fs", fs)] {
@@ -260,34 +167,23 @@ fn draw_range(spec: &str) -> Option<std::ops::Range<u32>> {
     }
 }
 
-/// Everything a render pipeline is built from, as a value that can be
-/// compared and hashed.
-///
-/// Not the whole of [`Pipeline`]: the viewport, the scissor and the blend
-/// constant are set on the pass rather than baked in, and they are the parts
-/// that change from draw to draw. What is left is what a title reuses.
+/// Everything a render pipeline bakes in; viewport, scissor and blend constant are set per pass.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PipelineKey {
-    /// The two module cache keys, which are hashes of the WGSL, so two
-    /// draws share a pipeline exactly when they would share both modules.
+    /// The two module cache keys (hashes of the WGSL).
     vs: u64,
     fs: u64,
-    /// `None` for a depth-only pass, which has no colour attachment and so
-    /// no colour target state either.
+    /// `None` for a depth-only pass.
     target: Option<wgpu::TextureFormat>,
-    /// The device depth format, whether depth is written, and what the test
-    /// compares, all three of which a pipeline bakes in.
+    /// Device depth format, whether depth is written, and the compare function.
     depth: Option<(wgpu::TextureFormat, bool, state::Compare)>,
-    /// The multisample state, which is only ever more than one sample on the
-    /// route that lets the device do the multisampling.
     samples: u32,
     sample_mask: u64,
     alpha_to_coverage: bool,
     blend: Option<state::Blend>,
     write_mask: [bool; 4],
     topology: state::Topology,
-    /// The index format a strip's primitive restart is spelled in, which a
-    /// pipeline bakes in and a draw of a different width cannot reuse.
+    /// The index format a strip's primitive restart uses.
     strip_index_format: Option<wgpu::IndexFormat>,
     front_face: state::FrontFace,
     cull: state::Cull,
@@ -295,32 +191,24 @@ struct PipelineKey {
     buffers: Vec<VertexBufferKey>,
 }
 
-/// One attribute a vertex buffer carries: its format, its offset into the
-/// buffer's element, and the shader location it feeds.
+/// Format, offset into the element, and shader location.
 type AttributeKey = (wgpu::VertexFormat, u64, u32);
 
-/// One bound vertex buffer: its stride, whether it steps per instance rather
-/// than per vertex, and the attributes read out of it.
+/// Stride, whether it steps per instance, and its attributes.
 type VertexBufferKey = (u32, bool, Vec<AttributeKey>);
 
-/// A vertex buffer a draw binds, and how it is stepped through.
 struct Bound {
     buffer: wgpu::Buffer,
     attributes: Vec<wgpu::VertexAttribute>,
-    /// Zero for an instanced array and for the constant that feeds attribute
-    /// slots the draw binds nothing to: both are one element read by every
-    /// vertex.
+    /// Zero for an instanced array and for the constant attribute: one element read by every vertex.
     stride: u64,
     step: wgpu::VertexStepMode,
 }
 
-/// How many translations to keep. qlaunch reaches 24 and Just Dance 2017 a
-/// similar handful, so this is a ceiling on a pathological title rather than a
-/// working-set limit: nothing real should ever reach it.
+/// A ceiling for pathological titles; real ones use a few dozen.
 const SHADER_CACHE_ENTRIES: usize = 1024;
 
-/// A translated shader and what it was translated from, so a later draw can
-/// tell whether the answer still holds. See [`Gpu::shader_cache`].
+/// A translated shader and what it was translated from. See [`Gpu::shader_cache`].
 #[derive(Debug)]
 struct CachedShader {
     translation: Translation,
@@ -330,315 +218,114 @@ struct CachedShader {
 /// A device, and the rasterizer to fall back to.
 #[derive(Debug)]
 pub struct Gpu {
-    /// The instance and adapter the device came from, held for as long as it
-    /// is: never read again, and not droppable either.
-    ///
-    /// A browser loses a device when the last *external* reference to the
-    /// instance behind it goes, and reports it as "A valid external Instance
-    /// reference no longer exists". Dropping these at the end of the call that
-    /// opened the device is what released it: the device's own handle does not
-    /// count as one, so the loss arrived whenever the collector next ran, and
-    /// from then on every readback failed to map and every frame was dropped.
-    /// Natively they are held for nothing: wgpu-core keeps the instance alive
-    /// behind the device, which is why this cost a browser to find.
+    /// Never read, but must be held: a browser loses the device once the instance is dropped.
     _instance: wgpu::Instance,
     _adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    /// Surfaces this is holding, by the guest address they came from.
-    ///
-    /// A frame's draws all target the same surface, so this is what makes a
-    /// frame one upload and one readback instead of eighty-eight of each.
+    /// Surfaces this is holding, by guest address.
     held: std::collections::HashMap<u64, Held>,
-    /// The buffers and textures the draw in progress made, destroyed once it
-    /// has been submitted.
-    ///
-    /// A draw's vertices, indices, constants and textures are built fresh
-    /// every time, and dropping them is not enough to give the memory back:
-    /// `wgpu` frees a dropped resource when the device is next polled, and a
-    /// browser never polls, WebGPU reclaims on garbage collection, which
-    /// does not run per draw and cannot be made to. Just Dance 2019 issues
-    /// 55,465 draws in a six-billion-instruction run, each with a texture and
-    /// three or four buffers, and an 8 GB card answered
-    /// `VK_ERROR_OUT_OF_DEVICE_MEMORY` a long way short of the end of them.
-    /// So each is destroyed outright, which WebGPU defines as safe once the
-    /// submission that reads it has been made: the memory comes back when
-    /// that work finishes rather than when the call does.
+    /// Per-draw resources, destroyed after submission: a browser only frees dropped resources on GC.
     scratch: Vec<Scratch>,
-    /// Surfaces the guest rebound out from under, still owing a write-back.
-    /// Kept rather than written back where it happened, so that no draw ever
-    /// waits on a device.
+    /// Surfaces the guest rebound, still owing a write-back.
     evicted: Vec<Held>,
-    /// Readbacks asked for and not yet collected. A flush that finds one of
-    /// these unfinished answers `Flush::Pending` rather than waiting: the
-    /// wait it would have to do is the one a browser cannot perform.
+    /// Readbacks asked for and not yet collected.
     pending: Vec<Pending>,
-    /// Compiled shader modules, by a hash of the WGSL that produced them.
-    ///
-    /// Compiling a module is the whole cost of a draw: WGSL through naga to
-    /// SPIR-V is about 59 ms, against 2 ms to translate the shader and half
-    /// a millisecond to read every buffer the draw touches. The Home Menu
-    /// has five distinct shader pairs and drew eighty-eight times a frame,
-    /// so this is not an optimisation so much as not doing the same work
-    /// eighty-eight times.
-    ///
-    /// Keyed by the source rather than by the shader's address, because the
-    /// source is what the module *is*: two draws whose shaders live at the
-    /// same address but were assembled with a different texture swizzle are
-    /// two different modules, and a guest is free to overwrite a shader in
-    /// place.
+    /// Compiled shader modules, keyed by a hash of the WGSL source.
     modules: std::collections::HashMap<u64, wgpu::ShaderModule>,
     /// Render pipelines, by everything they were built from.
-    ///
-    /// Building one is the device validating both modules against the fixed
-    /// function state around them, and it happened once per draw. A title
-    /// draws the same few pipelines over and over: the Home Menu's frame 60
-    /// renders 480 draws through 7 of them, and Just Dance 2019's first 3,481
-    /// through 4. So this is the argument [`Gpu::modules`] makes, one level
-    /// up, and like that one it is unbounded, because a program that walks
-    /// endlessly over fresh shaders is not a thing a title does.
     pipelines: std::collections::HashMap<PipelineKey, wgpu::RenderPipeline>,
-    /// Every sampler made so far, by what it is. A sampler is five settings
-    /// and nothing else, and making one is a call into JavaScript that
-    /// Chrome takes its time over: Tomodachi Life's busiest submission made
-    /// one per texture per draw and spent 62% of eight seconds in
-    /// `createSampler`, the page hearing nothing from the worker meanwhile.
+    /// Samplers by their settings; `createSampler` is slow in browsers.
     samplers: std::collections::HashMap<SamplerKey, wgpu::Sampler>,
     /// Bind group layouts, by the entries they describe.
-    ///
-    /// A layout is a description, not a resource, and two draws through the
-    /// same pair of shaders describe the same one, so this hands the same
-    /// object to the pipeline that was built from it and to every later
-    /// draw's bind group. WebGPU matches the two structurally rather than by
-    /// identity, so a cache is not what makes a cached pipeline usable; it is
-    /// what makes it obvious that it is.
     group_layouts:
         std::collections::HashMap<Vec<wgpu::BindGroupLayoutEntry>, wgpu::BindGroupLayout>,
-    /// The pipeline that puts a guest depth surface onto the device, by the
-    /// depth format it writes. See [`LOAD_DEPTH_WGSL`].
+    /// Depth upload pipelines by depth format. See [`LOAD_DEPTH_WGSL`].
     depth_loaders: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
-    /// The pipeline that clears a rectangle of a surface, by the formats and
-    /// the write mask it was built for. See [`CLEAR_RECT_WGSL`].
+    /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
     clear_pipelines: std::collections::HashMap<ClearKey, wgpu::RenderPipeline>,
-    /// The pipelines that move a multisampled surface between its expanded
-    /// form and a device companion. See [`resample_wgsl`].
+    /// Multisample resampling pipelines. See [`resample_wgsl`].
     resample_pipelines: std::collections::HashMap<ResampleKey, wgpu::RenderPipeline>,
-    /// `GPU_WEB_LIMITS=1`: hide the features a browser device cannot have,
-    /// so that a native run takes the routes a browser has no choice about.
-    ///
-    /// Two of wgpu's features are native-only and no browser will ever
-    /// report them: `SUBGROUP`, which its web backend can neither request
-    /// nor map, and `TEXTURE_FORMAT_16BIT_NORM`, which WebGPU has no
-    /// spelling for. Both used to be a fallback and a latched software
-    /// frame; both now have a route of their own, `shader::wgsl::QUAD_SWAP`
-    /// and [`convert::Widen`], which only this flag lets a native device
-    /// exercise.
+    /// `GPU_WEB_LIMITS=1`: hide native-only features so a native run takes the browser's routes.
     web_limits: bool,
-    /// `GPU_DEVICE_MSAA=1`: let the device do the multisampling where it
-    /// offers the sample count, instead of rendering the expanded surface a
-    /// texel at a time.
-    ///
-    /// Off, because the two do not produce the same frame: see
-    /// [`Gpu::route`]. It is a speed-for-fidelity trade and the frame it
-    /// gives up is the one the rasterizer can be compared against.
+    /// `GPU_DEVICE_MSAA=1`: let the device multisample where it can. Off: see [`Gpu::route`].
     device_msaa: bool,
-    /// What the device has rejected. Written by the uncaptured-error
-    /// callback, read on the next draw, because asking sooner means waiting.
+    /// Device rejections, written by the uncaptured-error callback.
     failed: std::sync::Arc<std::sync::Mutex<DeviceErrors>>,
-    /// Set when the device is lost, with the browser's reason.
-    ///
-    /// The one failure nothing else here can see: a lost device raises no
-    /// error and rejects nothing. It accepts every submission and performs
-    /// none of them, and the only symptom is a readback that never maps,
-    /// which read as "the readback was not mapped", every frame, for as long
-    /// as the title ran.
+    /// Set with the browser's reason when the device is lost, which is otherwise silent.
     lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// Whether a flush has ever answered [`Flush::Pending`]: that is,
-    /// whether a readback on this host completes later than the call that
-    /// asked for it.
-    ///
-    /// Natively it does not: the flush waits, so guest memory is the truth by
-    /// the time the call returns and a draw may hand itself to the rasterizer
-    /// in the middle of a frame. In a browser it does, because a map completes
-    /// from the event loop and nothing inside a run slice can make that
-    /// happen, and there a mid-frame fallback reads what was in memory
-    /// *before* the device drew, then has the readback land on top of what it
-    /// wrote.
-    ///
-    /// Observed rather than compiled in, because it is a fact about how the
-    /// host answers and not about which target this was built for.
+    /// Whether a readback has ever completed after the flush that asked for it (always in a browser).
+    /// Then a mid-frame fallback would read stale memory, so frames are not interleaved.
     deferred_readbacks: bool,
-    /// `GPU_DEFER_READBACKS=1`: do not wait for a readback even where waiting
-    /// is possible, so that a native run reproduces what a browser does. See
-    /// [`Gpu::deferred_readbacks`], which this is the way to provoke.
+    /// `GPU_DEFER_READBACKS=1`: never wait for readbacks, to reproduce a browser natively.
     defer_readbacks: bool,
-    /// `GPU_INTERLEAVE=1`: keep handing single draws to the rasterizer in the
-    /// middle of a device frame even where readbacks land late, instead of
-    /// giving the whole frame to the rasterizer.
-    ///
-    /// It is wrong, and it is not very wrong, and how wrong is measurable:
-    /// with `GPU_DEFER_READBACKS=1` to make a native run behave like a
-    /// browser, the Home Menu's frame 60 comes out with **795 of its 921,600
-    /// pixels** written by a draw the readback then overwrote, 0.09% of the
-    /// frame, in the places the fallback draws touched. Against that, the
-    /// latch costs the Home Menu every device draw after the first frame,
-    /// which is 0.10 s a frame becoming 1.03 s.
-    ///
-    /// So it is a real trade and the numbers are per title: a title the
-    /// translator covers has nothing to trade, and one where the device draws
-    /// half the frame would lose more than 795 pixels. Off, because a frame
-    /// nobody produced is the one thing this backend is built not to make.
+    /// `GPU_INTERLEAVE=1`: interleave fallback draws into device frames even with late readbacks.
+    /// Slightly wrong frames for speed; off by default.
     interleave: bool,
-    /// Whether the rasterizer has the frame, and the frames after it until
-    /// the device could take them back.
-    ///
-    /// The answer to a readback that cannot land inside a slice is not to
-    /// interleave more carefully: it is not to interleave. A frame the
-    /// device cannot render *all* of is one it renders none of: guest memory
-    /// is then the only copy of every surface, and no readback is ever owed.
-    ///
-    /// It latches, because a title mostly runs the same shaders every frame,
-    /// and alternating costs a frame with the rasterizer's draws under a
-    /// readback each time. But not for good: Tomodachi Life draws one frame
-    /// in 740 with a shader nothing here can translate, and a latch that
-    /// never let go gave every frame after that to the rasterizer. So each
-    /// draw of a rasterizer's frame is put through [`Gpu::check`], and after
-    /// [`Gpu::clean_frames_needed`] frames in a row in which every draw
-    /// passed, the device has the next one.
-    ///
-    /// The check cannot see everything that falls back, an upload or the
-    /// device itself can still refuse, so a draw that passes it and then
-    /// falls back latches this again, and doubles the clean frames the next
-    /// release waits for. A title that falls back on such a draw every frame
-    /// then costs one wrong frame at each of exponentially rarer releases.
-    ///
-    /// **What buys the acceleration back is `shader::wgsl`, mostly.** The
-    /// Home Menu's fallback is one `ldg b128`, an opcode with no WGSL form,
-    /// which is the shape of most of them. A Short Hike's two were not: a
-    /// warp shuffle and an `R16Unorm` texture, both of them things wgpu
-    /// offers only natively, and one draw of either latched all 52 frames of
-    /// a run onto the rasterizer. Both now have a route, `wgsl::QUAD_SWAP`
-    /// and [`convert::Widen`], so what reaches here is again what the
-    /// translator does not cover.
+    /// Whether the rasterizer has the whole frame. Latches; released after
+    /// [`Gpu::clean_frames_needed`] frames whose draws all pass [`Gpu::check`], doubling on each relatch.
     software_frame: bool,
     /// Whether anything fell back during the frame in progress.
     fell_back_this_frame: bool,
-    /// Whether a draw of the rasterizer's frame in progress was checked, and
-    /// whether one of them would have fallen back. A frame with no draws
-    /// says nothing about whether the device could have drawn it.
+    /// Whether a draw of the rasterizer's frame was checked, and whether one would have fallen back.
     checked_this_frame: bool,
     would_fall_back_this_frame: bool,
     /// Rasterizer's frames in a row in which every draw passed the check.
     clean_frames: u32,
-    /// How many of those release the latch: one, doubled every time the
-    /// latch has to close again after a release.
+    /// Clean frames needed to release the latch; doubles on each relatch.
     clean_frames_needed: u32,
     /// How many times the latch has let go.
     unlatched: u32,
     /// Whether [`Gpu::give_up`] has already handed the frame back.
     gave_up: bool,
-    /// The loss, kept for the first flush after it.
-    ///
-    /// A browser discards what `eprintln!` writes, and a flush's error is the
-    /// only way a reason reaches the frontend's diagnostics from here.
+    /// The loss reason, reported by the next flush.
     report: Option<String>,
     /// What this cannot express runs here instead.
     software: Software,
-    /// Draws this rendered, and draws that fell back with why the last one
-    /// did: the two numbers that say how much of a frame is really running
-    /// here.
+    /// Draws rendered here, and draws that fell back.
     pub drawn: u64,
     pub fallbacks: u64,
     pub last_fallback: Option<String>,
     /// Every distinct reason a draw fell back, in the order first seen.
     pub reasons: Vec<String>,
-    /// Draws by the route they took. See [`Render`]. Which of the two
-    /// multisampling routes a title actually gets is a question about the
-    /// adapter as much as about the title, so it is counted rather than
-    /// assumed.
+    /// Draws by the route they took. See [`Render`].
     pub direct: u64,
     pub expanded: u64,
     pub multisampled: u64,
     pub per_pixel: u64,
-    /// Which draw of the current frame this is, counting from the clear that
-    /// starts it. Only `GPU_ONLY` reads it.
+    /// Which draw of the current frame this is; only `GPU_ONLY` reads it.
     in_frame: u32,
-    /// Where a draw's time goes, printed when this is dropped and readable
-    /// at any point through [`Renderer::report_json`].
-    ///
-    /// Always on under wasm and `GPU_TIMES=1` natively. `env_flag!` reads
-    /// `std::env::var`, which is empty in a browser, so an env-gated clock
-    /// is one the target can never switch on, and the browser has no other
-    /// way to find out where a frame went. It costs one `performance.now()`
-    /// per phase per draw, which is microseconds across a whole run.
+    /// Phase timings; always on under wasm, `GPU_TIMES=1` natively.
     times: Option<Times>,
     /// What every draw's `Uploads::of` read, by category.
     uploaded: UploadBytes,
-    /// Texture bytes already deswizzled, by what decides them.
-    ///
-    /// A title samples a handful of images over and over, 96.5% of
-    /// everything `Uploads::of` lifts is texture bytes, 1.76 MiB a draw, and
-    /// nearly all of it the same images read again. An entry lives until the
-    /// guest writes to the memory behind it, which `Memory`'s watched pages
-    /// report.
+    /// Deswizzled texture bytes, evicted when the guest writes their pages.
     texture_cache: std::collections::HashMap<TextureKey, std::sync::Arc<[u8]>>,
-    /// A translated shader, by the address and stage it was translated from.
-    ///
-    /// Translating is `decode_program_from_memory` plus `wgsl::translate_for`,
-    /// and it ran **once per draw** for a result that only ever takes a handful
-    /// of values: a qlaunch run translated 278,631 times to reach 24 distinct
-    /// programs, and spent 158 of its 551 seconds of device time doing it.
+    /// Translated shaders by address and stage.
     shader_cache: std::collections::HashMap<(u64, ShaderStage), CachedShader>,
-    /// Which cached translations a guest page holds program words for, so a
-    /// write to it drops them, the same arrangement as [`Gpu::page_owners`],
-    /// and for the same reason.
+    /// Which cached translations a guest page holds program words for.
     shader_pages: std::collections::HashMap<u32, Vec<(u64, ShaderStage)>>,
-    /// Pages a translation was decoded from and nothing has watched yet, for
-    /// the same reason [`Gpu::to_remember`] exists: the draw path is handed a
-    /// shared `ExecCtx` and arming a page needs a mutable one.
+    /// Pages to watch once a mutable `ExecCtx` is available.
     shader_to_watch: Vec<(u32, (u64, ShaderStage))>,
-    /// Which cached textures a guest page holds bytes for, so a write to it
-    /// evicts them without walking the cache. A key left here after its entry
-    /// has gone evicts nothing, which is why nothing prunes these.
+    /// Which cached textures a guest page holds bytes for.
     page_owners: std::collections::HashMap<u32, Vec<TextureKey>>,
-    /// The device's copy of a cached texture, by the same key and paired with
-    /// the view it was created for, a 3D image and an array of the same
-    /// bytes are different textures.
-    ///
-    /// Only ever holds a key `texture_cache` also holds. That is what ties it
-    /// to a watched page: a texture kept here whose bytes were not cached
-    /// would never be told the guest had overwritten it.
+    /// Device copies of cached textures; only keys `texture_cache` also holds.
     gpu_textures:
         std::collections::HashMap<TextureKey, Vec<(wgpu::TextureViewDimension, wgpu::Texture)>>,
     cached_bytes: u64,
     pub texture_hits: u64,
     pub texture_misses: u64,
-    /// Draws served a translation out of [`Gpu::shader_cache`], and draws that
-    /// had to do the work. A run with more than a handful of misses is one
-    /// whose programs really are changing.
+    /// Draws served from [`Gpu::shader_cache`], and draws that missed.
     pub shader_hits: u64,
     pub shader_misses: u64,
     gpu_texture_bytes: u64,
-    /// Textures `prepare` read and has not watched yet. `prepare` is handed a
-    /// shared `ExecCtx` and watching a page needs a mutable one, so the two
-    /// halves happen either side of it.
+    /// Textures `prepare` read and has not watched yet.
     to_remember: Vec<(TextureKey, std::sync::Arc<[u8]>, u64)>,
-    /// `GPU_ONLY=<i>` renders only the i-th draw of each frame here and
-    /// leaves the rest to the rasterizer; `GPU_ONLY=<a>..<b>` renders the
-    /// half-open range of them.
-    ///
-    /// Which is how you find the draw that renders differently. The
-    /// difference between a frame and the reference is then exactly that
-    /// range's, and it takes a range rather than an index because that is
-    /// what a bisection needs: a frame is a hundred draws, and halving turns
-    /// that into seven runs instead of a hundred.
+    /// `GPU_ONLY=<i>` or `<a>..<b>`: render only those draws of each frame here, for bisecting.
     only: Option<std::ops::Range<u32>>,
 }
 
-/// How much deswizzled texture to keep. A frame's working set is a handful of
-/// images at 1.76 MiB each, so this is generous on purpose: the point is to
-/// bound a run that walks endlessly over fresh textures, not to ration a
-/// normal one.
+/// Bounds a run over endless fresh textures; a normal working set is far smaller.
 const TEXTURE_CACHE_BYTES: u64 = 256 << 20;
 /// Guest pages are 4 KiB, the granularity `Memory` watches writes at.
 const PAGE_BITS: u32 = 12;
@@ -712,23 +399,14 @@ macro_rules! timed {
 }
 
 impl Gpu {
-    /// Take a device somebody else opened.
-    ///
-    /// The browser's entry point. Opening a device there is asynchronous,
-    /// `requestAdapter` and `requestDevice` are promises, and nothing in
-    /// this crate may wait on a promise, so the waiting happens outside and
-    /// the result is handed in. [`Gpu::open`] is the native convenience that
-    /// does it by blocking, which is fine on a thread that owns itself.
-    ///
-    /// The instance and the adapter come too, and are not optional: see
-    /// [`Gpu::_instance`] for what a browser does when they are dropped.
+    /// Take a device opened elsewhere (asynchronously, in a browser).
+    /// The instance and adapter must be kept: see [`Gpu::_instance`].
     pub fn with_device(
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
     ) -> Gpu {
-        // Where a rejection lands, since nothing in a draw ever stops to ask.
         let failed: std::sync::Arc<std::sync::Mutex<DeviceErrors>> =
             std::sync::Arc::new(std::sync::Mutex::new(DeviceErrors::default()));
         let sink = failed.clone();
@@ -737,7 +415,6 @@ impl Gpu {
                 slot.record(e.to_string());
             }
         }));
-        // Asked for by name, because a lost device is silent everywhere else.
         let lost: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         let sink = lost.clone();
@@ -823,15 +500,11 @@ impl Gpu {
         Ok(Gpu::with_device(instance, adapter, device, queue))
     }
 
-    /// What adapter this opened.
     pub fn describe(&self) -> String {
         format!("{:?}", self.device.limits().max_texture_dimension_2d)
     }
 
-    /// Give the device back, for one that will not be used.
-    ///
-    /// Dropping it does not: wgpu's web backend frees nothing on drop, so an
-    /// abandoned device lives in the GPU process until the collector runs.
+    /// Release the device; dropping it does not on the web.
     pub fn destroy(&self) {
         self.device.destroy();
     }
@@ -839,8 +512,6 @@ impl Gpu {
     fn fall_back(&mut self, why: String) {
         self.fallbacks += 1;
         self.fell_back_this_frame = true;
-        // Each distinct reason once: a draw that falls back does it every
-        // frame, and the interesting thing is the list rather than the count.
         if !self.reasons.contains(&why) {
             eprintln!("[gpu] falling back: {why}");
             self.reasons.push(why.clone());
@@ -848,14 +519,7 @@ impl Gpu {
         self.last_fallback = Some(why);
     }
 
-    /// Hand the frame back to the rasterizer for good, once the device is
-    /// lost. Answers whether it has been.
-    ///
-    /// A lost device cannot copy a surface back, so everything held on it is
-    /// gone and what guest memory holds is the last thing the rasterizer
-    /// wrote. That is what the display gets from here on, which is the
-    /// point: the alternative, and what this replaces, was a readback that
-    /// failed and a frame that was dropped, once per frame, forever.
+    /// Hand the frame to the rasterizer for good once the device is lost; answers whether it has been.
     fn give_up(&mut self) -> bool {
         if self.gave_up {
             return true;
@@ -874,12 +538,7 @@ impl Gpu {
         true
     }
 
-    /// Put a draw of the rasterizer's frame through [`Gpu::check`], to learn
-    /// whether the device could have drawn it. See [`Gpu::software_frame`].
-    ///
-    /// The eviction and the watching around it are the ones a device draw
-    /// makes, for the same reason: a translation cached from a program the
-    /// guest has since rewritten would answer for the old program.
+    /// Check a draw of the rasterizer's frame to see whether the device could have drawn it.
     fn check_for_release(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) {
         self.evict_written(ctx);
         let verdict = self.check(engine, &*ctx);
@@ -890,8 +549,7 @@ impl Gpu {
         }
     }
 
-    /// At the clear that ends a rasterizer's frame, count it towards
-    /// releasing the latch, and release it once enough have passed.
+    /// At the clear that ends a rasterizer's frame, count it towards releasing the latch.
     fn release_if_clean(&mut self) {
         let (checked, would_fall_back) = (self.checked_this_frame, self.would_fall_back_this_frame);
         self.checked_this_frame = false;
@@ -917,22 +575,17 @@ impl Gpu {
         );
     }
 
-    /// Keep interleaving single fallback draws into a device frame on a host
-    /// whose readbacks land late, the `GPU_INTERLEAVE` flag, for the build
-    /// with no environment to read it from. See [`Gpu::interleave`] for what
-    /// it trades and what it costs.
+    /// The `GPU_INTERLEAVE` flag. See [`Gpu::interleave`].
     pub fn set_interleave(&mut self, interleave: bool) {
         self.interleave = interleave;
     }
 
-    /// Hide the features a browser device cannot have, the
-    /// `GPU_WEB_LIMITS` flag. See [`Gpu::web_limits`].
+    /// The `GPU_WEB_LIMITS` flag. See [`Gpu::web_limits`].
     pub fn set_web_limits(&mut self, web_limits: bool) {
         self.web_limits = web_limits;
     }
 
-    /// What this device is allowed to be asked for, which is not always what
-    /// it has: see [`Gpu::web_limits`].
+    /// What this device may be asked for; see [`Gpu::web_limits`].
     fn features(&self) -> wgpu::Features {
         let features = self.device.features();
         if self.web_limits {
@@ -942,29 +595,17 @@ impl Gpu {
         }
     }
 
-    /// Let the device do the multisampling where it offers the sample count
-    ///: the `GPU_DEVICE_MSAA` flag, for the build that has no environment to
-    /// read it from. See [`Gpu::route`] for what it trades.
+    /// The `GPU_DEVICE_MSAA` flag. See [`Gpu::route`].
     pub fn set_device_msaa(&mut self, device_msaa: bool) {
         self.device_msaa = device_msaa;
     }
 
-    /// The device texture for a surface, uploading it if this is the first
-    /// draw to reach it.
-    ///
-    /// A draw that blends reads what is already there. The first time that
-    /// is guest memory; afterwards it is whatever the previous draw left on
-    /// the device, which is the same thing and already in the right place.
+    /// The device texture for a surface, uploaded on first use.
     fn hold(&mut self, target: &Target, ctx: &ExecCtx) -> Result<()> {
         match self.held.get(&target.addr) {
-            // The same surface as last time. Anything about it having
-            // changed, a different format or extent at the same address,
-            // means the guest rebound it, and the old contents are not this
-            // one's.
+            // The same surface as last time.
             Some(held) if held.target == *target => return Ok(()),
-            // A different surface at the same address: the guest rebound
-            // it. The old one still has to go back, but not here, a draw
-            // that read a texture back is a draw that blocks.
+            // A different surface at the same address: the guest rebound it; write the old one back later.
             Some(_) => {
                 if let Some(held) = self.held.remove(&target.addr) {
                     self.evicted.push(held);
@@ -993,25 +634,9 @@ impl Gpu {
         self.ask_for(held);
     }
 
-    /// Ask for a surface back, without waiting for it.
-    ///
-    /// The waiting used to happen here, with `Device::poll`, which is a real
-    /// wait natively and a no-op on the web: WebGPU has no polling, and a map
-    /// completes when the event loop runs. So in a browser the collection read
-    /// a buffer that was not mapped yet.
-    ///
-    /// Nothing waits now. [`Gpu::flush`] collects what has arrived and says
-    /// `Flush::Pending` for what has not, and the *present* is what waits,
-    /// `Cpu::complete_pending_present` puts the frame up from a later slice,
-    /// once the host has had its turn. Which is not the same as landing a
-    /// readback one flush late and presenting guest memory meanwhile: that
-    /// came out black, because a double-buffered title queues the surface
-    /// whose readback was just asked for.
+    /// Ask for a surface back without waiting; [`Gpu::flush`] collects it.
     fn ask_for(&mut self, held: Held) {
-        // Whatever a companion holds is part of the surface, and a readback
-        // copies the surface, so it has to be in it first. This is where a
-        // multisampled frame's samples land in the expanded layout guest
-        // memory keeps them in.
+        // A companion's contents must be in the surface before it is copied.
         if let Some(companion) = &held.companion {
             let depth = held.target.depth_kind().is_some();
             if let Err(why) = self.resolve_into(&held.texture, companion, depth) {
@@ -1023,19 +648,13 @@ impl Gpu {
             let pending = self.start_read_back(&held.target, &held.texture);
             self.pending.push(pending);
         }
-        // Destroyed rather than dropped, the same as a cached texture: in a
-        // browser a dropped texture waits on the collector, and these are the
-        // largest things the backend makes. Persona 5 Royal flushes 1920x1080
-        // colour and 2048x2048 depth surfaces every frame, and the device ran
-        // out of memory with the dead ones still waiting. The readback copy
-        // above is already submitted, and submitted work finishes first.
+        // Destroyed rather than dropped, so a browser frees it without waiting for GC.
         held.texture.destroy();
         if let Some(companion) = &held.companion {
             companion.texture.destroy();
         }
     }
 
-    /// Bring a guest surface onto the device.
     fn upload_target(&mut self, target: &Target, ctx: &ExecCtx) -> Result<wgpu::Texture> {
         if let Some(kind) = target.depth_kind() {
             return self.upload_depth_target(target, kind, ctx);
@@ -1081,11 +700,7 @@ impl Gpu {
         Ok(texture)
     }
 
-    /// Bring a guest depth surface onto the device, converted.
-    ///
-    /// Nothing copies into a depth texture in the format this needs, so what
-    /// is copied is an `r32float` image of the same texels and what puts it
-    /// where it belongs is a pass. See [`LOAD_DEPTH_WGSL`].
+    /// Upload a depth surface via an `r32float` staging image and a pass. See [`LOAD_DEPTH_WGSL`].
     fn upload_depth_target(
         &mut self,
         target: &Target,
@@ -1110,9 +725,7 @@ impl Gpu {
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        // `read_depth` walks the surface, whose rows are `row_bytes` wide
-        // whatever the pass covers, so a cropped target takes the left of
-        // each one. `Target::rows` is already the pass's height.
+        // A cropped target takes the left of each row.
         let values = target.read_depth(ctx)?;
         let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
         let values = crop_rows(
@@ -1121,9 +734,7 @@ impl Gpu {
             target.width as usize,
             kind.unit() as usize,
         );
-        // The staging image is always `r32float`, whatever the depth format
-        // is: one WGSL text, one pipeline per depth format, and a `u16` that
-        // has to be widened on the way in either way.
+        // The staging image is always `r32float`.
         let staging = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth upload"),
             size,
@@ -1166,8 +777,7 @@ impl Gpu {
         Ok(texture)
     }
 
-    /// Draw `staging` into `texture`'s depth, which is the only way a value
-    /// gets there.
+    /// Draw `staging` into `texture`'s depth.
     fn load_depth(
         &mut self,
         texture: &wgpu::Texture,
@@ -1180,11 +790,7 @@ impl Gpu {
         Ok(())
     }
 
-    /// [`Gpu::load_depth`] for one layer of `texture`, drawn from one layer
-    /// of `staging`. One at a time, because a depth attachment is a single
-    /// layer and the loader samples a plain 2D image: the default views of a
-    /// shadow map with layers are arrays, which the device refuses in both
-    /// places.
+    /// One layer at a time: a depth attachment is a single layer.
     fn load_depth_layer(
         &mut self,
         texture: &wgpu::Texture,
@@ -1240,8 +846,7 @@ impl Gpu {
         Ok(())
     }
 
-    /// The pipeline that draws a depth surface into a depth texture of this
-    /// format, built once per format.
+    /// The depth loader for this format, built once.
     fn depth_loader(&mut self, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
         if let Some(pipeline) = self.depth_loaders.get(&format) {
             return pipeline.clone();
@@ -1280,18 +885,9 @@ impl Gpu {
         pipeline
     }
 
-    /// Take a surface off the device.
-    ///
-    /// `copyTextureToBuffer` wants rows aligned to 256 bytes, which a
-    /// surface's own rows need not be, so the padding is added on the way
-    /// out and dropped on the way in.
-    ///
-    /// This is the one place that waits, and the reason [`Renderer::flush`]
-    /// exists to be the only caller: on a browser the wait is a deadlock
-    /// anywhere the event loop is not free to run.
+    /// Start copying a surface off the device, with rows padded to 256 bytes.
     fn start_read_back(&self, target: &Target, texture: &wgpu::Texture) -> Pending {
-        // What a device row holds is the device format's, which for a depth
-        // surface is not the guest's texel width.
+        // Device row width, which for depth is not the guest's texel width.
         let row_bytes = match target.depth_kind() {
             Some(kind) => target.width * kind.unit(),
             None => target.row_bytes,
@@ -1335,9 +931,7 @@ impl Gpu {
         );
         self.queue.submit([encoder.finish()]);
 
-        // Asked for, not waited on. The map completes when the device is next
-        // polled, which on a browser is when the event loop next runs, and
-        // there is no way to make that happen from inside a blocking call.
+        // Asked for, not waited on.
         let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(MAP_WAITING));
         let sink = state.clone();
         staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -1353,22 +947,14 @@ impl Gpu {
         }
     }
 
-    /// Copy a finished readback into guest memory, dropping the row padding
-    /// `copyTextureToBuffer` insisted on.
+    /// Copy a finished readback into guest memory, dropping the row padding.
     fn land(&self, pending: &Pending, ctx: &mut ExecCtx) -> Result<()> {
         let slice = pending.staging.slice(..);
         let mapped = slice
             .get_mapped_range()
             .map_err(|e| Error::Gpu(format!("mapping the readback: {e}")))?;
         let target = &pending.target;
-        // A colour surface goes back straight out of the mapping, padding and
-        // all: `write_strided` skips whatever each row's alignment left over,
-        // which is a whole-surface copy (3.7 MB a frame at 720p) that only
-        // ever existed to hand the walk a packed buffer.
-        //
-        // Depth still repacks. Its write-back reads the surface and patches a
-        // window into it, so it wants the rows contiguous, and it is the
-        // rarer path.
+        // Colour writes straight from the padded mapping; depth repacks.
         let outcome = match target.depth_kind() {
             None => target.write_strided(ctx, &mapped, pending.padded),
             Some(kind) => {
@@ -1382,18 +968,14 @@ impl Gpu {
         };
         drop(mapped);
         pending.staging.unmap();
-        // Destroyed rather than merely dropped, for the reason
-        // [`Gpu::scratch`] gives: a readback is a whole surface, several a
-        // frame, and in a browser a dropped buffer waits on a collector.
+        // Destroyed rather than dropped; see [`Gpu::scratch`].
         pending.staging.destroy();
         outcome
     }
 
     /// Put a depth readback back, repacked.
     fn land_depth(target: &Target, kind: DepthKind, rows: &[u8], ctx: &mut ExecCtx) -> Result<()> {
-        // A cropped depth target holds the left of each row; the rest is what
-        // the surface already had, and reading it back is how it survives
-        // being written whole.
+        // A cropped depth target holds the left of each row; the rest is preserved.
         let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
         let window = target.width as usize;
         if window >= surface_texels {
@@ -1414,12 +996,7 @@ impl Gpu {
 }
 
 impl Gpu {
-    /// Build the pipeline and run the pass.
-    ///
-    /// Everything is created per draw: the modules, the pipeline, the
-    /// buffers, the bind groups. That is the slow arrangement and the one
-    /// worth having first, because a cache is only ever as right as the
-    /// thing it caches.
+    /// Build (or reuse) the pipeline and run the pass.
     fn render(&mut self, p: &Prepared, ctx: &mut ExecCtx) -> std::result::Result<(), String> {
         let target_format = match p.color {
             Some(color) => Some(
@@ -1428,9 +1005,7 @@ impl Gpu {
             ),
             None => None,
         };
-        // A rejected pipeline is not a fallback: the draw still counts as
-        // drawn and simply is not. So a blend the device cannot do is caught
-        // here, where it can still go to the rasterizer instead.
+        // A blend the device cannot do must fall back here; a rejected pipeline silently draws nothing.
         if let Some(format) = target_format {
             let blends = p.state.target.is_some_and(|t| t.blend.is_some());
             if blends && !can_blend(format, self.features()) {
@@ -1443,10 +1018,7 @@ impl Gpu {
             .depth
             .and_then(|d| d.depth_kind())
             .map(depth_texture_format);
-        // The sample mask and alpha-to-coverage belong to the device only on
-        // the route where the device is doing the multisampling. On the
-        // expanded route the fragment shader has them, and saying them twice
-        // would apply them twice.
+        // Sample mask and alpha-to-coverage are the device's only on the companion route.
         let multisample = match p.render {
             Render::Companion(Shape::Multisampled(count)) => wgpu::MultisampleState {
                 count,
@@ -1472,12 +1044,7 @@ impl Gpu {
             }
         })?;
 
-        // Vertex buffers, and the attributes the vertex shader actually
-        // reads: a draw binds sixteen slots and a shader reads one.
-        // The stride travels *with* the buffer rather than beside it: a
-        // bound array whose attributes the shader never reads is skipped, so
-        // the two lists are not the same length and pairing them by position
-        // gave one array another's stride.
+        // Vertex buffers the shader reads; the stride travels with each buffer.
         let mut bound: Vec<Bound> = Vec::new();
         for buffer in &p.state.vertex_buffers {
             let attributes: Vec<wgpu::VertexAttribute> = buffer
@@ -1499,15 +1066,12 @@ impl Gpu {
                 .iter()
                 .find(|v| v.array == buffer.index)
                 .ok_or("a bound vertex array with no bytes")?;
-            // An instanced array advances once per instance, and only this
-            // instance's element was uploaded, so the stride is nothing and
-            // every instance reads the one element there is.
+            // An instanced array uploads only this instance's element, so its stride is zero.
             let stride = match buffer.step {
                 state::StepMode::Instance => 0,
                 state::StepMode::Vertex => u64::from(buffer.stride),
             };
-            // Metal drops a vertex whose stride runs past the end of the
-            // buffer, though WebGPU only asks for the bytes its attributes read.
+            // Metal drops a vertex whose stride runs past the end of the buffer.
             let mut bytes = std::borrow::Cow::Borrowed(&upload.bytes[..]);
             let whole = bytes.len().next_multiple_of(stride.max(1) as usize);
             if whole != bytes.len() {
@@ -1523,11 +1087,7 @@ impl Gpu {
                 },
             });
         }
-        // Every location the shader declares has to be fed, or the pipeline
-        // will not build. A slot the draw binds no buffer to is not a gap:
-        // `fetch_attribute` answers `(0, 0, 0, 1)` for a fixed attribute and
-        // an unconfigured slot is left at zero, so both are a constant, one
-        // buffer of two vectors, read with a stride of nothing.
+        // Unbound locations read a constant buffer of the two default vectors.
         let fed: Vec<usize> = bound
             .iter()
             .flat_map(|b| b.attributes.iter().map(|a| a.shader_location as usize))
@@ -1570,22 +1130,12 @@ impl Gpu {
             timed!(self, pipeline, self.bind_group(p, ShaderStage::VertexB, 0))?;
         let (fs_group_layout, fs_group) =
             timed!(self, pipeline, self.bind_group(p, ShaderStage::Fragment, 1))?;
-        // A pipeline is keyed by what it is built from, so the cache can be
-        // consulted before any of it is created. The bind group layouts are
-        // not part of the key: they follow from the two modules, and WebGPU
-        // matches a bind group to a pipeline structurally rather than by
-        // identity, so the ones built for this draw fit a cached pipeline.
-        // The index buffer this draw will bind, if it binds one. An assembled
-        // topology is a list of ordinals and so is always `u32`.
+        // An assembled topology is always `u32` indices.
         let draw_index_format = match &p.assembled {
             Some(_) => Some(wgpu::IndexFormat::Uint32),
             None => p.uploads.index.as_ref().map(|i| index_format(i.format)),
         };
-        // WebGPU refuses `drawIndexed` on a strip pipeline that does not name
-        // the format its primitive restart index is spelled in, and throws out
-        // the whole command buffer with it, so one such draw costs the frame,
-        // not the draw. It refuses the format on a pipeline that is not a
-        // strip just as firmly, hence both halves of this.
+        // WebGPU requires the strip index format on strip pipelines and forbids it otherwise.
         let strip_index_format = match p.state.topology {
             state::Topology::LineStrip | state::Topology::TriangleStrip => draw_index_format,
             _ => None,
@@ -1632,8 +1182,7 @@ impl Gpu {
                 bind_group_layouts: &[Some(&vs_group_layout), Some(&fs_group_layout)],
                 immediate_size: 0,
             });
-        // Empty for a depth-only pass: a colour state with no attachment
-        // behind it is a pipeline that will not build.
+        // Empty for a depth-only pass.
         let colour_targets: Vec<Option<wgpu::ColorTargetState>> = target_format
             .map(|format| {
                 Some(wgpu::ColorTargetState {
@@ -1677,9 +1226,7 @@ impl Gpu {
                     format,
                     depth_write_enabled: Some(write_enabled),
                     depth_compare: Some(compare(test)),
-                    // Neither renderer tests stencil: `raster` reads the byte
-                    // back only to put it where it was. When one of them
-                    // learns to, they both must.
+                    // Neither renderer tests stencil.
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }
@@ -1703,10 +1250,7 @@ impl Gpu {
         self.encode(p, &pipeline, &vs_group, &fs_group, &bound, ctx)
     }
 
-    /// Record and submit one draw against a pipeline that is already built.
-    ///
-    /// Split out from [`Gpu::render`] because it is the half that runs on
-    /// every draw, cached pipeline or not.
+    /// Record and submit one draw against a built pipeline.
     fn encode(
         &mut self,
         p: &Prepared,
@@ -1716,8 +1260,7 @@ impl Gpu {
         bound: &[Bound],
         ctx: &mut ExecCtx,
     ) -> std::result::Result<(), String> {
-        // Held across the frame: the first draw brings the surface onto the
-        // device and every later one finds it already there.
+        // Held across the frame.
         let colour_view = match p.color {
             Some(color) => {
                 self.hold(&color, ctx).map_err(|e| format!("{e:?}"))?;
@@ -1725,8 +1268,7 @@ impl Gpu {
             }
             None => None,
         };
-        // The held surface's corner the pass covers, copied into a texture
-        // the size of the pass: see [`Prepared::color_scratch`].
+        // See [`Prepared::color_scratch`].
         let scratch = match (p.color, p.color_scratch) {
             (Some(color), Some((width, height))) => {
                 let held = &self
@@ -1775,17 +1317,14 @@ impl Gpu {
         let depth_view = match p.depth {
             Some(depth) => {
                 self.hold(&depth, ctx).map_err(|e| format!("{e:?}"))?;
-                // A draw that only tests depth leaves the surface as it
-                // found it, and a surface nothing wrote need not go back.
+                // A depth test without writes leaves the surface clean.
                 let writes = p.state.depth.is_some_and(|d| d.write_enabled);
                 Some(self.attachment(p, depth.addr, writes)?)
             }
             None => None,
         };
         let index = match &p.assembled {
-            // An assembled topology is always drawn indexed, whether or not
-            // the draw it came from was: the triangles are a list of
-            // ordinals, and that is what an index buffer is.
+            // An assembled topology is always drawn indexed.
             Some((indices, base)) => {
                 let bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
                 Some((
@@ -1817,9 +1356,7 @@ impl Gpu {
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            // Loaded, never cleared: a clear is its own
-                            // method, and this pass is one draw in the middle
-                            // of a frame.
+                            // Loaded, never cleared: a clear is its own method.
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
                         },
@@ -1850,10 +1387,7 @@ impl Gpu {
             for (slot, b) in bound.iter().enumerate() {
                 pass.set_vertex_buffer(slot as u32, b.buffer.slice(..));
             }
-            // The viewport and the scissor are in pixels, which is what the
-            // attachment is measured in on every route but the expanded one,
-            // there the attachment is the surface itself, and its extent is
-            // texels.
+            // In pixels, except on the expanded route where the attachment is in texels.
             let (sx, sy) = match p.render {
                 Render::Expanded => (p.state.grid.samples_x, p.state.grid.samples_y),
                 _ => (1, 1),
@@ -1884,14 +1418,12 @@ impl Gpu {
                     a: f64::from(a),
                 });
             }
-            // One instance, numbered so that `@builtin(instance_index)` is
-            // the `gl_InstanceID` the rasterizer would have used.
+            // One instance, numbered so `instance_index` matches `gl_InstanceID`.
             let instances = p.instance..p.instance + 1;
             match &index {
                 Some((buffer, format, base)) => {
                     pass.set_index_buffer(buffer.slice(..), *format);
-                    // The vertex buffer starts at the draw's lowest index, so
-                    // every index in it is that much too high.
+                    // The vertex buffer starts at the draw's lowest index.
                     pass.draw_indexed(0..p.count, *base, instances);
                 }
                 None => pass.draw(0..p.count, instances),
@@ -1905,8 +1437,7 @@ impl Gpu {
         Ok(())
     }
 
-    /// The view a draw renders one of its surfaces through, with whatever
-    /// companion the route asks for already in place.
+    /// The view a draw renders one of its surfaces through, with any companion in place.
     fn attachment(
         &mut self,
         p: &Prepared,
@@ -1915,10 +1446,7 @@ impl Gpu {
     ) -> std::result::Result<wgpu::TextureView, String> {
         match p.render {
             Render::Companion(shape) => self.companion(addr, shape, p.state.grid)?,
-            // A surface drawn into directly has to have whatever a previous
-            // draw left on a companion put back first: a frame is allowed to
-            // change its mind about how it renders a surface, and the two
-            // shapes are not the same pixels.
+            // Put back whatever a companion holds first.
             Render::Direct | Render::Expanded => self.resolve_companion(addr)?,
         }
         let held = self.held.get_mut(&addr).ok_or("the surface was not held")?;
@@ -1930,16 +1458,14 @@ impl Gpu {
         Ok(texture.create_view(&wgpu::TextureViewDescriptor::default()))
     }
 
-    /// One stage's bindings: its constant banks, and its textures with
-    /// their samplers.
+    /// One stage's bindings: constant banks, and textures with their samplers.
     fn bind_group(
         &mut self,
         p: &Prepared,
         stage: ShaderStage,
         group: u32,
     ) -> std::result::Result<(wgpu::BindGroupLayout, wgpu::BindGroup), String> {
-        // The dimensionality is the layout's, because it is what the module
-        // declared the binding as.
+        // The layout's dimensionality, as the module declared it.
         let declared = if stage == ShaderStage::VertexB {
             &p.vs_layout
         } else {
@@ -2014,9 +1540,7 @@ impl Gpu {
                 }),
                 count: None,
             });
-            // A texture the program only asked the size of is bound as 2D,
-            // and a 2D view of a texture with layers is one the device
-            // refuses to make.
+            // A size-only query binds as 2D, and the device refuses a 2D view of a layered texture.
             if view_dimension == wgpu::TextureViewDimension::D2 && upload.layers > 1 {
                 return Err(format!(
                     "binds a {}-layer texture where the program declared a 2D one",
@@ -2109,20 +1633,8 @@ impl Gpu {
         Ok((layout, bind_group))
     }
 
-    /// The layers of a texture the draw samples that are surfaces still held
-    /// on the device, each with the surface to copy it out of.
-    ///
-    /// Their guest memory holds what the surfaces were before the device drew
-    /// into them, so uploading those bytes samples a stale image. Tomodachi
-    /// Life renders its scene into an HDR surface, reduces it through a chain
-    /// of small float surfaces and tonemaps from them with no draw the device
-    /// refuses in between, and every stage read what the one before it had
-    /// been before it ran. It also renders an environment cube a face at a
-    /// time and samples all six. A rasterizer draw anywhere in between
-    /// flushed the surfaces first, which hid it.
-    ///
-    /// A held surface that cannot be copied into the layer it stands for
-    /// is refused rather than sampled stale: the fallback flushes first.
+    /// Layers of a sampled texture that are surfaces still held on the device, whose guest
+    /// memory is stale. One that cannot be copied is refused.
     fn held_layers(
         &self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -2135,20 +1647,13 @@ impl Gpu {
             let Some(held) = self.held.get(&addr) else {
                 continue;
             };
-            // A `ZF32` surface is held as a `depth32float` holding the guest's
-            // own floats, which is exactly what sampling it as an `R32` reads:
-            // Nintendo Switch Sports samples its depth that way right after
-            // drawing it. A copy cannot go from a depth texture to a colour
-            // one, so it goes through a buffer. Every other depth packing is
-            // converted on the way to the device, and a shadow sample needs a
-            // depth texture of its own.
+            // A held `ZF32` is copied through a buffer into an `R32` view; a depth texture cannot copy to colour.
             if let Some(depth) = held.target.depth {
                 let float =
                     depth.bytes == 4 && depth.depth_bits == 0 && depth.stencil_shift.is_none();
                 let (format, _) = sampled_texture_format(self.features(), upload.format)
                     .map_err(|e| format!("{e:?}"))?;
-                // A shadow map reads a `depth32float` itself, so a held one is
-                // copied depth to depth, whatever the guest packs it as.
+                // A shadow map is copied depth to depth.
                 if compare {
                     let (width, height) = (held.texture.width(), held.texture.height());
                     let depth32 = held.texture.format() == wgpu::TextureFormat::Depth32Float;
@@ -2156,11 +1661,7 @@ impl Gpu {
                         layers.push((layer, HeldLayer::Shadow(held.texture.clone())));
                         continue;
                     }
-                    // A padded depth surface sampled at the size that was
-                    // drawn: Nintendo Switch Sports samples a 1640x1640
-                    // shadow map out of a 1648x1640 one. A depth copy has to
-                    // take the whole surface, so this goes through the pass
-                    // that draws a shadow map, which reads the corner.
+                    // A padded depth surface sampled at its drawn size goes through the shadow map pass.
                     if depth32
                         && upload.width <= width
                         && upload.height <= height
@@ -2214,21 +1715,14 @@ impl Gpu {
             if held.companion.is_some() {
                 return Err("samples a multisampled surface held on the device".into());
             }
-            // A volume's slices interleave inside a block more than one GOB
-            // deep, so no one of them is a surface of its own. One GOB deep,
-            // each slice is a 2D image a stride apart, the same as a layer.
+            // Deep-block volume slices interleave, so none is a surface of its own.
             if view == wgpu::TextureViewDimension::D3 && upload.key.block_depth_gobs > 1 {
                 return Err(
                     "samples a surface held on the device as a slice of an interleaved volume"
                         .into(),
                 );
             }
-            // A texture may be the top-left corner of a larger surface, a
-            // padded render target sampled at the size that was drawn: it is
-            // the same texels when both lay their rows out the same way in
-            // memory, the same tiling and the same stride, which block-linear
-            // counts in whole GOBs. Nintendo Switch Sports samples a 40x22
-            // corner of a 48x22 target that way.
+            // A texture may be the top-left corner of a larger surface with the same rows.
             let size = held.texture.size();
             if !same_rows(&held.target, &upload.key)
                 || upload.width > size.width
@@ -2261,14 +1755,7 @@ impl Gpu {
         Ok(layers)
     }
 
-    /// A texture uploaded from guest memory with the `held` layers then
-    /// copied over it out of the surfaces the device holds for them.
-    ///
-    /// Copied rather than bound, because a draw may sample the surface it
-    /// renders into, which WebGPU does not allow in one pass, and what it
-    /// reads there is the surface before the draw. The copy is its own
-    /// submission ahead of the draw's, so it sees every earlier draw. Never
-    /// cached: what it holds is the device's, not the bytes it was keyed by.
+    /// Upload a texture, then copy the held layers over it; never cached.
     fn texture_over_held(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -2316,8 +1803,7 @@ impl Gpu {
                 // Drawn above, before these copies were encoded.
                 HeldLayer::ShadowCorner(_) => {}
                 HeldLayer::Depth(surface) => {
-                    // Four bytes a texel, in rows padded to what a copy
-                    // between a texture and a buffer requires.
+                    // Four bytes a texel, rows padded for a texture-buffer copy.
                     let row = (upload.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
                         * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
                     let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2360,13 +1846,7 @@ impl Gpu {
         Ok(texture)
     }
 
-    /// Draw the top-left corner of a held `depth32float` into layer `layer`
-    /// of `shadow`, a shadow map smaller than it. A depth copy has to take the
-    /// whole surface, and a buffer cannot be copied into a depth texture, so
-    /// the surface goes whole through a buffer into an `r32float` the size of
-    /// the surface, and the pass that draws a shadow map from guest memory
-    /// draws it from that instead: it reads each of its texels at the same
-    /// coordinates, so it reads the corner.
+    /// Draw the top-left corner of a held `depth32float` into a smaller shadow map layer, via `r32float`.
     fn draw_shadow_corner(
         &mut self,
         shadow: &wgpu::Texture,
@@ -2449,9 +1929,7 @@ impl Gpu {
             }
         }
         let (texture, len) = self.upload_texture(upload, view)?;
-        // Kept only alongside its bytes, which is what a guest write evicts;
-        // a texture whose source could not be watched goes back to being one
-        // draw's scratch, as everything was before this.
+        // Kept only alongside its cached bytes, which a guest write evicts.
         if self.texture_cache.contains_key(&upload.key) {
             self.gpu_texture_bytes += len as u64;
             self.gpu_textures
@@ -2464,8 +1942,7 @@ impl Gpu {
         Ok(texture)
     }
 
-    /// A texture made from an upload's bytes, and how many bytes went into
-    /// it. Neither cached nor released: the caller decides which.
+    /// A texture made from an upload's bytes, and how many bytes went into it.
     fn upload_texture(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -2473,9 +1950,7 @@ impl Gpu {
     ) -> std::result::Result<(wgpu::Texture, usize), String> {
         let (format, widening) =
             sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
-        // A format the device holds itself is uploaded as it stands; one it
-        // does not is widened first, which doubles every channel and so the
-        // row that carries them. See [`convert::Widen`].
+        // Formats the device lacks are widened first. See [`convert::Widen`].
         let widened = (widening != Widen::None).then(|| widen(&upload.bytes, widening));
         let (bytes, row_bytes) = match &widened {
             Some(bytes) => (bytes.as_slice(), upload.row_bytes * 2),
@@ -2486,9 +1961,7 @@ impl Gpu {
             height: upload.height.max(1),
             depth_or_array_layers: upload.layers.max(1),
         };
-        // A 3D image's slices are the same bytes an array's are, but the
-        // texture has to be created as one: a `texture_3d` binding filters
-        // between them, and a `D2Array` does not.
+        // A 3D image must be created as one so sampling filters between slices.
         let dimension = match view {
             wgpu::TextureViewDimension::D3 => wgpu::TextureDimension::D3,
             _ => wgpu::TextureDimension::D2,
@@ -2521,13 +1994,7 @@ impl Gpu {
         Ok((texture, bytes.len()))
     }
 
-    /// The buffers a stage's `ldg`s read, one per descriptor the translation
-    /// tracked back to a constant bank.
-    ///
-    /// The address is not something the shader computed: it is a descriptor
-    /// the driver wrote into a bank, so it can be read out of the bank this
-    /// draw already uploads and the memory it names bound beside it. Eden
-    /// does the same in `global_memory_to_storage_buffer`.
+    /// The buffers a stage's `ldg`s read, one per descriptor traced back to a constant bank.
     fn global_uploads(
         &self,
         layout: &Layout,
@@ -2584,13 +2051,7 @@ impl Gpu {
         Ok(out)
     }
 
-    /// A sampled depth image, which cannot be uploaded and so is *drawn*.
-    ///
-    /// WebGPU allows a copy into a `depth32float` only from another texture
-    /// of the same format (§26.1.2.2), so the guest's shadow map goes into an
-    /// `r32float` staging image and [`Gpu::load_depth`], the same pass that
-    /// puts a depth *target* on the device: writes it through `frag_depth`.
-    /// That is the workaround the specification itself names.
+    /// A sampled depth image, drawn through [`Gpu::load_depth`] since it cannot be copied in.
     fn shadow_texture(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -2608,15 +2069,13 @@ impl Gpu {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            // Copied into as well as drawn into: a layer the device holds the
-            // depth of is copied over the one drawn from guest memory.
+            // Copied into as well as drawn into.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        // Whatever the guest stored it as, the staging image is the one
-        // `load_depth` reads: `r32float`, one value a texel.
+        // The staging image `load_depth` reads: `r32float`.
         let depths = self.shadow_depths(upload)?;
         let staging = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow upload"),
@@ -2650,14 +2109,7 @@ impl Gpu {
         Ok(texture)
     }
 
-    /// One `f32` a texel out of a sampled depth image: its red channel,
-    /// which is the one a comparison reads.
-    ///
-    /// A shadow map is not always stored in a depth format: a title is free
-    /// to render its depth into an ordinary colour surface and compare that,
-    /// and A Short Hike does, so this reads whichever format the descriptor
-    /// named. Red rather than the first byte, because `sample_compare_with`
-    /// compares `texel[0]` of the *decoded* texel and the two have to agree.
+    /// One `f32` per texel: the decoded red channel, which a comparison reads.
     fn shadow_depths(
         &self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -2692,10 +2144,7 @@ impl Gpu {
         Ok(out)
     }
 
-    /// The sampler a texture is read through. `compare` is the *binding's*
-    /// question, not the descriptor's: a `texs.dc` asks for a comparison
-    /// whatever the TSC left in `depth_compare_enable`, and the rasterizer
-    /// answers such a sample with `Always`. See `sample_compare_with`.
+    /// `compare` is the binding's question, not the descriptor's.
     fn sampler(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -2706,15 +2155,7 @@ impl Gpu {
             Wrap::Repeat => wgpu::AddressMode::Repeat,
             Wrap::Mirror => wgpu::AddressMode::MirrorRepeat,
             Wrap::ClampToEdge => wgpu::AddressMode::ClampToEdge,
-            // WebGPU has no border mode at all -- `clamp-to-edge`, `repeat`
-            // and `mirror-repeat` are the whole list -- and asking wgpu's web
-            // backend for one is not an error it returns but a panic it
-            // raises, which on wasm stops the core.
-            //
-            // Edge is also what this has to agree with: the rasterizer takes
-            // `ClampToBorder` down the same arm as `ClampToEdge`
-            // (`texture::Wrap`), so neither renderer samples a border colour
-            // and the two match. When one of them learns to, they both must.
+            // WebGPU has no border mode, and the rasterizer also samples border as edge.
             Wrap::ClampToBorder => wgpu::AddressMode::ClampToEdge,
         };
         let filter = |linear: bool| {
@@ -2762,16 +2203,7 @@ impl Gpu {
             .clone()
     }
 
-    /// A shader module, without asking the device whether it liked it.
-    ///
-    /// Asking means an error scope, and popping one means waiting. What the
-    /// device rejects arrives through its uncaptured-error handler instead
-    /// and is read at the start of the next draw: a frame late, which is
-    /// what "do not block" costs and is cheap: the WGSL has already been
-    /// through `naga` before it gets here.
-    /// The module for this WGSL, with the cache key that named it, which is
-    /// a hash of the source, and so identifies the module to a pipeline key
-    /// as well.
+    /// The module for this WGSL and its cache key; rejections arrive via the error handler.
     fn module(&mut self, what: &str, source: &str) -> (u64, wgpu::ShaderModule) {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2795,9 +2227,7 @@ impl Gpu {
         self.failed.lock().ok().and_then(|mut e| e.fresh.take())
     }
 
-    /// Every distinct rejection the device has raised, and how many it has
-    /// raised in total: for the report, which is the only channel a browser
-    /// has. Taking nothing: a rejection stays reportable for the whole run.
+    /// Every distinct rejection and the total count, without draining.
     fn device_errors(&self) -> (u64, Vec<String>) {
         match self.failed.lock() {
             Ok(e) => (e.count, e.distinct.clone()),
@@ -2805,11 +2235,9 @@ impl Gpu {
         }
     }
 
-    /// A buffer holding `bytes`, for the draw in progress: see
-    /// [`Gpu::scratch`].
+    /// A buffer for the draw in progress; see [`Gpu::scratch`].
     fn buffer(&mut self, what: &str, bytes: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
-        // Padded to four bytes, which every buffer binding wants and a
-        // twelve-byte index buffer is not.
+        // Padded to four bytes.
         let mut padded = bytes.to_vec();
         while !padded.len().is_multiple_of(4) || padded.is_empty() {
             padded.push(0);
@@ -2825,21 +2253,8 @@ impl Gpu {
         buffer
     }
 
-    /// Decide how a draw reaches its surfaces.
-    ///
-    /// The expanded route is the default, and the reason is *where the
-    /// samples are*. Maxwell puts them at the centres of the texels they are
-    /// stored in, which is exactly where rendering the expanded surface one
-    /// texel at a time tests coverage, so that route reproduces the
-    /// rasterizer's frame texel for texel. WebGPU's sample positions are
-    /// fixed by the spec at a rotated grid that is not Maxwell's and cannot
-    /// be programmed, so the device's own multisampling anti-aliases every
-    /// edge *differently*: correct, and not the reference.
-    ///
-    /// What the device's route buys is shading once per pixel instead of once
-    /// per sample, which at `4x4` is sixteen times the fragment work. That is
-    /// worth having and it is not worth having silently, so it is
-    /// [`Gpu::device_msaa`] and it is off.
+    /// Decide how a draw reaches its surfaces. The expanded route is the default because
+    /// it reproduces Maxwell's texel-centre sample positions exactly.
     fn route(
         &self,
         state: &Pipeline,
@@ -2850,8 +2265,7 @@ impl Gpu {
             return Ok(Render::Direct);
         }
         if state.per_pixel_coverage {
-            // Every texel of a pixel's tile takes the same value, so a mask
-            // that keeps some of them and not others has nothing to act on.
+            // Every texel of a pixel's tile takes the same value, so a partial mask cannot apply.
             let all = (1u64 << state.samples) - 1;
             if u64::from(state.sample_mask) & all != all || state.alpha_to_coverage {
                 return Err("a draw with coverage per pixel and a mask that is per sample".into());
@@ -2868,8 +2282,7 @@ impl Gpu {
             },
             depth.and_then(|d| d.depth_kind()).map(depth_texture_format),
         ];
-        // Every attachment of a pass has to have the same sample count, so
-        // one format the device will not multisample decides it for both.
+        // All attachments of a pass share one sample count.
         let offered = self.device_msaa
             && formats
                 .into_iter()
@@ -2878,12 +2291,7 @@ impl Gpu {
         if offered {
             return Ok(Render::Companion(Shape::Multisampled(state.samples)));
         }
-        // The expanded route tests coverage at texel centres, because that is
-        // where a fragment is. A guest that has moved its samples somewhere
-        // else inside their texels is asking for coverage neither route can
-        // express: the device's positions are fixed by the spec and not
-        // Maxwell's either, so this is a draw to hand back rather than one
-        // to draw a fraction of a texel wrong.
+        // Samples moved off texel centres cannot be expressed by either route.
         if !state.grid.samples_at_texel_centres() {
             return Err("a draw with programmed sample locations".into());
         }
@@ -2891,18 +2299,8 @@ impl Gpu {
     }
 
     /// Whether this adapter will render `samples` samples into `format`.
-    ///
-    /// Core WebGPU guarantees four and nothing else, and a browser offers
-    /// exactly that; a native adapter usually adds two and eight. Which is
-    /// why there are two ways to render a multisampled surface here, asking
-    /// is how a draw picks one.
     fn samples_supported(&self, format: wgpu::TextureFormat, samples: u32) -> bool {
-        // The adapter's answer is only the device's answer when the device
-        // was given `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`. Without it a
-        // device permits the counts the spec guarantees and no more, and
-        // asking the adapter anyway is how a `2x1` draw built a two-sample
-        // pipeline that the device rejected, silently, leaving the surface
-        // exactly as empty as if nothing had been drawn.
+        // The adapter's answer applies only with `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`.
         let features = self.device.features();
         let flags = if features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
             self._adapter.get_texture_format_features(format).flags
@@ -2912,13 +2310,7 @@ impl Gpu {
         flags.sample_count_supported(samples)
     }
 
-    /// Give the surface at `addr` a companion of `shape`, replacing whatever
-    /// it has.
-    ///
-    /// A frame that changes its mind, the same surface drawn with per-sample
-    /// coverage and then with per-pixel: is why replacing is a case rather
-    /// than an error: what is already on the companion goes back into the
-    /// expanded surface first, and the new one is gathered out of it.
+    /// Give the surface at `addr` a companion of `shape`, resolving any previous one first.
     fn companion(
         &mut self,
         addr: u64,
@@ -2949,14 +2341,11 @@ impl Gpu {
             sample_count: samples,
             dimension: wgpu::TextureDimension::D2,
             format,
-            // No copy usage at all: a multisampled texture accepts none, and
-            // everything that reads this one reads it through a shader.
+            // A multisampled texture accepts no copy usage.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        // What is already in the surface has to be in the companion, or a
-        // draw that blends against it (or tests depth against it) reads a
-        // texture nothing has written.
+        // Fill the companion from the surface.
         let source = self
             .held
             .get(&addr)
@@ -2988,8 +2377,7 @@ impl Gpu {
         Ok(())
     }
 
-    /// Drop the companion of the surface at `addr` without putting it back,
-    /// for a caller that is about to overwrite every texel of the surface.
+    /// Drop the companion without resolving it, for a caller about to overwrite the surface.
     fn discard_companion(&mut self, addr: u64) {
         if let Some(held) = self.held.get_mut(&addr) {
             if let Some(companion) = held.companion.take() {
@@ -2998,8 +2386,7 @@ impl Gpu {
         }
     }
 
-    /// Put what the companion of the surface at `addr` holds back into it,
-    /// and stop holding it.
+    /// Resolve the companion back into the surface and drop it.
     fn resolve_companion(&mut self, addr: u64) -> std::result::Result<(), String> {
         let Some(held) = self.held.get_mut(&addr) else {
             return Ok(());
@@ -3075,8 +2462,7 @@ impl Gpu {
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            // Every texel of the destination is written, so
-                            // there is nothing to preserve under it.
+                            // Every texel of the destination is written.
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
                         },
@@ -3109,8 +2495,7 @@ impl Gpu {
         Ok(())
     }
 
-    /// The pipeline for one resampling direction, built once per shape it
-    /// moves between.
+    /// The pipeline for one resampling direction, built once per shape.
     fn resample_pipeline(
         &mut self,
         key: ResampleKey,
@@ -3182,13 +2567,7 @@ impl Gpu {
         Ok(pipeline)
     }
 
-    /// Clear part or all of the surfaces a `ClearBuffers` names, on the
-    /// device.
-    ///
-    /// A clear that covers a whole surface is the cheapest thing here and the
-    /// most common: it is a load operation, and a surface about to be
-    /// overwritten whole need not be uploaded at all, which is a megabyte a
-    /// frame that used to cross the bus twice for nothing.
+    /// Clear part or all of the surfaces a `ClearBuffers` names; whole clears skip the upload.
     fn clear_on_device(
         &mut self,
         color: Option<(Target, [f32; 4], [bool; 4])>,
@@ -3213,19 +2592,14 @@ impl Gpu {
             .flatten()
             .map(|t| (t, whole))
         {
-            // Nothing reads a surface that is about to be written whole, so
-            // nothing has to be uploaded to write it.
+            // A surface about to be written whole need not be uploaded.
             if blank {
                 self.hold_blank(&target).map_err(|e| format!("{e:?}"))?;
-                // Whatever a companion holds is about to be overwritten, so
-                // it is dropped rather than scattered back into the surface
-                // first. The next draw gathers a fresh one out of what the
-                // clear leaves.
+                // The companion is about to be overwritten, so drop it.
                 self.discard_companion(target.addr);
             } else {
                 self.hold(&target, ctx).map_err(|e| format!("{e:?}"))?;
-                // A clear of part of the surface is not: what the companion
-                // holds outside the rectangle survives it.
+                // A partial clear keeps what the companion holds outside the rectangle.
                 self.resolve_companion(target.addr)?;
             }
             let held = self
@@ -3255,8 +2629,7 @@ impl Gpu {
                 .map(depth_texture_format),
             write_mask: color.map_or([true; 4], |(_, _, channels)| channels),
         };
-        // A partial clear draws, so it needs its value where a shader can
-        // read it. A whole one does not, and pays nothing for this.
+        // Only a partial clear needs its value in a uniform.
         let uniform = (!whole).then(|| {
             let [r, g, b, a] = color.map_or([0.0; 4], |(_, colour, _)| colour);
             let mut bytes = Vec::new();
@@ -3358,14 +2731,12 @@ impl Gpu {
         channels: [bool; 4],
     ) -> std::result::Result<(), String> {
         if layer != 0 {
-            // A layered surface is `layer_stride` bytes further on, and
-            // nothing here holds a surface by anything but its address.
+            // Surfaces are held by address only, so layers are unsupported.
             return Err(format!("a clear of layer {layer}"));
         }
         let slot = engine.render_target_slot(target);
         let Some(surface) = Target::color(engine, slot).map_err(|e| format!("{e:?}"))? else {
-            // Nothing bound is nothing to clear, which is what the
-            // rasterizer answers too.
+            // Nothing bound is nothing to clear, which is what the rasterizer answers too.
             return Ok(());
         };
         let rect = self.clear_texels(engine, &surface)?;
@@ -3390,13 +2761,7 @@ impl Gpu {
         self.clear_on_device(None, Some((surface, engine.clear_depth_value())), rect, ctx)
     }
 
-    /// The rectangle a clear covers, in the surface's own texels.
-    ///
-    /// `clear_rectangle` answers in pixels, because that is what the scissor
-    /// and the viewport it is cut against are in. On a multisampled surface a
-    /// pixel is a tile of texels, and every one of them is cleared, so the
-    /// rectangle scales, which is the same reading `Engine3D::clear_color`
-    /// makes of it.
+    /// The clear rectangle in texels: pixels scaled by the sample tile.
     fn clear_texels(
         &self,
         engine: &Engine3D,
@@ -3413,12 +2778,10 @@ impl Gpu {
         })
     }
 
-    /// Hold a surface without reading it, for a clear that is about to write
-    /// every texel of it.
+    /// Hold a surface without reading it, for a clear that writes every texel.
     fn hold_blank(&mut self, target: &Target) -> Result<()> {
         match self.held.get(&target.addr) {
-            // Already here and already this surface: the clear writes it
-            // where it is.
+            // Already held: clear it in place.
             Some(held) if held.target == *target => return Ok(()),
             Some(_) => {
                 if let Some(held) = self.held.remove(&target.addr) {
@@ -3473,8 +2836,7 @@ impl Gpu {
         }))
     }
 
-    /// The pipeline that clears a rectangle of these formats, built once per
-    /// combination. See [`CLEAR_RECT_WGSL`].
+    /// The rectangle clear pipeline for these formats, built once. See [`CLEAR_RECT_WGSL`].
     fn clear_pipeline(
         &mut self,
         key: ClearKey,
@@ -3531,14 +2893,7 @@ impl Gpu {
         Ok(pipeline)
     }
 
-    /// Give back everything the draw that has just finished made, whether it
-    /// was submitted or handed to the rasterizer, nothing will read any of it
-    /// again.
     /// Drop every cached texture the guest has written over.
-    ///
-    /// The pages come from the same bitmap the JIT drains, so this sees pages
-    /// nothing here cached from as well; those find no owner and cost a miss
-    /// in a hash map.
     fn evict_written(&mut self, ctx: &mut ExecCtx) {
         if !ctx.mem.has_dirty_gpu() {
             return;
@@ -3558,9 +2913,7 @@ impl Gpu {
         }
     }
 
-    /// Give a cached texture's device copy back, destroyed rather than merely
-    /// dropped: in a browser a dropped texture waits on a collector, and this
-    /// is a whole image.
+    /// Destroy a cached texture's device copy.
     fn drop_gpu_texture(&mut self, key: &TextureKey, bytes: u64) {
         if let Some(made) = self.gpu_textures.remove(key) {
             for (_, texture) in made {
@@ -3570,11 +2923,7 @@ impl Gpu {
         }
     }
 
-    /// Keep what this draw read, and watch the memory it came from.
-    ///
-    /// The pages a texture's source covers are what a later write to it is
-    /// noticed through, so a texture with none of them is not kept: its bytes
-    /// could change with nothing to say so.
+    /// Keep what this draw read and watch its pages; textures with no watchable pages are not kept.
     fn remember_textures(&mut self, ctx: &mut ExecCtx) {
         for (page, key) in std::mem::take(&mut self.shader_to_watch) {
             ctx.mem.mark_gpu_page(page << PAGE_BITS);
@@ -3585,20 +2934,7 @@ impl Gpu {
                 continue;
             }
             self.texture_misses += 1;
-            // `source_len` is an upper bound on where a read could reach,
-            // `dense.max(strided)` in `upload.rs`, and not the size of the
-            // allocation, which a title routinely maps less of: Asphalt 9's
-            // textures claim 16 MiB against a 6 MiB mapping.
-            //
-            // So the walk stops where the mapping does and keeps what it
-            // found. Bytes that are not mapped cannot be written through this
-            // address space, and the decode did not read them either, it
-            // would have faulted rather than produced the image being cached,
-            // and a faulted upload is a draw on the rasterizer, which
-            // `fallbacks` would have counted. Requiring the whole bound
-            // instead cost this title every texture it had: 240 of 242
-            // decodes in a 40-frame run reproduced an image the cache had
-            // already decoded and would not take.
+            // `source_len` is an upper bound that can exceed the mapping, so stop where the mapping does.
             let end = key.addr.saturating_add(source_len);
             let mut pages: Vec<u32> = Vec::new();
             let mut at = key.addr;
@@ -3618,10 +2954,7 @@ impl Gpu {
             if pages.is_empty() {
                 continue;
             }
-            // Whole-cache rather than least-recently-used: the working set is
-            // a handful of images, so a run that reaches this is one whose
-            // textures have changed wholesale, and picking victims out of a
-            // set that is all about to be replaced buys nothing.
+            // Whole-cache eviction: reaching the limit means the textures changed wholesale.
             let len = bytes.len() as u64;
             if self.cached_bytes + len > TEXTURE_CACHE_BYTES {
                 for (_, made) in self.gpu_textures.drain() {
@@ -3653,29 +2986,18 @@ impl Gpu {
     }
 }
 
-/// How a draw reaches the surfaces it renders into.
-///
-/// Only a multisampled surface has more than one answer. Its samples live in
-/// guest memory as a tile of texels per pixel, and there are two ways to put
-/// them there: let the device multisample and scatter the result, or render
-/// the expanded image directly, one fragment per texel. Neither is a
-/// compromise for the other: the first shades once per pixel, which is what
-/// multisampling *is* and what the rasterizer does; the second works for
-/// every mode on every adapter, which the first does not.
+/// How a draw reaches its surfaces; only multisampled surfaces have a choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Render {
     /// Straight into the held surface, whose texels are its pixels.
     Direct,
-    /// Into the held surface at texel resolution, one fragment per sample.
-    /// The sample mask and alpha-to-coverage are the fragment shader's job
-    /// here, because there is no multisample state to carry them.
+    /// Into the held surface at texel resolution, with the shader handling mask and alpha-to-coverage.
     Expanded,
-    /// Into a companion of this shape, gathered on the way in and scattered
-    /// on the way out.
+    /// Into a companion of this shape, gathered on the way in and scattered on the way out.
     Companion(Shape),
 }
 
-/// Everything a sampler is made of here, and so what one is cached by.
+/// What a sampler is made of, and so what one is cached by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SamplerKey {
     compare: Option<wgpu::CompareFunction>,
@@ -3685,10 +3007,7 @@ struct SamplerKey {
     min: wgpu::FilterMode,
 }
 
-/// Whether a texture and a surface at the same address lay their rows out
-/// the same way in memory: the same tiling and the same stride, which
-/// block-linear counts in whole GOBs. Where they do, a texture no larger than
-/// the surface is the surface's top-left corner, texel for texel.
+/// Whether a texture and a surface at one address share row layout, making the texture its corner.
 fn same_rows(surface: &Target, texture: &TextureKey) -> bool {
     let stride = |layout: SurfaceLayout, row_bytes: u32| match layout {
         SurfaceLayout::BlockLinear { .. } => row_bytes.div_ceil(GOB_WIDTH),
@@ -3698,8 +3017,7 @@ fn same_rows(surface: &Target, texture: &TextureKey) -> bool {
         && stride(surface.layout, surface.row_bytes) == stride(texture.layout, texture.row_bytes)
 }
 
-/// A surface held on the device that stands in for one layer of a sampled
-/// texture, and how it gets there: see [`Gpu::held_layers`].
+/// A held surface standing in for one layer of a sampled texture: see [`Gpu::held_layers`].
 enum HeldLayer {
     /// Copied texture to texture.
     Colour(wgpu::Texture),
@@ -3707,14 +3025,11 @@ enum HeldLayer {
     Depth(wgpu::Texture),
     /// A `depth32float` copied whole into its layer of a shadow map.
     Shadow(wgpu::Texture),
-    /// A larger `depth32float` whose corner a layer of a shadow map is:
-    /// copied whole into an `r32float` through a buffer, and drawn into the
-    /// shadow map by the pass that draws one from guest memory.
+    /// A larger `depth32float` whose corner is drawn into a shadow map layer.
     ShadowCorner(wgpu::Texture),
 }
 
-/// What [`Gpu::check`] settled, for [`Gpu::prepare`] to go on from. The
-/// fields mean what [`Prepared`]'s of the same names do.
+/// What [`Gpu::check`] settled; fields mean what [`Prepared`]'s do.
 struct Checked {
     state: Pipeline,
     render: Render,
@@ -3728,18 +3043,12 @@ struct Checked {
 /// One draw, resolved into everything a device needs.
 struct Prepared {
     state: Pipeline,
-    /// How this draw reaches its surfaces.
     render: Render,
     /// `None` for a depth-only pass.
     color: Option<Target>,
-    /// The extent of the scratch texture the pass draws colour into, when
-    /// the colour target is larger than the depth surface beside it: see
-    /// [`Gpu::prepare`].
+    /// The scratch texture extent when the colour target is larger than the depth surface.
     color_scratch: Option<(u32, u32)>,
-    /// The depth surface the draw reads or writes, or `None` for a draw that
-    /// does neither, which is not the same as a draw with no depth surface
-    /// bound. A test of `Always` with writes off depends on nothing, so
-    /// attaching the surface would upload it for no reason.
+    /// The depth surface, or `None` for a draw that neither tests nor writes depth.
     depth: Option<Target>,
     vs: Translation,
     fs: Translation,
@@ -3748,65 +3057,27 @@ struct Prepared {
     uploads: Uploads,
     /// The memory each stage's `ldg`s read, by descriptor.
     globals: Vec<GlobalUpload>,
-    /// Vertices for a sequential draw, indices for an indexed one, or, for
-    /// a topology that had to be assembled, the length of
-    /// [`Prepared::assembled`].
+    /// Vertices, indices, or the length of [`Prepared::assembled`].
     count: u32,
-    /// The index list that makes this draw a triangle list, for a topology
-    /// WebGPU has no name for, paired with the base vertex to draw it with.
-    ///
-    /// Built with `raster::assemble`, which is the same call the rasterizer
-    /// assembles a fan or a quad with, so the two cannot come to disagree
-    /// about which triangles a quad is made of.
+    /// Triangle list indices and base vertex for topologies WebGPU lacks, from `raster::assemble`.
     assembled: Option<(Vec<u32>, i32)>,
-    /// `gl_InstanceID`, which WebGPU reproduces as the first instance of a
-    /// one-instance draw.
+    /// `gl_InstanceID`, reproduced as the first instance of a one-instance draw.
     instance: u32,
 }
 
 impl Gpu {
-    /// Read a draw out of the engine, or say what stops it running here.
-    ///
-    /// Everything this reaches for is `switch-core`'s: the translation, the
-    /// pipeline state and the uploads all already exist and are already
-    /// tested against the rasterizer. What is left is arranging them.
-    /// The part of [`Gpu::prepare`] that decides whether a draw can run
-    /// here at all, and nothing that costs an upload: the pipeline state,
-    /// the surfaces, how the pass reaches them, and both translations, which
-    /// are cached. A frame the rasterizer has asks each draw this, so that it
-    /// can tell when the device could take the frames back. See
-    /// [`Gpu::software_frame`].
+    /// Decide whether a draw can run here, without uploading anything.
     fn check(&mut self, engine: &Engine3D, ctx: &ExecCtx) -> std::result::Result<Checked, String> {
         let mut state = Pipeline::of(engine).map_err(|e| e.to_string())?;
         let targets = Targets::of(engine).map_err(|e| format!("{e:?}"))?;
         let color = targets.color;
-        // A draw that neither tests nor writes depth depends on the surface
-        // not at all, and attaching it would upload a megabyte to be read
-        // once and put straight back. Every other draw gets it.
+        // Attach depth only for draws that test or write it.
         let uses_depth = state
             .depth
             .is_some_and(|d| d.write_enabled || d.compare != state::Compare::Always);
         let depth = targets.depth.filter(|_| uses_depth);
-        // WebGPU wants every attachment of a pass to be the same size, and a
-        // draw only ever touches where both surfaces exist: see
-        // `engine::threed::draw_extent`, which confines the rasterizer the
-        // same way. Where the two differ, the pass is the size of the
-        // intersection.
-        //
-        // A depth surface larger than the colour one is attached cropped:
-        // the rest of it is read and written by nobody. Its stride stays the
-        // surface's, because that is what its block-linear addressing is in
-        // terms of.
-        //
-        // A colour target larger than the depth one cannot be cropped the
-        // same way. It is held on the device at its own extent, and a
-        // smaller `Target` at the same address reads as the guest rebinding
-        // it: the held surface would be evicted, its latest draws still on
-        // the device, and the crop uploaded from guest memory without them.
-        // So the pass draws into a scratch texture the size of the depth
-        // surface, filled from the held one and copied back into it
-        // afterwards. That only works that way round: WebGPU copies part of
-        // a colour texture but only the whole of a depth one.
+        // Attachments must match in size, so the pass covers the intersection. A larger depth surface is
+        // cropped; a larger colour target draws into a scratch texture copied back afterwards.
         let mut depth = depth;
         let mut color_scratch = None;
         if let (Some(full_color), Some(full_depth)) = (color, depth) {
@@ -3821,9 +3092,7 @@ impl Gpu {
                 });
             } else if dw <= cw && dh <= ch {
                 color_scratch = Some((dw, dh));
-                // The pipeline confines its scissor to the depth surface only
-                // for a draw that reaches it, and a depth write with the test
-                // off is attached here without doing so.
+                // The scissor is confined to the depth surface only for draws that reach it.
                 let (pixels_x, pixels_y) = state.grid.pixels(dw, dh);
                 state.scissor.x1 = state.scissor.x1.min(pixels_x);
                 state.scissor.y1 = state.scissor.y1.min(pixels_y);
@@ -3846,8 +3115,7 @@ impl Gpu {
             );
         }
 
-        // Unfolded, so a module depends only on the shader binary and not on
-        // what happened to be in a constant buffer when it was translated.
+        // Unfolded, so a module depends only on the shader binary.
         let vs = timed!(
             self,
             translate,
@@ -3887,34 +3155,21 @@ impl Gpu {
 
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
         let mut fs_layout = Layout::of(&fs, Stage::Fragment);
-        // A depth-only pass has nowhere to put a colour, and a fragment
-        // shader that names `@location(0)` with no attachment behind it is a
-        // pipeline that will not build.
+        // A depth-only pass has no colour output.
         fs_layout.targets = u32::from(color.is_some());
-        // The two stages have to name the same varyings: WebGPU will not
-        // link a fragment input nothing produces. The union is what agrees
-        // with the rasterizer, where a varying the vertex shader never wrote
-        // reads as zero rather than as absent.
+        // Both stages must name the same varyings; missing ones read as zero.
         let mut varyings = vs_layout.varyings.clone();
         varyings.extend(fs_layout.varyings.iter().copied());
         varyings.sort_unstable();
         varyings.dedup();
         vs_layout.varyings = varyings.clone();
         fs_layout.varyings = varyings;
-        // And on the same qualifier for each of them. Only the fragment
-        // program's `ipa` says which are sampled at the centroid, so the
-        // vertex stage is told rather than asked.
+        // Only the fragment program says which varyings are centroid.
         vs_layout.centroid_varyings = fs_layout.centroid_varyings.clone();
-        // Neither correction is anything the program says. Negated, because
-        // WebGPU mirrors y on its own: the two agree exactly when the
-        // guest's transform mirrors too, and the shader has to do it when
-        // the guest's does not. See `Layout::flip_y`.
+        // Negated because WebGPU mirrors y itself. See `Layout::flip_y`.
         vs_layout.flip_y = !state.viewport.flip_y;
         vs_layout.depth_minus_one_to_one = state.viewport.depth_minus_one_to_one();
-        // Rendering the expanded surface directly makes every texel its own
-        // fragment, so there is no multisample state to carry the sample mask
-        // or alpha-to-coverage and the shader does both. `raster` applies the
-        // mask before shading and the coverage after, and so does this.
+        // On the expanded route the shader applies the sample mask and alpha-to-coverage.
         if render == Render::Expanded {
             fs_layout.coverage = Some(Coverage {
                 samples_x: state.grid.samples_x,
@@ -3924,8 +3179,7 @@ impl Gpu {
                 alpha_to_coverage: state.alpha_to_coverage,
             });
         }
-        // Nor is which attributes are integers: the format is in the draw's
-        // registers, and WebGPU will not feed one to a `vec4<f32>` input.
+        // Integer attributes come from the draw's registers.
         vs_layout.integer_attributes = state
             .vertex_buffers
             .iter()
@@ -3933,9 +3187,7 @@ impl Gpu {
             .filter(|a| a.format.base() != AttributeBase::Float)
             .map(|a| (a.location as usize, a.format.base()))
             .collect();
-        // Nor is which of them are BGRA. WebGPU has no BGRA vertex format,
-        // so the swap happens in the entry point, which is where
-        // `raster::fetch_attribute` does it too.
+        // WebGPU has no BGRA vertex format, so the entry point swaps.
         vs_layout.bgra_attributes = state
             .vertex_buffers
             .iter()
@@ -3979,8 +3231,7 @@ impl Gpu {
                 .iter()
                 .map(|&b| (ShaderStage::Fragment, u32::from(b))),
         );
-        // Out of `self` and back, because the closure below holds it while
-        // `timed!` wants `self` for the clock.
+        // Taken out of `self` because the closure holds it while `timed!` borrows `self`.
         let cache = std::mem::take(&mut self.texture_cache);
         let mut hits = 0u64;
         let uploads = timed!(self, upload, {
@@ -4009,9 +3260,7 @@ impl Gpu {
             }
         }
 
-        // The swizzle is in the descriptor, which is guest memory the draw
-        // points at, so the translation cannot know it and the layout has to
-        // be told. WebGPU has no per-texture component swizzle.
+        // The texture swizzle is in the descriptor, and WebGPU has no per-texture swizzle.
         for (layout, stage) in [
             (&mut vs_layout, ShaderStage::VertexB),
             (&mut fs_layout, ShaderStage::Fragment),
@@ -4027,19 +3276,14 @@ impl Gpu {
             }
         }
 
-        // A fan, a quad strip and a polygon are a triangle list once their
-        // indices have been rewritten, which is what `Pipeline::expand` names
-        // and what the rasterizer does to them too.
+        // Fans, quad strips and polygons become triangle lists.
         let assembled = match state.expand {
             Some(primitive) => {
                 let triangles =
                     switch_core::gpu::raster::assemble(primitive, engine.last_draw.count);
                 let mut indices = Vec::with_capacity(triangles.len() * 3);
                 match &uploads.index {
-                    // An indexed draw's triples are positions in its index
-                    // list, so each one names the index to draw with. The
-                    // base vertex is the one the unexpanded draw would have
-                    // used: the vertex buffer starts at the lowest index.
+                    // Indexed: triples index the index list; base vertex is the lowest index.
                     Some(index) => {
                         let list = index.indices();
                         for triangle in triangles {
@@ -4051,9 +3295,7 @@ impl Gpu {
                         }
                         Some((indices, -(index.lowest as i32)))
                     }
-                    // A sequential draw's triples are vertex ordinals, and
-                    // the upload starts at the draw's first vertex, so the
-                    // ordinals are already what to draw with.
+                    // Sequential: triples are vertex ordinals, already relative to the upload.
                     None => {
                         for triangle in triangles {
                             indices.extend_from_slice(&triangle);
@@ -4069,8 +3311,7 @@ impl Gpu {
         globals.extend(self.global_uploads(&fs_layout, ShaderStage::Fragment, &uploads, ctx)?);
 
         if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {
-            // What the draw renders into, so the texture lines below read as
-            // passes: which surface each one fills and which the next samples.
+            // Trace what the draw renders into.
             switch_core::traceln!(
                 "[gpu-draw] colour={} depth={} state={:?} viewport={:?} scissor={:?} \
                  topology={:?} call={:?} vertex_buffers={} cull={:?} front={:?} buffers={:?}",
@@ -4089,8 +3330,7 @@ impl Gpu {
                 state.front_face,
                 state.vertex_buffers
             );
-            // A buffer bound over a surface still on the device reads it as
-            // stale as a texture would.
+            // A buffer over a held surface would read stale memory too.
             let held_at = |addr: u64| {
                 self.held
                     .values()
@@ -4119,9 +3359,7 @@ impl Gpu {
                     t.swizzle,
                     t.sampler,
                     t.key.addr,
-                    // Sampling a surface still on the device reads guest
-                    // memory the device has not written back yet, whether
-                    // the texture starts where the surface does or inside it.
+                    // Sampling a held surface would read stale guest memory.
                     match self.held.values().find(|h| {
                         (h.target.addr..h.target.addr + h.target.len()).contains(&t.key.addr)
                     }) {
@@ -4171,11 +3409,7 @@ impl Gpu {
             .program(stage)
             .ok_or_else(|| format!("no {stage:?} program"))?;
         let key = (binding.addr, stage);
-        // A hit still has to be checked. The decode resolves a `brx`'s jump
-        // table out of a constant buffer, so a program is only the same
-        // program while those words are, and unlike the program's own pages,
-        // constant buffers are rewritten every frame, so watching their pages
-        // would evict this on every draw instead of validating it.
+        // Validate hits: a `brx` jump table read from a constant buffer may have changed.
         if let Some(cached) = self.shader_cache.get(&key) {
             if cached.reads.constants_unchanged(ctx) {
                 self.shader_hits += 1;
@@ -4191,25 +3425,19 @@ impl Gpu {
         .map_err(|e| format!("{e:?}"))?;
         let caps = wgsl::Caps {
             subgroups: self.features().contains(wgpu::Features::SUBGROUP),
-            // On the web the browser compiles the text and wants the
-            // directive; natively naga does, and rejects it.
+            // A browser wants the directive; naga rejects it.
             subgroup_enable: cfg!(target_arch = "wasm32"),
         };
         let translation =
             wgsl::translate_for(&Compiled::new(&program), caps).map_err(|e| e.to_string())?;
-        // The decode read through the GPU address space, so its pages are
-        // virtual. Watching one means the CPU page behind it, the same walk
-        // the texture cache makes, and a page with nothing behind it cannot
-        // be written through this address space, so there is nothing to watch.
+        // Watch the CPU page behind each virtual page the decode read.
         for &page in &reads.pages {
             if let Some((cpu, _)) = ctx.vmm.translate(page << PAGE_BITS) {
                 self.shader_to_watch
                     .push(((u64::from(cpu) >> PAGE_BITS) as u32, key));
             }
         }
-        // Whole-cache rather than least-recently-used, as the texture cache
-        // does above: a run that reaches this is one whose shaders have
-        // changed wholesale, and a title only ever has a few dozen.
+        // Whole-cache eviction, as for textures.
         if self.shader_cache.len() >= SHADER_CACHE_ENTRIES {
             self.shader_cache.clear();
             self.shader_pages.clear();
@@ -4242,11 +3470,7 @@ impl Renderer for Gpu {
         if self.give_up() {
             return self.software.draw(engine, ctx);
         }
-        // Anything at all going wrong here runs the draw on the rasterizer
-        // instead. That is not timidity: the rasterizer is the reference, so
-        // a frame is always either right or a frame the reference produced,
-        // and `cmp` against it measures how much of the work this actually
-        // did rather than how much it got away with.
+        // Any failure runs the draw on the rasterizer.
         let index = self.in_frame;
         self.in_frame += 1;
         if self
@@ -4257,16 +3481,12 @@ impl Renderer for Gpu {
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
         }
-        // A frame the device is not rendering all of, it is not rendering any
-        // of. See [`Gpu::software_frame`]. Nothing is held, so the flush
-        // here has nothing to hand back after the first draw of it.
+        // See [`Gpu::software_frame`].
         if self.software_frame {
             self.check_for_release(engine, ctx);
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
         }
-        // Anything the guest wrote since the last draw is no longer what was
-        // read from it, whoever wrote it and whatever they meant by it.
         self.evict_written(ctx);
         let mut route = None;
         let attempt = match self.prepare(engine, &*ctx) {
@@ -4276,12 +3496,9 @@ impl Renderer for Gpu {
             }
             Err(why) => Err(why),
         };
-        // What `prepare` read, now that there is a mutable `ExecCtx` to watch
-        // its pages through. After the draw rather than before: a draw that
-        // failed read the same bytes, and they are as reusable either way.
+        // Watch `prepare`'s reads now that `ctx` is mutable.
         self.remember_textures(ctx);
-        // Whether it was submitted or abandoned, nothing reads this draw's
-        // buffers and textures again. See [`Gpu::scratch`].
+        // See [`Gpu::scratch`].
         self.release_scratch();
         match attempt {
             Ok(()) => {
@@ -4297,8 +3514,7 @@ impl Renderer for Gpu {
             }
             Err(why) => self.fall_back(why),
         }
-        // The rasterizer reads and writes guest memory, so it has to be the
-        // truth before a draw runs there.
+        // The rasterizer needs guest memory to be current.
         self.flush(ctx)?;
         self.software.draw(engine, ctx)
     }
@@ -4311,8 +3527,7 @@ impl Renderer for Gpu {
         layer: u32,
         channels: [bool; 4],
     ) -> Result<()> {
-        // A frame starts at its clear, which is where the last one's answer
-        // becomes this one's decision.
+        // A frame starts at its clear.
         self.in_frame = 0;
         if self.deferred_readbacks
             && self.fell_back_this_frame
@@ -4344,9 +3559,7 @@ impl Renderer for Gpu {
             Ok(()) => Ok(()),
             Err(why) => {
                 self.fall_back(why);
-                // The rasterizer writes guest memory, so anything held has to
-                // go back before it does, or the clear would be overwritten
-                // by a surface handed back after it.
+                // Write held surfaces back before the rasterizer clears.
                 self.flush(ctx)?;
                 self.software
                     .clear_color(engine, ctx, target, layer, channels)
@@ -4367,13 +3580,7 @@ impl Renderer for Gpu {
                 .software
                 .clear_depth_stencil(engine, ctx, depth, stencil);
         }
-        // The device holds no stencil at all, `depth32float` and
-        // `depth16unorm` are the two formats a readback can reach, and
-        // neither carries one. So a stencil clear goes straight to guest
-        // memory, which is where the stencil byte lives and stays: nothing
-        // here writes it, and `Target::write_depth` reads it back and puts it
-        // where it was. No flush is owed, because the two never touch the
-        // same bits.
+        // The device holds no stencil, so a stencil clear goes straight to guest memory.
         if stencil {
             self.software
                 .clear_depth_stencil(engine, ctx, false, true)?;
@@ -4403,24 +3610,14 @@ impl Renderer for Gpu {
     }
 
     fn lost(&self) -> bool {
-        // `gave_up` and not `software_frame`: the latch is a decision about
-        // this device, which is working, and replacing it would throw away a
-        // warm cache to reach the same conclusion. A lost device is the one
-        // condition a fresh one actually fixes.
+        // Only a lost device is fixed by replacing it.
         self.gave_up
     }
 
     fn report_json(&self) -> String {
-        // The same numbers `Drop` prints, except that a browser never sees
-        // those: the module outlives the page's interest in it, and stderr
-        // goes nowhere. `software_frame` is the one that matters most, once
-        // it latches, every frame after it is the rasterizer's however well
-        // the device is working.
+        // The `Drop` summary, for the browser.
         let ms = |v: u128| v as f64 / 1000.0;
-        // Nested rather than flattened: the phase that builds modules and the
-        // count of modules built are both called "modules", and one JSON
-        // object cannot hold that name twice: `JSON.parse` keeps whichever
-        // came last and drops the other without saying so.
+        // Nested so the two "modules" keys do not collide.
         let times = match self.times {
             Some(t) => format!(
                 ",\"times\":{{\"translate\":{:.1},\"upload\":{:.1},\"modules\":{:.1},\
@@ -4439,17 +3636,10 @@ impl Renderer for Gpu {
             None => String::new(),
         };
         let reasons: Vec<String> = self.reasons.iter().map(|why| json_string(why)).collect();
-        // A rejection is not a fallback: the backend does not learn about one
-        // until it next asks, so a frame can be counted as wholly the
-        // device's and still be wrong. These two are the only evidence of
-        // that, and a browser sees no stderr.
+        // Device rejections, which fallback counts do not show.
         let (error_count, errors) = self.device_errors();
         let errors: Vec<String> = errors.iter().map(|e| json_string(e)).collect();
-        // `held` is what a flush costs: `flush_inner` writes back every
-        // surface in it, every time, so this growing is the flush time
-        // growing. Nothing caps it, a title that renders to fresh addresses
-        // accumulates them, and the count is the only way to see that from
-        // outside.
+        // `held` grows with flush cost.
         format!(
             "{{\"backend\":\"device\",\"drawn\":{},\"fallbacks\":{},\"pipelines\":{},\
              \"modules\":{},\"held\":{},\"evicted\":{},\"pending\":{},\
@@ -4489,31 +3679,15 @@ impl Renderer for Gpu {
 
 impl Gpu {
     fn flush_inner(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
-        // After a loss the frame is ready: guest memory is the whole truth
-        // again and there is nothing left to wait for. The reason goes out in
-        // the report, not as an error, because a flush runs inside a GPU
-        // submission as well as before a present, and an error there faulted
-        // the guest: Persona 5 Royal's device ran out of memory and the title
-        // stopped, where the rasterizer could have carried on.
+        // After a loss, report rather than error: a flush also runs inside GPU submissions.
         if self.give_up() {
             return Ok(Flush::Done);
         }
-        // Nothing on the device, nothing owed, nothing in flight: guest
-        // memory cannot disagree with a backend holding no surfaces, so there
-        // is nothing to wait for and nothing to land.
-        //
-        // Worth checking because a flush is not once a frame. It also runs
-        // before every fallback draw, and `flush_one` empties `held` as it
-        // writes back, so every flush after a frame's first one reaches this
-        // with all three empty, and used to poll the device to find that out.
-        // On the web that poll cannot even do anything (callbacks come from
-        // the event loop) and still costs a crossing: a browser trace with
-        // *no draws at all* charged 1,755 ms to flush.
+        // Nothing held, owed or in flight: nothing to do (and no poll).
         if self.held.is_empty() && self.evicted.is_empty() && self.pending.is_empty() {
             return Ok(Flush::Done);
         }
-        // Only once per frame: asking again while the first ask is in flight
-        // would copy the same surface twice and read the second copy.
+        // Only once per frame.
         if self.pending.is_empty() {
             timed!(self, flush_ask, {
                 for held in std::mem::take(&mut self.evicted) {
@@ -4525,36 +3699,8 @@ impl Gpu {
                 }
             });
         }
-        // Let the device run its callbacks.
-        //
-        // `Wait` rather than `Poll`, which is not a change of mind about
-        // blocking: on WebGPU it has no effect at all, callbacks are invoked
-        // from the event loop and nothing here can make that happen, so the
-        // browser still gets `Flush::Pending` and the present still waits for
-        // a later slice. Natively it blocks until the copies are done, which
-        // is what the one caller that can afford to block actually wants.
-        //
-        // It matters because a flush is *also* what runs before a draw hands
-        // itself to the rasterizer, and the rasterizer reads guest memory. A
-        // flush that answered "not yet" there left the draw reading whatever
-        // was in memory before the device drew, and the readback then landed
-        // on top of what it wrote. The timeout is so that a submission that
-        // never completes is a dropped frame rather than a hung emulator.
-        //
-        // **This leaves the browser half-fixed, and the other half is not a
-        // browser limit.** There, the map still completes only when the event
-        // loop runs, so a draw that falls back mid-slice still reads stale
-        // memory. The browser-native fix is to *yield*: the backend says it
-        // needs the event loop, the channel suspends the pushbuffer at that
-        // method and `switch_run` returns, and the slice after it resumes with
-        // the readback landed. That is a change to how a channel is driven
-        // rather than anything WebGPU withholds, and the fallback set it
-        // matters for is itself a shortfall in `shader::wgsl`, not a fact
-        // about the platform.
-        // `GPU_DEFER_READBACKS=1` declines the wait, so a native run behaves
-        // the way a browser does: the map completes on some later call
-        // rather than this one. It is how the browser-only half of this is
-        // measured at all.
+        // `Wait` blocks natively and does nothing on the web, where the present waits for a later slice.
+        // `GPU_DEFER_READBACKS=1` skips it to reproduce the browser natively.
         let _ = timed!(self, flush_wait, {
             if self.defer_readbacks {
                 self.device.poll(wgpu::PollType::Poll)
@@ -4571,18 +3717,14 @@ impl Gpu {
             .iter()
             .any(|p| p.state.load(Ordering::Acquire) == MAP_WAITING)
         {
-            // The one place that learns a readback does not land inside the
-            // call that asked for it. From here on a frame is all one
-            // renderer's. See [`Gpu::deferred_readbacks`].
+            // A readback outlived its flush. See [`Gpu::deferred_readbacks`].
             self.deferred_readbacks = true;
             return Ok(Flush::Pending);
         }
         timed!(self, flush_land, {
             for pending in std::mem::take(&mut self.pending) {
                 if pending.state.load(Ordering::Acquire) == MAP_FAILED {
-                    // With the reason, if the device left one: on its own this
-                    // message names the symptom and nothing else, and the cause
-                    // is in the browser rather than in the frame.
+                    // Include the device's reason if it left one.
                     return Err(Error::Gpu(match self.device_error() {
                         Some(e) => format!("the readback was not mapped: {e}"),
                         None => "the readback was not mapped".into(),
@@ -4611,19 +3753,8 @@ mod tests {
         }
     }
 
-    /// Why `shader::wgsl` ends its dispatch function with a `return false;`
-    /// nothing can reach, and the check that will say when it can go.
-    ///
-    /// The dispatch loop has no `break`, so control cannot fall out of it.
-    /// Chrome's Tint knows that and warns `code is unreachable` about the
-    /// statement after it, twice per shader module. naga, which validates the
-    /// same WGSL for every native backend, rejects the function without it.
-    /// The two disagree, native has to compile, so the statement stays and the
-    /// warning is what it costs.
-    ///
-    /// The second assertion is the interesting one: when naga learns what Tint
-    /// already knows, this fails, and the trailing statement, and the console
-    /// full of warnings: can go.
+    /// naga rejects `shader::wgsl`'s dispatch function without its unreachable trailing
+    /// `return false;` (Tint warns about it); this fails once naga stops requiring it.
     #[test]
     fn naga_still_needs_a_return_after_a_loop_that_cannot_fall_through() {
         let Some(gpu) = device() else { return };
@@ -4665,14 +3796,7 @@ mod tests {
         );
     }
 
-    /// The quad swap a browser gets is WGSL a validator accepts.
-    ///
-    /// wgpu's web backend can neither request WebGPU's `subgroups` nor report
-    /// it, so `Caps::NONE` is what every browser device translates under and
-    /// `shader::wgsl::QUAD_SWAP` is what it emits, derivatives, in the
-    /// middle of the dispatch loop, under a `diagnostic` directive that says
-    /// so. naga validates the same text Tint will, and the uniformity rule is
-    /// exactly the one a validator is entitled to refuse over.
+    /// The browser's derivative-based quad swap (`Caps::NONE`) passes validation.
     #[test]
     fn the_quad_swap_a_browser_gets_is_wgsl_naga_accepts() {
         use super::{wgpu, wgsl, Compiled, Layout, Stage};
@@ -4716,9 +3840,7 @@ mod tests {
         assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
     }
 
-    /// Tomodachi Life's two cube-array `tex` forms and its `vmnmx`, the three
-    /// instructions whose draws fell back to the rasterizer and latched every
-    /// frame after them onto it, translate into WGSL naga accepts.
+    /// Tomodachi Life's cube-array `tex` forms and its `vmnmx` translate to valid WGSL.
     #[test]
     fn tomodachi_lifes_cube_array_and_video_min_are_wgsl_naga_accepts() {
         use super::{wgpu, wgsl, Compiled, Layout, Stage};
@@ -4770,10 +3892,7 @@ mod tests {
         assert!(can_blend(wgpu::TextureFormat::Rgba8Unorm, none));
     }
 
-    /// A 10-10-10-2 colour attribute reaches the same pixels on both
-    /// renderers: the device fetches the word and unpacks it in the entry
-    /// point, and the rasterizer unpacks the same word in `fetch_attribute`.
-    /// The values are whole ones and zeros, so no channel lands on a 255th.
+    /// A 10-10-10-2 colour attribute renders the same on both renderers.
     #[test]
     fn a_10_10_10_2_colour_reaches_the_same_pixels_on_both_renderers() {
         const UNORM: u32 = 2;
@@ -4781,8 +3900,7 @@ mod tests {
         for (ty, word) in [
             // Magenta, opaque: red and blue at their largest, alpha 3 of 3.
             (UNORM, 0x3ff | 0x3ff << 20 | 0b11 << 30),
-            // The same through snorm: 511 is 1, -512 clamps to -1 and then
-            // to 0 in the target, and a two-bit 1 is 1.
+            // Through snorm: 511 is 1, -512 clamps to -1 then 0, and a two-bit 1 is 1.
             (SNORM, 0x1ff | 0x200 << 10 | 0x1ff << 20 | 0b01 << 30),
         ] {
             let set_up = move |h: &mut Harness| {
@@ -4806,12 +3924,7 @@ mod tests {
         }
     }
 
-    /// A colour that goes through local memory comes out the same on both
-    /// renderers. The shader is the harness's solid colour with a round trip
-    /// before `exit`: `r0`/`r1`, the interpolated red and green, stored as
-    /// one 64-bit value with `st.64 l[RZ + 0x10]` (the form Tomodachi Life
-    /// falls back on) and loaded straight back. A local memory that dropped
-    /// the store or read the wrong bytes would lose the red.
+    /// A colour through local memory (`st.64 l[RZ + 0x10]` and back) renders the same on both.
     #[test]
     fn a_colour_through_local_memory_reaches_the_same_pixels_on_both_renderers() {
         use switch_core::gpu::shader::isa::{self, MemSize};
@@ -4874,10 +3987,7 @@ mod tests {
         assert_eq!(h.texel(1, 1), 0xffff_00ff, "red survived the round trip");
     }
 
-    /// A lost device hands the frame to the rasterizer without failing the
-    /// flush that finds out. The flush runs inside a GPU submission too, and
-    /// an error there faulted Persona 5 Royal when its device ran out of
-    /// memory. The reason goes into the report instead.
+    /// A lost device falls back without failing the flush.
     #[test]
     fn a_lost_device_is_reported_rather_than_failing_the_flush() {
         use switch_core::gpu::renderer::Renderer;
@@ -4886,7 +3996,7 @@ mod tests {
         h.triangle([1.0, 0.0, 1.0, 1.0]);
         h.draw_with(&mut gpu).expect("the draw");
         *gpu.lost.lock().unwrap() = Some("Out of memory".into());
-        // `flush_with` panics on an error, which is the point.
+        // `flush_with` panics on an error.
         h.flush_with(&mut gpu);
         h.flush_with(&mut gpu);
         let json = gpu.report_json();
@@ -4895,20 +4005,12 @@ mod tests {
     }
 
     /// A rejection the backend never asks about still reaches the report.
-    ///
-    /// The failure this guards is what made a magenta frame in the browser
-    /// read as `0 fell back`: the only production reader of `device_error`
-    /// runs before a pipeline is built, and a title that builds its pipelines
-    /// in the first frames never builds another. Everything the device
-    /// rejected from then on was captured and never looked at, and the report
-    /// had nowhere to put it.
     #[test]
     fn a_rejection_nothing_asked_about_is_still_counted_and_reported() {
         let Some(gpu) = device() else { return };
         assert_eq!(gpu.device_errors(), (0, Vec::new()), "nothing rejected yet");
 
-        // Rejected for a reason that cannot become valid: `bool` is not a
-        // fragment return type WebGPU accepts at a location.
+        // `bool` is not a valid fragment output.
         let _m = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -4925,12 +4027,9 @@ mod tests {
             "the device rejected the module and said nothing"
         );
         assert_eq!(distinct.len(), 1, "one rejection, one distinct message");
-        // Not taken: `device_error` is what drains, and the report has to keep
-        // saying so for the rest of the run.
+        // Not drained.
         assert_eq!(gpu.device_errors(), (count, distinct.clone()));
 
-        // `report_json` is the renderer's, and the page reads it through that
-        // trait rather than through this type.
         use switch_core::gpu::renderer::Renderer;
         let json = gpu.report_json();
         assert!(
@@ -4943,29 +4042,11 @@ mod tests {
         );
     }
 
-    /// Every internal pipeline this backend builds for itself, built.
-    ///
-    /// These are the passes a draw never mentions and a title cannot be asked
-    /// to exercise: the one that puts a depth surface on the device, the two
-    /// that clear part of one, and the four that move a multisampled surface
-    /// between its expanded form and a device companion. All of them are WGSL
-    /// this crate generates, and until this ran the only thing that compiled
-    /// them was a frame: where a rejected module is a silent fallback rather
-    /// than a failure, because nothing here asks the device whether it liked
-    /// what it was given.
+    /// Every internal pipeline this backend builds compiles.
     use switch_core::gpu::renderer::Software;
     use switch_core::gpu::testing::{self, Harness};
 
-    /// A solid white triangle over one of Maxwell's multisample modes,
-    /// rendered by the rasterizer and by the device, as two pictures of the
-    /// same expanded surface.
-    ///
-    /// Solid rather than interpolated on purpose: a colour that is the same
-    /// at all three vertices interpolates to itself, so the only thing left
-    /// to disagree about is *coverage*, which sample of which pixel the
-    /// triangle reached, and which texel of guest memory that sample is. That
-    /// is the whole of what multisampling is, and the whole of what the two
-    /// routes through it have to get right.
+    /// A solid white triangle over a multisample mode, by both renderers; only coverage can differ.
     fn compare(mode: u32, samples_x: u32, samples_y: u32, set_up: impl Fn(&mut Harness)) {
         let Some(mut gpu) = device() else { return };
         let colour = [1.0f32, 1.0, 1.0, 1.0];
@@ -4992,11 +4073,7 @@ mod tests {
             "the draw did not run on the device: {:?}",
             gpu.last_fallback
         );
-        // Nothing in a draw asks the device whether it liked what it was
-        // given (that would mean waiting) so a rejection is silent until
-        // the next draw reads it. A test is the one place that can afford to
-        // ask, and a rejected pass looks exactly like a surface nothing drew
-        // into.
+        // Surface any device rejection before comparing.
         let _ = gpu.device.poll(wgpu::PollType::Poll);
         assert_eq!(gpu.device_error(), None, "the device rejected the pass");
         assert_eq!(
@@ -5005,18 +4082,12 @@ mod tests {
         );
     }
 
-    /// One draw, set up by `set_up`, rendered by the rasterizer and by the
-    /// device, colour and depth both.
+    /// One draw, rendered by both renderers, colour and depth.
     fn agrees(set_up: impl Fn(&mut Harness)) {
         agrees_shading(Harness::new, |_| {}, set_up);
     }
 
-    /// [`agrees`], for a draw whose fragment shader is not the harness's own
-    /// and a device told what to pretend it cannot do.
-    ///
-    /// `new` builds the harness rather than the caller setting the shader on
-    /// one, because the program is written at construction; `tune` gets the
-    /// device before either picture is drawn.
+    /// [`agrees`] with a custom fragment shader, and `tune` applied to the device.
     fn agrees_shading(
         new: impl Fn() -> Harness,
         tune: impl Fn(&mut super::Gpu),
@@ -5050,25 +4121,8 @@ mod tests {
         assert_eq!(got.1, want.1, "the depth surface differs");
     }
 
-    /// A depth-tested draw, which is what this backend could not do at all
-    /// before it held a depth buffer.
-    ///
-    /// The depth surface is checked as well as the colour one, because it is
-    /// guest memory the rasterizer owns: a frame that comes out right with a
-    /// depth buffer left untouched is a frame the *next* draw gets wrong.
-    /// A shader that reads its neighbour's register reads the same neighbour
-    /// on the device as on the rasterizer.
-    ///
-    /// `testing::derivative_fragment_shader` is Checkpoint's antialiased
-    /// text: a `shfl.bfly` against the pixel beside it, then a subtract. On a
-    /// browser device the three quad operations are the ones
-    /// `shader::wgsl::QUAD_SWAP` defines out of derivatives, and this is the
-    /// claim that makes it worth defining: that the word it recovers is the
-    /// neighbour's exactly, so the surface comes out identical rather than
-    /// close.
-    ///
-    /// Run both ways, because a native adapter has the device's own quad
-    /// operations and would otherwise only ever test those.
+    /// A shader reading its quad neighbour's register reads the same on both renderers,
+    /// with native quad operations and with the browser's `QUAD_SWAP`.
     #[test]
     fn a_shuffling_fragment_shader_reads_the_same_neighbour_the_rasterizer_reads() {
         for web_limits in [false, true] {
@@ -5077,10 +4131,7 @@ mod tests {
                 move |gpu| gpu.set_web_limits(web_limits),
                 |h| {
                     h.depth_target(0x0207);
-                    // Red ramps from 0 to 1 across the 16-texel target, so
-                    // the difference between neighbours is a sixteenth
-                    // everywhere and a lane that read itself would leave a
-                    // zero.
+                    // Red ramps across the target, so neighbours differ by a sixteenth.
                     h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
                     h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
                     h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
@@ -5089,21 +4140,13 @@ mod tests {
         }
     }
 
-    /// A `tld4` gathers the same four texels on the device as on the
-    /// rasterizer, in the same order, for the channel it names after the
-    /// descriptor's swizzle.
-    ///
-    /// The coordinates ramp across the 8x8 image as in the bindless test, so
-    /// every pixel's footprint straddles texels whole, and the left and top
-    /// edges put a footprint's corner one texel outside the image, where the
-    /// sampler's clamp decides what it reads.
+    /// A `tld4` gathers the same four texels in the same order on both renderers.
     #[test]
     fn a_gather_reads_the_texels_the_rasterizer_reads() {
         for component in [0, 1] {
             let set_up = |h: &mut Harness| {
                 h.bindless_texture();
-                // `TexCbIndex`: bound texture handles come out of the bank
-                // the bindless fixture writes its handle into.
+                // `TexCbIndex`: the bank the bindless fixture writes its handle into.
                 h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
                 h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
                 h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
@@ -5112,8 +4155,7 @@ mod tests {
             let new =
                 move || Harness::with_fragment_shader(testing::gather_fragment_shader(component));
 
-            // The reference has to be the image's channel, or two renderers
-            // that both gathered nothing would agree.
+            // The reference must be the image's channel, or two empty renders would agree.
             let mut h = new();
             set_up(&mut h);
             h.draw_with(&mut Software).expect("the draw");
@@ -5140,8 +4182,7 @@ mod tests {
         }
     }
 
-    /// Nintendo Switch Sports' `txq` and `tld4`, word for word, translate to a
-    /// module the device accepts.
+    /// Nintendo Switch Sports' `txq` and `tld4` translate to a module the device accepts.
     #[test]
     fn nintendo_switch_sports_txq_and_tld4_are_wgsl_naga_accepts() {
         use super::{wgpu, wgsl, Compiled, Layout, Stage};
@@ -5177,8 +4218,7 @@ mod tests {
         assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
     }
 
-    /// Nintendo Switch Sports' `i2i.cc` and `csetp.neu`, word for word,
-    /// translate to a module the device accepts.
+    /// Nintendo Switch Sports' `i2i.cc` and `csetp.neu` translate to a module the device accepts.
     #[test]
     fn nintendo_switch_sports_csetp_is_wgsl_naga_accepts() {
         use super::{wgpu, wgsl, Compiled, Layout, Stage};
@@ -5213,8 +4253,7 @@ mod tests {
         assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
     }
 
-    /// A `tex.aoffi` whose offset was loaded as an immediate samples the same
-    /// texel on the device as on the rasterizer.
+    /// A `tex.aoffi` with an immediate offset samples the same texel on both renderers.
     #[test]
     fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
         let set_up = |h: &mut Harness| {
@@ -5241,12 +4280,7 @@ mod tests {
         agrees_shading(new, |_| {}, set_up);
     }
 
-    /// A `ZF32` depth surface the device holds, sampled as the one-channel
-    /// float texture it is, reads the depth the device put there.
-    ///
-    /// The depth is cleared on the device and never seen by guest memory
-    /// before the draw samples it, so a stale read draws zero where the
-    /// rasterizer draws the clear value.
+    /// A held `ZF32` surface sampled as a float texture reads the device's depth, not stale memory.
     #[test]
     fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
         let Some(mut gpu) = device() else { return };
@@ -5254,14 +4288,12 @@ mod tests {
             let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
             h.bindless_texture();
             h.depth_target(0x0207);
-            // ZF32, and neither tested nor written by the draw, so the draw
-            // samples it without attaching it.
+            // ZF32, neither tested nor written, so the draw samples it without attaching it.
             h.engine.regs.set(0x3FA, 0x0A);
             h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
             h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
             h.engine.regs.set(0x364, 0.25f32.to_bits());
-            // The fixture's image descriptor, pointed at the depth surface:
-            // `ZF32` with a float red channel, block-linear one GOB high.
+            // The image descriptor, pointed at the depth surface.
             let (tic, depth) = (h.base + 0x1400 + 32, h.base + 0x1000);
             let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
             let mut ctx = h.ctx();
@@ -5309,9 +4341,7 @@ mod tests {
         assert_eq!(got, want, "the colour surface differs");
     }
 
-    /// A depth surface the device holds, sampled as a shadow map, is compared
-    /// against the depth the device put there: the whole surface, and the
-    /// top-left corner of a padded one, which Nintendo Switch Sports samples.
+    /// A held depth surface sampled as a shadow map, whole and as a padded surface's corner.
     #[test]
     fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
         let Some(mut gpu) = device() else { return };
@@ -5359,9 +4389,7 @@ mod tests {
                 }
                 h.target()
             };
-            // A stale read compares against the zero guest memory still
-            // holds, which has to be a different picture for this to mean
-            // anything.
+            // A stale read would compare against zero, a different picture.
             let want = build(None, 0.75);
             assert_ne!(want, build(None, 0.0), "{width} wide: 0.75 reads as 0");
             let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
@@ -5378,14 +4406,7 @@ mod tests {
         }
     }
 
-    /// A texture that is the top-left corner of a surface the device holds,
-    /// laid out with the same rows, is copied out of that surface on the
-    /// device rather than refused or read stale out of guest memory.
-    ///
-    /// The draw samples an 8x8 corner of the 16x8 target it renders into,
-    /// with the target's own 64-byte pitch, right after a clear the device
-    /// holds and guest memory has not seen: reading memory would draw zeros
-    /// where the rasterizer draws the clear colour.
+    /// A texture that is the corner of a held surface is copied from the device.
     #[test]
     fn a_held_surface_stands_in_for_a_smaller_texture_laid_out_the_same_way() {
         let Some(mut gpu) = device() else { return };
@@ -5404,7 +4425,7 @@ mod tests {
             h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
             h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
             h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
-            // No half anywhere: see the clear test for why.
+            // No half anywhere: see the clear test.
             for (i, value) in [0.0f32, 0.2, 0.6, 1.0].into_iter().enumerate() {
                 h.engine.regs.set(0x360 + i as u32, value.to_bits());
             }
@@ -5435,13 +4456,7 @@ mod tests {
         assert_eq!(got, want, "the colour surface differs");
     }
 
-    /// Culling throws away the same faces on the device as on the
-    /// rasterizer, whether or not the viewport mirrors y.
-    ///
-    /// Facing is decided by the winding in window space, after the viewport:
-    /// Tomodachi Life composites through a viewport that mirrors y and Echoes
-    /// of Wisdom post-processes through one that does not, and each came out
-    /// black while one renderer or the other judged it some other way.
+    /// Culling matches on both renderers whether or not the viewport mirrors y.
     #[test]
     fn culling_keeps_the_faces_the_rasterizer_keeps() {
         const VIEWPORT_TRANSFORM: u32 = 0x280;
@@ -5470,8 +4485,7 @@ mod tests {
             }
         };
         for mirrored in [true, false] {
-            // One of the two windings keeps the triangle and the other culls
-            // it, or the test would pass on a device that culled everything.
+            // One winding keeps the triangle and the other culls it.
             let drawn = [CW, CCW].map(|front| {
                 let mut h = Harness::new();
                 set_up(mirrored, front)(&mut h);
@@ -5485,14 +4499,10 @@ mod tests {
         }
     }
 
-    /// A bindless `tex.b` samples the texture its handle names on the device
-    /// too, where the handle is resolved from the constant word the shader
-    /// loaded it from rather than read out of a register.
+    /// A bindless `tex.b` resolves its handle from the constant word the shader loaded.
     #[test]
     fn a_bindless_texture_is_the_one_the_rasterizer_samples() {
-        // The coordinates ramp across the image, so every pixel centre
-        // falls a quarter or three quarters into a texel and nearest
-        // sampling cannot land either side of an edge.
+        // Pixel centres fall a quarter or three quarters into a texel.
         let set_up = |h: &mut Harness| {
             h.bindless_texture();
             h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
@@ -5501,8 +4511,7 @@ mod tests {
         };
         let new = || Harness::with_fragment_shader(testing::bindless_fragment_shader());
 
-        // Agreement proves nothing if both sides drew nothing, so the
-        // reference has to be the image first.
+        // The reference must be the image first.
         let mut h = new();
         set_up(&mut h);
         h.draw_with(&mut Software).expect("the draw");
@@ -5523,14 +4532,8 @@ mod tests {
 
     #[test]
     fn a_depth_tested_draw_writes_the_same_depth_the_rasterizer_writes() {
-        // Less, less-equal, greater and always, in the numbering deko3d
-        // writes: the four a title actually uses.
-        //
-        // The colour is ones and zeros because these tests are about depth:
-        // `mufu rcp` is a hardware approximation and WGSL's `1.0 / x` is not
-        // the same approximation, so an interpolated channel can land a
-        // 255th either side of a rounding boundary. A half is exactly such a
-        // boundary; a one and a zero are not near one.
+        // The depth functions titles use. Colours are ones and zeros since `mufu rcp` and
+        // WGSL division differ by a rounding step.
         for (func, passes) in [
             (0x0201, false),
             (0x0203, false),
@@ -5556,23 +4559,17 @@ mod tests {
         }
     }
 
-    /// A depth surface smaller than the colour target beside it confines the
-    /// draw to where both exist, on both renderers alike. Tomodachi Life
-    /// draws 1280x720, 1920x1080 and 256x256 colour targets beside one
-    /// 128x128 depth surface, and every such draw fell back.
+    /// A depth surface smaller than the colour target confines the draw on both renderers.
     #[test]
     fn a_depth_surface_smaller_than_the_colour_target_confines_the_draw() {
-        // `Always` with writes on: every fragment passes, and the draw still
-        // reaches the depth surface, which is what confines it.
+        // `Always` with writes on still reaches the depth surface.
         let set_up = |h: &mut Harness| {
             h.depth_target_sized(0x0207, 8, 4);
             h.triangle([1.0, 0.0, 1.0, 1.0]);
         };
         agrees(set_up);
 
-        // And the confinement is the rasterizer's too, not only the two
-        // agreeing: (9, 1) is inside the triangle and outside the depth
-        // surface, (1, 1) inside both.
+        // (9, 1) is inside the triangle and outside the depth surface, (1, 1) inside both.
         let mut h = Harness::new();
         let (inside, outside) = (h.texel(1, 1), h.texel(9, 1));
         set_up(&mut h);
@@ -5583,9 +4580,7 @@ mod tests {
 
     #[test]
     fn a_depth_only_pass_still_writes_depth() {
-        // No colour target at all, which Just Dance 2017 renders every pass
-        // as. The fragment shader has nowhere to put its colour and still has
-        // to run.
+        // No colour target at all; the fragment shader still runs.
         let set_up = |h: &mut Harness| {
             h.depth_target(0x0207);
             // Unbind colour target 0: an address of zero is no surface.
@@ -5602,9 +4597,7 @@ mod tests {
 
     #[test]
     fn a_triangle_fan_is_assembled_the_way_the_rasterizer_assembles_one() {
-        // WebGPU has no fan, and the index rewriting that turns one into a
-        // triangle list is `raster::assemble`, the same call the rasterizer
-        // makes, so there is nothing for the two to disagree about.
+        // Fans go through `raster::assemble` on both renderers.
         for primitive in [6, 9] {
             // A quad as a four-vertex fan: a list or strip would leave (0, 7) bare.
             let set_up = move |h: &mut Harness| {
@@ -5629,10 +4622,7 @@ mod tests {
 
     #[test]
     fn an_instanced_array_reads_this_instance_and_not_the_first() {
-        // WebGPU fetches an instanced array at the absolute instance index,
-        // and the upload holds one element: the one this instance reaches.
-        // A stride of nothing is what makes those the same thing; without it
-        // the draw read past the end of a sixteen-byte buffer.
+        // An instanced array's single uploaded element needs a zero stride.
         for instance in [0, 1, 2] {
             agrees(move |h| {
                 h.depth_target(0x0207);
@@ -5651,9 +4641,7 @@ mod tests {
 
     #[test]
     fn a_bgra_attribute_is_swapped_the_way_the_rasterizer_swaps_one() {
-        // WebGPU has no BGRA vertex format, so the swap happens in the entry
-        // point. Red and blue are the two it exchanges, so a colour with one
-        // and not the other is what tells the two apart.
+        // Red and blue tell a BGRA swap apart.
         let set_up = |h: &mut Harness| {
             h.depth_target(0x0207);
             h.triangle([1.0, 0.0, 0.0, 1.0]);
@@ -5667,15 +4655,7 @@ mod tests {
         assert_eq!(h.texel(1, 1), 0xffff_0000, "red arrives as blue");
     }
 
-    /// What a host whose readbacks land late does with a frame the device
-    /// cannot render all of.
-    ///
-    /// Natively a flush waits, so this never arises and a frame interleaves
-    /// freely. In a browser the map completes from the event loop and nothing
-    /// inside a run slice can make that happen, so a mid-frame fallback read
-    /// guest memory the device had not written back yet, and the readback
-    /// then landed on top of what the rasterizer wrote. The frame after such
-    /// a fallback is the rasterizer's whole, and so is every frame after it.
+    /// With late readbacks, the frame after a fallback and those following go to the rasterizer.
     #[test]
     fn a_frame_the_device_cannot_finish_is_a_frame_it_does_not_start() {
         let Some(mut gpu) = device() else { return };
@@ -5687,12 +4667,9 @@ mod tests {
         h.triangle(colour);
         h.clear_with(&mut gpu, [true; 4]).expect("the clear");
         assert!(!gpu.software_frame, "nothing has fallen back yet");
-        // A line loop is a topology neither renderer draws and no pipeline
-        // can describe, so this is a draw that must fall back.
+        // A line loop must fall back.
         h.engine.last_draw.primitive = 2;
-        // The rasterizer will not draw one either, and says so, which is
-        // what a fallback landing somewhere that also refuses looks like. The
-        // fallback is the part under test.
+        // The rasterizer refuses it too; the fallback is what is under test.
         let _ = h.draw_with(&mut gpu);
         assert!(
             gpu.fell_back_this_frame,
@@ -5713,8 +4690,7 @@ mod tests {
             "a draw ran on the device in a rasterizer's frame"
         );
 
-        // What guest memory holds is the frame the rasterizer draws: read
-        // before anything clears it again.
+        // Read before anything clears it again.
         let got = h.target();
         let mut want = Harness::new();
         want.triangle(colour);
@@ -5723,8 +4699,7 @@ mod tests {
         want.draw_with(&mut Software).expect("the draw");
         assert_eq!(got, want.target());
 
-        // That frame's one draw would have run on the device, and one clean
-        // frame is what the first release waits for.
+        // One clean frame releases the latch the first time.
         h.clear_with(&mut gpu, [true; 4]).expect("the clear");
         assert!(
             !gpu.software_frame,
@@ -5733,17 +4708,14 @@ mod tests {
         assert_eq!(gpu.unlatched, 1);
     }
 
-    /// The latch holds through a frame whose draws the device still could not
-    /// run, lets go after one in which it could, and waits twice as long each
-    /// time it has to close again.
+    /// The latch holds through unrunnable frames, releases after a clean one, and doubles each relatch.
     #[test]
     fn the_latch_lets_go_after_clean_frames_and_waits_longer_each_time() {
         let Some(mut gpu) = device() else { return };
         gpu.deferred_readbacks = true;
         let mut h = Harness::new();
         h.triangle([1.0, 0.0, 1.0, 1.0]);
-        // A line loop has no pipeline, so the device refuses it and the check
-        // a rasterizer's frame makes refuses it too.
+        // A line loop has no pipeline, so the device and the check refuse it.
         let line_loop = |h: &mut Harness, gpu: &mut super::Gpu| {
             h.engine.last_draw.primitive = 2;
             let _ = h.draw_with(gpu);
@@ -5789,20 +4761,12 @@ mod tests {
 
     #[test]
     fn a_clear_writes_what_the_rasterizer_would_have_written() {
-        // Clears used to go to the rasterizer, which meant handing every
-        // surface back first, a whole frame's readback, at every clear.
         let Some(mut gpu) = device() else { return };
         for channels in [[true; 4], [true, false, true, false], [false; 4]] {
             let build = |gpu: Option<&mut super::Gpu>| {
                 let mut h = Harness::new();
-                // A colour with a channel in each of the four, so a masked
-                // clear has one to leave alone.
-                //
-                // Not a half anywhere: `0.5` is `127.5` in eight bits, and
-                // the two renderers break that tie in opposite directions,
-                // `ColorFormat::encode` rounds it up and a device's unorm
-                // conversion rounds it down. It is a 255th, it is real, and
-                // it is not what this test is about.
+                // A channel in each of the four so a masked clear has one to leave alone.
+                // No 0.5: the two renderers round 127.5 differently.
                 h.engine.regs.set(0x360, 0.0f32.to_bits());
                 h.engine.regs.set(0x361, 0.2f32.to_bits());
                 h.engine.regs.set(0x362, 0.6f32.to_bits());
@@ -5832,10 +4796,7 @@ mod tests {
 
     #[test]
     fn an_attribute_the_draw_binds_nothing_to_reads_what_the_rasterizer_reads() {
-        // `fetch_attribute` answers `(0, 0, 0, 1)` for a fixed attribute, and
-        // the pipeline needs *something* bound to every location the shader
-        // declares, so the backend feeds it a constant rather than handing
-        // the draw back.
+        // Fixed attributes get a constant buffer rather than falling back.
         agrees(|h| {
             h.depth_target(0x0207);
             h.triangle([1.0, 1.0, 1.0, 1.0]);
@@ -5845,13 +4806,7 @@ mod tests {
         });
     }
 
-    /// Every multisample mode, over whichever of the two routes this adapter
-    /// puts it down.
-    ///
-    /// Both are exercised on any real adapter: four samples is the count core
-    /// WebGPU guarantees, and sixteen is one nothing offers, so `4x4` takes
-    /// the expanded route here whatever the machine, and `2x2` takes the
-    /// device's own.
+    /// Every multisample mode; `4x4` takes the expanded route and `2x2` the device's.
     #[test]
     fn a_multisampled_draw_reaches_the_same_texels_the_rasterizer_reaches() {
         for (mode, x, y) in [(1, 2, 1), (2, 2, 2), (3, 4, 2), (6, 4, 4)] {
@@ -5859,15 +4814,7 @@ mod tests {
         }
     }
 
-    /// The other route: the device doing the multisampling.
-    ///
-    /// It cannot be checked against the reference texel for texel, and that
-    /// is the point of it being off by default, WebGPU's sample positions
-    /// are a rotated grid the spec fixes, Maxwell's are the texel centres,
-    /// and an edge falls differently under the two. What *must* still hold is
-    /// the thing multisampling promises: a pixel the triangle covers
-    /// completely is completely covered, one it misses entirely is untouched,
-    /// and only the pixels an edge crosses are free to differ.
+    /// The device multisampling route: fully covered pixels match, edges may differ.
     #[test]
     fn the_device_route_agrees_wherever_an_edge_is_not() {
         let Some(mut gpu) = device() else { return };
@@ -5892,8 +4839,7 @@ mod tests {
             let before = gpu.multisampled;
             let got = build(Some(&mut gpu));
             if gpu.multisampled == before {
-                // This device does not offer that many samples, so the draw
-                // went the expanded way and the strict test already covers it.
+                // Not offered, so it went the expanded way, already covered.
                 continue;
             }
             ran += 1;
@@ -5938,11 +4884,7 @@ mod tests {
 
     #[test]
     fn alpha_to_coverage_keeps_the_same_samples_on_the_device() {
-        // A device turns alpha into a coverage mask its own way, and the
-        // rasterizer keeps a prefix of `round(alpha * count)` samples. They
-        // agree on nothing in between, so this is the expanded route's
-        // arithmetic being checked against the reference, and at 4x4, which
-        // no adapter multisamples, that is the only route there is.
+        // Alpha-to-coverage on the expanded route at 4x4, against the reference.
         for alpha in [0.0f32, 0.25, 0.5, 1.0] {
             compare(6, 4, 4, move |h| {
                 h.engine.regs.set(testing::MULTISAMPLE_CONTROL, 1);
@@ -5954,9 +4896,7 @@ mod tests {
         }
     }
 
-    /// `AntiAliasEnable` off over a surface that still has a tile of texels
-    /// per pixel: coverage is whole pixels, and every texel of a covered
-    /// pixel gets the answer.
+    /// `AntiAliasEnable` off over a multisampled surface: whole-pixel coverage.
     #[test]
     fn coverage_per_pixel_covers_whole_pixels_on_the_device_too() {
         for (mode, x, y) in [(1, 2, 1), (2, 2, 2), (6, 4, 4)] {
@@ -5969,8 +4909,7 @@ mod tests {
     #[test]
     fn every_pass_the_backend_builds_for_itself_compiles() {
         let Some(mut gpu) = device() else { return };
-        // A surface format that is certainly multisampled, and the two depth
-        // formats a readback can reach.
+        // A multisampled colour format and the two readback depth formats.
         let colour = wgpu::TextureFormat::Bgra8Unorm;
         let depths = [
             wgpu::TextureFormat::Depth16Unorm,
@@ -5995,8 +4934,7 @@ mod tests {
             .expect("a colour clear pipeline");
         }
 
-        // Four samples is the one count core WebGPU guarantees, so it is the
-        // one a test may assume an adapter has.
+        // Four samples is the count core WebGPU guarantees.
         let samples = 4;
         assert!(
             gpu.samples_supported(colour, samples),
@@ -6007,8 +4945,7 @@ mod tests {
                 continue;
             }
             for key in [
-                // Into a device multisample companion, and into a
-                // one-sample-per-pixel one.
+                // Into a device multisample companion, and into a per-pixel one.
                 super::ResampleKey {
                     entry: "fs_gather",
                     dst,
@@ -6052,8 +4989,7 @@ mod tests {
         );
     }
 
-    /// The grid tables the resampling passes read, which are the only thing
-    /// standing between a sample and the texel it belongs in.
+    /// The grid tables the resampling passes read.
     #[test]
     fn the_grid_a_resampling_pass_reads_is_the_one_the_rasterizer_uses() {
         use switch_core::gpu::surface::SampleGrid;
@@ -6074,16 +5010,12 @@ mod tests {
             let (x, y) = grid.slot(sample);
             assert_eq!(word(2 + sample as usize), x);
             assert_eq!(word(18 + sample as usize), y);
-            // And the inverse really is one: the slot this sample sits in
-            // names this sample back.
+            // The inverse maps the slot back to this sample.
             assert_eq!(word(34 + (y * 2 + x) as usize), sample);
         }
     }
 
-    /// A fallback reason is an error message and can hold anything. The page
-    /// parses the whole report with `JSON.parse`, which rejects the entire
-    /// object over one unescaped quote, so the counters would vanish because
-    /// of a string beside them.
+    /// Fallback reasons are escaped so `JSON.parse` accepts the report.
     #[test]
     fn a_reason_with_json_punctuation_in_it_stays_one_string() {
         assert_eq!(super::json_string("plain"), "\"plain\"");

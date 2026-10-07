@@ -1,8 +1,4 @@
-/* Promise-based RPC over postMessage.
- *
- * The emulator runs in a web worker (see web/worker) so long executions
- * don't freeze the page. Buffers (files, framebuffer, console/trace output)
- * are transferred across the boundary rather than copied. */
+// Promise-based RPC to the emulator worker over postMessage.
 
 import type { CallRequest, Commands, WorkerMessage } from '../shared/protocol';
 import { log } from './log';
@@ -14,8 +10,7 @@ const readyPromise = new Promise<void>((r) => {
   readyResolve = r;
 });
 
-// The session the worker is holding, mirrored here so the persistence flushes
-// can tell whether there is anything to flush. Display only otherwise.
+// Mirrors the worker's session handle.
 let session = -1;
 
 let msgId = 0;
@@ -56,14 +51,7 @@ export function call<K extends keyof Commands>(
   });
 }
 
-// The worker is named by its *source*, which the bundler follows: it emits it
-// as its own hashed chunk and rewrites this URL to match. That is what retires
-// the old path trap - there is no longer a built path written down here that
-// has to agree with wherever the build actually put the file.
-//
-// `{ type: 'module' }` is required, not incidental: `worker.format` is 'es', in
-// dev and in the build alike. See the note in vite.config.ts before changing
-// either half.
+// `{ type: 'module' }` must match Vite's `worker.format: 'es'`.
 export function initWorker(): void {
   worker = new Worker(new URL('../worker/index.ts', import.meta.url), { type: 'module' });
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
@@ -74,9 +62,7 @@ export function initWorker(): void {
     }
     if ('type' in d) {
       ready = true;
-      // A core that failed to instantiate still reports ready, or the page
-      // would sit on "starting core..." for ever; the reason it failed is the
-      // only useful thing left to say.
+      // A core that failed to load still reports ready, with the error.
       if (d.error) log('core failed to load: ' + d.error, 'err');
       readyResolve();
       return;

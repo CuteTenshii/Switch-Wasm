@@ -1,25 +1,14 @@
-/* persistent SD card
-
-   The emulated SD card lives in the session's memory, so without this nothing
-   the guest writes survives a reload - and a save manager that cannot keep a
-   save is not much of one. IndexedDB fits the shape the core exposes: the card
-   is a path -> bytes map, and the core reports which paths the *guest*
-   changed, so a flush writes back only those instead of the whole card. */
+// Persists the guest-changed paths of the emulated SD card to IndexedDB.
 
 import { idbApply, idbGetAll, SD_STORE, sdIdb, type StoredEntry } from './db';
 import { log, logStored } from './log';
 import { call, hasSession } from './rpc';
 
-// Entries drained from the core but not yet stored - keyed by path, so a file
-// written repeatedly between two successful flushes only costs one slot. The
-// core cannot be handed a change back once drained, so anything IndexedDB
-// refuses (a quota, most likely) waits here for the next flush rather than
-// being lost.
+// Drained but unstored entries by path; IndexedDB refusals wait for the next flush.
 const sdBacklog = new Map<string, StoredEntry | null>();
 let sdFlushing = false;
 
-// Ask the browser not to evict the card under storage pressure. Without this
-// IndexedDB is best-effort and a save can quietly disappear.
+// Ask the browser not to evict the card under storage pressure.
 export async function sdRequestPersistence(): Promise<void> {
   if (!navigator.storage || !navigator.storage.persist) return;
   try {
@@ -30,9 +19,7 @@ export async function sdRequestPersistence(): Promise<void> {
   } catch { /* not fatal: the card still works for this session */ }
 }
 
-// Put the stored card back into a fresh session. Restores through the host
-// entry points, which do not count as guest changes, so this does not
-// immediately queue everything to be written straight back.
+// Restore the stored card through host entry points, which are not guest changes.
 export async function sdRestore(): Promise<void> {
   let entries: [string, StoredEntry][];
   try {
@@ -42,7 +29,7 @@ export async function sdRestore(): Promise<void> {
     return;
   }
   if (!entries.length) return;
-  // Directories first, so one the guest left empty survives on its own.
+  // Directories first, so empty ones survive.
   entries.sort((a, b) => (a[1].kind === b[1].kind ? 0 : a[1].kind === 'dir' ? -1 : 1));
   for (const [path, value] of entries) {
     if (value.kind === 'dir') await call('sd_create_dir', path);
@@ -51,8 +38,7 @@ export async function sdRestore(): Promise<void> {
   log('SD card: restored ' + entries.length + ' entries', 'dim');
 }
 
-// Write back what the guest changed. Cheap when it changed nothing, which is
-// almost every slice.
+// Write back what the guest changed.
 export async function sdFlush(): Promise<void> {
   if (sdFlushing || !hasSession()) return;
   sdFlushing = true;

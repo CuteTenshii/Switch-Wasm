@@ -1,20 +1,10 @@
 //! Texture Image Control (TIC) / Texture Sampler Control (TSC) descriptors
 //! and sampling.
 //!
-//! Layouts are ported from envytools' `gm200_texture.xml` (Maxwell TIC) and
-//! `g80_texture.xml` (TSC, unchanged since Tesla), real hardware register
-//! documentation (envytools, github.com/envytools/envytools, MIT-style
-//! license), not guesses. The bindless-texture-handle convention (`imageId
-//! | samplerId << 20`, each indexing 32-byte entries in their own pool)
-//! matches devkitPro/deko3d's public `dkMakeTextureHandle` exactly.
-//!
-//! Which constant bank a `texs` immediate indexes is not a constant at all:
-//! it is `TexCbIndex`, a register the driver programs
+//! Layouts are from envytools' `gm200_texture.xml` (TIC) and `g80_texture.xml`
+//! (TSC). Bindless handles are `imageId | samplerId << 20`, as deko3d's
+//! `dkMakeTextureHandle`. A `texs` immediate indexes the bank in `TexCbIndex`
 //! ([`Engine3D::tex_cb_index`](crate::gpu::engine::threed::Engine3D::tex_cb_index)).
-//! nouveau reserves bank 15 for its driver constants and writes 15 there;
-//! deko3d writes 0. The immediate indexes that bank in **dwords**, not
-//! bytes; [`handle_offset`] carries the story of why that took a second
-//! look.
 
 use crate::gpu::bcn::{self, Codec};
 use crate::gpu::exec::ExecCtx;
@@ -23,41 +13,23 @@ use crate::gpu::surface::{self, bilinear, ColorFormat, Layout};
 use crate::{Error, Result};
 use std::cell::RefCell;
 
-/// What nouveau programs `TexCbIndex` to: bank 15, the buffer it reserves
-/// for driver constants on every shader stage. Only a default for test
-/// fixtures captured from a Mesa run: a real draw reads the register, since
-/// deko3d answers 0.
+/// nouveau's `TexCbIndex` (bank 15), a default for Mesa-captured test fixtures
+/// only; deko3d uses 0.
 pub const NOUVEAU_TEX_CB_INDEX: u8 = 15;
 
-/// Where a `texs`'s 13-bit immediate reads its handle in
-/// the bank `TexCbIndex` names, as a byte offset.
-///
-/// The immediate is a **dword index**, not a byte offset: nouveau's lowering
-/// pass emits `tex.r = texBindBase / 4 + unit`, so the handle for texture
-/// unit *n* sits at `(texBindBase / 4 + n) * 4`. Reading the immediate as a
-/// byte offset lands a quarter of the way into the buffer, in the fixed
-/// header nouveau keeps ahead of the handle table, which on GM107 begins
-/// `0, 1, 2, 3, 4, 5, 6, 7`. That looked exactly like a handle table of
-/// sequential `imageId`s with `samplerId == 0`, which is why the byte
-/// reading survived: every draw resolved to a plausible handle, and every
-/// draw resolved to the *same* one, so a page of text drew one glyph over
-/// and over.
+/// The byte offset of a `texs` handle. The immediate is a dword index
+/// (nouveau emits `texBindBase / 4 + unit`).
 pub fn handle_offset(immediate: u16) -> u16 {
     immediate.wrapping_mul(4)
 }
 
-/// The constant-bank word a sampling instruction reads its handle from.
-///
-/// A translated shader cannot read the handle itself, because resolving it
-/// means walking the TIC and TSC in guest memory, so it names the word and
-/// the backend binds whatever texture that word holds at draw time.
+/// The constant-bank word a sampling instruction reads its handle from; the
+/// backend binds that word's texture at draw time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureSlot {
-    /// A `tex`/`texs` immediate, a dword index into the bank `TexCbIndex`
-    /// names; see [`handle_offset`].
+    /// A `tex`/`texs` immediate; see [`handle_offset`].
     Bound(u16),
-    /// A bindless `tex.b`, whose handle register was loaded from this word
-    /// of any bank, typically one the application filled itself.
+    /// A bindless `tex.b` handle loaded from this word of any bank.
     Bindless { bank: u8, offset: u16 },
 }
 
@@ -70,9 +42,7 @@ impl TextureSlot {
         }
     }
 
-    /// A number unique to this slot, which the WGSL sampling hooks switch
-    /// on. An immediate is 13 bits wide, so setting the top bit keeps every
-    /// bindless slot clear of every bound one.
+    /// A unique key for the WGSL sampling hooks; the top bit marks bindless slots.
     pub fn key(self) -> u32 {
         match self {
             TextureSlot::Bound(immediate) => u32::from(immediate),
@@ -112,18 +82,15 @@ fn decode_wrap(bits: u32) -> Wrap {
 pub struct Sampler {
     pub wrap_u: Wrap,
     pub wrap_v: Wrap,
-    /// `address_p`, the third axis, a 3D image's depth.
+    /// `address_p`, the third axis.
     pub wrap_w: Wrap,
     pub mag_linear: bool,
     pub min_linear: bool,
-    /// `depth_compare_enable` and `depth_compare_op`: a shadow sampler
-    /// answers with how the fetched depth compares against a reference the
-    /// instruction carries, not with the depth.
+    /// `depth_compare_enable` and `depth_compare_op`: a shadow sampler.
     pub compare: Option<Compare>,
 }
 
-/// The comparison a shadow sampler makes, in the order `depth_compare_op`
-/// numbers them (which is GL's).
+/// In `depth_compare_op` order (GL's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compare {
     Never,
@@ -175,17 +142,12 @@ pub fn read_sampler(ctx: &ExecCtx, addr: u64) -> Result<Sampler> {
         wrap_w: decode_wrap(w0 >> 6),
         mag_linear: (w1 & 0x3) == 2,
         min_linear: ((w1 >> 4) & 0x3) == 2,
-        // `depth_compare_enable` at bit 9, and the function it enables in the
-        // three bits above it.
+        // `depth_compare_enable` at bit 9, the function in the three bits above.
         compare: ((w0 >> 9) & 1 != 0).then(|| decode_compare(w0 >> 10)),
     })
 }
 
-/// Where one component of a sampled texel comes from, `TIC2`'s
-/// `X_SOURCE`..`W_SOURCE`. A texture's channels are not handed to the shader
-/// in memory order: the driver picks, per component, one of the stored
-/// channels or a constant, which is how one `R8` image serves GL's `RED`
-/// (`r,0,0,1`), `ALPHA` (`0,0,0,r`) and `LUMINANCE` (`r,r,r,1`).
+/// `TIC2`'s `X_SOURCE`..`W_SOURCE`: a stored channel or a constant per component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwizzleSource {
     Zero,
@@ -203,8 +165,7 @@ fn decode_swizzle_source(bits: u32) -> Result<SwizzleSource> {
         3 => Ok(SwizzleSource::G),
         4 => Ok(SwizzleSource::B),
         5 => Ok(SwizzleSource::A),
-        // ONE_INT and ONE_FLOAT differ only for an integer texture, which
-        // this sampler does not produce; 1 is not a documented value.
+        // ONE_INT and ONE_FLOAT; 1 is not a documented value.
         6 | 7 => Ok(SwizzleSource::One),
         other => Err(Error::Gpu(format!(
             "texture: unknown TIC swizzle source {other}"
@@ -212,38 +173,21 @@ fn decode_swizzle_source(bits: u32) -> Result<SwizzleSource> {
     }
 }
 
-/// How a texture's texels are stored.
-///
-/// The distinction is not cosmetic: a plain texel can be read on its own,
-/// while a compressed one only exists as part of a block that has to be
-/// decoded whole. That changes the addressing as well as the decode, a
-/// compressed surface is swizzled in units of blocks, not texels.
+/// How a texture's texels are stored. Compressed surfaces are swizzled in blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexelKind {
     Plain(ColorFormat),
     Block(Codec),
-    /// A depth surface sampled as a texture, which a title does to light or
-    /// fog by distance. Its texel is not a colour in any layout
-    /// [`ColorFormat`] names: `ZF32_X24S8` is a float and a stencil byte
-    /// three bytes apart, so it is its own kind rather than a colour format
-    /// whose green channel would be a lie.
+    /// A depth surface sampled as a texture.
     Depth(DepthTexel),
 }
 
-/// A depth texel's layout. Sampling one answers with the depth alone; the
-/// stencil byte and its padding belong to no channel.
+/// A depth texel's layout; sampling returns the depth alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepthTexel {
-    /// `ZF32_X24S8`: a 32-bit float, then 24 bits of nothing and a stencil
-    /// byte. The depth target of the same name: `SET_ZT_FORMAT` 0x19, see
-    /// `threed::depth_format_layout`, is where the surface comes from.
+    /// `ZF32_X24S8`: a 32-bit float, 24 unused bits and a stencil byte.
     F32X24S8,
-    /// `S8D24` sampled as an unsigned integer: the stencil byte in the low
-    /// eight bits, which red reads as the integer it is, and the depth in
-    /// the 24 above, which green reads as a unorm. Eden's
-    /// `S8_UINT_D24_UNORM`, and the packing of the `Z24S8` depth target.
-    /// The Legend of Zelda: Echoes of Wisdom reads its stencil this way in a
-    /// compute shader.
+    /// `S8D24` as an unsigned integer: stencil in red, depth (unorm) in green.
     S8D24Uint,
 }
 
@@ -255,14 +199,11 @@ impl DepthTexel {
         }
     }
 
-    /// The depth, in the red channel. What the other three hold is the TIC's
-    /// swizzle to decide, the same as for a one-channel colour format.
+    /// The depth in red; the TIC's swizzle decides the rest.
     fn decode(self, raw: u128) -> [f32; 4] {
         match self {
             DepthTexel::F32X24S8 => [f32::from_bits(raw as u32), 0.0, 0.0, 1.0],
-            // An integer channel reaches a shader as its bits, not as a
-            // float of its value, which is what hardware hands back from an
-            // integer texture.
+            // Integer channels reach the shader as bits.
             DepthTexel::S8D24Uint => [
                 f32::from_bits(raw as u32 & 0xff),
                 ((raw as u32) >> 8) as f32 / 16_777_215.0,
@@ -272,55 +213,40 @@ impl DepthTexel {
         }
     }
 
-    /// Whether any channel is an integer, which cannot be filtered.
+    /// Integer channels cannot be filtered.
     fn is_integer(self) -> bool {
         matches!(self, DepthTexel::S8D24Uint)
     }
 }
 
-/// A parsed TIC: where the texels are and how to read them, plus the
-/// per-component swizzle to apply once one is decoded.
+/// A parsed TIC.
 #[derive(Debug, Clone, Copy)]
 pub struct Texture {
     pub addr: u64,
-    /// Extent in texels, which for a compressed texture is not its extent in
-    /// blocks, the last block of a row or column may be partly outside it.
+    /// Extent in texels, not blocks.
     pub width: u32,
     pub height: u32,
     pub layout: Layout,
     pub kind: TexelKind,
-    /// The stored channels are sRGB-encoded, so sampling converts them back to
-    /// linear light before the shader sees them.
     pub srgb: bool,
     pub swizzle: [SwizzleSource; 4],
-    /// Bytes from one array layer to the next. Zero for a plain 2D image,
-    /// where there is only ever layer 0.
+    /// Bytes between array layers; zero for a plain 2D image.
     pub layer_stride: u32,
-    /// How many array layers the image has, and 1 for a plain 2D one.
-    ///
-    /// Sampling never needed this: the shader says which layer it wants,
-    /// but copying the image out does, since nothing else says where it
-    /// ends.
+    /// Array layers; 1 for a plain 2D image.
     pub layers: u32,
-    /// GOBs of depth per block, for a 3D image. Anything but 1 makes the
-    /// image a *volume*: consecutive slices interleave inside a block rather
-    /// than sitting a layer-stride apart, so `layer` addresses through
-    /// [`crate::gpu::surface::block_linear_volume_offset`] instead.
+    /// GOBs of depth per block. Above 1 the image is a volume whose slices
+    /// interleave; see [`crate::gpu::surface::block_linear_volume_offset`].
     pub block_depth_gobs: u32,
 }
 
 impl Texture {
-    /// Where texel `(x, y)` of `layer` starts, for an uncompressed image of
-    /// `bpp`-byte texels. A plain texel and a depth one are addressed
-    /// identically, one unit per texel, whatever the unit holds.
+    /// Where texel `(x, y)` of `layer` starts in an uncompressed image of `bpp`-byte texels.
     fn unit_address(&self, x: u32, y: u32, layer: u32, bpp: u32) -> u64 {
         let width_bytes = match self.layout {
             Layout::Pitch { pitch } => pitch,
             Layout::BlockLinear { .. } => self.width * bpp,
         };
         match self.layout {
-            // A volume's slices interleave, so the slice is part of the
-            // address rather than a stride onto the front of it.
             Layout::BlockLinear { block_height_gobs } if self.block_depth_gobs > 1 => {
                 self.addr
                     + u64::from(crate::gpu::surface::block_linear_volume_offset(
@@ -333,8 +259,7 @@ impl Texture {
                         self.block_depth_gobs,
                     ))
             }
-            // The layer is not part of the swizzle: an array's slices sit
-            // back to back, each one a whole surface.
+            // Array slices sit back to back, each a whole surface.
             _ => {
                 self.addr
                     + u64::from(layer) * u64::from(self.layer_stride)
@@ -343,9 +268,8 @@ impl Texture {
         }
     }
 
-    /// Where a surface access's texel is and how many bytes it spans, or
-    /// `None` outside the image, where a load reads zero and a store is
-    /// dropped. `at` is `x`, `y` and the layer or slice.
+    /// A surface access's texel address and size, or `None` outside the image.
+    /// `at` is `x`, `y` and the layer or slice.
     fn surface_texel(&self, at: [u32; 3]) -> Result<Option<(u64, u32)>> {
         let bytes = match self.kind {
             TexelKind::Plain(format) => format.bytes_per_pixel,
@@ -386,11 +310,7 @@ impl Texture {
                 depth.decode(ctx.read_pixel(self.unit_address(x, y, layer, bytes), bytes)?)
             }
             TexelKind::Block(codec) => {
-                // The swizzle addresses a compressed surface in blocks: one
-                // "pixel" of it is a whole block, and a row is as many bytes
-                // as the row has blocks. Reading it in texels instead is the
-                // mistake that shreds a compressed image into diagonal
-                // ribbons, because the stride comes out a whole block too big.
+                // Swizzled in blocks: a row is as many bytes as it has blocks.
                 let bytes = codec.bytes_per_block();
                 let (block_w, block_h) = codec.block_size();
                 let blocks_wide = self.width.div_ceil(block_w);
@@ -404,22 +324,15 @@ impl Texture {
                         .offset((x / block_w) * bytes, y / block_h, width_bytes)
                         as u64;
                 let index = ((y % block_h) * block_w + (x % block_w)) as usize;
-                // Decoding a block yields every texel in it, and the next
-                // fetch almost always wants one of them: bilinear asks for
-                // four texels that are usually two or three of the same block,
-                // and the pixel to the right asks for that block again.
-                // Bound to a local first: the `Ref` a `borrow()` in a match
-                // scrutinee produces lives until the end of the whole match,
-                // which would still be held when the miss arm borrows mutably.
+                // Bilinear and neighbouring fetches usually hit the same block. Bound
+                // to a local so the `borrow()` ends before the miss arm borrows mutably.
                 let cached = blocks.borrow().get(va).map(|block| block[index]);
                 match cached {
                     Some(texel) => texel,
                     None => {
                         let raw = ctx.read_pixel(va, bytes)?.to_le_bytes();
                         let mut cache = blocks.borrow_mut();
-                        // Decoded straight into the way it will live in: an
-                        // ASTC block is 2.3 KiB of texels, and building one on
-                        // the stack to copy it in cost that twice per miss.
+                        // Decode straight into the cache way (an ASTC block is 2.3 KiB).
                         let way = cache.claim();
                         bcn::decode_into(codec, &raw[..bytes as usize], &mut cache.texels[way])?;
                         cache.va[way] = Some(va);
@@ -429,7 +342,7 @@ impl Texture {
             }
         };
         if self.srgb {
-            // Alpha is never sRGB-encoded, whatever the colour channels are.
+            // Alpha is never sRGB-encoded.
             for channel in texel.iter_mut().take(3) {
                 *channel = surface::srgb_to_linear(*channel);
             }
@@ -437,8 +350,7 @@ impl Texture {
         Ok(texel)
     }
 
-    /// [`Texture::texel`] with a cache of its own, for tests that fetch a
-    /// handful of texels and do not care about reuse between them.
+    /// [`Texture::texel`] with its own cache, for tests.
     #[cfg(test)]
     pub fn texel_cached(&self, x: u32, y: u32, layer: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
         self.texel(x, y, layer, ctx, &RefCell::new(BlockCache::default()))
@@ -470,18 +382,8 @@ impl Texture {
 /// How many decoded blocks [`BlockCache`] keeps.
 const BLOCK_CACHE_WAYS: usize = 4;
 
-/// The most recently decoded compressed blocks, keyed by the address each came
-/// from.
-///
-/// A block-compressed texel is not stored on its own: fetching one decodes the
-/// whole 4x4 block (up to 12x12 for ASTC) that it sits in, and throws the
-/// other 15 (or 143) away. Doing that per fetch was 7% of the Home Menu's
-/// frame in ASTC decoding alone, on top of what it cost inside `texel`.
-///
-/// Four ways, because bilinear filtering straddling a block corner touches
-/// four of them at once. Replacement is round-robin: a texture is walked in
-/// scanline order, so the oldest entry is reliably the one furthest from where
-/// sampling is now.
+/// The most recently decoded compressed blocks, keyed by address. Four ways
+/// for a bilinear footprint straddling a block corner; round-robin replacement.
 pub struct BlockCache {
     va: [Option<u64>; BLOCK_CACHE_WAYS],
     texels: Box<[[[f32; 4]; bcn::MAX_TEXELS]; BLOCK_CACHE_WAYS]>,
@@ -504,9 +406,7 @@ impl BlockCache {
         Some(&self.texels[way])
     }
 
-    /// Take the next way to decode into, leaving it invalid until the caller
-    /// sets its address, so a decode that fails does not leave the way
-    /// claiming to hold texels it never wrote.
+    /// The next way to decode into, invalid until the caller sets its address.
     fn claim(&mut self) -> usize {
         let way = self.next;
         self.va[way] = None;
@@ -515,17 +415,9 @@ impl BlockCache {
     }
 }
 
-/// How a TIC's `COMPONENTS_SIZES` and `R_DATA_TYPE` pair describes its texels.
-///
-/// The uncompressed sizes and [`ColorFormat`] name channels the same way,
-/// most significant first, so `A8B8G8R8` and `RGBA8Unorm` are the same bytes,
-/// and so are `G8R8`/`RG8Unorm` and `R8`/`R8Unorm`. Only the sizes whose
-/// channel order is unambiguous under that reading are listed.
-///
-/// The compressed sizes are the `ImageFormat` values deko3d writes
-/// (`image_formats.h`); their data type distinguishes the signed and unsigned
-/// readings of the same block layout. Anything else is a clear, honest error
-/// rather than a guess at where its channels sit.
+/// Map a TIC's `COMPONENTS_SIZES` and `R_DATA_TYPE` to a texel kind. Uncompressed
+/// sizes name channels most significant first, like [`ColorFormat`];
+/// compressed ones are deko3d's `ImageFormat` values.
 fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     fn astc(width: u8, height: u8) -> Codec {
         Codec::Astc { width, height }
@@ -544,8 +436,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x17, UNORM) => Some(Codec::Bc7),
         (0x10, FLOAT) => Some(Codec::Bc6hSf16), // signed half
         (0x11, FLOAT) => Some(Codec::Bc6hUf16), // unsigned half
-        // ASTC's footprint is part of the format number, not a separate field.
-        // The values are deko3d's `ImageFormat_ASTC_2D_*`; 0x43 is not one.
+        // deko3d's `ImageFormat_ASTC_2D_*`; 0x43 is not one.
         (0x40, UNORM) => Some(astc(4, 4)),
         (0x41, UNORM) => Some(astc(5, 5)),
         (0x42, UNORM) => Some(astc(6, 6)),
@@ -565,7 +456,6 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     if let Some(codec) = codec {
         return Ok(TexelKind::Block(codec));
     }
-    // A depth surface read back as a texture, which is not a colour at all.
     if (components_sizes, data_type) == (0x30, FLOAT) {
         return Ok(TexelKind::Depth(DepthTexel::F32X24S8)); // ZF32_X24S8
     }
@@ -573,12 +463,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     if (components_sizes, data_type) == (0x29, UINT) {
         return Ok(TexelKind::Depth(DepthTexel::S8D24Uint)); // S8D24
     }
-    // An HDR title renders into a float surface and samples it back to
-    // tonemap: "A Short Hike" composites its frame out of an
-    // R16_G16_B16_A16 FLOAT target, and refusing that one sample left the
-    // whole frame transparent, and Persona 5 Royal out of a `B10G11R11` one.
-    // The sizes here are the ones [`ColorFormat`] decodes; the rest stay an
-    // honest error.
+    // Float and packed render targets sampled back (HDR tonemapping, composites).
     let raw = match (components_sizes, data_type) {
         (0x08, UNORM) => 0xD5, // A8B8G8R8          -> RGBA8Unorm
         (0x09, UNORM) => 0xD1, // A2B10G10R10       -> RGB10A2Unorm
@@ -590,10 +475,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x1B, FLOAT) => 0xF2, // R16               -> R16Float
         (0x1B, UNORM) => 0xEE, // R16               -> R16Unorm
         (0x21, FLOAT) => 0xE0, // B10G11R11         -> B10G11R11Float
-        // `ZF32`, a depth surface sampled as a colour: one float, the depth,
-        // which is an `R32` texel exactly. Nintendo Switch Sports reads its
-        // depth this way. Its stencil-carrying sibling, handled above, is
-        // the one that needs a kind of its own.
+        // `ZF32` sampled as a colour is exactly an `R32` texel.
         (0x2F, FLOAT) => 0xE5, // ZF32              -> R32Float
         (other, UNORM) => {
             return Err(Error::Gpu(format!(
@@ -610,10 +492,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     Ok(TexelKind::Plain(ColorFormat::from_raw(raw)?))
 }
 
-/// Parse one 32-byte TIC entry (`gm200_texture.xml`'s `TIC2` domain) into a
-/// [`Texture`] ready for `Surface::sample_point`/`sample_bilinear`. Only 2D,
-/// pitch or block-linear is supported, in the texel kinds [`texel_kind_for`]
-/// lists; anything else is a clear, honest error rather than a guess.
+/// Parse one 32-byte TIC entry (`gm200_texture.xml`'s `TIC2` domain).
 pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let dw = |i: u64| -> Result<u32> { ctx.read_u32(addr + i * 4) };
     let dw0 = dw(0)?;
@@ -640,11 +519,8 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
             let block_height_gobs = 1u32 << ((dw3 >> 3) & 0x7);
             ((dw1 >> 9) << 9, Layout::BlockLinear { block_height_gobs })
         }
-        // The block *depth* sits beside the height, and a 3D image with more
-        // than one GOB of it interleaves its slices. See the check below.
         1 | 2 => {
-            // PITCH[_COLORKEY]: 27 address MSBs, 32B-aligned; pitch is a
-            // separate 16-bit field, also in 32B units.
+            // PITCH[_COLORKEY]: 27 address MSBs, 32B-aligned; pitch is 16 bits in 32B units.
             let pitch = (dw3 & 0xffff) << 5;
             ((dw1 >> 5) << 5, Layout::Pitch { pitch })
         }
@@ -658,12 +534,9 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let addr_hi = (dw2 & 0xffff) as u64;
     let tex_addr = (addr_hi << 32) | addr_low as u64;
 
-    // `TextureType` (Eden's `video_core/textures/texture.h`): 1 is `_2D` and
-    // 7 `_2DNoMipmap`, which differ only in whether there are levels below
-    // this one; 2 is `_3D`; 3, 5 and 8 are the cubemap, the 2D array and the
-    // cubemap array, whose slices sit back to back and so decode as one 2D
-    // image apiece, a layer stride apart. The 1D types are refused rather
-    // than misread as a 2D image one texel high.
+    // `TextureType` (Eden's `video_core/textures/texture.h`): 1 `_2D`, 7
+    // `_2DNoMipmap`, 2 `_3D`; 3, 5 and 8 (cube, 2D array, cube array) decode
+    // as 2D slices a layer stride apart. 1D types are refused.
     let texture_type = (dw4 >> 23) & 0xF;
     const THREE_D: u32 = 2;
     if !matches!(texture_type, 1 | THREE_D | 3 | 5 | 7 | 8) {
@@ -671,8 +544,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
             "texture: TIC TextureType {texture_type} is not a 2D, 3D, array or cube image"
         )));
     }
-    // How many GOBs deep one block of a 3D image is. Anything but one makes
-    // it a volume, whose slices interleave. See `Texture::block_depth_gobs`.
+    // Block depth in GOBs; above one the image is a volume.
     let block_depth_gobs = if texture_type == THREE_D && header_version >= 3 {
         1u32 << ((dw3 >> 6) & 0x7)
     } else {
@@ -681,14 +553,8 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let srgb = (dw4 >> 22) & 1 != 0;
     let width = (dw4 & 0xffff) + 1;
     let height = (dw5 & 0xffff) + 1;
-    // `DEPTH_MINUS_ONE`, which only an image with a third dimension has: a
-    // plain 2D one leaves whatever is in the field, and reading it would give
-    // it slices it has no memory for.
-    //
-    // A cubemap is the exception in the other direction: its six faces are
-    // implied by the type and the field holds 1, which Eden's `image_info`
-    // asserts and then sets six layers anyway. Reading it would leave five
-    // faces of a cube behind.
+    // `DEPTH_MINUS_ONE` is only meaningful with a third dimension. Cubemaps
+    // hold 1 there but have six faces.
     const CUBE: u32 = 3;
     const CUBE_ARRAY: u32 = 8;
     let depth = ((dw5 >> 16) & 0x3fff) + 1;
@@ -698,10 +564,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
         THREE_D | 5 => depth,
         _ => 1,
     };
-    // The TIC carries no layer stride: it is the size of one swizzled slice,
-    // worked out from the extent and the layout the same way the offset of a
-    // texel inside one is. A layered image with mip levels keeps each layer's
-    // whole chain together, so its layers are further apart than one level.
+    // The layer stride is one swizzled slice including its mip chain.
     // `MAX_MIP_LEVEL` is the top nibble of dword 3.
     let levels = (dw3 >> 28) + 1;
     let layer_stride = match layout {
@@ -739,8 +602,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     Ok(texture)
 }
 
-/// Bytes in one row of an image `width` texels wide: a row of blocks for a
-/// compressed format.
+/// Bytes in a row (a row of blocks when compressed).
 fn width_bytes(kind: TexelKind, width: u32) -> u32 {
     match kind {
         TexelKind::Plain(format) => width * format.bytes_per_pixel,
@@ -752,8 +614,7 @@ fn width_bytes(kind: TexelKind, width: u32) -> u32 {
     }
 }
 
-/// Rows in an image `height` texels tall: rows of blocks for a compressed
-/// format.
+/// Rows in an image (rows of blocks when compressed).
 fn layer_rows(kind: TexelKind, height: u32) -> u32 {
     match kind {
         TexelKind::Plain(_) | TexelKind::Depth(_) => height,
@@ -764,10 +625,7 @@ fn layer_rows(kind: TexelKind, height: u32) -> u32 {
     }
 }
 
-/// The block height, in GOBs, a block-linear image `rows` tall is laid out
-/// with: the one it was given, halved while half of it would still hold
-/// every row. A mip level smaller than its image's blocks gets smaller blocks,
-/// and so does the alignment of a layer that is small to begin with.
+/// The block height in GOBs for `rows` rows: halved while half still holds every row.
 fn fitted_block_height(block_height_gobs: u32, rows: u32) -> u32 {
     let mut gobs = block_height_gobs.max(1);
     while gobs > 1 && rows <= (gobs / 2) * surface::GOB_HEIGHT {
@@ -777,13 +635,7 @@ fn fitted_block_height(block_height_gobs: u32, rows: u32) -> u32 {
 }
 
 /// The distance between layers of a block-linear array or cube with `levels`
-/// mip levels: every level of one layer, each laid out with its own
-/// [`fitted_block_height`], and the sum aligned to a block of the first.
-///
-/// The rule is Eden's (`CalculateLayerSize` and `AlignLayerSize` in its
-/// texture cache). Tomodachi Life's 64x64 environment cubes carry seven
-/// levels, which puts the faces 0x6000 apart; reading them 0x4000 apart
-/// sampled every face after the first out of the first face's mip chain.
+/// mip levels, per Eden's `CalculateLayerSize` and `AlignLayerSize`.
 fn mipmapped_layer_stride(
     kind: TexelKind,
     width: u32,
@@ -805,16 +657,14 @@ fn mipmapped_layer_stride(
     total.div_ceil(block) * block
 }
 
-/// Where to write every texture as a PPM (`DUMP_TEX=<dir>`), if anywhere.
+/// `DUMP_TEX=<dir>`: write every texture as a PPM.
 fn dump_textures() -> Option<&'static str> {
     static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| std::env::var("DUMP_TEX").ok())
         .as_deref()
 }
 
-/// Decode a whole texture through the same path a sample takes and write it
-/// out, so that "the image is the right shape and the wrong colour" can be
-/// pinned on the decoder or ruled out in one look.
+/// Decode a whole texture through the sampling path and write it out.
 fn dump_texture(texture: &Texture, ctx: &ExecCtx, dir: &str) -> Result<()> {
     let (w, h) = (texture.width.min(4096), texture.height.min(4096));
     let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
@@ -833,16 +683,11 @@ fn dump_texture(texture: &Texture, ctx: &ExecCtx, dir: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether to print every TIC as it is parsed (`TRACE_TEX=1`).
-///
-/// Its own switch rather than `TRACE_GPU`'s: a frame is a million method
-/// traces and a few dozen textures, and the descriptor is what says why a
-/// correctly-shaped image came out the wrong colour.
+/// `TRACE_TEX=1`: print every TIC as it is parsed.
 fn trace_textures() -> bool {
     crate::trace::enabled(crate::trace::Trace::Tex)
 }
 
-/// Rearrange a decoded texel into what the shader reads.
 fn apply_swizzle(swizzle: [SwizzleSource; 4], texel: [f32; 4]) -> [f32; 4] {
     swizzle.map(|source| match source {
         SwizzleSource::Zero => 0.0,
@@ -854,9 +699,8 @@ fn apply_swizzle(swizzle: [SwizzleSource; 4], texel: [f32; 4]) -> [f32; 4] {
     })
 }
 
-/// The registers a surface load (`suld`) reads from texel `at` of
-/// `texture`: the channels, converted, for a formatted load, and the bytes
-/// split into words, low first, for a raw one.
+/// The registers a `suld` reads from texel `at`: converted channels for a
+/// formatted load, low-first words for a raw one.
 pub fn surface_load(
     ctx: &ExecCtx,
     texture: &Texture,
@@ -886,8 +730,7 @@ pub fn surface_load(
     }
 }
 
-/// Write the registers of a surface store (`sust`) to texel `at` of
-/// `texture`; see [`surface_load`] for what they hold.
+/// Write a `sust`'s registers to texel `at`; see [`surface_load`].
 pub fn surface_store(
     ctx: &mut ExecCtx,
     texture: &Texture,
@@ -913,9 +756,7 @@ pub fn surface_store(
     ctx.write_pixel(addr, bytes, raw)
 }
 
-/// A raw access moves whole texels: one of another size would need the
-/// image reinterpreted in texels of that size, and nothing here keeps such
-/// a view.
+/// A raw access must move whole texels.
 fn check_raw_size(size: SurfaceSize, texel_bytes: u32) -> Result<()> {
     if size.bytes() == texel_bytes {
         return Ok(());
@@ -934,18 +775,14 @@ fn formatted_depth_access(texture: &Texture) -> Error {
     ))
 }
 
-/// What one bindless handle resolves to: its TIC and its TSC, both parsed.
-///
-/// Kept as a pair because they are looked up together and, for a given
-/// handle, decode to the same thing for every pixel of a draw.
+/// A bindless handle's parsed TIC and TSC.
 #[derive(Debug, Clone, Copy)]
 pub struct Descriptors {
     pub texture: Texture,
     pub sampler: Sampler,
 }
 
-/// Resolve a bindless `handle` (as a `texs` instruction's constant-buffer
-/// read produces it) against the bound TIC/TSC pools.
+/// Resolve a bindless `handle` against the bound TIC/TSC pools.
 pub fn read_descriptors(
     ctx: &ExecCtx,
     tex_header_pool: u64,
@@ -954,8 +791,7 @@ pub fn read_descriptors(
 ) -> Result<Descriptors> {
     let texture = read_image(ctx, tex_header_pool + image_id(handle) as u64 * 32)?;
     let mut sampler = read_sampler(ctx, tex_sampler_pool + sampler_id(handle) as u64 * 32)?;
-    // An integer texture is read at the nearest texel whatever its sampler
-    // says: blending integers is meaningless, and blending their bits worse.
+    // Integer textures are always read at the nearest texel.
     if matches!(texture.kind, TexelKind::Depth(depth) if depth.is_integer()) {
         sampler.mag_linear = false;
         sampler.min_linear = false;
@@ -963,8 +799,7 @@ pub fn read_descriptors(
     Ok(Descriptors { texture, sampler })
 }
 
-/// Resolve a bindless `handle` against the bound TIC/TSC pools and sample at
-/// normalized texture coordinates `(u, v)`.
+/// Resolve a bindless `handle` and sample at normalized `(u, v)`.
 pub fn sample(
     ctx: &ExecCtx,
     tex_header_pool: u64,
@@ -989,9 +824,6 @@ pub fn sample(
 fn wrap_coord(mode: Wrap, t: f64, size: u32) -> f64 {
     let t = match mode {
         Wrap::Repeat => t - t.floor(),
-        // Mirrored repeat folds every other period back on itself, which is
-        // the whole difference from plain repeat: treating it as repeat puts
-        // a seam where the reflection should be.
         Wrap::Mirror => {
             let period = t.rem_euclid(2.0);
             if period > 1.0 {
@@ -1005,8 +837,7 @@ fn wrap_coord(mode: Wrap, t: f64, size: u32) -> f64 {
     t * size as f64
 }
 
-/// Sample already-resolved descriptors at normalized coordinates `(u, v)` of
-/// array layer `layer`, which is 0 for everything that is not an array.
+/// Sample resolved descriptors at normalized `(u, v)` of array layer `layer`.
 pub fn sample_with(
     ctx: &ExecCtx,
     d: &Descriptors,
@@ -1021,8 +852,7 @@ pub fn sample_with(
     let px = wrap_coord(sampler.wrap_u, u, image.width);
     let py = wrap_coord(sampler.wrap_v, v, image.height);
 
-    // Filtering happens before the swizzle, which is free to do: selecting a
-    // component commutes with interpolating each one.
+    // Filtering before the swizzle is equivalent.
     let texel = if sampler.mag_linear {
         image.sample_bilinear(px, py, layer, ctx, blocks)?
     } else {
@@ -1031,11 +861,8 @@ pub fn sample_with(
     Ok(apply_swizzle(texture.swizzle, texel))
 }
 
-/// Gather channel `component`, after the swizzle, of the four texels a
-/// bilinear sample at `(u, v)` would blend, in the order `(u0,v1) (u1,v1)
-/// (u1,v0) (u0,v0)`: GL's, and what WGSL's `textureGather` returns. The
-/// footprint is [`crate::gpu::surface::bilinear`]'s, so the two agree about
-/// which texels a coordinate touches.
+/// Gather post-swizzle channel `component` of the four texels a bilinear sample
+/// at `(u, v)` would blend, in `textureGather` order `(u0,v1) (u1,v1) (u1,v0) (u0,v0)`.
 pub fn gather_with(
     ctx: &ExecCtx,
     d: &Descriptors,
@@ -1046,10 +873,7 @@ pub fn gather_with(
     blocks: &RefCell<BlockCache>,
 ) -> Result<[f32; 4]> {
     let (texture, sampler) = (&d.texture, d.sampler);
-    // The footprint's corner can be a texel before the first, which the
-    // sampler's wrap then resolves the way the device's does. A blend weights
-    // that texel by zero, which is why `bilinear` can clamp it away, but a
-    // gather returns it.
+    // The corner can precede the first texel; the sampler's wrap resolves it.
     let x0 = (wrap_coord(sampler.wrap_u, u, texture.width) - 0.5).floor() as i64;
     let y0 = (wrap_coord(sampler.wrap_v, v, texture.height) - 0.5).floor() as i64;
     let at = |x: i64, y: i64| -> Result<f32> {
@@ -1066,8 +890,7 @@ pub fn gather_with(
     ])
 }
 
-/// Which texel of a row or column `size` long index `i` reads under `mode`,
-/// for an index a footprint put outside it.
+/// The texel index `i` reads under `mode` when outside `0..size`.
 fn wrap_index(mode: Wrap, i: i64, size: u32) -> u32 {
     let size = i64::from(size.max(1));
     let i = match mode {
@@ -1085,14 +908,8 @@ fn wrap_index(mode: Wrap, i: i64, size: u32) -> u32 {
     i as u32
 }
 
-/// Sample a 3D image, whose third coordinate is normalized like the other
-/// two rather than a layer index.
-///
-/// A linear sampler filters *between* slices as well as within one: that is
-/// what makes a colour-grading lookup smooth rather than banded, so this
-/// blends the two nearest by the same rule [`crate::gpu::surface::bilinear`]
-/// uses for the other axes, and `textureSampleLevel` on a `texture_3d` does
-/// the same thing on the device.
+/// Sample a 3D image at a normalized third coordinate; linear samplers also
+/// filter between slices.
 pub fn sample_3d_with(
     ctx: &ExecCtx,
     d: &Descriptors,
@@ -1123,20 +940,9 @@ pub fn sample_3d_with(
     Ok(out)
 }
 
-/// Sample a cubemap, whose three coordinates are a *direction* rather than a
-/// position: the face is whichever axis the direction points most strongly
-/// along, and the two coordinates within it are the other two divided by it.
-///
-/// The face order and the sign of each axis are OpenGL's, which is what
-/// Maxwell stores its six faces in and what a `texture_cube` binding expects
-///, so the device and this pick the same face for the same direction.
-///
-/// The two renderers can still differ on a texel at a face's edge: a device
-/// filters across the seam and this clamps inside the face. Nothing seen so
-/// far samples one.
-///
-/// `cube` picks one cube of a cube array, whose faces are stored six layers
-/// to a cube in the same order; it is 0 for a lone cubemap.
+/// Sample a cubemap by direction, with OpenGL's face order and signs. Edge
+/// texels clamp inside the face rather than filtering across the seam. `cube`
+/// selects a cube of a cube array.
 pub fn sample_cube_with(
     ctx: &ExecCtx,
     d: &Descriptors,
@@ -1163,8 +969,7 @@ pub fn sample_cube_with(
     } else {
         (5, -s, -t, -r)
     };
-    // A direction of no length has no face; hardware leaves it undefined and
-    // the centre of face 0 is a defined answer rather than a division by zero.
+    // A zero direction samples the centre of face 0.
     let last = d.texture.layers.saturating_sub(1);
     let first_face = cube.saturating_mul(6);
     if ma == 0.0 {
@@ -1176,19 +981,9 @@ pub fn sample_cube_with(
     sample_with(ctx, d, u, v, face, blocks)
 }
 
-/// A shadow sample: the same fetch, with each texel replaced by whether
-/// `reference` passes against it before the filter runs.
-///
-/// Comparing per tap and filtering the results is what hardware does: it is
-/// percentage-closer filtering, and it is why a shadow edge is soft rather
-/// than a step. Comparing the *filtered* depth instead would give a hard edge
-/// wherever a linear sampler straddles one.
-///
-/// The answer is `[c, c, c, 1.0]`: a shadow sample has one value, and every
-/// channel a `texs` asks for gets it except alpha, which is one. That is
-/// Eden's `Extract` in `texture_fetch_swizzled`, and it lets the ordinary
-/// destination machinery store the result unchanged. The image's swizzle is
-/// not applied, for the same reason.
+/// A shadow sample: compare each texel against `reference`, then filter the
+/// results (PCF). Returns `[c, c, c, 1.0]` without the image swizzle, like
+/// Eden's `texture_fetch_swizzled`.
 pub fn sample_compare_with(
     ctx: &ExecCtx,
     d: &Descriptors,
@@ -1199,9 +994,7 @@ pub fn sample_compare_with(
     blocks: &RefCell<BlockCache>,
 ) -> Result<[f32; 4]> {
     let (image, sampler) = (&d.texture, d.sampler);
-    // A sampler with no comparison enabled still answers a `texs.dc`: the
-    // instruction is what asks for one, and `always` is what a TSC that
-    // never enabled it leaves behind.
+    // `texs.dc` asks for a comparison even when the sampler enables none.
     let compare = sampler.compare.unwrap_or(Compare::Always);
     let px = wrap_coord(sampler.wrap_u, u, image.width);
     let py = wrap_coord(sampler.wrap_v, v, image.height);
@@ -1224,10 +1017,9 @@ mod tests {
     use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
     use crate::mem::Memory;
 
-    /// `X_SOURCE=R, Y_SOURCE=G, Z_SOURCE=B, W_SOURCE=A` in TIC dword 0, the
-    /// identity swizzle, which a plain RGBA texture carries.
+    /// The identity swizzle in TIC dword 0.
     const IDENTITY_SWIZZLE: u32 = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
-    /// `TextureType_2D` in dword4, which every real TIC carries.
+    /// `TextureType_2D` in dword4.
     const TYPE_2D: u32 = 1 << 23;
 
     fn harness() -> (Memory, AddressSpace, u64) {
@@ -1284,8 +1076,6 @@ mod tests {
         assert_eq!(image.layout, Layout::Pitch { pitch: 64 });
     }
 
-    /// `ZF32` sampled as a colour is an `R32` float texel, and reads the same
-    /// on both renderers as one.
     #[test]
     fn a_float_depth_surface_samples_as_one_float_channel() {
         const FLOAT: u32 = 7;
@@ -1295,9 +1085,7 @@ mod tests {
         );
     }
 
-    /// `S8D24` read as an unsigned integer hands a shader the stencil byte's
-    /// bits and the depth as a unorm, and never blends two texels, whatever
-    /// its sampler asks for.
+    /// `S8D24` as an unsigned integer: stencil bits and unorm depth, never blended.
     #[test]
     fn an_integer_stencil_texture_reads_the_nearest_texel_bits() {
         let (mut mem, vmm, base) = harness();
@@ -1346,10 +1134,8 @@ mod tests {
         assert_eq!(right[1], 1.0);
     }
 
-    /// Tomodachi Life's environment cube array, word for word: 11 cubes of
-    /// 64x64 `R11G11B10F` faces with seven mip levels each. The faces sit
-    /// 0x6000 apart, which is where its render targets put them; without the
-    /// mip chain they would be one level, 0x4000, apart.
+    /// Tomodachi Life's environment cube array: 11 cubes of 64x64 `R11G11B10F`
+    /// faces with seven mips, 0x6000 apart (0x4000 with one level).
     #[test]
     fn a_mipmapped_cube_array_keeps_each_faces_mip_chain_in_its_layer() {
         const TIC: [u32; 8] = [
@@ -1382,11 +1168,8 @@ mod tests {
         assert_eq!(read(&mut mem, one_level).layer_stride, 0x4000);
     }
 
-    /// A BC1 block whose endpoints are equal decodes to one flat colour, which
-    /// makes a block's identity readable from any texel inside it.
+    /// A BC1 block with equal endpoints decodes to one flat colour.
     fn flat_bc1_block(rgb565: u16) -> u64 {
-        // Both endpoints the same colour and every index zero, as the eight
-        // little-endian bytes of one block.
         rgb565 as u64 | ((rgb565 as u64) << 16)
     }
 
@@ -1429,10 +1212,7 @@ mod tests {
         vmm.write_u32(mem, tic_addr + 20, height - 1).unwrap();
     }
 
-    /// A compressed surface is addressed in blocks. Four 4x4 blocks laid out
-    /// across one 16-texel row must be found at 8-byte steps, not at the
-    /// 8-bytes-per-*texel* steps a decoder that forgot the distinction would
-    /// use, which is the difference between an image and diagonal ribbons.
+    /// Four 4x4 BC1 blocks across a 16-texel row sit at 8-byte steps.
     #[test]
     fn a_pitch_bc1_texture_is_addressed_in_blocks() {
         let (mut mem, vmm, base) = harness();
@@ -1489,9 +1269,7 @@ mod tests {
         );
     }
 
-    /// The same, swizzled: the block-linear stride of a compressed surface is
-    /// its row length in *blocks*, so a whole GOB holds eight block rows
-    /// rather than eight texel rows.
+    /// Swizzled: a GOB holds eight block rows, not eight texel rows.
     #[test]
     fn a_block_linear_bc1_texture_swizzles_in_blocks() {
         use crate::gpu::surface::block_linear_offset;
@@ -1540,10 +1318,7 @@ mod tests {
         );
     }
 
-    /// An sRGB texture stores encoded values and hands the shader linear ones.
-    /// An ASTC texture is addressed in blocks like any other compressed one,
-    /// but its footprint is neither square nor four: 8x5 here, so a decoder
-    /// that transposed the two would put row 5 in the wrong block.
+    /// sRGB decoding, and an 8x5 ASTC footprint addressed in blocks.
     #[test]
     fn an_astc_texture_is_addressed_by_its_own_footprint() {
         let (mut mem, vmm, base) = harness();
@@ -1565,8 +1340,7 @@ mod tests {
             .unwrap(); // width 16
         vmm.write_u32(&mut mem, tic_addr + 20, 9).unwrap(); // height 10
 
-        // A void-extent block is the simplest valid ASTC block: one flat
-        // colour, with the "extends nowhere" encoding in its extent fields.
+        // Void-extent blocks: one flat colour each.
         let place = |mem: &mut Memory, at: u64, r: u16, g: u16, b: u16| {
             let low: u64 =
                 0x1FC | (0x1FFF << 12) | (0x1FFF << 25) | (0x1FFF << 38) | (0x1FFF << 51);
@@ -1612,8 +1386,7 @@ mod tests {
             [0.0, 1.0, 0.0, 1.0],
             "next block across"
         );
-        // Row 5 is the second block row, which it would not be for a 5-tall
-        // footprint read as 8 tall.
+        // Row 5 is the second block row of a 5-tall footprint.
         assert_eq!(
             texture.texel_cached(0, 5, 0, &ctx).unwrap(),
             [0.0, 0.0, 1.0, 1.0]
@@ -1661,8 +1434,7 @@ mod tests {
         assert!(encoded.srgb);
         let converted = encoded.texel_cached(0, 0, 0, &ctx).unwrap();
         assert!(converted[0] < plain, "sRGB decoding darkens a mid grey");
-        // 565's mid grey expands to 132/255 = 0.5176, whose linear value is
-        // ((0.5176 + 0.055) / 1.055) ^ 2.4.
+        // 565 mid grey is 132/255; linear is ((0.5176 + 0.055) / 1.055) ^ 2.4.
         assert!(
             (converted[0] - 0.2307).abs() < 0.001,
             "got {}",
@@ -1671,8 +1443,7 @@ mod tests {
         assert_eq!(converted[3], 1.0, "alpha is never sRGB-encoded");
     }
 
-    /// An HDR pass samples its own float render target back. `0x03`/FLOAT is
-    /// the one "A Short Hike" composites its frame through.
+    /// Float render targets sampled back by HDR passes.
     #[test]
     fn the_float_tic_formats_map_to_their_surface_format() {
         let plain = |sizes, ty| match texel_kind_for(sizes, ty).unwrap() {
@@ -1683,17 +1454,13 @@ mod tests {
         assert_eq!(plain(0x03, 7).bytes_per_pixel, 8);
         assert_eq!(plain(0x01, 7).raw, 0xC0); // R32_G32_B32_A32 -> RGBA32Float
         assert_eq!(plain(0x0F, 7).raw, 0xE5); // R32             -> R32Float
-                                              // The UNORM readings of those sizes are a different format, and none
-                                              // of them is one this decodes.
         assert!(texel_kind_for(0x03, 2).is_err());
-        // A size that is not a format at all still reports as one.
         assert!(texel_kind_for(0x09, 7).is_err());
     }
 
     #[test]
     fn every_compressed_tic_format_maps_to_its_codec() {
-        // BC6H's two data types are the signed and unsigned half readings of
-        // the same block layout, and deko3d numbers SF16 below UF16.
+        // BC6H's SF16 and UF16; deko3d numbers SF16 first.
         assert_eq!(
             texel_kind_for(0x10, 7).unwrap(),
             TexelKind::Block(Codec::Bc6hSf16)
@@ -1723,9 +1490,7 @@ mod tests {
             TexelKind::Block(Codec::Bc7)
         );
 
-        // The two packed 32-bit formats Persona 5 Royal samples its own
-        // render targets back through: `A2B10G10R10` for the UI composite and
-        // `B10G11R11` for the HDR scene it tonemaps.
+        // `A2B10G10R10` and `B10G11R11`, as Persona 5 Royal samples them.
         assert_eq!(
             texel_kind_for(0x09, 2).unwrap(),
             TexelKind::Plain(ColorFormat::from_raw(0xD1).unwrap())
@@ -1735,8 +1500,7 @@ mod tests {
             TexelKind::Plain(ColorFormat::from_raw(0xE0).unwrap())
         );
 
-        // Every ASTC footprint Maxwell can name, and the fourteen of them are
-        // not contiguous: 0x43 is not a format.
+        // Every ASTC footprint; 0x43 is not a format.
         let footprints = [
             (0x40, 4, 4),
             (0x41, 5, 5),
@@ -1777,8 +1541,7 @@ mod tests {
 
     #[test]
     fn mirrored_repeat_folds_alternate_periods_back() {
-        // 1.25 is a quarter into the second period, which mirrors to 0.75;
-        // plain repeat would answer 0.25 and put a seam at every integer.
+        // 1.25 mirrors to 0.75; plain repeat would give 0.25.
         let (mut mem, vmm, base) = harness();
         let tic_addr = base;
         let tsc_addr = base + 0x100;
@@ -1818,8 +1581,7 @@ mod tests {
             trace: false,
         };
 
-        // u = 1.9 mirrors to 0.1 -> texel 0 (red); plain repeat would give
-        // 0.9 -> texel 3 (white).
+        // u = 1.9 mirrors to 0.1 -> texel 0 (red), not texel 3.
         assert_eq!(
             sample(&ctx, tic_addr, tsc_addr, 0, 1.9, 0.5, 0).unwrap(),
             [1.0, 0.0, 0.0, 1.0]
@@ -1910,10 +1672,7 @@ mod tests {
         assert_eq!(blue, [0.0, 0.0, 1.0, 1.0]);
     }
 
-    /// A shadow sample compares each texel it fetches and filters the
-    /// *results*, which is what makes a shadow edge soft. Comparing the
-    /// filtered depth instead would give a step wherever the four taps
-    /// disagree.
+    /// Shadow samples compare each tap, then filter the results.
     #[test]
     fn a_shadow_sample_compares_before_it_filters() {
         let (mut mem, vmm, base) = harness();
@@ -1940,8 +1699,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Clamp on both axes, `depth_compare_enable` with `less`, and the
-        // filter chosen per case below.
+        // Clamp on both axes, `depth_compare_enable` with `less`.
         let compare_less = 1u32 << 9 | (1 << 10);
         let write_tsc = |mem: &mut Memory, linear: bool| {
             vmm.write_u32(mem, tsc_addr, 2 | (2 << 3) | compare_less)
@@ -1978,8 +1736,7 @@ mod tests {
         assert_eq!(sample_at(&mut mem, 0.75, 0.5), [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(sample_at(&mut mem, 0.25, 0.5), [0.0, 0.0, 0.0, 1.0]);
 
-        // Linear, halfway between the two columns: one tap passes and one does
-        // not, each weighted a half. Alpha stays one.
+        // Linear, halfway: one tap passes, one fails, each weighted a half.
         write_tsc(&mut mem, true);
         let half = sample_at(&mut mem, 0.5, 0.5);
         assert_eq!(half[3], 1.0);

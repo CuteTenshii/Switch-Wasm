@@ -1,24 +1,13 @@
 //! Compare this crate's Opus decoder against a reference decode, frame by
-//! frame.
+//! frame: `opus_difftest <dir>`.
 //!
-//! Usage: `cargo run --release -p switch-core --example opus_difftest -- <dir>`
+//! `<dir>` holds `<name>.opus` (a header of `{output rate, channels, 48 kHz
+//! frame size, streams, coupled streams}`, eight bytes of channel mapping, then
+//! per frame `{packet length, samples decoded, final range}` and the packet) and
+//! `<name>.pcm` (the reference decode as interleaved `f32`). Zero streams means
+//! a single-stream decoder; a zero-length packet is a dropped one.
 //!
-//! `<dir>` holds pairs of files per test case. `<name>.opus` is a header of
-//! `{output rate, channels, 48 kHz frame size, streams, coupled streams}`
-//! and eight bytes of channel mapping: a stream count of zero means an
-//! ordinary single-stream decoder, followed, per frame, by a record of
-//! `{packet length, samples decoded, final range}` and the packet's bytes.
-//! `<name>.pcm` is the reference decode as interleaved `f32`. A length of
-//! zero is a dropped packet, which both decoders conceal.
-//!
-//! Two things are checked, and they fail differently. The **final range** is
-//! the range coder's state after the frame: it has to match exactly, because
-//! it proves both decoders read the same symbols in the same order, a
-//! mismatch means the bitstream was misparsed and everything after it is
-//! meaningless. The **samples** need only be close: CELT is specified in
-//! floating point and the reference's own arithmetic is not reproducible bit
-//! for bit, so what matters is that the error stays far below the
-//! quantisation noise the codec already has.
+//! The final range must match exactly; samples need only be close.
 
 use std::env;
 use std::fs;

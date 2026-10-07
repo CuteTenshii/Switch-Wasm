@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { crc32, deflateSync } from 'node:zlib';
 import { expect, openPage, test } from './page';
 
-/** A PNG whose column `x` is `rgb(x)`, as an image file a user would pick. */
+// A PNG whose column `x` is `rgb(x)`.
 function png(width: number, height: number, rgb: (x: number) => [number, number, number]): Buffer {
   const chunk = (type: string, data: Buffer) => {
     const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
@@ -26,16 +26,14 @@ function png(width: number, height: number, rgb: (x: number) => [number, number,
   ]);
 }
 
-/** The row of the profile named exactly `name`: a string `hasText` is a
- *  case-insensitive substring match, and "E" is in "Player". */
+// The row of the profile named exactly `name` (`hasText` is a substring match).
 const row = (page: Page, name: string) =>
   page.locator('.profile-row').filter({
     has: page.locator('.profile-name').getByText(name, { exact: true }),
   });
 
 async function addProfile(page: Page, name: string): Promise<void> {
-  // Typed key by key: the game's keyboard controls must not swallow letters
-  // like A, S, E, Q, Z and X, or Enter.
+  // Typed key by key, so game keyboard controls must not swallow the letters.
   await page.locator('#profile-add-name').pressSequentially(name);
   await page.locator('#profile-add-name').press('Enter');
   await expect(row(page, name)).toBeVisible();

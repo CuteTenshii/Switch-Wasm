@@ -8,10 +8,7 @@ use switch_core::cpu::POINTER_BUFFER_SIZE;
 
 #[test]
 fn ssl_keeps_context_state_and_refuses_connections() {
-    // ssl is the system TLS stack: a title asks the OS to build connections
-    // rather than bringing its own implementation. The local half -- contexts
-    // and their options -- is real here; the connection half is not, because
-    // there is no socket layer under it.
+    // ssl contexts and their options are real; connections are not (no sockets).
     const SSL: u64 = 0x9000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -21,9 +18,7 @@ fn ssl_keeps_context_state_and_refuses_connections() {
     ipc_request(&mut cpu, SSL, 5, None, 0); // ConvertToDomain
     let service = cpu.mem.read_u32(tls + 0x20).unwrap();
 
-    // SetInterfaceVersion is the only ssl command an offline retail title
-    // issues, because ssl is in its NPDM service list and nnSdk initialises it
-    // at startup regardless.
+    // SetInterfaceVersion: nnSdk initialises ssl at startup.
     ipc_request_with_payload(&mut cpu, SSL, service, 5, &4u32.to_le_bytes());
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 
@@ -36,7 +31,6 @@ fn ssl_keeps_context_state_and_refuses_connections() {
     ipc_request(&mut cpu, SSL, 4, Some(service), 1);
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1);
 
-    // Options are per-context state a caller reads back.
     let mut args = Vec::new();
     args.extend_from_slice(&2u32.to_le_bytes()); // option
     args.extend_from_slice(&1u32.to_le_bytes()); // value
@@ -47,8 +41,7 @@ fn ssl_keeps_context_state_and_refuses_connections() {
     ipc_request_with_payload(&mut cpu, SSL, context, 1, &7u32.to_le_bytes());
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0);
 
-    // CreateConnection reports itself rather than handing back a connection
-    // that can never connect.
+    // CreateConnection is refused rather than returning a connection that cannot connect.
     const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
     ipc_request(&mut cpu, SSL, 4, Some(context), 2);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
@@ -56,11 +49,7 @@ fn ssl_keeps_context_state_and_refuses_connections() {
 
 #[test]
 fn hid_hands_over_the_input_shared_memory() {
-    // The input *data* lives in a shared memory region the guest reads
-    // directly; hid's IPC is the negotiation that hands it over. libnx got
-    // working input out of the old fabricated reply only because it maps that
-    // region by size and this emulator recognises it that way -- nnSdk calls a
-    // method on the IAppletResource it is given, and an object id is not one.
+    // nnSdk calls methods on the IAppletResource, so it must be a real object.
     let (mut cpu, hid, server) = hid_server();
     let tls = cpu.tls_base();
 
@@ -74,18 +63,14 @@ fn hid_hands_over_the_input_shared_memory() {
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
     assert_ne!(cpu.mem.read_u32(tls + 0x0c).unwrap(), 0);
 
-    // QueryPointerBufferSize has to be non-zero: nn::hid::SetSupportedNpadIdType
-    // marshals its id array as a pointer buffer, and nnSdk checks the
-    // negotiated size before it sends.
+    // nn::hid::SetSupportedNpadIdType needs a non-zero pointer buffer size.
     ipc_request(&mut cpu, hid, 5, None, 3);
     assert_eq!(cpu.mem.read_u16(tls + 0x20).unwrap(), POINTER_BUFFER_SIZE);
 }
 
 #[test]
 fn hid_reads_back_what_the_guest_configured() {
-    // A caller that sets a controller style set and reads back something else
-    // decides the pad it wanted is not there -- which is what the generic
-    // reply's incrementing object id looked like.
+    // A style set must read back as it was set.
     let (mut cpu, hid, server) = hid_server();
     let tls = cpu.tls_base();
     const STYLE_SET: u32 = 0b1101;
@@ -105,9 +90,7 @@ fn hid_reads_back_what_the_guest_configured() {
 
 #[test]
 fn hid_vibration_reaches_the_host() {
-    // SendVibrationValue(handle, HidVibrationValue, aruid): the value is four
-    // floats, so the two band amplitudes sit at +4 and +0xc after the u32
-    // handle. The frontend maps them onto dual-rumble's magnitudes.
+    // SendVibrationValue(handle, HidVibrationValue, aruid): band amplitudes at +4 and +0xc.
     let (mut cpu, hid, server) = hid_server();
     let tls = cpu.tls_base();
 
@@ -126,7 +109,7 @@ fn hid_vibration_reaches_the_host() {
     assert_eq!(f32::from_bits(cpu.mem.read_u32(tls + 0x30).unwrap()), 0.75);
     assert_eq!(f32::from_bits(cpu.mem.read_u32(tls + 0x38).unwrap()), 0.25);
 
-    // Out of range or not finite is clamped rather than handed to the browser.
+    // Out-of-range or non-finite values are clamped.
     let mut args = vec![0u8; 4];
     args.extend_from_slice(&5.0f32.to_bits().to_le_bytes());
     args.extend_from_slice(&0u32.to_le_bytes());
@@ -138,12 +121,8 @@ fn hid_vibration_reaches_the_host() {
 
 #[test]
 fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
-    // `libnx` opens hid:sys in hidsysInitialize and records the session's
-    // pointer buffer size on it before sending anything, so for a title that
-    // never calls a hid:sys command -- Checkpoint is one -- opening the
-    // service *is* the only traffic there ever is. With hid:sys unrouted that
-    // control request fell through to the generic reply and was answered with
-    // a fabricated object id, exactly the way ns:am2 was.
+    // libnx's hidsysInitialize queries the pointer buffer size on open, which
+    // must not be answered with a fabricated object id.
     const HIDSYS: u64 = 0x9100;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -158,31 +137,25 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
     ipc_request(&mut cpu, HIDSYS, 5, None, 0); // ConvertToDomain
     let server = cpu.mem.read_u32(tls + 0x20).unwrap();
 
-    // EnableAppletToGetInput: a setter over state this emulator does not have.
+    // EnableAppletToGetInput.
     ipc_request(&mut cpu, HIDSYS, 4, Some(server), 503);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 
-    // GetMaskedSupportedNpadStyleSet(u64 aruid) -> NpadStyleSet. This is what
-    // the system permits, not what the caller asked for -- so it has to name
-    // controllers even though nothing has called SetSupportedNpadStyleSet,
-    // and handheld above all, since that is the mode this console reports.
+    // GetMaskedSupportedNpadStyleSet(u64 aruid) -> NpadStyleSet: what the system
+    // permits, including handheld, regardless of SetSupportedNpadStyleSet.
     ipc_request_with_payload(&mut cpu, HIDSYS, server, 310, &[0u8; 8]);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
     let styles = cpu.mem.read_u32(tls + 0x30).unwrap();
     assert_ne!(styles & (1 << 1), 0, "handheld is not supported");
     assert_ne!(styles & (1 << 0), 0, "a full-key pad is not supported");
 
-    // SetNpadSystemExtStateEnabled(bool, u64 aruid), the same: this console
-    // publishes the SystemExt style already, so there is no permission left
-    // for it to grant.
+    // SetNpadSystemExtStateEnabled(bool, u64 aruid).
     let mut args = [0u8; 0x10];
     args[0] = 1;
     ipc_request_with_payload(&mut cpu, HIDSYS, server, 322, &args);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 
-    // IsJoyConRailEnabled / IsJoyConAttachedOnAllRail -> bool. Handheld play
-    // is the state where both pads are seated on the rails, and this console
-    // reports handheld mode and publishes a handheld npad, so both are true.
+    // IsJoyConRailEnabled / IsJoyConAttachedOnAllRail: true in handheld mode.
     for cmd in [523u32, 525] {
         ipc_request(&mut cpu, HIDSYS, 4, Some(server), cmd);
         assert_eq!(
@@ -193,28 +166,21 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
         assert_eq!(cpu.mem.read_u8(tls + 0x30).unwrap(), 1, "cmd {cmd}");
     }
 
-    // SetFirmwareHotfixUpdateSkipEnabled(bool): whether to skip the hotfix a
-    // controller firmware update would apply. The pad here has no firmware to
-    // flash, so there is nothing to skip -- but a refusal is a fatal.
+    // SetFirmwareHotfixUpdateSkipEnabled(bool): a refusal is fatal.
     ipc_request_with_payload(&mut cpu, HIDSYS, server, 1120, &[1u8, 0, 0, 0]);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 
-    // GetUniquePadIds -> an s64 count. A unique pad is a *detachable*
-    // controller and the one here is the built-in handheld pad, so there are
-    // none and the pointer buffer is left alone.
+    // GetUniquePadIds -> 0: the built-in handheld pad is not detachable.
     ipc_request(&mut cpu, HIDSYS, 4, Some(server), 703);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
     assert_eq!(cpu.mem.read_u64(tls + 0x30).unwrap(), 0);
 
-    // AcquireHomeButtonEventHandle -> a copy handle. There is no Home button,
-    // so it is handed out and never signalled.
+    // AcquireHomeButtonEventHandle -> a copy handle, never signalled.
     ipc_request(&mut cpu, HIDSYS, 4, Some(server), 101);
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
     assert_ne!(cpu.mem.read_u32(tls + 0x0c).unwrap(), 0);
 
-    // Converting the session to a domain must not quietly turn it into
-    // IHidServer: command 0 there is CreateAppletResource, and hid:sys has no
-    // command 0 at all.
+    // A domain conversion must not turn hid:sys into IHidServer.
     const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
     ipc_request(&mut cpu, HIDSYS, 4, Some(server), 0);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
@@ -222,11 +188,7 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
 
 #[test]
 fn events_are_copy_handles_and_start_unsignalled() {
-    // Every event a service hands out is a **copy** handle: a move handle
-    // transfers ownership and lives in a different field of the handle
-    // descriptor, so an event sent in the move slot is read back as 0. That is
-    // why nnSdk spent whole boots waiting on handle 0 after asking for
-    // GetGpuErrorDetectedSystemEvent.
+    // Events are copy handles; one sent in the move slot reads back as 0.
     const APPLET: u64 = 0x9000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -243,30 +205,24 @@ fn events_are_copy_handles_and_start_unsignalled() {
 
     // GetGpuErrorDetectedSystemEvent.
     ipc_request(&mut cpu, APPLET, 4, Some(functions), 130);
-    // { send_pid:1, num_copy:4, num_move:4 } -- one copy handle, no move ones.
+    // { send_pid:1, num_copy:4, num_move:4 }: one copy handle.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
     let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_ne!(event, 0, "the guest must receive a real handle");
 
-    // Nothing has fired it, so a poll times out. Reporting the wait satisfied
-    // is what told nn::oe::GpuErrorHandler that the GPU had faulted.
+    // Unfired, so a poll times out.
     const RESULT_TIMED_OUT: u64 = 0xEA01;
     let (result, _) = wait_sync(&mut cpu, &[event], 0);
     assert_eq!(result, RESULT_TIMED_OUT);
 
-    // A second event, left unsignalled, so the index below is a real position
-    // rather than "the first handle". GetAcquiredSleepLockEvent, not
-    // GetEventHandle -- nothing here ever sleeps, while the applet-message
-    // event *starts* signalled because AM really does have one message queued
-    // at startup.
+    // A second, unsignalled event so the index below is a real position.
     ipc_request(&mut cpu, APPLET, 4, Some(proxy), 0); // ICommonStateGetter
     let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
     ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 13);
     let quiet = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_ne!(quiet, event);
 
-    // Once signalled it reports the index that fired, and consumes it: these
-    // are auto-clear events, so a second poll times out again.
+    // Auto-clear: once signalled it reports its index, then times out again.
     cpu.signal_event(u64::from(event));
     let (result, index) = wait_sync(&mut cpu, &[quiet, event], 0);
     assert_eq!(result, 0);
@@ -274,9 +230,7 @@ fn events_are_copy_handles_and_start_unsignalled() {
     let (result, _) = wait_sync(&mut cpu, &[event], 0);
     assert_eq!(result, RESULT_TIMED_OUT);
 
-    // A handle this emulator does not model as an event is still treated as
-    // ready, which is what keeps thread handles and unmodelled service handles
-    // behaving as they always have.
+    // Handles not modelled as events are treated as ready.
     let (result, index) = wait_sync(&mut cpu, &[0x1234], 0);
     assert_eq!(result, 0);
     assert_eq!(index, 0);
@@ -284,13 +238,8 @@ fn events_are_copy_handles_and_start_unsignalled() {
 
 #[test]
 fn control_clone_hands_back_a_working_session() {
-    // CloneCurrentObject (control command 2) duplicates a session, and the
-    // reply has to carry a **new session handle as a move handle**. Answering
-    // it with a bare success and no handle left nnSdk -- which clones fsp-srv
-    // before mounting anything -- talking to handle 0, so nn::fs::MountRom
-    // failed without ever issuing a filesystem command.
-    // Clear of `alloc_handle`'s own range, which starts at 0x1000 -- a real
-    // session handle always comes from there, but this one is hand-registered.
+    // CloneCurrentObject (control 2) must return a new session as a move handle;
+    // nnSdk clones fsp-srv before mounting. The handle is clear of `alloc_handle`'s range.
     const FS: u64 = 0x9000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -298,19 +247,16 @@ fn control_clone_hands_back_a_working_session() {
     cpu.register_service_handle(FS, "fsp-srv");
     let tls = cpu.tls_base();
 
-    // Convert to a domain first, so the clone has objects to inherit.
     ipc_request(&mut cpu, FS, 5, None, 0);
     let object = cpu.mem.read_u32(tls + 0x20).unwrap();
 
     ipc_request(&mut cpu, FS, 5, None, 2); // CloneCurrentObject
     assert_eq!(cpu.read_x(0), 0);
-    // Move handles land right after the 8-byte hipc header: a descriptor word
-    // then the handles themselves.
+    // Move handles follow the 8-byte hipc header and a descriptor word.
     let clone = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(clone, 0, "clone must hand back a real handle, not 0");
     assert_ne!(clone, FS, "the clone is a separate session");
 
-    // The clone reaches the same service, holding the same domain objects.
     let handles = cpu.service_handles_snapshot();
     assert!(handles
         .iter()
@@ -321,11 +267,7 @@ fn control_clone_hands_back_a_working_session() {
 
 #[test]
 fn storage_read_uses_the_istorage_field_layout() {
-    // IStorage::Read is (s64 offset, u64 size) -- *not* IFile::Read, which
-    // leads with a u32 option and pads to 8, putting its offset at +8 and its
-    // size at +0x10. Reading those two fields here meant every RomFS read came
-    // back as "0 bytes at offset 0x50": the guest mounted its RomFS, parsed an
-    // empty header, and found none of its own files.
+    // IStorage::Read is (s64 offset, u64 size), unlike IFile::Read.
     const FS: u64 = 0x1000;
     const OUT: u32 = 0x6000;
     let romfs: Vec<u8> = (0..64u8).collect();
@@ -336,7 +278,6 @@ fn storage_read_uses_the_istorage_field_layout() {
     cpu.register_service_handle(FS, "fsp-srv-storage");
     let tls = cpu.tls_base();
 
-    // Read(offset = 4, size = 8).
     let mut args = Vec::new();
     args.extend_from_slice(&4u64.to_le_bytes()); // offset
     args.extend_from_slice(&8u64.to_le_bytes()); // size
@@ -349,14 +290,9 @@ fn storage_read_uses_the_istorage_field_layout() {
             "byte {i}"
         );
     }
-    // Nothing past the requested size is touched.
     assert_eq!(cpu.mem.read_u8(OUT + 8).unwrap(), 0);
 
-    // A read that runs off the end is refused, not clamped: `fs` checks the
-    // range against the storage and reports 2002-3005 rather than filling
-    // what exists. It used to be clamped, which reports success over a buffer
-    // the caller's own bytes are still in, and a caller that trusts the
-    // Result reads those as data.
+    // A read past the end is refused with 2002-3005, not clamped.
     const OUT_OF_RANGE: u32 = 2 | (3005 << 9);
     cpu.mem.write_u8(OUT, 0xAA).unwrap();
     let mut args = Vec::new();
@@ -366,7 +302,6 @@ fn storage_read_uses_the_istorage_field_layout() {
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), OUT_OF_RANGE);
     assert_eq!(cpu.mem.read_u8(OUT).unwrap(), 0xAA, "buffer left alone");
 
-    // The same read, sized to what is actually there, succeeds.
     let mut args = Vec::new();
     args.extend_from_slice(&(romfs.len() as u64 - 2).to_le_bytes());
     args.extend_from_slice(&2u64.to_le_bytes());
@@ -374,7 +309,6 @@ fn storage_read_uses_the_istorage_field_layout() {
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
     assert_eq!(cpu.mem.read_u8(OUT).unwrap(), romfs[romfs.len() - 2]);
 
-    // GetSize reports the whole RomFS.
     ipc_request(&mut cpu, FS, 4, Some(1), 4);
     assert_eq!(cpu.mem.read_u64(tls + 0x30).unwrap(), romfs.len() as u64);
 }
@@ -399,8 +333,7 @@ fn lm_writes_the_guests_own_log_to_the_console() {
     ipc_request(&mut cpu, LM, 4, Some(service), 0); // OpenLogger
     let logger = cpu.mem.read_u32(tls + 0x30).unwrap();
 
-    // One whole message in a single packet: severity 3 is Error, and the
-    // module name comes from key 6, the text from key 2.
+    // One packet: severity 3 is Error, module from key 6, text from key 2.
     let len = write_log_packet(
         &mut cpu,
         PACKET,
@@ -414,8 +347,7 @@ fn lm_writes_the_guests_own_log_to_the_console() {
         "[lm/ERROR/Game] hello world\n"
     );
 
-    // A message split across packets: only the head carries the prefix and
-    // only the tail ends the line, so the two halves join into one message.
+    // A message split across packets joins into one line.
     cpu.out.clear();
     let len = write_log_packet(&mut cpu, PACKET, HEAD, 1, &[(KEY_TEXT, b"split ")]);
     ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
@@ -426,8 +358,7 @@ fn lm_writes_the_guests_own_log_to_the_console() {
         "[lm/INFO] split message\n"
     );
 
-    // A packet claiming more payload than the buffer holds is trusted only as
-    // far as the buffer goes, rather than walking off the end of the mapping.
+    // A packet's claimed length is trusted only up to the buffer size.
     cpu.out.clear();
     let len = write_log_packet(
         &mut cpu,
@@ -467,22 +398,18 @@ fn pctl_reports_parental_controls_off() {
     cpu.register_service_handle(PCTL, "pctl");
     let tls = cpu.tls_base();
 
-    // Control::ConvertToDomain -> IParentalControlServiceFactory, then
-    // CreateServiceWithoutInitialize -> IParentalControlService.
     ipc_request(&mut cpu, PCTL, 5, None, 0);
     let factory = cpu.mem.read_u32(tls + 0x20).unwrap();
     ipc_request(&mut cpu, PCTL, 4, Some(factory), 1);
     let service = cpu.mem.read_u32(tls + 0x30).unwrap();
 
-    // A permission check answers with a bare Result: success *is* "permitted",
-    // and a restriction is an error the caller checks for by value.
+    // Permission checks: success means permitted.
     for cmd in [1001u32, 1004, 1013, 1017] {
         ipc_request(&mut cpu, PCTL, 4, Some(service), cmd);
         assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
     }
 
-    // The two query families read in opposite directions, and answering both
-    // the same way would report free communication as unavailable.
+    // The two query families read in opposite senses.
     for cmd in [1031u32, 1010, 1453, 1455] {
         ipc_request(&mut cpu, PCTL, 4, Some(service), cmd);
         assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
@@ -498,9 +425,7 @@ fn pctl_reports_parental_controls_off() {
         assert_eq!(cpu.mem.read_u8(tls + 0x30).unwrap(), 1, "cmd {cmd} allowed");
     }
 
-    // GenerateInquiryCode answers with the ten digits a guardian would read
-    // out, NUL-padded to 0x20. Refusing it is what a caller turns into a
-    // fatal 2010-0221 rather than carrying on without a code.
+    // GenerateInquiryCode -> ten digits NUL-padded to 0x20.
     ipc_request(&mut cpu, PCTL, 4, Some(service), 1204);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd 1204 refused");
     let code: Vec<u8> = (0..0x20)
@@ -511,7 +436,6 @@ fn pctl_reports_parental_controls_off() {
         "inquiry code is not ten digits in a 0x20 block: {code:?}"
     );
 
-    // Anything else still reports honestly rather than fabricating a success.
     const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
     ipc_request(&mut cpu, PCTL, 4, Some(service), 1203); // SetPinCode
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
@@ -519,15 +443,12 @@ fn pctl_reports_parental_controls_off() {
 
 #[test]
 fn applet_common_state_getter_reports_focus_once() {
-    // ICommonStateGetter::ReceiveMessage (cmd 1) must hand out the startup
-    // FocusStateChanged (15) exactly once and then report "no message", NOT
-    // the AM_BUSY error (0x19280) that wedges hbmenu in its "wait for applet"
-    // sleep loop, and not a fresh focus change on every poll, which made JKSV
-    // treat every frame as a new focus transition.
+    // ReceiveMessage (cmd 1) hands out the startup FocusStateChanged (15) once,
+    // then "no message", not AM_BUSY or a repeated focus change.
     let (mut cpu, handle, _proxy, state_getter) = applet_chain();
     let tls = cpu.tls_base();
 
-    // The message event announces the queued message to one poll, then clears.
+    // The message event fires for one poll, then clears.
     const RESULT_TIMED_OUT: u64 = 0xEA01;
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 0); // GetEventHandle
     let message = cpu.mem.read_u32(tls + 0x0c).unwrap();
@@ -548,8 +469,7 @@ fn applet_common_state_getter_reports_focus_once() {
     const NO_MESSAGES: u32 = 128 | (3 << 9);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), NO_MESSAGES);
 
-    // GetCurrentFocusState (cmd 9) reports InFocus so libnx's applet-mainloop
-    // wait loop terminates.
+    // GetCurrentFocusState (cmd 9) reports InFocus.
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 9);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1);
@@ -557,20 +477,12 @@ fn applet_common_state_getter_reports_focus_once() {
 
 #[test]
 fn applet_unimplemented_command_is_an_error_not_a_fake_success() {
-    // An `am` command with no implementation behind it must report cmif's
-    // "unknown command id" rather than a bare success. Everything `am` returns
-    // is a live handle or a piece of applet state the caller then acts on, so
-    // a fabricated success is a wrong answer the guest believes: answering
-    // IApplicationFunctions::GetGpuErrorDetectedSystemEvent that way left
-    // nnSdk's system worker waiting on handle 0.
+    // Unimplemented `am` commands report "unknown command id", not success.
     const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
     let (mut cpu, handle, proxy, _state_getter) = applet_chain();
     let tls = cpu.tls_base();
 
-    // IApplicationProxy::GetDisplayController, then a command it does not
-    // have. 10 is AcquireLastApplicationCaptureBuffer, which hands back a
-    // transfer memory handle -- exactly the shape a fabricated success gets
-    // wrong, and one of the capture commands still not implemented.
+    // GetDisplayController, then 10 (AcquireLastApplicationCaptureBuffer), unimplemented.
     ipc_request(&mut cpu, handle, 4, Some(proxy), 4);
     let display_controller = cpu.mem.read_u32(tls + 0x30).unwrap();
     ipc_request(&mut cpu, handle, 4, Some(display_controller), 10);
@@ -580,13 +492,9 @@ fn applet_unimplemented_command_is_an_error_not_a_fake_success() {
 
 #[test]
 fn gamepad_input_writes_input_reg_and_hid_shmem() {
-    // MapSharedMemory (svc 0x13) with x1=addr, x2=size must back the region
-    // with real memory and, for a region hid's size, record it; set_gamepad_state
-    // then mirrors the pad into INPUT_ADDR and into the two npad slots libnx
-    // reads. The offsets are `HidSharedMemory`'s: npad at 0x9A00, 0x5000 per
-    // controller, `full_key_lifo` at +0x28 and `handheld_lifo` at +0x378 within
-    // `HidNpadInternalState`, each LIFO holding a 0x20-byte header then storage
-    // entries of {sampling_number, HidNpadCommonState}.
+    // MapSharedMemory (svc 0x13) of a hid-sized region; set_gamepad_state
+    // mirrors the pad into INPUT_ADDR and the npad LIFOs (npad at 0x9A00,
+    // 0x5000 per controller, `full_key_lifo` at +0x28, `handheld_lifo` at +0x378).
     const SHMEM: u32 = 0x3000_0000;
     const NPAD: u32 = SHMEM + 0x9A00;
     const HANDHELD: u32 = NPAD + 8 * 0x5000;
@@ -597,11 +505,9 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
 
-    // A|B held, left stick pushed fully up and slightly left.
     cpu.set_gamepad_state(0x3, -1000, 30000, 0, 0);
 
-    // The mask handed to the guest gains HidNpadButton_StickLUp (1 << 17); the
-    // small horizontal deflection stays below the pseudo-button threshold.
+    // StickLUp (1 << 17) is added; the small horizontal deflection is below threshold.
     let expected_buttons = 0x3 | (1 << 17);
     assert_eq!(
         cpu.mem.read_u64(switch_core::INPUT_ADDR).unwrap(),
@@ -625,8 +531,7 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
         let entry = lifo + 0x20;
         let sample = cpu.mem.read_u64(entry).unwrap();
         assert!(sample > 0, "sampling number must advance");
-        // Bit 0 of the storage's number is the seqlock's "being written" flag,
-        // so it holds the state's own number doubled.
+        // Bit 0 of the storage number is the seqlock flag, so it is doubled.
         assert_eq!(cpu.mem.read_u64(entry + 0x08).unwrap() * 2, sample);
         assert_eq!(cpu.mem.read_u64(entry + 0x10).unwrap(), expected_buttons);
         assert_eq!(
@@ -634,20 +539,14 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
             1000u32.wrapping_neg()
         );
         assert_eq!(cpu.mem.read_u32(entry + 0x1C).unwrap(), 30000);
-        // IsConnected, whatever else the controller reports about its halves.
         assert_eq!(cpu.mem.read_u32(entry + 0x28).unwrap() & 1, 1);
 
-        // Power info, straight after `system_button_properties`: a full
-        // battery for the pad and for each of its two halves. An unwritten
-        // `battery_level` reads back as 0, which is `HidPowerInfo`'s flat
-        // step rather than a missing reading, so a controller UI drew every
-        // pad here as empty.
+        // Power info after `system_button_properties`: full batteries.
         for info in 0..3u32 {
             let level = cpu.mem.read_u32(base + 0x4198 + info * 4).unwrap();
             assert_eq!(level, 4, "battery_level[{info}]");
         }
-        // PowerInfo{0,1,2}PowerConnected set, their Charging counterparts in
-        // bits 0-2 clear: attached to the console, and already full.
+        // PowerConnected bits set, Charging bits clear.
         let properties = cpu.mem.read_u32(base + 0x4190).unwrap();
         assert_eq!(properties & 0x38, 0x38, "PowerConnected");
         assert_eq!(properties & 0x7, 0, "Charging");
@@ -656,12 +555,9 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
 
 #[test]
 fn touch_input_writes_the_hid_touchscreen_lifo() {
-    // `HidSharedMemory.touch_screen` sits at 0x400, straight after the debug
-    // pad's 0x400, and holds a `HidTouchScreenLifo`: the same 0x20-byte header
-    // the npad LIFOs use, then storage entries of `{u64 sampling_number,
-    // HidTouchScreenState}`. That state is `{u64 sampling_number, s32 count,
-    // u32 reserved, HidTouchState touches[16]}`, and a `HidTouchState` is 0x28
-    // bytes with finger_id at +0x0C, x at +0x10 and y at +0x14.
+    // `HidSharedMemory.touch_screen` at 0x400: a LIFO of `{u64 sampling_number,
+    // HidTouchScreenState}`; each 0x28-byte `HidTouchState` has finger_id at
+    // +0x0C, x at +0x10 and y at +0x14.
     use switch_core::cpu::TouchPoint;
     const SHMEM: u32 = 0x3000_0000;
     const LIFO: u32 = SHMEM + 0x400;
@@ -693,8 +589,7 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     let sample = cpu.mem.read_u64(storage).unwrap();
     assert!(sample > 0, "sampling number must advance");
     let state = storage + 8;
-    // The storage's number is the state's doubled, so bit 0 stays clear for a
-    // reader that treats it as the seqlock's "being written" flag.
+    // The storage number is the state's doubled.
     assert_eq!(
         cpu.mem.read_u64(state).unwrap() * 2,
         sample,
@@ -711,16 +606,12 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 100, "x");
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 700, "y");
 
-    // Both contacts are new, so both carry `start_touch`. A UI taps on that
-    // transition rather than on a finger being in the list, which is why
-    // publishing zero here left the Home Menu registering every tap and acting
-    // on none of them.
+    // New contacts carry `start_touch`; UIs tap on that transition.
     assert_eq!(cpu.mem.read_u32(touch(0) + 0x08).unwrap(), 1, "start 0");
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x08).unwrap(), 1, "start 3");
 
-    // Lifting one of the two publishes it **once more**, still counted, with
-    // `end_touch`: the finger has to be seen going up, not merely stop being
-    // there. The one still down is held, so its attributes go back to zero.
+    // A lifted finger is published once more with `end_touch`; the held one's
+    // attributes return to zero.
     cpu.set_touch_state(&[TouchPoint {
         finger_id: 0,
         x: 5,
@@ -739,8 +630,7 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
         "sample must advance"
     );
 
-    // And only then is it gone, with the slot it vacated cleared so a reader
-    // that scans the array rather than trusting the count finds no ghost.
+    // Then it is gone and its slot cleared.
     cpu.set_touch_state(&[TouchPoint {
         finger_id: 0,
         x: 5,
@@ -750,15 +640,14 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 0, "vacated x");
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 0, "vacated y");
 
-    // A full lift is a published state carrying the finger's end, not silence:
-    // a title polling the LIFO has to see it go up.
+    // A full lift is published, not silent.
     cpu.set_touch_state(&[]);
     assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "the end sample");
     assert_eq!(cpu.mem.read_u32(touch(0) + 0x08).unwrap(), 2, "end");
     cpu.set_touch_state(&[]);
     assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 0, "contact count");
 
-    // Coordinates are clamped to the digitizer, and the slot count to sixteen.
+    // Coordinates clamp to the digitizer; slots to sixteen.
     cpu.set_touch_state(&[TouchPoint {
         finger_id: 0,
         x: 99_999,
@@ -775,11 +664,8 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
 #[test]
 fn mapping_pl_shared_memory_delivers_the_shared_font() {
     use switch_core::cpu::PL_SHMEM_SIZE;
-    // `plInitialize` maps pl's shared memory and homebrew then reads the font
-    // out of it at the offset pl reported, so the bytes have to be there by
-    // the time the mapping syscall returns. Each font sits behind the
-    // eight-byte header a console stores it behind, which is why the offset
-    // `GetSharedMemoryAddressOffset` reports is not zero.
+    // pl's fonts must be in shared memory when the mapping returns, each behind
+    // an eight-byte header.
     const ADDR: u32 = 0x2000_0000;
     const HEADER: u32 = 8;
     let font: Vec<u8> = (0..=255u8).cycle().take(0x2000).collect();
@@ -792,8 +678,7 @@ fn mapping_pl_shared_memory_delivers_the_shared_font() {
     assert_eq!(cpu.read_x(0), 0);
     assert_eq!(cpu.mem.dump(ADDR + HEADER, font.len()).unwrap(), font);
 
-    // A font handed over after the guest mapped the region still reaches it:
-    // the guest is holding a pointer into memory it already mapped.
+    // A font set after mapping still reaches the guest.
     let replacement: Vec<u8> = vec![0xAB; 0x1000];
     cpu.set_shared_font(replacement.clone());
     assert_eq!(
@@ -804,16 +689,7 @@ fn mapping_pl_shared_memory_delivers_the_shared_font() {
 
 #[test]
 fn caps_a_reports_a_mounted_empty_album() {
-    // The Album applet asks three things before it will draw anything: an
-    // unnamed command 18, whether the album is mounted, and whether captures
-    // are being auto-saved to the SD card. Nothing implemented `caps:a` at
-    // all, so each came back as a fabricated object id, as a *bool*, a large
-    // number read one byte at a time.
-    //
-    // There is no NAND album and no SD card here, so what these describe is a
-    // freshly initialised console: mounted, and empty. Reporting it unmounted
-    // is the card-removed error, which is a screen of its own rather than a
-    // gallery.
+    // The Album applet's startup queries: an empty, mounted album with no SD auto-save.
     const CAPS: u64 = 0xCA00;
 
     let mut cpu = cpu_at(0x1000);
@@ -822,7 +698,7 @@ fn caps_a_reports_a_mounted_empty_album() {
     cpu.register_service_handle(CAPS, "caps:a");
     let tls = cpu.tls_base();
 
-    // Unknown18 -> the number of bytes written into the caller's buffer.
+    // Unknown18 -> bytes written into the caller's buffer.
     ipc_request_plain(&mut cpu, CAPS, 18, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "Unknown18 failed");
     assert_eq!(
@@ -844,7 +720,7 @@ fn caps_a_reports_a_mounted_empty_album() {
         "the album is not mounted"
     );
 
-    // GetAutoSavingStorage -> bool. There is no SD card to save to.
+    // GetAutoSavingStorage -> bool.
     ipc_request_plain(&mut cpu, CAPS, 401, &[]);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x18).unwrap(),
@@ -857,9 +733,7 @@ fn caps_a_reports_a_mounted_empty_album() {
         "captures are being auto-saved"
     );
 
-    // And the album it says is mounted is empty, by both the count and the
-    // list: a caller told "mounted" asks these next, and a count it cannot
-    // trust is worse than no service at all.
+    // The album is empty by both the count and the list.
     for cmd in [0u32, 1, 100, 101] {
         ipc_request_plain(&mut cpu, CAPS, cmd, &0u8.to_le_bytes());
         assert_eq!(
@@ -877,12 +751,8 @@ fn caps_a_reports_a_mounted_empty_album() {
 
 #[test]
 fn the_applet_capture_buffer_names_a_slot_nothing_renders_into() {
-    // `AcquireCallerAppletCaptureSharedBuffer` hands back the screen of
-    // whatever was on display before this applet. Booted alone, there is no
-    // such screen, but "nothing written, slot -1" is not how to say so:
-    // `nnSdk` reads it as not-ready-yet and asks again, and the Album applet
-    // spent every frame of a 300M-instruction run in that retry loop without
-    // ever reaching a draw.
+    // AcquireCallerAppletCaptureSharedBuffer with no caller: a black slot, not
+    // slot -1, which `nnSdk` retries forever.
     const APPLET: u64 = 0xA1000;
 
     let mut cpu = cpu_at(0x1000);
@@ -903,8 +773,7 @@ fn the_applet_capture_buffer_names_a_slot_nothing_renders_into() {
             1,
             "acquire {cmd} wrote nothing"
         );
-        // The slot named is past the ones `AcquireSharedFrameBuffer` hands
-        // out, so the black it claims to be stays black.
+        // A slot past those `AcquireSharedFrameBuffer` hands out stays black.
         let slot = cpu.mem.read_u32(tls + 0x24).unwrap();
         assert!(
             (switch_core::cpu::SHARED_BUFFER_USABLE_SLOTS..switch_core::cpu::SHARED_BUFFER_SLOTS)
@@ -916,11 +785,7 @@ fn the_applet_capture_buffer_names_a_slot_nothing_renders_into() {
 
 #[test]
 fn the_capture_image_getters_clear_the_buffer_they_fill() {
-    // The same black screen the three `Acquire`s hand out as a slot, asked
-    // for as pixels instead: a 1280x720 RGBA8888 image in a map-alias out
-    // buffer. Nothing was captured, and leaving the buffer alone while
-    // reporting one was written hands the applet whatever it had in there to
-    // draw. Refusing the command instead aborted `nnSdk` outright.
+    // The same black screen as pixels: a 1280x720 RGBA8888 image in a map-alias buffer.
     const APPLET: u64 = 0xA1000;
     const REGION: u32 = 0x20_0000;
     const ROOM: u32 = 0x4000;
@@ -951,8 +816,7 @@ fn the_capture_image_getters_clear_the_buffer_they_fill() {
             vec![0u8; SIZE as usize],
             "capture {cmd} left the buffer as it was"
         );
-        // And only the buffer: the clear walks a page at a time, so an
-        // overrun would land on the page after the one it ends in.
+        // Nothing past the buffer is cleared.
         assert_eq!(
             cpu.mem.read_u32(START - 4).unwrap(),
             PATTERN,
@@ -968,11 +832,7 @@ fn the_capture_image_getters_clear_the_buffer_they_fill() {
 
 #[test]
 fn the_caller_applet_stack_is_the_one_applet_above_this_one() {
-    // GetCallerAppletIdentityInfoStack walks up the chain of applets that
-    // launched this one. Nothing here launched it, so the chain above it is
-    // the menu and nothing else -- the same identity 12 and 14 answer with.
-    // The count has to fit the buffer the caller sized: one that overruns it
-    // is worse than a short one.
+    // GetCallerAppletIdentityInfoStack: just the menu, clamped to the buffer.
     const APPLET: u64 = 0xA3000;
     const STACK: u32 = 0x30_0000;
     const ENTRY: u32 = 0x10;
@@ -991,8 +851,7 @@ fn the_caller_applet_stack_is_the_one_applet_above_this_one() {
     assert_eq!(cpu.mem.read_u32(STACK).unwrap(), 3, "SystemAppletMenu");
     assert_eq!(cpu.mem.read_u64(STACK + 8).unwrap(), QLAUNCH_TITLE_ID);
 
-    // A buffer with no room for an entry gets a count of zero, not one that
-    // names an entry the caller has nowhere to read.
+    // No room for an entry gives a count of zero.
     ipc_request_plain_with_buffer(&mut cpu, APPLET, 17, STACK, ENTRY - 1, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "refused");
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "entries written");
@@ -1000,10 +859,7 @@ fn the_caller_applet_stack_is_the_one_applet_above_this_one() {
 
 #[test]
 fn a_library_applet_is_told_which_keyboard_layout_to_open_with() {
-    // GetDesirableKeyboardLayout is the layout the applet's caller asked it
-    // to open with, and hardware errors when no caller set one. There is no
-    // caller here, so it answers with the layout that goes with the language
-    // `set` reports -- en-US, so EnglishUs.
+    // GetDesirableKeyboardLayout with no caller: the layout for `set`'s en-US.
     const APPLET: u64 = 0xA2000;
     const ENGLISH_US: u32 = 1;
 
@@ -1020,10 +876,7 @@ fn a_library_applet_is_told_which_keyboard_layout_to_open_with() {
 
 #[test]
 fn audout_plays_the_buffers_the_guest_hands_it() {
-    // `audout` is the plain PCM-out device, and the whole interface is the
-    // buffer protocol: append a buffer, wait on the event, collect the tags of
-    // the buffers the device is done with. A device that accepts buffers and
-    // never releases them hangs the guest's audio thread forever.
+    // `audout`'s buffer protocol: append, wait on the event, collect released tags.
     const AUDOUT: u64 = 0xA000;
     const DESC: u32 = 0x8000; // the AudioOutBuffer struct
     const PCM: u32 = 0x8100; // its samples
@@ -1037,7 +890,7 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     let tls = cpu.tls_base();
 
     // OpenAudioOut(48 kHz, stereo) -> { rate, channels, format, state } and an
-    // IAudioOut as a *move* handle.
+    // IAudioOut move handle.
     let mut args = Vec::new();
     args.extend_from_slice(&48_000u32.to_le_bytes());
     args.extend_from_slice(&2u32.to_le_bytes());
@@ -1056,17 +909,16 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
         1,
         "a device opens stopped"
     );
-    // { send_pid:1, num_copy:4, num_move:4 }: one move handle, no copy ones.
+    // { send_pid:1, num_copy:4, num_move:4 }: one move handle.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
     let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(device, 0, "no IAudioOut came back");
 
-    // RegisterBufferEvent: an event, and events are *copy* handles.
+    // RegisterBufferEvent: a copy handle.
     ipc_request_plain(&mut cpu, device, 4, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
     let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_ne!(event, 0);
-    // Nothing has been played, so nothing has been released.
     assert_eq!(
         wait_sync(&mut cpu, &[event], 0).0,
         0xEA01,
@@ -1095,17 +947,12 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
         "AppendAudioOutBuffer failed"
     );
 
-    // The samples reached the host, unchanged, at full volume. That happens on
-    // arrival: it is the *tag* that waits for the device, not the audio.
+    // The samples reach the host on arrival; only the tag waits for the device.
     let mut played = [0i16; 8];
     assert_eq!(cpu.take_audio(&mut played), 8);
     assert_eq!(played, samples);
 
-    // The buffer is not back yet, because the device has not finished playing
-    // it. Four stereo frames at 48 kHz take 4/48000 of a second, which is
-    // 85,000 of the 1.02 GHz cycles one emulated instruction stands for.
-    // Releasing on arrival is what let Just Dance 2019 run its audio clock at
-    // 205x real time and drop every frame of its boot video.
+    // Not released until played: four frames at 48 kHz is 85,000 cycles at 1.02 GHz.
     assert_eq!(
         wait_sync(&mut cpu, &[event], 0).0,
         0xEA01,
@@ -1118,16 +965,13 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
         "a tag came back early"
     );
 
-    // Give the device that long. A branch-to-self is the cheapest way to spend
-    // the cycles, and spending them is the point: the clock is the instruction
-    // count.
+    // Spend the cycles with a branch-to-self; the clock is the instruction count.
     const SPIN: u32 = 0x9000;
     cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
     cpu.set_pc(SPIN);
     cpu.run(90_000).unwrap();
     cpu.set_pc(0x1000);
 
-    // Now it comes back: the event fires and the tag is collectable.
     assert_eq!(
         wait_sync(&mut cpu, &[event], 0).0,
         0,
@@ -1137,16 +981,13 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
     assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
 
-    // GetAudioOutPlayedSampleCount counts frames, not samples: four stereo
-    // frames, not eight.
+    // GetAudioOutPlayedSampleCount counts frames, not samples.
     ipc_request_plain(&mut cpu, device, 10, &[]);
     assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 4);
 
-    // And the host is told what to play it at.
     assert_eq!(cpu.audio_format(), (48_000, 2));
 
-    // The activity report says the same: one device, started, one buffer of
-    // four frames in and back out, and eight samples produced and taken.
+    // One device, started, one four-frame buffer in and out, eight samples.
     let activity = cpu.audio_activity();
     assert_eq!(
         (
@@ -1176,13 +1017,8 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
 
 #[test]
 fn audout_release_zeroes_the_entry_after_the_last_tag() {
-    // `nn::audio`'s wrapper around `GetReleasedAudioOutBuffer` points the
-    // receive buffer at an uninitialised stack slot and returns that slot
-    // without ever reading the count. So a release that hands back nothing has
-    // to leave a zero there, or the caller takes whatever the last call left
-    // on the stack for an `AudioOutBuffer`. The Album applet's audio thread
-    // took a `bl`'s return address, and de-interleaved its samples over the
-    // `.text` the address pointed into.
+    // `nn::audio` reads the released tag from an uninitialised stack slot without
+    // checking the count, so an empty release must write a zero terminator.
     const AUDOUT: u64 = 0xA000;
     const DESC: u32 = 0x8000;
     const PCM: u32 = 0x8100;
@@ -1214,8 +1050,7 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
     cpu.mem.write_u64(DESC + 32, 0).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
 
-    // Nothing has played yet, so the release is empty, and the slot the guest
-    // reads regardless has to say so.
+    // Nothing has played, so the release is empty and terminated.
     cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
     cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
@@ -1230,8 +1065,7 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
         "the guest kept reading its own stack"
     );
 
-    // Once the device is done with it the tag lands in the first slot, and the
-    // zero moves along to the one after it.
+    // Once played, the tag lands in the first slot and the zero after it.
     const SPIN: u32 = 0x9000;
     cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
     cpu.set_pc(SPIN);
@@ -1252,12 +1086,8 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
 
 #[test]
 fn audout_release_answers_the_auto_commands_pointer_buffer() {
-    // `nnSdk` reaches this through `GetReleasedAudioOutBufferAuto`, which
-    // offers the out buffer as a receive-static and leaves the map-alias
-    // descriptor null. Reading only the map-alias one wrote the reply to
-    // address 0, so the caller kept the uninitialised stack slot it points at:
-    // "A Short Hike"'s mixer took a `bl`'s return address for an
-    // `AudioOutBuffer` and stored its samples over its own `.text`.
+    // `GetReleasedAudioOutBufferAuto` offers a receive-static buffer and a null
+    // map-alias descriptor; the reply must go to the former.
     const AUDOUT: u64 = 0xA000;
     const DESC: u32 = 0x8000;
     const PCM: u32 = 0x8100;
@@ -1289,8 +1119,7 @@ fn audout_release_answers_the_auto_commands_pointer_buffer() {
     cpu.mem.write_u64(DESC + 32, 0).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
 
-    // Nothing has played yet, so the terminator has to reach the guest's own
-    // slot rather than address 0.
+    // The terminator reaches the guest's slot, not address 0.
     cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
     ipc_request_auto_recv(&mut cpu, device, 8, TAGS, 16, &[]);
     assert_eq!(
@@ -1304,7 +1133,7 @@ fn audout_release_answers_the_auto_commands_pointer_buffer() {
         "the pointer buffer was never written"
     );
 
-    // And once the device is done with it, so does the tag.
+    // And once played, so does the tag.
     const SPIN: u32 = 0x9000;
     cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
     cpu.set_pc(SPIN);
@@ -1325,12 +1154,8 @@ fn audout_release_answers_the_auto_commands_pointer_buffer() {
 
 #[test]
 fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_with() {
-    // `RequestUpdateAudioRenderer` runs every frame, and both `audrvUpdate`
-    // and `nnSdk` walk its reply section by section against sizes they
-    // computed themselves: a section left out is not ignored, it desynchronises
-    // the walk and aborts. Tomodachi Life opens a revision-15 renderer with 17
-    // effects; the reply had no effects section and no renderer info, and its
-    // audio setup ended the boot on an `nn::audio` result.
+    // `RequestUpdateAudioRenderer`'s reply is walked section by section against
+    // caller-computed sizes, so every section must be present.
     const AUDREN: u64 = 0xB000;
     const OUT: u32 = 0x9000;
 
@@ -1340,8 +1165,7 @@ fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_wit
     cpu.register_service_handle(AUDREN, "audren:u");
     let tls = cpu.tls_base();
 
-    // `AudioRendererParameter`: voices at +16, sinks at +20, effects at +24
-    // and the revision magic at +48.
+    // `AudioRendererParameter`: voices +16, sinks +20, effects +24, revision +48.
     let renderer_with = |cpu: &mut Cpu, revision: &[u8; 4]| -> u64 {
         let mut params = vec![0u8; 52];
         params[16..20].copy_from_slice(&2u32.to_le_bytes());
@@ -1357,10 +1181,9 @@ fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_wit
     assert_ne!(renderer, 0, "no IAudioRenderer came back");
     ipc_request_plain_with_buffer(&mut cpu, renderer, 4, OUT, 0x1000, true, &[]);
 
-    // One `MemPoolInfoOut` per mempool (effects + four per voice), one
-    // `VoiceInfoOut` per voice, one revision-9 `EffectOutStatus` per effect,
-    // one `SinkInfoOut` per sink, then the performance, behaviour and
-    // renderer-info tails.
+    // MemPoolInfoOut per mempool (effects + four per voice), VoiceInfoOut per
+    // voice, revision-9 EffectOutStatus per effect, SinkInfoOut per sink, then
+    // the performance, behaviour and renderer-info tails.
     assert_eq!(section(&cpu, 0x08), (3 + 4 * 2) * 16, "mempools");
     assert_eq!(section(&cpu, 0x0c), 2 * 16, "voices");
     assert_eq!(section(&cpu, 0x14), 3 * 0x90, "effects");
@@ -1371,8 +1194,7 @@ fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_wit
     let total = 64 + 176 + 32 + 3 * 0x90 + 32 + 16 + 176 + 16;
     assert_eq!(section(&cpu, 0x3c), total, "total size");
 
-    // Before revision 5 there is no renderer info at all, and an effect's
-    // status is the narrow form.
+    // Before revision 5: no renderer info, and the narrow effect status.
     let renderer = renderer_with(&mut cpu, b"REV4");
     ipc_request_plain_with_buffer(&mut cpu, renderer, 4, OUT, 0x1000, true, &[]);
     assert_eq!(section(&cpu, 0x14), 3 * 16, "revision-4 effects");
@@ -1386,11 +1208,7 @@ fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_wit
 
 #[test]
 fn audren_mixes_a_voice_through_to_the_host() {
-    // The renderer is where retail audio actually lives: `nn::audio` and
-    // libnx's `audrv` hand it wave buffers, a pitch and a routing matrix, and
-    // expect mixed PCM out the far end. It used to answer every update with a
-    // correctly shaped, entirely zeroed reply, the right size for the caller
-    // to accept and no sound whatsoever.
+    // The renderer mixes wave buffers into PCM.
     const IN: u32 = 0x3_0000;
     const OUT: u32 = 0x4_0000;
     const PCM: u32 = 0x5_0000;
@@ -1401,8 +1219,7 @@ fn audren_mixes_a_voice_through_to_the_host() {
     cpu.set_pc(0x1000);
     let renderer = audren_stereo(&mut cpu);
 
-    // A ramp: every sample differs from its neighbours, so an off-by-one in
-    // the resampler shows up as a shift rather than as plausible noise.
+    // A ramp, so a resampler off-by-one shows as a shift.
     let samples: Vec<i16> = (0..FRAMES).map(|i| (i as i16 - 120) * 100).collect();
     for (i, &s) in samples.iter().enumerate() {
         cpu.mem.write_u16(PCM + i as u32 * 2, s as u16).unwrap();
@@ -1415,11 +1232,7 @@ fn audren_mixes_a_voice_through_to_the_host() {
     update.mix(2);
     update.sink(&[0, 1]);
 
-    // One frame of emulated time, and one frame is what comes out: the
-    // renderer produces what the clock says has come due and not a sample
-    // more, which is the same rule `AudioOut::free_at` follows and the reason
-    // a title's audio clock runs at 1x rather than at whatever multiple of
-    // real time the emulator manages.
+    // One frame of emulated time renders exactly one frame.
     cpu.cycles += AUDREN_FRAME_CYCLES;
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
 
@@ -1430,17 +1243,13 @@ fn audren_mixes_a_voice_through_to_the_host() {
         "the mix never reached the host"
     );
     assert_eq!(cpu.audio_format(), (48_000, 2));
-    // The voice is mono into both mix buffers and the sink reads one into each
-    // output channel, so the frame is the source doubled up, and it is
-    // bit-exact, because a 16-bit source at unity gain has no arithmetic done
-    // to it that it should not survive.
+    // Mono into both mix buffers and outputs: the source doubled, bit-exact.
     for (i, &s) in samples.iter().enumerate() {
         assert_eq!(played[i * 2], s, "left channel at sample {i}");
         assert_eq!(played[i * 2 + 1], s, "right channel at sample {i}");
     }
 
-    // And nothing is queued twice: a second update with no time elapsed
-    // renders no further frames.
+    // No time elapsed renders nothing further.
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
     let mut again = [0i16; 2];
     assert_eq!(
@@ -1452,16 +1261,12 @@ fn audren_mixes_a_voice_through_to_the_host() {
 
 #[test]
 fn audren_reports_the_wave_buffers_it_finished_with() {
-    // `num_wavebufs_consumed` is the load-bearing number in the reply: the
-    // guest advances its own ring head by the delta and refills only the
-    // buffers this has accounted for. A renderer that reports zero is one
-    // whose title queues four buffers, waits for one back, and stops.
+    // `num_wavebufs_consumed` drives the guest's refills.
     const IN: u32 = 0x3_0000;
     const OUT: u32 = 0x4_0000;
     const PCM: u32 = 0x5_0000;
     const FRAMES: u32 = 240;
-    /// The reply's voice section: past the header and one `MemPoolInfoOut`
-    /// per mempool, of which there are four per voice.
+    /// The reply's voice section: past the header and four mempools per voice.
     const VOICE_OUT: u32 = 64 + 4 * 16;
 
     let mut cpu = cpu_at(0x1000);
@@ -1481,7 +1286,6 @@ fn audren_reports_the_wave_buffers_it_finished_with() {
     cpu.cycles += AUDREN_FRAME_CYCLES;
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
 
-    // Exactly one frame of samples, so the buffer is played out exactly.
     assert_eq!(
         cpu.mem.read_u64(OUT + VOICE_OUT).unwrap(),
         u64::from(FRAMES),
@@ -1496,10 +1300,8 @@ fn audren_reports_the_wave_buffers_it_finished_with() {
 
 #[test]
 fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
-    // Nintendo's 4-bit ADPCM is what retail voices are stored as, 14 samples
-    // in every 8 bytes, one header byte naming a shift and one of eight
-    // predictor pairs, then seven bytes of nibbles. A renderer that decodes
-    // only PCM is silent on almost everything that ships.
+    // Nintendo 4-bit ADPCM: 14 samples per 8 bytes, a header byte (shift and
+    // predictor pair) then seven bytes of nibbles.
     const IN: u32 = 0x3_0000;
     const OUT: u32 = 0x4_0000;
     const DATA: u32 = 0x5_0000;
@@ -1511,17 +1313,14 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
     cpu.set_pc(0x1000);
     let renderer = audren_stereo(&mut cpu);
 
-    // Two coefficient pairs, chosen so the arithmetic is checkable by hand:
-    // pair 0 predicts nothing, so a sample is its own nibble; pair 1 is 1.0 in
-    // the predictor's Q11, so a sample is its nibble plus the one before it.
+    // Pair 0 predicts nothing; pair 1 is 1.0 in Q11, adding the previous sample.
     let coefficients: [i16; 16] = [0, 0, 2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     for (i, &c) in coefficients.iter().enumerate() {
         cpu.mem.write_u16(COEFS + i as u32 * 2, c as u16).unwrap();
     }
 
     // Frame 0: pair 0, shift 0, nibbles 1..7 then -8..-2.
-    // Frame 1: pair 1, shift 0, every nibble 1, a running +1 from the -2 the
-    // first frame ended on.
+    // Frame 1: pair 1, shift 0, every nibble 1, a running +1 from -2.
     let data: [u8; 16] = [
         0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11,
@@ -1549,8 +1348,7 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
     for (i, &want) in expected.iter().enumerate() {
         assert_eq!(played[i * 2], want, "ADPCM sample {i}");
     }
-    // Past the end of the wave buffer the voice interpolates down to silence
-    // rather than holding its last sample, which would leave a DC step behind.
+    // Past the end the voice interpolates to silence rather than holding.
     assert_eq!(
         played[expected.len() * 2],
         0,
@@ -1560,20 +1358,14 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
 
 #[test]
 fn audren_frame_event_fires_on_the_clock() {
-    // `audrenWaitFrame` blocks on this event, and every mixer built on it
-    // paces itself by how often it comes back. The handle used to be a bare
-    // one, not modelled as an event at all, so `WaitSynchronization` treated
-    // it as permanently ready and the wait returned instantly. That is a
-    // renderer with no clock, which is how a title ends up running its audio
-    // at whatever multiple of real time the emulator manages.
+    // The renderer event paces `audrenWaitFrame` and must be a real event.
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
     let renderer = audren_stereo(&mut cpu);
     let tls = cpu.tls_base();
 
-    // QuerySystemEvent. Events are *copy* handles: sent as a move handle it
-    // reads back as 0 on the other side.
+    // QuerySystemEvent -> a copy handle.
     ipc_request_plain(&mut cpu, renderer, 7, &[]);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x08).unwrap(),
@@ -1583,14 +1375,13 @@ fn audren_frame_event_fires_on_the_clock() {
     let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_ne!(event, 0, "no frame event came back");
 
-    // No time has passed, so the frame is not due.
     assert_eq!(
         wait_sync(&mut cpu, &[event], 0).0,
         0xEA01,
         "the frame event fired early"
     );
 
-    // Five milliseconds of it, and it is.
+    // Five milliseconds later, it is.
     cpu.cycles += AUDREN_FRAME_CYCLES;
     assert_eq!(
         wait_sync(&mut cpu, &[event], 0).0,
@@ -1601,15 +1392,8 @@ fn audren_frame_event_fires_on_the_clock() {
 
 #[test]
 fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
-    // `end_sample_offset` is the guest's claim about its own buffer and `size`
-    // is what it allocated. Where they disagree the allocation wins, because
-    // the samples past it are somebody else's memory read as PCM, which is
-    // exactly the buzzing `audout` produced from the Mii editor's descriptor
-    // until it started checking.
-    //
-    // The buffer is still consumed: the guest is entitled to it back however
-    // unplayable it was, and a buffer that never comes back stalls the voice
-    // that queued it.
+    // Where `end_sample_offset` exceeds the allocation, the allocation wins;
+    // the buffer is still consumed.
     const IN: u32 = 0x3_0000;
     const OUT: u32 = 0x4_0000;
     const PCM: u32 = 0x5_0000;
@@ -1624,7 +1408,7 @@ fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
         cpu.mem.write_u16(PCM + i * 2, 0x7FFF).unwrap();
     }
     let mut update = AudrenUpdate::new(1, 1, 1);
-    // 240 samples claimed out of a buffer with room for none of them.
+    // 240 samples claimed from a buffer with room for none.
     update.voice(0, PCM_INT16, 1, PCM, 0, 240);
     update.route(0, 0, 1.0);
     update.route(0, 1, 1.0);
@@ -1653,14 +1437,8 @@ fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
 
 #[test]
 fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
-    // `data_offset + data_size` has to fit inside `buffer_size`. The Mii
-    // editor submits one where it does not: `buffer` is 6 and `data_offset`
-    // is a pointer, and `buffer + data_offset` then lands inside the
-    // `AudioOutBuffer` struct itself, so what reached the speakers was that
-    // struct's own pointers read as PCM, thousands of times a second. It
-    // buzzed.
-    //
-    // The buffer still comes back to the guest; only its samples are dropped.
+    // `data_offset + data_size` must fit inside `buffer_size` (the Mii editor's
+    // does not). The buffer still comes back; only its samples are dropped.
     const AUDOUT: u64 = 0xA000;
     const DESC: u32 = 0x8000;
     const PCM: u32 = 0x8100;
@@ -1681,13 +1459,11 @@ fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
     let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     ipc_request_plain(&mut cpu, device, 1, &[]); // StartAudioOut
 
-    // Something the device could play, sitting where the bad descriptor's
-    // arithmetic would land, so a failure to check would be audible rather
-    // than silent.
+    // Playable data where the bad arithmetic would land, so a missing check is audible.
     for i in 0..8u32 {
         cpu.mem.write_u16(PCM + i * 2, 0x4000).unwrap();
     }
-    // buffer_size says 8 bytes; data_offset alone is already past it.
+    // buffer_size is 8 bytes; data_offset alone is past it.
     cpu.mem.write_u64(DESC, 0).unwrap();
     cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
     cpu.mem.write_u64(DESC + 16, 8).unwrap();
@@ -1707,8 +1483,7 @@ fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
         "unplayable samples reached the host"
     );
 
-    // And the guest gets its buffer back, so its audio thread does not stall
-    // waiting for one it will never see again.
+    // The guest still gets its buffer back.
     ipc_request_plain_with_buffer(&mut cpu, device, 8, TAGS, 16, true, &[]);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x20).unwrap(),
@@ -1720,11 +1495,7 @@ fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
 
 #[test]
 fn audout_reads_the_channel_count_as_sixteen_bits() {
-    // `OpenAudioOut` takes the channel count as a 16-bit field, and the two
-    // bytes above it are padding the caller never writes. Reading the whole
-    // word and echoing it back handed `nnSdk` a channel count of 0xcafe0002 --
-    // negative, so its own "channelCount > 0" check failed and the title tore
-    // its audio down and re-opened, which aborts.
+    // `OpenAudioOut`'s channel count is 16 bits; the upper two bytes are padding.
     const AUDOUT: u64 = 0xA000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -1751,9 +1522,7 @@ fn audout_reads_the_channel_count_as_sixteen_bits() {
 
 #[test]
 fn audout_does_not_play_a_stopped_device() {
-    // A device that has not been started is not playing. Its buffers still
-    // come back -- the memory is the guest's -- but nothing is queued for the
-    // host, because nothing was heard.
+    // An unstarted device returns buffers but queues nothing for the host.
     const AUDOUT: u64 = 0xA000;
     const DESC: u32 = 0x8000;
     const PCM: u32 = 0x8100;
@@ -1785,7 +1554,6 @@ fn audout_does_not_play_a_stopped_device() {
         0,
         "a stopped device played something"
     );
-    // The tag still comes back, through GetReleasedAudioOutBuffer.
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "released count");
     assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), 7, "the tag");
@@ -1793,25 +1561,15 @@ fn audout_does_not_play_a_stopped_device() {
 
 #[test]
 fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
-    // `IHOSBinderDriver` has two transactions that do the same work and differ
-    // only in how the parcel is marshalled: `TransactParcel` (0), which takes
-    // map-alias buffers, and `TransactParcelAuto` (3), which takes auto-select
-    // ones and arrived in 3.0.0. An SDK older than that sends 0 and only 0.
-    //
-    // Only 3 was implemented, so 0 fell to the answer `vi_unhandled` gives a
-    // void setter: an empty success, with nothing written into the reply
-    // buffer. Just Dance 2017 -- built against a 2016 SDK -- drove its whole
-    // buffer queue through it, 402 transactions in three billion instructions,
-    // and presented **no frame at all**: every `QUEUE_BUFFER` was accepted and
-    // discarded, so `Action::Present` never reached the GPU.
+    // `TransactParcel` (0, map-alias) and `TransactParcelAuto` (3, auto-select,
+    // 3.0.0+) must answer identically; older SDKs send only 0.
     const VI: u64 = 0xB800;
     const PARCEL: u32 = 0x9000;
     const REPLY: u32 = 0x9400;
-    /// `NATIVE_WINDOW_WIDTH`, the field `QUERY` is being asked for here.
+    /// `NATIVE_WINDOW_WIDTH`.
     const QUERY_WIDTH: u32 = 0;
     const QUERY: u32 = 9;
 
-    // Both commands have to answer identically -- that is the whole claim.
     for cmd in [0u32, 3] {
         let mut cpu = cpu_at(0x1000);
         cpu.bootstrap();
@@ -1819,8 +1577,7 @@ fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
         cpu.register_service_handle(VI, "vi:m");
         let tls = cpu.tls_base();
 
-        // The relay lives two objects down: vi root -> IApplicationDisplayService
-        // (2) -> IHOSBinderDriver (100).
+        // vi root -> IApplicationDisplayService (2) -> IHOSBinderDriver (100).
         ipc_request_plain(&mut cpu, VI, 2, &[]);
         let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
         assert_ne!(display, 0, "no IApplicationDisplayService");
@@ -1836,8 +1593,7 @@ fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
             cpu.mem.write_u32(REPLY + i, 0).unwrap();
         }
 
-        // `{ s32 binder_id, u32 code, u32 flags }`, the parcel in the send
-        // buffer and the reply into the receive buffer.
+        // `{ s32 binder_id, u32 code, u32 flags }`, parcel in the send buffer.
         let mut data = Vec::new();
         data.extend_from_slice(&1u32.to_le_bytes());
         data.extend_from_slice(&QUERY.to_le_bytes());
@@ -1856,8 +1612,7 @@ fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
             0,
             "cmd {cmd} was refused"
         );
-        // The reply parcel: `{ i32 value, i32 status }` behind the same
-        // four-word header the request carries.
+        // The reply parcel `{ i32 value, i32 status }` behind the usual header.
         let payload_size = cpu.mem.read_u32(REPLY).unwrap();
         let payload_off = cpu.mem.read_u32(REPLY + 4).unwrap();
         assert_eq!(payload_off, 16, "cmd {cmd}: no reply parcel came back");
@@ -1880,11 +1635,8 @@ fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
 
 #[test]
 fn vi_native_window_names_the_binder_interface() {
-    // `OpenLayer` answers with an Android parcel holding one flattened binder
-    // object. libnx only reads the binder id out of it; nnSdk also checks the
-    // interface name, and rejected the whole layer -- vi result 114-1, an
-    // abort inside nn::vi::CreateLayer -- while the parcel carried a bare id
-    // and nothing else.
+    // `OpenLayer`'s parcel holds a full flattened binder; nnSdk checks the
+    // interface name (vi 114-1 otherwise).
     const VI: u64 = 0xB000;
     const WINDOW: u32 = 0x8000;
 
@@ -1894,14 +1646,12 @@ fn vi_native_window_names_the_binder_interface() {
     cpu.register_service_handle(VI, "vi:m");
     let tls = cpu.tls_base();
 
-    // GetDisplayService first: OpenLayer lives on the
-    // IApplicationDisplayService, not on the vi root.
+    // OpenLayer lives on IApplicationDisplayService.
     ipc_request_plain(&mut cpu, VI, 2, &[]);
     let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(display, 0, "no IApplicationDisplayService");
 
-    // OpenLayer, with the 0x100-byte native-window receive buffer the caller
-    // always provides.
+    // OpenLayer with the 0x100-byte native-window receive buffer.
     ipc_request_plain_with_buffer(&mut cpu, display, 2020, WINDOW, 0x100, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "OpenLayer failed");
     let size = cpu.mem.read_u64(tls + 0x20).unwrap() as u32;
@@ -1938,11 +1688,7 @@ fn vi_native_window_names_the_binder_interface() {
 
 #[test]
 fn an_undriven_gpio_pad_reads_high() {
-    // A GPIO pad is one wire into the SoC, and nothing is wired to this
-    // console. The level an undriven pad reads is not cosmetic: the buttons
-    // are active-low, and boot2 reads the two volume pads and enters
-    // maintenance mode when *both* read Low. Answering 0 here boots the
-    // console into maintenance mode on every single launch.
+    // Undriven GPIO pads read High; Low on both volume pads means maintenance mode.
     const GPIO: u64 = 0x9100;
     const VOLUME_UP: u32 = 0x3500_0003;
     let mut cpu = cpu_at(0x1000);
@@ -1961,7 +1707,7 @@ fn an_undriven_gpio_pad_reads_high() {
         0,
         "OpenSession2 failed"
     );
-    // { send_pid:1, num_copy:4, num_move:4 }: the session is a move handle.
+    // { send_pid:1, num_copy:4, num_move:4 }: a move handle.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
     let pad = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(pad, 0, "no IPadSession came back");
@@ -1975,27 +1721,16 @@ fn an_undriven_gpio_pad_reads_high() {
         "an undriven pad is High"
     );
 
-    // GetInterruptStatus: nothing drives the pad, so nothing is pending.
+    // GetInterruptStatus: nothing pending.
     ipc_request_plain(&mut cpu, pad, 6, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0);
 }
 
 #[test]
 fn a_fabricated_reply_fills_both_handle_slots() {
-    // The reply for a command nothing implements used to carry only a raw
-    // object id in its data. On a plain session that is not where an
-    // out-object lives -- nnSdk reads one as a move handle, and a reply
-    // carrying none is not an error to it: the handle parses as 0, the client
-    // skips constructing the proxy, and the command still returns *success*.
-    // The caller then makes its first virtual call through a null pointer,
-    // which is how boot2 reached pc=0 one instruction after `gpio`'s
-    // OpenSession2 was answered "successfully".
-    //
-    // An out-*event* is the same trap in the other handle slot, and nothing
-    // here knows which of the two an unimplemented command was meant to
-    // return -- so the reply carries one of each. That is what the Home Menu's
-    // message thread was missing when it settled into waiting on handle 0,
-    // three created-but-never-started threads behind it.
+    // An unimplemented command replies with both a move-handle object and a
+    // copy-handle event, since the intended out type is unknown and a missing
+    // handle parses as 0.
     const NCM: u64 = 0x9200;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2006,8 +1741,7 @@ fn a_fabricated_reply_fills_both_handle_slots() {
     // IContentManager::OpenContentStorage(StorageId) -> IContentStorage.
     ipc_request_plain(&mut cpu, NCM, 4, &[1, 0, 0, 0]);
     // { send_pid:1, num_copy:4, num_move:4 }: one of each. Copy handles come
-    // first in the reply, so the event is at +0x0c and the object at +0x10,
-    // and the raw section starts at the next 16-byte boundary after them.
+    // first (event +0x0c, object +0x10), then the raw section at the next 16 bytes.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), (1 << 1) | (1 << 5));
     assert_eq!(
         cpu.mem.read_u32(tls + 0x28).unwrap(),
@@ -2026,20 +1760,16 @@ fn a_fabricated_reply_fills_both_handle_slots() {
     );
     assert_ne!(event, storage);
 
-    // The sub-session reaches the same service, so a command on it is
-    // dispatched rather than falling through as an untracked handle.
+    // The sub-session dispatches to the same service.
     let handles = cpu.service_handles_snapshot();
     assert!(handles
         .iter()
         .any(|(h, name)| *h == storage && name == "ncm"));
 
-    // The event is real and quiet: a caller that waits on it is waiting for
-    // something that never happens, which is the truth, rather than acting on
-    // something that never will.
+    // The event exists and never fires.
     assert_eq!(wait_sync(&mut cpu, &[event as u32], 0).0, 0xEA01);
 
-    // Asked again, the same pair comes back: a guest polling a command nothing
-    // implements must not be handed fresh handles every call.
+    // Asked again, the same pair comes back.
     ipc_request_plain(&mut cpu, NCM, 4, &[1, 0, 0, 0]);
     assert_eq!(u64::from(cpu.mem.read_u32(tls + 0x10).unwrap()), storage);
     assert_eq!(u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap()), event);
@@ -2047,12 +1777,7 @@ fn a_fabricated_reply_fills_both_handle_slots() {
 
 #[test]
 fn the_home_menu_opens_a_system_applet_proxy() {
-    // qlaunch is neither an application nor a library applet. It is the one
-    // process that outlives every title, and it declares that by opening
-    // IAllSystemAppletProxiesService command 100 -- then R_ABORT_UNLESSes on
-    // the spot if the answer is an error. 2010-0221, `cmif`'s "unknown command
-    // id", is exactly what this stub used to reply, so the Home Menu died on
-    // its first applet call with an svcBreak and nothing else to go on.
+    // qlaunch opens IAllSystemAppletProxiesService command 100 and aborts on error.
     const APPLET: u64 = 0x9300;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2070,26 +1795,22 @@ fn the_home_menu_opens_a_system_applet_proxy() {
     let proxy = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(proxy, 0, "no ISystemAppletProxy came back");
 
-    // GetHomeMenuFunctions, which only this proxy exposes -- a library applet
-    // reaches the same interface at 22, and an application not at all.
+    // GetHomeMenuFunctions, only on this proxy.
     ipc_request_plain(&mut cpu, proxy, 20, &[]);
     let home = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(home, 0);
-    // IsSleepEnabled -> bool: what an unrestricted retail console reports.
+    // IsSleepEnabled -> bool.
     ipc_request_plain(&mut cpu, home, 40, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
     assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1);
-    // GetHomeButtonWriterLockAccessor -> ILockAccessor, and it must be a real
-    // session for the same reason every other out-object must be.
+    // GetHomeButtonWriterLockAccessor -> a real ILockAccessor session.
     ipc_request_plain(&mut cpu, home, 30, &[]);
     let lock = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(lock, 0, "no ILockAccessor came back");
     ipc_request_plain(&mut cpu, lock, 4, &[]); // IsLocked
     assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 0);
 
-    // GetGlobalStateController: ShouldSleepOnBoot is false, because a console
-    // that was slept rather than shut down would resume straight back to
-    // sleep, and this one always boots awake.
+    // GetGlobalStateController: ShouldSleepOnBoot is false.
     ipc_request_plain(&mut cpu, proxy, 21, &[]);
     let global = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(global, 0);
@@ -2097,8 +1818,7 @@ fn the_home_menu_opens_a_system_applet_proxy() {
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
     assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 0);
 
-    // The sleep and shutdown sequences stay refused: a console that answers
-    // "done" to a shutdown it did not perform is worse than one that refuses.
+    // Sleep and shutdown sequences stay refused.
     const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
     ipc_request_plain(&mut cpu, global, 3, &[]); // StartShutdownSequence
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
@@ -2106,14 +1826,8 @@ fn the_home_menu_opens_a_system_applet_proxy() {
 
 #[test]
 fn the_display_answers_what_it_is() {
-    // `ListDisplays` and `ListDisplayModes` used to fall through to `vi`'s
-    // catch-all, which answers with an empty success. That is not "no
-    // displays" -- a reply's declared raw section is four words of padding
-    // wide, so the caller read its count out of whatever the *request* had
-    // left in those bytes and then walked an out-buffer nothing had written.
-    // The Home Menu spent a billion instructions in that walk without making
-    // a single syscall, and there was nothing in any trace to say where it had
-    // gone.
+    // `ListDisplays` and `ListDisplayModes` must write their out data; an empty
+    // success leaves the caller reading stale padding as a count.
     const VI: u64 = 0xB100;
     const BUF: u32 = 0x8000;
 
@@ -2146,8 +1860,7 @@ fn the_display_answers_what_it_is() {
     assert_eq!(cpu.mem.read_u64(BUF + 0x50).unwrap(), 1280);
     assert_eq!(cpu.mem.read_u64(BUF + 0x58).unwrap(), 720);
 
-    // OpenDisplay takes that name and hands back the id every later display
-    // command carries.
+    // OpenDisplay takes that name and returns the display id.
     let mut open = [0u8; 0x40];
     open[..7].copy_from_slice(b"Default");
     ipc_request_plain(&mut cpu, display, 1010, &open);
@@ -2157,8 +1870,7 @@ fn the_display_answers_what_it_is() {
         "a display id of 0 is the no-display sentinel"
     );
 
-    // SetLayerScalingMode(mode, layer): the two modes the service supports
-    // succeed, and the rest are refused the way it refuses them.
+    // SetLayerScalingMode(mode, layer): only the two supported modes succeed.
     let scaling = |mode: u32| {
         let mut args = [0u8; 16];
         args[..4].copy_from_slice(&mode.to_le_bytes());
@@ -2170,12 +1882,12 @@ fn the_display_answers_what_it_is() {
         assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), result, "mode {mode}");
     }
 
-    // GetDisplayResolution, on the same interface, has to agree with it.
+    // GetDisplayResolution must agree.
     ipc_request_plain(&mut cpu, display, 1102, &display_id.to_le_bytes());
     assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 1280);
     assert_eq!(cpu.mem.read_u64(tls + 0x28).unwrap(), 720);
 
-    // ListDisplayModes lives on ISystemDisplayService: one
+    // ListDisplayModes (ISystemDisplayService): one
     // DisplayModeInfo { u32 width; u32 height; f32 refresh; u32 }.
     ipc_request_plain(&mut cpu, display, 101, &[]);
     let system = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
@@ -2210,15 +1922,8 @@ fn the_display_answers_what_it_is() {
 
 #[test]
 fn nifm_answers_a_system_title_the_same_as_an_application() {
-    // `nifm:u`, `nifm:s` and `nifm:a` are one interface at three privilege
-    // levels, and only the first was routed to the implementation -- so a
-    // system title, which opens `nifm:s`, had every network call answered by
-    // the generic fallback instead.
-    //
-    // The command ids were crossed underneath that: 12 answered with the
-    // connection-status triple and 15 with the IP address, when 12 *is*
-    // GetCurrentIpAddress and 18 is GetInternetConnectionStatus. A caller
-    // asking this console for its own address got `{2, 0, 2}` back.
+    // `nifm:u`, `nifm:s` and `nifm:a` share one interface; 12 is
+    // GetCurrentIpAddress and 18 GetInternetConnectionStatus.
     const NIFM: u64 = 0xD100;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2244,8 +1949,7 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
     );
     assert_eq!(cpu.mem.read_u8(tls + 0x22).unwrap(), 2, "not connected");
 
-    // A request on a link that is up is accepted the moment it is made, and
-    // the two events a caller waits on for that have already happened.
+    // A request on an up link is accepted immediately, its events already fired.
     ipc_request_plain(&mut cpu, general, 4, &[]); // CreateRequest
     let request = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(request, 0, "no IRequest");
@@ -2257,9 +1961,7 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
     );
 
     ipc_request_plain(&mut cpu, request, 2, &[]); // GetSystemEventReadableHandles
-                                                  // { send_pid:1, num_copy:4, num_move:4 }: **two** copy handles. One left
-                                                  // the caller holding a session for the second, and a bare success left it
-                                                  // holding 0 for both.
+                                                  // { send_pid:1, num_copy:4, num_move:4 }: two copy handles.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 2 << 1);
     let state = cpu.mem.read_u32(tls + 0x0c).unwrap();
     let done = cpu.mem.read_u32(tls + 0x10).unwrap();
@@ -2280,14 +1982,8 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
 
 #[test]
 fn a_service_with_no_stub_still_answers_its_control_commands() {
-    // The control commands belong to the session, not to whatever is behind
-    // it, so a service with no dedicated stub still has to answer them itself.
-    // The generic fallback used to hand them the same fabricated object id it
-    // hands every other command -- and as a *pointer buffer size* that is a
-    // large number, which is how a caller decides to marshal its buffers as
-    // pointer buffers, the one form this IPC layer does not read. `friend`,
-    // `olsc`, `prepo` and `btm` were all being told to send their data
-    // somewhere nothing looks.
+    // A service without its own stub must still answer control commands; a
+    // fabricated pointer buffer size makes callers use pointer buffers.
     const NIFM: u64 = 0xD000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2308,7 +2004,7 @@ fn a_service_with_no_stub_still_answers_its_control_commands() {
             POINTER_BUFFER_SIZE,
             "type {msg_type}: not a size"
         );
-        // And no handle came with it: a size is not an object.
+        // No handle comes with a size.
         assert_eq!(
             cpu.mem.read_u32(tls + 0x04).unwrap() >> 31,
             0,
@@ -2316,8 +2012,7 @@ fn a_service_with_no_stub_still_answers_its_control_commands() {
         );
     }
 
-    // ConvertToDomain is the other control command, and it *does* answer with
-    // an object id -- the one the session's later requests carry.
+    // ConvertToDomain does answer with an object id.
     build_ipc_request(&mut cpu, 5, None, 0);
     run_ipc_request(&mut cpu, NIFM);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
@@ -2331,12 +2026,8 @@ fn a_service_with_no_stub_still_answers_its_control_commands() {
 
 #[test]
 fn the_display_refreshes_without_being_drawn_to() {
-    // The vsync event used to be fired by one thing only: the guest's own
-    // present. That is a circle a title never gets into, because it waits for
-    // vsync *before* it renders the frame that would have fired it. A real
-    // panel refreshes whether or not anything drew, so the event fires on a
-    // period as well -- and a present still fires it, so a guest that draws
-    // faster than the panel is not held to it.
+    // Vsync fires on a period as well as on present, since titles wait for it
+    // before rendering.
     const VI: u64 = 0xB500;
     const RESULT_TIMED_OUT: u64 = 0xEA01;
     let mut cpu = cpu_at(0x1000);
@@ -2348,20 +2039,18 @@ fn the_display_refreshes_without_being_drawn_to() {
     ipc_request_plain(&mut cpu, VI, 2, &[]);
     let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     ipc_request_plain(&mut cpu, display, 5202, &[]);
-    // { send_pid:1, num_copy:4, num_move:4 }: one copy handle, no move ones.
+    // { send_pid:1, num_copy:4, num_move:4 }: one copy handle.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
     let vsync = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_ne!(vsync, 0, "the guest must receive a real handle");
 
-    // The period has not passed yet, and nothing has been presented.
     assert_eq!(
         wait_sync(&mut cpu, &[vsync], 0).0,
         RESULT_TIMED_OUT,
         "vsync fired early"
     );
 
-    // Run out the refresh period on nops. The event fires on its own, with no
-    // frame behind it, and being auto-clearing it fires once per period.
+    // Run out the refresh period on nops; the auto-clear event fires once per period.
     cpu.mem.map_zero(0x2000, 0x100).unwrap();
     cpu.mem.map(0x2000, &nop().to_le_bytes()).unwrap();
     for _ in 0..switch_core::cpu::VSYNC_PERIOD_CYCLES {
@@ -2390,11 +2079,7 @@ fn the_display_refreshes_without_being_drawn_to() {
 
 #[test]
 fn closing_a_domain_object_is_not_command_zero() {
-    // `CmifDomainRequestType_Close` sits where SendMessage's type byte would,
-    // and carries no command id at all -- so a close dispatched to a service
-    // is read as command 0, which on most interfaces is a real operation. The
-    // Home Menu's `IStorage` close ran as a **Read**, with the reply's own
-    // "SFCO" magic for an offset, and left the object open behind it.
+    // `CmifDomainRequestType_Close` has no command id; it must not dispatch as command 0.
     const FS: u64 = 0xC000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2402,7 +2087,6 @@ fn closing_a_domain_object_is_not_command_zero() {
     cpu.register_service_handle(FS, "fsp-srv");
     let tls = cpu.tls_base();
 
-    // Convert to a domain, then open the process's own RomFS as an IStorage.
     ipc_request(&mut cpu, FS, 5, None, 0);
     let root = cpu.mem.read_u32(tls + 0x20).unwrap();
     cpu.set_romfs(vec![0xAB; 0x400]);
@@ -2414,8 +2098,7 @@ fn closing_a_domain_object_is_not_command_zero() {
         Some("fsp-srv-storage".to_owned())
     );
 
-    // A close, marshalled the way a caller marshals one: the domain header's
-    // type byte is 2 and there is no CmifInHeader behind it.
+    // A close: domain header type byte 2, no CmifInHeader.
     for i in (0..0x100u32).step_by(4) {
         cpu.mem.write_u32(tls + i, 0).unwrap();
     }
@@ -2439,10 +2122,8 @@ fn closing_a_domain_object_is_not_command_zero() {
 
 #[test]
 fn vi_reads_a_control_request_in_either_encoding() {
-    // Control-ness is `ipc_is_control_request`, never `type == 5`: a control
-    // message has a with-context encoding too (type 7), and that is the one
-    // nnSdk sends. ConvertToDomain in that encoding hands back an object id
-    // rather than being read as a binder AdjustRefcount.
+    // With-context control (type 7) ConvertToDomain returns an object id, not
+    // a binder AdjustRefcount.
     const VI: u64 = 0xB400;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2462,17 +2143,12 @@ fn vi_reads_a_control_request_in_either_encoding() {
 
 #[test]
 fn reset_signal_reports_whether_the_event_had_fired() {
-    // `svcResetSignal` is `nn::os::TryWaitSystemEvent`: it clears a signalled
-    // event and fails if there was nothing to clear. Succeeding
-    // unconditionally told every guest that every event it ever polled had
-    // fired, so a loop that drains a queue while its event keeps signalling
-    // had no reason to stop.
+    // `svcResetSignal` clears a signalled event and fails if there was nothing to clear.
     const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
     let (mut cpu, applet, _proxy, state_getter) = applet_chain();
     let tls = cpu.tls_base();
 
-    // The applet message event starts signalled: AM has the startup focus
-    // transition waiting.
+    // The applet message event starts signalled with the startup focus change.
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 0); // GetEventHandle
     assert_eq!(
         cpu.mem.read_u32(tls + 0x08).unwrap(),
@@ -2494,11 +2170,8 @@ fn reset_signal_reports_whether_the_event_had_fired() {
 
 #[test]
 fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
-    // The Home Menu and the system's own applets do not render into a layer of
-    // their own. AM shares one buffer between them: the applet asks for a slot
-    // in it, draws there, and presents the slot back. The whole path turns on
-    // `IsSystemBufferSharingEnabled` succeeding -- refuse that and qlaunch
-    // builds a swapchain instead and never draws one triangle into it.
+    // System applets draw through AM's shared buffer once
+    // `IsSystemBufferSharingEnabled` succeeds.
     const VI: u64 = 0xB500;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2506,9 +2179,7 @@ fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
     cpu.register_service_handle(VI, "vi:m");
     let tls = cpu.tls_base();
 
-    // GetSharedBufferMemoryHandleId -> the nvmap handle the applet maps the
-    // buffer by, and how big it is. The buffer is the system's, so this is
-    // where it comes into being; nothing in the guest ever created it.
+    // GetSharedBufferMemoryHandleId -> the buffer's nvmap handle and size.
     ipc_request(&mut cpu, VI, 4, None, 8225);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
     assert_ne!(
@@ -2521,10 +2192,8 @@ fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
         u64::from(switch_core::cpu::SHARED_BUFFER_GEOMETRY.shared_buffer_size())
     );
 
-    // AcquireSharedFrameBuffer -> an empty fence, the slots that exist, and
-    // the one to draw into. Two slots exist and they alternate; handing out
-    // the same one twice would have the applet overwrite the frame the display
-    // is still scanning.
+    // AcquireSharedFrameBuffer -> an empty fence, the slots, and the slot to draw.
+    // The two slots alternate.
     let mut acquired = Vec::new();
     for _ in 0..4 {
         ipc_request(&mut cpu, VI, 4, None, 8254);
@@ -2548,11 +2217,8 @@ fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
 
 #[test]
 fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
-    // A reply is written *over* the request, in the same TLS buffer, and the
-    // padding its header declares is four words wide -- room for a small out
-    // parameter. So a command answered with a bare success never handed the
-    // caller nothing: it handed the caller stale request bytes, in a reply
-    // whose declared size passes every length check nnSdk and libnx make.
+    // A reply overwrites the request in TLS with four words of padding, so a
+    // bare success must not leak stale request bytes.
     const VI: u64 = 0xB200;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2563,8 +2229,7 @@ fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
     ipc_request_plain(&mut cpu, VI, 2, &[]);
     let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
 
-    // CloseDisplay: void, and nothing implements it. Poison the bytes an out
-    // parameter would be read from before sending.
+    // CloseDisplay is unimplemented; poison the out-parameter bytes first.
     build_ipc_request(&mut cpu, 4, None, 1020);
     for i in 0..4u32 {
         cpu.mem.write_u32(tls + 0x20 + i * 4, 0xDEAD_BEEF).unwrap();
@@ -2587,11 +2252,7 @@ fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
 
 #[test]
 fn an_applet_is_told_it_came_into_the_foreground_not_that_focus_changed() {
-    // `FocusStateChanged` is the *application's* message. An applet -- every
-    // one of the system's own, the Home Menu included -- is told
-    // `ChangeIntoForeground` instead, and which one it gets is decided by
-    // which proxy it opened. Sending an applet the application's message is
-    // sending it one its own framework does not act on.
+    // Applets get `ChangeIntoForeground`, not the application's `FocusStateChanged`.
     const CHANGE_INTO_FOREGROUND: u32 = 1;
     const APPLET: u64 = 0x9700;
     let mut cpu = cpu_at(0x1000);
@@ -2602,8 +2263,7 @@ fn an_applet_is_told_it_came_into_the_foreground_not_that_focus_changed() {
 
     ipc_request(&mut cpu, APPLET, 5, None, 0);
     let proxy_service = cpu.mem.read_u32(tls + 0x20).unwrap();
-    // IAllSystemAppletProxiesService::OpenSystemAppletProxy -- what qlaunch
-    // opens, and what says it is not an application.
+    // OpenSystemAppletProxy, as qlaunch opens it.
     ipc_request(&mut cpu, APPLET, 4, Some(proxy_service), 100);
     let proxy = cpu.mem.read_u32(tls + 0x30).unwrap();
     ipc_request(&mut cpu, APPLET, 4, Some(proxy), 0); // ICommonStateGetter
@@ -2623,13 +2283,8 @@ fn an_applet_is_told_it_came_into_the_foreground_not_that_focus_changed() {
 
 #[test]
 fn an_applet_that_handles_its_own_display_is_asked_to_display() {
-    // `SetHandlesRequestToDisplay(true)` is an applet saying it will decide
-    // when it appears. AM answers by queueing `RequestToDisplay`, and the
-    // applet draws nothing until it has read that message and approved
-    // itself. With only the startup focus change to hand out, the Home Menu
-    // finished its layer, preallocated both swapchain buffers and then ran its
-    // frame loop for thirty seconds of console time without ever dequeuing
-    // one.
+    // `SetHandlesRequestToDisplay(true)` makes AM queue `RequestToDisplay`;
+    // the applet draws nothing until it reads it.
     const REQUEST_TO_DISPLAY: u32 = 41;
     const FOCUS_STATE_CHANGED: u32 = 15;
     const NO_MESSAGES: u32 = 128 | (3 << 9);
@@ -2638,7 +2293,7 @@ fn an_applet_that_handles_its_own_display_is_asked_to_display() {
     ipc_request(&mut cpu, applet, 4, Some(proxy), 1); // GetSelfController
     let self_controller = cpu.mem.read_u32(tls + 0x30).unwrap();
 
-    // Drain the one message AM has waiting before the applet's first poll.
+    // Drain the startup message.
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 0); // GetEventHandle
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 1); // ReceiveMessage
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), FOCUS_STATE_CHANGED);
@@ -2661,8 +2316,7 @@ fn an_applet_that_handles_its_own_display_is_asked_to_display() {
     );
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), REQUEST_TO_DISPLAY);
 
-    // Once, not on every poll -- the mistake that made JKSV re-process a focus
-    // change every frame.
+    // Once, not on every poll.
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 1);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x28).unwrap(),
@@ -2670,8 +2324,7 @@ fn an_applet_that_handles_its_own_display_is_asked_to_display() {
         "it was queued twice"
     );
 
-    // And the approval that follows is accepted. It used to reach
-    // `unimplemented_command`, which `nnSdk` answers with an svcBreak.
+    // The approval that follows is accepted.
     ipc_request(&mut cpu, applet, 4, Some(self_controller), 51);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x28).unwrap(),
@@ -2682,12 +2335,8 @@ fn an_applet_that_handles_its_own_display_is_asked_to_display() {
 
 #[test]
 fn parental_control_hands_out_the_events_it_is_asked_for() {
-    // The Home Menu opens `pctl`, asks IParentalControlService for its
-    // synchronisation event, and R_ABORT_UNLESSes on the answer. Refusing the
-    // command -- 2010-0221, `cmif`'s "unknown command id" -- killed it there
-    // with an svcBreak, one applet call into its own boot. There is no
-    // guardian account to synchronise with, so the event is real and never
-    // fires, which is the true state rather than a placeholder for one.
+    // The Home Menu aborts unless pctl's synchronisation event is handed out;
+    // it never fires.
     const PCTL: u64 = 0x9500;
     const RESULT_TIMED_OUT: u64 = 0xEA01;
     let mut cpu = cpu_at(0x1000);
@@ -2721,9 +2370,7 @@ fn parental_control_hands_out_the_events_it_is_asked_for() {
         );
     }
 
-    // Nothing restricts anything here, and the two families of query read in
-    // opposite directions: "is something restricting you" is false, "is
-    // something still allowed" is true.
+    // "Is restricted" is false; "is allowed" is true.
     ipc_request_plain(&mut cpu, service, 1031, &[]); // IsRestrictionEnabled
     assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 0);
     ipc_request_plain(&mut cpu, service, 1458, &[]); // IsPlayTimerAlarmDisabled
@@ -2732,13 +2379,8 @@ fn parental_control_hands_out_the_events_it_is_asked_for() {
 
 #[test]
 fn the_vibration_device_list_is_a_hid_session_not_a_fabricated_object() {
-    // `IHidServer::CreateActiveVibrationDeviceList` hands back a sub-session,
-    // and `nn::hid::InitializeVibrationDevice` calls command 0 on it once per
-    // motor. That name was missing from the session router, so every one of
-    // those calls fell through to the fabricated-object fallback -- which
-    // answers a command whose whole reply is a Result with an object id and
-    // two handles nobody asked for, and which said so as
-    // "[ipc] no implementation: hid:vibration-devices" on a real title's boot.
+    // `CreateActiveVibrationDeviceList`'s sub-session must be routed:
+    // `nn::hid::InitializeVibrationDevice` calls its command 0 per motor.
     const HID: u64 = 0x1000;
     const SFCO: u32 = 0x4F43_4653;
     const HAS_HANDLE_DESCRIPTOR: u32 = 1 << 31;
@@ -2767,26 +2409,20 @@ fn the_vibration_device_list_is_a_hid_session_not_a_fabricated_object() {
 
 #[test]
 fn ldr_ro_initialize_is_not_a_fabricated_object() {
-    // RegisterProcessHandle (cmd 4) is the first call `nn::ro::Initialize`
-    // makes, and the one that reported `ldr:ro` as having no implementation at
-    // all. The generic fallback answers it with an object id, a sub-session
-    // and an event: for a command that returns nothing but a Result.
+    // RegisterProcessHandle (cmd 4), `nn::ro::Initialize`'s first call: a bare Result.
     let (mut cpu, handle) = ldr_ro_session();
     let tls = cpu.tls_base();
 
     ldr_ro_request(&mut cpu, handle, 4, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x10).unwrap(), 0x4F43_4653); // "SFCO"
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
-    // No handle descriptor: bit 31 of the second header word is what says a
-    // reply carries handles, and this reply has none to carry.
+    // Bit 31 of the second header word marks handles; there are none.
     assert_eq!(cpu.mem.read_u32(tls + 4).unwrap() >> 31, 0);
 }
 
 #[test]
 fn ldr_ro_maps_a_module_where_nothing_else_lives() {
-    // LoadModule has to actually map the NRO: the caller relocates against the
-    // address returned here and then jumps into it, so an address with no
-    // image behind it is a branch into whatever the region happened to hold.
+    // LoadModule must actually map the NRO at the returned address.
     use switch_core::cpu::{RO_MODULE_REGION_ADDR, RO_MODULE_REGION_SIZE};
     let (mut cpu, handle) = ldr_ro_session();
     let tls = cpu.tls_base();
@@ -2802,24 +2438,20 @@ fn ldr_ro_maps_a_module_where_nothing_else_lives() {
     );
     let base = base as u32;
 
-    // The three segments, in the order the file has them, and the BSS behind
-    // them: zero-filled, whatever the caller's own buffer held.
+    // The three segments in file order, then a zero-filled BSS.
     assert_eq!(cpu.mem.read_u32(base).unwrap(), 0x1400_0010);
     assert_eq!(cpu.mem.read_u8(base + 0x1000).unwrap(), 0xAA);
     assert_eq!(cpu.mem.read_u8(base + 0x2000).unwrap(), 0xBB);
     assert_eq!(cpu.mem.read_u8(base + 0x3000).unwrap(), 0);
 
-    // `.text` is read-execute, the way a real kernel maps it. Its `.data` is
-    // not: that is where the relocations the caller is about to apply land.
+    // `.text` is read-only; `.data` is writable for relocations.
     assert!(cpu.mem.write_u32(base, 0).is_err());
     assert!(cpu.mem.write_u32(base + 0x2000, 0).is_ok());
 }
 
 #[test]
 fn ldr_ro_unload_frees_the_address_space_and_the_protection() {
-    // A module that has been unloaded has to leave nothing behind: not the
-    // pages, and not the read-only marking on its `.text`, which would
-    // outlive the mapping and fault whatever is loaded over it next.
+    // Unloading removes the pages and the `.text` read-only marking.
     let (mut cpu, handle) = ldr_ro_session();
     let tls = cpu.tls_base();
 
@@ -2829,13 +2461,11 @@ fn ldr_ro_unload_frees_the_address_space_and_the_protection() {
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
     assert!(cpu.mem.write_u32(base as u32, 0).is_ok());
 
-    // And the address space is free again, so the next load reuses it rather
-    // than walking up the region.
+    // The address space is reused by the next load.
     ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0x1000]);
     assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), base);
 
-    // Unloading something that was never loaded is `ro`'s NotLoaded, not a
-    // success the caller then treats as a freed module.
+    // Unloading something never loaded is NotLoaded.
     const NOT_LOADED: u32 = 22 | (1028 << 9);
     ldr_ro_request(&mut cpu, handle, 1, &[0x2800_0000]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), NOT_LOADED);
@@ -2843,8 +2473,7 @@ fn ldr_ro_unload_frees_the_address_space_and_the_protection() {
 
 #[test]
 fn ldr_ro_two_modules_do_not_overlap() {
-    // The second module has to go behind the first, BSS included: `ro` hands
-    // out one address space between every module a title loads.
+    // The second module goes behind the first, BSS included.
     let (mut cpu, handle) = ldr_ro_session();
     let tls = cpu.tls_base();
 
@@ -2861,11 +2490,7 @@ fn ldr_ro_two_modules_do_not_overlap() {
 
 #[test]
 fn ldr_ro_refuses_what_is_not_a_module() {
-    // A bad NRO is refused rather than mapped: the caller jumps into what this
-    // command returns, so "success" over an image with no segment table is a
-    // branch into nothing. Same for a BSS the caller sized too small, the
-    // module's zero-initialized data would land past the mapping, on whatever
-    // is loaded next.
+    // A bad NRO or an undersized BSS is refused.
     const INVALID_NRO: u32 = 22 | (4 << 9);
     const INVALID_ADDRESS: u32 = 22 | (1025 << 9);
     const INVALID_SIZE: u32 = 22 | (1026 << 9);
@@ -2889,9 +2514,7 @@ fn ldr_ro_refuses_what_is_not_a_module() {
 
 #[test]
 fn ldr_ro_module_info_is_registered_before_it_is_unregistered() {
-    // An NRR cannot be verified here: there is no key to check its signature
-    // chain against, but it can be *tracked*, so unregistering one that was
-    // never registered is an error rather than a success the caller believes.
+    // NRRs are tracked, so unregistering an unknown one is an error.
     const INVALID_NRR: u32 = 22 | (6 << 9);
     const NOT_REGISTERED: u32 = 22 | (1029 << 9);
     const NRR: u64 = 0x1020_0000;
@@ -2901,7 +2524,7 @@ fn ldr_ro_module_info_is_registered_before_it_is_unregistered() {
     ldr_ro_request(&mut cpu, handle, 3, &[NRR]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), NOT_REGISTERED);
 
-    // Nothing is at that address yet, so there is no NRR to register.
+    // Nothing is at that address yet.
     ldr_ro_request(&mut cpu, handle, 2, &[NRR, 0x1000]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), INVALID_NRR);
 
@@ -2914,12 +2537,7 @@ fn ldr_ro_module_info_is_registered_before_it_is_unregistered() {
 
 #[test]
 fn docking_moves_every_answer_that_depends_on_it() {
-    // The operation mode is not one service's opinion: `am` reports it,
-    // `am` and `apm` both derive the performance mode from it, `vi` sizes the
-    // display by it, `clkrst` clocks the GPU by it, and the touchscreen only
-    // exists on one side of it. A title that picks its render target from one
-    // of those and scans out through another draws at the wrong scale, so what
-    // is pinned here is that they move together.
+    // The operation mode drives `am`, `apm`, `vi`, `clkrst` and touch together.
     use switch_core::cpu::OperationMode;
     let (mut cpu, handle, _proxy, state_getter) = applet_chain();
     let tls = cpu.tls_base();
@@ -2939,8 +2557,7 @@ fn docking_moves_every_answer_that_depends_on_it() {
         "GetPerformanceMode"
     );
 
-    // The startup focus message, out of the way, so what is left in the queue
-    // below is the dock's doing and nothing else.
+    // Clear the startup focus message.
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
 
     cpu.set_operation_mode(OperationMode::Docked);
@@ -2957,9 +2574,7 @@ fn docking_moves_every_answer_that_depends_on_it() {
         "docked is Boost (1)"
     );
 
-    // And the title is *told*, which is the half that makes it act: it read
-    // the mode once at startup and laid out for that answer. Without these it
-    // never goes back to ask, and the new number is one nobody reads.
+    // The title is notified of the change.
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x28).unwrap(),
@@ -2978,9 +2593,7 @@ fn docking_moves_every_answer_that_depends_on_it() {
         "PerformanceModeChanged"
     );
 
-    // GetDefaultDisplayResolution (60) is the answer that sits *beside* the
-    // mode on a title's own screen, so the two coming from different places
-    // is how NX-Fetch came to print "1280x720 @ 60Hz [Docked]".
+    // GetDefaultDisplayResolution (60) must match the mode.
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 60);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x30).unwrap(),
@@ -2993,9 +2606,7 @@ fn docking_moves_every_answer_that_depends_on_it() {
         "docked default height"
     );
 
-    // Docking a docked console is not a transition. AM does not announce one
-    // that did not happen, and a title told to re-lay-out does the work
-    // whether or not anything changed.
+    // Docking a docked console announces nothing.
     const NO_MESSAGES: u32 = 128 | (3 << 9);
     cpu.set_operation_mode(OperationMode::Docked);
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
@@ -3033,9 +2644,7 @@ fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1920, "docked width");
     assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 1080, "docked height");
 
-    // Touch is handheld-only: the screen is in the dock, so nothing can be on
-    // it. The sample is still published: a LIFO that stops advancing is not
-    // "no touches" to a reader waiting for the next one, but it carries none.
+    // Docked, touch samples are still published but carry no contacts.
     cpu.set_reg(1, SHMEM as u64);
     cpu.set_reg(2, 0x40000);
     cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
@@ -3075,18 +2684,8 @@ fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
 
 #[test]
 fn the_shared_buffer_does_not_move_when_the_console_is_docked() {
-    // The pool layout is a promise: it goes out once, at
-    // GetSharedBufferMemoryHandleId, and the applet maps it and renders into
-    // it for as long as it holds it. Sizing it by the display broke that
-    // promise on the dock, every slot in the pool moved while qlaunch was
-    // still drawing into the old ones, and the present that followed read
-    // from the wrong offset at the wrong pitch. Thirteen frames after a dock
-    // the Home Menu was 0 of 2073600 pixels non-black, with the guest drawing
-    // perfectly well.
-    //
-    // Nor did the larger pool buy anything: qlaunch lays its UI out at
-    // 1280x720 whatever `vi` reports, so the docked frame was the undocked
-    // frame at the origin, to the pixel, and black across the rest.
+    // The shared buffer pool layout is fixed at GetSharedBufferMemoryHandleId
+    // and must not change on dock; qlaunch lays out at 1280x720 regardless.
     use switch_core::cpu::{OperationMode, SHARED_BUFFER_GEOMETRY};
     const VI: u64 = 0x2000;
     let mut cpu = cpu_at(0x1000);
@@ -3095,8 +2694,7 @@ fn the_shared_buffer_does_not_move_when_the_console_is_docked() {
     cpu.register_service_handle(VI, "vi:m");
     let tls = cpu.tls_base();
 
-    // GetSharedBufferMemoryHandleId reports the pool's total size, and per
-    // slot an offset, a size and the slot's width and height.
+    // GetSharedBufferMemoryHandleId: total size, then per-slot offset, size, width and height.
     let pool = |cpu: &mut Cpu| {
         ipc_request(cpu, VI, 4, None, 8225);
         assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
@@ -3116,24 +2714,18 @@ fn the_shared_buffer_does_not_move_when_the_console_is_docked() {
         "docking moved the pool the applet had mapped"
     );
 
-    // The display did move, though: the pool is the shared layer's geometry
-    // and the display is the panel's, and the two are no longer the same
-    // number.
+    // The display size does change.
     assert_eq!(cpu.operation_mode().display_size(), (1920, 1080));
     assert_eq!(SHARED_BUFFER_GEOMETRY.display_size(), (1280, 720));
 
-    // Rows round up to a 128-row block-linear block: 720 -> 768, 1080 -> 1152.
+    // Rows round up to a 128-row block: 720 -> 768, 1080 -> 1152.
     assert_eq!(OperationMode::Handheld.shared_buffer_rows(), 768);
     assert_eq!(OperationMode::Docked.shared_buffer_rows(), 1152);
 }
 
 #[test]
 fn the_resolution_change_event_fires_on_the_dock() {
-    // `GetDefaultDisplayResolutionChangeEvent` is how a title that is not
-    // polling AM's message queue finds out to go and re-read the resolution.
-    // It used to be a fresh event per caller, handed out dark, on the grounds
-    // that the resolution never changed -- so even once one did, nothing could
-    // have signalled the object anybody was actually waiting on.
+    // `GetDefaultDisplayResolutionChangeEvent` is one shared event, signalled on change.
     use switch_core::cpu::OperationMode;
     let (mut cpu, handle, _proxy, state_getter) = applet_chain();
     let tls = cpu.tls_base();
@@ -3166,10 +2758,7 @@ fn the_resolution_change_event_fires_on_the_dock() {
 
 #[test]
 fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
-    // `nn::codec` asks for the work buffer size, allocates that much as
-    // transfer memory, and only then opens a decoder. A size of zero, which
-    // is what the generic fallback answered: is an allocation that fails, so
-    // nothing ever gets as far as decoding.
+    // `nn::codec` allocates the reported work buffer size before opening a decoder.
     const HWOPUS: u64 = 0xC000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -3194,7 +2783,7 @@ fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
         "a work buffer of {stereo:#x} bytes is not one"
     );
 
-    // The large-frame form asks for room for a 120 ms packet, so it is bigger.
+    // The large-frame form fits a 120 ms packet.
     args[8] = 1;
     ipc_request_plain(&mut cpu, HWOPUS, 5, &args);
     let large = cpu.mem.read_u32(tls + 0x20).unwrap();
@@ -3203,7 +2792,7 @@ fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
         "the large-frame size {large:#x} is not above {stereo:#x}"
     );
 
-    // A rate Opus does not have is refused rather than sized.
+    // An unsupported rate is refused.
     let mut bad = Vec::new();
     bad.extend_from_slice(&44_100u32.to_le_bytes());
     bad.extend_from_slice(&2u32.to_le_bytes());
@@ -3220,11 +2809,8 @@ fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
 
 #[test]
 fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
-    // The packet does not arrive bare: `nn::codec` puts an eight-byte
-    // big-endian { size, final_range } header in front of it, and the reply's
-    // "bytes consumed" counts that header. A decoder that read the header as
-    // little-endian, or reported only the payload, would leave the caller
-    // walking its own buffer wrong and desynchronising after one packet.
+    // Packets carry an eight-byte big-endian { size, final_range } header,
+    // counted in "bytes consumed".
     const HWOPUS: u64 = 0xC000;
     const INPUT: u32 = 0x9000;
     const OUTPUT: u32 = 0x9400;
@@ -3249,7 +2835,7 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
         0,
         "OpenHardwareOpusDecoderEx failed"
     );
-    // { send_pid:1, num_copy:4, num_move:4 }: the decoder is a move handle.
+    // { send_pid:1, num_copy:4, num_move:4 }: a move handle.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
     let decoder = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(decoder, 0, "no IHardwareOpusDecoder came back");
@@ -3288,8 +2874,7 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
         "a 20 ms frame is 960 samples"
     );
 
-    // The samples are 16-bit and are not all zero: a decoder that answered
-    // success and wrote nothing would pass every check above.
+    // The samples are not all zero.
     let loudest = (0..960)
         .map(|i| i32::from(cpu.mem.read_u16(OUTPUT + i * 2).unwrap() as i16).abs())
         .max()
@@ -3302,10 +2887,7 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
 
 #[test]
 fn hwopus_refuses_a_packet_shorter_than_its_own_header() {
-    // The header says how long the packet is. A size longer than the buffer,
-    // or a buffer with no room for the header at all, is a caller that has
-    // lost its place in the stream; decoding whatever follows would turn that
-    // into noise rather than an error it can act on.
+    // A header size beyond the buffer, or no room for a header, is an error.
     const HWOPUS: u64 = 0xC000;
     const INPUT: u32 = 0x9000;
     const OUTPUT: u32 = 0x9400;

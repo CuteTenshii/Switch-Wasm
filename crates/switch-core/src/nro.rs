@@ -1,9 +1,4 @@
-//! Nintendo homebrew NRO loader.
-//!
-//! NRO is the binary format produced by devkitA64 for Switch homebrew. It is
-//! a simple container: a 0x40/0x50 byte header followed by three segments
-//! (`.text`, `.rodata`, `.data`) that are loaded contiguously, plus a BSS
-//! region zero-filled at the end.
+//! Homebrew NRO loader: a header, `.text`/`.rodata`/`.data` loaded contiguously, then BSS.
 //!
 //! Header layout (offsets relative to the file start):
 //!
@@ -21,9 +16,7 @@
 //! 0x50  (version 2 only) "NRO2" header
 //! ```
 //!
-//! `elf2nro` appends an asset section after the image, at the file offset the
-//! header's total size points at. It is where homebrew keeps the icon and
-//! name a home menu shows for it, and the RomFS `romfsMountSelf` mounts:
+//! `elf2nro`'s optional asset section, at the header's total size:
 //!
 //! ```text
 //! 0x00  magic "ASET"
@@ -33,8 +26,7 @@
 //! 0x28  romfs: u64 offset, u64 size
 //! ```
 //!
-//! Those offsets are relative to the asset header, and each part is optional:
-//! a build made without `--icon` leaves that pair zeroed.
+//! Offsets are relative to the asset header; absent parts are zeroed.
 
 use crate::mem::Memory;
 use crate::nsp::read_u32;
@@ -43,23 +35,15 @@ use crate::{Error, Result};
 pub const NRO0_MAGIC: u32 = 0x304f524e; // "NRO0"
 pub const NRO2_MAGIC: u32 = 0x32524f4e; // "NRO2"
 pub const ASET_MAGIC: u32 = 0x54455341; // "ASET"
-/// Base address where the NRO image is mapped.
-///
-/// Real homebrew (devkitA64/libnx) is linked against `0x08000000`, the load
-/// address the Homebrew Loader (HBL) uses, so baked-in absolute pointers in
-/// the image assume that base. Loading anywhere else would make those
-/// pointers dangle.
+/// Where HBL maps NROs; homebrew is linked against it.
 pub const NRO_BASE: u32 = 0x0800_0000;
 const HEADER_MIN: usize = 0x50;
-/// The asset header: magic, version, and an (offset, size) pair per part.
 const ASSET_HEADER_SIZE: usize = 0x38;
-/// The only asset header version `elf2nro` has ever written.
 const ASSET_VERSION: u32 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NroHeader {
-    /// File offset where the "NRO0" magic lives (may be nonzero after a boot
-    /// stub preamble).
+    /// File offset of the "NRO0" magic; nonzero after a boot stub.
     pub magic_offset: u32,
     pub version: u32,
     pub nro_size: u32,
@@ -83,37 +67,29 @@ pub struct LoadedNro {
     pub bss_size: u32,
     pub build_id: [u8; 0x20],
     pub is_64bit: bool,
-    /// Address of the synthesized homebrew environment block to pass as the
-    /// crt0's `x0` (0 for NROs whose crt0 doesn't parse one).
+    /// Homebrew environment block passed in the crt0's `x0`, or 0.
     pub env_addr: u32,
 }
 
-/// The three blobs an NRO carries after its image. Each is empty when the
-/// build was made without it.
+/// The blobs after an NRO's image; each is empty when absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Assets<'a> {
-    /// The icon a home menu shows, a 256x256 JPEG in every build seen so far.
+    /// A 256x256 JPEG in every build seen so far.
     pub icon: &'a [u8],
-    /// A `control.nacp`, the same fixed-layout blob a Control NCA holds.
+    /// A `control.nacp`.
     pub nacp: &'a [u8],
-    /// The RomFS image `romfsMountSelf` mounts. Already reachable through the
-    /// NRO on the emulated SD card, so nothing reads this yet.
+    /// Unread: the NRO on the emulated SD card already serves it.
     pub romfs: &'a [u8],
 }
 
-/// The asset section appended to an NRO, or `None` when the build has none.
 pub fn assets(data: &[u8]) -> Option<Assets<'_>> {
     NroHeader::parse(data).ok()?.assets(data)
 }
 
-/// Where [`setup_env_block`] maps the environment block. Kept out of the
-/// loaded image so the crt0's BSS zeroing never touches it.
+/// Kept out of the image so crt0 BSS zeroing never touches it.
 pub const ENV_BLOCK_ADDR: u32 = 0x0010_0000;
 
-/// Path the loaded NRO is presented at on the emulated SD card. libnx's
-/// `romfsMountSelf` re-opens the running NRO by `argv[0]` to read the RomFS
-/// appended after its image, so the file has to exist and the path has to
-/// match what the environment block advertises.
+/// The NRO's SD card path, advertised as `argv[0]` for `romfsMountSelf`.
 pub const HOMEBREW_NRO_PATH: &str = "sdmc:/switch/homebrew.nro";
 
 /// Entry keys of the libnx homebrew ABI (`nx/source/runtime/env.h`).
@@ -123,22 +99,14 @@ const ENTRY_ARGV: u32 = 5;
 const ENTRY_HOS_VERSION: u32 = 16;
 const ENTRY_END_OF_LIST: u32 = 0;
 
-/// Where the environment block keeps the "next NRO to run" buffers that
-/// `EntryType_NextLoadPath` points at. A menu writes the path it wants launched
-/// here and exits; hbmenu's `launchInit()` refuses to start without them.
+/// `EntryType_NextLoadPath` buffers; hbmenu's `launchInit()` requires them.
 pub const NEXT_LOAD_PATH_ADDR: u32 = ENV_BLOCK_ADDR + 0x400;
 pub const NEXT_LOAD_ARGV_ADDR: u32 = ENV_BLOCK_ADDR + 0x800;
-/// Size of each of those buffers, as hbloader sizes them.
+/// Size of each, as hbloader sizes them.
 pub const NEXT_LOAD_BUFFER_SIZE: usize = 0x300;
 
-/// Write a minimal homebrew ABI environment block so `envSetup` in the crt0
-/// populates its runtime globals. libnx's `EntryType_HosVersion` handler
-/// stores `Value[0]` as the host version and, when `Value[1]` is the
-/// `'ATMOSPHR'` magic, keeps it as-is. `0xFFFFFFFF` reads as "current
-/// firmware", which the version gates accept. Returns [`ENV_BLOCK_ADDR`].
-///
-/// The `ConfigEntry` here is the 24-byte form used by the linked crt0
-/// (`u32 Key, u32 Flags, u64 Value[2]`).
+/// Write a minimal homebrew ABI environment block for the crt0's `envSetup`,
+/// using 24-byte `ConfigEntry`s. Returns [`ENV_BLOCK_ADDR`].
 pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let a = ENV_BLOCK_ADDR;
     // MainThreadHandle (Key 1): required by __libnx_init_thread.
@@ -146,21 +114,17 @@ pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let _ = mem.write_u32(a + 4, 0);
     let _ = mem.write_u64(a + 8, 1);
     let _ = mem.write_u64(a + 16, 0);
-    // HosVersion (Key 16 in this crt0): { version = 0xFFFFFFFF, "ATMOSPHR" }.
+    // HosVersion: 0xFFFFFFFF ("current") with the "ATMOSPHR" magic.
     let _ = mem.write_u32(a + 24, ENTRY_HOS_VERSION);
     let _ = mem.write_u32(a + 28, 0);
     let _ = mem.write_u64(a + 32, 0xFFFF_FFFF);
     let _ = mem.write_u64(a + 40, 0x4154_4D4F_5350_4852); // "ATMOSPHR"
-                                                          // Argv (Key 5): Value[1] points at the command line, which libnx splits
-                                                          // into argv. argv[0] is how `romfsMountSelf` finds the running NRO.
     const ARGV_STRING_OFFSET: u32 = 0x100;
     let _ = mem.write_u32(a + 48, ENTRY_ARGV);
     let _ = mem.write_u32(a + 52, 0);
     let _ = mem.write_u64(a + 56, 0);
     let _ = mem.write_u64(a + 64, (a + ARGV_STRING_OFFSET) as u64);
-    // NextLoadPath (Key 2): { path buffer, argv buffer }. A homebrew menu is
-    // expected to write what it wants launched next into these and exit, and
-    // hbmenu's `launchInit()` fails outright when the loader doesn't offer them.
+    // NextLoadPath (Key 2): { path buffer, argv buffer }.
     let _ = mem.write_u32(a + 72, ENTRY_NEXT_LOAD_PATH);
     let _ = mem.write_u32(a + 76, 0);
     let _ = mem.write_u64(a + 80, u64::from(NEXT_LOAD_PATH_ADDR));
@@ -188,9 +152,7 @@ pub struct Segment {
 }
 
 impl NroHeader {
-    /// Parse an NRO header. The `NRO0` magic may appear after a small
-    /// preamble (some builds prepend a boot stub, e.g. hbmenu); we scan the
-    /// first 0x100 bytes for it.
+    /// Parse an NRO header, scanning the first 0x100 bytes for the magic.
     pub fn parse(data: &[u8]) -> Result<NroHeader> {
         if data.len() < HEADER_MIN {
             return Err(Error::Truncated {
@@ -271,12 +233,8 @@ impl NroHeader {
         true
     }
 
-    /// The asset section, which starts where the image ends. `nro_size` is
-    /// measured from the file start, not from the magic, so a build with a
-    /// boot stub in front of its header still lands on it.
-    ///
-    /// A part whose (offset, size) runs past the file is dropped rather than
-    /// taken as far as the file goes: half an icon is not an icon.
+    /// The asset section, at `nro_size` from the file start. Parts running past
+    /// the file are dropped.
     pub fn assets<'a>(&self, data: &'a [u8]) -> Option<Assets<'a>> {
         let base = self.nro_size as usize;
         if data.len() < base + ASSET_HEADER_SIZE
@@ -332,7 +290,6 @@ fn read_cstr(data: &[u8], off: usize) -> &str {
     std::str::from_utf8(&data[off..off + end]).unwrap_or("")
 }
 
-/// ELF hash used by the legacy DT_HASH symbol table.
 fn elf_hash(name: &str) -> u32 {
     let mut h: u32 = 0;
     for &b in name.as_bytes() {
@@ -346,10 +303,7 @@ fn elf_hash(name: &str) -> u32 {
     h
 }
 
-/// Look up a symbol in the NRO's DT_HASH / DT_SYMTAB / DT_STRTAB dynamic
-/// tables. Returns the symbol's `st_value` (a file-offset relative to the
-/// load base) when found. This is intentionally simple: it only supports the
-/// legacy DT_HASH layout used by devkitA64/libtransistor NROs.
+/// `st_value` of `name` via the legacy DT_HASH tables, relative to the load base.
 pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
     let mod0 = find_mod0(data)?;
     let dyn_off = mod0.wrapping_add(read_u32(data, mod0 + 4) as usize);
@@ -403,7 +357,6 @@ pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
         }
         idx = read_u32(data, chains_off + 4 * idx) as usize;
     }
-    // Bucket 0 may legitimately point to symbol index 0, so check it too.
     if idx == 0 {
         let sym_off = symtab;
         if sym_off + 24 <= data.len() {
@@ -416,15 +369,8 @@ pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
     None
 }
 
-/// libtransistor NROs can ship with `_trn_runconf_heap_mode` set to OVERRIDE
-/// with a tiny or zero-sized heap. Without a real loader config that leaves
-/// `_sbrk_r` returning NULL on the first allocation. We force the runtime into
-/// NORMAL heap mode so it calls `svcSetHeapSize`, which the emulator stubs.
-///
-/// The active `_trn_runconf_heap_mode` is not always the weak symbol exported
-/// in the dynamic table; the main executable may define a strong copy that
-/// `_sbrk_r` actually reads. We therefore decode `_sbrk_r` to find the live
-/// mode pointer and patch that.
+/// Force libtransistor's live `_trn_runconf_heap_mode` (found by decoding
+/// `_sbrk_r`) to NORMAL, so a tiny OVERRIDE heap does not fail the first malloc.
 fn patch_libtransistor_runconf(
     mem: &mut Memory,
     data: &[u8],
@@ -477,7 +423,7 @@ fn decode_adrp_target(pc: u32, insn: u32) -> Option<u32> {
 }
 
 fn decode_ldr_x_imm_offset(insn: u32) -> Option<u32> {
-    // ldr Xt, [Xn, #imm12]: offset in units of 8 bytes.
+    // ldr Xt, [Xn, #imm12], scaled by 8.
     if insn & 0xFFC00000 == 0xF9400000 {
         Some(((insn >> 10) & 0xFFF) * 8)
     } else {
@@ -486,7 +432,7 @@ fn decode_ldr_x_imm_offset(insn: u32) -> Option<u32> {
 }
 
 fn decode_cmp_w_imm(insn: u32) -> Option<(u8, u16)> {
-    // subs wzr, wn, #imm  →  top 9 bits 0b011100010, Rd=31.
+    // subs wzr, wn, #imm
     if insn & 0xFF80001F != 0x7100001F {
         return None;
     }
@@ -499,11 +445,8 @@ fn is_b_cond(insn: u32, cond: u8) -> bool {
     insn & 0xFF00000F == (0x54000000 | (cond as u32))
 }
 
-/// Find the `_sbrk_r` function by locating `svc #1` (SetHeapSize) and the
-/// `bl` to it, then decode the live `_trn_runconf_heap_mode` pointer and set
-/// it to NORMAL.
+/// Find `_sbrk_r` from its `bl` to `svc #1` and patch the heap mode it reads.
 fn patch_sbrk_runconf_via_code(mem: &mut Memory, base: u32, text_end: u32) -> Result<()> {
-    // Locate svc #1 inside the text segment.
     let mut svc_addr = None;
     let mut addr = base;
     while addr < text_end {
@@ -520,7 +463,6 @@ fn patch_sbrk_runconf_via_code(mem: &mut Memory, base: u32, text_end: u32) -> Re
         None => return Ok(()),
     };
 
-    // Find a bl that calls it (this is inside _sbrk_r).
     let mut bl_addr = None;
     addr = base;
     while addr < text_end {
@@ -539,7 +481,7 @@ fn patch_sbrk_runconf_via_code(mem: &mut Memory, base: u32, text_end: u32) -> Re
         None => return Ok(()),
     };
 
-    // Walk backwards to find the function start (previous ret or prologue).
+    // Walk back to the function start.
     let mut func_start = base;
     addr = bl_addr;
     while addr > base {
@@ -581,7 +523,6 @@ fn patch_sbrk_runconf_via_code(mem: &mut Memory, base: u32, text_end: u32) -> Re
                 if let Some(off) = decode_ldr_x_imm_offset(i1) {
                     let ptr_addr = page.wrapping_add(off);
                     let reg = i1 & 0x1F;
-                    // i2: ldr wreg, [xreg, #0]
                     let i2_is_ldrw = i2 & 0xFFC00000 == 0xB9400000;
                     let i2_reg = i2 & 0x1F;
                     let i2_base = (i2 >> 5) & 0x1F;
@@ -605,26 +546,20 @@ fn patch_sbrk_runconf_via_code(mem: &mut Memory, base: u32, text_end: u32) -> Re
     Ok(())
 }
 
-/// Find the MOD0 header in the NRO image. It is usually close to the end of
-/// the file (just before the dynamic section), so the search covers the whole
-/// image rather than only the first page.
+/// The MOD0 header, usually near the end of the image.
 fn find_mod0(data: &[u8]) -> Option<usize> {
     let magic = 0x30444f4du32.to_le_bytes(); // "MOD0"
     data.windows(4).position(|w| w == &magic[..])
 }
 
-/// Read the `.init_array` function addresses (relative to [`NRO_BASE`]) from
-/// the image's dynamic section, returning them as absolute vaddrs. Self-
-/// relocating NROs run this table in their crt0's `__libnx_init`; when the
-/// crt0 skips that step the loader (HBL / the emulator boot) must run it so
-/// C++ static constructors (std::string globals, ...) actually run. Returns
-/// an empty list when the image has no constructors.
+/// `.init_array` entries as absolute addresses, for crt0s that skip
+/// `__libnx_init`. Empty without constructors.
 pub fn init_array_entries(data: &[u8]) -> Vec<u32> {
     let mod0 = match find_mod0(data) {
         Some(m) => m,
         None => return Vec::new(),
     };
-    // The dynamic offset is relative to the MOD0 header itself.
+    // Relative to the MOD0 header.
     let dyn_rel = crate::nsp::read_u32(data, mod0 + 4);
     let mut dynp = mod0.wrapping_add(dyn_rel as usize);
     let mut init_arr: Option<u32> = None;
@@ -655,13 +590,8 @@ pub fn init_array_entries(data: &[u8]) -> Vec<u32> {
     out
 }
 
-/// Apply RELR packed relative relocations. Every 64-bit entry is either an
-/// address (bit 0 clear) or a bitmap (bit 0 set); each relocated word gets the
-/// load base added, turning stored file offsets into runtime addresses.
-///
-/// The chain is strictly monotonic (addresses only increase), so processing
-/// stops as soon as an entry would move backwards or past `end_addr`, this
-/// also guards against trailing garbage after the real RELR data.
+/// Apply RELR relocations, stopping at the first backward or out-of-range
+/// address (some sections end in garbage).
 fn apply_relr(mem: &mut Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()> {
     let mut addr: u32 = 0;
     let mut last: u32 = 0;
@@ -698,9 +628,7 @@ fn apply_relr(mem: &mut Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result
     Ok(())
 }
 
-/// Apply the RELR relocations described by the image's MOD0/dynamic headers,
-/// if present. NROs are linked against `NRO_BASE`, so absolute pointers in
-/// .data/.rodata only become valid once the base is added.
+/// Apply the image's RELR relocations, if any.
 fn apply_nro_relocations(mem: &mut Memory, data: &[u8], image_end: u32) -> Result<()> {
     let mod0 = match find_mod0(data) {
         Some(m) => m,
@@ -731,8 +659,7 @@ fn apply_nro_relocations(mem: &mut Memory, data: &[u8], image_end: u32) -> Resul
             _ => {}
         }
     }
-    // Some builds report a bogus DT_RELRSZ (e.g. hbmenu writes the byte size
-    // into DT_RELRCOUNT instead); take whichever field is larger, in bytes.
+    // hbmenu writes the byte size into DT_RELRCOUNT; take the larger.
     let size = relr_size.max(relr_count as u32);
     let start = relr_off as usize;
     let end = start.saturating_add(size as usize);
@@ -742,10 +669,7 @@ fn apply_nro_relocations(mem: &mut Memory, data: &[u8], image_end: u32) -> Resul
     Ok(())
 }
 
-/// Whether the NRO carries the "HOME BREW" self-relocating crt0 (the `b` +
-/// "HOME" "BREW" preamble with `NRO0` at offset 0x10). Such images run their
-/// own RELR relocator during startup, so applying RELR here too would add the
-/// load base a second time and corrupt every relocated pointer.
+/// The "HOME BREW" self-relocating crt0, which applies RELR itself.
 fn has_self_relocating_crt0(data: &[u8]) -> bool {
     data.len() >= 0x10
         && read_u32(data, 0x08) == 0x454d_4f48 // "HOME"
@@ -769,25 +693,14 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     copy_segment(mem, data, h.data_offset, h.data_size, data_addr)?;
     mem.map_zero(end_addr, h.bss_size as usize)?;
     let image_end = end_addr.wrapping_add(h.bss_size);
-    // Self-relocating NROs apply RELR themselves in their crt0; running it
-    // here as well would relocate every pointer twice. Plain NROs (e.g. the
-    // sdl demo) rely on the loader to do it.
     if !has_self_relocating_crt0(data) {
         apply_nro_relocations(mem, data, image_end)?;
     }
-    // libtransistor NROs may hardcode a tiny OVERRIDE heap. Force NORMAL so
-    // the runtime uses svcSetHeapSize instead of faulting on the first malloc.
     let text_end = text_addr.wrapping_add(h.text_size);
     let _ = patch_libtransistor_runconf(mem, data, base, text_end);
-    // .text is never a legitimate relocation target (position-independent
-    // code needs no runtime patches to its own instructions), so it can be
-    // locked down now: a wild guest write through a stray/null pointer
-    // faults immediately instead of silently corrupting the running image.
-    // `.rodata` is left writable: a self-relocating crt0 may still need to
-    // patch RELR entries living in `.data.rel.ro` there.
+    // Lock `.text`; `.rodata` stays writable for a crt0 patching `.data.rel.ro`.
     mem.mark_readonly(text_addr, ro_addr);
-    // The image is two memory states to the guest, not one: `.text`/`.rodata`
-    // static, `.data`/`.bss` mutable. See `Memory::mark_module`.
+    // See `Memory::mark_module`.
     mem.mark_module((text_addr, data_addr), (data_addr, image_end), false);
 
     let env_addr = if has_self_relocating_crt0(data) {
@@ -862,8 +775,7 @@ mod tests {
         (n + 3) & !3
     }
 
-    /// Append an asset section the way `elf2nro` does: the header first, then
-    /// the parts it points at, back to back after it.
+    /// Append an asset section the way `elf2nro` does.
     fn append_assets(nro: &mut Vec<u8>, icon: &[u8], nacp: &[u8], romfs: &[u8]) {
         let base = nro.len();
         nro.extend_from_slice(&ASET_MAGIC.to_le_bytes());
@@ -897,8 +809,7 @@ mod tests {
 
     #[test]
     fn an_asset_part_the_build_omitted_is_empty() {
-        // `elf2nro --icon` with no `--nacp` is a normal way to build, and the
-        // icon still has to come out of it.
+        // `--icon` without `--nacp`.
         let mut nro = build_nro(&[0u8; 4], &[]);
         append_assets(&mut nro, b"icon", b"", b"");
         let assets = assets(&nro).unwrap();
@@ -912,8 +823,7 @@ mod tests {
         let mut nro = build_nro(&[0u8; 4], &[]);
         let base = nro.len();
         append_assets(&mut nro, b"icon", b"nacp", b"");
-        // Claim a RomFS the file does not hold: the parts that are there stay
-        // readable, rather than the whole section being thrown away.
+        // A RomFS past the file end leaves the other parts readable.
         let romfs = base + 0x28;
         nro[romfs..romfs + 8].copy_from_slice(&(ASSET_HEADER_SIZE as u64).to_le_bytes());
         nro[romfs + 8..romfs + 16].copy_from_slice(&u64::MAX.to_le_bytes());
@@ -934,7 +844,6 @@ mod tests {
         assert_eq!(mem.read_u32(NRO_BASE).unwrap(), 0x01);
         assert_eq!(mem.read_u32(NRO_BASE + 4).unwrap(), 0x02);
         assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0xEFBE_ADDE);
-        // bss zero-filled
         assert_eq!(
             mem.read_u8(loaded.data.mem_addr + loaded.data.file_size)
                 .unwrap(),
@@ -951,11 +860,9 @@ mod tests {
         let nro = build_nro(&text, &data);
         let mut mem = Memory::new();
         let loaded = load_nro(&mut mem, &nro).unwrap();
-        // A wild write into .text (what corrupted the running image before
         // this was locked down) now faults instead of silently succeeding.
         assert!(mem.write_u32(loaded.text.mem_addr, 0xDEAD_BEEF).is_err());
         assert_eq!(mem.read_u32(loaded.text.mem_addr).unwrap(), 0x01);
-        // .data stays writable: globals still work.
         mem.write_u32(loaded.data.mem_addr, 0x1234).unwrap();
         assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0x1234);
     }
@@ -966,8 +873,7 @@ mod tests {
         mem.map_zero(NRO_BASE, 0x2000).unwrap();
         mem.write_u64(NRO_BASE + 0x1000, 0x1234).unwrap();
         mem.write_u64(NRO_BASE + 0x1008, 0x5678).unwrap();
-        // RELR: address entry [0x1000], a bitmap flagging the next slot, then
-        // a backward address (the trailing garbage hbmenu's section has).
+        // An address, a bitmap, then a backward address that stops the walk.
         let mut relr = Vec::new();
         relr.extend_from_slice(&0x1000u64.to_le_bytes());
         relr.extend_from_slice(&0b101u64.to_le_bytes()); // bitmap: bit0=1, bit2 → +8

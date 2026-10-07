@@ -1,5 +1,4 @@
-/* The on-page console: everything the emulator has to say, shown down to the
-   chosen level. */
+// The on-page console.
 
 import { $, el } from './dom';
 import type { LogClass } from '../shared/protocol';
@@ -60,48 +59,29 @@ levelSelect.addEventListener('change', () => {
   for (const listener of levelListeners) listener(level);
 });
 
-/** How many entries the console keeps on the page.
- *
- *  It kept all of them, and every entry is its own element: with the
- *  instruction trace on, a run puts tens of thousands into the document and
- *  the page slows to a crawl laying them out -- while `Copy all` walks every
- *  one of them. The text is kept in `backlog` either way, so what is dropped
- *  here is dropped from the *view*, not from what gets copied or saved. */
+// Entries kept on the page; `backlog` keeps more for copying and saving.
 const SHOWN_MAX = 2000;
 
-/** How many entries the log keeps at all.
- *
- *  Larger than the view by a lot, because this is what a bug report is cut
- *  from, and smaller than unbounded because a session left running overnight
- *  should not end as a tab the browser kills. */
 const KEPT_MAX = 50_000;
 
-/** One entry: what was said, how loudly, and how many times in a row.
- *
- *  A guest polling a service that is not there says the same thing on every
- *  frame, and a thousand identical rows hide everything else that happened.
- *  Consecutive repeats collapse into one row carrying a count, which is what a
- *  browser's own console does with the same problem. */
+// Consecutive repeats collapse into one entry with a count.
 interface Entry {
   text: string;
   cls?: LogClass;
   count: number;
 }
 
-/** Every entry, in order, whether or not it is still on the page. */
+// Every entry, whether or not it is still on the page.
 const backlog: Entry[] = [];
 
-/** The row the newest entry is on, so a repeat of it can be counted in place
- *  rather than appended. */
+// The newest entry's row, so a repeat can be counted in place.
 let lastRow: HTMLElement | null = null;
 
 export function log(msg: string, cls?: LogClass): void {
   mirrorDirty = true;
   const visible = shown(cls);
 
-  // `isConnected` rather than a null check: a row the view has evicted is
-  // still referenced here, and counting into a detached element would swallow
-  // the repeat instead of showing it.
+  // A row the view evicted is detached, so counting into it would hide the repeat.
   const last = backlog[backlog.length - 1];
   if (last && last.text === msg && last.cls === cls && !visible) {
     last.count += 1;
@@ -111,9 +91,6 @@ export function log(msg: string, cls?: LogClass): void {
     last.count += 1;
     lastRow.dataset.repeat = String(last.count);
     if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
-    // Deliberately not `openPanel`: the first of these opened it already, and
-    // re-opening on every repeat takes the panel back from someone who has
-    // moved off it to look at something else.
     return;
   }
 
@@ -125,7 +102,6 @@ export function log(msg: string, cls?: LogClass): void {
   consoleEl.appendChild(lastRow);
   while (consoleEl.childElementCount > SHOWN_MAX) consoleEl.firstElementChild!.remove();
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
-  // Anything that went wrong is worth surfacing even with the panel closed.
   if (cls === 'err') openPanel('console');
 }
 
@@ -135,7 +111,6 @@ function row(entry: Entry): HTMLElement {
   return line;
 }
 
-/** Rebuild the view from the backlog at the current level. */
 function renderConsole(): void {
   const rows: HTMLElement[] = [];
   lastRow = null;
@@ -149,11 +124,9 @@ function renderConsole(): void {
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
-/** How many paths a line about stored changes names before it summarises. */
 const STORED_NAMED_MAX = 8;
 
-/** Log what a flush just wrote to IndexedDB. `null` in the map is a
- *  deletion. */
+// `null` in the map is a deletion.
 export function logStored(what: string, changes: Map<string, StoredEntry | null>): void {
   let bytes = 0;
   const named: string[] = [];
@@ -170,12 +143,7 @@ export function logStored(what: string, changes: Map<string, StoredEntry | null>
   );
 }
 
-/** Log a block of text one entry per line, at one level.
- *
- *  What arrives from the emulator is a stream, not a line: a fault is its
- *  message, a register dump and an instruction trail, and pushing all of that
- *  into a single element makes it one unbreakable row the console scrolls
- *  sideways for. */
+// One entry per line, at one level.
 export function logBlock(text: string, cls?: LogClass): void {
   for (const line of text.replace(/\n$/, '').split('\n')) log(line, cls);
 }
@@ -188,24 +156,17 @@ export function clearConsole(): void {
 
 $('btn-clear-console').addEventListener('click', clearConsole);
 
-/** The whole log as text, one line per entry -- including the entries the
- *  view has since dropped. */
+// Includes entries the view has dropped.
 export function consoleText(): string {
   return backlog.map(asLine).join('\n');
 }
 
-/** One entry as a line, carrying its count. A log that collapsed a thousand
- *  identical lines has to say so: without this a copy of it reads as though
- *  the thing happened once. */
 function asLine(entry: Entry): string {
   return entry.count > 1 ? `${entry.text}  (x${entry.count})` : entry.text;
 }
 
 const copyBtn = $('btn-copy-console');
 
-/** Say what happened on the button itself and put its label back. A log copy
- *  is worth confirming -- there is no other sign it worked -- but not worth a
- *  line in the log it just copied. */
 let copyLabelTimer = 0;
 function flashCopyLabel(text: string): void {
   clearTimeout(copyLabelTimer);
@@ -215,10 +176,7 @@ function flashCopyLabel(text: string): void {
   }, 1400);
 }
 
-/** `navigator.clipboard` needs a secure context, which a page served over
- *  plain http from another machine is not -- and that is exactly how this gets
- *  opened when someone is testing on a phone. Fall back to a selection copy,
- *  which has no such requirement. */
+// Fallback for insecure contexts, where `navigator.clipboard` is unavailable.
 function copyViaSelection(text: string): boolean {
   const area = el('textarea');
   area.value = text;
@@ -237,7 +195,6 @@ function copyViaSelection(text: string): boolean {
   return ok;
 }
 
-/** Put `text` on the clipboard, however this context allows. */
 export async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
@@ -259,41 +216,21 @@ async function copyConsole(): Promise<void> {
 
 copyBtn.addEventListener('click', copyConsole);
 
-/** Offer `text` as a file to save.
- *
- *  The clipboard is not enough on its own: a log worth reporting is tens of
- *  thousands of lines, a crash takes the tab that holds it, and a phone has
- *  nowhere to paste it. */
 export function download(name: string, text: string, type = 'text/plain'): void {
   const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
   const link = el('a');
   link.href = url;
   link.download = name;
   link.click();
-  // Not before the click: revoking the URL is revoking the download.
+  // Not before the click: revoking the URL cancels the download.
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-/** A filename stamp that sorts, and that names the moment rather than the
- *  locale: two reports from one session must not collide. */
 export function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
 }
 
-/* Surviving the tab.
-
-   Everything else that can go wrong here leaves the page alive: a wasm trap
-   unwinds into the run loop, which then reads the panic message and dumps the
-   context, and the log is still there to be saved. What is not survivable is
-   the browser killing the tab -- which an emulator that maps gigabytes of
-   guest memory is a candidate for -- and after that a reload has nothing at
-   all to say about what was happening.
-
-   So the log is mirrored, on a timer rather than per line: with the
-   instruction trace on this would otherwise be a database write per
-   instruction. What is kept is the tail, because a cap that can be reached is
-   better than a store that grows until the browser evicts the whole origin --
-   which would take the SD card and the NAND with it. */
+// The log's tail is mirrored to IndexedDB on a timer, so it survives the browser killing the tab.
 const MIRROR_EVERY_MS = 5000;
 const MIRRORED_MAX = 4000;
 
@@ -310,16 +247,11 @@ async function mirrorLog(): Promise<void> {
     const tail = backlog.slice(-MIRRORED_MAX).map(asLine).join('\n');
     await idbApply(await logIdb(), LOG_STORE, [[LOG_KEY, tail]]);
   } catch {
-    // Private browsing, a refused quota, an evicted origin. The log is still
-    // on the page; only the copy that would outlive it is lost, and saying so
-    // in the log would be a line per attempt.
+    // Private browsing, refused quota, or evicted origin: the mirror is lost silently.
   }
 }
 
-/** The log from the session before this one, if the browser kept it.
- *
- *  Read once at startup and then cleared, so that "previous" always means the
- *  run before this one rather than the oldest run that ever crashed. */
+// Read once at startup and then cleared.
 export async function takePreviousLog(): Promise<string> {
   try {
     const db = await logIdb();
@@ -332,23 +264,13 @@ export async function takePreviousLog(): Promise<string> {
   }
 }
 
-/* Whether the session before this one closed itself.
-
-   The mirrored log is worth offering only when it is the account of a run that
-   did not get to finish -- otherwise every ordinary reload nags about the last
-   one. `pagehide` is the signal, and this is `localStorage` rather than the
-   database the log itself lives in because a `pagehide` handler is not given
-   time to await anything: a synchronous write is the only kind that reliably
-   lands there. A tab the browser kills never runs the handler, which is
-   exactly the case being detected. */
+// A `pagehide` mark in `localStorage` (synchronous) tells a clean exit from a killed tab.
 const RUNNING_KEY = 'switch-wasm-running';
 
 function endedCleanly(): boolean {
   try {
     return localStorage.getItem(RUNNING_KEY) === null;
   } catch {
-    // No storage at all: treat every run as clean rather than warning about
-    // sessions this page cannot know anything about.
     return true;
   }
 }
@@ -358,24 +280,17 @@ function markRunning(running: boolean): void {
     if (running) localStorage.setItem(RUNNING_KEY, '1');
     else localStorage.removeItem(RUNNING_KEY);
   } catch {
-    // See `endedCleanly`.
+    // No storage: see `endedCleanly`.
   }
 }
 
 window.addEventListener('pagehide', () => markRunning(false));
 
-/* The mark is per origin, not per tab, so a second tab opened beside a first
-   sees it set and would report the *live* tab as a session that died. Asking
-   is what tells the two apart: a tab that is still there answers, and a tab
-   the browser killed cannot. */
+// The mark is per origin, so other live tabs are asked before reporting a dead session.
 const TAB_CHANNEL = 'switch-wasm-tabs';
 const TAB_ANSWER_MS = 250;
 
-/* Who is asking. A `BroadcastChannel` withholds a message only from the object
-   that sent it, *not* from the rest of the page -- so the answering channel
-   below is delivered this page's own ping and used to answer it, which made
-   every session look as though it had a live sibling and suppressed the offer
-   entirely. The id is what the two halves tell each other apart by. */
+// A page receives its own `BroadcastChannel` pings, so they carry an id.
 const TAB_ID = Math.random().toString(36).slice(2);
 
 interface TabMessage {
@@ -407,7 +322,6 @@ if (typeof BroadcastChannel !== 'undefined') {
   };
 }
 
-/** Offer the previous session's log, if there is one worth offering. */
 export async function offerPreviousLog(): Promise<void> {
   const clean = endedCleanly() || await anotherTabIsLive();
   markRunning(true);

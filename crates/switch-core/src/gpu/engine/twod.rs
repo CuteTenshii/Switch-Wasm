@@ -1,9 +1,6 @@
-//! FERMI_TWOD_A (class 0x902D), the 2D blitter.
-//!
-//! `PixelsFromMemory` scales a source rectangle into a destination rectangle
-//! using 32.32 fixed-point stepping, with point or bilinear sampling. deko3d
-//! routes `dkCmdBufBlitImage` here whenever the copy engine cannot express the
-//! operation (scaling, format conversion, filtering).
+//! FERMI_TWOD_A (class 0x902D), the 2D blitter: `PixelsFromMemory` scales a
+//! source rectangle into a destination with 32.32 fixed-point stepping and
+//! point or bilinear sampling.
 
 use crate::gpu::engine::Registers;
 use crate::gpu::exec::ExecCtx;
@@ -45,23 +42,18 @@ const MEMORY_LAYOUT_PITCH: u32 = 1;
 const OPERATION_SRC_COPY: u32 = 3;
 const FILTER_BILINEAR: u32 = 1;
 
-/// The tile a byte-exact copy walks the destination in: a GOB column of
-/// 32-bit texels at a halving step, and one 16-GOB block of rows.
+/// Destination tile for a byte-exact copy: a GOB column of 32-bit texels at a
+/// halving step, by one 16-GOB block of rows.
 const TILE_W: usize = 8;
 const TILE_H: usize = 64;
 
 #[derive(Debug, Default)]
 pub struct Engine2D {
     pub regs: Registers,
-    /// Both surfaces of the last staged copy, kept between blits so a title
-    /// that resolves every frame does not allocate and zero 18 MB each time.
-    /// See [`Engine2D::blit_staged`].
+    /// Both surfaces of the last staged copy, reused between blits.
     source: Vec<u8>,
     target: Vec<u8>,
-    /// The texels the last staged copy read out of its source, in the order
-    /// it wrote them, and where they came from. A copy of the same texels
-    /// from a source nothing has written since reuses them rather than
-    /// reading the source again.
+    /// The texels the last staged copy read, and their source, for reuse.
     resolved: Vec<u8>,
     resolved_from: Option<ResolvedFrom>,
     /// Blits by source and destination: see [`crate::gpu::activity`].
@@ -80,8 +72,7 @@ impl Engine2D {
         }
     }
 
-    /// Which method write launches a blit, so a caller can hand a GPU
-    /// backend's surfaces back before the copy reads guest memory.
+    /// The method that launches a blit.
     pub const LAUNCHES_BLIT: u32 = SRC_Y0_INT;
 
     pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
@@ -154,13 +145,7 @@ impl Engine2D {
         let src_y0 = fixed(self.regs.get(SRC_Y0_INT), self.regs.get(SRC_Y0_FRAC));
         let bilinear = self.regs.field(SAMPLE_MODE, 4, 4) == FILTER_BILINEAR;
 
-        // A filter whose taps land exactly on texel centres is not a filter.
-        // `bilinear` weights its four taps by the fractional part of
-        // `(u, v) - 0.5`, so a step and an origin that leave that zero for
-        // every pixel give weights of 1, 0, 0, 0, `c00` plus three terms
-        // multiplied by zero. Just Dance 2019 resolves its 2x2 MSAA target
-        // with `du_dx=2, dv_dy=2, src0=(0.5,0.5)`, which is exactly that, and
-        // paid four fetches and twelve lerps per pixel to copy one texel.
+        // Taps exactly on texel centres make bilinear a point sample.
         let centred = |origin: f64, step: f64| (origin - 0.5).fract() == 0.0 && step.fract() == 0.0;
         let filtered = bilinear && !(centred(src_x0, du_dx) && centred(src_y0, dv_dy));
 
@@ -209,31 +194,16 @@ impl Engine2D {
             );
         }
 
-        // Point-sampling between two surfaces of one byte-exact format is a
-        // move, not a conversion: `encode(decode(x))` is `x` there, and the
-        // pair costs a round trip through linear light for every pixel of the
-        // destination. A title that resolves its render target this way does
-        // 921,600 of them a frame.
+        // Point-sampling between surfaces of one byte-exact format is a move.
         let byte_exact =
             !filtered && src.format.raw == dst.format.raw && dst.format.is_byte_exact();
         let bpp = dst.format.bytes_per_pixel;
 
-        // A copy walks both surfaces whole, so their GPU addresses are worth
-        // translating once here rather than once per texel. `Gpu::present`
-        // has always worked this way; the blitter went through `ExecCtx` per
-        // texel and paid an address-space lookup for every pixel it read and
-        // every pixel it wrote, which measured 40% of the copy.
-        //
-        // Only when each surface lies in one mapping: a copy that would walk
-        // off the end of one is left to the general path below, which asks
-        // per texel and so cannot.
+        // Translate each surface once, when it lies in a single mapping.
         if byte_exact {
             if let (Some(src_base), Some(dst_base)) = (mapped(&src, ctx), mapped(&dst, ctx)) {
                 let (src_width, dst_width) = (src.width_bytes(), dst.width_bytes());
-                // A column's half of the swizzle depends on `x` alone, and the
-                // same 1280 columns are walked for every one of 720 rows, so
-                // they are worked out once here instead of 921,600 times, and
-                // the source step's fixed-point arithmetic goes with them.
+                // A column's half of the swizzle depends on `x` alone.
                 let columns: Vec<(u32, u32)> = (0..dst_w)
                     .map(|x| {
                         let u = src_x0 + du_dx * x as f64;
@@ -244,14 +214,10 @@ impl Engine2D {
                         )
                     })
                     .collect();
-                // The same for a row's half, once per row rather than 1280
-                // times.
                 let rows: Vec<(u32, u32)> = (0..dst_h)
                     .map(|y| {
                         let v = src_y0 + dv_dy * y as f64;
-                        // `Surface::texel_raw` clamps to the surface; reading
-                        // the addresses directly means doing that here
-                        // instead.
+                        // `Surface::texel_raw` would clamp; do it here.
                         let sy = (v.max(0.0) as u32).min(src.height.saturating_sub(1));
                         (
                             src.layout.row_offset(sy, src_width),
@@ -259,17 +225,8 @@ impl Engine2D {
                         )
                     })
                     .collect();
-                // Walked a destination row at a time, a block-linear source is
-                // read in the one order its layout makes slowest: eight texels
-                // of a GOB, then a jump of a whole column of GOBs to the next,
-                // a new cache line every few texels and in no pattern a
-                // prefetcher follows. In tiles, each one's source is a few
-                // contiguous blocks.
-                //
-                // Only the order changes, which nothing can see unless the
-                // copy reads what it has already written, so overlapping
-                // surfaces keep going a row at a time. The hardware does not
-                // promise an order either.
+                // Walk in tiles so a block-linear source is read a few blocks
+                // at a time; overlapping surfaces keep row order.
                 let disjoint = disjoint((&src, src_base), (&dst, dst_base));
                 if disjoint
                     && self.blit_staged(ctx, (&src, src_base), (&dst, dst_base), &rows, &columns)?
@@ -342,28 +299,11 @@ impl Engine2D {
         Ok(())
     }
 
-    /// A byte-exact copy between two disjoint surfaces, done in host memory:
-    /// the source read whole and its texels gathered into one buffer, the
-    /// target read whole, the texels put in it, and the target written back.
-    /// `rows` and `columns` are the two halves of every texel's offset into
-    /// its surface, source first. Reports whether it did the copy; when it
-    /// did not, nothing has been written.
-    ///
-    /// Just Dance 2019 resolves a 2560x1440 target this way every frame, and
-    /// through guest memory each of the 921,600 texels it reads was a
-    /// dependent load out of whichever of 3,600 separately allocated pages
-    /// held it, so the copy was a chain of cache misses: 13 ms of a frame.
-    /// Staged, the misses are page-sized sequential copies instead. And the
-    /// gathered texels are kept, with the source's pages watched, so a copy
-    /// of the same texels from a source nothing has stored to since skips
-    /// the source altogether; that target is one Just Dance 2019 stopped
-    /// drawing to when it finished loading.
-    ///
-    /// Only where that is exactly the per-texel copy: every offset inside its
-    /// surface, no watchpoint over either and no protected byte in the
-    /// target, so skipping the per-access checks skips nothing. Writing back
-    /// the bytes between texels, the padding of a block-linear surface,
-    /// stores what was just read from them.
+    /// A byte-exact copy between disjoint surfaces done in host memory, reusing
+    /// the gathered texels when the source has not been written since.
+    /// `rows` and `columns` are the two halves of each texel's offset, source
+    /// first. Only used where it equals the per-texel copy (offsets in bounds,
+    /// no watchpoints or protected bytes); returns false having written nothing.
     fn blit_staged(
         &mut self,
         ctx: &mut ExecCtx,
@@ -389,10 +329,7 @@ impl Engine2D {
             return Ok(false);
         }
         let texels = rows.len() * columns.len() * bpp as usize;
-        // The source's texels are what they were at the last copy if it read
-        // the same ones and nothing has been stored to its pages since. Just
-        // Dance 2019 resolves a target it has not drawn to since it loaded,
-        // so this is every frame of it.
+        // Reuse last copy's texels if the same ones were read and the source is unchanged.
         let unwritten = !ctx.mem.take_copy_written();
         let current = self
             .resolved_from
@@ -441,9 +378,7 @@ impl Engine2D {
     }
 }
 
-/// What the texels in [`Engine2D::resolved`] were read from: the source's
-/// place and size, the texel width, and the source's half of every row and
-/// column offset. Two copies that agree on all of it read the same texels.
+/// What [`Engine2D::resolved`] was read from; equal keys mean the same texels.
 #[derive(Debug)]
 struct ResolvedFrom {
     base: u32,
@@ -488,11 +423,8 @@ impl ResolvedFrom {
     }
 }
 
-/// Read every texel a staged blit copies out of `source`, `N` bytes each,
-/// into `resolved` in destination order, a row of columns at a time; a
-/// tile at a time, so the source is read a few blocks at a time too. A
-/// width known here makes each move one load and one store rather than a
-/// call to `memcpy`.
+/// Gather a staged blit's source texels into `resolved` in destination order,
+/// a tile at a time.
 fn gather<const N: usize>(
     source: &[u8],
     resolved: &mut [u8],
@@ -515,14 +447,8 @@ fn gather<const N: usize>(
     }
 }
 
-/// Write the texels [`gather`] collected into `target`, each where the
-/// destination's half of its row and column offsets puts it.
-/// [`Engine2D::blit_staged`] has already established that the furthest any
-/// row and column offset can add up to is inside `target`, and that `resolved`
-/// holds exactly one texel per row and column. Neither index here can be out
-/// of range, and saying so is what leaves the walk without a bounds check and
-/// without the panic path behind it: the destination offset was being spilled
-/// to the stack on the way past every one of 921,600 texels a frame.
+/// Scatter the texels [`gather`] collected into `target`. The caller has
+/// established that every index is in range.
 fn scatter<const N: usize>(
     resolved: &[u8],
     target: &mut [u8],
@@ -544,9 +470,8 @@ fn scatter<const N: usize>(
     }
 }
 
-/// The per-texel loop's filtered blit, decoding each source row once instead
-/// of four texels per destination pixel. The surfaces must be disjoint and
-/// each in one mapping, and the destination rectangle inside its surface.
+/// Filtered blit decoding each source row once. Surfaces must be disjoint and
+/// each in one mapping, with the destination rectangle inside its surface.
 fn blit_filtered(
     ctx: &mut ExecCtx,
     (src, src_base): (&Surface, u32),
@@ -579,7 +504,6 @@ fn blit_filtered(
         }
         Ok(())
     };
-    // The two source rows the destination row being written blends.
     let mut rows: [(Option<u32>, Vec<[f32; 4]>); 2] = Default::default();
     for y in 0..dst_h {
         let (y0, fy) = taps(src_y0 + dv_dy * y as f64);
@@ -605,22 +529,16 @@ fn blit_filtered(
     Ok(())
 }
 
-/// Whether two surfaces, at the guest addresses given, share no byte.
 fn disjoint((a, a_base): (&Surface, u32), (b, b_base): (&Surface, u32)) -> bool {
     u64::from(a_base) + u64::from(a.size()) <= u64::from(b_base)
         || u64::from(b_base) + u64::from(b.size()) <= u64::from(a_base)
 }
 
-/// Recombine the 32.32 fixed-point pairs the engine takes.
 fn fixed(int_part: u32, frac: u32) -> f64 {
     int_part as i32 as f64 + frac as f64 / 4_294_967_296.0
 }
 
 /// Where a surface begins in guest memory, if the whole of it is one mapping.
-///
-/// `None` means some of it is not, and the caller has to go on asking per
-/// texel, a translation that covered less than the surface would hand out an
-/// address past the end of the mapping for the rest of it.
 fn mapped(surface: &Surface, ctx: &ExecCtx) -> Option<u32> {
     match ctx.vmm.translate(surface.addr) {
         Some((cpu, left)) if left >= u64::from(surface.size()) => Some(cpu),
@@ -696,11 +614,8 @@ mod tests {
         assert_eq!(stats.copies, 1);
     }
 
-    /// The staged copy is only allowed where it is the texel-by-texel one, so
-    /// it has to leave memory byte for byte as that one does: every texel,
-    /// and the padding a block-linear surface carries past its edges. A write
-    /// watchpoint over the target is what sends a copy the other way, so the
-    /// same resolve is run both ways and the results compared.
+    /// The staged copy must leave memory byte for byte as the per-texel copy
+    /// does, padding included; a write watchpoint forces the per-texel path.
     #[test]
     fn a_staged_blit_leaves_memory_as_the_texel_walk_does() {
         const SRC: u32 = 0x3000_0000;
@@ -774,9 +689,7 @@ mod tests {
         assert_eq!(differs, None, "first differing byte, from {SRC:#x}");
     }
 
-    /// A filtered blit gives what sampling each destination pixel on its own
-    /// gives, for a 2:1 resolve and for fractional steps that clamp at the
-    /// source's edges.
+    /// A filtered blit matches sampling each destination pixel on its own.
     #[test]
     fn a_filtered_blit_matches_per_pixel_sampling() {
         const SRC: u32 = 0x3000_0000;
@@ -882,9 +795,7 @@ mod tests {
         }
     }
 
-    /// A copy that reuses the texels it gathered last time has to notice
-    /// that the source changed under it, whether a store or a new mapping
-    /// did it.
+    /// Reused texels must be invalidated by a store or a new mapping.
     #[test]
     fn a_repeated_blit_sees_what_was_written_to_its_source() {
         const SRC: u32 = 0x3000_0000;
@@ -966,9 +877,7 @@ mod tests {
         );
     }
 
-    /// A halving copy bigger than one tile in both directions, so the tiled
-    /// walk has to get every band and every strip right, the ragged last ones
-    /// included.
+    /// A halving copy larger than one tile both ways, ragged edges included.
     #[test]
     fn a_blit_larger_than_a_tile_lands_every_texel() {
         const SRC_W: u32 = 2 * 21;

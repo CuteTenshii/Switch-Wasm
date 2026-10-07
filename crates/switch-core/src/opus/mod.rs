@@ -1,27 +1,7 @@
-//! An Opus decoder (RFC 6716).
-//!
-//! Opus is two codecs behind one container. SILK is a linear-prediction coder
-//! that carries speech efficiently at low rates and internally runs at 8, 12
-//! or 16 kHz; CELT is an MDCT transform coder that carries everything else at
-//! 48 kHz. A packet is coded by one of them, or (in hybrid mode) by both at
-//! once, SILK below 8 kHz and CELT above it.
-//!
-//! Which of the three a packet used is in its first byte, and a stream may
-//! change from one packet to the next. That is the awkward part of decoding
-//! Opus: the two codecs have different internal rates, different frame
-//! lengths and entirely separate state, so a switch has to be faded through
-//! rather than simply taken, and both decoders have to be kept warm across
-//! frames that did not use them.
-//!
-//! What is here is a decoder only. Nothing on this console encodes Opus.
+//! An Opus decoder (RFC 6716): SILK, CELT, and hybrid packets, with fades
+//! across mode changes.
 
-// RFC 6716's decoder, transcribed rather than rewritten: the tables are
-// normative, the integer arithmetic has to round the way the encoder's did,
-// and a loop that carries its index into the arithmetic reads as the
-// reference does only while it stays a loop. Clippy's suggestions here range
-// from noise to actively wrong, shortening a table constant or swapping in
-// `FRAC_1_SQRT_2` desynchronises the range decoder, so they are off for the
-// ported modules and on everywhere else.
+// Clippy lints that fight a faithful transcription of the reference decoder.
 macro_rules! ported {
     ($($item:item)*) => {
         $(
@@ -54,23 +34,17 @@ use celt::CeltDecoder;
 use range::RangeDecoder;
 use silk::SilkDecoder;
 
-/// Why a packet could not be decoded. A caller that gets one of these should
-/// conceal the frame rather than stop: a damaged packet in a stream is not a
-/// damaged stream.
+/// Why a packet could not be decoded; callers should conceal the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// The packet is malformed: a length that does not fit, a frame count of
-    /// zero, a duration no mode can produce.
+    /// The packet is malformed.
     InvalidPacket,
-    /// The arguments do not describe something this decoder can do.
     BadArgument,
-    /// The output buffer is shorter than the packet's own duration.
     BufferTooSmall,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Which codec, or both, coded a packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     SilkOnly,
@@ -78,8 +52,7 @@ enum Mode {
     CeltOnly,
 }
 
-/// The coded audio bandwidth, which is what sets CELT's top band and SILK's
-/// internal rate.
+/// Coded audio bandwidth: sets CELT's top band and SILK's internal rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bandwidth {
     Narrow,
@@ -90,7 +63,6 @@ enum Bandwidth {
 }
 
 impl Bandwidth {
-    /// The first CELT band above this bandwidth.
     fn end_band(self) -> usize {
         match self {
             Bandwidth::Narrow => 13,
@@ -100,7 +72,6 @@ impl Bandwidth {
         }
     }
 
-    /// The rate SILK codes at internally for this bandwidth.
     fn silk_rate(self) -> u32 {
         match self {
             Bandwidth::Narrow => 8000,
@@ -110,7 +81,6 @@ impl Bandwidth {
     }
 }
 
-/// What a packet's first byte says about it, before any of it is decoded.
 struct Toc {
     mode: Mode,
     bandwidth: Bandwidth,
@@ -169,7 +139,7 @@ fn parse_toc(byte: u8, fs: u32) -> Toc {
     }
 }
 
-/// A frame length, coded as one byte below 252 and two above it.
+/// A frame length: one byte below 252, two above.
 fn parse_size(data: &[u8]) -> Result<(usize, usize)> {
     match data.first() {
         None => Err(Error::InvalidPacket),
@@ -181,16 +151,8 @@ fn parse_size(data: &[u8]) -> Result<(usize, usize)> {
     }
 }
 
-/// The frames a packet holds, as `(offset, length)` into the packet, and how
-/// far into `data` the packet actually ends.
-///
-/// Four framings share the two low bits of the first byte: one frame, two of
-/// equal size, two of coded sizes, and an arbitrary run with its own count,
-/// optional padding and either equal or coded sizes.
-///
-/// `self_delimited` is the variant used inside a multi-stream packet, where
-/// each stream's sub-packet has to say where it ends because another follows
-/// it: the last frame's length is coded rather than implied by what is left.
+/// The frames a packet holds as `(offset, length)`, and where the packet ends.
+/// `self_delimited` (multi-stream sub-packets) codes the last frame's length.
 fn parse_frames(data: &[u8], self_delimited: bool) -> Result<(Vec<(usize, usize)>, usize)> {
     if data.is_empty() {
         return Err(Error::InvalidPacket);
@@ -239,7 +201,6 @@ fn parse_frames(data: &[u8], self_delimited: bool) -> Result<(Vec<(usize, usize)
             if count == 0 {
                 return Err(Error::InvalidPacket);
             }
-            // Padding is coded as a run of 255s and then a final count.
             if ch & 0x40 != 0 {
                 loop {
                     if len == 0 {
@@ -313,7 +274,6 @@ fn parse_frames(data: &[u8], self_delimited: bool) -> Result<(Vec<(usize, usize)
         }
         last_size = size;
     } else if last_size > 1275 {
-        // Not coded explicitly, so nothing above stopped it being too large.
         return Err(Error::InvalidPacket);
     }
     sizes.push(last_size);
@@ -329,15 +289,12 @@ fn parse_frames(data: &[u8], self_delimited: bool) -> Result<(Vec<(usize, usize)
     Ok((frames, pad + at))
 }
 
-/// One Opus stream's decoder: one SILK decoder, one CELT decoder, and the
-/// state needed to cross between them.
 pub struct Decoder {
     fs: u32,
     channels: usize,
     stream_channels: usize,
     silk: SilkDecoder,
     celt: CeltDecoder,
-    /// What the last packet used, so a mode change can be faded.
     prev_mode: Option<Mode>,
     prev_redundancy: bool,
     mode: Option<Mode>,
@@ -345,16 +302,13 @@ pub struct Decoder {
     frame_size: usize,
     last_packet_duration: usize,
     final_range: u32,
-    /// What SILK was last told about the stream. A lost packet carries no
-    /// description of itself, so these carry over.
+    /// Carried over to lost packets, which describe nothing.
     silk_channels_internal: usize,
     silk_internal_rate: u32,
 }
 
 impl Decoder {
-    /// A decoder producing `channels` channels at `fs` Hz. Opus decodes at
-    /// 48 kHz internally and decimates, so only the rates that divide it are
-    /// available.
+    /// `fs` must divide 48 kHz.
     pub fn new(fs: u32, channels: usize) -> Result<Self> {
         if !matches!(fs, 8000 | 12000 | 16000 | 24000 | 48000) || !matches!(channels, 1 | 2) {
             return Err(Error::BadArgument);
@@ -387,8 +341,7 @@ impl Decoder {
         self.fs
     }
 
-    /// The range coder's state after the last packet. Comparing it with the
-    /// encoder's is how two implementations prove they stayed in step.
+    /// The range coder's final state, for comparison with the encoder's.
     pub fn final_range(&self) -> u32 {
         self.final_range
     }
@@ -408,8 +361,7 @@ impl Decoder {
     }
 
     /// Decode one packet into interleaved samples in `-1.0..=1.0`, returning
-    /// how many samples per channel were written. `None` conceals a lost
-    /// packet of `frame_size` samples.
+    /// samples per channel. `None` conceals a lost packet of `frame_size` samples.
     pub fn decode_float(
         &mut self,
         packet: Option<&[u8]>,
@@ -420,8 +372,7 @@ impl Decoder {
             .map(|(samples, _)| samples)
     }
 
-    /// The form [`MultiStreamDecoder`] needs: it also reports where the
-    /// packet ended, because the next stream's starts there.
+    /// Also reports where the packet ended, for [`MultiStreamDecoder`].
     fn decode_native(
         &mut self,
         packet: Option<&[u8]>,
@@ -432,8 +383,7 @@ impl Decoder {
         let data = match packet {
             Some(data) if !data.is_empty() => data,
             _ => {
-                // A loss is concealed in whole 2.5 ms steps, because that is
-                // the shortest thing either codec can synthesise.
+                // Losses are concealed in whole 2.5 ms steps.
                 if !frame_size.is_multiple_of(self.fs as usize / 400) {
                     return Err(Error::BadArgument);
                 }
@@ -453,8 +403,7 @@ impl Decoder {
             return Err(Error::BufferTooSmall);
         }
 
-        // Only commit the packet's parameters once it has parsed, so a
-        // damaged packet does not leave the decoder describing itself wrong.
+        // Commit parameters only once the packet has parsed.
         self.mode = Some(toc.mode);
         self.bandwidth = Some(toc.bandwidth);
         self.frame_size = toc.frame_size;
@@ -474,7 +423,6 @@ impl Decoder {
         Ok((done, packet_offset))
     }
 
-    /// Decode one packet into interleaved 16-bit samples.
     pub fn decode(
         &mut self,
         packet: Option<&[u8]>,
@@ -489,8 +437,7 @@ impl Decoder {
         Ok(got)
     }
 
-    /// Decode one frame of a packet: the unit both codecs actually work in.
-    /// `at` is where in `pcm` it goes, in samples per channel.
+    /// Decode one frame at `at` samples per channel into `pcm`.
     fn decode_frame(
         &mut self,
         data: Option<&[u8]>,
@@ -507,8 +454,7 @@ impl Decoder {
         }
         let out = &mut pcm[at * self.channels..];
 
-        // A payload of one byte carries no audio: it is a "this frame is
-        // silent" marker, and is concealed rather than decoded.
+        // A one-byte payload marks a silent frame; conceal it.
         let data = data.filter(|d| d.len() > 1);
 
         let (mode, bandwidth, mut audiosize) = match data {
@@ -520,8 +466,6 @@ impl Decoder {
                     self.prev_mode
                 };
                 let Some(mode) = mode else {
-                    // Nothing has been decoded yet, so there is nothing to
-                    // conceal from.
                     let n = room.min(self.frame_size);
                     out[..n * self.channels].fill(0.0);
                     return Ok(n);
@@ -531,8 +475,7 @@ impl Decoder {
         };
 
         if data.is_none() {
-            // Conceal only in the lengths the codecs have: 2.5, 5, 10 or 20
-            // ms, never 12.5 or 30.
+            // Conceal only in codec frame lengths: 2.5, 5, 10 or 20 ms.
             if audiosize > f20 {
                 let mut done = 0usize;
                 while done < audiosize {
@@ -554,8 +497,7 @@ impl Decoder {
         }
         let frame_size = audiosize;
 
-        // Crossing between the two codecs is faded, because their overlap
-        // windows do not line up and a hard cut is audible as a click.
+        // Fade between codecs; their overlap windows do not line up.
         let transition = data.is_some()
             && self.prev_mode.is_some()
             && ((mode == Mode::CeltOnly
@@ -578,9 +520,7 @@ impl Decoder {
             if self.prev_mode == Some(Mode::CeltOnly) {
                 self.silk = SilkDecoder::new();
             }
-            // A concealed frame keeps the last packet's channel count and
-            // internal rate: nothing in a lost packet says what they were,
-            // and SILK's state describes a signal at that rate.
+            // A concealed frame keeps the last packet's channels and internal rate.
             if data.is_some() {
                 self.silk_channels_internal = self.stream_channels;
                 self.silk_internal_rate = match mode {
@@ -593,8 +533,7 @@ impl Decoder {
                 channels_api: self.channels,
                 channels_internal: self.silk_channels_internal,
                 internal_sample_rate: self.silk_internal_rate,
-                // SILK's own concealment cannot make anything shorter than
-                // 10 ms, whatever the packet claimed.
+                // SILK cannot conceal less than 10 ms.
                 payload_size_ms: 10.max(1000 * audiosize / self.fs as usize),
             };
             let mut decoded = 0usize;
@@ -619,7 +558,6 @@ impl Decoder {
                 match got {
                     Ok(n) => decoded += n,
                     Err(_) => {
-                        // A concealment failure is not fatal; silence is.
                         for v in
                             silk_pcm[decoded * self.channels..frame_size * self.channels].iter_mut()
                         {
@@ -631,8 +569,7 @@ impl Decoder {
             }
         }
 
-        // A packet may carry a 5 ms CELT frame beside its SILK, to cover the
-        // band SILK does not reach across a mode change.
+        // A redundant 5 ms CELT frame may cover a mode change.
         let mut start_band = 0usize;
         let mut redundancy = false;
         let mut redundancy_bytes = 0usize;
@@ -658,8 +595,7 @@ impl Decoder {
                             redundancy_bytes = 0;
                             redundancy = false;
                         }
-                        // The redundant frame's bytes are at the end, where
-                        // this frame's raw bits would otherwise be read from.
+                        // The redundant frame's bytes are at the end.
                         dec.shrink(redundancy_bytes);
                     }
                 }
@@ -683,8 +619,7 @@ impl Decoder {
         let mut redundant_audio = vec![0.0f32; if redundancy { f5 * self.channels } else { 0 }];
         let mut redundant_rng = 0u32;
         if redundancy && celt_to_silk {
-            // Decoded even when the CELT state is stale and the audio will go
-            // unused, because the range coder's final state depends on it.
+            // Decoded even when unused: the final range depends on it.
             self.celt.start = 0;
             let bytes = data.unwrap();
             let mut rdec = RangeDecoder::new(&bytes[len..len + redundancy_bytes]);
@@ -696,8 +631,7 @@ impl Decoder {
         self.celt.start = start_band;
         if mode != Mode::SilkOnly {
             let celt_frame_size = f20.min(frame_size);
-            // A mode change leaves the CELT state describing a different
-            // signal; keeping it would ring.
+            // Reset stale CELT state after a mode change.
             if Some(mode) != self.prev_mode && self.prev_mode.is_some() && !self.prev_redundancy {
                 self.celt.reset();
             }
@@ -711,8 +645,7 @@ impl Decoder {
             }
         } else {
             out[..frame_size * self.channels].fill(0.0);
-            // Coming out of hybrid, let the MDCT fade the CELT half out
-            // rather than dropping it.
+            // Leaving hybrid, let the MDCT fade the CELT half out.
             if self.prev_mode == Some(Mode::Hybrid)
                 && !(redundancy && celt_to_silk && self.prev_redundancy)
             {
@@ -786,8 +719,7 @@ impl Decoder {
     }
 }
 
-/// Fade `other` in over what `out` already holds, using the squared CELT
-/// window so the two halves sum to unity.
+/// Fade `other` in over `out` with the squared CELT window.
 fn fade_in_over(other: &[f32], out: &mut [f32], overlap: usize, channels: usize, fs: u32) {
     let inc = (48000 / fs) as usize;
     for c in 0..channels {
@@ -800,8 +732,7 @@ fn fade_in_over(other: &[f32], out: &mut [f32], overlap: usize, channels: usize,
     }
 }
 
-/// The mirror of [`fade_in_over`]: `out` is what fades in, `other` what fades
-/// out under it.
+/// The mirror of [`fade_in_over`].
 fn fade_out_under(other: &[f32], out: &mut [f32], overlap: usize, channels: usize, fs: u32) {
     let inc = (48000 / fs) as usize;
     for c in 0..channels {
@@ -814,7 +745,6 @@ fn fade_out_under(other: &[f32], out: &mut [f32], overlap: usize, channels: usiz
     }
 }
 
-/// Convert one sample to 16-bit, rounding to nearest and clipping.
 fn float_to_i16(x: f32) -> i16 {
     let v = (x * 32768.0).round();
     if v > 32767.0 {
@@ -826,13 +756,8 @@ fn float_to_i16(x: f32) -> i16 {
     }
 }
 
-/// A multi-stream Opus decoder: several Opus streams in one packet, mapped
-/// onto more channels than one stream can carry.
-///
-/// Each stream is either mono or a coupled stereo pair, and the mapping says
-/// which output channel takes which half of which stream. A channel mapped to
-/// 255 is silent: surround layouts use that for the ones a particular mix
-/// does not fill.
+/// Multi-stream Opus: several mono or coupled stereo streams in one packet,
+/// mapped onto output channels.
 pub struct MultiStreamDecoder {
     decoders: Vec<Decoder>,
     channels: usize,
@@ -842,9 +767,8 @@ pub struct MultiStreamDecoder {
 }
 
 impl MultiStreamDecoder {
-    /// `mapping[c]` selects what output channel `c` plays: `2*s` and `2*s+1`
-    /// for the two halves of coupled stream `s`, `coupled + s` for mono
-    /// stream `s`, and 255 for silence.
+    /// `mapping[c]` for output channel `c`: `2*s`/`2*s+1` for the halves of
+    /// coupled stream `s`, `coupled + s` for mono stream `s`, 255 for silence.
     pub fn new(
         fs: u32,
         channels: usize,
@@ -875,21 +799,17 @@ impl MultiStreamDecoder {
         }
     }
 
-    /// The range coder state of the last stream decoded, which is what a
-    /// caller comparing against an encoder checks.
     pub fn final_range(&self) -> u32 {
         self.decoders.iter().fold(0, |acc, d| acc ^ d.final_range())
     }
 
-    /// Decode one packet into `channels` interleaved channels.
     pub fn decode_float(
         &mut self,
         packet: Option<&[u8]>,
         pcm: &mut [f32],
         frame_size: usize,
     ) -> Result<usize> {
-        // Every stream but the last is self-delimited, because another
-        // follows it in the same packet.
+        // Every stream but the last is self-delimited.
         let mut at = 0usize;
         let mut produced = frame_size;
         let mut buf = vec![0.0f32; 2 * frame_size];
@@ -930,7 +850,6 @@ impl MultiStreamDecoder {
         Ok(produced)
     }
 
-    /// Decode one packet into interleaved 16-bit samples.
     pub fn decode(
         &mut self,
         packet: Option<&[u8]>,
@@ -950,9 +869,8 @@ impl MultiStreamDecoder {
 mod tests {
     use super::*;
 
-    /// Three 20 ms CELT-only packets at 48 kHz mono, and what libopus makes of
-    /// them: the range coder state it ends each one with, and the RMS of the
-    /// samples it produced.
+    /// Three 20 ms CELT-only 48 kHz mono packets, with libopus's final range
+    /// and RMS for each.
     const CELT_PACKETS: [&[u8]; 3] = [
         &[
             0xf8, 0x9f, 0xf7, 0xda, 0x9b, 0x32, 0x2b, 0xce, 0x91, 0xf2, 0x50, 0x86, 0xd0, 0xbe,
@@ -1000,7 +918,6 @@ mod tests {
     const CELT_PACKETS_RANGES: [u32; 3] = [0x0e010400, 0x00f07200, 0x170a6e00];
     const CELT_PACKETS_RMS: [f32; 3] = [0.304529, 0.317325, 0.324115];
 
-    /// Three 20 ms SILK-only wideband packets, same shape.
     const SILK_PACKETS: [&[u8]; 3] = [
         &[
             0x48, 0x83, 0x9c, 0x2d, 0xb5, 0xa7, 0xe7, 0xf6, 0x4c, 0x00, 0x00, 0x1f, 0x4e, 0xce,
@@ -1029,7 +946,6 @@ mod tests {
     const SILK_PACKETS_RANGES: [u32; 3] = [0x00a5f670, 0x07a53e8d, 0x071f1754];
     const SILK_PACKETS_RMS: [f32; 3] = [0.233532, 0.319418, 0.317738];
 
-    /// Three 20 ms hybrid fullband stereo packets, same shape.
     const HYBRID_PACKETS: [&[u8]; 3] = [
         &[
             0x7c, 0x8a, 0x0e, 0x85, 0xb2, 0x6c, 0xa8, 0x9f, 0xba, 0x3c, 0x02, 0xc0, 0x01, 0x75,
@@ -1071,10 +987,7 @@ mod tests {
     const HYBRID_PACKETS_RANGES: [u32; 3] = [0x0f578500, 0x045d0a00, 0x04447100];
     const HYBRID_PACKETS_RMS: [f32; 3] = [0.202872, 0.267704, 0.261691];
 
-    /// Decode `packets` and check every frame against libopus: the range
-    /// coder must end each packet in the same state, which proves the same
-    /// symbols were read, and the samples must have the same energy, which
-    /// proves they were turned into the same signal.
+    /// Each packet must match libopus's final range and sample RMS.
     fn check(packets: &[&[u8]], ranges: &[u32], rms: &[f32], channels: usize) {
         let mut decoder = Decoder::new(48000, channels).unwrap();
         let mut pcm = vec![0.0f32; 960 * channels];
@@ -1118,8 +1031,6 @@ mod tests {
         );
     }
 
-    /// A lost packet is concealed rather than refused, and produces exactly
-    /// the frame the caller asked for.
     #[test]
     fn conceals_a_lost_packet() {
         let mut decoder = Decoder::new(48000, 1).unwrap();
@@ -1128,8 +1039,6 @@ mod tests {
             .decode_float(Some(CELT_PACKETS[0]), &mut pcm, 960)
             .unwrap();
         assert_eq!(decoder.decode_float(None, &mut pcm, 960).unwrap(), 960);
-        // Concealment extrapolates the signal, so it is neither silence nor
-        // a repeat of the frame before it.
         let energy: f32 = pcm.iter().map(|v| v * v).sum();
         assert!(energy > 0.0, "concealment produced silence");
         assert_eq!(
@@ -1139,8 +1048,6 @@ mod tests {
         );
     }
 
-    /// The output rate is chosen at open time, and everything below 48 kHz
-    /// is the same decode decimated.
     #[test]
     fn decodes_at_every_supported_output_rate() {
         for (rate, samples) in [
@@ -1164,9 +1071,6 @@ mod tests {
         assert_eq!(Decoder::new(48000, 3).err(), Some(Error::BadArgument));
     }
 
-    /// The four framings of the first byte's low two bits, each built by
-    /// hand so the parse is checked against the format rather than against
-    /// whatever an encoder happened to emit.
     #[test]
     fn parses_every_packet_framing() {
         // Code 0: one frame, the rest of the packet.
@@ -1177,7 +1081,6 @@ mod tests {
         // Code 1: two frames of equal size.
         let (frames, _) = parse_frames(&[0x01, 1, 2, 3, 4], false).unwrap();
         assert_eq!(frames, vec![(1, 2), (3, 2)]);
-        // An odd remainder cannot be halved.
         assert_eq!(
             parse_frames(&[0x01, 1, 2, 3], false).err(),
             Some(Error::InvalidPacket)
@@ -1195,15 +1098,12 @@ mod tests {
         let (frames, _) = parse_frames(&[0x03, 0x82, 2, 1, 2, 3, 4], false).unwrap();
         assert_eq!(frames, vec![(3, 2), (5, 2)]);
 
-        // Code 3 with padding: the padding is counted in the packet's length
-        // but is not part of any frame.
+        // Code 3 with padding, which belongs to no frame.
         let (frames, offset) = parse_frames(&[0x03, 0x41, 2, 1, 2, 3, 4], false).unwrap();
         assert_eq!(frames, vec![(3, 2)]);
         assert_eq!(offset, 7);
     }
 
-    /// Inside a multi-stream packet every stream but the last says where it
-    /// ends, because the next one starts there.
     #[test]
     fn parses_self_delimited_framing() {
         // Code 0 self-delimited: one coded length, then that many bytes.
@@ -1239,12 +1139,10 @@ mod tests {
     /// mapping names, and leaves a channel mapped to 255 silent.
     #[test]
     fn multistream_maps_streams_onto_channels() {
-        // Two mono streams, the second duplicated onto two channels and one
-        // channel muted.
+        // Two mono streams: the second on two channels, one channel muted.
         let mapping = [0u8, 1, 1, 255];
         let mut decoder = MultiStreamDecoder::new(48000, 4, 2, 0, &mapping).unwrap();
-        // A packet holding both streams: the first self-delimited, then the
-        // second. Both are the same CELT frame.
+        // Both streams carry the same CELT frame, the first self-delimited.
         let stream = CELT_PACKETS[0];
         let mut packet = vec![stream[0]];
         let len = stream.len() - 1;
@@ -1280,10 +1178,7 @@ mod tests {
         }
     }
 
-    /// A guest can hand this decoder anything at all, so nothing it is handed
-    /// may panic. This throws random bytes and corrupted real packets at it
-    /// and only asks that it come back, with samples or with an error, but
-    /// without taking the emulator down.
+    /// Arbitrary input must never panic.
     #[test]
     fn survives_arbitrary_input() {
         let mut seed = 0x1234_5678u32;
@@ -1300,8 +1195,6 @@ mod tests {
             let _ = decoder.decode_float(Some(&packet), &mut pcm, 5760);
         }
 
-        // Real packets with one byte flipped, which is the case that gets
-        // furthest into the decoder before anything looks wrong.
         for &original in CELT_PACKETS
             .iter()
             .chain(SILK_PACKETS.iter())
@@ -1315,15 +1208,12 @@ mod tests {
             }
         }
 
-        // And truncations, which is what a stream cut mid-packet looks like.
         for &original in CELT_PACKETS.iter().chain(HYBRID_PACKETS.iter()) {
             for len in 1..original.len() {
                 let _ = decoder.decode_float(Some(&original[..len]), &mut pcm, 5760);
             }
         }
 
-        // A multi-stream decoder has more to get wrong: the sub-packets are
-        // sized from the bytes themselves.
         let mut multi = MultiStreamDecoder::new(48000, 6, 4, 2, &[0, 1, 2, 3, 4, 5]).unwrap();
         let mut pcm = vec![0.0f32; 5760 * 6];
         for _ in 0..400 {

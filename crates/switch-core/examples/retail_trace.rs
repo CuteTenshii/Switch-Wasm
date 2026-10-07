@@ -1,9 +1,10 @@
-//! Boot a retail NSP like `boot_nsp`, but keep a ring buffer of the last N
-//! executed instructions and dump it when the guest halts, the fastest way
-//! to see how an `nnSdk` abort was reached without tracing 117M steps.
+//! Boot a retail container and dump the last N executed instructions when the
+//! guest halts.
 //!
 //! Usage: retail_trace <container> <prod.keys> [title.keys] [tail_len] [max_steps]
 //!   RING_FROM=<hex pc>  start recording only once this pc is first hit.
+//!   RING_MIN=<hex pc>  skip pcs below this.
+//!   RING_STOP_AFTER=<n>  stop n steps after recording starts.
 //!   MARK=<pc>[=name][,...]  print a line each time one of these pcs runs.
 //!   MARK_DUMP=<reg>,<byte offset>,<words>  also dump memory at each mark.
 mod common;
@@ -17,17 +18,11 @@ fn main() {
     let args = common::container_args(USAGE);
     let title = args.open();
     let tail: usize = args.rest_num(0).unwrap_or(4000) as usize;
-    // A retail title takes billions of steps to reach the fault worth
-    // recording, so how long to run is an argument rather than a constant.
     let budget = args.rest_num(1).unwrap_or(400_000_000);
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
     title.mount_romfs(&mut cpu);
-    // The system fonts `pl:u` hands out. Without them a title that draws
-    // text waits for a font that never arrives, the browser stages one at
-    // startup, so a native run that skips it fails in a way the real
-    // frontend never would.
     common::load_fallback_font(&mut cpu);
     title.boot(&mut cpu);
 
@@ -35,8 +30,6 @@ fn main() {
         .ok()
         .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
     let mut recording = ring_from.is_none();
-    // Skip whole address ranges (rtld's lazy-binding resolver runs hundreds
-    // of steps per call and would otherwise fill the whole ring).
     let ring_min = env::var("RING_MIN")
         .ok()
         .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
@@ -44,15 +37,10 @@ fn main() {
     let mut ring: std::collections::VecDeque<(u64, u32, [u64; 8])> =
         std::collections::VecDeque::with_capacity(tail + 1);
 
-    // Stop this many steps after recording starts, so the ring holds the
-    // *beginning* of a function rather than the last N steps before the halt.
     let stop_after = env::var("RING_STOP_AFTER")
         .ok()
         .and_then(|s| s.parse::<u64>().ok());
     let mut recorded = 0u64;
-    // Print a line every time one of these addresses is executed. Pass a
-    // comma-separated list of hex pcs (a function's entry, say) to watch a
-    // whole API get called in order without recording every step in between.
     let marks: std::collections::HashMap<u32, String> = env::var("MARK")
         .ok()
         .map(|v| {
@@ -66,8 +54,6 @@ fn main() {
                 .collect()
         })
         .unwrap_or_default();
-    // With MARK, also dump memory: `MARK_DUMP=<reg>,<signed byte offset>,<words>`
-    //: the reply struct a marked function is about to read, say.
     let mark_dump: Option<(u8, i64, u32)> = env::var("MARK_DUMP").ok().and_then(|v| {
         let mut parts = v.split(',');
         Some((
@@ -102,11 +88,7 @@ fn main() {
         }
         if !recording && Some(pc) == ring_from {
             recording = true;
-            // Whatever this function was called with: dump any argument that
-            // points at a printable C string, which is how a path or a mount
-            // name gets read out of a stuck `nn::fs` call, or the condition,
-            // file, function and message of an `nn::diag` assertion, which sit
-            // as far out as x5.
+            // Dump any argument that points at a printable C string.
             for r in 0..8u8 {
                 let addr = cpu.read_x(r) as u32;
                 let mut sbuf = String::new();

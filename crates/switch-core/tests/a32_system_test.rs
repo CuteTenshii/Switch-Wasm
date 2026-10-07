@@ -1,6 +1,5 @@
-//! The AArch32 execution state itself: the register-file layout the mode
-//! switch installs, control flow between subroutines, CP15's thread pointer,
-//! and the Thumb boundary this core deliberately refuses to cross.
+//! AArch32 execution state: register layout, subroutine calls, CP15 thread
+//! pointer, and the Thumb boundary.
 
 mod a32;
 
@@ -8,8 +7,7 @@ use a32::{cpu, r, run, run_failing, BASE, HALT};
 
 use switch_core::cpu::{Cpu, ExecMode};
 
-/// A64 keeps the stack pointer in a slot of its own; AArch32 keeps it in
-/// `r13`. The switch has to move it, or the first push writes to zero.
+/// AArch32 keeps the stack pointer in `r13`, so the mode switch must move it.
 #[test]
 fn the_mode_switch_moves_the_stack_pointer_and_link_register() {
     let mut cpu = Cpu::new();
@@ -34,9 +32,7 @@ fn bl_links_and_bx_returns() {
     assert_eq!(r(&cpu, 2), 2);
 }
 
-/// `bx lr` sits in the miscellaneous group, which bit 7 selects, not bit 4.
-/// Reading bit 4 sends every return to the halfword multiplier, which falls
-/// through into whatever follows it.
+/// `bx lr` is selected by bit 7, not bit 4.
 #[test]
 fn bx_is_decoded_as_a_branch_and_not_as_a_multiply() {
     let cpu = run(&[
@@ -51,9 +47,7 @@ fn bx_is_decoded_as_a_branch_and_not_as_a_multiply() {
     assert_eq!(r(&cpu, 2), 0, "the branch skipped this");
 }
 
-/// A branch to an odd address would switch to Thumb, which is not
-/// implemented; it has to say so where it happens rather than decode ARM
-/// words at a Thumb address and fault somewhere else entirely.
+/// Branching to Thumb is unimplemented and must fault at the branch.
 #[test]
 fn an_interworking_branch_to_thumb_is_reported_where_it_happens() {
     let err = run_failing(&[
@@ -65,9 +59,7 @@ fn an_interworking_branch_to_thumb_is_reported_where_it_happens() {
     assert!(err.contains("0x00008001"), "and says where: {err}");
 }
 
-/// The thread pointer is CP15 c13, and AArch32 keeps the same two registers
-/// apart that A64 does: `TPIDRURO` is the kernel's, `TPIDRURW` the guest's.
-/// Aliasing them lets a guest's own write stomp the IPC buffer pointer.
+/// `TPIDRURO` and `TPIDRURW` are distinct registers.
 #[test]
 fn the_thread_pointer_comes_from_cp15_c13() {
     let mut cpu = cpu();
@@ -100,9 +92,7 @@ fn the_thread_pointer_comes_from_cp15_c13() {
     );
 }
 
-/// The barriers and preload hints are architectural no-ops here, but they are
-/// in the unconditional encoding space, so a decoder that only handles
-/// `cond != 0xF` faults on them.
+/// Barriers and preload hints live in the `cond == 0xF` encoding space.
 #[test]
 fn the_barriers_and_preloads_retire() {
     let cpu = run(&[
@@ -115,8 +105,7 @@ fn the_barriers_and_preloads_retire() {
     assert_eq!(r(&cpu, 0), 1);
 }
 
-/// `svc` retires before it dispatches, so a syscall that switches threads
-/// leaves the outgoing one resuming after its own `svc` rather than on it.
+/// `svc` retires before dispatching, so the caller resumes after it.
 #[test]
 fn a_syscall_retires_before_it_dispatches() {
     let mut cpu = cpu();
@@ -134,8 +123,7 @@ fn a_syscall_retires_before_it_dispatches() {
     assert_eq!(cpu.get_pc(), BASE + 8, "past the svc, not on it");
 }
 
-/// An A32 fault trace has to be annotated by the A32 decoder; the A64 one
-/// names entirely different instructions for the same words.
+/// A32 fault traces use the A32 decoder.
 #[test]
 fn a_fault_names_a32_mnemonics() {
     let mut cpu = cpu();
@@ -156,8 +144,6 @@ fn a_fault_names_a32_mnemonics() {
         !trace.contains("movz"),
         "the A64 decoder annotated an A32 trace: {trace}"
     );
-    // And the register dump names the state's own registers rather than
-    // sixteen it does not have.
     assert!(trace.contains("lr ="), "{trace}");
     assert!(!trace.contains("x30"), "{trace}");
 }

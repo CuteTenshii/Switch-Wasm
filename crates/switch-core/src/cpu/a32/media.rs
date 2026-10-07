@@ -1,17 +1,11 @@
-//! The ARMv6 media instructions: the extends, the reverses, the bitfield
-//! moves and the saturations a compiler emits from ordinary C.
-//!
-//! They share their `op1` with each other in ways that matter: `SSAT` is
-//! `0110 101x` and `SXTB16`/`SXTH` are `0110 1000`/`0110 1011`, so bit 5 of
-//! `op2` is what tells a saturation from an extend, not the opcode field.
+//! The ARMv6 media instructions: extends, reverses, bitfield moves, saturations,
+//! parallel arithmetic and the media-space multiplies.
 
 use super::shift::{decode_imm_shift, shift_c};
 use crate::cpu::Cpu;
 use crate::{Error, Result};
 
 impl Cpu {
-    /// The ARMv6 media space: the extends, the reverses, the bitfield
-    /// instructions and the saturations a compiler emits from ordinary C.
     pub(super) fn a32_media(&mut self, insn: u32) -> Result<()> {
         let rd = ((insn >> 12) & 0xF) as u8;
         let rn = ((insn >> 16) & 0xF) as u8;
@@ -33,9 +27,7 @@ impl Cpu {
                 });
                 self.set_r32(rd, result);
             }
-            // PKHBT / PKHTB: one halfword of Rn and one of the shifted Rm.
-            // The top-from-Rn form shifts arithmetically right, and a shift
-            // of 0 there means 32.
+            // PKHBT / PKHTB; a TB shift of 0 means 32.
             (0x08, 0b000 | 0b010 | 0b100 | 0b110) => {
                 let amount = (insn >> 7) & 0x1F;
                 let (n, m) = (self.r32(rn), self.r32(rm));
@@ -124,9 +116,7 @@ impl Cpu {
                 };
                 self.set_r32(rd, result);
             }
-            // (S|U)XTB16(A): bytes 0 and 2 of the rotated source, each
-            // extended to a halfword; the addend form adds lane by lane, and
-            // a carry out of the low lane does not reach the high one.
+            // (S|U)XTB16(A): lanes are independent, no carry between them.
             (0x08 | 0x0C, 0b011) => {
                 let rotate = ((insn >> 10) & 0b11) * 8;
                 let value = self.r32(rm).rotate_right(rotate);
@@ -179,9 +169,7 @@ impl Cpu {
                 }
                 self.set_r32(rd, clamped as u32);
             }
-            // The dual signed multiplies: two halfword products added or
-            // subtracted, optionally accumulated. `X` swaps the second
-            // operand's halves.
+            // SMLAD / SMLSD / SMUAD / SMUSD; `X` swaps Rm's halves.
             (0x10, 0b000..=0b011) => {
                 let d = rn;
                 let a = self.r32(rm) as i32;
@@ -210,8 +198,7 @@ impl Cpu {
                 };
                 self.set_r32(d, result as u32);
             }
-            // SMMUL, SMMLA and SMMLS: the top 32 bits of a 64-bit product,
-            // optionally rounded and accumulated.
+            // SMMUL / SMMLA / SMMLS
             (0x15, 0b000 | 0b001 | 0b110 | 0b111) => {
                 let d = rn;
                 let a = i64::from(self.r32(rm) as i32);
@@ -227,7 +214,6 @@ impl Cpu {
                 } else {
                     acc.wrapping_add(product)
                 };
-                // The R bit rounds by adding half before the truncation.
                 let rounded = if (insn >> 5) & 1 != 0 {
                     sum.wrapping_add(0x8000_0000)
                 } else {
@@ -235,8 +221,7 @@ impl Cpu {
                 };
                 self.set_r32(d, (rounded >> 32) as u32);
             }
-            // SMLALD / SMLSLD: the dual products, summed or differenced, into
-            // a 64-bit accumulator in RdHi:RdLo. `X` swaps Rm's halves.
+            // SMLALD / SMLSLD; `X` swaps Rm's halves.
             (0x14, 0b000..=0b011) => {
                 let (lo_reg, hi_reg) = (rd, rn);
                 let n = self.r32(rm);
@@ -258,8 +243,7 @@ impl Cpu {
                 self.set_r32(lo_reg, sum as u32);
                 self.set_r32(hi_reg, (sum >> 32) as u32);
             }
-            // USAD8 / USADA8: the sum of the four bytes' absolute differences,
-            // plus Ra unless it is 15. The destination is bits 19:16.
+            // USAD8 / USADA8; Rd is bits 19:16.
             (0x18, 0b000) => {
                 let n = self.r32(rm);
                 let m = self.r32(((insn >> 8) & 0xF) as u8);
@@ -275,14 +259,11 @@ impl Cpu {
                 };
                 self.set_r32(rn, result);
             }
-            // SDIV and UDIV, which the media space files under the signed
-            // multiplies. The destination is bits 19:16 here, not 15:12,
-            // that field holds the 0b1111 that says there is no accumulator.
+            // SDIV / UDIV; Rd is bits 19:16.
             (0x11 | 0x13, 0b000) => {
                 let n = self.r32(rm);
                 let m = self.r32(((insn >> 8) & 0xF) as u8);
-                // Horizon leaves integer division-by-zero untrapped, so it
-                // gives zero rather than faulting.
+                // Division by zero gives zero.
                 let result = if m == 0 {
                     0
                 } else if op1 == 0x11 {
@@ -303,11 +284,7 @@ impl Cpu {
         Ok(())
     }
 
-    /// One parallel add or subtract. `op1`'s low two bits are the kind: 1
-    /// modular, which sets GE; 2 saturating; 3 halving. Its bit 2 says
-    /// unsigned. `op2` is the operation: ADD16, ASX, SAX, SUB16, ADD8 or
-    /// SUB8. Each lane is computed at full precision first, and the flags,
-    /// the saturation and the halving are all taken from that.
+    /// `op1` low bits: 1 modular (sets GE), 2 saturating, 3 halving; bit 2 unsigned.
     fn a32_parallel(&mut self, op1: u32, op2: u32, n: u32, m: u32) -> u32 {
         let signed = op1 < 0x04;
         let kind = op1 & 0b11;
@@ -339,9 +316,6 @@ impl Cpu {
             let (a, b) = (lane_value(n, from_n), lane_value(m, from_m));
             let full = if subtract { a - b } else { a + b };
             let value = match kind {
-                // GE says which lanes did not go negative, for a signed lane
-                // or an unsigned subtract, and which carried out, for an
-                // unsigned add.
                 0b01 => {
                     let set = if signed || subtract {
                         full >= 0

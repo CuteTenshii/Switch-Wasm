@@ -1,11 +1,5 @@
-//! nvmap: the GPU memory-object table behind `/dev/nvmap`.
-//!
-//! Unlike a discrete GPU, the Tegra nvmap driver does not own memory. The
-//! guest allocates a CPU buffer itself (deko3d carves memblocks out of its
-//! heap), calls `NVMAP_IOC_CREATE` to get a handle, then `NVMAP_IOC_ALLOC`
-//! passing the buffer's CPU address. The handle is what gets mapped into a GPU
-//! address space, so a handle is really just "this CPU range, with this memory
-//! kind".
+//! nvmap, the memory-object table behind `/dev/nvmap`. A handle names a
+//! guest-allocated CPU range and its memory kind; nvmap owns no memory.
 
 use crate::{Error, Result};
 use std::collections::HashMap;
@@ -18,8 +12,6 @@ pub const PARAM_HEAP: u32 = 4;
 pub const PARAM_KIND: u32 = 5;
 pub const PARAM_COMPR: u32 = 6;
 
-/// The heap the Switch's nvmap reports for every allocation
-/// (`NVMAP_HEAP_CARVEOUT_GENERIC`).
 pub const HEAP_CARVEOUT_GENERIC: u32 = 0x0000_0001;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,8 +20,7 @@ pub struct NvMapHandle {
     pub id: u32,
     /// Size requested by `NVMAP_IOC_CREATE`.
     pub size: u32,
-    /// CPU address the guest allocated and passed to `NVMAP_IOC_ALLOC`; 0
-    /// until the handle is allocated.
+    /// CPU address passed to `NVMAP_IOC_ALLOC`; 0 until allocated.
     pub cpu_addr: u32,
     pub align: u32,
     pub heap_mask: u32,
@@ -60,8 +51,7 @@ impl NvMapHandle {
 #[derive(Debug, Default)]
 pub struct NvMap {
     handles: HashMap<u32, NvMapHandle>,
-    /// nvmap id -> handle, for `NVMAP_IOC_FROM_ID` (how a buffer crosses a
-    /// process boundary; the graphics buffer queue passes ids, not handles).
+    /// nvmap id -> handle, for `NVMAP_IOC_FROM_ID` (ids cross process boundaries).
     ids: HashMap<u32, u32>,
     next_handle: u32,
     next_id: u32,
@@ -77,8 +67,7 @@ impl NvMap {
         }
     }
 
-    /// `NVMAP_IOC_CREATE`: reserve a handle for a `size`-byte object. No
-    /// memory is committed until [`NvMap::alloc`].
+    /// `NVMAP_IOC_CREATE`: reserve a handle; memory comes with [`NvMap::alloc`].
     pub fn create(&mut self, size: u32) -> u32 {
         let handle = self.next_handle;
         self.next_handle += 1;
@@ -90,8 +79,7 @@ impl NvMap {
         handle
     }
 
-    /// `NVMAP_IOC_ALLOC`: bind the guest-allocated buffer at `cpu_addr` to the
-    /// handle and record its layout parameters.
+    /// `NVMAP_IOC_ALLOC`: bind the buffer at `cpu_addr` and record its layout.
     pub fn alloc(
         &mut self,
         handle: u32,
@@ -118,8 +106,7 @@ impl NvMap {
         Ok(())
     }
 
-    /// `NVMAP_IOC_FREE`: drop a reference; returns the handle as it was, so
-    /// the caller can fill in the ioctl's out-fields.
+    /// `NVMAP_IOC_FREE`: drop a reference, returning the handle for the ioctl's out-fields.
     pub fn free(&mut self, handle: u32) -> Option<NvMapHandle> {
         let h = self.handles.get_mut(&handle)?;
         h.refcount = h.refcount.saturating_sub(1);
@@ -140,8 +127,7 @@ impl NvMap {
         Some(handle)
     }
 
-    /// Every live handle, for tools that want to inspect what the guest
-    /// allocated (sizes and CPU addresses are how deko3d's memblocks are found).
+    /// Every live handle, for inspection tools.
     pub fn iter(&self) -> impl Iterator<Item = &NvMapHandle> {
         self.handles.values()
     }

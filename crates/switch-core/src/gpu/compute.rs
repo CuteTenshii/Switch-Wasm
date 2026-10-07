@@ -1,18 +1,6 @@
-//! Running a compute dispatch.
-//!
-//! What [`crate::gpu::raster`] is to a draw, this is to a launch: the software
-//! reference that turns the engine's state into the memory a kernel was
-//! supposed to write. It reads the [`Qmd`], decodes the program the way a draw
-//! decodes its shaders, and runs one [`Invocation`] per thread of the grid.
-//!
-//! The interpreter is scalar, so a CTA's threads run one after another rather
-//! than in lockstep. That is exact for everything except a barrier and the
-//! warp instructions, `shfl` and `vote`, the places a thread's progress
-//! depends on the others': threads run to the next `bar`, and only once every
-//! one of them has arrived does any of them continue; a warp instruction
-//! suspends the same way and is answered once its warp has caught up. Since nothing runs concurrently, an atomic needs no locking
-//! and a race cannot be observed: a kernel whose result depends on one gets a
-//! valid answer here and a different one on hardware.
+//! Software compute dispatch: reads the [`Qmd`], decodes the program and runs one
+//! [`Invocation`] per thread. Threads run serially, suspending at barriers and warp
+//! instructions until their CTA or warp catches up.
 
 use crate::gpu::engine::compute::EngineCompute;
 use crate::gpu::exec::ExecCtx;
@@ -28,16 +16,9 @@ use crate::gpu::texture::{self, BlockCache, Descriptors, Texture};
 use crate::{Error, Result};
 use std::cell::RefCell;
 
-/// The most threads one dispatch may run.
-///
-/// Not a hardware limit: hardware would run a grid this size in microseconds.
-/// It is a liveness guard for the browser, where the whole GPU stack runs on
-/// one worker thread: a grid of a million interpreted threads is a tab that
-/// stops answering, and a refused dispatch that says so is worth more than
-/// that.
+/// The most threads one dispatch may run, a liveness guard for the browser worker.
 pub const MAX_DISPATCH_THREADS: u64 = 1 << 20;
 
-/// Run `engine.last_dispatch`.
 pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
     let launch = engine
         .last_dispatch
@@ -95,10 +76,7 @@ pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
     env.special.shared_size = qmd.shared_memory_size;
     env.special.local_size = qmd.local_memory_size;
 
-    // A program with neither a barrier nor a warp instruction needs no scheduler
-    // and no per-thread state kept alive, which is the common case and much
-    // the cheaper one. Both are places a thread's progress depends on the
-    // others', and nothing else is.
+    // Only barriers and warp instructions need the cooperative scheduler.
     let cooperative = program
         .ops()
         .iter()
@@ -119,12 +97,9 @@ pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
     release(&qmd, &mut ctx)
 }
 
-/// The invocations a CTA is run with.
 enum Threads {
-    /// One invocation reused for every thread, run to completion in turn.
     Serial(Box<Invocation>),
-    /// One invocation per thread, all of them live at once because a barrier
-    /// suspends a thread in the middle of its program.
+    /// One live invocation per thread, since a barrier suspends mid-program.
     Cooperative(Vec<Invocation>),
 }
 
@@ -158,10 +133,8 @@ impl Threads {
                     invocation.reset();
                 }
                 let mut waiting = vec![true; invocations.len()];
-                // Each pass runs every thread that is still going until it
-                // exits, reaches a barrier, or reaches a warp instruction. A pass that
-                // ends with nothing waiting is the barrier every thread
-                // arrived at, released.
+                // Each pass runs threads until exit, barrier or warp instruction. A pass with
+                // nothing waiting releases the barrier.
                 loop {
                     let mut arrived = false;
                     let mut exchanging = false;
@@ -177,9 +150,7 @@ impl Threads {
                             Halt::Warp => exchanging = true,
                         }
                     }
-                    // A warp instruction reaches across one warp, not the whole CTA:
-                    // threads are numbered in the order they were launched,
-                    // so a warp is a run of [`WARP_LANES`] of them.
+                    // Warps are runs of [`WARP_LANES`] threads in launch order.
                     if exchanging {
                         for warp in invocations.chunks_mut(WARP_LANES) {
                             resolve_warp(warp);
@@ -201,7 +172,6 @@ fn tid(thread: u32, qmd: &Qmd) -> [u32; 3] {
     [thread % width, (thread / width) % height, thread / plane]
 }
 
-/// Write whichever release semaphores the launch asked for.
 fn release(qmd: &Qmd, ctx: &mut ExecCtx) -> Result<()> {
     for release in qmd.releases.into_iter().flatten() {
         let Release {
@@ -219,26 +189,17 @@ fn release(qmd: &Qmd, ctx: &mut ExecCtx) -> Result<()> {
     Ok(())
 }
 
-/// Everything a dispatch's threads read and write, over one borrow of the
-/// execution context.
-///
-/// The interpreter reads constants and textures and writes global memory from
-/// the same instruction stream, and a write needs the context mutably, so the
-/// one mutable borrow lives here and every access goes through it. Nothing
-/// re-enters, so no two of those borrows overlap.
+/// Everything a dispatch's threads read and write, through one mutable borrow of the context.
 struct DispatchMemory<'a, 'b> {
     ctx: RefCell<&'a mut ExecCtx<'b>>,
-    /// The QMD's constant buffers. The bind slot is the index: entry `i` is
-    /// what the program reads as `c[i]`.
+    /// The QMD's constant buffers; entry `i` is `c[i]`.
     banks: [Option<ConstantBuffer>; CONSTANT_BUFFERS],
     consts: RefCell<ConstCache>,
     tex_header_pool: u64,
     tex_sampler_pool: u64,
     descriptors: RefCell<crate::IdMap<u32, Descriptors>>,
     blocks: RefCell<BlockCache>,
-    /// The images surface instructions address, keyed by handle. Only the
-    /// TIC: an image is addressed without a sampler, and a handle's sampler
-    /// bits need not name a valid one.
+    /// Images for surface instructions, keyed by handle (TIC only, no sampler).
     surfaces: RefCell<crate::IdMap<u32, Texture>>,
 }
 
@@ -294,7 +255,6 @@ impl GlobalMemory for DispatchMemory<'_, '_> {
 }
 
 impl DispatchMemory<'_, '_> {
-    /// The image `handle` names, parsed once per dispatch.
     fn surface(&self, handle: u32) -> ShaderResult<Texture> {
         if let Some(image) = self.surfaces.borrow().get(&handle).copied() {
             return Ok(image);
@@ -305,8 +265,7 @@ impl DispatchMemory<'_, '_> {
         Ok(image)
     }
 
-    /// The draw path's texture source over this dispatch's borrow, so a
-    /// shader reads a texture alike whichever engine runs it.
+    /// The draw path's texture source over this dispatch's borrow.
     fn textures<R>(&self, read: impl FnOnce(&MemoryTextures) -> R) -> R {
         let ctx = self.ctx.borrow();
         read(&MemoryTextures {
@@ -409,16 +368,13 @@ mod tests {
     const SR_CTAIDX: u8 = 0x25;
     const RZ: u8 = isa::RZ;
 
-    /// The guard-predicate field holding `PT`, which is every instruction
-    /// here: none of them is predicated.
+    /// The guard-predicate field holding `PT`.
     const PT: u64 = 7 << 16;
 
     /// A control-flow instruction's condition-code test field holding `T`.
     const FLOW_TEST_T: u64 = 0xF;
 
-    /// Assemble one instruction, and check it against the decoder, which is
-    /// what makes these encodings trustworthy rather than a second guess at
-    /// the same tables.
+    /// Assemble one instruction and check it against the decoder.
     fn encode(word: u64, expected: Op) -> u64 {
         assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");
         word
@@ -438,8 +394,7 @@ mod tests {
         )
     }
 
-    /// `iscadd dst, a, b, shift`: `(a << shift) + b`, which is every
-    /// "index into an array" one of these kernels does.
+    /// `iscadd dst, a, b, shift`: `(a << shift) + b`.
     fn iscadd(dst: u8, a: u8, b: u8, shift: u8) -> u64 {
         encode(
             0x5c18u64 << 48
@@ -459,8 +414,7 @@ mod tests {
         )
     }
 
-    /// The size field lives in the three opcode bits the group's mask leaves
-    /// free, so `b32` is the base opcode `| 4`.
+    /// `b32` is the base opcode `| 4`.
     fn stg(addr: u8, offset: u32, src: u8) -> u64 {
         encode(
             (0xeed8u64 | 4) << 48
@@ -493,8 +447,7 @@ mod tests {
         )
     }
 
-    /// `shfl.bfly p0, dst, src, index, mask`, the lane whose number differs
-    /// from this one's in the bits `index` names.
+    /// `shfl.bfly p0, dst, src, index, mask`.
     fn shfl_bfly(dst: u8, src: u8, index: u32, mask: u32) -> u64 {
         encode(
             0xef10u64 << 48
@@ -613,14 +566,12 @@ mod tests {
         )
     }
 
-    /// `exit` with the condition-code test a compiler emits: `T`. The field
-    /// left at zero is `F`, which is an `exit` that never fires.
+    /// `exit` with condition-code test `T`; zero would be `F`, never firing.
     fn exit() -> u64 {
         encode(0xe300_0000_0000_0000 | PT | FLOW_TEST_T, Op::Exit)
     }
 
-    /// Lay instructions out the way a real binary does: one `sched` control
-    /// word then three instructions, per 32-byte block.
+    /// Lay out instructions as a binary does: one `sched` word then three instructions.
     fn blocks(insns: &[u64]) -> Vec<u64> {
         let mut out = Vec::new();
         for chunk in insns.chunks(3) {
@@ -630,7 +581,6 @@ mod tests {
         out
     }
 
-    /// Where each piece of a test launch lives, as offsets from the mapping.
     const QMD_AT: u64 = 0;
     const PROGRAM_AT: u64 = 0x1000;
     const OUTPUT_AT: u64 = 0x2000;
@@ -694,8 +644,6 @@ mod tests {
                 .collect()
         }
 
-        /// An engine whose program region and QMD address point at this
-        /// harness's memory, ready for the trigger.
         fn engine(&self) -> EngineCompute {
             let mut engine = EngineCompute::new();
             let program = self.base + PROGRAM_AT;
@@ -708,7 +656,6 @@ mod tests {
         }
     }
 
-    /// A QMD as words, with only the fields these tests vary.
     #[derive(Default)]
     struct Launch {
         grid: [u32; 3],
@@ -747,7 +694,6 @@ mod tests {
         }
     }
 
-    /// Run a launch and hand back the harness it wrote into.
     fn run(harness: &mut Harness, launch: &Launch, insns: &[u64]) -> Result<()> {
         let words = launch.words();
         harness.write_words(QMD_AT, &words);
@@ -759,15 +705,12 @@ mod tests {
 
     #[test]
     fn every_thread_of_every_cta_writes_its_own_slot() {
-        // The whole point of a dispatch: a grid of threads that differ only
-        // in what `s2r` tells them. If the thread and CTA registers were
-        // still the zero they used to read, all eight would write slot 0.
+        // Each thread writes its own slot, from `s2r` thread and CTA ids.
         let mut h = Harness::new();
         let out = h.base + OUTPUT_AT;
         let program = [
             s2r(0, SR_TIDX),
             s2r(1, SR_CTAIDX),
-            // The block is four wide, so the linear index is ctaid*4 + tid.
             iscadd(0, 1, 0, 2),
             mov32i(4, out as u32),
             iscadd(2, 0, 4, 2),
@@ -786,10 +729,7 @@ mod tests {
 
     #[test]
     fn a_thread_sees_what_another_thread_of_its_cta_wrote_before_the_barrier() {
-        // Each thread publishes its own id into shared memory and then reads
-        // thread 3's slot. Threads run one at a time here, so without the
-        // barrier releasing them together thread 0 would read a slot nothing
-        // had written yet and the answer would be [0, 0, 0, 3].
+        // Without the barrier, thread 0 would read thread 3's slot before it was written.
         let mut h = Harness::new();
         let out = h.base + OUTPUT_AT;
         let program = [
@@ -816,10 +756,7 @@ mod tests {
 
     #[test]
     fn a_thread_reads_another_lane_of_its_warp_through_a_shuffle() {
-        // Each thread puts its own id in r0 and then reads the id of the
-        // lane beside it. Threads run one at a time here, so the exchange
-        // only has an answer because a shuffle suspends the thread the same
-        // way a barrier does.
+        // Each thread reads its neighbour lane's id through a shuffle.
         let mut h = Harness::new();
         let out = h.base + OUTPUT_AT;
         let program = [
@@ -840,9 +777,7 @@ mod tests {
         assert_eq!(h.read_output(4), vec![1, 0, 3, 2]);
     }
 
-    /// Echoes of Wisdom's `vote.all r2, PT, PT`, which is how a kernel learns
-    /// which lanes of its warp are running. A CTA of 36 threads is a full
-    /// warp and one of four.
+    /// `vote.all r2, PT, PT`. 36 threads are one full warp and one of four.
     #[test]
     fn a_vote_ballots_the_lanes_of_its_own_warp() {
         let mut h = Harness::new();
@@ -867,10 +802,8 @@ mod tests {
         assert_eq!(h.read_output(36), expected);
     }
 
-    /// Five threads each store `100 + tid` to texel `tid` of a 4x2 `R32F`
-    /// image, then, past a barrier, read texel `tid + 1` back raw. Thread
-    /// 4's store falls outside the image and is dropped, and the last two
-    /// reads fall outside it and read zero.
+    /// Five threads store `100 + tid` to texel `tid` of a 4x2 `R32F` image, then read
+    /// `tid + 1` past a barrier. Out-of-bounds stores drop and loads read zero.
     #[test]
     fn a_dispatch_stores_to_an_image_and_reads_it_back() {
         const TIC_POOL_AT: u64 = 0x3000;
@@ -938,9 +871,7 @@ mod tests {
 
     #[test]
     fn shared_memory_does_not_carry_from_one_cta_to_the_next() {
-        // Same kernel, two CTAs, and the second must publish its own slot 3
-        // rather than inherit the first's, which it would if the block were
-        // allocated once for the grid.
+        // Shared memory is per CTA, not per grid.
         let mut h = Harness::new();
         let out = h.base + OUTPUT_AT;
         let program = [
@@ -1008,8 +939,7 @@ mod tests {
 
     #[test]
     fn a_launch_of_nothing_still_releases_its_semaphore() {
-        // A zero-width grid is a legal launch, and a guest waiting on its
-        // fence waits forever if "no work" means "no release".
+        // A zero-width grid still releases its semaphore.
         let mut h = Harness::new();
         let at = h.base + OUTPUT_AT + 0x100;
         let launch = Launch {
@@ -1038,8 +968,7 @@ mod tests {
     fn a_kernel_the_interpreter_cannot_follow_fails_the_dispatch() {
         let mut h = Harness::new();
         let out = h.base + OUTPUT_AT;
-        // Not an instruction this decoder knows, with a `PT` guard, or the
-        // predicate would skip it and the kernel would run clean.
+        // An unknown instruction with a `PT` guard.
         let unknown = 0xffff_ffff_ff00_0000 | PT;
         assert!(matches!(isa::decode(unknown).op, Op::Unimplemented { .. }));
         let program = [

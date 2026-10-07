@@ -1,9 +1,5 @@
-//! `vi`: the display service, the layers on it, and the `IHOSBinderDriver`
-//! parcels that carry Android's buffer queue underneath.
-//!
-//! A frame reaches the screen through here: `vi:m`/`vi:u` open a display, a
-//! layer on it produces a binder, and the parcel transactions on that binder
-//! are what queue and dequeue the buffers [`crate::display`] presents.
+//! `vi`: the display service, its layers, and the `IHOSBinderDriver` parcels
+//! that carry Android's buffer queue to [`crate::display`].
 
 use super::Cpu;
 use crate::Result;
@@ -11,30 +7,18 @@ use crate::Result;
 /// The refresh rate `ListDisplayModes` reports, in Hz.
 const DISPLAY_REFRESH_HZ: f32 = 60.0;
 
-/// That display's name. `OpenDisplay` takes it as a 0x40-byte string and
-/// `ListDisplays` hands it back; there is no second display to name.
+/// The one display's name, as `OpenDisplay` and `ListDisplays` use it.
 const DISPLAY_NAME: &str = "Default";
 
-/// The id `OpenDisplay` returns and every later display command carries back.
 const DISPLAY_ID: u64 = 1;
 
-/// The id of the one layer, shared by `OpenLayer`, `CreateStrayLayer` and
-/// `CreateManagedLayer`: they all end up on the single buffer queue.
+/// The one layer, shared by `OpenLayer`, `CreateStrayLayer` and `CreateManagedLayer`.
 const LAYER_ID: u64 = 1;
 
 impl Cpu {
     pub(super) fn vi_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
-        // Control requests: cmd 0 = ConvertToDomain, cmd 3 =
-        // QueryPointerBufferSize. Older libnx always converts the session to a
-        // domain before dispatching; hbmenu's libnx (NX_SERVICE_ASSUME_NON_DOMAIN)
-        // instead sends cmd 3 and then uses raw non-domain requests.
-        //
-        // Control-ness is `ipc_is_control_request`, never `type == 5`: a
-        // control message has a with-context encoding too (type 7), and that
-        // is the one `nnSdk` sends. Testing for 5 alone read the Home Menu's
-        // QueryPointerBufferSize as command **3 on the binder relay** and ran
-        // a parcel transaction for it, which answered a size query with a
-        // failed binder reply.
+        // Control requests. Use `ipc_is_control_request`, not `type == 5`:
+        // `nnSdk` sends the with-context encoding (type 7).
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(0) => {
@@ -52,39 +36,25 @@ impl Cpu {
             0xFFFFFFFF
         };
         let is_domain = object_id != 0xFFFFFFFF;
-        // The display commands answer the same way on either dialect and on
-        // whichever sub-interface they arrive at, so they are dispatched ahead
-        // of the object getters below rather than duplicated into four arms.
-        // None of their command ids collide with a getter's.
+        // Display commands are identical on every sub-interface and dialect.
         if let Some(done) = self.vi_common_command(tls, cmd_id) {
             return done;
         }
         if !is_domain {
-            // Non-domain (NX_SERVICE_ASSUME_NON_DOMAIN) sessions marshal output
-            // objects as move handles. Dispatch on the sub-interface (tracked per
-            // handle); unknown handles default to the vi root.
-            // Owned rather than borrowed: the arms below take `&mut self`.
+            // Non-domain sessions marshal output objects as move handles;
+            // dispatch on the per-handle sub-interface, defaulting to the vi root.
             let iface = self
                 .vi_ifaces
                 .get(&handle)
                 .cloned()
                 .unwrap_or_else(|| "vi:root".to_owned());
             match iface.as_str() {
-                // IHOSBinderDriverRelay: the binder protocol, TransactParcel
-                // (0), AdjustRefcount (1), GetNativeHandle (2),
-                // TransactParcelAuto (3).
-                //
-                // 0 and 3 are the same transaction; they differ only in how
-                // the parcel is marshalled, and `ipc_buffers` reads either
-                // form. 3 arrived in 3.0.0, so a caller built against an SDK
-                // older than that sends 0 and only 0: Just Dance 2017 does,
-                // and answering it with an empty success queued every frame it
-                // rendered into nothing.
+                // IHOSBinderDriverRelay: TransactParcel (0), AdjustRefcount (1),
+                // GetNativeHandle (2), TransactParcelAuto (3, 3.0.0+). 0 and 3
+                // differ only in parcel marshalling.
                 "vi:ihosbd" => match cmd_id {
                     Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                    // GetNativeHandle: the buffer queue's own event, and a
-                    // **copy** handle like every other event a service hands
-                    // out. Sent in the move slot it arrives as 0.
+                    // GetNativeHandle: the buffer queue's event, as a copy handle.
                     Some(2) => {
                         let h = self.vi_binder_event();
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
@@ -103,14 +73,7 @@ impl Cpu {
                     Some(101) => self.vi_out_session(tls, "vi:isds"),
                     Some(102) => self.vi_out_session(tls, "vi:imds"),
                     Some(103) => self.vi_out_session(tls, "vi:ihosbdind"),
-                    // GetDisplayVsyncEvent, on a session that never became a
-                    // domain. It used to hand back a bare handle in the *move*
-                    // slot and register nothing: a copy handle read from the
-                    // move slot is 0, and `signal_vsync` had no event to fire
-                    // even if the caller had got one. So a render loop paced
-                    // by vsync was waiting on handle 0 forever, and only kept
-                    // running at all because a wait on an unknown handle is
-                    // answered as satisfied.
+                    // GetDisplayVsyncEvent: a copy handle, signalled per presented frame.
                     Some(5202) => {
                         let h = self.alloc_event("vi:vsync", true);
                         self.vsync_event = Some(h);
@@ -150,8 +113,7 @@ impl Cpu {
                         self.record_domain_object(handle, obj, "vi:ihosbdind");
                         self.write_ipc_response(tls, 0, &[], &[], &[obj])
                     }
-                    // GetDisplayVsyncEvent: a real copy handle, signalled
-                    // once per presented frame by `Cpu::signal_vsync`.
+                    // GetDisplayVsyncEvent: a copy handle, signalled per presented frame.
                     Some(5202) => {
                         let h = self.alloc_event("vi:vsync", true);
                         self.vsync_event = Some(h);
@@ -159,11 +121,7 @@ impl Cpu {
                     }
                     _ => self.vi_unhandled(tls, "vi:iads", cmd_id),
                 },
-                // The binder relay does the same work on a domain session as
-                // on a plain one. Answering `TransactParcel` with an empty
-                // success instead meant a caller that converted its vi session
-                // to a domain (which is what libnx does by default) queued
-                // every frame into nothing and presented none of them.
+                // The binder relay works the same on a domain session.
                 Some("vi:ihosbd") => match cmd_id {
                     Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     Some(2) => {
@@ -180,28 +138,12 @@ impl Cpu {
         }
     }
 
-    /// The `vi` commands that answer with data rather than with an object.
-    ///
-    /// They are the same on `IApplicationDisplayService`,
-    /// `ISystemDisplayService` and `IManagerDisplayService`, the command ids
-    /// do not overlap, and identical on a domain session and a plain one, so
-    /// dispatching them once ahead of the sub-interface match beats writing
-    /// each of them four times.
-    ///
-    /// The shape of the bug this closes is worth stating: a command with an
-    /// `out` parameter answered by an *empty success* is worse than a refusal.
-    /// `ListDisplayModes` did exactly that, so the Home Menu read its mode
-    /// count out of whatever the previous reply had left in the TLS data area
-    /// and then walked a buffer nothing had written, a billion instructions
-    /// of spinning without a single syscall, and no way to tell from the
-    /// outside that a display query was where it went wrong.
-    ///
-    /// Returns `None` for anything not answered here, so the caller falls
-    /// through to its own dispatch.
+    /// The `vi` commands that answer with data, identical across the display
+    /// services and dialects. Returns `None` for anything not answered here.
     fn vi_common_command(&mut self, tls: u32, cmd_id: Option<u32>) -> Option<Result<()>> {
         let (width, height) = self.operation_mode().display_size();
         let raw: Vec<u8> = match cmd_id? {
-            // ListDisplays: the one display, and a count of one.
+            // ListDisplays: one display.
             1000 => {
                 let mut info = [0u8; 0x60];
                 let name = DISPLAY_NAME.as_bytes();
@@ -215,37 +157,30 @@ impl Cpu {
             }
             // OpenDisplay / OpenDefaultDisplay.
             1010 | 1011 => DISPLAY_ID.to_le_bytes().to_vec(),
-            // GetDisplayResolution, on the application and manager interfaces
-            // alike.
+            // GetDisplayResolution.
             1102 => {
                 let mut raw = Vec::with_capacity(0x10);
                 raw.extend_from_slice(&u64::from(width).to_le_bytes());
                 raw.extend_from_slice(&u64::from(height).to_le_bytes());
                 raw
             }
-            // GetZOrderCountMin / GetZOrderCountMax: one layer stack, so 0 is
-            // both the lowest and the highest z a layer can take.
+            // GetZOrderCountMin / GetZOrderCountMax: one layer stack.
             1200 | 1202 => 0i64.to_le_bytes().to_vec(),
-            // GetDisplayLogicalResolution: the same size, as two s32.
+            // GetDisplayLogicalResolution, as two s32.
             1203 => {
                 let mut raw = Vec::with_capacity(8);
                 raw.extend_from_slice(&(width as i32).to_le_bytes());
                 raw.extend_from_slice(&(height as i32).to_le_bytes());
                 raw
             }
-            // CreateManagedLayer: the managed form of the same single layer.
+            // CreateManagedLayer.
             2010 => LAYER_ID.to_le_bytes().to_vec(),
             // _viOpenLayer (2020) / _viCreateStrayLayer (2030 / 2012 / 2312):
-            // fill the native-window receive buffer with a Binder parcel whose
-            // payload[2] is the IGraphicBufferProducer binder id, and return
-            // the parcel size. viCreateLayer parses exactly that.
+            // a native-window parcel, returning its size.
             2020 => return Some(self.vi_native_window(tls, 8)),
             2030 | 2012 | 2312 => return Some(self.vi_native_window(tls, 16)),
-            // SetLayerScalingMode(u32 mode, u64 layer_id): nothing here
-            // scales, but the mode is checked as the service checks it,
-            // since only `ScaleToWindow` (2) and `PreserveAspectRatio` (4)
-            // are supported and a caller learns that from the result.
-            // Mario Kart 8 Deluxe aborts at boot when this is refused.
+            // SetLayerScalingMode(u32 mode, u64 layer_id): only `ScaleToWindow` (2)
+            // and `PreserveAspectRatio` (4) are supported.
             2101 => {
                 const VI_OPERATION_FAILED: u32 = 114 | (1 << 9);
                 const VI_NOT_SUPPORTED: u32 = 114 | (6 << 9);
@@ -257,12 +192,11 @@ impl Cpu {
                 };
                 return Some(self.write_ipc_response(tls, result, &[], &[], &[]));
             }
-            // ConvertScalingMode: every nn mode this composes ends up as
-            // ScalingMode_PreserveAspectRatio.
+            // ConvertScalingMode: always ScalingMode_PreserveAspectRatio.
             2102 => 2u64.to_le_bytes().to_vec(),
             // GetLayerZ.
             2204 => 0u64.to_le_bytes().to_vec(),
-            // ListDisplayModes: one mode, the display's own.
+            // ListDisplayModes: one mode.
             3000 => {
                 let mut mode = [0u8; 0x10];
                 mode[0..4].copy_from_slice(&width.to_le_bytes());
@@ -271,13 +205,12 @@ impl Cpu {
                 self.vi_fill_out_buffer(tls, &mode);
                 1u64.to_le_bytes().to_vec()
             }
-            // ListDisplayRgbRanges / ListDisplayContentTypes: one entry each,
-            // and 0 is the automatic setting in both enums.
+            // ListDisplayRgbRanges / ListDisplayContentTypes: one automatic (0) entry each.
             3001 | 3002 => {
                 self.vi_fill_out_buffer(tls, &0u32.to_le_bytes());
                 1u64.to_le_bytes().to_vec()
             }
-            // GetDisplayMode: that one mode, by value.
+            // GetDisplayMode.
             3200 => {
                 let mut raw = Vec::with_capacity(0x10);
                 raw.extend_from_slice(&width.to_le_bytes());
@@ -286,15 +219,13 @@ impl Cpu {
                 raw.extend_from_slice(&0u32.to_le_bytes());
                 raw
             }
-            // GetDisplayUnderscan: none, on a panel that is not a television.
+            // GetDisplayUnderscan.
             3202 => 0i64.to_le_bytes().to_vec(),
-            // GetDisplayContentType / GetDisplayRgbRange / GetDisplayCmuMode:
-            // all automatic, which is 0 in each of the three enums.
+            // GetDisplayContentType / GetDisplayRgbRange / GetDisplayCmuMode: automatic (0).
             3204 | 3206 | 3208 => 0u32.to_le_bytes().to_vec(),
-            // GetDisplayContrastRatio: unadjusted.
+            // GetDisplayContrastRatio.
             3210 => 1.0f32.to_le_bytes().to_vec(),
-            // The system shared buffer, which is how the Home Menu and every
-            // system applet actually draw. See [`Cpu::vi_shared_buffer`].
+            // The system shared buffer the Home Menu and system applets draw through.
             8225 | 8250 | 8251 | 8252 | 8253 | 8254 | 8255 | 8256 | 8258 => {
                 return Some(self.vi_shared_buffer(tls, cmd_id?));
             }
@@ -303,28 +234,19 @@ impl Cpu {
         Some(self.write_ipc_response(tls, 0, &[], &raw, &[]))
     }
 
-    /// `ISystemDisplayService`'s shared-buffer commands.
-    ///
-    /// AM hands the system's applets one buffer between them rather than a
-    /// layer each: an applet asks for a slot, renders into it and presents the
-    /// slot back. This is the path the Home Menu takes, and it takes it the
-    /// moment `IsSystemBufferSharingEnabled` succeeds, refuse that and it
-    /// falls back to building a swapchain of its own, which it then never
-    /// draws a single triangle into.
+    /// `ISystemDisplayService`'s shared-buffer commands: applets acquire a slot
+    /// of one shared buffer, render into it and present it.
     fn vi_shared_buffer(&mut self, tls: u32, cmd_id: u32) -> Result<()> {
         use super::{SHARED_BUFFER_ADDR, SHARED_BUFFER_SLOTS, SHARED_BUFFER_USABLE_SLOTS};
-        // The shared layer's geometry, which is not the display's and does
-        // not follow the dock. See [`super::SHARED_BUFFER_GEOMETRY`].
+        // See [`super::SHARED_BUFFER_GEOMETRY`]; does not follow the dock.
         let mode = super::SHARED_BUFFER_GEOMETRY;
         let (shared_width, shared_height) = mode.display_size();
         let slot_size = mode.shared_buffer_slot_size();
         /// `NvMultiFence`: a count and four `{ id, value }` pairs.
         const FENCE_SIZE: usize = 4 + 4 * 8;
         match cmd_id {
-            // GetSharedBufferMemoryHandleId(u64 buffer_id, aruid) ->
-            // s32 nvmap_handle, u64 size, and the pool layout in the out
-            // buffer. The buffer is ours, not the guest's, so this is where it
-            // comes into being and gets an nvmap handle to be mapped by.
+            // GetSharedBufferMemoryHandleId(u64 buffer_id, aruid) -> s32
+            // nvmap_handle, u64 size, and the pool layout in the out buffer.
             8225 => {
                 let (handle, _) = self.shared_buffer_object();
                 let mut layout = [0u8; 0x188];
@@ -351,9 +273,8 @@ impl Cpu {
                 raw.extend_from_slice(&u64::from(mode.shared_buffer_size()).to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            // AcquireSharedFrameBuffer(u64 layer_id) -> fence, s32 slots[4],
-            // s64 target slot. The fence is empty: whatever was drawn into the
-            // slot last time has already been scanned out.
+            // AcquireSharedFrameBuffer(u64 layer_id) -> fence (empty), s32 slots[4],
+            // s64 target slot.
             8254 => {
                 let slot = self.shared_buffer_slot;
                 self.shared_buffer_slot = (slot + 1) % SHARED_BUFFER_USABLE_SLOTS;
@@ -371,14 +292,8 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
             // PresentSharedFrameBuffer(fence, Rect crop, u32 transform,
-            // s32 swap interval, u64 layer_id, s64 slot). The slot is the last
-            // field, and it is the frame.
-            //
-            // `android::Fence` is a count and four `{ id, value }` pairs, 36
-            // bytes, not 40, so the crop starts at 0x24 and the transform is
-            // at 0x34. Reading the transform one field along lands on the swap
-            // interval, which the Home Menu queues as 1 and which decodes as
-            // `FLIP_H` on a frame that is plainly not mirrored.
+            // s32 swap interval, u64 layer_id, s64 slot). The fence is 36 bytes,
+            // so the crop is at 0x24 and the transform at 0x34.
             8255 => {
                 let data = self.ipc_request_data(tls);
                 let word = |at: u32| self.mem.read_u32(data.wrapping_add(at)).unwrap_or(0);
@@ -408,8 +323,7 @@ impl Cpu {
                     transform,
                     crop,
                 };
-                // A GPU backend holds its render targets on the device; the
-                // display reads them out of guest memory.
+                // GPU backends keep render targets on the device; the display reads guest memory.
                 if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done
                 {
                     self.nv.gpu.present(&self.mem, &buffer)?;
@@ -425,30 +339,24 @@ impl Cpu {
                 let _ = SHARED_BUFFER_ADDR;
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // GetSharedFrameBufferAcquirableEvent: a slot is always free, so
-            // the event is signalled and stays that way. An applet waits on it
-            // before every acquire.
+            // GetSharedFrameBufferAcquirableEvent: a slot is always free, so it stays signalled.
             8256 => {
                 let h = self.alloc_event("vi:shared-buffer", false);
                 self.signal_event(h);
                 self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
             }
-            // Open/Close/Connect/DisconnectSharedLayer, CancelSharedFrameBuffer:
-            // there is one shared layer and it is always connected.
+            // Open/Close/Connect/DisconnectSharedLayer, CancelSharedFrameBuffer.
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
     }
 
-    /// The system shared buffer's nvmap `(handle, id)`, creating it on first
-    /// use. Unlike every other nvmap object this one is not the guest's, the
-    /// system owns it and the applet is only lent slots in it, so it is
-    /// registered here rather than through `NVMAP_IOC_CREATE`.
+    /// The system shared buffer's nvmap `(handle, id)`, created on first use.
+    /// System-owned, so it is registered here rather than via `NVMAP_IOC_CREATE`.
     fn shared_buffer_object(&mut self) -> (u32, u32) {
         if let Some(pair) = self.shared_buffer {
             return pair;
         }
-        // Reserved for the docked geometry whatever mode this is: the buffer
-        // is created once and the console can be docked afterwards.
+        // Sized for the docked geometry, since docking can happen later.
         let size = super::SHARED_BUFFER_RESERVED_SIZE;
         let addr = super::SHARED_BUFFER_ADDR;
         let handle = self.nv.gpu.nvmap.create(size);
@@ -458,9 +366,7 @@ impl Cpu {
         (handle, id)
     }
 
-    /// Write one element into the request's out buffer, if the caller left
-    /// room for it. Nothing `vi` lists here has a second entry, so one element
-    /// is the whole list.
+    /// Write one element into the out buffer if it fits.
     fn vi_fill_out_buffer(&mut self, tls: u32, entry: &[u8]) {
         let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
             return;
@@ -470,12 +376,7 @@ impl Cpu {
         }
     }
 
-    /// Answer a `vi` command nothing implements.
-    ///
-    /// It cannot refuse: most of what lands here is a void setter, and an
-    /// empty success is the right answer for those. But it says so under
-    /// `TRACE_IPC`, because when the command did have an out parameter this
-    /// line is the only place the silence becomes visible.
+    /// An empty success, traced under `TRACE_IPC` in case the command had an out parameter.
     fn vi_unhandled(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
         if crate::trace::enabled(crate::trace::Trace::Ipc) {
             crate::traceln!("[ipc] no implementation: {iface} cmd={cmd_id:?}");
@@ -483,9 +384,7 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
-    /// Non-domain vi session hand-out: allocate a fresh handle, record it as a
-    /// vi session so later SendSyncRequests route back here, and return it as a
-    /// move handle (how NX_SERVICE_ASSUME_NON_DOMAIN marshals output objects).
+    /// Hand out a non-domain vi session as a move handle.
     pub(super) fn vi_out_session(&mut self, tls: u32, iface: &str) -> Result<()> {
         let h = self.alloc_handle();
         self.record_handle(h, "vi:m");
@@ -493,14 +392,10 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[h], &[], &[])
     }
 
-    /// IHOSBinderDriver `TransactParcel`: run one `IGraphicBufferProducer`
-    /// transaction against the app's buffer queue.
-    ///
-    /// The request data is `{ s32 session_id, u32 code, u32 flags }` followed
-    /// by the incoming parcel in a map-alias send buffer; the reply parcel
-    /// goes into the receive buffer. When the app queues a finished frame, the
-    /// GPU scans that buffer out: this is where a rendered frame becomes
-    /// something the host can display.
+    /// IHOSBinderDriver `TransactParcel`: one `IGraphicBufferProducer`
+    /// transaction. Request data is `{ s32 session_id, u32 code, u32 flags }`
+    /// with the parcel in a map-alias send buffer; the reply goes to the
+    /// receive buffer.
     pub(super) fn vi_transact_parcel(&mut self, tls: u32) -> Result<()> {
         let data = self.ipc_request_data(tls);
         let code = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
@@ -512,8 +407,6 @@ impl Cpu {
 
         let (reply, action) = self.display.transact(code, &request);
         if crate::trace::enabled(crate::trace::Trace::Nv) {
-            // The binder transaction code, not the IPC command: this is the
-            // level a stuck buffer-queue loop shows up at.
             crate::traceln!(
                 "[vi] transact code={code} in={} out={} bytes",
                 request.len(),
@@ -521,11 +414,8 @@ impl Cpu {
             );
         }
         if let crate::display::Action::Present(buffer) = action {
-            // A GPU backend holds its render targets on the device; the
-            // display reads them out of guest memory.
-            // A backend holding this surface on a device may not be able to
-            // hand it back yet; `Cpu::complete_pending_present` puts the frame
-            // up when it can. The software rasterizer is always `Done`.
+            // A device-backed surface may not be ready yet;
+            // `Cpu::complete_pending_present` presents it later.
             if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done {
                 self.nv.gpu.present(&self.mem, &buffer)?;
                 if crate::trace::enabled(crate::trace::Trace::Nv) {
@@ -539,8 +429,7 @@ impl Cpu {
             } else {
                 self.pending_present = Some(buffer);
             }
-            // Paced either way: what the guest is being held to is the
-            // refresh rate, not how fast a readback happens to land.
+            // Paced to the refresh rate either way.
             self.pace_present();
         }
 
@@ -552,22 +441,12 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
-    /// viOpenLayer / viCreateStrayLayer reply: fill the request's native-window
-    /// receive buffer with a Binder parcel (ParcelHeader + payload whose third
-    /// word is the IGraphicBufferProducer binder object id), then return the
-    /// parcel size. `out_size` is the number of reply data words (8 for 2020's
-    /// single u64, 16 for 2030's layer_id+size pair).
-    /// The native-window parcel `OpenLayer` (2020) and `CreateStrayLayer`
-    /// (2030) hand back: an Android `Parcel` holding one flattened binder
-    /// object that names the layer's `IGraphicBufferProducer`.
-    ///
-    /// libnx only reads the binder id out of it, but `nnSdk` also checks the
-    /// interface name, so the object is written in full: the 0x28-byte
-    /// `flat_binder_object` real `vi` sends, followed by the four-byte object
-    /// offset table the parcel header points at.
+    /// The native-window parcel `OpenLayer` (2020) and `CreateStrayLayer` (2030)
+    /// return: a full 0x28-byte `flat_binder_object` naming the layer's
+    /// `IGraphicBufferProducer` (`nnSdk` checks the interface name), then the
+    /// object offset table. `out_size` is the reply data word count.
     pub(super) fn vi_native_window(&mut self, tls: u32, out_size: usize) -> Result<()> {
-        /// The binder handle every layer here shares, `vi_transact_parcel`
-        /// serves the one `IGraphicBufferProducer` this emulator has.
+        /// The one `IGraphicBufferProducer` every layer shares.
         const BINDER_ID: u64 = 1;
 
         let mut payload = Vec::with_capacity(0x28);
@@ -608,14 +487,8 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &raw, &[])
     }
 
-    /// The buffer queue's own event, which a producer waits on before it
-    /// dequeues. It is created **signalled** and manual-reset: the queue here
-    /// always has a free buffer (`dequeueBuffer` never refuses) so the state
-    /// it reports is "a buffer is available", permanently and truthfully.
-    ///
-    /// One object per process rather than one per `GetNativeHandle`, because a
-    /// caller that asks twice has to be given the event it is already waiting
-    /// on.
+    /// The buffer queue's event: one per process, created signalled and
+    /// manual-reset because a buffer is always free.
     fn vi_binder_event(&mut self) -> u64 {
         match self.binder_event {
             Some(h) => h,

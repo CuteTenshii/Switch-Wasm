@@ -17,8 +17,7 @@ export default defineConfig(
   }),
   {
     rules: {
-      // Operators lead a continued line, but an assignment's `=` stays at
-      // the end of the line it starts on.
+      // Operators lead continued lines, except `=`.
       '@stylistic/operator-linebreak': ['error', 'before', { overrides: { '=': 'after' } }],
     },
   },
@@ -32,8 +31,7 @@ export default defineConfig(
       },
     },
     rules: {
-      // UI handlers are async on purpose and report their own failures;
-      // the check stays on for every other place a promise is misused.
+      // UI handlers are async and report their own failures.
       '@typescript-eslint/no-misused-promises': ['error', { checksVoidReturn: { arguments: false } }],
     },
   },
@@ -46,7 +44,7 @@ export default defineConfig(
     languageOptions: { globals: globals.worker },
   },
   {
-    // Tools run under Node, and hand callbacks to the browser they drive.
+    // Tools run under Node and hand callbacks to the browser.
     files: ['tools/**/*.mjs', '*.mjs', 'tests/**/*.ts', 'playwright.config.ts'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },

@@ -1,60 +1,32 @@
-//! The networking services, and the answer they all give.
-//!
-//! There is no network behind any of this. `sfdnsres` resolves nothing; `nifm`
-//! reports a console that is connected to a LAN with no route off it; `ssl`
-//! builds contexts that never handshake; a `bsd` *connection* to any address
-//! but this console's own is refused, while a datagram aimed anywhere leaves
-//! and is never answered.
-//!
-//! That is deliberate: an *empty* network is a state a real console reaches
-//! and every caller has a path for. A failure is the path built for hardware
-//! that broke.
-//!
-//! **Loopback is not the network.** A console with its cable out still talks
-//! to itself, and enough middleware assumes it that "no network" and "no
-//! loopback" are not the same offer: asio builds one socket pair per
-//! `io_context`, bind a listener to `127.0.0.1:0`, connect to the port
-//! `getsockname` reports, accept the other end: purely so it can wake its own
-//! `select`. Nothing crosses a wire. Asphalt 9 asserts three times over that
-//! pair before it draws anything, so this service connects, accepts and
-//! carries bytes between two sockets of *this* process, and refuses everything
-//! aimed anywhere else.
+//! The networking services: an empty network. Nothing off the console answers,
+//! but `bsd` loopback between sockets of this process works.
 
 use std::collections::VecDeque;
 
 use super::Cpu;
 use crate::Result;
 
-/// One trusted root from the firmware's certificate store.
 #[derive(Debug)]
 pub(super) struct SslCertificate {
-    /// `CaCertificateId`, the number a caller names this root by. Signed
-    /// because -1 is `All`, which is how a caller asks for every one of them.
+    /// `CaCertificateId`; -1 is `All`.
     id: i32,
-    /// `TrustedCertStatus`: whether the root is trusted, revoked or disabled.
-    /// Passed through as the store recorded it, a caller acts on it.
+    /// `TrustedCertStatus`, passed through as stored.
     status: u32,
-    /// The certificate itself, DER-encoded.
     der: Vec<u8>,
 }
 
-/// The system data archive the certificate store lives in, and the file inside
-/// it. It is firmware rather than anything `ssl` carries, so the store is only
-/// there when a firmware directory was registered.
+/// The firmware system data archive holding the certificate store, and the file in it.
 const CERT_STORE_DATA_ID: u64 = 0x0100_0000_0000_0800;
 const CERT_STORE_PATH: &str = "/ssl_TrustedCerts.bdf";
 
-/// `CaCertificateId_All`, which a caller sends alone to ask for every root
-/// rather than naming them one at a time.
+/// `CaCertificateId_All`.
 const CERT_ID_ALL: i32 = -1;
 
-/// `BuiltInCertificateInfo`, the fixed-width record `GetCertificates` writes
-/// one of per certificate (plus a terminator) ahead of the DER bytes.
+/// `BuiltInCertificateInfo`, one per certificate plus a terminator, ahead of the DER bytes.
 const CERT_INFO_SIZE: u32 = 0x18;
 
-/// Parse `ssl_TrustedCerts.bdf`: an `sslT` header giving a count, that many
-/// 0x10-byte entries, and the DER bodies the entries point into. Offsets are
-/// measured from the end of the header.
+/// Parse `ssl_TrustedCerts.bdf`: an `sslT` header with a count, 0x10-byte entries,
+/// then DER bodies. Offsets are from the end of the header.
 fn parse_cert_store(data: &[u8]) -> Vec<SslCertificate> {
     const MAGIC: u32 = u32::from_le_bytes(*b"sslT");
     const HEADER_SIZE: usize = 8;
@@ -92,39 +64,22 @@ fn parse_cert_store(data: &[u8]) -> Vec<SslCertificate> {
     certs
 }
 
-/// One open `bsd:u` socket.
-///
-/// A socket here can be created, configured, bound and listened on, and can
-/// be connected to another socket of this same process: see
-/// [`Cpu::bsd_request`]. It can never reach anything off the console.
+/// One open `bsd:u` socket. It can only connect to sockets of this process.
 #[derive(Debug, Clone)]
 pub(crate) struct BsdSocket {
-    /// The address family and socket type it was created with. The family is
-    /// carried for `DuplicateSocket`; the type decides which "went nowhere"
-    /// errno the data path reports.
+    /// The family is kept for `DuplicateSocket`; the type picks the data path errno.
     pub domain: u32,
     pub kind: u32,
-    /// The `sockaddr` this socket answers to, normalized: see
-    /// [`Cpu::bsd_normalize_bind`]. Empty until `bind`, and reported by
-    /// `GetSockName`.
+    /// Normalized by [`Cpu::bsd_normalize_bind`]; empty until `bind`.
     pub bound: Vec<u8>,
-    /// The flags word `fcntl(F_SETFL)` set, stored verbatim so `F_GETFL` hands
-    /// back exactly what the guest wrote.
+    /// Stored verbatim so `F_GETFL` returns what the guest wrote.
     pub flags: u32,
-    /// Whether `listen` was called, an `accept` on a socket that never
-    /// listened is a different error from one nobody has connected to.
     pub listening: bool,
-    /// Connections that have been made to this listener and not yet accepted.
-    /// A `connect` completes the moment it is issued, so the queue is what
-    /// `accept` drains rather than a backlog anything waits in.
+    /// Connections made to this listener and not yet accepted.
     pub incoming: VecDeque<i32>,
-    /// The descriptor at the other end of this connection.
     pub peer: Option<i32>,
-    /// Bytes the peer has sent and this socket has not read yet.
     pub rx: VecDeque<u8>,
-    /// Whether the peer has closed or shut down its writing half. Distinct
-    /// from `peer: None`: a socket that was never connected reports
-    /// `ENOTCONN`, while one whose peer left reads end-of-file.
+    /// The peer closed or shut down writing: reads return end-of-file, unlike `peer: None`.
     pub peer_closed: bool,
 }
 
@@ -143,39 +98,26 @@ impl BsdSocket {
         }
     }
 
-    /// Whether a `select` or `poll` would call this descriptor readable: it
-    /// has bytes, it has a connection waiting to be accepted, or its peer has
-    /// gone and the read that reports end-of-file will not block.
+    /// Readable: has bytes, a pending connection, or a closed peer (EOF).
     fn readable(&self) -> bool {
         !self.rx.is_empty() || !self.incoming.is_empty() || self.peer_closed
     }
 
-    /// Whether a `select` or `poll` would call it writable. Nothing here has a
-    /// send buffer that can fill, so a live connection always is, and so is a
-    /// datagram socket, which needs no connection to send on and would
-    /// otherwise never be reported ready for the `sendto` it can make.
+    /// Writable: a live connection or any datagram socket; nothing here has a send buffer.
     fn writable(&self) -> bool {
         self.kind == BSD_SOCK_DGRAM || (self.peer.is_some() && !self.peer_closed)
     }
 }
 
-/// The address `nifm` reports for the console's wired link, and the one
-/// `bsd` reports for a socket that was never bound.
+/// The console's address, as reported by `nifm` and for unbound sockets.
 const NIFM_LOCAL_IP: [u8; 4] = [192, 168, 1, 100];
 
-/// `sfdnsres` failures. `EAI_NONAME` ("name or service not known") is the
-/// `getaddrinfo` family's, `HOST_NOT_FOUND` the `gethostbyname` family's, and
-/// both are the **definitive** failure rather than the try-again one: a caller
-/// told to retry retries, and there is no other thread here to run while it
-/// does. These are FreeBSD's positive `EAI_*` values, matching the errnos
-/// below rather than glibc's negative ones.
+/// `sfdnsres` failures: the definitive ones, not try-again, in FreeBSD's positive numbering.
 const SFDNSRES_EAI_NONAME: i32 = 8;
 
 const SFDNSRES_HOST_NOT_FOUND: i32 = 1;
 
-/// `bsd` errnos, in **FreeBSD's** numbering, which is what the real service
-/// returns, and so what guest code is written against (`EAGAIN` is 35 here,
-/// not the 11 a Linux-hosted build would use).
+/// `bsd` errnos in FreeBSD's numbering (`EAGAIN` is 35).
 const BSD_EBADF: i32 = 9;
 
 const BSD_EINVAL: i32 = 22;
@@ -192,36 +134,26 @@ const BSD_ENOTCONN: i32 = 57;
 
 const BSD_ECONNREFUSED: i32 = 61;
 
-/// `SOCK_DGRAM`. A datagram socket that named no destination has nowhere to
-/// send *to* (`ENETUNREACH`) where a stream socket has no connection to send
-/// *on* (`ENOTCONN`), and only a stream socket can be one end of the loopback
-/// pair below.
+/// `SOCK_DGRAM`.
 const BSD_SOCK_DGRAM: u32 = 2;
 
 /// `AF_INET`, in the `sin_family` byte of Horizon's `sockaddr`.
 const BSD_AF_INET: u8 = 2;
 
-/// `sizeof(sockaddr_in)`, which is also the `sin_len` every well-formed one
-/// carries.
+/// `sizeof(sockaddr_in)`, also its `sin_len`.
 const BSD_SOCKADDR_IN_LEN: usize = 16;
 
-/// Where [`Cpu::bsd_assign_port`] starts handing out ports for a `bind` to
-/// port 0: the bottom of IANA's ephemeral range, which is where FreeBSD's own
-/// allocator starts.
+/// Start of the ephemeral port range for `bind` to port 0.
 pub(super) const BSD_FIRST_EPHEMERAL_PORT: u16 = 49152;
 
-/// The loopback address. A listener bound to it, to `INADDR_ANY` or to the
-/// address `nifm` reports is reachable from this process; nothing else is.
 const BSD_LOOPBACK_IP: [u8; 4] = [127, 0, 0, 1];
 
 const BSD_ANY_IP: [u8; 4] = [0, 0, 0, 0];
 
-/// How many descriptors a `select` set can name: `FD_SETSIZE`, which is what
-/// the 128-byte bitmap the caller marshals holds.
+/// `FD_SETSIZE`: the 128-byte bitmap the caller marshals.
 const BSD_MAX_SELECT_FDS: u32 = 1024;
 
-/// The `(address, port)` an `AF_INET` `sockaddr_in` names, or `None` for any
-/// other family: nothing else can be an endpoint of this process.
+/// The `(address, port)` of an `AF_INET` `sockaddr_in`, or `None`.
 fn sockaddr_in(raw: &[u8]) -> Option<([u8; 4], u16)> {
     if raw.len() < 8 || raw[1] != BSD_AF_INET {
         return None;
@@ -230,9 +162,7 @@ fn sockaddr_in(raw: &[u8]) -> Option<([u8; 4], u16)> {
     Some(([raw[4], raw[5], raw[6], raw[7]], port))
 }
 
-/// A well-formed `sockaddr_in`. Horizon's is FreeBSD's, a length byte and a
-/// family byte where Linux has a 16-bit family, and both the port and the
-/// address are in network order.
+/// A FreeBSD `sockaddr_in`: length byte, family byte, then port and address in network order.
 fn sockaddr_in_bytes(ip: [u8; 4], port: u16) -> Vec<u8> {
     let mut raw = vec![0u8; BSD_SOCKADDR_IN_LEN];
     raw[0] = BSD_SOCKADDR_IN_LEN as u8;
@@ -242,14 +172,12 @@ fn sockaddr_in_bytes(ip: [u8; 4], port: u16) -> Vec<u8> {
     raw
 }
 
-/// Whether an address names this console. `connect` reaches a listener only
-/// through one of these; everything else is off the console and refused.
+/// Whether an address names this console.
 fn is_local_ip(ip: [u8; 4]) -> bool {
     ip == BSD_LOOPBACK_IP || ip == BSD_ANY_IP || ip == NIFM_LOCAL_IP
 }
 
-/// `FIONBIO`, `F_GETFL`/`F_SETFL`, and FreeBSD's `O_NONBLOCK`, the last only
-/// so that the `ioctl` route sets the same bit the `fcntl` route reads back.
+/// `FIONBIO`, `F_GETFL`/`F_SETFL`, and FreeBSD's `O_NONBLOCK`.
 const BSD_FIONBIO: u32 = 0x8004_667E;
 
 const BSD_F_GETFL: u32 = 3;
@@ -259,20 +187,7 @@ const BSD_F_SETFL: u32 = 4;
 const BSD_O_NONBLOCK: u32 = 0x0004;
 
 impl Cpu {
-    /// `ssl`: the system TLS stack.
-    ///
-    /// Switch does not let a title bring its own TLS, the OS owns the
-    /// implementation and the certificate store, and a title asks it to build
-    /// connections: `ISslService::CreateContext` gives an `ISslContext`, whose
-    /// `CreateConnection` gives an `ISslConnection` wrapping a `bsd:u` socket.
-    ///
-    /// The local half of that is real here: contexts and their options are
-    /// ordinary objects that exist whether or not anything can be reached. The
-    /// connection half is not, and is left to report itself rather than hand
-    /// back a connection that can never connect: there is no socket layer
-    /// under it. "A Short Hike" is offline and only calls
-    /// `SetInterfaceVersion`, which `nnSdk` issues at startup because `ssl` is
-    /// in the title's NPDM service list.
+    /// `ssl`: contexts and options are real objects; connections never connect.
     pub(super) fn ssl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
@@ -310,43 +225,30 @@ impl Cpu {
                     let count = self.ssl_contexts;
                     self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
                 }
-                // SetInterfaceVersion(u32): which revision of the interface the
-                // caller speaks. Recording it is the whole implementation, and
-                // it is the only `ssl` command a retail title issues at all
-                // unless it goes online.
+                // SetInterfaceVersion(u32).
                 Some(5) => {
                     self.ssl_interface_version = self.mem.read_u32(data)?;
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // GetCertificateBufSize(ids in a buffer) -> u32 size: how
-                // much room `GetCertificates` will need, which a caller asks
-                // for first so it can allocate it.
+                // GetCertificateBufSize(ids in a buffer) -> u32 size.
                 Some(3) => {
                     let ids = self.ssl_requested_ids(tls);
                     let (size, _) = self.ssl_certificate_extent(&ids);
                     self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
                 }
-                // GetCertificates(ids) -> u32 count, with the certificates in
-                // an out buffer: a `BuiltInCertificateInfo` per root and a
-                // terminator, then the DER bodies they point at.
-                //
-                // An *empty* store is not a neutral answer here. The browser
-                // asks on startup, and answering zero aborted it 10.7M steps
-                // in: the same place a refused command did. Given a store it
-                // runs on to 588M steps.
+                // GetCertificates(ids) -> u32 count, with records, a terminator and the DER
+                // bodies in an out buffer.
                 Some(2) => {
                     let ids = self.ssl_requested_ids(tls);
                     let count = self.ssl_write_certificates(tls, &ids)?;
                     self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
                 }
-                // FlushSessionCache: nothing has been cached to flush.
+                // FlushSessionCache.
                 Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             "ssl:context" => match cmd_id {
-                // Set/GetOption(SslContextOption, s32). Options are per-context
-                // state a caller reads back, so they are stored rather than
-                // acknowledged and forgotten.
+                // Set/GetOption(SslContextOption, s32), stored per context.
                 Some(0) => {
                     let option = self.mem.read_u32(data)?;
                     let value = self.mem.read_u32(data.wrapping_add(4))?;
@@ -360,21 +262,15 @@ impl Cpu {
                     let value = self.ssl_options.get(&(key, option)).copied().unwrap_or(0);
                     self.write_ipc_response(tls, 0, &[], &value.to_le_bytes(), &[])
                 }
-                // GetConnectionCount: none, and none can be made. See below.
+                // GetConnectionCount: none.
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-                // ImportServerPki / ImportClientPki(format, certificates in a
-                // buffer) -> a u64 id naming what was imported. The chain is
-                // only ever verified against a peer, and there are no peers,
-                // so the certificates are accepted and the id is all a caller
-                // gets back, which is what it needs to remove them again at
-                // 6 and 7. The browser imports its own before it will draw.
+                // ImportServerPki / ImportClientPki(format, certificates) -> u64 id. Accepted, not kept.
                 Some(4) | Some(5) => {
                     let id = self.ssl_next_pki_id;
                     self.ssl_next_pki_id = id.wrapping_add(1);
                     self.write_ipc_response(tls, 0, &[], &id.to_le_bytes(), &[])
                 }
-                // RemoveServerPki / RemoveClientPki(id): nothing was kept, so
-                // there is nothing to drop.
+                // RemoveServerPki / RemoveClientPki(id).
                 Some(6) | Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
@@ -382,8 +278,7 @@ impl Cpu {
         }
     }
 
-    /// The certificates a request named, as `CaCertificateId`s read out of its
-    /// input buffer. A single `All` (or no buffer at all) means every root.
+    /// The `CaCertificateId`s a request named. A single `All`, or no buffer, means every root.
     fn ssl_requested_ids(&mut self, tls: u32) -> Vec<i32> {
         let Some((addr, len)) = self.ipc_input_buffer(tls, 0) else {
             return vec![CERT_ID_ALL];
@@ -401,7 +296,6 @@ impl Cpu {
         ids
     }
 
-    /// Load the firmware's certificate store on the first ask and keep it.
     fn ssl_certificate_store(&mut self) -> &[SslCertificate] {
         if self.ssl_certificates.is_none() {
             let mut certs = Vec::new();
@@ -428,15 +322,12 @@ impl Cpu {
         self.ssl_certificates.as_deref().unwrap_or(&[])
     }
 
-    /// Whether a certificate is one this request asked for.
     fn ssl_wanted(ids: &[i32], cert: &SslCertificate) -> bool {
         ids == [CERT_ID_ALL] || ids.contains(&cert.id)
     }
 
-    /// The size `GetCertificates` needs for `ids`, and how many it will write.
-    /// Every DER body is padded to a 4-byte boundary so that each record after
-    /// it starts aligned, and the terminator is counted whether or not any
-    /// certificate matched.
+    /// The size `GetCertificates` needs for `ids`, and how many it writes. DER bodies are
+    /// padded to 4 bytes; the terminator is always counted.
     fn ssl_certificate_extent(&mut self, ids: &[i32]) -> (u32, u32) {
         let mut size = CERT_INFO_SIZE;
         let mut count = 0u32;
@@ -451,11 +342,8 @@ impl Cpu {
         (size, count)
     }
 
-    /// Write the records and the DER bodies into the request's out buffer, and
-    /// answer with how many certificates went in. A buffer too small for what
-    /// [`Cpu::ssl_certificate_extent`] reported is left alone: a caller that
-    /// ignored the size it asked for would otherwise be handed a record whose
-    /// offset points past the end of its own allocation.
+    /// Write the records and DER bodies, returning the count. A buffer too small for
+    /// [`Cpu::ssl_certificate_extent`] is left alone.
     fn ssl_write_certificates(&mut self, tls: u32, ids: &[i32]) -> Result<u32> {
         let (size, count) = self.ssl_certificate_extent(ids);
         let Some((addr, len)) = self.ipc_output_buffer(tls, 0) else {
@@ -464,7 +352,6 @@ impl Cpu {
         if len < size {
             return Ok(0);
         }
-        // The bodies start past every record, the terminator included.
         let mut der_at = (count + 1) * CERT_INFO_SIZE;
         let mut info_at = 0u32;
         let store = std::mem::take(&mut self.ssl_certificates).unwrap_or_default();
@@ -489,8 +376,7 @@ impl Cpu {
             der_at += (cert.der.len() as u32).next_multiple_of(4);
         }
         self.ssl_certificates = Some(store);
-        // The terminator: `CaCertificateId_All` with an empty body, which is
-        // how a reader knows it has reached the end of the records.
+        // The terminator: `CaCertificateId_All` with an empty body.
         let mut end = [0u8; CERT_INFO_SIZE as usize];
         end[0..4].copy_from_slice(&CERT_ID_ALL.to_le_bytes());
         for (index, &byte) in end.iter().enumerate() {
@@ -500,46 +386,22 @@ impl Cpu {
         Ok(count)
     }
 
-    /// `sfdnsres` (`IResolver`): the DNS resolver, and the other half of the
-    /// socket stack `bsd` is the transport half of. `getaddrinfo`,
-    /// `gethostbyname` and `getnameinfo` are all IPC calls into this, and
-    /// libnx's `socketInitialize` opens it alongside `bsd:u`.
-    ///
-    /// **Nothing resolves.** There is no resolver here and no network to reach
-    /// a name server on, so every lookup fails the way a name that does not
-    /// exist fails: `EAI_NONAME` for the `getaddrinfo` family, `HOST_NOT_FOUND`
-    /// for the `gethostbyname` one. That is deliberately the *definitive*
-    /// failure rather than `EAI_AGAIN`, which invites a caller to retry
-    /// forever, the same reasoning as `bsd`'s `ECONNREFUSED`, and for the same
-    /// reason: there is no other thread here to run while a guest retries.
-    ///
-    /// A numeric address string would resolve on real hardware without any DNS
-    /// at all, and this fails that too. Serializing an `addrinfo` into the
-    /// packed form Horizon returns is guesswork this cannot verify against a
-    /// real console, and the connect that would follow is refused by `bsd`
-    /// anyway, so the lookup fails where the guest can act on it, rather than
-    /// succeeding into a reply whose layout might be wrong.
-    ///
-    /// The error *strings* are worth answering properly: a guest that prints
-    /// why a lookup failed gets a sentence, not an empty line.
+    /// `sfdnsres` (`IResolver`): nothing resolves. Every lookup fails definitively,
+    /// `EAI_NONAME` or `HOST_NOT_FOUND`, including numeric addresses.
     pub(super) fn sfdnsres_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[]);
         }
         match cmd_id {
-            // GetHostByNameRequest / GetHostByAddrRequest, and their
-            // WithOptions forms: the `gethostbyname` family, which reports
-            // through `h_errno`.
+            // GetHostByNameRequest / GetHostByAddrRequest and WithOptions forms (`h_errno`).
             Some(2) | Some(3) | Some(10) | Some(11) => {
                 self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND)
             }
-            // GetAddrInfoRequest / GetNameInfoRequest and their WithOptions
-            // forms: the `getaddrinfo` family, which reports a `gai` error.
+            // GetAddrInfoRequest / GetNameInfoRequest and WithOptions forms (`gai` error).
             Some(6) | Some(7) | Some(12) | Some(13) => {
                 self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME)
             }
-            // GetHostStringErrorRequest / GetGaiStringErrorRequest: the text
-            // for an error code, into an output buffer.
+            // GetHostStringErrorRequest / GetGaiStringErrorRequest.
             Some(4) | Some(5) => {
                 let message: &[u8] = b"Name or service not known\0";
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
@@ -551,63 +413,29 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // RequestCancelHandleRequest -> u32: the token a caller passes to
-            // CancelRequest to abandon a lookup in flight. Every lookup here
-            // finishes before it returns, so the token is only ever handed
-            // back and cancelled.
+            // RequestCancelHandleRequest -> u32 token.
             Some(8) => {
                 let handle = self.next_object_id;
                 self.next_object_id = handle.wrapping_add(1);
                 self.write_ipc_response(tls, 0, &[], &handle.to_le_bytes(), &[])
             }
-            // CancelRequest, and the resolver options: there is nothing in
-            // flight to cancel, and no resolver whose behaviour an option
-            // could change.
+            // CancelRequest, and the resolver options.
             Some(9) | Some(14) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             Some(15) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
             _ => self.unimplemented_command(tls, "sfdnsres", cmd_id),
         }
     }
 
-    /// A failed lookup: the error in the first word, no `errno` behind it, and
-    /// nothing serialized into the output buffer.
-    ///
-    /// The three words are `SfdnsresRequestResults`: return value, `errno`,
-    /// and how many bytes were written to the caller's buffer. Putting the
-    /// failure in the *first* word is what makes this robust to the exact
-    /// field order: a caller checking the return value sees the error, and one
-    /// that reads the serialized size sees zero either way. `errno` stays 0
-    /// because these errors are not `EAI_SYSTEM`: there is no underlying
-    /// system call that failed.
+    /// A failed lookup. `SfdnsresRequestResults` is { return value, errno, bytes
+    /// written }; the error goes in the first word, errno stays 0.
     fn sfdnsres_failure(&mut self, tls: u32, error: i32) -> Result<()> {
         let mut results = [0u8; 12];
         results[..4].copy_from_slice(&error.to_le_bytes());
         self.write_ipc_response(tls, 0, &[], &results, &[])
     }
 
-    /// `bsd:u`/`bsd:s`, the socket service, `nn::socket` and libnx's
-    /// `socketInitialize` sit on top of it.
-    ///
-    /// **The only peer is this console.** A browser tab cannot open a TCP
-    /// socket and nothing here proxies one, so what is modelled is a console
-    /// whose link is up (which is what `nifm` reports) and on which nothing
-    /// off the box ever answers. Everything aimed at this console itself is
-    /// real: two sockets of this process connect, accept and carry bytes
-    /// between them, `select` and `poll` report which of them are ready, and a
-    /// `close` at one end is end-of-file at the other. Everything aimed
-    /// anywhere else is `ECONNREFUSED`, at once rather than as a timeout,
-    /// precisely because a title checking for an update should find out now
-    /// rather than block a frame loop that has no other thread to run.
-    ///
-    /// The errnos are **FreeBSD's**, not Linux's or newlib's (`EAGAIN` is 35,
-    /// not 11), because that is what the real service returns and guest code
-    /// is written against the real service. A title whose own `strerror` table
-    /// is Linux's will print the wrong sentence for the right number, on
-    /// hardware as much as here.
-    ///
-    /// Both save managers here reach it the same way: `RegisterClient`,
-    /// `StartMonitoring`, then a socket that gets an option set, is bound, and
-    /// is closed again.
+    /// `bsd:u`/`bsd:s`, the socket service. The only peer is this console: loopback
+    /// connections work, everything else is refused immediately. Errnos are FreeBSD's.
     pub(super) fn bsd_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
@@ -624,38 +452,19 @@ impl Cpu {
         let word =
             |cpu: &Cpu, index: u32| cpu.mem.read_u32(data.wrapping_add(index * 4)).unwrap_or(0);
         match cmd_id {
-            // RegisterClient(BsdInitConfig, pid, tmem_size, tmem) -> u64. The
-            // transfer memory is the buffer pool a real bsd server allocates
-            // out of; nothing here needs it.
+            // RegisterClient(BsdInitConfig, pid, tmem_size, tmem) -> u64.
             Some(0) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // StartMonitoring(pid).
             Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // Socket(domain, type, protocol) / SocketExempt.
-            //
-            // The family is not validated. `AF_INET6` is a different number in
-            // FreeBSD, in newlib and in Linux, so a guest built against any of
-            // them would be rejected for the wrong reason, and nothing here
-            // behaves differently per family anyway, since no socket of any
-            // family can reach anything.
+            // Socket(domain, type, protocol) / SocketExempt. The family is not validated.
             Some(2) | Some(3) => {
                 let socket = BsdSocket::new(word(self, 0), word(self, 1));
                 let fd = self.alloc_bsd_fd();
                 self.bsd_sockets.insert(fd, socket);
                 self.bsd_reply(tls, fd, 0)
             }
-            // Select(nfds, timeval timeout) with the read, write and except
-            // sets in buffers 0, 1 and 2 on each side.
-            //
-            // The out-sets are always written, never left as the caller's own
-            // input: a caller handed a success reads readiness out of the
-            // *output* buffer, and one that finds its own request there sees
-            // every descriptor it asked about as ready.
-            //
-            // The timeout is a `timeval` at the second word: asio asks for
-            // 300 seconds when it has no timer pending, which is its own cap
-            // and not a number this can honour. A wait that finds nothing
-            // gives up the CPU for the reason [`Cpu::bsd_request`]'s `Poll`
-            // arm gives; a zero timeout is an explicit probe and does not.
+            // Select(nfds, timeval timeout), sets in buffers 0, 1 and 2. The out-sets are
+            // always written. An empty wait with a non-zero timeout yields.
             Some(5) => {
                 let nfds = word(self, 0).min(BSD_MAX_SELECT_FDS);
                 let timeout = self.mem.read_u64(data.wrapping_add(8)).unwrap_or(0)
@@ -667,19 +476,8 @@ impl Cpu {
                 self.pending_yield = ready == 0 && timeout != 0;
                 self.bsd_reply(tls, ready, 0)
             }
-            // Poll(nfds, timeout): the fds come in and go back out, with each
-            // `revents` cleared: no event ever fires. Copying the array
-            // through matters: the caller reads its `revents` out of the
-            // *output* buffer, which is a different range from the input one.
-            //
-            // A poll with a timeout is a *wait*, and answering it instantly is
-            // what breaks a guest, not the empty answer. NXpotify's Zeroconf
-            // listener runs `if (poll(&pfd, 1, 200) <= 0) continue;`, which on
-            // hardware sleeps a fifth of a second per turn; returning zero
-            // immediately turned it into a loop that never makes a blocking
-            // syscall, and threads here only switch at those, so it starved
-            // every other thread, main included, and no frame was ever drawn.
-            // Reschedule instead, once the reply is written.
+            // Poll(nfds, timeout): copies the fds to the output buffer with fresh `revents`.
+            // A wait that finds nothing yields, since threads only switch at blocking syscalls.
             Some(6) => {
                 let timeout = word(self, 1) as i32;
                 let mut ready = 0;
@@ -698,31 +496,21 @@ impl Cpu {
                         self.mem.write_u16(dst.wrapping_add(offset + 6), revents)?;
                     }
                 }
-                // `timeout == 0` is an explicit non-blocking probe, and comes
-                // back at once on hardware too.
+                // A zero timeout is a non-blocking probe.
                 self.pending_yield = ready == 0 && timeout != 0;
                 self.bsd_reply(tls, ready as i32, 0)
             }
-            // Recv(fd, flags) / Read(fd): bytes the peer sent, out of this
-            // socket's queue and into the caller's buffer.
+            // Recv(fd, flags) / Read(fd).
             Some(8) | Some(25) => {
                 let fd = word(self, 0) as i32;
                 self.bsd_receive(tls, fd, None)
             }
-            // RecvFrom(fd, flags): the same, and the sender's address, which
-            // for a connected socket is the peer's, in the second buffer.
+            // RecvFrom(fd, flags), with the sender's address in the second buffer.
             Some(9) => {
                 let fd = word(self, 0) as i32;
                 self.bsd_receive(tls, fd, Some(1))
             }
-            // Send(fd, flags) / SendTo(fd, flags, sockaddr) / Write(fd): into
-            // the peer's queue.
-            //
-            // `SendTo`'s destination is ignored on a connected socket, which
-            // is what the connected end of a loopback pair is; on an
-            // unconnected datagram socket it is the whole of the operation,
-            // and [`Cpu::bsd_send`] answers it out of the link `nifm`
-            // reports rather than refusing it.
+            // Send(fd, flags) / SendTo(fd, flags, sockaddr) / Write(fd). See [`Cpu::bsd_send`].
             Some(10) | Some(24) => {
                 let fd = word(self, 0) as i32;
                 self.bsd_send(tls, fd, None)
@@ -731,14 +519,8 @@ impl Cpu {
                 let fd = word(self, 0) as i32;
                 self.bsd_send(tls, fd, Some(1))
             }
-            // Accept(fd) -> the connection at the head of the listener's
-            // queue, its address in the output buffer and the length of that
-            // address in the third reply word.
-            //
-            // EAGAIN when the queue is empty says "not right now" rather than
-            // failing the listener outright, which is what a server socket on
-            // an idle network reports, and unlike blocking forever it leaves
-            // the guest's own loop able to run.
+            // Accept(fd): head of the listener's queue, address in the output buffer and its
+            // length in the third reply word. EAGAIN when empty.
             Some(12) => {
                 let fd = word(self, 0) as i32;
                 let accepted = match self.bsd_sockets.get_mut(&fd) {
@@ -755,10 +537,7 @@ impl Cpu {
                 let written = self.bsd_write_address(tls, 0, &address)?;
                 self.bsd_reply_len(tls, accepted, 0, written)
             }
-            // Bind(fd, sockaddr): genuinely local, and genuinely succeeds. The
-            // address is kept because `GetSockName` has to report it back, and
-            // normalized on the way in because what it reports is what a
-            // caller then connects to.
+            // Bind(fd, sockaddr): kept, normalized, for `GetSockName`.
             Some(13) => {
                 let address = match self.ipc_input_buffer(tls, 0) {
                     Some((addr, size)) => self.read_bytes(addr, size.min(0x80)),
@@ -774,8 +553,7 @@ impl Cpu {
                 }
                 self.bsd_reply(tls, 0, 0)
             }
-            // Connect(fd, sockaddr): to a listener of this process, or
-            // nowhere.
+            // Connect(fd, sockaddr): to a listener of this process, or refused.
             Some(14) => {
                 let address = match self.ipc_input_buffer(tls, 0) {
                     Some((addr, size)) => self.read_bytes(addr, size.min(0x80)),
@@ -784,7 +562,7 @@ impl Cpu {
                 let fd = word(self, 0) as i32;
                 self.bsd_connect(tls, fd, &address)
             }
-            // GetPeerName(fd) -> the address of the socket at the other end.
+            // GetPeerName(fd).
             Some(15) => {
                 let fd = word(self, 0) as i32;
                 match self.bsd_sockets.get(&fd) {
@@ -798,15 +576,8 @@ impl Cpu {
                 let written = self.bsd_write_address(tls, 0, &address)?;
                 self.bsd_reply_len(tls, 0, 0, written)
             }
-            // GetSockName(fd) -> the bound address, or the console's own
-            // address (the one `nifm` reports) when nothing was bound.
-            //
-            // The **third** reply word is the length of what was written, and
-            // it is not optional: nnSdk hands that length to whatever the
-            // caller does next, so a `getsockname` that reports zero turns the
-            // `connect` after it into `EINVAL` inside the SDK, which never
-            // reaches this service at all. That is what Asphalt 9's
-            // `socket_select_interrupter: Invalid argument` was.
+            // GetSockName(fd): the bound address, or the console's own. The third reply word
+            // (length) is required; nnSdk passes it on to the next call.
             Some(16) => {
                 let fd = word(self, 0) as i32;
                 let address = match self.bsd_sockets.get(&fd) {
@@ -817,10 +588,7 @@ impl Cpu {
                 let written = self.bsd_write_address(tls, 0, &address)?;
                 self.bsd_reply_len(tls, 0, 0, written)
             }
-            // GetSockOpt(fd, level, option) -> the option's value in the
-            // output buffer, and its length in the third reply word. Options
-            // are read back, so they are stored rather than acknowledged and
-            // forgotten: the same reason `ssl`'s are.
+            // GetSockOpt(fd, level, option): stored value in the output buffer, length in the third word.
             Some(17) => {
                 let (fd, level, option) = (word(self, 0) as i32, word(self, 1), word(self, 2));
                 if !self.bsd_sockets.contains_key(&fd) {
@@ -851,9 +619,7 @@ impl Cpu {
                     }
                 }
             }
-            // Ioctl(fd, request, ...): only FIONBIO, the other way to set
-            // non-blocking mode. It folds into the same flags word `fcntl`
-            // reads back, so the two routes cannot disagree.
+            // Ioctl(fd, request, ...): only FIONBIO, folded into the `fcntl` flags word.
             Some(19) => {
                 let (fd, request) = (word(self, 0) as i32, word(self, 1));
                 let nonblocking = match self.ipc_input_buffer(tls, 0) {
@@ -873,14 +639,8 @@ impl Cpu {
                     Some(_) => self.bsd_reply(tls, -1, BSD_EINVAL),
                 }
             }
-            // Fcntl(fd, cmd, arg): F_GETFL and F_SETFL, which between them are
-            // how a guest sets and reads back O_NONBLOCK.
-            //
-            // F_SETFL stores the flags word **verbatim** and F_GETFL hands
-            // that same word back, rather than decoding it: `O_NONBLOCK` is a
-            // different bit in FreeBSD, in newlib and in Linux, and the one
-            // thing that has to hold is that a guest reads back the flags it
-            // set, whichever of those it was built against.
+            // Fcntl(fd, cmd, arg): F_GETFL / F_SETFL, flags stored verbatim since `O_NONBLOCK`
+            // differs between FreeBSD, newlib and Linux.
             Some(20) => {
                 let (fd, command, arg) = (word(self, 0) as i32, word(self, 1), word(self, 2));
                 match self.bsd_sockets.get_mut(&fd) {
@@ -911,10 +671,7 @@ impl Cpu {
                 self.bsd_socket_options.insert((fd, level, option), value);
                 self.bsd_reply(tls, 0, 0)
             }
-            // Shutdown(fd, how): `SHUT_WR` and `SHUT_RDWR` end the peer's
-            // reading, which is how a guest signals end-of-file without giving
-            // up the descriptor. `SHUT_RD` only stops this end reading, and
-            // nothing here reads on the caller's behalf.
+            // Shutdown(fd, how): `SHUT_WR` and `SHUT_RDWR` end the peer's reading.
             Some(22) => {
                 const SHUT_RD: u32 = 0;
                 let (fd, how) = (word(self, 0) as i32, word(self, 1));
@@ -926,8 +683,7 @@ impl Cpu {
                 }
                 self.bsd_reply(tls, 0, 0)
             }
-            // ShutdownAllSockets(how): every connection at once, which is what
-            // a process tearing its socket layer down issues.
+            // ShutdownAllSockets(how).
             Some(23) => {
                 let fds: Vec<i32> = self.bsd_descriptors();
                 for fd in fds {
@@ -935,9 +691,7 @@ impl Cpu {
                 }
                 self.bsd_reply(tls, 0, 0)
             }
-            // Close(fd). The peer is left readable rather than merely
-            // disconnected: a read on it now reports end-of-file, which is
-            // what the other end of a closed connection does.
+            // Close(fd). The peer then reads end-of-file.
             Some(26) => {
                 if !self.bsd_sockets.contains_key(&(word(self, 0) as i32)) {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
@@ -946,14 +700,7 @@ impl Cpu {
                 self.bsd_close(fd);
                 self.bsd_reply(tls, 0, 0)
             }
-            // DuplicateSocket(fd): a second descriptor for the same socket.
-            //
-            // The copy carries this socket's *local* state, its family, its
-            // address, its flags, and not its connection: two descriptors
-            // sharing one byte queue would need an indirection this table does
-            // not have, and a copy that claimed the connection would swallow
-            // the bytes the original is owed. Nothing in this emulator's path
-            // duplicates a connected socket.
+            // DuplicateSocket(fd): copies local state (family, address, flags), not the connection.
             Some(27) => {
                 let fd = word(self, 0) as i32;
                 let Some(socket) = self.bsd_sockets.get(&fd) else {
@@ -971,10 +718,7 @@ impl Cpu {
         }
     }
 
-    /// Answer a `bsd` command: every one of them replies with `{ s32 ret, s32
-    /// errno }`, where `ret` is -1 on failure and `errno` is 0 on success.
-    /// Reporting a failure with a zero errno is the one combination a caller
-    /// cannot make sense of.
+    /// Reply `{ s32 ret, s32 errno }`: `ret` is -1 on failure, `errno` 0 on success.
     fn bsd_reply(&mut self, tls: u32, ret: i32, errno: i32) -> Result<()> {
         let mut raw = [0u8; 8];
         raw[..4].copy_from_slice(&ret.to_le_bytes());
@@ -982,14 +726,7 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &raw, &[])
     }
 
-    /// Answer a command whose reply carries a **third** word: how many bytes
-    /// were written into the caller's output buffer.
-    ///
-    /// `GetSockName`, `GetPeerName`, `Accept`, `RecvFrom` and `GetSockOpt` all
-    /// have it, and nnSdk passes that length on to whatever the caller does
-    /// next rather than assuming the buffer was filled. Answering those five
-    /// with the two-word reply left the length reading zero, which is a
-    /// `sockaddr` of no bytes. See the `GetSockName` arm above.
+    /// Reply with a third word: bytes written into the caller's output buffer.
     fn bsd_reply_len(&mut self, tls: u32, ret: i32, errno: i32, len: u32) -> Result<()> {
         let mut raw = [0u8; 12];
         raw[..4].copy_from_slice(&ret.to_le_bytes());
@@ -998,31 +735,26 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &raw, &[])
     }
 
-    /// The next descriptor. Monotonic, so a closed one is never handed out
-    /// again while anything still holds it.
+    /// The next descriptor; monotonic.
     fn alloc_bsd_fd(&mut self) -> i32 {
         let fd = self.next_bsd_fd;
         self.next_bsd_fd = self.next_bsd_fd.wrapping_add(1);
         fd
     }
 
-    /// Every open descriptor, in order. Sorted rather than in the table's own
-    /// order because a hash map's is not stable between runs, and two runs of
-    /// the same title have to make the same calls.
+    /// Every open descriptor, sorted for deterministic runs.
     fn bsd_descriptors(&self) -> Vec<i32> {
         let mut fds: Vec<i32> = self.bsd_sockets.keys().copied().collect();
         fds.sort_unstable();
         fds
     }
 
-    /// The `sockaddr_in` `GetSockName` reports for a socket that was never
-    /// bound: the address `nifm` says this console has, on port 0.
+    /// The `sockaddr_in` reported for an unbound socket: the `nifm` address, port 0.
     fn bsd_local_address() -> Vec<u8> {
         sockaddr_in_bytes(NIFM_LOCAL_IP, 0)
     }
 
-    /// Where a connected socket's peer can be reached, which is what
-    /// `GetPeerName` reports and what `Accept` and `RecvFrom` write out.
+    /// The peer's address, for `GetPeerName`, `Accept` and `RecvFrom`.
     fn bsd_peer_address(&self, fd: i32) -> Vec<u8> {
         let peer = self.bsd_sockets.get(&fd).and_then(|socket| socket.peer);
         match peer.and_then(|peer| self.bsd_sockets.get(&peer)) {
@@ -1031,12 +763,8 @@ impl Cpu {
         }
     }
 
-    /// Put an address in the caller's `index`-th output buffer, and say how
-    /// much of it fitted.
-    ///
-    /// A caller may offer no buffer at all, asio's `accept` passes a null
-    /// one, because it does not care who connected, and that is a length of
-    /// zero rather than a failure.
+    /// Put an address in the caller's `index`-th output buffer, returning how much fitted.
+    /// No buffer is a length of zero.
     fn bsd_write_address(&mut self, tls: u32, index: u32, address: &[u8]) -> Result<u32> {
         let Some((addr, size)) = self.ipc_output_buffer(tls, index) else {
             return Ok(0);
@@ -1052,16 +780,8 @@ impl Cpu {
         Ok(written)
     }
 
-    /// Normalize what `bind` was handed, so that what `GetSockName` reports
-    /// back is an address something can actually connect to.
-    ///
-    /// Two things are wrong with echoing the caller's own bytes. A guest that
-    /// memsets a `sockaddr_in` and fills in only the family leaves `sin_len`
-    /// at zero, which is not a `sockaddr` any nnSdk call will accept; and a
-    /// bind to port 0 is a request for *a* port, not a socket that answers on
-    /// port 0. An address of any other family is passed through untouched,
-    /// this service does not know what it means, and reporting back exactly
-    /// what it was given is the one answer that cannot be wrong.
+    /// Normalize a `bind` address so `GetSockName` reports something connectable: fix
+    /// `sin_len` and assign a port for port 0. Other families pass through.
     fn bsd_normalize_bind(&mut self, address: Vec<u8>) -> Vec<u8> {
         let Some((ip, port)) = sockaddr_in(&address) else {
             return address;
@@ -1074,10 +794,7 @@ impl Cpu {
         sockaddr_in_bytes(ip, port)
     }
 
-    /// A port no open socket is bound to. Wraps around the ephemeral range
-    /// rather than growing without bound, and gives up after one lap, at
-    /// which point every port really is taken and reusing one is the least
-    /// wrong answer left.
+    /// A port no open socket is bound to, wrapping the ephemeral range once.
     fn bsd_assign_port(&mut self) -> u16 {
         let range = u16::MAX - BSD_FIRST_EPHEMERAL_PORT + 1;
         let mut port = self.next_bsd_port;
@@ -1101,7 +818,6 @@ impl Cpu {
         port
     }
 
-    /// The listening socket that answers on `port`, lowest descriptor first.
     fn bsd_listener_on(&self, port: u16) -> Option<i32> {
         self.bsd_descriptors().into_iter().find(|fd| {
             self.bsd_sockets.get(fd).is_some_and(|socket| {
@@ -1110,18 +826,8 @@ impl Cpu {
         })
     }
 
-    /// `Connect(fd, sockaddr)`: to a listener of this process, or nowhere.
-    ///
-    /// The connection completes here rather than being queued for the
-    /// listener to finish, because there is no listener *thread* to finish it
-    ///: both ends are this process, and a connect that returned "in progress"
-    /// would be waiting on the guest to run code it only runs after the
-    /// connect returns.
-    ///
-    /// Everything that is not a listener of this process is `ECONNREFUSED`,
-    /// at once, for the reason the module doc gives: a title that checks for
-    /// an update has to find out now, and there is no other thread here to run
-    /// while it blocks.
+    /// `Connect(fd, sockaddr)`. Completes immediately to a listener of this process;
+    /// anything else is `ECONNREFUSED`.
     fn bsd_connect(&mut self, tls: u32, fd: i32, address: &[u8]) -> Result<()> {
         let (domain, kind) = match self.bsd_sockets.get(&fd) {
             None => return self.bsd_reply(tls, -1, BSD_EBADF),
@@ -1137,8 +843,7 @@ impl Cpu {
             return self.bsd_reply(tls, -1, BSD_ECONNREFUSED);
         };
 
-        // The accepted end answers on the listener's own address, which is
-        // what `GetSockName` on it has to report.
+        // The accepted end answers on the listener's address.
         let mut accepted = BsdSocket::new(domain, kind);
         accepted.bound = self
             .bsd_sockets
@@ -1149,8 +854,7 @@ impl Cpu {
         let accepted_fd = self.alloc_bsd_fd();
         self.bsd_sockets.insert(accepted_fd, accepted);
 
-        // A client that never bound gets an address now, so that
-        // `GetPeerName` on the accepted end names something.
+        // An unbound client gets an address now, for `GetPeerName` on the accepted end.
         let unbound = self
             .bsd_sockets
             .get(&fd)
@@ -1169,18 +873,10 @@ impl Cpu {
         self.bsd_reply(tls, 0, 0)
     }
 
-    /// `Send`/`SendTo`/`Write`: into the peer's queue, all of it, at once.
-    /// Nothing here has a send buffer that can fill, so a short write is not a
-    /// state this can reach.
-    ///
-    /// `destination` names the buffer holding `SendTo`'s `sockaddr`; only
-    /// `SendTo` has one, and on a socket with no peer it is the whole of the
-    /// operation. See [`Cpu::bsd_send_datagram`].
+    /// `Send`/`SendTo`/`Write`: everything goes into the peer's queue at once.
     fn bsd_send(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
         let peer = match self.bsd_sockets.get(&fd) {
             None => return self.bsd_reply(tls, -1, BSD_EBADF),
-            // The peer is gone; on hardware this raises `SIGPIPE` as well, and
-            // a guest that blocked it reads the errno instead.
             Some(socket) if socket.peer_closed => return self.bsd_reply(tls, -1, BSD_EPIPE),
             Some(socket) => match socket.peer {
                 Some(peer) => peer,
@@ -1198,13 +894,7 @@ impl Cpu {
         self.bsd_reply(tls, sent, 0)
     }
 
-    /// `SendTo` from a datagram socket with no peer: the link takes it, and
-    /// the bytes are dropped. On a link that is up, which is the one `nifm`
-    /// reports: `sendto` hands the datagram over and returns the byte count
-    /// without waiting for anyone; `ENETUNREACH` describes an interface that
-    /// is *down*, and RakNet's `BindShared` reads a failed test send as
-    /// `BR_FAILED_SEND_TEST`, which failed every `RakPeerInterface::Startup`.
-    /// A stream socket, and a datagram that named no destination, still fail.
+    /// `SendTo` from a datagram socket with no peer: the link takes it and drops it.
     fn bsd_send_datagram(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
         let datagram = self
             .bsd_sockets
@@ -1223,8 +913,7 @@ impl Cpu {
         self.bsd_reply(tls, sent, 0)
     }
 
-    /// `Recv`/`RecvFrom`/`Read`, and (when `address_buffer` names one) the
-    /// sender's address alongside the bytes.
+    /// `Recv`/`RecvFrom`/`Read`, with the sender's address when `address_buffer` names one.
     fn bsd_receive(&mut self, tls: u32, fd: i32, address_buffer: Option<u32>) -> Result<()> {
         let (ret, errno) = self.bsd_receive_bytes(tls, fd)?;
         let Some(index) = address_buffer else {
@@ -1239,23 +928,12 @@ impl Cpu {
         self.bsd_reply_len(tls, ret, errno, written)
     }
 
-    /// Drain what the peer sent into the caller's buffer, and say how the read
-    /// went.
-    ///
-    /// An empty queue on a live connection is `EAGAIN` **and** a reschedule,
-    /// not a block: a blocking read would have to be resumed from inside the
-    /// syscall that made it, and the guest re-checks its own predicate in a
-    /// loop anyway. Giving up the CPU is what lets the thread that will send
-    /// the bytes run: a read that spins here would starve it, which is the
-    /// same trap [`Cpu::bsd_request`]'s `Poll` arm describes.
+    /// Drain the peer's bytes into the caller's buffer. An empty live queue is
+    /// `EAGAIN` plus a yield.
     fn bsd_receive_bytes(&mut self, tls: u32, fd: i32) -> Result<(i32, i32)> {
         match self.bsd_sockets.get(&fd) {
             None => return Ok((-1, BSD_EBADF)),
-            // A stream socket has no connection to read from. A datagram
-            // socket needs none: it reads whatever arrived, and on this
-            // console nothing ever does, which is the empty queue below,
-            // not an error. Answering `ENETUNREACH` here said the link was
-            // gone to a caller that had just been told it was up.
+            // A stream socket needs a connection; a datagram socket just has an empty queue.
             Some(socket)
                 if socket.kind != BSD_SOCK_DGRAM
                     && socket.peer.is_none()
@@ -1273,8 +951,7 @@ impl Cpu {
         };
         let take = size.min(socket.rx.len() as u32) as usize;
         if take == 0 {
-            // A peer that has gone is end-of-file, which is a read of zero
-            // bytes and not an error.
+            // End-of-file: a read of zero bytes.
             if socket.peer_closed {
                 return Ok((0, 0));
             }
@@ -1288,10 +965,7 @@ impl Cpu {
         Ok((take as i32, 0))
     }
 
-    /// The answer for a *send* that has no destination: a datagram socket that
-    /// named none has nowhere to send *to*, a stream socket has no connection
-    /// to send *on*. Receiving does not come here: nothing arriving is an
-    /// empty queue, not a broken link.
+    /// The error for a send with no destination.
     fn bsd_unconnected(&mut self, tls: u32, fd: i32) -> Result<()> {
         match self.bsd_sockets.get(&fd) {
             None => self.bsd_reply(tls, -1, BSD_EBADF),
@@ -1302,13 +976,8 @@ impl Cpu {
         }
     }
 
-    /// One of `select`'s three descriptor sets: read the caller's, write back
-    /// which of those descriptors are ready, and count them.
-    ///
-    /// A set is a bitmap indexed by descriptor. FreeBSD's `fd_mask` is 64 bits
-    /// wide and Linux's is 32, and on a little-endian machine both put
-    /// descriptor *n* in bit *n* of the byte array either way, so this walks
-    /// bytes and does not have to know which.
+    /// One of `select`'s descriptor sets: read it, write back the ready ones, count them.
+    /// Descriptor n is bit n of the byte array for both 32- and 64-bit `fd_mask`.
     fn bsd_select_set(&mut self, tls: u32, index: u32, nfds: u32) -> Result<i32> {
         let Some((dst, dst_size)) = self.ipc_output_buffer(tls, index) else {
             return Ok(0);
@@ -1326,9 +995,7 @@ impl Cpu {
             if wanted.get(byte).copied().unwrap_or(0) & bit == 0 || byte as u32 >= dst_size {
                 continue;
             }
-            // A descriptor this service never handed out is nothing it can
-            // report on. Saying "not ready" leaves the caller waiting, which
-            // is what it was already doing before any of this was modelled.
+            // Unknown descriptors are reported not ready.
             let is_ready = match self.bsd_sockets.get(&(fd as i32)) {
                 Some(socket) if index == 0 => socket.readable(),
                 Some(socket) if index == 1 => socket.writable(),
@@ -1345,12 +1012,8 @@ impl Cpu {
         Ok(ready)
     }
 
-    /// Which of the events a `poll` asked about have happened on `fd`.
-    ///
-    /// A descriptor this service does not know is answered with no events
-    /// rather than `POLLNVAL`: a guest polls its own pipes and standard
-    /// streams alongside its sockets, and none of those are this service's to
-    /// call invalid.
+    /// The events a `poll` asked about that have happened on `fd`. Unknown descriptors
+    /// get no events rather than `POLLNVAL`.
     fn bsd_poll_revents(&self, fd: i32, events: u16) -> u16 {
         const POLLIN: u16 = 0x0001;
         const POLLOUT: u16 = 0x0004;
@@ -1365,18 +1028,13 @@ impl Cpu {
         if events & POLLOUT != 0 && socket.writable() {
             revents |= POLLOUT;
         }
-        // Reported whether or not it was asked for, the way `poll` does.
         if socket.peer_closed && socket.rx.is_empty() {
             revents |= POLLHUP;
         }
         revents
     }
 
-    /// Tell `fd`'s peer that nothing more is coming: its reads report
-    /// end-of-file, and it is no longer writable.
-    ///
-    /// The link itself is left in place so `GetPeerName` still names who was
-    /// there: a peer that is gone is not a connection that never existed.
+    /// Tell `fd`'s peer nothing more is coming. The link is kept for `GetPeerName`.
     fn bsd_orphan_peer(&mut self, fd: i32) {
         let Some(peer) = self.bsd_sockets.get(&fd).and_then(|socket| socket.peer) else {
             return;
@@ -1386,9 +1044,7 @@ impl Cpu {
         }
     }
 
-    /// Drop a descriptor, and everything that was only reachable through it: a
-    /// listener takes its unaccepted connections with it, exactly as closing
-    /// one on hardware does.
+    /// Drop a descriptor; a listener takes its unaccepted connections with it.
     fn bsd_close(&mut self, fd: i32) {
         let Some(socket) = self.bsd_sockets.remove(&fd) else {
             return;
@@ -1403,14 +1059,7 @@ impl Cpu {
         }
     }
 
-    /// `nifm`'s root session (`nifm:u`, `nifm:s`, `nifm:a`): session control
-    /// plus `CreateGeneralServiceOld`/`CreateGeneralService`, which hand back
-    /// the `IGeneralService` connectivity is actually queried through.
-    ///
-    /// The three names are the same interface at three privilege levels, and
-    /// only `nifm:u` used to be routed here, so a system title, which opens
-    /// `nifm:s`, had every one of its network calls answered by the generic
-    /// fallback instead.
+    /// `nifm`'s root session (`nifm:u`, `nifm:s`, `nifm:a`), handing out `IGeneralService`.
     pub(super) fn nifm_request(
         &mut self,
         tls: u32,
@@ -1421,8 +1070,6 @@ impl Cpu {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
-                    // Under the session's own name, so the three aliases stay
-                    // distinguishable in a trace.
                     let name = self.service_name(handle).unwrap_or("nifm:u").to_string();
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, &name);
@@ -1442,18 +1089,7 @@ impl Cpu {
         }
     }
 
-    /// `IGeneralService`: reports a wired connection that is up and has
-    /// internet access, and hands out `IRequest` objects that immediately
-    /// look accepted: there is no real network stack behind this, so every
-    /// caller that only checks "is there a connection" sees a permanent wired
-    /// one instead of the emulator looking offline.
-    ///
-    /// The command ids used to be crossed: 12 answered with the connection
-    /// status triple and 15 with the IP address, when 12 *is*
-    /// `GetCurrentIpAddress`, 15 is `GetCurrentIpConfigInfo` and 18 is
-    /// `GetInternetConnectionStatus`. So a caller asking for the console's
-    /// address got `{2, 0, 2}` for one, and the one query that matters: is
-    /// there internet, fell through to a bare success.
+    /// `IGeneralService`: a wired link that is up with internet access.
     pub(super) fn nifm_general_service_request(
         &mut self,
         tls: u32,
@@ -1468,16 +1104,9 @@ impl Cpu {
                 self.reply_with_interface(tls, handle, "nifm:request")?;
                 Ok(())
             }
-            // EnumerateNetworkInterfaces / EnumerateNetworkProfiles: the list
-            // goes in a buffer nothing fills, and the count that comes back
-            // with it is what a caller iterates on. Zero of them.
+            // EnumerateNetworkInterfaces / EnumerateNetworkProfiles: zero.
             Some(6) | Some(7) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-            // GetCurrentNetworkProfile: the whole answer is an
-            // `SfNetworkProfileData` written into the caller's buffer, with
-            // nothing in the raw reply. The link reported here is wired, and a
-            // wired link genuinely has no wireless profile, but the buffer
-            // still has to be *written*, because a caller handed a success and
-            // an untouched buffer reads its profile off its own stack.
+            // GetCurrentNetworkProfile: the buffer must still be written.
             Some(5) => {
                 if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
                     for i in 0..len {
@@ -1488,11 +1117,8 @@ impl Cpu {
             }
             // GetCurrentIpAddress.
             Some(12) => self.write_ipc_response(tls, 0, &[], &NIFM_LOCAL_IP, &[]),
-            // GetCurrentIpConfigInfo -> IpAddressSetting { bool is_automatic;
-            // address; subnet; gateway } then a DnsSetting. Automatic, with
-            // the address `bsd` also reports, a /24 behind it and the router
-            // at .1: the three have to agree or a caller computing its own
-            // broadcast address gets one off this subnet.
+            // GetCurrentIpConfigInfo -> IpAddressSetting { bool is_automatic; address; subnet;
+            // gateway } then a DnsSetting.
             Some(15) => {
                 let mut raw = Vec::with_capacity(0x18);
                 raw.push(1); // is_automatic
@@ -1502,18 +1128,13 @@ impl Cpu {
                 raw.resize(0x18, 0); // the DnsSetting, which resolves nothing
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            // IsWirelessCommunicationEnabled: the link this reports is wired,
-            // so the radio is off, and saying otherwise invites a caller to
-            // scan for access points that do not exist.
+            // IsWirelessCommunicationEnabled: wired, so no.
             Some(17) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-            // GetInternetConnectionStatus -> { NifmInternetConnectionType,
-            // wifi strength, status }: Ethernet, no strength to report,
-            // connected.
+            // GetInternetConnectionStatus -> { type, wifi strength, status }: Ethernet, 0, connected.
             Some(18) => self.write_ipc_response(tls, 0, &[], &[2u8, 0u8, 2u8], &[]),
-            // IsEthernetCommunicationEnabled: that is the link.
+            // IsEthernetCommunicationEnabled.
             Some(20) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
-            // IsAnyInternetRequestAccepted / IsAnyForegroundRequestAccepted:
-            // a request made here is accepted the moment it is made, so both.
+            // IsAnyInternetRequestAccepted / IsAnyForegroundRequestAccepted.
             Some(21) | Some(22) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
             _ => {
                 self.warn_no_implementation("nifm:general-service", cmd_id);
@@ -1522,14 +1143,7 @@ impl Cpu {
         }
     }
 
-    /// `IRequest`: one application's claim on the network.
-    ///
-    /// The link is up and nothing else is competing for it, so a request is
-    /// **Accepted** from the moment it exists and its result is success.
-    /// The two events it hands out start signalled for the same reason: a
-    /// caller waits on them for the state to settle, and it already has.
-    /// Answering those two with nothing, which is what a bare success does,
-    /// left a caller holding handle 0 for the one and a session for the other.
+    /// `IRequest`: accepted from the moment it exists; its events start signalled.
     pub(super) fn nifm_request_object_request(
         &mut self,
         tls: u32,
@@ -1538,8 +1152,7 @@ impl Cpu {
         match cmd_id {
             // GetRequestState -> NifmRequestState_Accepted.
             Some(0) => self.write_ipc_response(tls, 0, &[], &3u32.to_le_bytes(), &[]),
-            // GetSystemEventReadableHandles -> **two** copy handles: the state
-            // change and the request's completion.
+            // GetSystemEventReadableHandles -> two copy handles: state change and completion.
             Some(2) => {
                 let state = self.alloc_event("nifm:request-state", true);
                 let done = self.alloc_event("nifm:request-done", true);
@@ -1549,8 +1162,7 @@ impl Cpu {
             }
             // GetRevision.
             Some(20) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-            // GetResult, Cancel, Submit, SubmitAndWait and the whole family of
-            // requirement setters: a bare Result, and nothing here to set.
+            // GetResult, Cancel, Submit, SubmitAndWait and the requirement setters.
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
     }
@@ -1569,14 +1181,12 @@ mod tests {
         )
     }
 
-    /// The third word of the replies that carry one: how many bytes of the
-    /// caller's output buffer were filled.
+    /// The third reply word: bytes of the output buffer filled.
     fn bsd_result_len(cpu: &Cpu) -> u32 {
         cpu.mem.read_u32(TLS + 0x28).unwrap()
     }
 
-    /// Open a socket of `kind` on a fresh `bsd:u` session, returning the cpu
-    /// and the descriptor.
+    /// Open a socket of `kind` on a fresh `bsd:u` session.
     fn bsd_socket(kind: u32) -> (Cpu, i32) {
         let mut cpu = request(false, 2, &[]);
         cpu.register_service_handle(9, "bsd:u");
@@ -1584,7 +1194,6 @@ mod tests {
         (cpu, fd)
     }
 
-    /// A second (and third) socket on a session that already has one.
     fn open_socket(cpu: &mut Cpu, kind: u32) -> i32 {
         let mut payload = [0u8; 12];
         payload[..4].copy_from_slice(&2u32.to_le_bytes()); // AF_INET
@@ -1596,12 +1205,9 @@ mod tests {
         fd
     }
 
-    /// Where the tests below park a `sockaddr` and a byte or two of payload.
     const SCRATCH: u32 = 0x4000;
 
-    /// `127.0.0.1:port`, as a caller writes it before a `bind` or a `connect`
-    ///: `sin_len` left at zero, because a guest that memsets the struct and
-    /// fills in only the family is exactly the case this has to survive.
+    /// `127.0.0.1:port` with `sin_len` left at zero, as a memsetting guest writes it.
     fn loopback_sockaddr(port: u16) -> [u8; 16] {
         let mut raw = [0u8; 16];
         raw[1] = 2; // AF_INET
@@ -1610,17 +1216,14 @@ mod tests {
         raw
     }
 
-    /// Put an address where a request's buffer descriptor will point at it.
     fn place(cpu: &mut Cpu, at: u32, bytes: &[u8]) {
         for (offset, &byte) in bytes.iter().enumerate() {
             cpu.mem.write_u8(at + offset as u32, byte).unwrap();
         }
     }
 
-    /// Run asio's `socket_select_interrupter` dance and hand back the two
-    /// descriptors it ends up holding: bind a listener to an ephemeral port on
-    /// the loopback address, connect to the port `getsockname` reports, and
-    /// accept the other end.
+    /// asio's `socket_select_interrupter` setup: bind to an ephemeral loopback port,
+    /// connect to the port `getsockname` reports, accept.
     fn connected_pair(cpu: &mut Cpu, listener: i32) -> (i32, i32) {
         place(cpu, SCRATCH, &loopback_sockaddr(0));
         write_map_buffer_request(cpu, 13, &listener.to_le_bytes(), SCRATCH, 16, true);
@@ -1636,8 +1239,6 @@ mod tests {
         cpu.bsd_request(TLS, 9, Some(18)).unwrap();
         assert_eq!(bsd_result(cpu), (0, 0), "listen");
 
-        // Straight back out of the buffer `getsockname` filled, which is what
-        // asio connects to.
         let client = open_socket(cpu, 1);
         write_map_buffer_request(cpu, 14, &client.to_le_bytes(), SCRATCH, 16, true);
         cpu.bsd_request(TLS, 9, Some(14)).unwrap();
@@ -1650,7 +1251,6 @@ mod tests {
         (client, server)
     }
 
-    /// Send `bytes` on `fd`, and report what the service said.
     fn send_on(cpu: &mut Cpu, fd: i32, bytes: &[u8]) -> (i32, i32) {
         const AT: u32 = SCRATCH + 0x40;
         place(cpu, AT, bytes);
@@ -1659,8 +1259,6 @@ mod tests {
         bsd_result(cpu)
     }
 
-    /// Read up to `len` bytes off `fd`, and report what the service said and
-    /// what landed in the buffer.
     fn recv_on(cpu: &mut Cpu, fd: i32, len: u32) -> ((i32, i32), Vec<u8>) {
         const AT: u32 = SCRATCH + 0x80;
         place(cpu, AT, &vec![0u8; len as usize]);
@@ -1677,16 +1275,13 @@ mod tests {
 
     #[test]
     fn sfdnsres_fails_every_lookup_definitively() {
-        // getaddrinfo: EAI_NONAME, not EAI_AGAIN. A caller told to try again
-        // tries again, and there is no other thread here to run while it does.
+        // getaddrinfo: EAI_NONAME, not EAI_AGAIN.
         let mut cpu = request(false, 6, &[]);
         cpu.sfdnsres_request(TLS, Some(6)).unwrap();
         assert_eq!(
             cpu.mem.read_u32(TLS + 0x20).unwrap() as i32,
             super::SFDNSRES_EAI_NONAME
         );
-        // Nothing was serialized into the caller's buffer, and no errno is
-        // claimed behind the failure.
         assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 0, "errno");
         assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "serialized size");
 
@@ -1701,8 +1296,6 @@ mod tests {
 
     #[test]
     fn sfdnsres_explains_the_failure_it_reports() {
-        // A guest that prints why a lookup failed should get a sentence, not
-        // an empty line.
         const BUFFER: u32 = 0x4000;
         let mut cpu = request_with_recv_buffer(5, &[], BUFFER, 0x40);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
@@ -1722,8 +1315,6 @@ mod tests {
         cpu.bsd_request(TLS, 9, Some(26)).unwrap();
         assert_eq!(bsd_result(&cpu), (0, 0), "close");
 
-        // Closing it twice is a bad descriptor, not a second success, a
-        // socket table that never forgets anything would report the latter.
         write_request(&mut cpu, 26, &fd.to_le_bytes());
         cpu.bsd_request(TLS, 9, Some(26)).unwrap();
         assert_eq!(bsd_result(&cpu), (-1, super::BSD_EBADF));
@@ -1731,8 +1322,6 @@ mod tests {
 
     #[test]
     fn bsd_fails_where_there_is_no_peer_rather_than_pretending() {
-        // Connect: refused, at once. A title that checks for an update has to
-        // find out now: there is no other thread here to run while it blocks.
         let (mut cpu, fd) = bsd_socket(1);
         write_request(&mut cpu, 14, &fd.to_le_bytes());
         cpu.bsd_request(TLS, 9, Some(14)).unwrap();
@@ -1743,16 +1332,13 @@ mod tests {
         cpu.bsd_request(TLS, 9, Some(10)).unwrap();
         assert_eq!(bsd_result(&cpu), (-1, super::BSD_ENOTCONN));
 
-        // ...and a datagram socket that named no destination has nowhere to
-        // send to. One that named a destination is
-        // `bsd_sends_an_addressed_datagram_the_link_would_carry`.
+        // ...and a datagram socket that named no destination has nowhere to send to.
         let (mut cpu, fd) = bsd_socket(super::BSD_SOCK_DGRAM);
         write_request(&mut cpu, 11, &fd.to_le_bytes());
         cpu.bsd_request(TLS, 9, Some(11)).unwrap();
         assert_eq!(bsd_result(&cpu), (-1, super::BSD_ENETUNREACH));
 
-        // Accept on a socket that never listened is the caller's mistake;
-        // after listen it is an idle network, which is EAGAIN.
+        // Accept before listen is an error; after listen it is EAGAIN.
         let (mut cpu, fd) = bsd_socket(1);
         write_request(&mut cpu, 12, &fd.to_le_bytes());
         cpu.bsd_request(TLS, 9, Some(12)).unwrap();
@@ -1768,12 +1354,8 @@ mod tests {
 
     #[test]
     fn bsd_sends_an_addressed_datagram_the_link_would_carry() {
-        // RakNet's `BindShared` binds a UDP socket, sends a test datagram to
-        // the address it just bound, and reports `BR_FAILED_SEND_TEST` when
-        // that send fails. That fails `RakPeerInterface::Startup`, and
-        // Minecraft answers a failed startup by destroying its peer, nulling
-        // its own pointer to it and calling through it anyway, 29.6 billion
-        // instructions into a boot, as a jump to address zero.
+        // RakNet's `BindShared` sends a test datagram to its own address and fails startup
+        // if it does not go out.
         let (mut cpu, fd) = bsd_socket(super::BSD_SOCK_DGRAM);
         cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
         const PAYLOAD: u32 = SCRATCH + 0x40;
@@ -1804,26 +1386,18 @@ mod tests {
             "the address it just bound"
         );
 
-        // And the LAN broadcast a discovery ping actually goes to, which is
-        // an address this console could not be hosting either end of.
         let mut broadcast = loopback_sockaddr(PORT);
         broadcast[4..8].copy_from_slice(&[255, 255, 255, 255]);
         assert_eq!(send_to(&mut cpu, fd, &broadcast), (4, 0), "broadcast");
 
-        // Sent is not delivered: nothing on this console is at the other end
-        // of either address, so a datagram this process sent does not turn up
-        // in its own queue. Nothing having arrived *yet* is what a bound
-        // socket on an idle link reports, `EAGAIN` and a reschedule, the
-        // same answer a live connection with an empty queue gives. It is not
-        // `ENETUNREACH`: the caller was just told the link was up.
+        // Nothing arrives: EAGAIN and a yield, not `ENETUNREACH`.
         cpu.pending_yield = false;
         let (result, bytes) = recv_on(&mut cpu, fd, 4);
         assert_eq!(result, (-1, super::BSD_EAGAIN), "nothing yet");
         assert!(bytes.is_empty());
         assert!(cpu.pending_yield, "a read that waits has to reschedule");
 
-        // And `poll` calls it writable, or a caller that waits for the socket
-        // to be ready before sending never gets to send at all.
+        // Datagram sockets poll writable.
         const POLL_IN: u32 = SCRATCH + 0xc0;
         const POLL_OUT: u32 = SCRATCH + 0xd0;
         const POLLOUT: u16 = 0x0004;
@@ -1839,7 +1413,7 @@ mod tests {
         assert_eq!(bsd_result(&cpu), (1, 0), "ready to send");
         assert_eq!(cpu.mem.read_u16(POLL_OUT + 6).unwrap(), POLLOUT);
 
-        // A stream socket is unchanged: a destination is not a connection.
+        // A destination is not a connection for a stream socket.
         let (mut cpu, stream) = bsd_socket(1);
         cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
         assert_eq!(
@@ -1854,7 +1428,6 @@ mod tests {
         let (mut cpu, fd) = bsd_socket(1);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
 
-        // SetSockOpt(fd, level, option) with the value in a send buffer.
         let mut payload = [0u8; 12];
         payload[..4].copy_from_slice(&fd.to_le_bytes());
         payload[4..8].copy_from_slice(&0xFFFFu32.to_le_bytes()); // SOL_SOCKET
@@ -1864,15 +1437,12 @@ mod tests {
         cpu.bsd_request(TLS, 9, Some(21)).unwrap();
         assert_eq!(bsd_result(&cpu), (0, 0));
 
-        // GetSockOpt hands it back rather than a zero it never stored.
         cpu.mem.write_u32(BUFFER, 0).unwrap();
         write_map_buffer_request(&mut cpu, 17, &payload, BUFFER, 4, false);
         cpu.bsd_request(TLS, 9, Some(17)).unwrap();
         assert_eq!(bsd_result(&cpu), (0, 0));
         assert_eq!(cpu.mem.read_u32(BUFFER).unwrap(), 1);
 
-        // fcntl's flags word survives verbatim, whichever libc's O_NONBLOCK
-        // the guest was built against.
         let mut payload = [0u8; 12];
         payload[..4].copy_from_slice(&fd.to_le_bytes());
         payload[4..8].copy_from_slice(&4u32.to_le_bytes()); // F_SETFL
@@ -1889,13 +1459,7 @@ mod tests {
 
     #[test]
     fn a_poll_with_a_timeout_gives_up_the_cpu() {
-        // NXpotify's Zeroconf listener runs `if (poll(&pfd, 1, 200) <= 0)
-        // continue;`, which on hardware sleeps a fifth of a second per turn.
-        // Answering "nothing ready" instantly turned that into a loop with no
-        // blocking syscall in it, and threads here only switch at those, so
-        // it starved every other thread, main included, and the app never drew
-        // a frame. The empty answer is right; returning it without yielding is
-        // not.
+        // A poll that waits must yield, or a polling loop starves every other thread.
         let (mut cpu, _fd) = bsd_socket(1);
         let mut payload = [0u8; 8];
         payload[..4].copy_from_slice(&1u32.to_le_bytes()); // nfds
@@ -1905,8 +1469,7 @@ mod tests {
         assert_eq!(bsd_result(&cpu), (0, 0), "no descriptor is ever ready");
         assert!(cpu.pending_yield, "a poll that waits has to reschedule");
 
-        // A zero timeout is an explicit non-blocking probe: hardware answers
-        // that one immediately too, so there is nothing to give up.
+        // A zero timeout is a non-blocking probe.
         payload[4..].copy_from_slice(&0i32.to_le_bytes());
         write_request(&mut cpu, 6, &payload);
         cpu.bsd_request(TLS, 9, Some(6)).unwrap();
@@ -1916,11 +1479,8 @@ mod tests {
 
     #[test]
     fn bsd_bind_assigns_a_port_and_get_sock_name_reports_a_usable_address() {
-        // Asphalt 9's `socket_select_interrupter: Invalid argument`. asio
-        // binds to port 0, asks `getsockname` where that landed, and connects
-        // there, so echoing the caller's own bytes back hands it
-        // `127.0.0.1:0` with `sin_len` still zero, and nnSdk rejects the
-        // connect without ever issuing it.
+        // asio binds to port 0 and connects to what `getsockname` reports, so the reply
+        // must carry a real port and `sin_len`.
         let (mut cpu, fd) = bsd_socket(1);
         cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
         place(&mut cpu, SCRATCH, &loopback_sockaddr(0));
@@ -1932,8 +1492,6 @@ mod tests {
         write_map_buffer_request(&mut cpu, 16, &fd.to_le_bytes(), SCRATCH, 16, false);
         cpu.bsd_request(TLS, 9, Some(16)).unwrap();
         assert_eq!(bsd_result(&cpu), (0, 0));
-        // The third word is the one that was missing, and the one nnSdk hands
-        // to whatever the caller does next.
         assert_eq!(
             bsd_result_len(&cpu),
             16,
@@ -1954,7 +1512,6 @@ mod tests {
             "an ephemeral port, not 0: {port}"
         );
 
-        // A port the caller *did* ask for is its own, not one reassigned.
         let other = open_socket(&mut cpu, 1);
         place(&mut cpu, SCRATCH, &loopback_sockaddr(8080));
         write_map_buffer_request(&mut cpu, 13, &other.to_le_bytes(), SCRATCH, 16, true);
@@ -1967,10 +1524,7 @@ mod tests {
 
     #[test]
     fn bsd_builds_the_socket_pair_asio_wakes_its_own_select_with() {
-        // The whole of `socket_select_interrupter::open_descriptors`, and then
-        // the interrupt it exists to deliver. Every asio `io_context` builds
-        // one of these before it runs anything, so a console that cannot make
-        // the pair cannot run the middleware.
+        // asio's `socket_select_interrupter::open_descriptors`, then an interrupt.
         let (mut cpu, listener) = bsd_socket(1);
         cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
         let (client, server) = connected_pair(&mut cpu, listener);
@@ -1984,13 +1538,10 @@ mod tests {
             ((1, 0), vec![0x7f]),
             "recv"
         );
-        // Drained, not merely peeked at: the second read finds nothing.
         assert_eq!(recv_on(&mut cpu, server, 0x20).0, (-1, super::BSD_EAGAIN));
 
-        // The bytes go one way only. The client's own queue is still empty.
         assert_eq!(recv_on(&mut cpu, client, 0x20).0, (-1, super::BSD_EAGAIN));
 
-        // GetPeerName names the other end rather than reporting no peer.
         place(&mut cpu, SCRATCH, &[0u8; 16]);
         write_map_buffer_request(&mut cpu, 15, &server.to_le_bytes(), SCRATCH, 16, false);
         cpu.bsd_request(TLS, 9, Some(15)).unwrap();
@@ -2001,7 +1552,6 @@ mod tests {
 
     #[test]
     fn bsd_select_names_the_descriptor_that_has_a_byte() {
-        /// One `fd_set`: a bitmap with room for `FD_SETSIZE` descriptors.
         const SET: u32 = 0x80;
         const SETS: u32 = 0x6000;
         let (mut cpu, listener) = bsd_socket(1);
@@ -2030,15 +1580,12 @@ mod tests {
             (ready, out & bit != 0)
         };
 
-        // Nothing has been sent, so nothing is ready, and a wait that finds
-        // nothing gives up the CPU rather than spinning the guest's loop.
+        // Nothing sent, so nothing ready, and the wait yields.
         assert_eq!(select(&mut cpu, server, 1), ((0, 0), false));
         assert!(cpu.pending_yield, "a select that waits has to reschedule");
 
         assert_eq!(send_on(&mut cpu, client, &[0x7f]), (1, 0));
-        // Now it is, and the *output* set is what says so. A caller handed a
-        // success reads readiness out of that buffer, never out of its own
-        // request: the two are different ranges.
+        // Readiness is reported in the output set.
         assert_eq!(select(&mut cpu, server, 1), ((1, 0), true));
         assert!(!cpu.pending_yield, "nothing to wait for");
     }
@@ -2049,17 +1596,14 @@ mod tests {
         cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
         let (client, server) = connected_pair(&mut cpu, listener);
 
-        // Bytes already sent survive the sender: they are the receiver's now.
         assert_eq!(send_on(&mut cpu, client, &[1, 2, 3]), (3, 0));
         write_request(&mut cpu, 26, &client.to_le_bytes());
         cpu.bsd_request(TLS, 9, Some(26)).unwrap();
         assert_eq!(bsd_result(&cpu), (0, 0), "close");
         assert_eq!(recv_on(&mut cpu, server, 0x20), ((3, 0), vec![1, 2, 3]));
 
-        // Then end-of-file, which is a read of zero bytes and not an error,
-        // a caller told EAGAIN forever waits forever.
+        // Then end-of-file.
         assert_eq!(recv_on(&mut cpu, server, 0x20).0, (0, 0));
-        // And writing into it is a broken pipe rather than a silent success.
         assert_eq!(send_on(&mut cpu, server, &[4]), (-1, super::BSD_EPIPE));
     }
 
@@ -2068,9 +1612,7 @@ mod tests {
         let (mut cpu, fd) = bsd_socket(1);
         cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
 
-        // A loopback port nothing is listening on is refused, exactly as a
-        // remote address is: the address being local is not the same as
-        // something being there.
+        // A loopback port nothing listens on is refused.
         place(&mut cpu, SCRATCH, &loopback_sockaddr(9999));
         write_map_buffer_request(&mut cpu, 14, &fd.to_le_bytes(), SCRATCH, 16, true);
         cpu.bsd_request(TLS, 9, Some(14)).unwrap();
@@ -2092,8 +1634,6 @@ mod tests {
             "off the console"
         );
 
-        // A second connect on a socket that already has a peer is the
-        // caller's mistake, not another connection.
         let listener = open_socket(&mut cpu, 1);
         let (client, _server) = connected_pair(&mut cpu, listener);
         write_map_buffer_request(&mut cpu, 14, &client.to_le_bytes(), SCRATCH, 16, true);
@@ -2109,8 +1649,7 @@ mod tests {
         write_map_buffer_request(&mut cpu, 16, &fd.to_le_bytes(), BUFFER, 0x10, false);
         cpu.bsd_request(TLS, 9, Some(16)).unwrap();
         assert_eq!(bsd_result(&cpu), (0, 0));
-        // FreeBSD's sockaddr_in: a length byte and a family byte, then the
-        // port and the address in network order.
+        // FreeBSD's sockaddr_in: length, family, then port and address in network order.
         assert_eq!(cpu.mem.read_u8(BUFFER).unwrap(), 16);
         assert_eq!(cpu.mem.read_u8(BUFFER + 1).unwrap(), 2, "AF_INET");
         assert_eq!(cpu.read_bytes(BUFFER + 4, 4), super::NIFM_LOCAL_IP.to_vec());

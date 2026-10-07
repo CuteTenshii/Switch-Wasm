@@ -1,40 +1,12 @@
-//! The fixed-function state a draw runs under, in one typed value.
-//!
-//! Everything here is already in [`Engine3D`]'s registers, and the software
-//! rasterizer reads it straight out of them a field at a time. A GPU backend
-//! cannot: a pipeline is built once and then drawn with, so the state has to
-//! be a *value*, something to hash, compare against the last draw's, and
-//! look a cached pipeline up by. That is what this is.
-//!
-//! # It answers in the target's vocabulary, not the hardware's
-//!
-//! A blend factor arrives as `0x4302` or as `0x05` depending on whose driver
-//! wrote the register: Mesa writes the GL enum, deko3d and nvn write the
-//! D3D one, and neither number means anything to a shading API. So this
-//! resolves them, and everything else, into the vocabulary WebGPU uses. A
-//! backend that had to re-decode `0x4302` would be a second place for the
-//! two to disagree about what a draw meant.
-//!
-//! # What it refuses
-//!
-//! Maxwell can describe draws WebGPU has no way to express: a triangle fan,
-//! a blend factor built from the constant colour's alpha alone, a vertex
-//! attribute stepped once per two instances. Every one of those is an
-//! [`Unsupported`] rather than an approximation, because the point of a
-//! second backend is to agree with the first, and the caller's answer to
-//! being told is to run that draw on the software rasterizer, which is a
-//! normal thing to do and not a failure.
-//!
-//! It also refuses things the software rasterizer *does* accept by falling
-//! back on a default. `blend_factor` answers `One` for a code it does not
-//! know, which is a reasonable thing for a rasterizer that must produce a
-//! pixel and the wrong thing for a description that can say "I don't know".
+//! The fixed-function state a draw runs under as one hashable value, resolved
+//! into WebGPU's vocabulary so a backend can cache pipelines by it. State WebGPU
+//! can't express, or codes not recognised, are [`Unsupported`] and the draw falls
+//! back to the software rasterizer.
 
 use crate::gpu::engine::threed::{
     BlendTarget, DepthLayout, DepthState, Engine3D, VertexArray, ViewportTransform,
 };
-// A pipeline's scissor is one of these, so a backend reading `Pipeline` needs
-// the name as well.
+// Re-exported for backends reading `Pipeline::scissor`.
 pub use crate::gpu::engine::threed::ScissorRect;
 use crate::gpu::raster::Primitive;
 use crate::gpu::surface::{ColorFormat, SampleGrid};
@@ -43,22 +15,17 @@ use std::fmt;
 /// A piece of state that has no WebGPU spelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsupported {
-    /// A primitive topology nothing turns into triangles. Fans, quads and
-    /// polygons are not here: [`Pipeline::expand`] names them, and a backend
-    /// rewrites the index buffer through [`crate::gpu::raster::assemble`] the
-    /// way the rasterizer does. Lines and points are, because neither
-    /// renderer assembles those into anything.
+    /// A topology neither renderer assembles into triangles (lines, points);
+    /// fans, quads and polygons go through [`Pipeline::expand`].
     Topology(Primitive),
-    /// A blend factor with no equivalent, or a code neither numbering
-    /// recognises.
+    /// A blend factor with no equivalent, or an unknown code.
     BlendFactor {
         code: u32,
     },
     BlendEquation {
         code: u32,
     },
-    /// A depth comparison the software rasterizer does not implement either
-    ///. See [`Depth::compare`].
+    /// A depth comparison the software rasterizer doesn't implement either.
     DepthCompare {
         code: u32,
     },
@@ -66,18 +33,16 @@ pub enum Unsupported {
     Format {
         raw: u32,
     },
-    /// A vertex attribute's component count and type, as
-    /// `DkVtxAttribSize`/`DkVtxAttribType`.
+    /// A vertex attribute's `DkVtxAttribSize`/`DkVtxAttribType`.
     VertexFormat {
         size: u32,
         ty: u32,
     },
-    /// A vertex array stepped once every `divisor` instances. WebGPU steps
-    /// per instance or per vertex and has nothing in between.
+    /// A vertex array stepped every `divisor` instances.
     InstanceDivisor {
         divisor: u32,
     },
-    /// The engine could not resolve a piece of state at all.
+    /// The engine could not resolve a piece of state.
     State(String),
 }
 
@@ -100,7 +65,6 @@ impl fmt::Display for Unsupported {
     }
 }
 
-/// How vertices assemble into primitives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Topology {
     PointList,
@@ -110,13 +74,7 @@ pub enum Topology {
     TriangleStrip,
 }
 
-/// Which winding is the front face in the NDC a WebGPU backend's vertex
-/// stage produces: the guest's, with y negated where the viewport does not
-/// mirror (see [`Viewport::flip_y`]).
-///
-/// Facing is decided in NDC. A viewport that mirrors y reverses the winding
-/// on screen without changing which face is front, which is what
-/// `raster::culls` does; only the negation the backend adds reverses it.
+/// Front-face winding in the backend's NDC: the guest's, judged before any y flip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FrontFace {
     Ccw,
@@ -168,7 +126,6 @@ pub enum BlendOperation {
     Max,
 }
 
-/// A surface format, named as WebGPU names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     R8Unorm,
@@ -178,9 +135,7 @@ pub enum Format {
     Bgra8Unorm,
     Bgra8UnormSrgb,
     Rgb10a2Unorm,
-    // SNORM, which WebGPU samples but does not render into. Naming them puts
-    // a title's SNORM *textures* on the device; the backend's own attachment
-    // check turns the render-target case back into a fallback.
+    // SNORM: sampled but not renderable; the backend rejects them as targets.
     R8Snorm,
     Rg8Snorm,
     Rgba8Snorm,
@@ -196,21 +151,15 @@ pub enum Format {
     R32Float,
     Rg32Float,
     Rgba32Float,
-    /// `B10G11R11_FLOAT`: three unsigned floats in one 32-bit word, and the
-    /// HDR target a title tonemaps from. Renderable only where the device has
-    /// `rg11b10ufloat-renderable`, which is why `Rgba16Float` cannot stand in
-    /// for it: that is eight bytes a pixel against this one's four, and the
-    /// surface is written back into guest memory at the guest's width.
+    /// `B10G11R11_FLOAT`; needs `rg11b10ufloat-renderable`, and `Rgba16Float`
+    /// can't stand in since the guest surface is four bytes a pixel.
     Rg11b10Ufloat,
     Depth16Unorm,
     Depth24Plus,
     Depth24PlusStencil8,
     Depth32Float,
     Depth32FloatStencil8,
-    // Compressed, and so sampled-only: nothing renders into these. They are
-    // in the same enum because WebGPU has one format enum for both, and
-    // because a texture upload and a render target ask the same question of
-    // the same raw codes.
+    // Compressed, sampled-only.
     Bc1RgbaUnorm,
     Bc1RgbaUnormSrgb,
     Bc2RgbaUnorm,
@@ -227,9 +176,7 @@ pub enum Format {
     Bc7RgbaUnormSrgb,
 }
 
-/// What a vertex format's components arrive as. WebGPU makes this part of
-/// the match between a format and the shader input it feeds, so it decides
-/// whether an attribute is declared `vec4<f32>`, `vec4<i32>` or `vec4<u32>`.
+/// A vertex format's component base type, which picks the shader input type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttributeBase {
     Float,
@@ -237,12 +184,8 @@ pub enum AttributeBase {
     Uint,
 }
 
-/// How a 10-10-10-2 attribute's four fields read: Maxwell's size `0x30`,
-/// with red in the low ten bits and alpha in the top two.
-///
-/// WebGPU has `unorm10-10-10-2` and none of the other three, so a backend
-/// fetches every one of them as a plain word and unpacks it in the entry
-/// point, the way `raster::fetch_attribute` unpacks the same word.
+/// A 10-10-10-2 attribute (size `0x30`), red in the low bits. WebGPU only has
+/// `unorm10-10-10-2`, so backends fetch a word and unpack it in the entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Packed1010102 {
     Snorm,
@@ -292,12 +235,10 @@ pub enum VertexFormat {
     Snorm8x4,
     Sint8x4,
     Uint8x4,
-    /// Four fields packed 10-10-10-2 into one word.
     Packed1010102(Packed1010102),
 }
 
 impl VertexFormat {
-    /// How many bytes one attribute of this format is.
     pub fn size(self) -> u32 {
         match self {
             VertexFormat::Unorm8
@@ -339,9 +280,7 @@ impl VertexFormat {
         }
     }
 
-    /// The normalized formats are floats by the time a shader sees them;
-    /// only the integer ones carry their bits through, which is what
-    /// `raster::fetch_attribute` leaves in the slot for one as well.
+    /// Normalized formats are floats to the shader; integer ones keep their bits.
     pub fn base(self) -> AttributeBase {
         match self {
             VertexFormat::Sint32
@@ -377,7 +316,6 @@ pub enum StepMode {
     Instance,
 }
 
-/// One side of a blend: `src * src_factor <op> dst * dst_factor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlendComponent {
     pub src_factor: BlendFactor,
@@ -394,11 +332,9 @@ pub struct Blend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColorTarget {
     pub format: Format,
-    /// `None` when blending is off, which is WebGPU's own spelling for it.
+    /// `None` when blending is off.
     pub blend: Option<Blend>,
-    /// Which of R, G, B, A the draw may write; see `Engine3D::color_mask`.
-    /// Part of the pipeline rather than of the pass because that is where
-    /// WebGPU keeps it, and because it is what the guest changes it with.
+    /// See `Engine3D::color_mask`.
     pub write_mask: [bool; 4],
 }
 
@@ -406,36 +342,29 @@ pub struct ColorTarget {
 pub struct Depth {
     pub format: Format,
     pub write_enabled: bool,
-    /// `Always` when the test is off, which is what a disabled depth test
-    /// does and what WebGPU wants written down.
+    /// `Always` when the test is off.
     pub compare: Compare,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VertexAttribute {
     pub format: VertexFormat,
-    /// Byte offset within the buffer's element.
     pub offset: u32,
-    /// Which `@location` the shader reads it as. Maxwell's attribute slot
-    /// number, which is also the generic `a[]` slot it lands in.
+    /// The shader `@location`: Maxwell's attribute slot.
     pub location: u32,
-    /// Whether the fetch swaps the first and third components. WebGPU has no
-    /// BGRA vertex format, so a backend does it in the entry point, which is
-    /// where `raster::fetch_attribute` does it too.
+    /// Swap the first and third components; WebGPU has no BGRA vertex format.
     pub is_bgra: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VertexBuffer {
-    /// Which of Maxwell's sixteen vertex arrays this is.
     pub index: u32,
     pub stride: u32,
     pub step: StepMode,
     pub attributes: Vec<VertexAttribute>,
 }
 
-/// The viewport, as a rectangle rather than as the scale-and-translate pair
-/// the hardware holds.
+/// The viewport as a rectangle rather than scale-and-translate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {
     pub x: f32,
@@ -444,56 +373,31 @@ pub struct Viewport {
     pub height: f32,
     pub min_depth: f32,
     pub max_depth: f32,
-    /// The transform's z scale and translate, unresolved.
-    ///
-    /// Kept because `min_depth`/`max_depth` are read under one of two
-    /// conventions and these are not: see
-    /// [`Viewport::depth_minus_one_to_one`].
+    /// The unresolved z scale; see [`Viewport::depth_minus_one_to_one`].
     pub depth_scale: f32,
     pub depth_translate: f32,
-    /// Whether the guest's transform mirrors y, a negative `scale_y`, which
-    /// is how a driver reconciles GL's bottom-left window origin with a
-    /// render target whose row 0 is at the top.
-    ///
-    /// WebGPU has no negative viewport height, so a backend reproduces this
-    /// by negating `position.y` in the vertex entry point where the guest's
-    /// transform does *not* mirror. The pixels land where the guest's
-    /// transform puts them either way, so the winding the target holds, which
-    /// is what [`Pipeline::front_face`] is judged by, does not depend on it.
+    /// Whether the guest's transform mirrors y (negative `scale_y`). A backend
+    /// negates `position.y` where it doesn't, since WebGPU has no negative viewport height.
     pub flip_y: bool,
 }
 
-/// Everything a draw's pipeline is built from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pipeline {
     pub topology: Topology,
-    /// The topology the draw actually asked for, when it is one that becomes
-    /// a triangle list by rewriting the index buffer rather than by naming a
-    /// WebGPU topology. `None` when [`Pipeline::topology`] is the whole
-    /// answer.
+    /// The requested topology when it becomes a triangle list by index rewriting.
     pub expand: Option<Primitive>,
     pub front_face: FrontFace,
     pub cull: Cull,
-    /// Colour target 0, or `None` for a depth-only pass, which is a real
-    /// thing a title does, not a gap: Just Dance 2017 renders every pass
-    /// that way.
+    /// Colour target 0, or `None` for a depth-only pass.
     pub target: Option<ColorTarget>,
     pub depth: Option<Depth>,
     pub vertex_buffers: Vec<VertexBuffer>,
-    /// Attribute slots the draw binds no buffer to. They read `(0, 0, 0, 1)`
-    ///, a shader reading an input this draw supplies nothing for is
-    /// well-defined, and a backend feeds them from a constant of its own.
+    /// Attribute slots with no buffer bound; they read `(0, 0, 0, 1)`.
     pub fixed_attributes: Vec<u32>,
-    /// How the bound surfaces lay their samples out, and where inside a
-    /// pixel coverage is tested. [`Pipeline::samples`] is its count, kept
-    /// separate because it is what a multisample state is built from.
+    /// Sample layout and coverage positions; [`Pipeline::samples`] is its count.
     pub grid: SampleGrid,
-    /// Whether coverage is tested once per pixel rather than per sample,
-    /// `AntiAliasEnable` off over a surface that still has more than one
-    /// texel per pixel. [`Pipeline::grid`] has already moved every sample to
-    /// the pixel centre for it; this is what says so out loud, because a
-    /// device's own multisampling cannot be told to do that and a backend
-    /// has to render such a draw another way.
+    /// Coverage tested per pixel over a multisampled surface (`AntiAliasEnable` off),
+    /// which device multisampling can't do.
     pub per_pixel_coverage: bool,
     pub samples: u32,
     pub sample_mask: u32,
@@ -503,11 +407,9 @@ pub struct Pipeline {
     pub blend_constant: [f32; 4],
 }
 
-/// How many vertex arrays and attribute slots the engine has.
 const MAX_VERTEX_ATTRIBS: u32 = 16;
 
 impl Pipeline {
-    /// Read the state [`Engine3D::last_draw`] would run under.
     pub fn of(engine: &Engine3D) -> Result<Pipeline, Unsupported> {
         let state = |what: &str, e: crate::Error| Unsupported::State(format!("{what}: {e:?}"));
 
@@ -536,8 +438,7 @@ impl Pipeline {
             None => None,
         };
 
-        // The extent the scissor is resolved against is the target's, in
-        // pixels, which differ from texels on a multisampled surface.
+        // Scissor extent is in pixels, which differ from texels when multisampled.
         let grid = engine.sample_grid().map_err(|e| state("sample grid", e))?;
         let Some(extent) = crate::gpu::engine::threed::draw_extent(
             rt.map(|rt| (rt.width, rt.height)),
@@ -562,12 +463,7 @@ impl Pipeline {
         Ok(Pipeline {
             topology,
             expand,
-            // Facing is judged in window space, as the target holds it, the
-            // same as `raster::culls` (see there for why). The backend lands
-            // every pixel where the guest's viewport puts it, negating y or
-            // not as that takes, and WebGPU judges winding in that same
-            // framebuffer space, so the guest's front face carries over as
-            // it is, whether or not the viewport mirrors.
+            // Facing is judged in window space like `raster::culls`, so it carries over.
             front_face: if cull.front_ccw {
                 FrontFace::Ccw
             } else {
@@ -576,8 +472,7 @@ impl Pipeline {
             cull: match (cull.enabled, cull.cull_front, cull.cull_back) {
                 (false, _, _) | (_, false, false) => Cull::None,
                 (_, true, true) => {
-                    // Culling both faces draws nothing, which WebGPU cannot
-                    // say. It is also not something a draw means to do.
+                    // Culling both faces draws nothing, which WebGPU can't say.
                     return Err(Unsupported::State("a draw that culls both faces".into()));
                 }
                 (_, true, false) => Cull::Front,
@@ -599,10 +494,7 @@ impl Pipeline {
     }
 }
 
-/// `window = ndc * scale + translate` as a rectangle. NDC spans `-1..=1`, so
-/// each axis covers `translate - |scale| ..= translate + |scale|` and a
-/// negative scale means the axis is mirrored rather than that the rectangle
-/// is.
+/// `window = ndc * scale + translate` as a rectangle; negative scale mirrors the axis.
 fn viewport(transform: ViewportTransform) -> Viewport {
     let [sx, sy, sz] = transform.scale;
     let [tx, ty, tz] = transform.translate;
@@ -611,8 +503,6 @@ fn viewport(transform: ViewportTransform) -> Viewport {
         y: ty - sy.abs(),
         width: 2.0 * sx.abs(),
         height: 2.0 * sy.abs(),
-        // Depth is not mirrored by anything this has seen, so the near plane
-        // is the low end of the range the transform maps onto.
         min_depth: (tz - sz).min(tz + sz),
         max_depth: (tz - sz).max(tz + sz),
         depth_scale: sz,
@@ -622,31 +512,15 @@ fn viewport(transform: ViewportTransform) -> Viewport {
 }
 
 impl Viewport {
-    /// Whether the guest's clip space runs z from `-w` to `w` rather than
-    /// from `0` to `w`, which decides whether a vertex entry point has to
-    /// remap `position.z`: WebGPU clips z the way Vulkan does, and a shader
-    /// whose z is left alone has the near half of its frustum clipped away.
-    ///
-    /// This is an inference, not a reading. A driver using GL's range writes
-    /// scale 0.5 and translate 0.5, because that is what maps `-1..1` onto a
-    /// `0..1` window depth; one using Vulkan's writes scale 1.0 and
-    /// translate 0.0. Both give the same window range, so the two numbers
-    /// tell them apart only by which of those shapes they have, and a
-    /// Vulkan-convention guest that also narrowed its depth range would look
-    /// like neither. Every transform this has seen is the first shape.
+    /// Whether clip z runs `-w..w` (GL) rather than `0..w`, inferred from scale 0.5
+    /// and translate 0.5. WebGPU clips like Vulkan, so GL-range shaders need z remapped.
     pub fn depth_minus_one_to_one(&self) -> bool {
         self.depth_translate - self.depth_scale >= 0.0
     }
 }
 
-/// The WebGPU topology to draw with, and the primitive whose indices have to
-/// be rewritten first.
-///
-/// A fan, a quad strip and a polygon all become a triangle list through
-/// `raster::assemble`, the same call the rasterizer assembles them with, so
-/// the two cannot disagree about which triangles a quad is. Line loops and
-/// bare points and lines are not on that list: `assemble` produces nothing
-/// for them, and neither renderer draws them.
+/// WebGPU topology, and the primitive whose indices `raster::assemble` must
+/// rewrite first. Line loops, points and lines are drawn by neither renderer.
 fn topology(primitive: Primitive) -> Result<(Topology, Option<Primitive>), Unsupported> {
     match primitive {
         Primitive::Points => Ok((Topology::PointList, None)),
@@ -661,10 +535,8 @@ fn topology(primitive: Primitive) -> Result<(Topology, Option<Primitive>), Unsup
     }
 }
 
-/// Both numberings, as [`crate::gpu::raster`]'s `blend_factor` takes them:
-/// Mesa writes the GL enum straight through and deko3d and nvn write the D3D
-/// one. A code in neither is an error here where the rasterizer answers
-/// `One`: a rasterizer has to produce a pixel, and this does not.
+/// GL (Mesa) or D3D (deko3d, nvn) numbering. Unknown codes are errors here,
+/// where the rasterizer answers `One`.
 fn blend_factor(code: u32) -> Result<BlendFactor, Unsupported> {
     Ok(match code {
         0x01 | 0x4000 => BlendFactor::Zero,
@@ -680,9 +552,7 @@ fn blend_factor(code: u32) -> Result<BlendFactor, Unsupported> {
         0x0b | 0x4308 => BlendFactor::SrcAlphaSaturated,
         0x61 | 0xc001 => BlendFactor::Constant,
         0x62 | 0xc002 => BlendFactor::OneMinusConstant,
-        // ConstantAlpha and its complement broadcast the blend constant's
-        // alpha to all four channels. WebGPU's `Constant` is per-channel and
-        // there is no alpha-only form of it.
+        // ConstantAlpha has no WebGPU form: `Constant` is per-channel.
         code => return Err(Unsupported::BlendFactor { code }),
     })
 }
@@ -716,10 +586,7 @@ fn blend(target: BlendTarget) -> Result<Option<Blend>, Unsupported> {
     }))
 }
 
-/// The GL comparison enums, which are the ones [`crate::gpu::raster`]'s
-/// `depth_test_passes` implements. `DepthState`'s doc describes a one-based
-/// `DepthTestFunc` numbering as well; nothing decodes that, so a pipeline
-/// claiming to would disagree with the rasterizer it is meant to match.
+/// The GL comparison enums `raster::depth_test_passes` implements.
 fn depth_compare(code: u32) -> Result<Compare, Unsupported> {
     Ok(match code {
         1 | 0x0200 => Compare::Never,
@@ -734,7 +601,6 @@ fn depth_compare(code: u32) -> Result<Compare, Unsupported> {
     })
 }
 
-/// The WebGPU format a depth surface's layout names.
 pub fn depth_format(layout: DepthLayout) -> Result<Format, Unsupported> {
     Ok(
         match (
@@ -756,7 +622,6 @@ fn depth(layout: DepthLayout, state: DepthState) -> Result<Depth, Unsupported> {
     Ok(Depth {
         format: depth_format(layout)?,
         write_enabled: state.write_enabled,
-        // A disabled test passes everything, which is what `Always` says.
         compare: if state.test_enabled {
             depth_compare(state.func)?
         } else {
@@ -765,23 +630,11 @@ fn depth(layout: DepthLayout, state: DepthState) -> Result<Depth, Unsupported> {
     })
 }
 
-/// The WebGPU format a colour target's raw code names.
-///
-/// Follows [`crate::gpu::surface`]'s reading of those codes rather than a
-/// second one, the tests below check the two still agree about how wide a
-/// pixel is, whether it is sRGB and what kind of number it holds, which is
-/// what would drift.
-///
-/// This is the texture path's format too ([`crate::gpu::upload`]'s
-/// `image_copy`), so a code with no name costs a title the texture as well as
-/// the target. Two families have none on purpose: the integer formats, whose
-/// WebGPU pipeline would need the integer fragment output and integer sampled
-/// texture the shader translator does not yet emit, and the packings WebGPU
-/// has no spelling for.
+/// The WebGPU format for a colour code, following [`crate::gpu::surface`]'s
+/// reading. Also used for textures. Integer formats and packings WebGPU lacks are unnamed.
 pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
     Ok(match format.raw {
-        // Eight bits a channel. `0xD8` and `0xD9` are the SINT and UINT codes
-        // at these same bytes.
+        // Eight bits a channel. `0xD8`/`0xD9` are the SINT/UINT codes.
         0xD5 | 0xF9 => Format::Rgba8Unorm,
         0xD6 | 0xFA => Format::Rgba8UnormSrgb,
         0xD7 => Format::Rgba8Snorm,
@@ -791,8 +644,7 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
         0xEB => Format::Rg8Snorm,
         0xF3 => Format::R8Unorm,
         0xF4 => Format::R8Snorm,
-        // Sixteen. The normalized ones need `texture-format-16bit-norm`,
-        // which is native-only; see `switch_gpu::device_descriptor`.
+        // Sixteen. Normalized needs `texture-format-16bit-norm` (native only).
         0xC6 => Format::Rgba16Unorm,
         0xC7 => Format::Rgba16Snorm,
         0xCA | 0xCE => Format::Rgba16Float,
@@ -802,7 +654,7 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
         0xEE => Format::R16Unorm,
         0xEF => Format::R16Snorm,
         0xF2 => Format::R16Float,
-        // Thirty-two, and the two packed formats WebGPU spells.
+        // Thirty-two, and the packed formats WebGPU has.
         0xC0 | 0xC3 => Format::Rgba32Float,
         0xCB => Format::Rg32Float,
         0xE5 => Format::R32Float,
@@ -812,16 +664,14 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
     })
 }
 
-/// `DkVtxAttribType` (deko3d.h), as `crate::gpu::raster` also names them.
+/// `DkVtxAttribType` (deko3d.h).
 const ATTRIB_TYPE_SNORM: u32 = 1;
 const ATTRIB_TYPE_UNORM: u32 = 2;
 const ATTRIB_TYPE_SINT: u32 = 3;
 const ATTRIB_TYPE_UINT: u32 = 4;
 const ATTRIB_TYPE_FLOAT: u32 = 7;
 
-/// The formats [`crate::gpu::raster`]'s `fetch_attribute` decodes, and no
-/// others: a pipeline that claimed one the rasterizer cannot fetch would
-/// draw something the reference could not be compared against.
+/// Only the formats `raster::fetch_attribute` decodes.
 fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
     Ok(match (size, ty) {
         (0x01, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32x4,
@@ -836,11 +686,7 @@ fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
         (0x02, ATTRIB_TYPE_UINT) => VertexFormat::Uint32x3,
         (0x04, ATTRIB_TYPE_UINT) => VertexFormat::Uint32x2,
         (0x12, ATTRIB_TYPE_UINT) => VertexFormat::Uint32,
-        // The 16- and 8-bit shapes WebGPU spells: one, two and four
-        // components. Three has no vertex format to build a pipeline out of,
-        // so `3x16` and `3x8` are left to the rasterizer. A shape with fewer
-        // than four pads the rest `(0, 0, 0, 1)` on both renderers, an
-        // integer one with the integer 1.
+        // 16- and 8-bit shapes WebGPU has; three-component ones stay on the rasterizer.
         (0x1b, ATTRIB_TYPE_FLOAT) => VertexFormat::Float16,
         (0x1b, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm16,
         (0x1b, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm16,
@@ -868,8 +714,7 @@ fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
         (0x0a, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm8x4,
         (0x0a, ATTRIB_TYPE_SINT) => VertexFormat::Sint8x4,
         (0x0a, ATTRIB_TYPE_UINT) => VertexFormat::Uint8x4,
-        // Size `0x30` is 10-10-10-2, fetched as a word and unpacked in the
-        // entry point: see [`Packed1010102`].
+        // Size `0x30` is 10-10-10-2; see [`Packed1010102`].
         (0x30, ATTRIB_TYPE_SNORM) => VertexFormat::Packed1010102(Packed1010102::Snorm),
         (0x30, ATTRIB_TYPE_UNORM) => VertexFormat::Packed1010102(Packed1010102::Unorm),
         (0x30, ATTRIB_TYPE_SINT) => VertexFormat::Packed1010102(Packed1010102::Sint),
@@ -878,15 +723,13 @@ fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
     })
 }
 
-/// Group the attributes by the array they read, which is the shape WebGPU
-/// wants and the opposite of the register file's.
+/// Group attributes by vertex array, as WebGPU wants.
 fn vertex_buffers(engine: &Engine3D) -> Result<(Vec<VertexBuffer>, Vec<u32>), Unsupported> {
     let mut buffers: Vec<VertexBuffer> = Vec::new();
     let mut fixed = Vec::new();
     for location in 0..MAX_VERTEX_ATTRIBS {
         let attrib = engine.vertex_attrib(location);
-        // Size 0 is what an unconfigured slot reads back as, so it means
-        // "not used" rather than "a format I do not know".
+        // Size 0 is an unconfigured slot.
         if attrib.size == 0 {
             continue;
         }
@@ -896,9 +739,7 @@ fn vertex_buffers(engine: &Engine3D) -> Result<(Vec<VertexBuffer>, Vec<u32>), Un
         }
         let array = engine.vertex_array(attrib.buffer_id);
         if !array.enabled {
-            // The attribute claims to read an array the draw never turned
-            // on. `fetch_attribute` calls that an error rather than
-            // inventing a value, and so does this.
+            // An attribute reading a disabled array is an error, as in `fetch_attribute`.
             return Err(Unsupported::State(format!(
                 "attribute {location} reads from disabled vertex buffer {}",
                 attrib.buffer_id
@@ -923,8 +764,7 @@ fn vertex_buffers(engine: &Engine3D) -> Result<(Vec<VertexBuffer>, Vec<u32>), Un
     Ok((buffers, fixed))
 }
 
-/// A divisor of zero steps per vertex and one steps per instance, which are
-/// WebGPU's two. Anything else (every `n` instances) it cannot say.
+/// Divisor 0 steps per vertex, 1 per instance; others are unsupported.
 fn step_mode(array: VertexArray) -> Result<StepMode, Unsupported> {
     match array.divisor {
         0 => Ok(StepMode::Vertex),
@@ -937,8 +777,7 @@ fn step_mode(array: VertexArray) -> Result<StepMode, Unsupported> {
 mod tests {
     use super::*;
 
-    /// The two numberings, paired: the D3D code a deko3d or nvn driver
-    /// writes, and the GL code Mesa writes, for the same factor.
+    /// (D3D code, GL code, factor).
     const FACTOR_PAIRS: &[(u32, u32, BlendFactor)] = &[
         (0x01, 0x4000, BlendFactor::Zero),
         (0x02, 0x4001, BlendFactor::One),
@@ -957,10 +796,7 @@ mod tests {
 
     #[test]
     fn both_numberings_name_the_same_blend_factor() {
-        // Which one a register holds is down to whose driver wrote it, and a
-        // backend that only knew one would blend a third of this emulator's
-        // draws wrongly, the Home Menu's whole UI blends
-        // SrcAlpha/OneMinusSrcAlpha, in the numbering that is not GL's.
+        // Both numberings occur; the Home Menu uses the D3D one.
         for &(d3d, gl, expected) in FACTOR_PAIRS {
             assert_eq!(blend_factor(d3d), Ok(expected), "D3D {d3d:#x}");
             assert_eq!(blend_factor(gl), Ok(expected), "GL {gl:#x}");
@@ -969,10 +805,7 @@ mod tests {
 
     #[test]
     fn a_factor_neither_numbering_knows_is_reported_rather_than_defaulted() {
-        // `raster::blend_factor` answers `One` here, which is what a
-        // rasterizer that must produce a pixel has to do. A description can
-        // say it does not know, and saying so is what sends the draw to the
-        // rasterizer instead of drawing it differently.
+        // `raster::blend_factor` answers `One`; this reports it instead.
         assert_eq!(
             blend_factor(0x1234),
             Err(Unsupported::BlendFactor { code: 0x1234 })
@@ -981,9 +814,6 @@ mod tests {
 
     #[test]
     fn a_constant_alpha_factor_has_no_webgpu_spelling() {
-        // ConstantAlpha broadcasts the blend constant's alpha to all four
-        // channels; WebGPU's `Constant` is per-channel and has no alpha-only
-        // form.
         for code in [0x63, 0x64, 0xc003, 0xc004] {
             assert_eq!(blend_factor(code), Err(Unsupported::BlendFactor { code }));
         }
@@ -1018,7 +848,6 @@ mod tests {
             func_alpha_src: 0,
             func_alpha_dst: 0,
         };
-        // The codes are nonsense, and unreachable while it is disabled.
         assert_eq!(blend(target), Ok(None));
         target.enabled = true;
         assert!(blend(target).is_err(), "an enabled blend reads its codes");
@@ -1026,9 +855,7 @@ mod tests {
 
     #[test]
     fn topologies_webgpu_lacks_are_assembled_into_triangles_instead() {
-        // Every one of these is a triangle list once `raster::assemble` has
-        // rewritten the indices, and saying so is what keeps the draw on the
-        // device. A line loop is not: nothing assembles it.
+        // These all become triangle lists; a line loop does not.
         for primitive in [
             Primitive::TriangleFan,
             Primitive::Quads,
@@ -1060,8 +887,7 @@ mod tests {
 
     #[test]
     fn a_depth_test_that_is_off_compares_always() {
-        // What a disabled test does, said in the only vocabulary a pipeline
-        // has for it. The `func` here is nonsense and never read.
+        // A disabled test is `Always`; `func` is never read.
         let layout = DepthLayout {
             bytes: 4,
             depth_bits: 24,
@@ -1085,12 +911,7 @@ mod tests {
 
     #[test]
     fn both_numberings_of_a_depth_comparison_decode_the_same() {
-        // Maxwell's register takes either, and titles use both: Mesa's GL
-        // driver writes 0x200..=0x207, a D3D-shaped path writes 1..=8. Eden's
-        // `ComparisonOp` lists the two side by side. This used to reject
-        // 1..=8 on the grounds that the rasterizer only decoded the GL half,
-        // which was true, and the reason Just Dance 2019 fell back to software
-        // on every draw and then had its depth test ignored there.
+        // Maxwell accepts both GL (0x200..=0x207) and D3D (1..=8) comparison codes.
         let layout = DepthLayout {
             bytes: 4,
             depth_bits: 24,
@@ -1111,7 +932,6 @@ mod tests {
         assert_eq!(of(4), Compare::LessEqual, "the one Just Dance 2019 sends");
         assert_eq!(of(0x0203), Compare::LessEqual);
 
-        // A code in neither numbering is still reported rather than guessed.
         let on = DepthState {
             test_enabled: true,
             write_enabled: false,
@@ -1123,7 +943,6 @@ mod tests {
         );
     }
 
-    /// How wide a pixel of each colour format is, and whether it is sRGB.
     fn shape(format: Format) -> (u32, bool) {
         match format {
             Format::R8Unorm | Format::R8Snorm => (1, false),
@@ -1147,8 +966,7 @@ mod tests {
         }
     }
 
-    /// The range the blend unit clamps into for each colour format, which is
-    /// `None` for a float one.
+    /// The blend clamp range per format; `None` for floats.
     fn clamp(format: Format) -> Option<(f32, f32)> {
         match format {
             Format::R16Float
@@ -1170,10 +988,7 @@ mod tests {
 
     #[test]
     fn a_colour_format_is_what_the_surface_module_makes_of_the_same_code() {
-        // These names are a second reading of the raw codes `gpu::surface`
-        // already interprets, and two readings drift. This is the coupling:
-        // every code named here has to have the width and the transfer
-        // function `surface` gives it, or one of the two is wrong.
+        // These names must agree with `gpu::surface` on width and transfer function.
         for raw in 0u32..=0xff {
             let Ok(format) = ColorFormat::from_raw(raw) else {
                 continue;
@@ -1184,25 +999,18 @@ mod tests {
             let (bytes, srgb) = shape(named);
             assert_eq!(bytes, format.bytes_per_pixel, "{raw:#x} is {named:?}");
             assert_eq!(srgb, format.is_srgb(), "{raw:#x} is {named:?}");
-            // And what kind of number the channels hold. Width and transfer
-            // function alone did not tell `A8B8G8R8_SINT` apart from the
-            // UNORM code above it, and it was named `Rgba8Unorm` for years.
+            // And on the channel number kind.
             assert_eq!(clamp(named), format.source_clamp(), "{raw:#x} is {named:?}");
         }
     }
 
-    /// The codes `gpu::surface` can store but the device gets no name for.
-    /// It is a decision rather than a gap, the integer formats wait on a
-    /// shader path that is not float-typed, and the rest have no WebGPU
-    /// spelling, so it is written down where a change to it is visible.
+    /// Codes `gpu::surface` stores that have no device name, deliberately.
     #[test]
     fn the_codes_with_no_webgpu_name_are_the_ones_that_cannot_have_one() {
         const UNNAMED: [u32; 26] = [
-            // SINT and UINT, at every width Maxwell offers them.
             0xC1, 0xC2, 0xC4, 0xC5, 0xC8, 0xC9, 0xCC, 0xCD, 0xD2, 0xD8, 0xD9, 0xDC, 0xDD, 0xE3,
             0xE4, 0xEC, 0xED, 0xF0, 0xF1, 0xF5, 0xF6,
-            // `A2R10G10B10`, `R5G6B5`, `A1R5G5B5`, `X1R5G5B5` and `A8`:
-            // WebGPU orders or packs none of these.
+            // `A2R10G10B10`, `R5G6B5`, `A1R5G5B5`, `X1R5G5B5`, `A8`.
             0xDF, 0xE8, 0xE9, 0xF7, 0xF8,
         ];
         let mut unnamed = Vec::new();
@@ -1210,7 +1018,6 @@ mod tests {
             let Ok(format) = ColorFormat::from_raw(raw) else {
                 continue;
             };
-            // A code `surface` cannot store is not a device question.
             if format.encode([0.0; 4]).is_err() {
                 continue;
             }
@@ -1225,9 +1032,7 @@ mod tests {
 
     #[test]
     fn a_mirrored_viewport_is_a_rectangle_and_a_flag() {
-        // A driver writes a negative scale_y to reconcile GL's bottom-left
-        // window origin with a target whose row 0 is at the top. The
-        // rectangle is the same either way; which way up it is is not.
+        // A negative scale_y flips the viewport, same rectangle.
         let flipped = viewport(ViewportTransform {
             scale: [640.0, -360.0, 0.5],
             translate: [640.0, 360.0, 0.5],
@@ -1245,10 +1050,7 @@ mod tests {
 
     #[test]
     fn a_gl_depth_range_is_told_apart_from_a_vulkan_one() {
-        // Both map onto a 0..1 window depth, and differ only in what the
-        // shader's z is expected to span, which decides whether a vertex
-        // entry point has to remap it. Every transform this has seen is the
-        // first shape.
+        // Both map onto 0..1 window depth, differing in the expected clip z range.
         let gl = viewport(ViewportTransform {
             scale: [1.0, 1.0, 0.5],
             translate: [0.0, 0.0, 0.5],
@@ -1273,8 +1075,6 @@ mod tests {
         };
         assert_eq!(step_mode(array(0)), Ok(StepMode::Vertex));
         assert_eq!(step_mode(array(1)), Ok(StepMode::Instance));
-        // Every two instances: WebGPU steps per instance or per vertex and
-        // has nothing in between.
         assert_eq!(
             step_mode(array(2)),
             Err(Unsupported::InstanceDivisor { divisor: 2 })
@@ -1303,15 +1103,11 @@ mod tests {
             vertex_format(0x0a, ATTRIB_TYPE_UINT),
             Ok(VertexFormat::Uint8x4)
         );
-        // An integer attribute reaches the shader as its bits, so it is the
-        // one kind that cannot be declared `vec4<f32>`.
         assert_eq!(VertexFormat::Sint8x4.base(), AttributeBase::Sint);
         assert_eq!(VertexFormat::Uint8x4.base(), AttributeBase::Uint);
         assert_eq!(VertexFormat::Snorm8x4.base(), AttributeBase::Float);
         assert_eq!(VertexFormat::Unorm8x4.base(), AttributeBase::Float);
-        // The 16-bit shapes WebGPU spells. `4x16` float is what Minecraft's
-        // every draw is built out of, and refusing it put the whole title on
-        // the rasterizer, which then could not fetch it either.
+        // The 16-bit shapes WebGPU has.
         assert_eq!(
             vertex_format(0x03, ATTRIB_TYPE_FLOAT),
             Ok(VertexFormat::Float16x4)
@@ -1331,9 +1127,7 @@ mod tests {
         assert_eq!(VertexFormat::Sint16x4.base(), AttributeBase::Sint);
         assert_eq!(VertexFormat::Uint16x2.base(), AttributeBase::Uint);
         assert_eq!(VertexFormat::Float16x4.base(), AttributeBase::Float);
-        // `3x16` is a shape `fetch_attribute` decodes and WebGPU has no
-        // vertex format for, so it is the rasterizer's, the same split the
-        // odd 8-bit shapes are on.
+        // `3x16` has no WebGPU vertex format.
         assert_eq!(
             vertex_format(0x05, ATTRIB_TYPE_FLOAT),
             Err(Unsupported::VertexFormat {
@@ -1341,7 +1135,6 @@ mod tests {
                 ty: ATTRIB_TYPE_FLOAT
             })
         );
-        // `10_10_10_2`, which both renderers now unpack from one word.
         assert_eq!(
             vertex_format(0x30, ATTRIB_TYPE_UNORM),
             Ok(VertexFormat::Packed1010102(Packed1010102::Unorm))
@@ -1350,7 +1143,6 @@ mod tests {
             VertexFormat::Packed1010102(Packed1010102::Sint).base(),
             AttributeBase::Sint
         );
-        // The narrow 8-bit shapes WebGPU has, and the one it has not.
         assert_eq!(
             vertex_format(0x1d, ATTRIB_TYPE_UINT),
             Ok(VertexFormat::Uint8)
@@ -1374,7 +1166,6 @@ mod tests {
                 ty: ATTRIB_TYPE_UNORM
             })
         );
-        // `1x16` and the 32-bit integers.
         assert_eq!(
             vertex_format(0x1b, ATTRIB_TYPE_FLOAT),
             Ok(VertexFormat::Float16)
@@ -1385,8 +1176,7 @@ mod tests {
         );
         assert_eq!(VertexFormat::Uint32x3.base(), AttributeBase::Uint);
         assert_eq!(VertexFormat::Uint32x3.size(), 12);
-        // A shape neither renderer decodes: `11_11_10`. Claiming it would
-        // draw something the reference could not be compared against.
+        // `11_11_10` is decoded by neither renderer.
         assert_eq!(
             vertex_format(0x31, ATTRIB_TYPE_FLOAT),
             Err(Unsupported::VertexFormat {
@@ -1398,8 +1188,7 @@ mod tests {
 
     #[test]
     fn a_draw_with_no_targets_at_all_says_so_rather_than_panicking() {
-        // A register file nothing has written. The rasterizer raises the
-        // same thing rather than picking an extent out of the air.
+        // An unwritten register file is an error, as in the rasterizer.
         let engine = Engine3D::new();
         assert_eq!(
             Pipeline::of(&engine),

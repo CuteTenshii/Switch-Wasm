@@ -1,85 +1,56 @@
-//! `hwopus`, the console's Opus decoder.
+//! `hwopus`, the console's Opus decoder service.
 //!
-//! On hardware this is a service in front of the audio DSP: the caller hands
-//! it a work buffer as transfer memory, the DSP decodes into it, and the PCM
-//! comes back through an output buffer. Here the decode happens in
-//! [`crate::opus`] on the emulator's own side, so the work buffer is sized
-//! and never read: [`work_buffer_size`] still has to answer, because the
-//! caller allocates from it before it opens anything.
-//!
-//! The packets are not bare Opus. Each one arrives behind an eight-byte
-//! header of `{u32 size, u32 final_range}`, **big-endian**, and the reply's
-//! "bytes consumed" counts that header. `final_range` is the range coder
-//! state the encoder finished the packet with; a decoder that stayed in step
-//! ends with the same value, which is what
-//! [`crate::opus::Decoder::final_range`] reports.
+//! Packets carry an eight-byte big-endian `{u32 size, u32 final_range}` header.
 
 use super::Cpu;
 use crate::opus;
 use crate::Result;
 
-/// `hwopus` (module 111) description 1001: a sample rate Opus does not have.
+/// Description 1001: unsupported sample rate.
 const OPUS_INVALID_SAMPLE_RATE: u32 = 111 | (1001 << 9);
 
-/// Description 1002: a channel count this decoder cannot open.
+/// Description 1002: unsupported channel count.
 const OPUS_INVALID_CHANNEL_COUNT: u32 = 111 | (1002 << 9);
 
-/// Description 8: the input buffer is too short to hold even the header.
+/// Description 8: input shorter than the header.
 const OPUS_INPUT_TOO_SMALL: u32 = 111 | (8 << 9);
 
-/// Description 3: the input buffer is shorter than the header says.
+/// Description 3: input shorter than the header says.
 const OPUS_BUFFER_TOO_SMALL: u32 = 111 | (3 << 9);
 
-/// Description 17: the packet is not decodable Opus.
+/// Description 17: packet is not decodable Opus.
 const OPUS_INVALID_PACKET: u32 = 111 | (17 << 9);
 
-/// The eight-byte header in front of every packet.
 const PACKET_HEADER_LEN: u32 = 8;
 
-/// The DSP's own decoder object, per channel count. On hardware this is
-/// `opus_decoder_get_size` plus the object around it; here it is only a
-/// number the caller sizes an allocation with, since nothing reads that
-/// allocation. Erring small would be the dangerous direction, so these are
-/// the reference library's own sizes rounded up.
+/// Per-channel-count decoder object size, rounded up from the reference library.
 const DECODER_STATE_SIZE: [u32; 2] = [0x4A00, 0x6C00];
 
-/// The largest number of streams Opus multi-stream allows.
 const MAX_STREAMS: u32 = 255;
 
-/// `OpusMultiStreamParameters`, which is too wide for a request's raw data
-/// and so arrives in a buffer of its own.
 struct MultiStreamParams {
     sample_rate: u32,
     channels: u32,
     total_streams: u32,
     stereo_streams: u32,
     large_frame: bool,
-    /// Which stream, and which half of it, each output channel plays.
+    /// Stream and half each output channel plays.
     mapping: Vec<u8>,
 }
 
-/// One open `IHardwareOpusDecoder`.
 pub(crate) struct HwOpus {
     decoder: Decoder,
     channels: usize,
-    /// The largest number of samples per channel one packet can produce,
-    /// which bounds how much a decode may write into the caller's buffer.
+    /// Most samples per channel one packet can produce.
     max_frame: usize,
 }
 
-/// Either a plain decoder or a multi-stream one: the two are opened by
-/// different commands and decoded by different ones, and a decoder never
-/// changes from one to the other.
 enum Decoder {
-    /// Boxed because a single decoder carries far more state than a
-    /// multi-stream one's list of them, and these live in a map.
     Single(Box<opus::Decoder>),
     Multi(opus::MultiStreamDecoder),
 }
 
 impl core::fmt::Debug for HwOpus {
-    /// The decoder's own state is a megabyte of filter history that says
-    /// nothing useful in a dump; what a reader wants is how it was opened.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let kind = match self.decoder {
             Decoder::Single(_) => "single",
@@ -101,11 +72,6 @@ fn valid_sample_rate(rate: u32) -> bool {
     matches!(rate, 8000 | 12000 | 16000 | 24000 | 48000)
 }
 
-/// How large a work buffer a decoder with these parameters needs.
-///
-/// The base is the decoder object itself; on top of it goes one frame of
-/// scratch at the requested rate, and a fixed allowance for the rest of the
-/// object's bookkeeping.
 fn work_buffer_size(
     sample_rate: u32,
     channels: u32,
@@ -122,8 +88,6 @@ fn work_buffer_size(
     Ok(DECODER_STATE_SIZE[channels as usize - 1] + scratch + 0x600)
 }
 
-/// The same for a multi-stream decoder, which also needs room to hold each
-/// stream's sub-packet while it is unpicked from the one it arrived in.
 fn work_buffer_size_multistream(
     sample_rate: u32,
     channels: u32,
@@ -137,9 +101,7 @@ fn work_buffer_size_multistream(
     if !valid_sample_rate(sample_rate) {
         return Err(OPUS_INVALID_SAMPLE_RATE);
     }
-    // The sample-rate error for a bad stream count is the console's own
-    // answer, not a slip: the real service checks all three against one
-    // result.
+    // The console reports a bad stream count as a sample-rate error.
     if total_streams == 0
         || stereo_streams > total_streams
         || total_streams + stereo_streams > channels
@@ -156,8 +118,6 @@ fn work_buffer_size_multistream(
 }
 
 impl Cpu {
-    /// `hwopus`: the decoder factory, and every `IHardwareOpusDecoder` it
-    /// hands out.
     pub(super) fn hwopus_request(
         &mut self,
         tls: u32,
@@ -174,26 +134,24 @@ impl Cpu {
 
         let data = self.ipc_request_data(tls);
         match cmd_id {
-            // OpenHardwareOpusDecoder: in { OpusParameters, u32 work size },
-            // the work buffer as transfer memory, out the decoder.
+            // OpenHardwareOpusDecoder
             Some(0) => {
                 let sample_rate = self.mem.read_u32(data).unwrap_or(0);
                 let channels = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
                 self.hwopus_open(tls, handle, sample_rate, channels, false)
             }
-            // GetWorkBufferSize: in OpusParameters, out u32.
+            // GetWorkBufferSize
             Some(1) => {
                 let sample_rate = self.mem.read_u32(data).unwrap_or(0);
                 let channels = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
                 self.hwopus_reply_size(tls, work_buffer_size(sample_rate, channels, false))
             }
-            // OpenHardwareOpusDecoderForMultiStream: the parameters are too
-            // wide for the raw data, so they arrive in a pointer buffer.
+            // OpenHardwareOpusDecoderForMultiStream
             Some(2) => {
                 let params = self.hwopus_multistream_params(tls, false);
                 self.hwopus_open_multistream(tls, handle, params)
             }
-            // GetWorkBufferSizeForMultiStream.
+            // GetWorkBufferSizeForMultiStream
             Some(3) => {
                 let p = self.hwopus_multistream_params(tls, false);
                 let size = work_buffer_size_multistream(
@@ -205,27 +163,26 @@ impl Cpu {
                 );
                 self.hwopus_reply_size(tls, size)
             }
-            // OpenHardwareOpusDecoderEx: as command 0, plus the large-frame
-            // flag that doubles the longest packet the decoder will take.
+            // OpenHardwareOpusDecoderEx
             Some(4) => {
                 let sample_rate = self.mem.read_u32(data).unwrap_or(0);
                 let channels = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
                 let large = self.mem.read_u8(data.wrapping_add(8)).unwrap_or(0) != 0;
                 self.hwopus_open(tls, handle, sample_rate, channels, large)
             }
-            // GetWorkBufferSizeEx / GetWorkBufferSizeExEx.
+            // GetWorkBufferSizeEx / GetWorkBufferSizeExEx
             Some(5) | Some(8) => {
                 let sample_rate = self.mem.read_u32(data).unwrap_or(0);
                 let channels = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
                 let large = self.mem.read_u8(data.wrapping_add(8)).unwrap_or(0) != 0;
                 self.hwopus_reply_size(tls, work_buffer_size(sample_rate, channels, large))
             }
-            // OpenHardwareOpusDecoderForMultiStreamEx.
+            // OpenHardwareOpusDecoderForMultiStreamEx
             Some(6) => {
                 let params = self.hwopus_multistream_params(tls, true);
                 self.hwopus_open_multistream(tls, handle, params)
             }
-            // GetWorkBufferSizeForMultiStreamEx / …ExEx.
+            // GetWorkBufferSizeForMultiStreamEx / ExEx
             Some(7) | Some(9) => {
                 let p = self.hwopus_multistream_params(tls, true);
                 let size = work_buffer_size_multistream(
@@ -274,9 +231,6 @@ impl Cpu {
         Ok(())
     }
 
-    /// `OpusMultiStreamParameters`, from the pointer buffer the caller sent
-    /// it in: rate, channels, stream counts, the large-frame flag on the `Ex`
-    /// forms, and the channel mapping.
     fn hwopus_multistream_params(&self, tls: u32, extended: bool) -> MultiStreamParams {
         let Some((addr, size)) = self.ipc_input_buffer(tls, 0) else {
             return MultiStreamParams {
@@ -357,27 +311,17 @@ impl Cpu {
         Ok(())
     }
 
-    /// `IHardwareOpusDecoder`. Every command but the two `SetContext`s is a
-    /// decode; they differ only in whether they report how long the decode
-    /// took, whether they reset the decoder first, and whether the stream is
-    /// multi-stream.
     fn hwopus_decoder_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
-        /// Whether the command's reply carries the decode time.
         const WITH_PERF: [bool; 10] = [
             false, false, false, false, true, true, true, true, true, true,
         ];
-        /// Whether the command's request carries a reset flag.
         const WITH_RESET: [bool; 10] = [
             false, false, false, false, false, false, true, true, true, true,
         ];
 
         let key = self.ipc_object_key(tls, handle);
         match cmd_id {
-            // SetContext / SetContextForMultiStream. The context is the
-            // hardware decoder's own memory image, which says nothing about
-            // the state of this one; a caller only uses it to resume a stream
-            // it has already been feeding, and feeding it is what actually
-            // carries the state here.
+            // SetContext / SetContextForMultiStream: the hardware context is ignored.
             Some(1) | Some(3) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             Some(cmd @ 0..=9) => {
                 let index = cmd as usize;
@@ -395,7 +339,7 @@ impl Cpu {
         if input_len <= PACKET_HEADER_LEN {
             return self.write_ipc_response(tls, OPUS_INPUT_TOO_SMALL, &[], &[], &[]);
         }
-        // The header is big-endian, unlike everything else on the wire here.
+        // The header is big-endian.
         let size = self.read_bytes(input, 4);
         let size = u32::from_be_bytes([size[0], size[1], size[2], size[3]]);
         if size == 0 || size > input_len - PACKET_HEADER_LEN {
@@ -416,8 +360,6 @@ impl Cpu {
             }
         }
         let channels = decoder.channels;
-        // The caller's buffer bounds the decode as much as the packet does:
-        // a frame longer than it left room for cannot be handed back.
         let frame = decoder.max_frame.min(output_room / (2 * channels));
         let mut pcm = vec![0i16; frame * channels];
         let decoded = match &mut decoder.decoder {
@@ -426,8 +368,6 @@ impl Cpu {
         };
         let samples = match decoded {
             Ok(samples) => samples,
-            // A buffer too short for the frame is the caller's mistake and
-            // says so; anything else means the packet itself was not Opus.
             Err(opus::Error::BufferTooSmall) => {
                 return self.write_ipc_response(tls, OPUS_BUFFER_TOO_SMALL, &[], &[], &[]);
             }
@@ -444,11 +384,7 @@ impl Cpu {
         raw.extend_from_slice(&(size + PACKET_HEADER_LEN).to_le_bytes());
         raw.extend_from_slice(&(samples as u32).to_le_bytes());
         if with_perf {
-            // How long the decode took, in microseconds. Reporting zero would
-            // be a lie a caller can act on: `nn::codec` uses it to decide
-            // how far ahead to decode, so report the time the hardware would
-            // have taken, which is the samples' own duration over the DSP's
-            // real-time factor.
+            // Decode time in microseconds, as the DSP would take (real-time factor 8).
             let micros = (samples as u64 * 1_000_000) / 48_000 / 8;
             raw.extend_from_slice(&micros.to_le_bytes());
         }
@@ -456,8 +392,7 @@ impl Cpu {
     }
 }
 
-/// The most samples per channel one packet can decode to: 120 ms at 48 kHz,
-/// or 60 ms for a decoder that was not opened for large frames.
+/// 120 ms at 48 kHz, or 60 ms without large frames.
 fn max_frame(sample_rate: u32, large: bool) -> usize {
     let millis = if large { 120 } else { 60 };
     (sample_rate as usize * millis) / 1000
