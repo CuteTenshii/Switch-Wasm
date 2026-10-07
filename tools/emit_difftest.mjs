@@ -170,10 +170,11 @@ for (const line of manifest.slice(first)) {
   const bad = [];
   // Allowed retired counts: `exact` all, `maybe` all or none, `none` none (the
   // interpreter's watchpoint fired). `left:<target>` retired all with `LEFT`
-  // set and the target in the pc.
-  const leftTo = mode.startsWith('left:') ? Number(mode.slice(5)) : null;
-  const allowed = leftTo !== null
-    ? [Number(ops) | LEFT]
+  // set and the target in the pc; `maybe-left:<target>` that or none.
+  const leftMode = /^(maybe-)?left:(.+)$/.exec(mode);
+  const leftTo = leftMode ? Number(leftMode[2]) : null;
+  const allowed = leftMode
+    ? (leftMode[1] ? [Number(ops) | LEFT, 0] : [Number(ops) | LEFT])
     : { exact: [Number(ops)], maybe: [Number(ops), 0], none: [0] }[mode];
   if (!allowed) {
     console.error(`${name}: manifest asks for an unknown mode ${mode}`);
@@ -193,7 +194,7 @@ for (const line of manifest.slice(first)) {
     handedBack++;
   }
 
-  if (leftTo !== null && want) {
+  if (leftTo !== null && want && retired !== 0) {
     const gotPc = view.getUint32(PC_AT, true) >>> 0;
     if (gotPc !== (leftTo >>> 0)) {
       bad.push(`pc: emitted ${gotPc.toString(16)}, interpreted ${(leftTo >>> 0).toString(16)}`);

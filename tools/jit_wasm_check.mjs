@@ -86,6 +86,24 @@ const PROGRAMS = [
     // Either path is five instructions: 4001 steps is 800 trips plus one.
     expect: { 0: 800n, 2: 400n, 3: 400n },
   },
+  {
+    name: 'calls and returns',
+    data: false,
+    code: [
+      0x91000400, // add  x0, x0, #1
+      0x94000004, // bl   #0x10          -> BASE+0x14
+      0x100000a4, // adr  x4, #0x14      -> x4 = BASE+0x1c
+      0xd63f0080, // blr  x4
+      0x17fffffc, // b    #-0x10         -> back to BASE
+      0x91000442, // add  x2, x2, #1
+      0xd65f03c0, // ret
+      0x91000463, // add  x3, x3, #1
+      0xd65f03c0, // ret
+    ],
+    // Nine instructions a trip; enough trips for each block to be compiled.
+    steps: 8001n,
+    expect: { 0: 889n, 2: 889n, 3: 889n },
+  },
 ];
 
 function elf(program) {
@@ -170,7 +188,7 @@ function run(program, jit) {
   if (entry !== BigInt(BASE)) {
     throw new Error(`the core loaded the program at ${entry}, not ${BASE}`);
   }
-  const steps = api.switch_run(handle, STEPS);
+  const steps = api.switch_run(handle, program.steps ?? STEPS);
   const regs = [];
   for (let i = 0; i < 31; i++) regs.push(api.switch_get_reg(handle, i));
   const state = {

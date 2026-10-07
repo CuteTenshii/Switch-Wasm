@@ -3,7 +3,7 @@
 
 use super::cache::JitStats;
 use super::decode::translate;
-use super::emit::{emit_block, LEFT};
+use super::emit::{emit_block, writes_term, LEFT};
 use super::host;
 use super::ir::{Block, Code, Exit, Op, PackedImm, Term};
 use crate::cpu::bits::*;
@@ -314,7 +314,8 @@ impl Cpu {
             return None;
         };
         // Only enter a block that fits the remaining budget.
-        if block.ops.len() as u64 > budget {
+        let whole = block.ops.len() + usize::from(block.term.as_ref().is_some_and(writes_term));
+        if whole as u64 > budget {
             return None;
         }
         self.jit.entered_emitted += 1;
@@ -324,7 +325,6 @@ impl Cpu {
         let answer = unsafe { host::enter(entry, state) };
         let left = answer & LEFT != 0;
         let retired = (answer & !LEFT) as usize;
-        let whole = block.ops.len();
         if retired == 0 && !left {
             let misses = misses + 1;
             if misses >= MAX_MISSES {

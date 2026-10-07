@@ -121,6 +121,7 @@ fn main() {
     let mut cases = 0usize;
     let mut faulted = 0usize;
     let mut refused = 0usize;
+    let mut rewrote = 0usize;
     let mut handed_back = 0usize;
     let mut pinned = 0usize;
     let all_flags: Vec<u8> = (0u8..16).collect();
@@ -189,6 +190,12 @@ fn main() {
                         faulted += 1;
                         continue;
                     }
+                    // A store over the block's own terminator; real code pages hand back.
+                    let left = path.last() == Some(&u32::MAX);
+                    if left && cpu.mem.read_u32(path[ops - 1]).ok() != Some(RET) {
+                        rewrote += 1;
+                        continue;
+                    }
 
                     // Faults, watched reads and writes, and cached-page stores must all hand
                     // back with no state change.
@@ -200,12 +207,15 @@ fn main() {
                     let name = format!("case{cases:05}");
                     std::fs::write(format!("{out_dir}/{name}.wasm"), &module)
                         .expect("cannot write a module");
-                    let mode = match (hands_back, must_hand_back) {
-                        (false, _) => "exact",
-                        (true, false) => "maybe",
-                        (true, true) => {
+                    // A written terminator leaves with the interpreter's pc.
+                    let mode = match (hands_back, must_hand_back, left) {
+                        (false, _, false) => "exact".into(),
+                        (false, _, true) => format!("left:{:#010x}", cpu.get_pc()),
+                        (true, false, false) => "maybe".into(),
+                        (true, false, true) => format!("maybe-left:{:#010x}", cpu.get_pc()),
+                        (true, true, _) => {
                             pinned += 1;
-                            "none"
+                            "none".into()
                         }
                     };
                     let _ = write!(
@@ -249,6 +259,7 @@ fn main() {
          watched_at {WATCHED_AT}\n\
          pages_at {PAGES_AT}\n\
          discard_slot {DISCARD_SLOT}\n\
+         pc_at {PC_AT}\n\
          table_at {TABLE_AT}\n\
          bitmap_at {BITMAP_AT}\n\
          slots {}\n\
@@ -274,7 +285,8 @@ fn main() {
         "{cases} cases over {} forms written to {out_dir}/ \
          ({handed_back} forms able to hand an instruction back, \
          {pinned} cases where it has to, \
-         {refused} blocks the emitter refused, {faulted} that faulted)",
+         {refused} blocks the emitter refused, {faulted} that faulted, \
+         {rewrote} that stored over their terminator)",
         buckets.len()
     );
     println!("now run: node tools/emit_difftest.mjs {out_dir}");

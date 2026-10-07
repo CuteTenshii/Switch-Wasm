@@ -5,15 +5,16 @@
 //! accesses walk the page table inline and make exactly the checks of
 //! [`crate::mem::Memory::peek`]/[`crate::mem::Memory::poke`], handing the
 //! instruction back to the interpreter when they decline. `run` returns how
-//! many instructions retired, with [`LEFT`] set when it left at a taken branch.
+//! many instructions retired, with [`LEFT`] set when it left at a taken branch or
+//! a terminator [`writes_term`] accepts.
 //! A block with anything the emitter cannot write is [`Refused`].
 
 use super::decode::{decode, translate, Decoded};
-use super::ir::{Block, Exit, Op};
+use super::ir::{Block, Exit, Op, Term};
 use super::wasm::{Func, Module, I32, I64};
 use crate::cpu::bits::mask_of_width;
 use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
-use crate::cpu::{Cpu, CONDITION_MASKS};
+use crate::cpu::{Cpu, CONDITION_MASKS, SELF_RETURN_TRAMPOLINE};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
 /// Whether the emitter has a way to write `insn` out as wasm. Block-ending and
@@ -261,6 +262,40 @@ impl Emitter<'_> {
     fn store_reg(&mut self, slot: u8) {
         self.f
             .i64_store(ALIGN_8, self.layout.regs + 8 * u32::from(slot));
+    }
+
+    /// Leave through `term` with `pc` on its target and `x30` linked for a call.
+    fn term(&mut self, term: &Term) {
+        match *term {
+            Term::B { target } | Term::Bl { target, .. } => {
+                self.f.i32_const(target as i32);
+                self.f.local_set(L_ADDR);
+            }
+            // Read before linking: `blr x30` jumps to the old x30.
+            Term::Br { rn } | Term::Blr { rn, .. } | Term::Ret { rn } => {
+                self.read_reg_raw(rn & 0x1F);
+                self.f.i32_wrap_i64();
+                self.f.local_set(L_ADDR);
+            }
+            _ => unreachable!("writes_term accepts only branches"),
+        }
+        // A return to 0 is homebrew's exit, routed through the trampoline.
+        if let Term::Ret { .. } = term {
+            self.f.i32_const(SELF_RETURN_TRAMPOLINE as i32);
+            self.f.local_get(L_ADDR);
+            self.f.local_get(L_ADDR);
+            self.f.i32_eqz();
+            self.f.select();
+            self.f.local_set(L_ADDR);
+        }
+        if let Term::Bl { ret_pc, .. } | Term::Blr { ret_pc, .. } = *term {
+            self.addr_regs();
+            self.f.i64_const(i64::from(ret_pc));
+            self.store_reg(30);
+        }
+        self.f.local_get(STATE);
+        self.f.local_get(L_ADDR);
+        self.f.i32_store(ALIGN_4, self.layout.pc);
     }
 
     /// Write the local `L_R` into `regs[slot]`.
@@ -1570,6 +1605,14 @@ fn access_bytes(acc: Acc) -> u32 {
     }
 }
 
+/// Whether [`emit_block`] writes `term` instead of leaving it to [`super::exec`].
+pub(super) fn writes_term(term: &Term) -> bool {
+    matches!(
+        term,
+        Term::B { .. } | Term::Bl { .. } | Term::Br { .. } | Term::Blr { .. } | Term::Ret { .. }
+    )
+}
+
 /// Emit `block`'s body as a module exporting `run`.
 pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refused> {
     let mut f = scratch_func();
@@ -1602,7 +1645,13 @@ pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refus
     if next_exit != block.exits.len() {
         return Err(Refused::ControlFlow);
     }
-    f.i32_const(block.ops.len() as i32);
+    match block.term.as_ref().filter(|term| writes_term(term)) {
+        Some(term) => {
+            e.term(term);
+            f.i32_const(((block.ops.len() + 1) as u32 | LEFT) as i32);
+        }
+        None => f.i32_const(block.ops.len() as i32),
+    }
     f.end();
 
     let mut m = Module::new();
@@ -1633,6 +1682,10 @@ impl Cpu {
             }
             path.push(at);
             at = at.wrapping_add(4);
+        }
+        // A written terminator is covered too; no branch target is `u32::MAX`.
+        if block.term.as_ref().is_some_and(writes_term) {
+            path.push(u32::MAX);
         }
         Ok((bytes, path))
     }
