@@ -20,8 +20,8 @@ Status, lowest to highest:
 | Title | Title ID | Version | Status | How far it gets |
 |---|---|---|---|---|
 | Minecraft | 0100D71004694000 | 1.0.0 | Menus | Mojang logo, the Autosave notice over the title world, and with <kbd>A</kbd> the Play screen (Worlds, Friends, Servers). Creating a world needs menu navigation, so gameplay is untested. The software renderer draws blocky tile glitches on the right half of the title world. |
+| Just Dance 2017 | 0100BCE000598000 | 1.0.0 | Menus | In the browser (2026-10-07): dancer card creation and the song carousel. Its VP8 videos play correctly since `ce3870d` (blocky and green before). |
 | Asphalt 9: Legends | 01007B000C834000 | 1.3.1 | Boots | Title splash, then "Connection error: could not connect to the server to launch Asphalt 9 (error 2)". It needs Gameloft's servers. |
-| Just Dance 2017 | 0100BCE000598000 | 1.0.0 | Boots | The Joy-Con strap warning, then its background, where it stays; <kbd>A</kbd> changes nothing. Slow: 1143 frames in 25B instructions. |
 | Just Dance 2019 | 010075600AE96000 | 284652.419607 | Boots | A white screen on both renderers through frame 6000 (about 100 s of guest time), with or without <kbd>A</kbd>. It keeps presenting frames, but is too slow in the browser to see further. |
 | A Short Hike | 01004890117B2000 | 1.0.0 | Boots | A white square on a dark screen, then black through 7840 frames, with or without <kbd>A</kbd>. |
 
