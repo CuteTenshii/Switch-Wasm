@@ -15,6 +15,7 @@ export const NAND_CONTENT = 'content';
 export const NAND_TITLES = 'titles';
 export const NAND_SAVES = 'saves';
 export const NAND_USERS = 'users';
+export const NAND_CONTROLS = 'controls';
 
 export interface StoredEntry {
   kind: 'dir' | 'file';
@@ -66,13 +67,14 @@ let nandDb: IDBDatabase | null = null;
 export function nandIdb(): Promise<IDBDatabase> {
   if (nandDb) return Promise.resolve(nandDb);
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(NAND_DB_NAME, 3);
+    const req = indexedDB.open(NAND_DB_NAME, 4);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(NAND_CONTENT)) db.createObjectStore(NAND_CONTENT);
       if (!db.objectStoreNames.contains(NAND_TITLES)) db.createObjectStore(NAND_TITLES);
       if (!db.objectStoreNames.contains(NAND_SAVES)) db.createObjectStore(NAND_SAVES);
       if (!db.objectStoreNames.contains(NAND_USERS)) db.createObjectStore(NAND_USERS);
+      if (!db.objectStoreNames.contains(NAND_CONTROLS)) db.createObjectStore(NAND_CONTROLS);
     };
     req.onsuccess = () => {
       nandDb = req.result;

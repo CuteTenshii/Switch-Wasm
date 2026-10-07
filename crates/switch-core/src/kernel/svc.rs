@@ -707,7 +707,7 @@ impl Cpu {
                                     self.fs_storage_request(tls, handle, cmd_id)?
                                 }
                                 Some("fsp-srv-save-info-reader") => {
-                                    self.fs_save_data_info_reader_request(tls, cmd_id)?
+                                    self.fs_save_data_info_reader_request(tls, handle, cmd_id)?
                                 }
                                 Some("fsp-srv-device-operator") => {
                                     self.fs_device_operator_request(tls, cmd_id)?
@@ -729,7 +729,7 @@ impl Cpu {
                         }
                         "fsp-srv-storage" => self.fs_storage_request(tls, handle, cmd_id)?,
                         "fsp-srv-save-info-reader" => {
-                            self.fs_save_data_info_reader_request(tls, cmd_id)?
+                            self.fs_save_data_info_reader_request(tls, handle, cmd_id)?
                         }
                         "fsp-srv-device-operator" => {
                             self.fs_device_operator_request(tls, cmd_id)?

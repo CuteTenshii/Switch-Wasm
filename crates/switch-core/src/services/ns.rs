@@ -6,7 +6,21 @@ use super::fs::{SD_FREE_SPACE, SD_TOTAL_SPACE};
 use crate::cpu::Cpu;
 use crate::Result;
 
+/// `NsApplicationControlData`: the NACP, then up to this much icon.
+const NACP_SIZE: usize = 0x4000;
+
+const ICON_SIZE_MAX: usize = 0x20000;
+
 impl Cpu {
+    /// Register a title's `control.nacp` and icon for `GetApplicationControlData`.
+    pub fn add_application_control(&mut self, application_id: u64, nacp: &[u8], icon: &[u8]) {
+        let mut data = vec![0u8; NACP_SIZE];
+        let n = nacp.len().min(NACP_SIZE);
+        data[..n].copy_from_slice(&nacp[..n]);
+        data.extend_from_slice(&icon[..icon.len().min(ICON_SIZE_MAX)]);
+        self.application_controls.insert(application_id, data);
+    }
+
     /// `ns:am2` (`IServiceGetterInterface`) and the interfaces it hands out.
     /// Nothing is installed, so record lists are empty. Before 3.0.0 `ns:am`
     /// was the application manager itself; both routes land here.
@@ -307,6 +321,27 @@ impl Cpu {
                 };
                 self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
             }
+            // GetApplicationControlData(u8 source, u64 application_id) -> u32 size.
+            Some(400) => {
+                /// ncm `ContentMetaNotFound` (2005-0007).
+                const CONTENT_META_NOT_FOUND: u32 = 5 | (7 << 9);
+                let application_id = self
+                    .mem
+                    .read_u64(self.ipc_request_data(tls).wrapping_add(8))?;
+                let Some(data) = self.application_controls.get(&application_id).cloned() else {
+                    self.diagnostic(
+                        crate::trace::Level::Warn,
+                        &format!(
+                            "[ns] no control data for {application_id:016x}; open that title once to record it"
+                        ),
+                    );
+                    return self.write_ipc_response(tls, CONTENT_META_NOT_FOUND, &[], &[], &[]);
+                };
+                let (addr, len) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
+                let n = data.len().min(len as usize);
+                self.mem.write_bytes(addr, &data[..n])?;
+                self.write_ipc_response(tls, 0, &[], &(n as u32).to_le_bytes(), &[])
+            }
             // 20.0.0+, unnamed: one u64 out, 0 (as in Eden).
             Some(4023) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             _ => self.unimplemented_command(tls, iface, cmd_id),
@@ -479,6 +514,44 @@ mod tests {
         cpu.ns_request(TLS, records, Some(3)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "record count");
+    }
+
+    #[test]
+    fn control_data_is_served_for_a_recorded_title_only() {
+        const RECORDED: u64 = 0x0100_7EF0_0011_E000;
+        let mut payload = [0u8; 0x10];
+        payload[8..].copy_from_slice(&RECORDED.to_le_bytes());
+        let mut cpu = request(false, 400, &[]);
+        cpu.mem.map_zero(0x10000, 0x30000).unwrap();
+        cpu.register_service_handle(9, "ns:app-manager");
+        cpu.add_application_control(RECORDED, b"Name", &[0xFF, 0xD8, 0xFF, 0xE0]);
+
+        write_map_buffer_request(&mut cpu, 400, &payload, 0x10000, 0x24000, false);
+        cpu.ns_request(TLS, 9, Some(400)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            0x4004,
+            "NACP plus icon"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(0x10000).unwrap(),
+            u32::from_le_bytes(*b"Name")
+        );
+        assert_eq!(
+            cpu.mem.read_u32(0x14000).unwrap(),
+            0xE0FF_D8FF,
+            "icon after the NACP"
+        );
+
+        payload[8..].copy_from_slice(&(RECORDED + 0x1000).to_le_bytes());
+        write_map_buffer_request(&mut cpu, 400, &payload, 0x10000, 0x24000, false);
+        cpu.ns_request(TLS, 9, Some(400)).unwrap();
+        assert_ne!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "an unrecorded title fails"
+        );
     }
 
     #[test]

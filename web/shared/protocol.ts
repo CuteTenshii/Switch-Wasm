@@ -249,6 +249,9 @@ export interface Commands {
   load_control_from_nca(): number;
   control_json(): string;
   control_icon(size: number): Bytes;
+  control_nacp(): Bytes;
+  // Record a title's NACP and icon for ns's GetApplicationControlData.
+  add_application_control(titleId: string, nacp: Bytes, icon: Bytes): number;
   parse_nca(header: Bytes): string;
 
   run(budget: number): number;

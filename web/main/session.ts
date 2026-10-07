@@ -3,6 +3,7 @@
 
 import fontUrl from '../font.ttf?url';
 import type { Bytes } from '../shared/protocol';
+import { controlRestore } from './controls';
 import { hasKeys, stageKeys } from './keys';
 import { loadPhase } from './loading';
 import { log } from './log';
@@ -67,6 +68,7 @@ export async function recycleSession({ reopen, force = false }: Recycle = {}): P
     stageFont(),
     sdRestore(),
     saveRestore(),
+    controlRestore(),
     stageUsers(),
     (hasKeys() ? stageKeys() : Promise.resolve()).then(restoreArchives),
   ]);

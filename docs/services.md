@@ -71,6 +71,8 @@ and tests.
 - **`fsp-srv` saves** are keyed by save id and the `SaveDataAttribute` uid:
   each user has their own save of a title, and system and device saves (uid
   0) are shared.
+  `ISaveDataInfoReader` lists the saves the session holds (every stored save is restored at boot): a save with a uid is an account save, a zero uid with the top id bit set a system save, any other a device save.
+  Cache storage is never listed.
 - **`am`** is the applet manager every title opens first, and `nnSdk` answers
   an unknown command from it with an `svcBreak`, so a refused command ends
   the boot there. Its shapes matter more than its answers:
@@ -277,6 +279,7 @@ stored, not answered: one caller writes, another reads back.
 - `aoc:u`: before implementation, the fallback answered `CountAddOnContent` with an object id read as a count, sending titles after nonexistent DLC. Listed indices and mountable content come from the same registration (a listed but unmountable index is worse than an unlisted one). Base id is program id + 0x1000; a DLC id is base title + index below 0x800. `PrepareAddOnContent` is an acknowledgement only. `CheckAddOnContentMountStatus` has no out value; failure means removed DLC.
 - `caps:a`: the Album applet polls `IsAlbumMounted` and `GetAutoSavingStorage` every frame; the fallback answered the bool with an object id. Mounted-and-empty is a state the applet shows; unmounted is the card-removed error. Cmd 18 is unnamed, issued once first with a 0x40-byte buffer. `GetAlbumAccessResultForDebug` returns the code injected by 50012, and switchbrew notes the command returns 0 regardless.
 - 20.0.0+ unnamed `IApplicationManagerInterface` event getters are signalled before handout.
+- `GetApplicationControlData` (400) answers for titles the page has opened: it stores each title's `control.nacp` and icon and hands them to every new session, since a homebrew save manager (EdiZon) runs without the game loaded. Any other title gets ncm's `ContentMetaNotFound` (2005-0007); which code a real console returns is unverified.
 - `prepo` and `pdm:qry` implement a console that never transmits and has never played anything (factory-fresh); the fallback previously answered void requests with object ids.
 
 ### `crates/switch-core/src/kernel/ipc.rs`

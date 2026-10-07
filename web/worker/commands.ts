@@ -68,6 +68,8 @@ const changesCap = (pending: number) => 2 + pending * (0x301 * 2 + 64);
 
 const READ_CHUNK = 1 << 20;
 
+const NACP_SIZE = 0x4000;
+
 function describe(file: Blob): string {
   const name = file instanceof File ? `"${file.name}" ` : '';
   return name + '(' + fmtSize(file.size) + ')';
@@ -272,6 +274,18 @@ export const CMD: CommandHandlers = {
       const n = Number(api().switch_control_icon(handle(), buf, size));
       return n > 0 ? fromWasm(buf, n) : new Uint8Array(0);
     });
+  },
+  control_nacp() {
+    return withBuffer(NACP_SIZE, (buf) => {
+      const n = Number(api().switch_control_nacp(handle(), buf, NACP_SIZE));
+      return n > 0 ? fromWasm(buf, n) : new Uint8Array(0);
+    });
+  },
+  add_application_control(titleId, nacp, icon) {
+    return withBytes(nacp, (nptr, nlen) =>
+      withBytes(icon, (iptr, ilen) =>
+        api().switch_add_application_control(
+          handle(), BigInt('0x' + titleId), nptr, nlen, iptr, ilen)));
   },
   parse_nca(header) {
     return withBytes(header, (ptr, len) =>

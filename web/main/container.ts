@@ -1,6 +1,7 @@
 // NSP / NCA / XCI containers: inspecting, showing the title, launching.
 
 import type { Bytes, ControlInfo, DlcEntry, NcaInfo, NspFile } from '../shared/protocol';
+import { controlRemember } from './controls';
 import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from './format';
@@ -409,6 +410,7 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
   }
   if (!info.name) return null;
   const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
+  if (!/^0*$/.test(info.title_id)) await controlRemember(info.title_id, icon);
   const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);
   log('Title: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'ok');

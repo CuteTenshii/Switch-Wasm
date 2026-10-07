@@ -352,6 +352,8 @@ pub struct Control {
     /// The icon as stored (JPEG on retail), empty when absent.
     pub icon: Vec<u8>,
     pub nacp: Nacp,
+    /// `control.nacp` as stored, for `ns`'s `GetApplicationControlData`.
+    pub nacp_raw: Vec<u8>,
 }
 
 impl Control {
@@ -381,11 +383,10 @@ impl Control {
         let image = romfs_source.read_vec(0, romfs_source.len())?;
         let romfs = RomFs::parse(&image)?;
 
-        let nacp = Nacp::parse(
-            romfs
-                .read_path(Nacp::PATH)
-                .ok_or_else(|| Error::RomFs(format!("no {} in the Control NCA", Nacp::PATH)))?,
-        )?;
+        let nacp_raw = romfs
+            .read_path(Nacp::PATH)
+            .ok_or_else(|| Error::RomFs(format!("no {} in the Control NCA", Nacp::PATH)))?;
+        let nacp = Nacp::parse(nacp_raw)?;
         let title = nacp
             .preferred()
             .ok_or_else(|| Error::RomFs("control.nacp has no title in any language".into()))?;
@@ -404,6 +405,7 @@ impl Control {
             publisher,
             icon,
             nacp,
+            nacp_raw: nacp_raw.to_vec(),
         })
     }
 
@@ -427,6 +429,7 @@ impl Control {
             publisher: title.map_or(String::new(), |t| t.publisher.clone()),
             icon: assets.icon.to_vec(),
             nacp,
+            nacp_raw: assets.nacp.to_vec(),
         })
     }
 
@@ -700,6 +703,7 @@ mod tests {
             publisher: "Studio".into(),
             icon: vec![0xFF, 0xD8, 0xFF, 0xE0],
             nacp,
+            nacp_raw: Vec::new(),
         };
         assert_eq!(control.icon_mime(), "image/jpeg");
         control.icon = vec![0x89, b'P', b'N', b'G'];

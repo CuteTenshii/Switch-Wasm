@@ -3,6 +3,7 @@
 
 import { resetAudio } from './audio';
 import { watchBattery } from './battery';
+import { controlRestore } from './controls';
 import { initFbSize, resetDisplay } from './display';
 import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
@@ -42,6 +43,7 @@ async function init(): Promise<void> {
       stageFont(),
       sdRequestPersistence().then(sdRestore),
       saveRestore(),
+      controlRestore(),
       loadProfiles().then(stageUsers),
       initFbSize(),
       offerPreviousLog(),

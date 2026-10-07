@@ -372,6 +372,10 @@ pub extern "C" fn switch_parse_nca(
 
 /// Cache control data and pass its NACP figures (save data, add-on base id) to the CPU.
 fn cache_control(s: &mut Session, control: switch_core::control::Control) {
+    if control.title_id != 0 {
+        s.cpu
+            .add_application_control(control.title_id, &control.nacp_raw, &control.icon);
+    }
     s.cpu
         .set_save_data_quota(switch_core::cpu::SaveDataQuota::from(&control.nacp));
     s.cpu
@@ -432,6 +436,40 @@ pub extern "C" fn switch_load_control_from_nca(handle: u32) -> i32 {
             -1
         }
     }
+}
+
+/// Record another title's `control.nacp` and icon for `ns`'s `GetApplicationControlData`.
+#[no_mangle]
+pub extern "C" fn switch_add_application_control(
+    handle: u32,
+    application_id: u64,
+    nacp_ptr: *const u8,
+    nacp_len: u32,
+    icon_ptr: *const u8,
+    icon_len: u32,
+) -> i32 {
+    let nacp = unsafe { std::slice::from_raw_parts(nacp_ptr, nacp_len as usize) };
+    let icon = unsafe { std::slice::from_raw_parts(icon_ptr, icon_len as usize) };
+    session(handle)
+        .cpu
+        .add_application_control(application_id, nacp, icon);
+    0
+}
+
+/// The cached `control.nacp` as stored; returns its length, or -1 with none cached.
+#[no_mangle]
+pub extern "C" fn switch_control_nacp(handle: u32, buf: *mut u8, maxlen: u32) -> i64 {
+    let s = session(handle);
+    let Some(control) = &s.control else {
+        return -1;
+    };
+    let n = control.nacp_raw.len().min(maxlen as usize);
+    if n > 0 && !buf.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(control.nacp_raw.as_ptr(), buf, n);
+        }
+    }
+    n as i64
 }
 
 /// The cached control data as JSON, or `{}`. `icon_size` sizes `switch_control_icon`'s buffer.

@@ -4,6 +4,7 @@
 use crate::cpu::{Cpu, SaveKey};
 use crate::trace::{Level, Trace};
 use crate::Result;
+use std::collections::VecDeque;
 
 /// Emulated SD card size and free space; `ns` reports both and callers subtract them.
 pub(crate) const SD_TOTAL_SPACE: u64 = 32 << 30;
@@ -75,6 +76,56 @@ impl From<&crate::control::Nacp> for SaveDataQuota {
             cache_storage_size_max: nacp.cache_storage_data_and_journal_size_max,
             cache_storage_index_max: i32::from(nacp.cache_storage_index_max),
         }
+    }
+}
+
+/// `sizeof(FsSaveDataInfo)`.
+pub(crate) const SAVE_DATA_INFO_SIZE: usize = 0x60;
+
+/// `FsSaveDataSpaceId`.
+const SPACE_SYSTEM: u8 = 0;
+
+const SPACE_USER: u8 = 1;
+
+/// `FsSaveDataType`.
+const SAVE_TYPE_SYSTEM: u8 = 0;
+
+const SAVE_TYPE_ACCOUNT: u8 = 1;
+
+const SAVE_TYPE_DEVICE: u8 = 3;
+
+/// System save ids have the top bit set; application ids never do.
+fn save_data_type(key: SaveKey) -> u8 {
+    if key.user != [0; 16] {
+        SAVE_TYPE_ACCOUNT
+    } else if key.id >> 63 == 1 {
+        SAVE_TYPE_SYSTEM
+    } else {
+        SAVE_TYPE_DEVICE
+    }
+}
+
+/// The criteria of a `FsSaveDataFilter` that are switched on.
+#[derive(Clone, Copy)]
+struct SaveDataFilter {
+    application_id: Option<u64>,
+    save_type: Option<u8>,
+    user: Option<[u8; 16]>,
+    system_save_id: Option<u64>,
+    index: Option<u16>,
+}
+
+impl SaveDataFilter {
+    fn admits(&self, key: SaveKey, kind: u8) -> bool {
+        let (application, system) = match kind {
+            SAVE_TYPE_SYSTEM => (0, key.id),
+            _ => (key.id, 0),
+        };
+        self.application_id.is_none_or(|id| id == application)
+            && self.save_type.is_none_or(|t| t == kind)
+            && self.user.is_none_or(|u| u == key.user)
+            && self.system_save_id.is_none_or(|id| id == system)
+            && self.index.is_none_or(|i| i == 0)
     }
 }
 
@@ -412,9 +463,21 @@ impl Cpu {
                 self.set_mount(key, Some(id));
                 Ok(())
             }
-            // 60/61/62/68 = OpenSaveDataInfoReader variants, all the same empty reader.
+            // 60 = all spaces, 61 = one space, 62 = cache storage (none), 68 = filtered.
             Some(60) | Some(61) | Some(62) | Some(68) => {
-                self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
+                let data = self.ipc_request_data(tls);
+                let space = self.mem.read_u8(data).unwrap_or(0);
+                let filter = match cmd_id {
+                    Some(68) => Some(self.save_data_filter(data.wrapping_add(8))),
+                    _ => None,
+                };
+                let infos = match cmd_id {
+                    Some(62) => VecDeque::new(),
+                    Some(60) => self.save_data_infos(None, None),
+                    _ => self.save_data_infos(Some(space), filter),
+                };
+                let key = self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
+                self.fs_save_infos.insert(key, infos);
                 Ok(())
             }
             // 400 = OpenDeviceOperator.
@@ -494,11 +557,76 @@ impl Cpu {
     pub(crate) fn fs_save_data_info_reader_request(
         &mut self,
         tls: u32,
+        handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
         match cmd_id {
-            Some(0) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
+            Some(0) => {
+                let key = self.ipc_object_key(tls, handle);
+                let (addr, len) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
+                let room = len as usize / SAVE_DATA_INFO_SIZE;
+                let infos = self.fs_save_infos.entry(key).or_default();
+                let batch: Vec<_> = infos.drain(..room.min(infos.len())).collect();
+                for (i, info) in batch.iter().enumerate() {
+                    self.mem
+                        .write_bytes(addr.wrapping_add((i * SAVE_DATA_INFO_SIZE) as u32), info)?;
+                }
+                let count = batch.len() as i64;
+                self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
+            }
             _ => self.unimplemented_command(tls, "fsp-srv-save-info-reader", cmd_id),
+        }
+    }
+
+    /// The `FsSaveDataInfo` of every save in `space` (all with `None`) that `filter` admits.
+    fn save_data_infos(
+        &self,
+        space: Option<u8>,
+        filter: Option<SaveDataFilter>,
+    ) -> VecDeque<[u8; SAVE_DATA_INFO_SIZE]> {
+        let mut keys: Vec<SaveKey> = self.saves.keys().copied().collect();
+        keys.sort();
+        keys.iter()
+            .enumerate()
+            .filter_map(|(index, &key)| {
+                let kind = save_data_type(key);
+                let system = kind == SAVE_TYPE_SYSTEM;
+                let key_space = if system { SPACE_SYSTEM } else { SPACE_USER };
+                if space.is_some_and(|s| s != key_space)
+                    || filter.is_some_and(|f| !f.admits(key, kind))
+                {
+                    return None;
+                }
+                // Application saves have no id of their own here; their position stands in.
+                let save_data_id = if system { key.id } else { index as u64 + 1 };
+                let mut info = [0u8; SAVE_DATA_INFO_SIZE];
+                info[..8].copy_from_slice(&save_data_id.to_le_bytes());
+                info[8] = key_space;
+                info[9] = kind;
+                info[0x10..0x20].copy_from_slice(&key.user);
+                let id_at = if system { 0x20 } else { 0x28 };
+                info[id_at..id_at + 8].copy_from_slice(&key.id.to_le_bytes());
+                Some(info)
+            })
+            .collect()
+    }
+
+    /// A `FsSaveDataFilter` at `addr`.
+    fn save_data_filter(&self, addr: u32) -> SaveDataFilter {
+        let byte = |offset: u32| self.mem.read_u8(addr.wrapping_add(offset)).unwrap_or(0);
+        let word = |offset: u32| self.mem.read_u64(addr.wrapping_add(offset)).unwrap_or(0);
+        let attr = 8;
+        let mut user = [0u8; 16];
+        for (i, b) in user.iter_mut().enumerate() {
+            *b = byte(attr + 8 + i as u32);
+        }
+        let index = u16::from(byte(attr + 0x22)) | u16::from(byte(attr + 0x23)) << 8;
+        SaveDataFilter {
+            application_id: (byte(0) != 0).then(|| word(attr)),
+            save_type: (byte(1) != 0).then(|| byte(attr + 0x20)),
+            user: (byte(2) != 0).then_some(user),
+            system_save_id: (byte(3) != 0).then(|| word(attr + 0x18)),
+            index: (byte(4) != 0).then_some(index),
         }
     }
 
@@ -1144,7 +1272,8 @@ mod tests {
 
         // Zero entries ends the caller's scan.
         write_request(&mut cpu, 0, &[]);
-        cpu.fs_save_data_info_reader_request(TLS, Some(0)).unwrap();
+        cpu.fs_save_data_info_reader_request(TLS, reader, Some(0))
+            .unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "entries");
 
@@ -1237,10 +1366,117 @@ mod tests {
         );
     }
 
+    /// Open a save scan with `cmd` and `payload`, then read it one entry at a time.
+    fn scan_saves(cpu: &mut Cpu, cmd: u32, payload: &[u8]) -> Vec<[u8; 0x60]> {
+        write_request(cpu, cmd, payload);
+        cpu.fsp_srv_request(TLS, Some(cmd), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "opening the scan");
+        let reader = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        let mut infos = Vec::new();
+        loop {
+            write_map_buffer_request(cpu, 0, &[], 0x3000, 0x60, false);
+            cpu.fs_save_data_info_reader_request(TLS, reader, Some(0))
+                .unwrap();
+            match cpu.mem.read_u64(TLS + 0x20).unwrap() {
+                0 => return infos,
+                1 => {
+                    let mut info = [0u8; 0x60];
+                    for (i, byte) in info.iter_mut().enumerate() {
+                        *byte = cpu.mem.read_u8(0x3000 + i as u32).unwrap();
+                    }
+                    infos.push(info);
+                }
+                n => panic!("{n} entries in a buffer that holds one"),
+            }
+        }
+    }
+
+    fn seeded_saves() -> Cpu {
+        let mut cpu = request(false, 0, &[]);
+        cpu.mem.map_zero(0x3000, 0x100).unwrap();
+        cpu.record_handle(9, "fsp-srv");
+        for key in [
+            crate::cpu::SaveKey {
+                id: 0x0100_0000_0000_1000,
+                user: *b"ann-uid-00000001",
+            },
+            crate::cpu::SaveKey {
+                id: 0x0100_0000_0000_2000,
+                user: *b"ben-uid-00000002",
+            },
+            crate::cpu::SaveKey::shared(0x0100_0000_0000_1000),
+            crate::cpu::SaveKey::shared(0x8000_0000_0000_0010),
+        ] {
+            cpu.save_data_mut(key);
+        }
+        cpu
+    }
+
+    #[test]
+    fn the_save_scan_lists_each_space_s_saves() {
+        let mut cpu = seeded_saves();
+        let user = scan_saves(&mut cpu, 61, &[1]);
+        let listed: Vec<_> = user
+            .iter()
+            .map(|info| {
+                let application = u64::from_le_bytes(info[0x28..0x30].try_into().unwrap());
+                (info[8], info[9], application, info[0x10..0x20].to_vec())
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (1, 3, 0x0100_0000_0000_1000, vec![0; 16]),
+                (1, 1, 0x0100_0000_0000_1000, b"ann-uid-00000001".to_vec()),
+                (1, 1, 0x0100_0000_0000_2000, b"ben-uid-00000002".to_vec()),
+            ],
+            "(space, type, application, uid)"
+        );
+
+        let system = scan_saves(&mut cpu, 61, &[0]);
+        assert_eq!(system.len(), 1);
+        assert_eq!(
+            (system[0][8], system[0][9]),
+            (0, 0),
+            "system space and type"
+        );
+        assert_eq!(
+            u64::from_le_bytes(system[0][0x20..0x28].try_into().unwrap()),
+            0x8000_0000_0000_0010,
+            "system save id"
+        );
+
+        assert_eq!(scan_saves(&mut cpu, 60, &[]).len(), 4, "every space");
+        assert!(
+            scan_saves(&mut cpu, 62, &[1]).is_empty(),
+            "no cache storage"
+        );
+    }
+
+    #[test]
+    fn the_filtered_save_scan_keeps_only_matching_saves() {
+        let mut cpu = seeded_saves();
+        // u8 space, pad, then FsSaveDataFilter: flags, rank, pad, FsSaveDataAttribute.
+        let mut payload = [0u8; 0x50];
+        payload[0] = 1;
+        payload[8 + 2] = 1; // filter_by_user_id
+        payload[0x10 + 8..0x10 + 0x18].copy_from_slice(b"ben-uid-00000002");
+        let infos = scan_saves(&mut cpu, 68, &payload);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(&infos[0][0x10..0x20], b"ben-uid-00000002");
+
+        payload[8 + 2] = 0;
+        payload[8 + 1] = 1; // filter_by_save_data_type
+        payload[0x10 + 0x20] = 3; // Device
+        let infos = scan_saves(&mut cpu, 68, &payload);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0][9], 3);
+    }
+
     #[test]
     fn the_filtered_save_scan_is_a_reader_too() {
         // 68 = OpenSaveDataInfoReaderWithFilter hands out the same reader.
-        let mut payload = [0u8; 0x48];
+        let mut payload = [0u8; 0x50];
         payload[0] = 1; // FsSaveDataSpaceId::User
         let mut cpu = request(false, 68, &payload);
         cpu.record_handle(9, "fsp-srv");
@@ -1251,7 +1487,8 @@ mod tests {
         assert_eq!(cpu.service_name(reader), Some("fsp-srv-save-info-reader"));
 
         write_request(&mut cpu, 0, &[]);
-        cpu.fs_save_data_info_reader_request(TLS, Some(0)).unwrap();
+        cpu.fs_save_data_info_reader_request(TLS, reader, Some(0))
+            .unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "entries");
     }

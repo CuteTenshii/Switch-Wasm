@@ -36,6 +36,10 @@ export interface WasmExports {
   switch_load_control_from_nca(handle: number): number;
   switch_control_json(handle: number, buf: number, maxlen: number): number;
   switch_control_icon(handle: number, buf: number, maxlen: number): bigint;
+  switch_control_nacp(handle: number, buf: number, maxlen: number): bigint;
+  switch_add_application_control(
+    handle: number, applicationId: bigint, nacpPtr: number, nacpLen: number,
+    iconPtr: number, iconLen: number): number;
 
   switch_load_keys(
     handle: number, prodPtr: number, prodLen: number,

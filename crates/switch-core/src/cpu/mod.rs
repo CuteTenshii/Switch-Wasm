@@ -133,6 +133,8 @@ pub struct Cpu {
     pub(crate) application_record_event: Option<u64>,
     /// `IApplicationManagerInterface`'s SD and game card events, by command id; never fired.
     pub(crate) ns_manager_events: BTreeMap<u32, u64>,
+    /// `NsApplicationControlData` (NACP, then icon) by application id.
+    pub(crate) application_controls: BTreeMap<u64, Vec<u8>>,
     /// `GetPopFromGeneralChannelEvent`; never fired.
     pub(crate) general_channel_event: Option<u64>,
     /// The `ILockAccessor` event: always signalled. See `Cpu::am_lock_accessor_event`.
@@ -203,6 +205,8 @@ pub struct Cpu {
     pub(crate) fs_mount: IdMap<u64, SaveKey>,
     /// The data archive an open `IStorage` serves; absent for the process's own RomFS.
     pub(crate) fs_storage_archive: IdMap<u64, u64>,
+    /// `FsSaveDataInfo` records an open save scan has yet to yield.
+    pub(crate) fs_save_infos: IdMap<u64, VecDeque<[u8; crate::services::fs::SAVE_DATA_INFO_SIZE]>>,
     /// `SetGlobalAccessLogMode`'s value; round-trips because `nnSdk` reads it at startup.
     pub(crate) fs_access_log_mode: u32,
     /// `SetSpeedEmulationMode`'s value; round-trips, no effect.
@@ -434,6 +438,7 @@ impl Cpu {
             application_functions_210_event: None,
             application_record_event: None,
             ns_manager_events: BTreeMap::new(),
+            application_controls: BTreeMap::new(),
             general_channel_event: None,
             lock_accessor_event: None,
             binder_event: None,
@@ -472,6 +477,7 @@ impl Cpu {
             saves: HashMap::new(),
             fs_mount: IdMap::default(),
             fs_storage_archive: IdMap::default(),
+            fs_save_infos: IdMap::default(),
             fs_access_log_mode: 0,
             fs_speed_emulation_mode: 0,
             last_ipc_result: None,
