@@ -2,7 +2,6 @@
 
 use crate::tests::device;
 
-/// Every internal pipeline this backend builds compiles.
 use switch_core::gpu::renderer::Software;
 use switch_core::gpu::testing::{self, Harness};
 
