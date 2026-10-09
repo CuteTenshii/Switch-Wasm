@@ -153,6 +153,9 @@ const BSD_ANY_IP: [u8; 4] = [0, 0, 0, 0];
 /// `FD_SETSIZE`: the 128-byte bitmap the caller marshals.
 const BSD_MAX_SELECT_FDS: u32 = 1024;
 
+/// Longest an empty `select` or `poll` parks, so asio's loopback wakeups still land.
+const BSD_WAIT_SLICE_NS: i64 = 1_000_000;
+
 /// The `(address, port)` of an `AF_INET` `sockaddr_in`, or `None`.
 fn sockaddr_in(raw: &[u8]) -> Option<([u8; 4], u16)> {
     if raw.len() < 8 || raw[1] != BSD_AF_INET {
@@ -486,21 +489,31 @@ impl Cpu {
                 self.bsd_sockets.insert(fd, socket);
                 self.bsd_reply(tls, fd, 0)
             }
-            // Select(nfds, timeval timeout), sets in buffers 0, 1 and 2. The out-sets are
-            // always written. An empty wait with a non-zero timeout yields.
+            // Select(nfds, timeval timeout, bool null_timeout), sets in buffers 0, 1 and 2.
+            // The out-sets are always written.
             Some(5) => {
                 let nfds = word(self, 0).min(BSD_MAX_SELECT_FDS);
-                let timeout = self.mem.read_u64(data.wrapping_add(8)).unwrap_or(0)
-                    | self.mem.read_u64(data.wrapping_add(16)).unwrap_or(0);
+                let seconds = self.mem.read_u64(data.wrapping_add(8)).unwrap_or(0);
+                let micros = self.mem.read_u64(data.wrapping_add(16)).unwrap_or(0);
+                let timeout = if self.mem.read_u8(data.wrapping_add(24)).unwrap_or(0) != 0 {
+                    -1
+                } else {
+                    seconds
+                        .saturating_mul(1_000_000_000)
+                        .saturating_add(micros.saturating_mul(1_000))
+                        .min(i64::MAX as u64) as i64
+                };
                 let mut ready = 0;
                 for index in 0..3 {
                     ready += self.bsd_select_set(tls, index, nfds)?;
                 }
-                self.pending_yield = ready == 0 && timeout != 0;
+                if ready == 0 {
+                    self.bsd_park(timeout);
+                }
                 self.bsd_reply(tls, ready, 0)
             }
             // Poll(nfds, timeout): copies the fds to the output buffer with fresh `revents`.
-            // A wait that finds nothing yields, since threads only switch at blocking syscalls.
+            // A wait that finds nothing parks, since threads only switch at blocking syscalls.
             Some(6) => {
                 let timeout = word(self, 1) as i32;
                 let mut ready = 0;
@@ -519,8 +532,9 @@ impl Cpu {
                         self.mem.write_u16(dst.wrapping_add(offset + 6), revents)?;
                     }
                 }
-                // A zero timeout is a non-blocking probe.
-                self.pending_yield = ready == 0 && timeout != 0;
+                if ready == 0 {
+                    self.bsd_park(i64::from(timeout).saturating_mul(1_000_000));
+                }
                 self.bsd_reply(tls, ready as i32, 0)
             }
             // Recv(fd, flags) / Read(fd).
@@ -747,6 +761,16 @@ impl Cpu {
         raw[..4].copy_from_slice(&ret.to_le_bytes());
         raw[4..].copy_from_slice(&errno.to_le_bytes());
         self.write_ipc_response(tls, 0, &[], &raw, &[])
+    }
+
+    /// Park a wait that found nothing; `timeout` in ns, negative for none, zero for a probe.
+    fn bsd_park(&mut self, timeout: i64) {
+        let wait = if timeout < 0 {
+            BSD_WAIT_SLICE_NS
+        } else {
+            timeout.min(BSD_WAIT_SLICE_NS)
+        };
+        self.pending_sleep = self.wait_deadline(wait);
     }
 
     /// Reply with a third word: bytes written into the caller's output buffer.
@@ -1506,14 +1530,26 @@ mod tests {
         write_request(&mut cpu, 6, &payload);
         cpu.bsd_request(TLS, 9, Some(6)).unwrap();
         assert_eq!(bsd_result(&cpu), (0, 0), "no descriptor is ever ready");
-        assert!(cpu.pending_yield, "a poll that waits has to reschedule");
+        assert_eq!(
+            cpu.pending_sleep.take(),
+            cpu.wait_deadline(super::BSD_WAIT_SLICE_NS),
+            "a poll that waits parks, but only for a slice"
+        );
+
+        payload[4..].copy_from_slice(&(-1i32).to_le_bytes());
+        write_request(&mut cpu, 6, &payload);
+        cpu.bsd_request(TLS, 9, Some(6)).unwrap();
+        assert_eq!(
+            cpu.pending_sleep.take(),
+            cpu.wait_deadline(super::BSD_WAIT_SLICE_NS)
+        );
 
         // A zero timeout is a non-blocking probe.
         payload[4..].copy_from_slice(&0i32.to_le_bytes());
         write_request(&mut cpu, 6, &payload);
         cpu.bsd_request(TLS, 9, Some(6)).unwrap();
         assert_eq!(bsd_result(&cpu), (0, 0));
-        assert!(!cpu.pending_yield);
+        assert_eq!(cpu.pending_sleep, None);
     }
 
     #[test]
@@ -1599,17 +1635,17 @@ mod tests {
         let (client, server) = connected_pair(&mut cpu, listener);
 
         let sets: Vec<(u32, u32)> = (0..6).map(|index| (SETS + index * SET, SET)).collect();
-        let select = |cpu: &mut Cpu, watch: i32, seconds: u64| {
+        let select = |cpu: &mut Cpu, watch: i32, micros: u64| {
             for offset in 0..6 * SET {
                 cpu.mem.write_u8(SETS + offset, 0).unwrap();
             }
             let bit = 1u8 << (watch % 8);
             cpu.mem.write_u8(SETS + (watch as u32 / 8), bit).unwrap();
-            let mut payload = [0u8; 24];
+            let mut payload = [0u8; 32];
             payload[..4].copy_from_slice(&((watch + 1) as u32).to_le_bytes());
-            payload[8..16].copy_from_slice(&seconds.to_le_bytes());
+            payload[16..24].copy_from_slice(&micros.to_le_bytes());
             write_buffer_request(cpu, 5, &payload, &sets[..3], &sets[3..]);
-            cpu.pending_yield = false;
+            cpu.pending_sleep = None;
             cpu.bsd_request(TLS, 9, Some(5)).unwrap();
             let ready = bsd_result(cpu);
             let out = cpu
@@ -1619,14 +1655,20 @@ mod tests {
             (ready, out & bit != 0)
         };
 
-        // Nothing sent, so nothing ready, and the wait yields.
-        assert_eq!(select(&mut cpu, server, 1), ((0, 0), false));
-        assert!(cpu.pending_yield, "a select that waits has to reschedule");
+        // Nothing sent, so nothing ready, and the wait parks for its timeout.
+        assert_eq!(select(&mut cpu, server, 300), ((0, 0), false));
+        assert_eq!(cpu.pending_sleep, cpu.wait_deadline(300_000));
+        // A long wait parks only for a slice.
+        assert_eq!(select(&mut cpu, server, 1_000_000), ((0, 0), false));
+        assert_eq!(
+            cpu.pending_sleep,
+            cpu.wait_deadline(super::BSD_WAIT_SLICE_NS)
+        );
 
         assert_eq!(send_on(&mut cpu, client, &[0x7f]), (1, 0));
         // Readiness is reported in the output set.
-        assert_eq!(select(&mut cpu, server, 1), ((1, 0), true));
-        assert!(!cpu.pending_yield, "nothing to wait for");
+        assert_eq!(select(&mut cpu, server, 1_000_000), ((1, 0), true));
+        assert_eq!(cpu.pending_sleep, None, "nothing to wait for");
     }
 
     #[test]
