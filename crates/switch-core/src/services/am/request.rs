@@ -846,6 +846,18 @@ impl Cpu {
                     }
                     // Start / RequestExit / Terminate.
                     Some(10) | Some(20) | Some(25) => {
+                        if cmd_id == Some(10) {
+                            let shown = self
+                                .am_applets
+                                .get(&key)
+                                .and_then(LibraryApplet::error_shown);
+                            if let Some(shown) = shown {
+                                self.diagnostic(
+                                    Level::Warn,
+                                    &format!("[am] the error applet was asked to show {shown}"),
+                                );
+                            }
+                        }
                         self.forget_keyboard(key);
                         if let Some(applet) = self.am_applets.get_mut(&key) {
                             applet.finish();

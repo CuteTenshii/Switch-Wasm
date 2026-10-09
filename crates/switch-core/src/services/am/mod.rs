@@ -76,6 +76,12 @@ impl LibraryApplet {
     fn is_finished(&self) -> bool {
         self.finished
     }
+
+    /// For an error applet, the error it was asked to show.
+    fn error_shown(&self) -> Option<String> {
+        (self.id == APPLET_ERROR)
+            .then(|| describe_error_arg(self.in_data.last().map_or(&[], |d| d)))
+    }
 }
 
 const STATE_CHANGED_EVENT: usize = 0;
@@ -191,6 +197,40 @@ pub(crate) fn applet_interface_version(program_id: u64) -> u32 {
 }
 
 const APPLET_SWKBD: u32 = 0x11;
+const APPLET_ERROR: u32 = 0x0E;
+
+/// What an error applet's argument storage asks to show: its `ErrorCommonHeader`
+/// type, the result or code after it, and any message text, as one log line.
+fn describe_error_arg(arg: &[u8]) -> String {
+    let byte = |at: usize| arg.get(at).copied().unwrap_or(0);
+    let word = |at: usize| u32::from_le_bytes(std::array::from_fn(|i| byte(at + i)));
+    let result = |r: u32| format!("{:04}-{:04}", 2000 + (r & 0x1FF), (r >> 9) & 0x1FFF);
+    let mut line = format!("type {}", byte(0));
+    // ErrorCommonArg: an error code at 8 and, with the result flag, a Result at 0x10.
+    if byte(0) == 0 && byte(6) != 0 {
+        line += &format!(", result {}", result(word(0x10)));
+    } else {
+        line += &format!(", code {:#x}/{:#x}", word(8), word(12));
+    }
+    let text: String = arg
+        .get(0x18..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|&&b| b != 0)
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .take(200)
+        .collect();
+    if !text.is_empty() {
+        line += &format!(", \"{text}\"");
+    }
+    line
+}
 const APPLET_CONTROLLER: u32 = 0x0C;
 const APPLET_MY_PAGE: u32 = 0x1A;
 const APPLET_WEB: u32 = 0x13;

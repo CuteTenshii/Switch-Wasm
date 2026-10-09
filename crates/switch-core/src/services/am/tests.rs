@@ -931,3 +931,23 @@ fn a_keyboard_without_a_config_is_cancelled_as_before() {
     cpu.applet_request(TLS, accessor, Some(30)).unwrap();
     assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (22 << 9));
 }
+
+#[test]
+fn an_error_applet_argument_names_its_result_and_its_message() {
+    let mut normal = vec![0u8; 0x18];
+    normal[6] = 1; // the result flag
+    normal[0x10..0x14].copy_from_slice(&0x7D402u32.to_le_bytes());
+    assert_eq!(
+        super::describe_error_arg(&normal),
+        "type 0, result 2002-1002"
+    );
+
+    let mut application = vec![0u8; 0x18];
+    application[0] = 2;
+    application[8..12].copy_from_slice(&1234u32.to_le_bytes());
+    application.extend_from_slice(b"Unable to connect\0");
+    assert_eq!(
+        super::describe_error_arg(&application),
+        "type 2, code 0x4d2/0x0, \"Unable to connect\""
+    );
+}
