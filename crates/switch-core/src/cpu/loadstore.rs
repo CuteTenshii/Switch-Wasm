@@ -169,18 +169,18 @@ impl Cpu {
                     let imm = ((insn >> 10) & 0xFFF) as u64;
                     ((self.read_x(rn).wrapping_add(imm * scale)) as u32, None)
                 }
-                // Register offset (mode 0b00, bit 21 set): addr = Xn + (Rm << LSL).
+                // Register offset (mode 0b00, bit 21 set): Xn plus the extended,
+                // scaled Rm, which is XZR at 31.
                 0b00 if ((insn >> 21) & 1) == 1 => {
                     let rm = ((insn >> 16) & 0x1F) as u8;
-                    let s = (insn >> 12) & 1;
-                    let shift = if s == 1 { bytes.trailing_zeros() } else { 0 };
-                    (
-                        (self
-                            .read_x(rn)
-                            .wrapping_add(self.read_x(rm).wrapping_shl(shift)))
-                            as u32,
-                        None,
-                    )
+                    let option = ((insn >> 13) & 0b111) as u8;
+                    let offset = self.offset_from_reg(
+                        rm,
+                        option,
+                        (insn >> 12) & 1,
+                        bytes.trailing_zeros() as u8,
+                    )?;
+                    (self.read_x(rn).wrapping_add(offset as u64) as u32, None)
                 }
                 // Unscaled, post-index and pre-index: bits[11:10] pick which.
                 0b00 => {

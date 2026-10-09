@@ -101,6 +101,38 @@ fn simd_saturating_add_sub_clamp_by_signedness() {
 }
 
 #[test]
+fn orr_and_bic_immediate_modify_the_register_rather_than_replace_it() {
+    // Expected values read from an arm64 host running the same two instructions.
+    let code = [
+        0x0F00_1552, // orr v18.2s, #0xa
+        0x2F02_15F0, // bic v16.2s, #0x4f
+        nop(),
+    ];
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(18, 0x5555666677778888_1111222233334444);
+    cpu.set_vreg(16, 0x5555666677778888_1111222233334444);
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_vreg(18), 0x1111222a_3333444e);
+    assert_eq!(cpu.read_vreg(16), 0x11112220_33334400);
+}
+
+#[test]
+fn simd_register_offset_reads_31_as_zero_not_sp() {
+    let code = [
+        0x3C3F_6994, // str b20, [x12, xzr]
+        nop(),
+    ];
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x3000, 0x100).unwrap();
+    cpu.set_pc_and_sp(0x1000, 0x40);
+    cpu.set_reg(12, 0x3020);
+    cpu.set_vreg(20, 0x7F);
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.mem.read_u8(0x3020).unwrap(), 0x7F);
+    assert_eq!(cpu.mem.read_u8(0x3060).unwrap(), 0, "the offset was SP");
+}
+
+#[test]
 fn simd_pairwise_addp() {
     // v1 = {0..15}, v2 = {0x10..0x1f}; addp v3.16b, v1.16b, v2.16b puts v1's
     // pairwise sums in the low half and v2's in the high half.

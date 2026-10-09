@@ -119,7 +119,8 @@ impl Cpu {
             }
         }
 
-        // MOVI/MVNI: imm8 is split across bits 18:16 and 9:5, cmode in 15:12, op in bit29.
+        // MOVI/MVNI, and ORR/BIC (vector, immediate) at an odd cmode below 12: imm8
+        // is split across bits 18:16 and 9:5, cmode in 15:12, op in bit29.
         if ((insn >> 31) & 1) == 0
             && ((insn >> 23) & 0x3F) == 0b011110
             && ((insn >> 19) & 0b1111) == 0b0000
@@ -129,12 +130,15 @@ impl Cpu {
             let rd = (insn & 0x1F) as u8;
             let imm8 = (((insn >> 16) & 0b111) << 5) | ((insn >> 5) & 0x1F);
             let cmode = (insn >> 12) & 0b1111;
+            // Inverted for MVNI and BIC.
             let imm64 = simd_imm_const(imm8, cmode, op);
-            self.vregs[rd as usize] = if q == 1 {
-                imm64 as u128 | ((imm64 as u128) << 64)
-            } else {
-                imm64 as u128
+            let imm = imm64 as u128 | ((imm64 as u128) << 64);
+            let value = match (cmode < 12 && cmode & 1 == 1, op) {
+                (false, _) => imm,
+                (true, 0) => self.vregs[rd as usize] | imm,
+                (true, _) => self.vregs[rd as usize] & imm,
             };
+            self.vregs[rd as usize] = if q == 1 { value } else { value as u64 as u128 };
             return Ok(true);
         }
 
