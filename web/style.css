@@ -41,6 +41,7 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--topbar-h) 1fr var(--statusbar-h);
   height: 100%;
 }
