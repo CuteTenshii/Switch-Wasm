@@ -1215,3 +1215,14 @@ A compiled block that leaves at a taken branch or a written terminator now tail-
 The chain table size decides the result. With 4,096 slots for about 10K compiled Minecraft blocks, only 32% of compiled entries came through a jump and the steady frame did not improve; with 65,536 slots it is 90%. Two alternating pairs of Minecraft runs (`wasm_bench`, profiled, 6 frames, machine under outside load) put CPU emulation at 44.0 and 43.8 ms a frame against 70.2 and 60.5 unchained (17.0M instructions a frame), with `run_jit` itself down from about 40 to 14 ms. The boot phase gained about 10%.
 
 Engines without tail calls get unchained blocks; `switch-wasm` probes once at startup.
+
+
+### Regions, register locals, and SIMD128
+
+Hot blocks are now compiled with the warm blocks their known branches reach, as one function whose branches between them stay inside, guest registers and NZCV in locals, and PLT-folded calls written out. On its own this moved Just Dance 2017's menus (no-draw build, frames 700 to 1100) only from about 217 to 234M instructions/s: a tight emitted loop already ran at 1.4G/s and a call/return loop at 1.16G/s, so neither the per-instruction cost nor the jumps were what held real code back.
+
+What did was the interpreter: about 8% of instructions sat in blocks the emitter refused, nearly all Advanced SIMD (libvpx's VP8 decoder) and scalar float, and at interpreter speed that 8% was over half the time. Emitting those as SIMD128 and wasm floats took the same window from 142 to 313M instructions/s in an alternated pair, and with the machine quiet the window now runs at 600M/s, a CPU-only mean of 15 ms a frame. Work per frame was unchanged throughout (6,830,424 instructions).
+
+Declaring every register local up front ran about a third slower than allocating them on first use: Liftoff zero-initializes every declared local on every entry. A 256K-slot chain table cut jumps that missed by colliding from 46M to 4.6M over a run but measured no faster.
+
+The SIMD sweep found two interpreter bugs (ORR/BIC immediate, XZR register offsets) and, being host timing under shared load, the benchmarks above were only trusted as best-of-three alternated runs; one binary measured anywhere from 122 to 295M/s.

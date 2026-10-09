@@ -24,6 +24,8 @@ pub struct JitHost {
     /// Whether the engine has tail calls, so compiled blocks may jump into each
     /// other through the function table, imported as `e`.`t`.
     pub tail_calls: bool,
+    /// Whether the engine has SIMD128, so Advanced SIMD can be emitted.
+    pub simd: bool,
 }
 
 static HOST: OnceLock<JitHost> = OnceLock::new();
@@ -42,6 +44,12 @@ pub(super) fn available() -> bool {
 #[inline]
 pub(super) fn chains() -> bool {
     HOST.get().is_some_and(|host| host.tail_calls)
+}
+
+/// Whether Advanced SIMD is emitted.
+#[inline]
+pub(super) fn simd() -> bool {
+    HOST.get().is_some_and(|host| host.simd)
 }
 
 pub(super) fn install(code: &[u8]) -> Entry {

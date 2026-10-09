@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! cargo run --release --example emit_difftest -- <nro> [-- <outdir>]
+//! FROM_FRAME=<n> cargo run --release --example emit_difftest -- <title> <prod.keys>
 //! node tools/emit_difftest.mjs <outdir>
 //! ```
 mod common;
@@ -29,6 +30,8 @@ const WATCHED_AT: u32 = 4124;
 const PAGES_AT: u32 = 4128;
 /// Guest `pc` offset, written by a taken branch.
 const PC_AT: u32 = 4132;
+/// Fuel, read only by branches between blocks, which a single block never takes.
+const FUEL_AT: u32 = 4136;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 8192;
 
@@ -48,6 +51,7 @@ const LAYOUT: Layout = Layout {
     readonly_hi: READONLY_HI_AT,
     watched: WATCHED_AT,
     pc: PC_AT,
+    fuel: FUEL_AT,
     vregs: VREGS_AT,
 };
 
@@ -86,6 +90,13 @@ fn main() {
     cpu.bootstrap();
     program.boot(&mut cpu);
 
+    // `FROM_FRAME=<n>` runs to that frame first, to sample a title's later code.
+    if let Some(frame) = std::env::var("FROM_FRAME")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        common::run_to(&mut cpu, u64::MAX, |cpu| cpu.nv.gpu.frames >= frame);
+    }
     // Sample the pc once per slice to get branch targets, not mid-block addresses.
     let mut seen: BTreeSet<u32> = BTreeSet::new();
     common::drive(&mut cpu, Pace::Instructions, WARMUP, |cpu, steps| {
@@ -105,6 +116,7 @@ fn main() {
     let mut branched = 0usize;
     let mut refused_long = 0usize;
     let mut skipped_fault = 0usize;
+    let mut skipped_switch = 0usize;
     // Encodings that kept a block off the emitted path, by blocks lost.
     let mut unwritable: HashMap<u32, u64> = HashMap::new();
 
@@ -144,22 +156,34 @@ fn main() {
         let nzcv_before = cpu.nzcv();
         cpu.set_pc(pc);
         let mut faulted = false;
+        let mut switched = false;
         let mut retired = 0usize;
         let mut left = None;
+        let thread = cpu.current_thread_handle();
         for i in 0..ops {
             if cpu.step().is_err() {
                 faulted = true;
                 break;
             }
+            // A step may preempt into another thread, whose pc says nothing about this block.
+            if cpu.current_thread_handle() != thread {
+                switched = true;
+                break;
+            }
             retired = i + 1;
             let next = cpu.get_pc();
-            if next != path[retired] {
+            // A written terminator's slot is `u32::MAX`, which a jump to -1 would match.
+            if next != path[retired] || path[retired] == u32::MAX {
                 left = Some(next);
                 break;
             }
         }
         if faulted {
             skipped_fault += 1;
+            continue;
+        }
+        if switched {
+            skipped_switch += 1;
             continue;
         }
         if left.is_some() {
@@ -218,7 +242,7 @@ fn main() {
     let refused_op: u64 = unwritable.values().sum();
     println!(
         "{cases} cases written to {out_dir}/, {branched} of them leaving at a branch they took \
-         ({skipped_fault} blocks faulted under the interpreter)"
+         ({skipped_fault} blocks faulted under the interpreter, {skipped_switch} switched threads)"
     );
     println!(
         "refused: {refused_flow} for control flow, {refused_op} for an op with no emitter, \

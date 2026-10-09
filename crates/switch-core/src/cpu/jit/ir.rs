@@ -573,6 +573,9 @@ pub(super) struct Block {
     pub(super) term: Option<Term>,
     /// Page numbers the block was read from; a store to any drops the block.
     pub(super) pages: Vec<u32>,
+    /// The other blocks compiled into this one's region, in the order its
+    /// `run` numbers them from 1. Cleared with the compiled form.
+    pub(super) members: std::cell::RefCell<Vec<std::rc::Rc<Block>>>,
 }
 
 impl Block {
@@ -599,7 +602,57 @@ impl Block {
             follows,
             term,
             pages,
+            members: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// The address of the `i`th instruction, across followed `B`s.
+    pub(super) fn pc_at(&self, i: usize) -> u32 {
+        let (mut run_pc, mut run_i) = (self.start, 0usize);
+        for branch in &self.exits {
+            let Exit::Jump { target } = branch.exit else {
+                continue;
+            };
+            let after = branch.at as usize + branch.span as usize;
+            if after > i {
+                break;
+            }
+            (run_pc, run_i) = (target, after);
+        }
+        run_pc.wrapping_add(4 * (i - run_i) as u32)
+    }
+
+    /// Where control can go next that is known before running: conditional
+    /// branch targets, a `B`'s target, and the fall-through of a block cut short.
+    pub(super) fn successors(&self) -> impl Iterator<Item = u32> + '_ {
+        let exits = self.exits.iter().filter_map(|branch| match branch.exit {
+            Exit::Cond { target, .. }
+            | Exit::Cbz { target, .. }
+            | Exit::Tbz { target, .. }
+            | Exit::CmpImm { target, .. }
+            | Exit::UpdateCmpImm { target, .. }
+            | Exit::CmpReg { target, .. } => Some(target),
+            Exit::Jump { .. } => None,
+        });
+        let end = match self.term {
+            Some(Term::B { target }) => Some(target),
+            None => Some(self.pc_at(self.ops.len())),
+            _ => None,
+        };
+        exits.chain(end)
+    }
+
+    /// Pages this block's compiled region was read from, its members' included.
+    pub(super) fn region_pages(&self) -> Vec<u32> {
+        let mut pages = self.pages.clone();
+        for member in self.members.borrow().iter() {
+            for &page in &member.pages {
+                if !pages.contains(&page) {
+                    pages.push(page);
+                }
+            }
+        }
+        pages
     }
 
     #[inline(always)]
@@ -620,6 +673,7 @@ impl Block {
         if let Code::Ready { entry, .. } = self.code.replace(Code::Never) {
             super::host::release(entry);
         }
+        self.members.borrow_mut().clear();
     }
 }
 

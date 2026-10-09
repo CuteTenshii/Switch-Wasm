@@ -3,6 +3,9 @@
 
 pub(super) const I32: u8 = 0x7F;
 pub(super) const I64: u8 = 0x7E;
+pub(super) const V128: u8 = 0x7B;
+pub(super) const F32: u8 = 0x7D;
+pub(super) const F64: u8 = 0x7C;
 
 pub(super) fn uleb(out: &mut Vec<u8>, mut v: u64) {
     loop {
@@ -50,6 +53,8 @@ pub(super) struct Func {
     /// Run-length encoded `(count, type)` declarations.
     locals: Vec<(u32, u8)>,
     code: Vec<u8>,
+    /// Open `block`, `loop` and `if` constructs, for [`Func::br`].
+    depth: u32,
 }
 
 impl Func {
@@ -84,6 +89,21 @@ impl Func {
         sleb(&mut self.code, v);
     }
 
+    pub(super) fn f32_const(&mut self, v: f32) {
+        self.code.push(0x43);
+        self.code.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+
+    pub(super) fn f64_const(&mut self, v: f64) {
+        self.code.push(0x44);
+        self.code.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+
+    /// A one-byte instruction with no immediates, named where it is used.
+    pub(super) fn op_raw(&mut self, opcode: u8) {
+        self.op(opcode);
+    }
+
     pub(super) fn local_get(&mut self, i: u32) {
         self.op_idx(0x20, i);
     }
@@ -108,19 +128,54 @@ impl Func {
     pub(super) fn if_result(&mut self, ty: u8) {
         self.code.push(0x04);
         self.code.push(ty);
+        self.depth += 1;
     }
 
     pub(super) fn if_void(&mut self) {
         self.code.push(0x04);
         self.code.push(0x40);
+        self.depth += 1;
+    }
+
+    /// Opens a `block` and returns its label for [`Func::br`].
+    pub(super) fn block_void(&mut self) -> u32 {
+        self.code.push(0x02);
+        self.code.push(0x40);
+        self.depth += 1;
+        self.depth - 1
+    }
+
+    /// Opens a `loop` and returns its label for [`Func::br`].
+    pub(super) fn loop_void(&mut self) -> u32 {
+        self.code.push(0x03);
+        self.code.push(0x40);
+        self.depth += 1;
+        self.depth - 1
+    }
+
+    /// Branches to `label`, as returned when its construct was opened.
+    pub(super) fn br(&mut self, label: u32) {
+        self.op_idx(0x0C, self.depth - 1 - label);
+    }
+
+    /// Branches to the `targets` entry the value on the stack names, or to
+    /// `default`; all relative depths.
+    pub(super) fn br_table(&mut self, targets: &[u32], default: u32) {
+        self.code.push(0x0E);
+        uleb(&mut self.code, targets.len() as u64);
+        for &t in targets {
+            uleb(&mut self.code, u64::from(t));
+        }
+        uleb(&mut self.code, u64::from(default));
+    }
+
+    /// Puts `code` ahead of everything emitted so far.
+    pub(super) fn prepend(&mut self, code: &[u8]) {
+        self.code.splice(0..0, code.iter().copied());
     }
 
     pub(super) fn else_(&mut self) {
         self.op(0x05);
-    }
-
-    pub(super) fn return_(&mut self) {
-        self.op(0x0F);
     }
 
     /// Tail-call the table entry on the stack, with arguments under it, as type `ty`.
@@ -219,6 +274,10 @@ impl Func {
 
     pub(super) fn i32_ge_s(&mut self) {
         self.op(0x4E);
+    }
+
+    pub(super) fn i32_lt_s(&mut self) {
+        self.op(0x48);
     }
 
     pub(super) fn i32_eqz(&mut self) {
@@ -323,8 +382,51 @@ impl Func {
         self.op(0xAD);
     }
 
+    pub(super) fn i64_extend_i32_s(&mut self) {
+        self.op(0xAC);
+    }
+
+    /// A SIMD instruction: the `0xFD` prefix and its opcode.
+    pub(super) fn simd(&mut self, opcode: u32) {
+        self.code.push(0xFD);
+        uleb(&mut self.code, u64::from(opcode));
+    }
+
+    /// A SIMD memory access; `align` as for [`Func::i64_load`].
+    pub(super) fn simd_mem(&mut self, opcode: u32, align: u8, offset: u32) {
+        self.simd(opcode);
+        uleb(&mut self.code, u64::from(align));
+        uleb(&mut self.code, u64::from(offset));
+    }
+
+    /// A SIMD access to one lane of the vector on the stack.
+    pub(super) fn simd_mem_lane(&mut self, opcode: u32, align: u8, offset: u32, lane: u8) {
+        self.simd_mem(opcode, align, offset);
+        self.code.push(lane);
+    }
+
+    /// `extract_lane`/`replace_lane`.
+    pub(super) fn simd_lane(&mut self, opcode: u32, lane: u8) {
+        self.simd(opcode);
+        self.code.push(lane);
+    }
+
+    pub(super) fn v128_const(&mut self, bytes: [u8; 16]) {
+        self.simd(0x0C);
+        self.code.extend_from_slice(&bytes);
+    }
+
+    /// `i8x16.shuffle`: byte `i` of the result is byte `lanes[i]` of the two
+    /// operands side by side.
+    pub(super) fn i8x16_shuffle(&mut self, lanes: [u8; 16]) {
+        self.simd(0x0D);
+        self.code.extend_from_slice(&lanes);
+    }
+
+    /// Closes the innermost construct, or the function body when none is open.
     pub(super) fn end(&mut self) {
         self.op(0x0B);
+        self.depth = self.depth.saturating_sub(1);
     }
 
     pub(super) fn len(&self) -> usize {
@@ -521,6 +623,31 @@ mod tests {
             0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x7C, 0x0B,
         ];
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn a_branch_counts_its_depth_from_where_it_is() {
+        let mut f = Func::new();
+        let outer = f.block_void();
+        let inner = f.loop_void();
+        f.if_void();
+        f.br(outer);
+        f.br(inner);
+        f.end();
+        f.end();
+        f.end();
+        assert_eq!(
+            f.code(),
+            &[0x02, 0x40, 0x03, 0x40, 0x04, 0x40, 0x0C, 2, 0x0C, 1, 0x0B, 0x0B, 0x0B]
+        );
+    }
+
+    #[test]
+    fn a_simd_opcode_is_prefixed_and_leb_encoded() {
+        let mut f = Func::new();
+        f.simd(0x0B);
+        f.simd(0x9E);
+        assert_eq!(f.code(), &[0xFD, 0x0B, 0xFD, 0x9E, 0x01]);
     }
 
     #[test]

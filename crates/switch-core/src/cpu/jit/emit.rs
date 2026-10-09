@@ -1,24 +1,29 @@
-//! Turning a translated block into wasm.
+//! Turning a region of translated blocks into wasm.
 //!
-//! A block function takes the address of the [`crate::cpu::Cpu`] in linear
+//! A region function takes the address of the [`crate::cpu::Cpu`] in linear
 //! memory and reaches guest state through baked [`Layout`] offsets. Guest
-//! accesses walk the page table inline and make exactly the checks of
-//! [`crate::mem::Memory::peek`]/[`crate::mem::Memory::poke`], handing the
-//! instruction back to the interpreter when they decline. `run` returns how
-//! many instructions retired, with [`LEFT`] set when it left at a taken branch or
-//! a terminator [`writes_term`] accepts.
-//! A block with anything the emitter cannot write is [`Refused`].
-//! [`emit_chained`] blocks leave by tail-calling the next compiled block
-//! when the chain table has it and the fuel allows.
+//! registers and NZCV live in locals, loaded on entry and stored on the way
+//! out. Guest accesses walk the page table inline and make exactly the checks
+//! of [`crate::mem::Memory::peek`]/[`crate::mem::Memory::poke`], handing the
+//! instruction back to the interpreter when they decline. Branches between the
+//! region's blocks stay inside the function while the fuel lasts. `run`
+//! returns how many instructions the block it stopped in retired, that block's
+//! index above [`MEMBER_SHIFT`], and [`LEFT`] when it left at a taken branch or
+//! a terminator [`writes_term`] accepts. A block with anything the emitter
+//! cannot write is [`Refused`]. Chained regions leave by tail-calling the next
+//! compiled region when the chain table has it and the fuel allows.
 
 use super::cache::{Chain, Jit, CHAIN_SLOTS};
 use super::decode::{decode, translate, Decoded, MAX_BLOCK_OPS};
 use super::ir::{Block, Exit, Op, Term};
-use super::wasm::{Func, Module, I32, I64};
+use super::wasm::{Func, Module, F32, F64, I32, I64, V128};
 use crate::cpu::bits::mask_of_width;
 use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
-use crate::cpu::{Cpu, CONDITION_MASKS, RECENT_LEN, SELF_RETURN_TRAMPOLINE};
+use crate::cpu::{Cpu, CONDITION_MASKS, REG_SLOTS, SELF_RETURN_TRAMPOLINE};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
+
+mod fp;
+mod simd;
 
 /// Whether the emitter has a way to write `insn` out as wasm. Block-ending and
 /// branching instructions answer `false`: those are exits, not ops.
@@ -29,25 +34,7 @@ pub fn emits(insn: u32) -> bool {
         return false;
     };
     let mut f = scratch_func();
-    Emitter {
-        f: &mut f,
-        layout: Layout {
-            regs: 0,
-            nzcv: 0,
-            pc: 0,
-            pages: 0,
-            read_watch_lo: 0,
-            read_watch_hi: 0,
-            watch_lo: 0,
-            watch_hi: 0,
-            readonly_lo: 0,
-            readonly_hi: 0,
-            watched: 0,
-            vregs: 0,
-        },
-        chain: None,
-    }
-    .op(&op, 0)
+    Emitter::new(&mut f, SCRATCH, false, Vec::new()).op(&op, 0)
 }
 
 /// Whether the emitted form of `insn` can decline and hand the instruction
@@ -60,38 +47,40 @@ pub fn defers(insn: u32) -> bool {
     };
     let body = |retired: usize| {
         let mut f = scratch_func();
-        let layout = Layout {
-            regs: 0,
-            nzcv: 0,
-            pc: 0,
-            pages: 0,
-            read_watch_lo: 0,
-            read_watch_hi: 0,
-            watch_lo: 0,
-            watch_hi: 0,
-            readonly_lo: 0,
-            readonly_hi: 0,
-            watched: 0,
-            vregs: 0,
-        };
-        Emitter {
-            f: &mut f,
-            layout,
-            chain: None,
-        }
-        .op(&op, retired);
+        Emitter::new(&mut f, SCRATCH, false, Vec::new()).op(&op, retired);
         f.code().to_vec()
     };
     body(0) != body(1)
 }
 
-/// A function body with the locals every emitted block declares.
+/// A function body with the locals every emitted region declares.
 fn scratch_func() -> Func {
     let mut f = Func::new();
     f.locals(1, 6, I64);
-    f.locals(1, 5, I32);
+    f.locals(1, 10, I32);
+    f.locals(1, 3, V128);
+    f.locals(1, 2, F32);
+    f.locals(1, 2, F64);
+    f.locals(1, ENV_SLOTS, I32);
     f
 }
+
+/// Offsets for code that is inspected, never run.
+const SCRATCH: Layout = Layout {
+    regs: 0,
+    nzcv: 0,
+    pc: 0,
+    fuel: 0,
+    pages: 0,
+    read_watch_lo: 0,
+    read_watch_hi: 0,
+    watch_lo: 0,
+    watch_hi: 0,
+    readonly_lo: 0,
+    readonly_hi: 0,
+    watched: 0,
+    vregs: 0,
+};
 
 /// Byte offsets of the guest state an emitted block touches, from the pointer
 /// it is handed. Taken from `offset_of!`, since `Cpu` is not `#[repr(C)]`.
@@ -101,8 +90,11 @@ pub struct Layout {
     pub regs: u32,
     /// The packed NZCV word, in its architectural bit positions.
     pub nzcv: u32,
-    /// The guest program counter, written only by a taken branch leaving the block.
+    /// The guest program counter, written only by a taken branch leaving the region.
     pub pc: u32,
+    /// Instructions blocks left through a branch may still retire, as an `i32`;
+    /// a branch that takes it below zero leaves the region.
+    pub fuel: u32,
     /// Start of the `[u128; 32]` SIMD&FP register file.
     pub vregs: u32,
     /// Where the page table's pointer is kept (the table itself is boxed).
@@ -130,6 +122,9 @@ impl Layout {
             regs: std::mem::offset_of!(Cpu, regs) as u32,
             nzcv: std::mem::offset_of!(Cpu, nzcv) as u32,
             pc: std::mem::offset_of!(Cpu, pc) as u32,
+            fuel: (std::mem::offset_of!(Cpu, jit)
+                + std::mem::offset_of!(Jit, chain)
+                + std::mem::offset_of!(Chain, fuel)) as u32,
             vregs: std::mem::offset_of!(Cpu, vregs) as u32,
             pages: mem + m.pages,
             read_watch_lo: mem + m.read_watch_lo,
@@ -172,9 +167,15 @@ pub enum Refused {
     TooLong,
 }
 
-/// Set in `run`'s result when the block left at a taken branch; the guest `pc`
+/// Set in `run`'s result when the region left at a taken branch; the guest `pc`
 /// holds the target. A block never spans a page, so counts stay below 1,024.
 pub const LEFT: u32 = 1 << 31;
+
+/// The retired count in `run`'s result.
+pub(super) const COUNT_MASK: u32 = 0xFFFF;
+
+/// Where `run`'s result keeps the index of the block it stopped in.
+pub(super) const MEMBER_SHIFT: u32 = 16;
 
 /// The parameter every block function takes.
 const STATE: u32 = 0;
@@ -197,80 +198,78 @@ const L_PAGE: u32 = 9;
 const L_IDX: u32 = 10;
 /// The watched-pages bitmap.
 const L_WP: u32 = 11;
+/// `run`'s result, set before branching to the epilogue.
+const L_RET: u32 = 12;
+/// The block a branch to the loop head goes to.
+const L_NEXT: u32 = 13;
+const L_FUEL: u32 = 14;
+/// Where a region that left is going.
+const L_TARGET: u32 = 15;
+const L_NZCV: u32 = 16;
+/// Vector scratch.
+const L_V0: u32 = 17;
+const L_V1: u32 = 18;
+const L_V2: u32 = 19;
+/// Float scratch, two of each width.
+const L_F32: u32 = 20;
+const L_F32B: u32 = 21;
+const L_F64: u32 = 22;
+const L_F64B: u32 = 23;
+/// Memory state only the host changes, loaded once per run instead of per access.
+const L_ENV: u32 = 24;
+const ENV_SLOTS: u32 = 8;
+/// The first register local; slots get theirs in the order the region touches them.
+const L_REGS: u32 = L_ENV + ENV_SLOTS;
+
+/// Reads as zero and is never written.
+const ZR_SLOT: u8 = 31;
+
+/// Register 31 as a base register is SP.
+fn base_slot(rn: u32) -> u8 {
+    if rn == 31 {
+        crate::cpu::regs::SP_SLOT as u8
+    } else {
+        rn as u8
+    }
+}
+
+/// Register 31 as a destination is the zero register, whose writes land in the discard slot.
+fn gp_dst(rd: u32) -> u8 {
+    if rd == 31 {
+        DISCARD
+    } else {
+        rd as u8
+    }
+}
+/// Takes writes to the zero register; not guest state, so never loaded or stored.
+const DISCARD: u8 = crate::cpu::DISCARD_SLOT as u8;
 
 /// A block bigger than this is not emitted, to bound module compile time.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// The most a block can retire, terminator included: fuel keeps this much budget for the next.
-pub(super) const MAX_WHOLE: i64 = MAX_BLOCK_OPS as i64 + 1;
+/// Instructions in a PLT stub, which a folded call retires after the `BL`.
+pub(super) const PLT_STUB: u32 = 4;
 
-/// Offsets from the `Cpu` of what a jump between blocks touches.
+/// The most a block can retire, terminator and stub included: fuel keeps this
+/// much budget for the next.
+pub(super) const MAX_WHOLE: i64 = MAX_BLOCK_OPS as i64 + 1 + PLT_STUB as i64;
+
+/// Offsets from the `Cpu` of what a jump between regions touches.
 struct ChainLayout {
-    fuel: u32,
     hops: u32,
     last: u32,
     slots: u32,
-    recent: u32,
-    recent_len: u32,
-    run_start: u32,
-    run_count: u32,
 }
 
 impl ChainLayout {
     const OF_CPU: ChainLayout = {
         let chain = std::mem::offset_of!(Cpu, jit) + std::mem::offset_of!(Jit, chain);
         ChainLayout {
-            fuel: (chain + std::mem::offset_of!(Chain, fuel)) as u32,
             hops: (chain + std::mem::offset_of!(Chain, hops)) as u32,
             last: (chain + std::mem::offset_of!(Chain, last)) as u32,
             slots: (chain + std::mem::offset_of!(Chain, slots)) as u32,
-            recent: std::mem::offset_of!(Cpu, recent) as u32,
-            recent_len: std::mem::offset_of!(Cpu, recent_len) as u32,
-            run_start: std::mem::offset_of!((u32, u32), 0) as u32,
-            run_count: std::mem::offset_of!((u32, u32), 1) as u32,
         }
     };
-}
-
-/// The block being emitted, as far as a jump out of it needs: its trail runs.
-pub(super) struct Chaining {
-    start: u32,
-    /// Index after each followed `B`, and its target.
-    jumps: Vec<(usize, u32)>,
-}
-
-impl Chaining {
-    pub(super) fn of(block: &Block) -> Chaining {
-        let jumps = block
-            .exits
-            .iter()
-            .filter_map(|branch| match branch.exit {
-                Exit::Jump { target } => Some((branch.at as usize + branch.span as usize, target)),
-                _ => None,
-            })
-            .collect();
-        Chaining {
-            start: block.start,
-            jumps,
-        }
-    }
-
-    /// The trail runs of the first `retired` instructions, as `exec` pushes them.
-    pub(super) fn runs(&self, retired: usize) -> Vec<(u32, u32)> {
-        let mut runs = Vec::new();
-        let (mut run_pc, mut run_i) = (self.start, 0usize);
-        for &(after, target) in &self.jumps {
-            if after > retired {
-                break;
-            }
-            runs.push((run_pc, (after - run_i) as u32));
-            (run_pc, run_i) = (target, after);
-        }
-        if retired > run_i {
-            runs.push((run_pc, (retired - run_i) as u32));
-        }
-        runs
-    }
 }
 
 /// The immediate of a fused `CMP` inverted at emit time, as
@@ -309,15 +308,78 @@ fn size_of(sf: bool) -> u32 {
 struct Emitter<'a> {
     f: &'a mut Func,
     layout: Layout,
-    chain: Option<Chaining>,
+    chain: bool,
+    /// Whether the engine has SIMD128, for the Advanced SIMD forms.
+    simd: bool,
+    /// Entry addresses of the region's blocks a branch may stay inside for.
+    targets: Vec<u32>,
+    /// The block being emitted, as an index into the region.
+    member: usize,
+    epilogue: u32,
+    /// The loop head that dispatches on `L_NEXT`, when a branch stays inside.
+    top: Option<u32>,
+    /// Register slots the region touches, loaded on entry.
+    used: u64,
+    /// Register slots it writes, stored on the way out.
+    written: u64,
+    /// Each slot's local, or 0 before it has one.
+    locals: [u32; REG_SLOTS],
+    next_local: u32,
+    flags_used: bool,
+    flags_written: bool,
+    fuel_used: bool,
+    /// Whether any exit leaves with [`LEFT`].
+    leaves: bool,
+    /// [`Emitter::env`] offsets, by local, that the region reads.
+    env: [Option<u32>; ENV_SLOTS as usize],
+}
+
+impl<'a> Emitter<'a> {
+    /// Opens the block every exit branches out of to reach the epilogue.
+    fn new(f: &'a mut Func, layout: Layout, chain: bool, targets: Vec<u32>) -> Emitter<'a> {
+        let epilogue = f.block_void();
+        Emitter {
+            f,
+            layout,
+            chain,
+            simd: true,
+            targets,
+            member: 0,
+            epilogue,
+            top: None,
+            used: 0,
+            written: 0,
+            locals: [0; REG_SLOTS],
+            next_local: L_REGS,
+            flags_used: false,
+            flags_written: false,
+            fuel_used: false,
+            leaves: false,
+            env: [None; ENV_SLOTS as usize],
+        }
+    }
 }
 
 impl Emitter<'_> {
     /// Push `regs[slot]` unnarrowed, for ops that shift its high bits out.
     fn read_reg_raw(&mut self, slot: u8) {
-        self.f.local_get(STATE);
-        self.f
-            .i64_load(ALIGN_8, self.layout.regs + 8 * u32::from(slot));
+        if slot == ZR_SLOT {
+            self.f.i64_const(0);
+            return;
+        }
+        self.used |= 1 << slot;
+        let local = self.local_of(slot);
+        self.f.local_get(local);
+    }
+
+    /// The local holding `slot`, assigned on first use.
+    fn local_of(&mut self, slot: u8) -> u32 {
+        let local = &mut self.locals[usize::from(slot)];
+        if *local == 0 {
+            *local = self.next_local;
+            self.next_local += 1;
+        }
+        *local
     }
 
     /// Narrow the value on the stack to the operation's width.
@@ -341,60 +403,244 @@ impl Emitter<'_> {
         self.mask_to(sf);
     }
 
-    /// Push the address a register write needs; it goes under the value.
-    fn addr_regs(&mut self) {
-        self.f.local_get(STATE);
+    /// Push the `u32` at `offset` from the `Cpu`, which only the host writes,
+    /// from the local the prologue loads it into.
+    fn env(&mut self, offset: u32) {
+        let slot = match self.env.iter().position(|&o| o == Some(offset)) {
+            Some(slot) => slot,
+            None => {
+                let slot = self
+                    .env
+                    .iter()
+                    .position(Option::is_none)
+                    .expect("more host-written words than ENV_SLOTS");
+                self.env[slot] = Some(offset);
+                slot
+            }
+        };
+        self.f.local_get(L_ENV + slot as u32);
     }
 
+    /// Write the value on the stack to `regs[slot]`.
     fn store_reg(&mut self, slot: u8) {
-        self.f
-            .i64_store(ALIGN_8, self.layout.regs + 8 * u32::from(slot));
+        if slot != DISCARD {
+            self.used |= 1 << slot;
+            self.written |= 1 << slot;
+        }
+        let local = self.local_of(slot);
+        self.f.local_set(local);
     }
 
-    /// Leave through `term` with `pc` on its target and `x30` linked for a call.
-    fn term(&mut self, term: &Term) {
-        match *term {
-            Term::B { target } | Term::Bl { target, .. } => {
+    /// `run`'s result for leaving `retired` instructions into the current block.
+    fn answer(&self, retired: usize) -> u32 {
+        (self.member as u32) << MEMBER_SHIFT | retired as u32
+    }
+
+    /// Leave the region through the epilogue with `answer`.
+    fn exit_with(&mut self, answer: u32) {
+        if answer & LEFT != 0 {
+            self.leaves = true;
+        }
+        self.f.i32_const(answer as i32);
+        self.f.local_set(L_RET);
+        self.f.br(self.epilogue);
+    }
+
+    /// Continue at `target` after `retired` instructions of the current block:
+    /// inside the region if it has the block, out through the epilogue if not.
+    /// `fall` says the code emitted next is where the following block starts.
+    fn goto(&mut self, retired: usize, target: u32, fall: bool) {
+        match self.inside(target) {
+            Some(k) => self.edge(retired, k, fall),
+            None => {
                 self.f.i32_const(target as i32);
-                self.f.local_set(L_ADDR);
+                self.f.local_set(L_TARGET);
+                self.exit_with(self.answer(retired) | LEFT);
+            }
+        }
+    }
+
+    /// The region's block at `pc`, when there is a loop head to reach it by.
+    fn inside(&self, pc: u32) -> Option<usize> {
+        self.top?;
+        self.targets.iter().position(|&start| start == pc)
+    }
+
+    /// Branch to the region's block `k`, charging `retired` to the fuel; out
+    /// of fuel, leave with nothing of block `k` retired.
+    fn edge(&mut self, retired: usize, k: usize, fall: bool) {
+        self.fuel_used = true;
+        self.f.local_get(L_FUEL);
+        self.f.i32_const(retired as i32);
+        self.f.i32_sub();
+        self.f.local_tee(L_FUEL);
+        self.f.i32_const(0);
+        self.f.i32_lt_s();
+        self.f.if_void();
+        self.exit_with((k as u32) << MEMBER_SHIFT);
+        self.f.end();
+        if fall && k == self.member + 1 {
+            return;
+        }
+        self.f.i32_const(k as i32);
+        self.f.local_set(L_NEXT);
+        let top = self.top.expect("`inside` answers only with a loop head");
+        self.f.br(top);
+    }
+
+    /// Leave through `term`, which follows `len` instructions of the block,
+    /// linking `x30` for a call.
+    fn term(&mut self, term: &Term, len: usize) {
+        let retired = len + term_retires(term);
+        match *term {
+            Term::B { target } => self.goto(retired, target, true),
+            Term::Bl { target, ret_pc } => {
+                self.f.i64_const(i64::from(ret_pc));
+                self.store_reg(30);
+                self.goto(retired, target, true);
             }
             // Read before linking: `blr x30` jumps to the old x30.
             Term::Br { rn } | Term::Blr { rn, .. } | Term::Ret { rn } => {
                 self.read_reg_raw(rn & 0x1F);
                 self.f.i32_wrap_i64();
+                self.f.local_set(L_TARGET);
+                // A return to 0 is homebrew's exit, routed through the trampoline.
+                if let Term::Ret { .. } = term {
+                    self.f.i32_const(SELF_RETURN_TRAMPOLINE as i32);
+                    self.f.local_get(L_TARGET);
+                    self.f.local_get(L_TARGET);
+                    self.f.i32_eqz();
+                    self.f.select();
+                    self.f.local_set(L_TARGET);
+                }
+                if let Term::Blr { ret_pc, .. } = *term {
+                    self.f.i64_const(i64::from(ret_pc));
+                    self.store_reg(30);
+                }
+                self.exit_with(self.answer(retired) | LEFT);
+            }
+            // The stub's `adrp`/`ldr`/`add`/`br` as `exec`'s fold does them: x16 the
+            // slot, x17 what it holds. A slot the page table cannot answer hands the
+            // call back before anything is written.
+            Term::BlPlt { got, .. } | Term::BPlt { got, .. } => {
+                self.f.i32_const(got as i32);
                 self.f.local_set(L_ADDR);
+                self.page_for_read(8, len);
+                self.in_page();
+                self.f.i64_load(UNALIGNED, 0);
+                self.f.local_tee(L_T);
+                self.store_reg(17);
+                self.f.local_get(L_T);
+                self.f.i32_wrap_i64();
+                self.f.local_set(L_TARGET);
+                self.f.i64_const(i64::from(got));
+                self.store_reg(16);
+                if let Term::BlPlt { ret_pc, .. } = *term {
+                    self.f.i64_const(i64::from(ret_pc));
+                    self.store_reg(30);
+                }
+                self.exit_with(self.answer(retired) | LEFT);
             }
             _ => unreachable!("writes_term accepts only branches"),
         }
-        // A return to 0 is homebrew's exit, routed through the trampoline.
-        if let Term::Ret { .. } = term {
-            self.f.i32_const(SELF_RETURN_TRAMPOLINE as i32);
-            self.f.local_get(L_ADDR);
-            self.f.local_get(L_ADDR);
-            self.f.i32_eqz();
-            self.f.select();
-            self.f.local_set(L_ADDR);
-        }
-        if let Term::Bl { ret_pc, .. } | Term::Blr { ret_pc, .. } = *term {
-            self.addr_regs();
-            self.f.i64_const(i64::from(ret_pc));
-            self.store_reg(30);
-        }
-        self.f.local_get(STATE);
-        self.f.local_get(L_ADDR);
-        self.f.i32_store(ALIGN_4, self.layout.pc);
     }
 
-    /// Jump into the compiled block at the target (`target`, or `L_ADDR`) if
-    /// the chain table has it and `retired` fits the fuel; otherwise fall through.
-    fn chain(&mut self, retired: usize, target: Option<u32>) {
-        let Some(runs) = self.chain.as_ref().map(|c| c.runs(retired)) else {
-            return;
-        };
+    /// The current block's body and how it ends.
+    fn block(&mut self, block: &Block) -> Result<(), Refused> {
+        let mut next_exit = 0usize;
+        let mut i = 0usize;
+        while i < block.ops.len() {
+            // The same walk [`super::exec`] makes over ops and branch spans.
+            match block.exits.get(next_exit) {
+                Some(branch) if branch.at as usize == i => {
+                    let retired = i + branch.span as usize;
+                    if !self.exit(&branch.exit, retired) {
+                        return Err(Refused::ControlFlow);
+                    }
+                    i = retired;
+                    next_exit += 1;
+                }
+                _ => {
+                    if !self.op(&block.ops[i], i) {
+                        return Err(Refused::Op(block.words[i]));
+                    }
+                    i += 1;
+                }
+            }
+            if self.f.len() > MAX_BODY_BYTES {
+                return Err(Refused::TooLong);
+            }
+        }
+        // An exit the walk did not reach would be silently dropped; refuse.
+        if next_exit != block.exits.len() {
+            return Err(Refused::ControlFlow);
+        }
+        let len = block.ops.len();
+        match block.term {
+            Some(ref term) if writes_term(term) => self.term(term, len),
+            // Off the end of a block cut at its length or page limit.
+            None => self.goto_or_stop(len, block.pc_at(len)),
+            // `exec` runs the terminator.
+            Some(_) => self.exit_with(self.answer(len)),
+        }
+        Ok(())
+    }
+
+    /// Fall into `next` when the region has it; otherwise stop, `exec` finding
+    /// the pc from the count.
+    fn goto_or_stop(&mut self, retired: usize, next: u32) {
+        match self.inside(next) {
+            Some(k) => self.edge(retired, k, true),
+            None => self.exit_with(self.answer(retired)),
+        }
+    }
+
+    /// Store what the region changed and answer `L_RET`; a region that left
+    /// writes the target to `pc` and, chained, jumps into its compiled form.
+    fn epilogue(&mut self) {
+        let regs = self.layout.regs;
+        for slot in 0..REG_SLOTS as u32 {
+            if self.written & (1 << slot) != 0 {
+                self.f.local_get(STATE);
+                self.f.local_get(self.locals[slot as usize]);
+                self.f.i64_store(ALIGN_8, regs + 8 * slot);
+            }
+        }
+        if self.flags_written {
+            self.f.local_get(STATE);
+            self.f.local_get(L_NZCV);
+            self.f.i32_store(ALIGN_4, self.layout.nzcv);
+        }
+        if self.fuel_used {
+            self.f.local_get(STATE);
+            self.f.local_get(L_FUEL);
+            self.f.i32_store(ALIGN_4, self.layout.fuel);
+        }
+        if self.leaves {
+            self.f.local_get(L_RET);
+            self.f.i32_const(LEFT as i32);
+            self.f.i32_and();
+            self.f.if_void();
+            self.f.local_get(STATE);
+            self.f.local_get(L_TARGET);
+            self.f.i32_store(ALIGN_4, self.layout.pc);
+            if self.chain {
+                self.jump_out();
+            }
+            self.f.end();
+        }
+        self.f.local_get(L_RET);
+    }
+
+    /// Jump into the compiled region at `L_TARGET` if the chain table has it
+    /// and what the stopping block retired fits the fuel; otherwise fall through.
+    fn jump_out(&mut self) {
         let at = ChainLayout::OF_CPU;
         self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, at.fuel);
-        self.f.i32_const(retired as i32);
+        self.f.i32_load(ALIGN_4, self.layout.fuel);
+        self.f.local_get(L_RET);
+        self.f.i32_const(COUNT_MASK as i32);
+        self.f.i32_and();
         self.f.i32_sub();
         self.f.local_tee(L_IDX);
         self.f.i32_const(0);
@@ -402,27 +648,20 @@ impl Emitter<'_> {
         self.f.if_void();
         self.f.local_get(STATE);
         self.f.i32_load(ALIGN_4, at.slots);
-        // A known target's slot is a constant offset; `slot_at` is added to the loads.
-        let slot_at = match target {
-            Some(pc) => (Chain::slot(pc) * 8) as u32,
-            None => {
-                self.f.local_get(L_ADDR);
-                self.f.i32_const(1);
-                self.f.i32_shl();
-                self.f.i32_const(((CHAIN_SLOTS - 1) * 8) as i32);
-                self.f.i32_and();
-                self.f.i32_add();
-                0
-            }
-        };
+        self.f.local_get(L_TARGET);
+        self.f.i32_const(1);
+        self.f.i32_shl();
+        self.f.i32_const(((CHAIN_SLOTS - 1) * 8) as i32);
+        self.f.i32_and();
+        self.f.i32_add();
         self.f.local_tee(L_PAGE);
-        self.f.i32_load(ALIGN_4, slot_at);
-        self.push_target(target);
+        self.f.i32_load(ALIGN_4, 0);
+        self.f.local_get(L_TARGET);
         self.f.i32_eq();
         self.f.if_void();
         self.f.local_get(STATE);
         self.f.local_get(L_IDX);
-        self.f.i32_store(ALIGN_4, at.fuel);
+        self.f.i32_store(ALIGN_4, self.layout.fuel);
         self.f.local_get(STATE);
         self.f.local_get(STATE);
         self.f.i32_load(ALIGN_4, at.hops);
@@ -430,56 +669,48 @@ impl Emitter<'_> {
         self.f.i32_add();
         self.f.i32_store(ALIGN_4, at.hops);
         self.f.local_get(STATE);
-        self.push_target(target);
+        self.f.local_get(L_TARGET);
         self.f.i32_store(ALIGN_4, at.last);
-        self.push_runs(&runs, &at);
         self.f.local_get(STATE);
         self.f.local_get(L_PAGE);
-        self.f.i32_load(ALIGN_4, slot_at + 4);
+        self.f.i32_load(ALIGN_4, 4);
         self.f.return_call_indirect(0);
         self.f.end();
         self.f.end();
     }
 
-    fn push_target(&mut self, target: Option<u32>) {
-        match target {
-            Some(pc) => self.f.i32_const(pc as i32),
-            None => self.f.local_get(L_ADDR),
+    /// Load what the region touches, ahead of everything else.
+    fn prologue(&self) -> Vec<u8> {
+        let mut f = Func::new();
+        for slot in 0..REG_SLOTS as u32 {
+            if self.used & (1 << slot) != 0 {
+                f.local_get(STATE);
+                f.i64_load(ALIGN_8, self.layout.regs + 8 * slot);
+                f.local_set(self.locals[slot as usize]);
+            }
         }
-    }
-
-    /// Append `runs` to the fault trail, as `Cpu::push_run` does.
-    fn push_runs(&mut self, runs: &[(u32, u32)], at: &ChainLayout) {
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, at.recent_len);
-        self.f.local_set(L_C);
-        for (k, &(start, count)) in runs.iter().enumerate() {
-            self.f.local_get(L_C);
-            self.f.i32_const(k as i32);
-            self.f.i32_add();
-            self.f.i32_const((RECENT_LEN - 1) as i32);
-            self.f.i32_and();
-            self.f.i32_const(3);
-            self.f.i32_shl();
-            self.f.local_get(STATE);
-            self.f.i32_add();
-            self.f.local_tee(L_WP);
-            self.f.i32_const(start as i32);
-            self.f.i32_store(ALIGN_4, at.recent + at.run_start);
-            self.f.local_get(L_WP);
-            self.f.i32_const(count as i32);
-            self.f.i32_store(ALIGN_4, at.recent + at.run_count);
+        if self.flags_used {
+            f.local_get(STATE);
+            f.i32_load(ALIGN_4, self.layout.nzcv);
+            f.local_set(L_NZCV);
         }
-        self.f.local_get(STATE);
-        self.f.local_get(L_C);
-        self.f.i32_const(runs.len() as i32);
-        self.f.i32_add();
-        self.f.i32_store(ALIGN_4, at.recent_len);
+        if self.fuel_used {
+            f.local_get(STATE);
+            f.i32_load(ALIGN_4, self.layout.fuel);
+            f.local_set(L_FUEL);
+        }
+        for (slot, offset) in self.env.iter().enumerate() {
+            if let Some(offset) = *offset {
+                f.local_get(STATE);
+                f.i32_load(ALIGN_4, offset);
+                f.local_set(L_ENV + slot as u32);
+            }
+        }
+        f.code().to_vec()
     }
 
     /// Write the local `L_R` into `regs[slot]`.
     fn write_reg_from_r(&mut self, slot: u8) {
-        self.addr_regs();
         self.f.local_get(L_R);
         self.store_reg(slot);
     }
@@ -499,8 +730,8 @@ impl Emitter<'_> {
     fn cond_holds(&mut self, cond: u8) {
         self.f
             .i32_const(i32::from(CONDITION_MASKS[(cond & 0xF) as usize]));
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, self.layout.nzcv);
+        self.flags_used = true;
+        self.f.local_get(L_NZCV);
         self.f.i32_const(28);
         self.f.i32_shr_u();
         self.f.i32_shr_u();
@@ -703,8 +934,8 @@ impl Emitter<'_> {
             self.f.i32_or();
         } else {
             // `ANDS` leaves C and V exactly as they were.
-            self.f.local_get(STATE);
-            self.f.i32_load(ALIGN_4, self.layout.nzcv);
+            self.flags_used = true;
+            self.f.local_get(L_NZCV);
             self.f.i32_const(0x3000_0000);
             self.f.i32_and();
             self.f.i32_or();
@@ -713,10 +944,9 @@ impl Emitter<'_> {
 
     /// Store the packed word on the stack into NZCV.
     fn store_nzcv(&mut self) {
-        self.f.local_set(L_C);
-        self.f.local_get(STATE);
-        self.f.local_get(L_C);
-        self.f.i32_store(ALIGN_4, self.layout.nzcv);
+        self.flags_used = true;
+        self.flags_written = true;
+        self.f.local_set(L_NZCV);
     }
 
     /// `AND`/`ORR`/`EOR`/`ANDS` with the second operand already in `L_B`.
@@ -746,7 +976,6 @@ impl Emitter<'_> {
         sf: bool,
         operands: impl Fn(&mut Self),
     ) {
-        self.addr_regs();
         self.read_reg(ra, sf);
         operands(self);
         self.f.i64_mul();
@@ -793,25 +1022,19 @@ impl Emitter<'_> {
         self.f.end();
     }
 
-    /// Leave the block if the value on the stack is nonzero, reporting
-    /// `retired` instructions done; the interpreter resumes there.
+    /// Leave the region if the value on the stack is nonzero, reporting
+    /// `retired` instructions of this block done; the interpreter resumes there.
     fn deopt_if(&mut self, retired: usize) {
         self.f.if_void();
-        self.f.i32_const(retired as i32);
-        self.f.return_();
+        self.exit_with(self.answer(retired));
         self.f.end();
     }
 
-    /// Leave the block at a taken branch, if the value on the stack is
-    /// nonzero, reporting `retired` (the branch included) and `target`.
-    fn leave_if(&mut self, retired: usize, target: u32) {
+    /// Branch to `target` if the value on the stack is nonzero, with
+    /// `retired` instructions (the branch included) done.
+    fn branch_if(&mut self, retired: usize, target: u32) {
         self.f.if_void();
-        self.f.local_get(STATE);
-        self.f.i32_const(target as i32);
-        self.f.i32_store(ALIGN_4, self.layout.pc);
-        self.chain(retired, Some(target));
-        self.f.i32_const((retired as u32 | LEFT) as i32);
-        self.f.return_();
+        self.goto(retired, target, false);
         self.f.end();
     }
 
@@ -917,7 +1140,7 @@ impl Emitter<'_> {
             // A followed `B`: the following ops are already its target's.
             Exit::Jump { .. } => return true,
         };
-        self.leave_if(retired, target);
+        self.branch_if(retired, target);
         true
     }
 
@@ -978,7 +1201,6 @@ impl Emitter<'_> {
     /// Write `L_W` back to the base register, for the modes that have one.
     fn write_back(&mut self, rn: u8, wb: Wb) {
         if !matches!(wb, Wb::None) {
-            self.addr_regs();
             self.f.local_get(L_W);
             self.store_reg(rn);
         }
@@ -1039,8 +1261,7 @@ impl Emitter<'_> {
 
     /// Leave that page's storage in `L_PAGE`, or leave the block if it is null.
     fn page_or_defer(&mut self, retired: usize) {
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, self.layout.pages);
+        self.env(self.layout.pages);
         self.f.local_get(L_IDX);
         self.f.i32_const(PAGE_ENTRY_SHIFT);
         self.f.i32_shl();
@@ -1062,12 +1283,10 @@ impl Emitter<'_> {
             }
         };
         addr(self);
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, lo);
+        self.env(lo);
         self.f.i32_ge_u();
         addr(self);
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, hi);
+        self.env(hi);
         self.f.i32_lt_u();
         self.f.i32_and();
     }
@@ -1075,8 +1294,7 @@ impl Emitter<'_> {
     /// Leave the block if anything has cached page `L_IDX`'s contents, when
     /// the bitmap exists.
     fn owes_a_report(&mut self, retired: usize) {
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, self.layout.watched);
+        self.env(self.layout.watched);
         self.f.local_tee(L_WP);
         self.f.if_void();
         self.f.local_get(L_WP);
@@ -1112,14 +1330,12 @@ impl Emitter<'_> {
     /// `L_ADDR`, wrapping included.
     fn covers(&mut self, n: u32, lo: u32, hi: u32) {
         self.f.local_get(L_ADDR);
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, hi);
+        self.env(hi);
         self.f.i32_lt_u();
         self.f.local_get(L_ADDR);
         self.f.i32_const(n as i32);
         self.f.i32_add();
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, lo);
+        self.env(lo);
         self.f.i32_gt_u();
         self.f.i32_and();
     }
@@ -1137,7 +1353,6 @@ impl Emitter<'_> {
     /// anything after the wasm load.
     fn load(&mut self, rt: u8, acc: Acc, retired: usize) {
         self.page_for_read(access_bytes(acc), retired);
-        self.addr_regs();
         self.in_page();
         match acc {
             Acc::Load8 => self.f.i64_load8_u(0),
@@ -1178,7 +1393,6 @@ impl Emitter<'_> {
     fn load_pair(&mut self, rt: u8, rt2: u8, n: u32, signed: bool, retired: usize) {
         self.page_for_read(2 * n, retired);
         for (slot, at) in [(rt, 0), (rt2, n)] {
-            self.addr_regs();
             self.in_page();
             match (n, signed) {
                 (8, _) => self.f.i64_load(UNALIGNED, at),
@@ -1246,21 +1460,18 @@ impl Emitter<'_> {
             Op::Nop => true,
 
             Op::MovConst { rd, val } => {
-                self.addr_regs();
                 self.f.i64_const(val as i64);
                 self.store_reg(rd);
                 true
             }
 
             Op::Mov32 { rd, rn } => {
-                self.addr_regs();
                 self.read_reg(rn, false);
                 self.store_reg(rd);
                 true
             }
 
             Op::Mov64 { rd, rn } => {
-                self.addr_regs();
                 self.read_reg(rn, true);
                 self.store_reg(rd);
                 true
@@ -1269,7 +1480,6 @@ impl Emitter<'_> {
             Op::MovK { rd, shift, val, sf } => {
                 // Replace the field, then narrow: a 32-bit MOVK zeroes the top half.
                 let keep = !(0xFFFFu64 << shift) & (width_mask(sf) as u64);
-                self.addr_regs();
                 self.read_reg_raw(rd);
                 self.f.i64_const(keep as i64);
                 self.f.i64_and();
@@ -1411,7 +1621,6 @@ impl Emitter<'_> {
                 sf,
             } => {
                 let (left, right, up, signed) = extract.parts();
-                self.addr_regs();
                 // `left` shifts the high bits out, so read the register whole.
                 self.read_reg_raw(rn);
                 if left != 0 {
@@ -1445,7 +1654,6 @@ impl Emitter<'_> {
             } => {
                 // Only `BFM` reaches here with anything to do.
                 if opc != 0b01 {
-                    self.addr_regs();
                     self.f.i64_const(0);
                     self.store_reg(rd);
                     return true;
@@ -1457,7 +1665,6 @@ impl Emitter<'_> {
                     let up = size_of(sf) - lsb;
                     (mask_of_width(msb + 1, sf).wrapping_shl(up), 0, up)
                 };
-                self.addr_regs();
                 self.read_reg(rd, sf);
                 self.f.i64_const(!field as i64);
                 self.f.i64_and();
@@ -1490,7 +1697,6 @@ impl Emitter<'_> {
                 if imm >= size {
                     return false;
                 }
-                self.addr_regs();
                 self.read_reg(rm, sf);
                 if imm != 0 {
                     // Rn is the *high* half of the pair being shifted down.
@@ -1522,7 +1728,6 @@ impl Emitter<'_> {
                     self.f.i64_and();
                 }
                 self.f.local_set(L_B);
-                self.addr_regs();
                 match kind {
                     0 => {
                         self.f.local_get(L_A);
@@ -1583,7 +1788,6 @@ impl Emitter<'_> {
                     self.sext_to(sf);
                 }
                 self.f.local_set(L_B);
-                self.addr_regs();
                 self.divide(signed, sf);
                 self.mask_to(sf);
                 self.store_reg(rd);
@@ -1636,7 +1840,6 @@ impl Emitter<'_> {
                 else_inc,
                 sf,
             } => {
-                self.addr_regs();
                 self.read_reg(rn, sf);
                 self.read_reg(rm, sf);
                 // The invert and increment apply to the else value only.
@@ -1677,12 +1880,11 @@ impl Emitter<'_> {
                 self.f.local_set(L_B);
                 self.add_carry(u8::from(sub), true, sf);
                 // Select between the compare's flags and the immediate ones.
-                self.f.local_get(STATE);
                 self.pack_nzcv(sf, true);
                 self.f.i32_const((u32::from(nzcv) << 28) as i32);
                 self.cond_holds(cond);
                 self.f.select();
-                self.f.i32_store(ALIGN_4, self.layout.nzcv);
+                self.store_nzcv();
                 true
             }
 
@@ -1791,6 +1993,14 @@ impl Emitter<'_> {
                 self.write_back(rn, wb);
                 true
             }
+            Op::Fp { insn, scalar, form } => {
+                if scalar {
+                    self.fp(insn, form)
+                } else {
+                    self.simd(insn)
+                }
+            }
+            Op::SimdLoadStore { insn } => self.simd_load_store(insn, retired),
             Op::LoadLiteral { rt, addr, acc } => {
                 self.f.i32_const(addr as i32);
                 self.f.local_set(L_ADDR);
@@ -1819,12 +2029,40 @@ fn access_bytes(acc: Acc) -> u32 {
 pub(super) fn writes_term(term: &Term) -> bool {
     matches!(
         term,
-        Term::B { .. } | Term::Bl { .. } | Term::Br { .. } | Term::Blr { .. } | Term::Ret { .. }
+        Term::B { .. }
+            | Term::Bl { .. }
+            | Term::Br { .. }
+            | Term::Blr { .. }
+            | Term::Ret { .. }
+            | Term::BlPlt { .. }
+            | Term::BPlt { .. }
     )
 }
 
+/// Instructions a written `term` retires: a folded PLT call runs its stub too.
+pub(super) fn term_retires(term: &Term) -> usize {
+    match term {
+        Term::BlPlt { .. } | Term::BPlt { .. } => 1 + PLT_STUB as usize,
+        _ => 1,
+    }
+}
+
+/// A module that validates only if the engine has SIMD128, for the embedder
+/// to set [`super::JitHost::simd`].
+pub fn simd_probe() -> Vec<u8> {
+    let mut f = Func::new();
+    f.v128_const([0; 16]);
+    f.drop_value();
+    f.local_get(STATE);
+    f.end();
+    let mut m = Module::new();
+    let ty = m.add_type(vec![I32], vec![I32]);
+    m.add_func(ty, f);
+    m.finish()
+}
+
 /// A module that validates only if the engine has the tail calls
-/// [`emit_chained`] blocks use; for the embedder to set [`super::JitHost::tail_calls`].
+/// chained regions use; for the embedder to set [`super::JitHost::tail_calls`].
 pub fn tail_call_probe() -> Vec<u8> {
     let mut f = Func::new();
     f.local_get(STATE);
@@ -1838,69 +2076,65 @@ pub fn tail_call_probe() -> Vec<u8> {
     m.finish()
 }
 
-/// Emit `block`'s body as a module exporting `run`.
+/// Emit `block` alone as a module exporting `run`, leaving at every branch.
 pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refused> {
-    emit(block, layout, None)
+    emit_region(&[block], layout, false, false, true).map_err(|(_, refused)| refused)
 }
 
-/// [`emit_block`] for a real `Cpu`, jumping straight into compiled successors
-/// through the function table it imports.
-pub(super) fn emit_chained(block: &Block) -> Result<Vec<u8>, Refused> {
-    emit(block, Layout::of_cpu(), Some(Chaining::of(block)))
-}
-
-fn emit(block: &Block, layout: Layout, chain: Option<Chaining>) -> Result<Vec<u8>, Refused> {
-    let chained = chain.is_some();
-    let mut f = scratch_func();
-    let mut e = Emitter {
-        f: &mut f,
-        layout,
-        chain,
+/// Emit the region `blocks`, entered at the first, as a module exporting
+/// `run`. `inside` lets branches between them stay in the function; `chain`
+/// jumps into compiled successors through the function table it imports;
+/// `simd` writes Advanced SIMD as SIMD128. A refusal names the block that caused it.
+pub(super) fn emit_region(
+    blocks: &[&Block],
+    layout: Layout,
+    chain: bool,
+    inside: bool,
+    simd: bool,
+) -> Result<Vec<u8>, (usize, Refused)> {
+    let targets: Vec<u32> = if inside {
+        blocks.iter().map(|b| b.start).collect()
+    } else {
+        Vec::new()
     };
-    let mut next_exit = 0usize;
-    let mut i = 0usize;
-    while i < block.ops.len() {
-        // The same walk [`super::exec`] makes over ops and branch spans.
-        match block.exits.get(next_exit) {
-            Some(branch) if branch.at as usize == i => {
-                let retired = i + branch.span as usize;
-                if !e.exit(&branch.exit, retired) {
-                    return Err(Refused::ControlFlow);
-                }
-                i = retired;
-                next_exit += 1;
+    let looped = blocks
+        .iter()
+        .any(|b| b.successors().any(|pc| targets.contains(&pc)));
+    let n = blocks.len();
+    let mut f = scratch_func();
+    let mut e = Emitter::new(&mut f, layout, chain, targets);
+    e.simd = simd;
+    if looped {
+        e.top = Some(e.f.loop_void());
+        if n > 1 {
+            for _ in 0..n {
+                e.f.block_void();
             }
-            _ => {
-                if !e.op(&block.ops[i], i) {
-                    return Err(Refused::Op(block.words[i]));
-                }
-                i += 1;
-            }
-        }
-        if e.f.len() > MAX_BODY_BYTES {
-            return Err(Refused::TooLong);
+            e.f.local_get(L_NEXT);
+            let table: Vec<u32> = (0..n as u32).collect();
+            e.f.br_table(&table, 0);
         }
     }
-    // An exit the walk did not reach would be silently dropped; refuse.
-    if next_exit != block.exits.len() {
-        return Err(Refused::ControlFlow);
-    }
-    match block.term.as_ref().filter(|term| writes_term(term)) {
-        Some(term) => {
-            e.term(term);
-            let target = match *term {
-                Term::B { target } | Term::Bl { target, .. } => Some(target),
-                _ => None,
-            };
-            e.chain(block.ops.len() + 1, target);
-            f.i32_const(((block.ops.len() + 1) as u32 | LEFT) as i32);
+    for (j, block) in blocks.iter().enumerate() {
+        if looped && n > 1 {
+            e.f.end();
         }
-        None => f.i32_const(block.ops.len() as i32),
+        e.member = j;
+        e.block(block).map_err(|refused| (j, refused))?;
     }
+    if looped {
+        e.f.end();
+    }
+    e.f.end();
+    e.epilogue();
+    let prologue = e.prologue();
+    let registers = e.next_local - L_REGS;
+    f.prepend(&prologue);
+    f.locals(1, registers, I64);
     f.end();
 
     let mut m = Module::new();
-    if chained {
+    if chain {
         m.import_table();
     }
     let ty = m.add_type(vec![I32], vec![I32]);
@@ -1931,8 +2165,12 @@ impl Cpu {
             path.push(at);
             at = at.wrapping_add(4);
         }
-        // A written terminator is covered too; no branch target is `u32::MAX`.
-        if block.term.as_ref().is_some_and(writes_term) {
+        // A written terminator is covered too; no branch target is `u32::MAX`. A
+        // folded PLT call reads its GOT slot, which difftests never map, so it is not.
+        let covered = |term: &Term| {
+            writes_term(term) && !matches!(term, Term::BlPlt { .. } | Term::BPlt { .. })
+        };
+        if block.term.as_ref().is_some_and(covered) {
             path.push(u32::MAX);
         }
         Ok((bytes, path))
@@ -1960,6 +2198,7 @@ mod tests {
         regs: 0,
         nzcv: 2048,
         pc: 2084,
+        fuel: 2088,
         pages: 2052,
         read_watch_lo: 2056,
         read_watch_hi: 2060,
@@ -2061,23 +2300,22 @@ mod tests {
         }
     }
 
-    /// The same for what a jump between blocks touches.
+    /// The same for what a jump between regions touches.
     #[test]
-    fn a_jump_finds_the_chain_table_and_the_trail_through_its_layout() {
+    fn a_jump_finds_the_chain_table_through_its_layout() {
         let mut cpu = Cpu::new();
         cpu.jit.chain.fuel = -7;
         cpu.jit.chain.hops = 11;
         cpu.jit.chain.last = 0x0800_0010;
         cpu.jit.chain.slots[5] = [0x0800_0014, 42];
-        cpu.recent[3] = (0x0800_0020, 9);
-        cpu.recent_len = 13;
 
         let at = ChainLayout::OF_CPU;
+        let fuel = Layout::of_cpu().fuel;
         let base = &cpu as *const Cpu as usize;
         // SAFETY: as above, in-bounds offsets from a live `Cpu` of the right types.
         unsafe {
             let u32_at = |off: u32| *((base + off as usize) as *const u32);
-            assert_eq!(u32_at(at.fuel) as i32, -7, "the fuel moved");
+            assert_eq!(u32_at(fuel) as i32, -7, "the fuel moved");
             assert_eq!(u32_at(at.hops), 11, "the jump count moved");
             assert_eq!(u32_at(at.last), 0x0800_0010, "the last target moved");
             let slots = *((base + at.slots as usize) as *const *const u32);
@@ -2086,13 +2324,6 @@ mod tests {
                 (0x0800_0014, 42),
                 "a chain slot is not two words at eight bytes a slot"
             );
-            let run = at.recent + 3 * 8;
-            assert_eq!(
-                (u32_at(run + at.run_start), u32_at(run + at.run_count)),
-                (0x0800_0020, 9),
-                "a trail entry is not where a jump writes it"
-            );
-            assert_eq!(u32_at(at.recent_len), 13, "the trail length moved");
         }
     }
 

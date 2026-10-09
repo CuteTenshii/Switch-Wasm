@@ -10,7 +10,14 @@ const dir = process.argv[2] || 'target/emit-difftest';
 // `INJECT=1` corrupts one expected register and one NZCV; exactly two failures
 // must be reported.
 const inject = process.env.INJECT === '1';
-const manifest = readFileSync(join(dir, 'manifest.txt')).toString('utf8').trim().split('\n');
+// Split from the bytes: a selftest manifest outgrows the longest string V8 can hold.
+const raw = readFileSync(join(dir, 'manifest.txt'));
+const manifest = [];
+for (let at = 0; at < raw.length;) {
+  const end = raw.indexOf(10, at) < 0 ? raw.length : raw.indexOf(10, at);
+  if (end > at) manifest.push(raw.toString('utf8', at, end));
+  at = end + 1;
+}
 
 const HEADER_KEYS = new Set([
   'regs_at', 'nzcv_at', 'read_watch_lo_at', 'read_watch_hi_at', 'watch_lo_at',

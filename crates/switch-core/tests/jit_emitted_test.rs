@@ -156,6 +156,7 @@ fn exclusive() -> MutexGuard<'static, ()> {
         install,
         release,
         tail_calls: false,
+        simd: false,
     });
     ENTERED.store(0, Ordering::SeqCst);
     RELEASED.store(0, Ordering::SeqCst);

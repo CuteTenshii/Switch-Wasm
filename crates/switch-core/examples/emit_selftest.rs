@@ -28,6 +28,8 @@ const READONLY_HI_AT: u32 = 0x101C;
 const WATCHED_AT: u32 = 0x1020;
 /// Where the guest `pc` is; unused here but required by `Layout`.
 const PC_AT: u32 = 0x1024;
+/// Fuel, read only by branches between blocks, which a single block never takes.
+const FUEL_AT: u32 = 0x1028;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 0x2000;
 
@@ -311,6 +313,7 @@ const LAYOUT: Layout = Layout {
     readonly_hi: READONLY_HI_AT,
     watched: WATCHED_AT,
     pc: PC_AT,
+    fuel: FUEL_AT,
     vregs: VREGS_AT,
 };
 
@@ -430,7 +433,14 @@ fn survey() -> BTreeMap<String, Vec<u32>> {
             if !emits(insn) {
                 continue;
             }
-            let slot = buckets.entry(form(&disassemble(insn))).or_default();
+            // The disassembler names no Advanced SIMD form; key those by encoding.
+            let text = disassemble(insn);
+            let key = if text.starts_with(".word") {
+                format!(".word {:08x}", insn & !(0x1F | 0x1F << 5 | 0x1F << 16))
+            } else {
+                form(&text)
+            };
+            let slot = buckets.entry(key).or_default();
             if slot.len() < PER_FORM {
                 slot.push(insn);
             }

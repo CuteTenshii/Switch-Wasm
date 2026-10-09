@@ -3,7 +3,7 @@
 
 use js_sys::{Function, Object, Reflect, Uint8Array, WebAssembly};
 use std::cell::RefCell;
-use switch_core::cpu::{set_jit_host, tail_call_probe, Entry, JitHost};
+use switch_core::cpu::{set_jit_host, simd_probe, tail_call_probe, Entry, JitHost};
 use wasm_bindgen::{JsCast, JsValue};
 
 thread_local! {
@@ -16,14 +16,14 @@ pub fn attach() {
     set_jit_host(JitHost {
         install,
         release,
-        tail_calls: tail_calls(),
+        tail_calls: validates(&tail_call_probe()),
+        simd: validates(&simd_probe()),
     });
 }
 
-fn tail_calls() -> bool {
-    let probe = tail_call_probe();
+fn validates(probe: &[u8]) -> bool {
     let bytes = Uint8Array::new_with_length(probe.len() as u32);
-    bytes.copy_from(&probe);
+    bytes.copy_from(probe);
     WebAssembly::validate(bytes.as_ref()).unwrap_or(false)
 }
 

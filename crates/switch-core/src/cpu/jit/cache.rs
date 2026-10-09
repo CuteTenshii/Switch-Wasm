@@ -11,7 +11,7 @@ const MAX_BLOCKS: usize = 32 * 1024;
 const LOOKUP_SLOTS: usize = 4096;
 
 /// Chain-table slots, indexed like the lookup; retail titles compile some ten thousand blocks.
-pub(super) const CHAIN_SLOTS: usize = 64 * 1024;
+pub(super) const CHAIN_SLOTS: usize = 256 * 1024;
 
 /// What emitted blocks read and write to jump straight into the next one.
 #[derive(Debug)]
@@ -158,6 +158,24 @@ impl Jit {
         Some(block)
     }
 
+    /// The cached block at `pc`, without promoting it or touching the hints.
+    pub(super) fn peek(&self, pc: u32) -> Option<Rc<Block>> {
+        self.blocks
+            .get(&pc)
+            .or_else(|| self.older.get(&pc))
+            .cloned()
+    }
+
+    /// List `block` under the pages its region's other blocks were read from,
+    /// so a store to any of them drops it.
+    pub(super) fn cover(&mut self, block: &Block) {
+        for page in block.region_pages() {
+            if !block.pages.contains(&page) {
+                self.by_page.entry(page).or_default().push(block.start);
+            }
+        }
+    }
+
     /// Whether `block` is the cached block for its address.
     pub(super) fn holds(&self, block: &Block) -> bool {
         let same = |held: &Rc<Block>| std::ptr::eq(Rc::as_ptr(held), block);
@@ -198,11 +216,12 @@ impl Jit {
         let dropped = std::mem::replace(&mut self.older, std::mem::take(&mut self.blocks));
         for block in dropped.values() {
             self.unchain(block);
+            block.drop_code();
         }
         // Rebuild `by_page` from the surviving generations.
         self.by_page.clear();
         for block in self.older.values() {
-            for &page in &block.pages {
+            for page in block.region_pages() {
                 self.by_page.entry(page).or_default().push(block.start);
             }
         }
@@ -226,6 +245,7 @@ impl Jit {
                     let older = self.older.remove(&start);
                     for block in newer.iter().chain(older.iter()) {
                         self.unchain(block);
+                        block.drop_code();
                         self.invalidated += 1;
                         dropped = true;
                     }
@@ -239,6 +259,9 @@ impl Jit {
 
     pub(super) fn clear(&mut self) {
         self.invalidated += (self.blocks.len() + self.older.len()) as u64;
+        for block in self.blocks.values().chain(self.older.values()) {
+            block.drop_code();
+        }
         self.blocks.clear();
         self.older.clear();
         self.by_page.clear();

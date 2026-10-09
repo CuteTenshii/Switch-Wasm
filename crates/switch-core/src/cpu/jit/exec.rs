@@ -3,7 +3,10 @@
 
 use super::cache::JitStats;
 use super::decode::translate;
-use super::emit::{emit_block, emit_chained, writes_term, LEFT, MAX_WHOLE};
+use super::emit::{
+    emit_region, term_retires, writes_term, Refused, COUNT_MASK, LEFT, MAX_WHOLE, MEMBER_SHIFT,
+    PLT_STUB,
+};
 use super::host;
 use super::ir::{Block, Code, Exit, Op, PackedImm, Term};
 use crate::cpu::bits::*;
@@ -17,6 +20,12 @@ pub const HOT: u32 = 512;
 /// Hand-backs at a block's first instruction before its emitted form is dropped.
 const MAX_MISSES: u16 = 8;
 
+/// The most blocks a region compiles together.
+const MAX_REGION_BLOCKS: usize = 32;
+
+/// Entries before a block is worth compiling into another's region.
+const REGION_WARM: u32 = 16;
+
 #[derive(Clone, Copy)]
 enum Taken {
     No,
@@ -28,14 +37,16 @@ enum Taken {
 
 #[derive(Clone, Copy)]
 struct Emitted {
-    /// Of the block that answered: the entered one, or the last jumped to.
+    /// Of the block that answered.
     retired: usize,
     /// Whether it left through a taken branch, with the target in `pc`.
     left: bool,
-    /// Jumps between compiled blocks before the answer.
+    /// Jumps between compiled regions before the answer.
     hops: u32,
-    /// Instructions the jumped-from blocks retired.
+    /// Instructions retired by blocks left through a branch before the answer.
     chained: u64,
+    /// Which block of the answering region answered; 0 is its entry block.
+    member: usize,
 }
 
 /// Where the straight-line stretch being executed starts, in the block body
@@ -72,7 +83,12 @@ fn invert_if(v: u64, carry: u8) -> u64 {
 /// What an entered emitted block can retire, terminator included.
 #[inline(always)]
 fn whole(block: &Block) -> usize {
-    block.ops.len() + usize::from(block.term.as_ref().is_some_and(writes_term))
+    block.ops.len()
+        + block
+            .term
+            .as_ref()
+            .filter(|term| writes_term(term))
+            .map_or(0, term_retires)
 }
 
 impl Cpu {
@@ -202,7 +218,7 @@ impl Cpu {
     fn exec_block(&mut self, block: &mut Rc<Block>, budget: u64) -> Result<u64> {
         // The emitted form replaces only the op walk; the terminator and accounting are shared.
         if let Some(done) = self.enter_emitted(block, budget) {
-            if done.hops != 0 {
+            if done.hops != 0 || done.chained != 0 {
                 return self.finish_chain(block, done, budget);
             }
             return self.finish_emitted(block, done.retired, done.left, budget);
@@ -287,6 +303,19 @@ impl Cpu {
     /// its terminator if it did not leave.
     #[inline(always)]
     fn finish_emitted(&mut self, block: &Block, i: usize, left: bool, budget: u64) -> Result<u64> {
+        // A folded PLT call: its stub is a run of its own.
+        if let Some(Term::BlPlt { stub, .. } | Term::BPlt { stub, .. }) = block.term {
+            if left && i > block.ops.len() + 1 {
+                let call = block.ops.len() + 1;
+                let (_, run_pc, run_i) = self.follow_runs(block, call);
+                self.retire_runs(run_pc, run_i, call);
+                self.record_run(stub, PLT_STUB);
+                let stub = u64::from(PLT_STUB);
+                self.cycles += stub;
+                self.steps += stub;
+                return Ok(call as u64 + stub);
+            }
+        }
         let (pc, run_pc, run_i) = self.follow_runs(block, i);
         if left {
             // The branch set `pc`; the terminator does not run.
@@ -296,8 +325,9 @@ impl Cpu {
         self.finish(block, i, pc, (run_pc, run_i), budget)
     }
 
-    /// Settle a visit in which compiled blocks jumped into each other: the
-    /// jumped-from blocks' clock and steps (they wrote the trail), then the last.
+    /// Settle a visit that went on past the entered block, within its region
+    /// or by jumps into others: the left blocks' clock and steps, then the
+    /// block that answered.
     #[inline(never)]
     fn finish_chain(&mut self, block: &mut Rc<Block>, done: Emitted, budget: u64) -> Result<u64> {
         let chained = done.chained;
@@ -307,18 +337,25 @@ impl Cpu {
         self.jit.chained += hops;
         self.jit.executed += hops;
         self.jit.entered_emitted += hops;
-        *block = self
-            .jit
-            .get(self.jit.chain.last)
-            .expect("the chain table holds only cached blocks");
-        // Handed back at its first instruction: `pc` is its start, and the next visit settles it.
-        if done.retired == 0 && !done.left {
-            return Ok(chained);
-        }
-        if let Code::Ready { entry, misses } = block.code.get() {
-            if misses != 0 {
-                block.code.set(Code::Ready { entry, misses: 0 });
+        if hops != 0 {
+            *block = self
+                .jit
+                .get(self.jit.chain.last)
+                .expect("the chain table holds only cached blocks");
+            if let Code::Ready { entry, misses } = block.code.get() {
+                if misses != 0 {
+                    block.code.set(Code::Ready { entry, misses: 0 });
+                }
             }
+        }
+        if done.member != 0 {
+            let member = block.members.borrow()[done.member - 1].clone();
+            *block = member;
+        }
+        // Stopped at a block's first instruction: the next visit runs it.
+        if done.retired == 0 && !done.left {
+            self.pc = block.start;
+            return Ok(chained);
         }
         let retired = done.retired.min(whole(block));
         let ran = self.finish_emitted(block, retired, done.left, budget - chained)?;
@@ -390,15 +427,20 @@ impl Cpu {
         // So were the blocks it can jump to, which leave the chain table first.
         let answer = unsafe { host::enter(entry, state) };
         let left = answer & LEFT != 0;
-        let retired = (answer & !LEFT) as usize;
+        let retired = (answer & COUNT_MASK) as usize;
+        let member = ((answer & !LEFT) >> MEMBER_SHIFT) as usize;
         let hops = self.jit.chain.hops;
-        if hops != 0 {
-            let chained = (fuel - self.jit.chain.fuel) as u64;
+        let chained = (fuel - self.jit.chain.fuel) as u64;
+        if hops != 0 || chained != 0 {
+            if misses != 0 {
+                block.code.set(Code::Ready { entry, misses: 0 });
+            }
             return Some(Emitted {
                 retired,
                 left,
                 hops,
                 chained,
+                member,
             });
         }
         if retired == 0 && !left {
@@ -420,6 +462,7 @@ impl Cpu {
             left,
             hops: 0,
             chained: 0,
+            member: 0,
         })
     }
 
@@ -473,34 +516,82 @@ impl Cpu {
         }
     }
 
-    /// Emit `block` as wasm and install it. Whatever the outcome, the block
-    /// never asks again.
+    /// Emit `block` as wasm, with the warm blocks it branches to as its
+    /// region, and install it. Whatever the outcome, the block never asks again.
     #[cold]
     #[inline(never)]
     fn install(&mut self, block: &Block) {
+        if !host::available() {
+            block.code.set(Code::Never);
+            return;
+        }
         let chains = host::chains();
-        let code = match host::available() {
-            true if chains => emit_chained(block),
-            true => emit_block(block, Layout::of_cpu()),
-            false => {
-                block.code.set(Code::Never);
-                return;
+        let mut members = self.region_members(block);
+        let code = loop {
+            let blocks: Vec<&Block> = std::iter::once(block)
+                .chain(members.iter().map(|m| &**m))
+                .collect();
+            match emit_region(&blocks, Layout::of_cpu(), chains, true, host::simd()) {
+                Ok(code) => break Some(code),
+                Err((0, _)) => break None,
+                Err((j, Refused::TooLong)) => members.truncate(j - 1),
+                Err((j, _)) => {
+                    let refused = members.remove(j - 1);
+                    if let Code::Cold(_) = refused.code.get() {
+                        refused.code.set(Code::Never);
+                    }
+                }
             }
         };
-        let entry = match code {
-            Ok(code) => host::install(&code),
-            Err(_) => 0,
-        };
+        let entry = code.map_or(0, |code| host::install(&code));
         if entry == 0 {
             block.code.set(Code::Never);
             return;
         }
         self.jit.emitted += 1;
         block.code.set(Code::Ready { entry, misses: 0 });
+        *block.members.borrow_mut() = members;
         // A block no longer cached may still be running; nothing may jump to it.
-        if chains && self.jit.holds(block) {
-            self.jit.chain_to(block, entry as u32);
+        if self.jit.holds(block) {
+            self.jit.cover(block);
+            if chains {
+                self.jit.chain_to(block, entry as u32);
+            }
         }
+    }
+
+    /// The cached blocks reachable from `head` by known branches that have
+    /// run often enough to be worth compiling with it, nearest first.
+    fn region_members(&self, head: &Block) -> Vec<Rc<Block>> {
+        let mut members: Vec<Rc<Block>> = Vec::new();
+        // Pending stores could have left a cached block stale.
+        if self.mem.has_dirty_code() {
+            return members;
+        }
+        let mut seen = vec![head.start];
+        let mut queue: std::collections::VecDeque<u32> = head.successors().collect();
+        while let Some(pc) = queue.pop_front() {
+            if members.len() + 1 >= MAX_REGION_BLOCKS {
+                break;
+            }
+            if seen.contains(&pc) {
+                continue;
+            }
+            seen.push(pc);
+            let Some(next) = self.jit.peek(pc) else {
+                continue;
+            };
+            let warm = match next.code.get() {
+                Code::Cold(seen) => seen >= REGION_WARM,
+                Code::Ready { .. } => true,
+                Code::Never => false,
+            };
+            if warm {
+                queue.extend(next.successors());
+                members.push(next);
+            }
+        }
+        members
     }
 
     /// Account for `ran` retired instructions: clock and steps for all, trail
@@ -1147,7 +1238,7 @@ impl Cpu {
     /// the fast path, leave `pc` on the stub to run as its own block.
     #[inline(always)]
     fn through_plt(&mut self, got: u32, stub: u32, room: u64) -> u64 {
-        const STUB: u64 = 4;
+        const STUB: u64 = PLT_STUB as u64;
         let target = match self.mem.peek::<8>(got) {
             Some(bytes) if room > STUB => u64::from_le_bytes(bytes),
             _ => {
@@ -1165,12 +1256,11 @@ impl Cpu {
 
 #[cfg(test)]
 mod tests {
-    use super::super::emit::Chaining;
     use super::super::ir::{Block, Branch, Exit, Op};
-    use crate::cpu::{Cpu, RECENT_LEN};
+    use crate::cpu::Cpu;
 
     #[test]
-    fn a_chained_block_writes_the_trail_exec_would() {
+    fn a_block_places_each_instruction_where_exec_does() {
         // Two followed `B`s: runs at 0x1000, 0x2000 and 0x3000.
         let exits = vec![
             Branch::new(1, Exit::Jump { target: 0x2000 }),
@@ -1184,20 +1274,10 @@ mod tests {
             None,
             vec![1, 2, 3],
         );
-        let chaining = Chaining::of(&block);
-        for retired in 1..=block.ops.len() + 1 {
-            let mut cpu = Cpu::new();
-            let before = cpu.recent_len;
-            let (_, run_pc, run_i) = cpu.follow_runs(&block, retired);
-            cpu.retire_runs(run_pc, run_i, retired);
-            let pushed: Vec<(u32, u32)> = (before..cpu.recent_len)
-                .map(|k| cpu.recent[k % RECENT_LEN])
-                .collect();
-            assert_eq!(
-                chaining.runs(retired),
-                pushed,
-                "after {retired} instructions"
-            );
+        for i in 0..=block.ops.len() {
+            let (pc, _, _) = Cpu::new().follow_runs(&block, i);
+            assert_eq!(block.pc_at(i), pc, "instruction {i}");
         }
+        assert_eq!(block.successors().collect::<Vec<_>>(), vec![0x3008]);
     }
 }
