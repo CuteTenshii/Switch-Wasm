@@ -50,13 +50,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      # The wasm build rebuilds std with atomics, so it needs the nightly the
+      # Makefile pins, with rust-src.
+      - name: Read the pinned nightly
+        id: nightly
+        run: |
+          toolchain=$(sed -n 's/^NIGHTLY *?= *//p' Makefile)
+          test -n "$toolchain"
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+
+      - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.nightly.outputs.toolchain }}
+          components: rust-src
           targets: wasm32-unknown-unknown
 
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
-          key: wasm32-unknown-unknown
+          key: wasm32-unknown-unknown-nightly
           cache-bin: "false"
 
       - name: Install matching wasm-bindgen CLI
