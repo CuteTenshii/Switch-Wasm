@@ -52,7 +52,7 @@
 
     <div class="transport" role="group" aria-label="Emulation controls">
       <button id="btn-run" class="btn primary" title="Run / Pause (Space)">
-        <span class="glyph" id="run-glyph">&#9654;</span><span id="run-label">Run</span>
+        <span class="glyph" id="run-glyph"></span><span id="run-label">Run</span>
       </button>
       <button id="btn-step" class="btn" title="Execute one instruction">Step</button>
       <button id="btn-reset" class="btn" title="Reset the session">Reset</button>
@@ -74,13 +74,9 @@
       <label class="btn" for="nro-file" title="Open a .nro, .elf, .nsp, .xci or .nca">Open</label>
       <input type="file" id="nro-file" accept=".nro,.elf,.bin,.nsp,.nsz,.xci,.nca" hidden>
       <button id="btn-fullscreen" class="btn icon" title="Fullscreen" aria-label="Fullscreen">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path
-          d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>
       </button>
       <button id="btn-panel" class="btn icon" title="Toggle panel (`)" aria-label="Toggle panel"
               aria-expanded="false">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11"
-          rx="1.5"/><path d="M10 2.5v11"/></svg>
       </button>
     </div>
   </header>
@@ -142,7 +138,6 @@
     <header class="profiles-head">
       <h2 id="profiles-title">Profiles</h2>
       <button type="button" class="icon-btn" id="btn-profiles-close" aria-label="Close">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
       </button>
     </header>
     <p class="muted tiny">Titles save separately for each profile. Click a picture to change it.</p>
@@ -185,7 +180,6 @@
     <header class="files-head">
       <h2 id="files-title">Storage</h2>
       <button type="button" class="icon-btn" id="btn-files-close" aria-label="Close">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
       </button>
     </header>
     <div class="files-tabs" role="tablist" aria-label="Storage">
@@ -232,7 +226,6 @@
       <button class="tab" data-tab="files" role="tab" aria-selected="false">Files</button>
     </div>
     <button class="icon-btn" id="btn-panel-close" title="Close panel (`)" aria-label="Close panel">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
     </button>
   </header>
 

@@ -1,6 +1,8 @@
 // The application shell: stage and side panel.
 
+import { Maximize, PanelRight, X } from 'lucide';
 import { $ } from './dom';
+import { icon } from './icons';
 
 export const stageEl = $('stage');
 export const screenEl = $<HTMLCanvasElement>('screen');
@@ -146,6 +148,13 @@ gripEl.addEventListener('keydown', (e) => {
   e.preventDefault();
   e.stopPropagation();
 });
+
+for (const [id, glyph] of [
+  ['btn-fullscreen', Maximize], ['btn-panel', PanelRight], ['btn-panel-close', X],
+  ['btn-profiles-close', X], ['btn-files-close', X],
+] as const) {
+  $(id).append(icon(glyph));
+}
 
 $('btn-fullscreen').addEventListener('click', () => {
   if (document.fullscreenElement) void document.exitFullscreen();

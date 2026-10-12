@@ -1,5 +1,6 @@
 // The run loop, and the status bar it keeps up to date.
 
+import { Pause, Play } from 'lucide';
 import { pumpAudio } from './audio';
 import { showEmulatorCrash, showGuestCrash } from './crash';
 import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
@@ -8,6 +9,7 @@ import { recordRunSlice } from './display-metrics';
 import { $ } from './dom';
 import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
+import { icon } from './icons';
 import { dropErrors, pollErrors } from './errors';
 import { dropKeyboard, pollKeyboard } from './keyboard';
 import { endLoad } from './loading';
@@ -34,13 +36,12 @@ let pauseRequested = false;
 // Set when the session is being freed, so the loop must not touch it again.
 let aborted = false;
 
-const PLAY_GLYPH = '▶';
-const PAUSE_GLYPH = '❙❙';
-
 function setRunButton(isRunning: boolean): void {
-  $('run-glyph').textContent = isRunning ? PAUSE_GLYPH : PLAY_GLYPH;
+  $('run-glyph').replaceChildren(icon(isRunning ? Pause : Play));
   $('run-label').textContent = isRunning ? 'Pause' : 'Run';
 }
+
+setRunButton(false);
 
 function nothingLoaded(): boolean {
   if (loaded()) return false;
