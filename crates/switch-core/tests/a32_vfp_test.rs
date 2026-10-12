@@ -246,3 +246,25 @@ fn a_block_transfer_writes_its_base_back() {
     let cpu = run(&code);
     assert_eq!(r(&cpu, 0), SCRATCH + 16, "two doubles is sixteen bytes");
 }
+
+/// Mario Kart 8 Deluxe restores `d14-d15` with `vldmia sp`; P and W clear with U set
+/// is a block transfer, not the core-pair `vmov` that would write `sp`.
+#[test]
+fn an_increment_after_transfer_without_writeback_leaves_its_base() {
+    let mut code: Vec<u32> = Vec::new();
+    code.extend_from_slice(&load(1, 0x1111_1111));
+    code.extend_from_slice(&load(2, 0x2222_2222));
+    code.push(0xEC42_1B10); // vmov d0, r1, r2
+    code.extend_from_slice(&load(1, 0x3333_3333));
+    code.extend_from_slice(&load(2, 0x4444_4444));
+    code.push(0xEC42_1B11); // vmov d1, r1, r2
+    code.push(0xEC8D_0B04); // vstmia sp, {d0-d1}
+    code.push(0xEC9D_EB04); // vldmia sp, {d14-d15}
+    let cpu = run(&code);
+    assert_eq!(cpu.sp(), 0x9000, "neither transfer writes its base");
+    assert_eq!(
+        cpu.read_vreg(7),
+        0x4444_4444_3333_3333_2222_2222_1111_1111,
+        "d14 and d15 came back from the stack"
+    );
+}

@@ -71,9 +71,18 @@ impl Cpu {
         let double = (insn >> 8) & 0xF == 0xB;
         let imm8 = insn & 0xFF;
 
-        // P and W both clear is the core-register pair transfer.
-        if !pre && !writeback {
-            return self.a32_vfp_core_pair(insn, load, double);
+        // Bits 24:21 (P U D W): 0010 is the core-register pair transfer, 01x0 and
+        // 01x1 increment after, 10x1 decrement before; 000x, 00x1 and 11x1 are
+        // unallocated.
+        match (insn >> 21) & 0xF {
+            0b0010 => return self.a32_vfp_core_pair(insn, load, double),
+            0b0000 | 0b0001 | 0b0011 | 0b1101 | 0b1111 => {
+                return Err(Error::Cpu(format!(
+                    "unallocated extension register load/store {insn:#010x} at pc={:#010x}",
+                    self.pc
+                )))
+            }
+            _ => {}
         }
 
         if pre && !writeback {
@@ -661,7 +670,7 @@ pub(super) fn vfp_mnemonic(insn: u32, cond: &str) -> String {
         let pre = (insn >> 24) & 1 != 0;
         let writeback = (insn >> 21) & 1 != 0;
         return match (pre, writeback, base) {
-            (false, false, _) => format!("vmov{cond} (core pair)"),
+            _ if (insn >> 21) & 0xF == 0b0010 => format!("vmov{cond} (core pair)"),
             (true, false, _) => format!(
                 "v{}r{cond}.{width} d{}, [r{base}]",
                 if load { "ld" } else { "st" },

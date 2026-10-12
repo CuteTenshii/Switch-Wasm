@@ -22,7 +22,7 @@ checkout. "measured" = run against this tree; the rest is carried forward.
 | "Minecraft" (NSP) | the world, on the device: 110 draws a frame, no fallbacks | yes | measured |
 | "Tomodachi Life" (NSP) | its loading screen, every pixel, at 3.98B steps | yes | measured |
 | "Echoes of Wisdom" (NSP) | the prologue scene at frame 150, both renderers within 3/255 | partial | measured |
-| "Mario Kart 8 Deluxe" 1.0 (NSP, A32) | boots to 4.4B steps, then a virtual call through a corrupt vtable | no | measured |
+| "Mario Kart 8 Deluxe" 1.0 (NSP, A32) | its title screen, 146 frames by 12B steps | yes | measured |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its

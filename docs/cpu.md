@@ -53,6 +53,7 @@ Interpreter details for A64, A32, SIMD and floating point that the code relies o
 
 - AArch32 D0..D31 alias the low halves of A64 V0..V15 (`D(2n)` low, `D(2n+1)` high), so `Cpu::vregs` backs both states and context switches need no special casing.
 - FPSCR rounding bits 23:22 match FPCR. `VCMP` sets FPSCR N/Z/C/V, not the condition flags; `VMRS APSR_nzcv` copies them.
+- In the extension register load/store space only bits 24:21 = `0010` is the core-pair `VMOV`. Treating every P=0, W=0 encoding as one ran `vldmia sp, {d14-d15}` as a move into `lr` and `sp`, and Mario Kart 8 Deluxe returned through a zeroed stack.
 
 ## `crates/switch-core/tests/a32/mod.rs, a32_memory_test.rs`
 
