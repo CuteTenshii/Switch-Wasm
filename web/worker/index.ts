@@ -21,7 +21,6 @@ function reply(message: WorkerMessage, transfer?: Transferable[]): void {
 // Commands valid with no session open.
 const SESSIONLESS = new Set([
   'new', 'set_battery', 'last_error',
-  'crash_report', 'version',
 ]);
 
 // GPU install state. Installed between run slices, once the title has opened a

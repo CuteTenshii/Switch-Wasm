@@ -13,7 +13,7 @@ export const screenCtx = ctx;
 
 const runEl = $<HTMLButtonElement>('btn-run');
 // Readouts that mean nothing without a program.
-const programItems = ['pc-item', 'instructions-item', 'res-item'].map((id) => $(id));
+const programItems = ['instructions-item', 'res-item'].map((id) => $(id));
 const stepEl = $<HTMLButtonElement>('btn-step');
 
 // The run state, also on `<body data-state>` for the page tests.

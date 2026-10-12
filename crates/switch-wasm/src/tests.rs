@@ -1,13 +1,9 @@
 use super::*;
 use switch_core::cpu::SaveKey;
-use switch_core::trace::Level;
 
 use crate::boot::switch_load_nca_from_nsp;
 use crate::container::{switch_nsp_files_json, switch_open_nsp, switch_read_file};
-use crate::debug::{
-    switch_crash_report_json, switch_set_trace_channels, switch_start_created_threads,
-    switch_thread_dump, switch_unimplemented_json, switch_wake_blocked,
-};
+use crate::debug::{switch_drain_trace, switch_set_trace_channels};
 use crate::stats::switch_activity_json;
 use crate::storage::{
     switch_save_create_dir, switch_save_file_size, switch_save_ids_json,
@@ -152,114 +148,11 @@ fn the_activity_report_names_each_file_and_hands_it_over_once() {
     assert_eq!(field(&small, "dropped"), "1");
 }
 
-#[test]
-fn a_crash_report_names_the_build_even_with_no_session_behind_it() {
-    // A report needs no live session.
-    let _host = HOST.lock().unwrap_or_else(|e| e.into_inner());
-    let json = json_from(|buf, cap| switch_crash_report_json(u32::MAX, buf, cap));
-    assert_eq!(field(&json, "session"), "null");
-    assert!(field(&json, "version").len() > 2, "{json}");
-    assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
-}
-
-#[test]
-fn a_crash_report_carries_the_run_it_is_about() {
-    let (_host, handle) = new_session();
-    let cpu = &mut session(handle).cpu;
-    cpu.diagnostic(Level::Error, "[test] the thing that went wrong");
-    session(handle).last_error = "a fault worth reporting".to_string();
-
-    let json = json_from(|buf, cap| switch_crash_report_json(handle, buf, cap));
-    assert_eq!(field(&json, "lastError"), "\"a fault worth reporting\"");
-    for key in [
-        "version",
-        "panicked",
-        "title",
-        "cpu",
-        "jit",
-        "gpu",
-        "backtrace",
-        "registers",
-        "threads",
-        "unimplemented",
-        "stubbed",
-        "trace",
-    ] {
-        assert!(
-            !field(&json, key).is_empty(),
-            "{key} is empty in {json:.400}"
-        );
-    }
-    assert!(
-        field(&json, "trace").contains("the thing that went wrong"),
-        "the trace has to carry what was said: {json:.400}"
-    );
-    assert!(field(&json, "backtrace").starts_with('['));
-    assert!(field(&json, "registers").contains("pc="));
-}
-
-#[test]
-fn the_threads_a_guest_parked_can_be_released_from_the_browser() {
-    let (_host, handle) = new_session();
-    assert!(!json_from(|buf, cap| { switch_thread_dump(handle, buf, cap) }).is_empty());
-    assert_eq!(switch_wake_blocked(handle), 0);
-    assert_eq!(switch_start_created_threads(handle), 0);
-
-    // Two threads, one started; main then waits on a zero word, yielding to it.
-    let cpu = &mut session(handle).cpu;
-    let mut create = || {
-        guest_svc(cpu, 0x08, &[0, 0x0800_1000, 0, 0x2880_0000, 44, 0]);
-        assert_eq!(cpu.reg(0), 0, "CreateThread failed");
-        cpu.reg(1)
-    };
-    let started = create();
-    create();
-    guest_svc(cpu, 0x09, &[started]);
-    guest_svc(cpu, 0x34, &[0x0800_2000, 2, 0, u64::MAX]);
-    assert_eq!(switch_wake_blocked(handle), 1);
-    assert_eq!(switch_start_created_threads(handle), 1);
-    assert_eq!(switch_start_created_threads(handle), 0);
-}
-
-/// Run one `svc #imm` with `args` in X0 upward.
-fn guest_svc(cpu: &mut Cpu, imm: u32, args: &[u64]) {
-    let pc = 0x0800_0000 + imm * 4;
-    cpu.mem.write_u32(pc, 0xD400_0001 | imm << 5).unwrap();
-    for (i, &arg) in args.iter().enumerate() {
-        cpu.set_reg(i as u8, arg);
-    }
-    cpu.set_pc(pc);
-    cpu.step().unwrap();
-}
-
-#[test]
-fn what_a_title_asked_for_and_did_not_get_is_a_list_not_a_scrollback() {
-    let (_host, handle) = new_session();
-    let json = json_from(|buf, cap| switch_unimplemented_json(handle, buf, cap));
-    assert_eq!(field(&json, "unimplemented"), "[]");
-    assert_eq!(field(&json, "stubbed"), "[]");
-
-    // A request (type 4) for command 5 on an unopened handle.
-    let cpu = &mut session(handle).cpu;
-    let tls = cpu.tls_base();
-    for (i, word) in [4, 8, 0, 0, 0x4943_4653, 0, 5, 0].into_iter().enumerate() {
-        cpu.mem.write_u32(tls + i as u32 * 4, word).unwrap();
-    }
-    guest_svc(cpu, 0x21, &[0x1234]);
-    let json = json_from(|buf, cap| switch_unimplemented_json(handle, buf, cap));
-    assert_eq!(
-        field(&json, "unimplemented"),
-        r#"[{"iface":"<untracked session>","cmd":5}]"#
-    );
-    assert_eq!(field(&json, "stubbed"), "[]");
-}
-
 /// Reset clears module-level panic and trace state.
 #[test]
 fn a_new_session_inherits_nothing_from_the_one_before_it() {
     let (_host, first) = new_session();
 
-    PANICKED.store(true, Ordering::Relaxed);
     // SAFETY: single-threaded under the `HOST` lock.
     let planted = b"PANIC: the old session died here";
     let guard = unsafe { &mut *PANIC_MSG.get() };
@@ -270,15 +163,10 @@ fn a_new_session_inherits_nothing_from_the_one_before_it() {
     switch_free_session(first);
     let second = switch_new();
 
-    let json = json_from(|buf, cap| switch_crash_report_json(second, buf, cap));
-    assert_eq!(
-        field(&json, "panicked"),
-        "false",
-        "a reset console has not panicked"
-    );
+    let trace = json_from(|buf, cap| switch_drain_trace(second, buf, cap));
     assert!(
-        !field(&json, "trace").contains("the old session traced this"),
-        "the new session opened with the old one's trace: {json:.400}"
+        !trace.contains("the old session traced this"),
+        "the new session opened with the old one's trace: {trace:.400}"
     );
 
     let mut buf = [0u8; 256];

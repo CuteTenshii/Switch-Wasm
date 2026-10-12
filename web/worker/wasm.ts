@@ -10,7 +10,6 @@ export interface WasmExports {
   switch_free(ptr: number, len: number): void;
 
   switch_init(): void;
-  switch_version(buf: number, maxlen: number): number;
   switch_new(): number;
   switch_free_session(handle: number): void;
   switch_last_error(handle: number, buf: number, maxlen: number): number;
@@ -75,12 +74,6 @@ export interface WasmExports {
   switch_drain_trace(handle: number, buf: number, maxlen: number): number;
   switch_dump_regs(handle: number, buf: number, maxlen: number): number;
   switch_thread_dump(handle: number, buf: number, maxlen: number): number;
-  switch_backtrace_json(handle: number, depth: number, buf: number, maxlen: number): number;
-  switch_wake_blocked(handle: number): number;
-  switch_start_created_threads(handle: number): number;
-  switch_unimplemented_json(handle: number, buf: number, maxlen: number): number;
-  switch_crash_report_json(handle: number, buf: number, maxlen: number): number;
-  switch_get_pc(handle: number): number;
   switch_get_reg(handle: number, idx: number): bigint;
   switch_get_steps(handle: number): bigint;
   switch_guest_ram(handle: number): bigint;

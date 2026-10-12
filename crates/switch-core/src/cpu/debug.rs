@@ -8,29 +8,6 @@ impl Cpu {
         self.current_thread
     }
 
-    /// Debugging lever: make every blocked thread runnable; returns the count.
-    pub fn wake_all_blocked(&mut self) -> usize {
-        let mut woken = 0;
-        for index in 0..self.threads.len() {
-            match self.threads[index].state {
-                ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
-                ThreadState::WaitMutex(_) | ThreadState::WaitAddress { .. } => {
-                    self.threads[index].state = ThreadState::Runnable;
-                }
-                _ => continue,
-            }
-            woken += 1;
-        }
-        woken
-    }
-
-    /// Every `(interface, command)` reported as unimplemented, sorted.
-    pub fn unimplemented_ipc(&self) -> Vec<(String, Option<u32>)> {
-        let mut all: Vec<(String, Option<u32>)> = self.unimplemented_ipc.iter().cloned().collect();
-        all.sort();
-        all
-    }
-
     /// Every `(interface, command)` answered by a stub; see [`Cpu::warn_stub`].
     pub fn stubbed_ipc(&self) -> Vec<(String, Option<u32>)> {
         let mut all: Vec<(String, Option<u32>)> = self.stubbed_ipc.iter().cloned().collect();
@@ -68,18 +45,6 @@ impl Cpu {
             self.npad_style_set,
             npad_presentation_for(self.npad_style_set).style,
         )
-    }
-
-    /// Debugging lever: start every created-but-unstarted thread; returns the count.
-    pub fn start_created_threads(&mut self) -> usize {
-        let mut started = 0;
-        for thread in &mut self.threads {
-            if thread.state == ThreadState::Created {
-                thread.state = ThreadState::Runnable;
-                started += 1;
-            }
-        }
-        started
     }
 
     pub fn thread_dump(&self) -> String {

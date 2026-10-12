@@ -75,9 +75,6 @@ static SESSIONS: SyncCell<Vec<Option<Session>>> = SyncCell::new(Vec::new());
 /// Last panic message, in a fixed buffer so the hook never allocates.
 static PANIC_MSG: SyncCell<[u8; 2048]> = SyncCell::new([0u8; 2048]);
 
-/// Whether the hook has fired since the host last looked; outlives the taken message.
-static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// The largest `n <= limit` at which `s` may be cut on a char boundary.
 fn floor_char_boundary(s: &str, limit: usize) -> usize {
     if s.len() <= limit {
@@ -102,14 +99,6 @@ fn session(handle: u32) -> &'static mut Session {
         .and_then(|s| s.as_mut())
         .unwrap_or_else(|| panic!("invalid session handle {handle} (slots len {len})"));
     unsafe { std::mem::transmute::<&mut Session, &'static mut Session>(slot) }
-}
-
-/// The session `handle` names, or `None`. See [`session`] for the panicking form.
-fn session_opt(handle: u32) -> Option<&'static mut Session> {
-    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
-    let slots = unsafe { &mut *SESSIONS.get() };
-    let slot = slots.get_mut(handle as usize)?.as_mut()?;
-    Some(unsafe { std::mem::transmute::<&mut Session, &'static mut Session>(slot) })
 }
 
 fn new_handle(session: Session) -> u32 {
@@ -278,15 +267,12 @@ fn install_panic_hook() {
             let n = floor_char_boundary(&msg, guard.len() - 1);
             guard[..n].copy_from_slice(&msg.as_bytes()[..n]);
             guard[n] = 0;
-            PANICKED.store(true, Ordering::Relaxed);
         }));
     });
 }
 
-/// Clear module-level state (panic flag, panic message, pending traces) left by
-/// the previous session.
+/// Clear module-level state (panic message, pending traces) left by the previous session.
 fn forget_the_last_session() {
-    PANICKED.store(false, std::sync::atomic::Ordering::Relaxed);
     // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
     unsafe { &mut *PANIC_MSG.get() }.fill(0);
     // Drop traces the previous session left.

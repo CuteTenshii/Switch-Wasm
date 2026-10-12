@@ -17,6 +17,9 @@ declare module '@core/switch_wasm.js' {
   ): Record<string, unknown>;
 }
 
+// The commit the site was built from; see `vite.config.ts`.
+declare const __BUILD__: string;
+
 interface ImportMetaEnv {
   readonly MODE: string;
   readonly BASE_URL: string;

@@ -336,11 +336,23 @@ export async function offerPreviousLog(): Promise<void> {
     + 'has what it had said by then.', 'warn');
 }
 
-$('btn-save-console').addEventListener('click', () => {
+// What a report needs that the log lines do not say.
+function logHeader(): string {
+  return [
+    'Switch WASM build ' + __BUILD__,
+    'Browser: ' + navigator.userAgent,
+    'WebGPU: ' + ('gpu' in navigator ? 'available' : 'not available'),
+  ].join('\n');
+}
+
+// Download the console as a text file, under a header naming the build and browser.
+export function saveLog(): void {
   const text = consoleText();
   if (!text) {
     flashCopyLabel('Log is empty');
     return;
   }
-  download(`switch-wasm-log-${stamp()}.txt`, text);
-});
+  download(`switch-wasm-log-${stamp()}.txt`, logHeader() + '\n\n' + text);
+}
+
+$('btn-save-console').addEventListener('click', saveLog);

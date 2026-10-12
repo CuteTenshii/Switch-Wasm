@@ -10,7 +10,7 @@ import { hasKeys, stageKeys, updateKeysState } from './keys';
 import { clearConsole, log, logLevel, offerPreviousLog, onLogLevel } from './log';
 import { initNand } from './nand';
 import { call, initWorker, setSession, whenReady } from './rpc';
-import { updatePc, updateRam } from './runloop';
+import { updateReadouts, updateRam } from './runloop';
 import { saveRestore } from './saves';
 import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence, sdRestore } from './sdcard';
@@ -38,8 +38,7 @@ async function init(): Promise<void> {
     setSession(await call('new'));
     loadPhase('restoring the SD card, saves, profiles and keys');
     // Independent of each other once the session exists.
-    const [version] = await Promise.all([
-      call('version'),
+    await Promise.all([
       stageFont(),
       sdRequestPersistence().then(sdRestore),
       saveRestore(),
@@ -50,8 +49,6 @@ async function init(): Promise<void> {
       call('set_trace_channels', logLevel() === 'debug'),
       hasKeys() ? stageKeys() : undefined,
     ]);
-    $('wasm-ver').textContent = 'core ' + version;
-    log('core ready - build ' + version, 'ok');
     updateKeysState();
     // The NAND needs the keys. Only its index is awaited; archives register later.
     loadPhase('reading the NAND');
@@ -83,7 +80,7 @@ $('btn-reset').addEventListener('click', async () => {
   setState('idle');
   showOverlay(true);
   screenCtx.clearRect(0, 0, screenEl.width, screenEl.height);
-  await updatePc();
+  await updateReadouts();
   endLoad();
 });
 

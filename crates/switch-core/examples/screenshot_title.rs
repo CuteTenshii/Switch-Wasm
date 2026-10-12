@@ -3,7 +3,7 @@
 //!
 //! Knobs beyond [`common::Debug`]: `SWITCH_FIRMWARE`, `STEPS`, `PROFILE`, `STACKS`,
 //! `COVER`, `WATCH_MEM`, `SCAN_MEM`, `DUMP_VERTS`, `DUMP_SURFACE`, `POKE_U32`,
-//! `POKE_AT`, `START_THREADS`, `WAKE_ALL`, `GATE_SNIFF`, `FIND_MAGIC`.
+//! `POKE_AT`, `GATE_SNIFF`, `FIND_MAGIC`.
 mod common;
 
 use common::{Flow, Pace};
@@ -105,24 +105,15 @@ fn main() {
     let mut seen_nonzero = false;
     let poke = env_bounds("POKE_U32");
     let poke_at: Option<u64> = env::var("POKE_AT").ok().and_then(|v| v.parse().ok());
-    let start_threads: Option<u64> = env::var("START_THREADS").ok().and_then(|v| v.parse().ok());
-    let mut started_threads = false;
-    let wake_every = common::env_u64("WAKE_ALL", 0);
     let gate_sniff = env::var("GATE_SNIFF").is_ok();
     let mut gate: Option<u32> = None;
 
-    let pace = if debug.stepwise()
-        || interval > 0
-        || cover.is_some()
-        || poke.is_some()
-        || start_threads.is_some()
-        || wake_every > 0
-        || gate_sniff
-    {
-        Pace::Instructions
-    } else {
-        Pace::Blocks
-    };
+    let pace =
+        if debug.stepwise() || interval > 0 || cover.is_some() || poke.is_some() || gate_sniff {
+            Pace::Instructions
+        } else {
+            Pace::Blocks
+        };
     let run = common::drive(
         &mut cpu,
         pace,
@@ -157,15 +148,6 @@ fn main() {
                     }
                     _ => {}
                 }
-            }
-            if let Some(at) = start_threads {
-                if !started_threads && done >= at {
-                    started_threads = true;
-                    println!("[threads] force-started {}", cpu.start_created_threads());
-                }
-            }
-            if wake_every > 0 && done % wake_every == 0 {
-                cpu.wake_all_blocked();
             }
             if let Some((lo, hi)) = cover {
                 let pc = cpu.get_pc();

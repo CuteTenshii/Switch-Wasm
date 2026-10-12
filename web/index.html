@@ -125,11 +125,10 @@
         <div class="crash-copy">
           <h1 id="crash-title">Guest crashed</h1>
           <p class="crash-message" id="crash-message"></p>
-          <p class="crash-help">Save the report before resetting. Reset clears the registers,
-            trace, and other crash context.</p>
+          <p class="crash-help">Save the log before resetting: reset clears it.</p>
         </div>
         <div class="crash-actions">
-          <button type="button" class="btn primary" id="crash-save">Save crash report</button>
+          <button type="button" class="btn primary" id="crash-save">Save log</button>
           <button type="button" class="btn" id="crash-console">Open console</button>
           <button type="button" class="btn ghost" id="crash-reset">Reset console</button>
         </div>
@@ -214,13 +213,10 @@
   </dialog>
 
   <footer class="statusbar">
-    <span class="item" id="pc-item" hidden>PC <b id="pc">-</b></span>
     <span class="item" id="instructions-item" hidden title="Guest instructions executed, and how many a second while running">Instructions <b id="instructions">0</b></span>
     <span class="item" id="ram-item" title="Guest RAM the emulated console has touched (wasm heap in brackets)">RAM <b id="ram">-</b></span>
     <span class="item" id="res-item" hidden>Res <b id="res">-</b></span>
     <span class="item">Input <b id="input-state">none</b></span>
-    <span class="spacer"></span>
-    <span class="item dim" id="wasm-ver">starting core…</span>
   </footer>
 
 </div>
@@ -265,8 +261,6 @@
         aria-pressed="true">CPU</button>
       <button class="btn small debug-group" data-debug-group="graphics"
         aria-pressed="false">Graphics</button>
-      <button class="btn small debug-group" data-debug-group="system"
-        aria-pressed="false">System</button>
     </div>
 
     <details class="section" data-debug-section="cpu" open>
@@ -281,54 +275,6 @@
         <div class="panel-tools">
           <button id="btn-dumptrace" class="btn small">Dump trace</button>
           <button id="btn-dumpregs" class="btn small">Dump regs</button>
-        </div>
-      </div>
-    </details>
-
-    <details class="section" data-debug-section="cpu">
-      <summary class="section-head">
-        <span class="section-title">Threads</span>
-      </summary>
-      <div class="section-body">
-        <p class="muted tiny">A title that has stopped and a title that is working look the same
-          from outside. This says which thread is running, what each of the others is waiting on,
-          and where it stopped - and lets you release them, which answers whether the stall is a
-          thread nobody woke or a thread nobody started.</p>
-        <div class="panel-tools">
-          <button id="btn-threads" class="btn small">Thread dump</button>
-          <button id="btn-wake" class="btn small">Wake blocked</button>
-          <button id="btn-start-threads" class="btn small">Start created</button>
-        </div>
-      </div>
-    </details>
-
-    <details class="section" data-debug-section="system" hidden>
-      <summary class="section-head">
-        <span class="section-title">Missing services</span>
-      </summary>
-      <div class="section-body">
-        <p class="muted tiny">Everything this title has asked the console for and not been given,
-          collected. Refused commands and commands answered with nothing behind the answer are
-          listed apart, because they fail differently: the first stops the caller there, the second
-          lets it carry on and fail somewhere else.</p>
-        <div class="panel-tools">
-          <button id="btn-gaps" class="btn small">What's missing</button>
-        </div>
-      </div>
-    </details>
-
-    <details class="section" data-debug-section="system" hidden>
-      <summary class="section-head">
-        <span class="section-title">Crash report</span>
-      </summary>
-      <div class="section-body">
-        <p class="muted tiny">Everything an issue needs about this run in one file: the build, the
-          title, the renderer and what it refused, the registers, the threads, the services that
-          were missing, and the run-up to the fault. Take it while the run is still where it
-          stopped - a reset is what loses it.</p>
-        <div class="panel-tools">
-          <button id="btn-crash-report" class="btn small">Save report</button>
-          <button id="btn-copy-report" class="btn small ghost">Copy report</button>
         </div>
       </div>
     </details>

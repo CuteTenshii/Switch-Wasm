@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 
@@ -14,7 +15,19 @@ const crossOriginIsolation = {
   'Cross-Origin-Embedder-Policy': 'require-corp',
 };
 
+// The commit the site was built from, `-dirty` with uncommitted changes, for log headers.
+function buildId(): string {
+  const git = (args: string) => execSync('git ' + args, { encoding: 'utf8' }).trim();
+  try {
+    const dirty = git('status --porcelain --untracked-files=no') !== '';
+    return git('rev-parse --short HEAD') + (dirty ? '-dirty' : '');
+  } catch {
+    return 'unknown';
+  }
+}
+
 export default defineConfig(({ command }) => ({
+  define: { __BUILD__: JSON.stringify(buildId()) },
   root: 'web',
   // Relative: the site is published below a host path.
   base: './',

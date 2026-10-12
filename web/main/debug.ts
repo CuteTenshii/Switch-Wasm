@@ -7,7 +7,7 @@ import {
 } from './display-metrics';
 import { $ } from './dom';
 import { formatBytes } from './format';
-import { consoleText, copyText, download, log, logBlock, stamp } from './log';
+import { log, logBlock } from './log';
 import { call } from './rpc';
 import { openPanel, setNote } from './shell';
 
@@ -232,97 +232,7 @@ $('btn-dumpregs').addEventListener('click', async () => {
   if (s) logBlock(s);
 });
 
-$('btn-threads').addEventListener('click', async () => {
-  const dump = await call('thread_dump');
-  openPanel('console');
-  if (dump) logBlock(dump);
-  else log('(no threads)');
-  const frames = await call('backtrace', 16);
-  if (frames.length) {
-    log('  backtrace: ' + frames.map((pc) => '0x' + pc.toString(16)).join(' <- '));
-  }
-});
-
-$('btn-wake').addEventListener('click', async () => {
-  const woken = await call('wake_blocked');
-  openPanel('console');
-  log(
-    woken
-      ? `Woke ${woken} blocked thread(s). A guest re-checks its predicate, so a wake it did not `
-      + 'need degrades to a spin rather than to a wrong answer.'
-      : 'No thread was blocked - this process is idle for some other reason.',
-  );
-});
-
-$('btn-start-threads').addEventListener('click', async () => {
-  const started = await call('start_created_threads');
-  openPanel('console');
-  log(
-    started
-      ? `Started ${started} thread(s) the guest created and never ran.`
-      : 'Every thread the guest created has been started.',
-  );
-});
-
-$('btn-gaps').addEventListener('click', async () => {
-  const gaps = await call('ipc_gaps');
-  openPanel('console');
-  const name = (g: { iface: string; cmd: number | null }) =>
-    `${g.iface} cmd=${g.cmd === null ? '-' : g.cmd}`;
-  if (!gaps.unimplemented.length && !gaps.stubbed.length) {
-    log('Nothing this title has asked for has been refused or stubbed.');
-    return;
-  }
-  if (gaps.unimplemented.length) {
-    log(`Refused - no implementation behind them (${gaps.unimplemented.length}):`, 'warn');
-    for (const g of gaps.unimplemented) log('  ' + name(g));
-  }
-  if (gaps.stubbed.length) {
-    log(`Answered with nothing behind the answer (${gaps.stubbed.length}):`, 'warn');
-    for (const g of gaps.stubbed) log('  ' + name(g));
-  }
-});
-
 const regIdx = $<HTMLInputElement>('reg-idx');
 $('btn-readreg').addEventListener('click', async () => {
   $('reg-val').textContent = await call('get_reg', parseInt(regIdx.value, 10));
-});
-
-// The crash report: everything an issue needs, in one file.
-async function crashReport(): Promise<string> {
-  const report = await call('crash_report');
-  return JSON.stringify(
-    {
-      ...report,
-      browser: {
-        userAgent: navigator.userAgent,
-        platform: (navigator as unknown as { platform?: string }).platform ?? '',
-        hardwareConcurrency: navigator.hardwareConcurrency,
-        webgpu: 'gpu' in navigator,
-        deviceMemory: (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? null,
-        display: displayMetrics(),
-      },
-      // The page's log holds worker errors, load failures and renderer notes.
-      log: consoleText().split('\n'),
-    },
-    null,
-    2,
-  );
-}
-
-export async function saveCrashReport(): Promise<void> {
-  const text = await crashReport();
-  download(`switch-wasm-report-${stamp()}.json`, text, 'application/json');
-  openPanel('console');
-  log('Crash report saved. Attach it to the issue - it names the build, the title, '
-    + 'the renderer, the registers and the run-up to the fault.', 'ok');
-}
-
-$('btn-crash-report').addEventListener('click', saveCrashReport);
-
-$('btn-copy-report').addEventListener('click', async () => {
-  const ok = await copyText(await crashReport());
-  openPanel('console');
-  log(ok ? 'Crash report copied to the clipboard.' : 'Could not copy the crash report.',
-    ok ? 'ok' : 'err');
 });

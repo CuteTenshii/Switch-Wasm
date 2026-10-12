@@ -2,10 +2,11 @@ import { aarch64Elf, bootElf, expect, openPage, test } from './page';
 
 const SVC_EXIT_PROCESS = 0xd40000e1;
 
-test('the core starts and names its build', async ({ page }) => {
+test('the core starts and reports its heap', async ({ page }) => {
   await openPage(page);
-  await expect(page.locator('#wasm-ver')).toHaveText(/^core \d+\.\d+\.\d+/);
   await expect(page.locator('body')).toHaveAttribute('data-state', 'idle');
+  // Guest RAM, then the core's heap in brackets, as the core reports them.
+  await expect(page.locator('#ram')).toHaveText(/^\d+(\.\d+)? [KMG]?i?B \(\d+(\.\d+)? [KMG]iB\)$/);
 });
 
 test('the display debugger starts empty and can reset its samples', async ({ page }) => {
@@ -13,15 +14,12 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   await page.locator('#btn-panel').click();
   await page.getByRole('tab', { name: 'Debug' }).click();
 
-  await expect(page.getByText('Tracing', { exact: true })).toBeVisible();
-  await expect(page.getByText('Missing services', { exact: true })).toBeHidden();
-  await page.getByRole('button', { name: 'System' }).click();
-  await expect(page.getByText('Missing services', { exact: true })).toBeVisible();
-  await expect(page.getByText('Tracing', { exact: true })).toBeHidden();
-  await page.getByRole('button', { name: 'Graphics' }).click();
-
   const display = page.locator('#display-debug-section');
+  await expect(page.getByText('Tracing', { exact: true })).toBeVisible();
+  await expect(display).toBeHidden();
+  await page.getByRole('button', { name: 'Graphics' }).click();
   await expect(display).toBeVisible();
+  await expect(page.getByText('Tracing', { exact: true })).toBeHidden();
   await expect(display.locator('#display-debug-badge')).toHaveText('no samples');
   await expect(display.locator('#display-debug-empty')).toHaveText(
     'Run a title to collect display samples.',
@@ -61,7 +59,7 @@ test('the guest crash screen exposes recovery paths', async ({ page }) => {
   await expect(crash.locator('#crash-message')).toHaveText(
     'CPU: read from unmapped address 0xfff00000',
   );
-  await expect(crash.getByRole('button', { name: 'Save crash report' })).toBeVisible();
+  await expect(crash.getByRole('button', { name: 'Save log' })).toBeVisible();
 
   // The fixture fails on console errors, so clear the expected fault report.
   await expect(page.locator('#console .err', {

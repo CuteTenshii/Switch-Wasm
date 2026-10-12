@@ -41,7 +41,7 @@ The `.nro`/`.nsp` files are gitignored.
   correctly, and a disagreement means only that.
 - `node tools/browser_boot.mjs <container> --keys=… --title-keys=…` - the same
   boot in a real browser, sampling the page's run state every five seconds and
-  saving the page's console, the worker's output and a thread dump.
+  saving the page's console, with its periodic thread reports, and the worker's output.
 - `--example jit_difftest <nro>` - both engines, with every state difference.
   `SWITCH_NO_JIT=1` disables translation for host tools.
 - `--example screenshot_title <container> <prod.keys> [title.keys] out.ppm [n]` -

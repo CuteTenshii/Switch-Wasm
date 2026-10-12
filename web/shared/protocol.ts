@@ -62,48 +62,6 @@ export interface GpuReport {
   };
 }
 
-// A refused service command; `cmd` is null without a command id.
-export interface IpcGap {
-  iface: string;
-  cmd: number | null;
-}
-
-// `unimplemented` was refused; `stubbed` answered with nothing behind it.
-export interface IpcGaps {
-  unimplemented: IpcGap[];
-  stubbed: IpcGap[];
-}
-
-// Everything for a bug report about one run. `panicked` means an emulator bug;
-// `session` is null if requested after the session ended.
-export interface CrashReport {
-  version: string;
-  panicked: boolean;
-  traceMask: number;
-  lastError?: string;
-  guestFatal?: string | null;
-  title?: { id: string; name?: string; version?: string };
-  cpu?: {
-    pc: number;
-    mode: string;
-    steps: number;
-    cycles: number;
-    halted: boolean;
-    thread: number;
-    guestRam: number;
-    docked: boolean;
-  };
-  jit?: JitStats & { interpreted?: number };
-  gpu?: GpuReport;
-  backtrace?: number[];
-  registers?: string;
-  threads?: string;
-  unimplemented?: IpcGap[];
-  stubbed?: IpcGap[];
-  trace?: string;
-  session?: null;
-}
-
 export interface JitStats {
   enabled: boolean;
   blocks: number;
@@ -268,13 +226,6 @@ export interface Commands {
   drain_trace(): Bytes;
   dump_regs(): string;
   thread_dump(): string;
-  backtrace(depth: number): number[];
-  wake_blocked(): number;
-  start_created_threads(): number;
-  ipc_gaps(): IpcGaps;
-  crash_report(): CrashReport;
-  version(): string;
-  get_pc(): number;
   get_steps(): number;
   get_reg(i: number): string;
   ram(): RamUsage;

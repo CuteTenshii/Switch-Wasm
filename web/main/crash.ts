@@ -1,8 +1,7 @@
 // Stage-level end state and recovery options for a run that cannot continue.
 
-import { saveCrashReport } from './debug';
 import { $ } from './dom';
-import { log } from './log';
+import { saveLog } from './log';
 import { openPanel } from './shell';
 
 const rootEl = $('crash');
@@ -29,14 +28,7 @@ export function hideCrash(): void {
   rootEl.hidden = true;
 }
 
-saveEl.addEventListener('click', async () => {
-  try {
-    await saveCrashReport();
-  } catch (err) {
-    openPanel('console');
-    log('Could not build the crash report: ' + (err as Error).message, 'err');
-  }
-});
+saveEl.addEventListener('click', saveLog);
 
 $('crash-console').addEventListener('click', () => openPanel('console'));
 $('crash-reset').addEventListener('click', () => {

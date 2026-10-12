@@ -8,7 +8,7 @@ import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { clearConsole, log } from './log';
 import { call, readLastError } from './rpc';
-import { run, updatePc } from './runloop';
+import { run, updateReadouts } from './runloop';
 import { noteBooted, recycleSession } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
 import { setRunning } from './title';
@@ -660,6 +660,6 @@ export async function doLaunchNca(
   loadPhase('starting the process');
   showScreen();
   awaitFirstFrame();
-  await updatePc();
+  await updateReadouts();
   await run();
 }

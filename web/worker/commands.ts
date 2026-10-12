@@ -1,7 +1,7 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, CrashReport, ErrorDialog, FsChange, GpuReport, IpcGaps, JitStats, KeyboardRequest,
+  CommandHandlers, ErrorDialog, FsChange, GpuReport, JitStats, KeyboardRequest,
   UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
@@ -315,41 +315,6 @@ export const CMD: CommandHandlers = {
   },
   thread_dump() {
     return readString(8192, (buf, cap) => api().switch_thread_dump(handle(), buf, cap));
-  },
-  backtrace(depth) {
-    return readJson<number[]>(
-      1024,
-      (buf, cap) => api().switch_backtrace_json(handle(), depth, buf, cap),
-      [],
-    );
-  },
-  wake_blocked() {
-    return api().switch_wake_blocked(handle());
-  },
-  start_created_threads() {
-    return api().switch_start_created_threads(handle());
-  },
-  ipc_gaps() {
-    if (handle() < 0) return { unimplemented: [], stubbed: [] };
-    return readJson<IpcGaps>(
-      64 * 1024,
-      (buf, cap) => api().switch_unimplemented_json(handle(), buf, cap),
-      { unimplemented: [], stubbed: [] },
-    );
-  },
-  // Large enough to keep the trace.
-  crash_report() {
-    return readJson<CrashReport>(
-      1024 * 1024,
-      (buf, cap) => api().switch_crash_report_json(handle(), buf, cap),
-      { version: 'unknown', panicked: false, traceMask: 0 },
-    );
-  },
-  version() {
-    return readString(128, (buf, cap) => api().switch_version(buf, cap));
-  },
-  get_pc() {
-    return api().switch_get_pc(handle());
   },
   get_steps() {
     return Number(api().switch_get_steps(handle()));

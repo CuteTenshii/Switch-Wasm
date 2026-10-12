@@ -86,7 +86,7 @@ export async function run(): Promise<void> {
       await pumpAudio();
       if (done || ++tick % HOUSEKEEPING_EVERY === 0) {
         await Promise.all([
-          updatePc(), drainOutput(), drainDiagnostics(), sdFlush(), saveFlush(), pullProfileEdits(),
+          updateReadouts(), drainOutput(), drainDiagnostics(), sdFlush(), saveFlush(), pullProfileEdits(),
           pollKeyboard(), pollErrors(),
         ]);
       }
@@ -230,19 +230,17 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     showGuestCrash('The guest stopped unexpectedly.');
   }
   await Promise.all([
-    drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), flushDisplay(), updatePc(),
+    drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), flushDisplay(), updateReadouts(),
   ]);
 }
 
 let countedInstructions = 0;
 let countedAt = 0;
 
-export async function updatePc(): Promise<void> {
-  const pc = await call('get_pc');
+export async function updateReadouts(): Promise<void> {
   // Instructions retired, not the clock, which jumps while threads idle.
   const instructions = await call('get_steps');
   const at = performance.now();
-  $('pc').textContent = '0x' + pc.toString(16).padStart(8, '0');
   // Only while running; a count that went backwards is a new session.
   const seconds = (at - countedAt) / 1000;
   const ran = instructions - countedInstructions;

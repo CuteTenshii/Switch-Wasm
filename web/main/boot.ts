@@ -9,7 +9,7 @@ import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
 import { clearConsole, log } from './log';
 import { call, readLastError } from './rpc';
-import { run, updatePc } from './runloop';
+import { run, updateReadouts } from './runloop';
 import { noteBooted, recycleSession } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
 import { runningIconUrl, setRunning } from './title';
@@ -62,7 +62,7 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
   // The loading screen stays over it until `display.renderFb` has a real frame.
   showScreen();
   awaitFirstFrame();
-  await updatePc();
+  await updateReadouts();
   return true;
 }
 

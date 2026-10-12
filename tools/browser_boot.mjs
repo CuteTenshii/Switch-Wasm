@@ -71,10 +71,9 @@ try {
   });
 
   await page.goto(url);
-  // "idle" also shows before the core loads, so wait for the announcement.
+  // "idle" also shows before the core loads; the loading screen closes once it has.
   await page.waitForFunction(() =>
-    [...(document.getElementById('console')?.children ?? [])]
-      .some((row) => row.textContent.startsWith('core ready')));
+    document.getElementById('loading')?.classList.contains('hidden'));
   if (keys) await page.setInputFiles('#prod-keys', keys);
   if (titleKeys) await page.setInputFiles('#title-keys', titleKeys);
   await page.setInputFiles('#nro-file', resolve(container));
@@ -114,7 +113,6 @@ try {
   if (!crashed) {
     // Clicked from script because the debug panel is closed.
     await page.evaluate(() => document.getElementById('btn-gpustats').click());
-    await page.evaluate(() => document.getElementById('btn-threads').click());
     await page.waitForTimeout(3000);
     pageConsole = await page.evaluate(() =>
       [...document.getElementById('console').children]
