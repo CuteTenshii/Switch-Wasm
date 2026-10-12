@@ -163,7 +163,7 @@ impl Cpu {
             }
         }
         self.mode = mode;
-        if let Some(thread) = self.threads.get_mut(self.current_thread) {
+        if let Some(thread) = self.machine.threads.get_mut(self.current_thread) {
             thread.mode = mode;
         }
     }

@@ -862,8 +862,13 @@ impl Cpu {
             self.romfs_indexes.insert(archive, index);
         }
         let storage = storage_text(archive);
-        let activity = &mut self.fs_activity;
-        let Some(index) = self.romfs_indexes.get(&archive).and_then(Option::as_ref) else {
+        let activity = &mut self.machine.fs_activity;
+        let Some(index) = self
+            .machine
+            .romfs_indexes
+            .get(&archive)
+            .and_then(Option::as_ref)
+        else {
             activity.read(&storage, len);
             return;
         };

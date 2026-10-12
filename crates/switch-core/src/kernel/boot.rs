@@ -195,7 +195,7 @@ impl Cpu {
         if crate::services::am::is_library_applet(self.program_id) {
             return;
         }
-        self.am_launch_parameters.insert(
+        self.machine.am_launch_parameters.insert(
             crate::services::am::LAUNCH_PARAMETER_PRESELECTED_USER,
             crate::services::am::preselected_user_parameter(self.current_user().uid),
         );

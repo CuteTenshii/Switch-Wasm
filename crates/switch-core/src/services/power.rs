@@ -175,7 +175,7 @@ impl Cpu {
             }
             // FinalizeOld(module) / Finalize(request id).
             Some(1) | Some(5) => {
-                self.mm_requests.remove(&arg(self, 0));
+                self.machine.mm_requests.remove(&arg(self, 0));
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // SetAndWaitOld(module, min, max) / SetAndWait(request id, min, max).

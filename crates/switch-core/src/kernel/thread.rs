@@ -81,7 +81,7 @@ impl Cpu {
     /// Created on demand so a single-threaded program costs nothing.
     pub(crate) fn ensure_main_thread(&mut self) {
         if self.threads.is_empty() {
-            self.threads.push(ThreadContext {
+            self.machine.threads.push(ThreadContext {
                 handle: MAIN_THREAD_HANDLE,
                 id: MAIN_THREAD_ID,
                 state: ThreadState::Runnable,
@@ -98,10 +98,10 @@ impl Cpu {
                 fpsr: 0,
                 tpidr: self.tpidr,
                 tpidr_rw: self.tpidr_rw,
-                priority: self.main_thread_priority,
-                core: self.main_thread_core,
-                ideal_core: i32::from(self.main_thread_core),
-                affinity: 1 << self.main_thread_core,
+                priority: self.machine.main_thread_priority,
+                core: self.machine.main_thread_core,
+                ideal_core: i32::from(self.machine.main_thread_core),
+                affinity: 1 << self.machine.main_thread_core,
                 passed_over: 0,
                 entry: 0,
                 arg: 0,
@@ -149,7 +149,7 @@ impl Cpu {
         }
         let id = self.next_thread_id;
         self.next_thread_id += 1;
-        self.threads.push(ThreadContext {
+        self.machine.threads.push(ThreadContext {
             handle,
             id,
             state: ThreadState::Created,
@@ -280,7 +280,7 @@ impl Cpu {
             self.halted = true;
             return;
         }
-        self.threads[self.current_thread].state = ThreadState::Finished;
+        self.machine.threads[self.current_thread].state = ThreadState::Finished;
         // Joiners are parked on this thread's handle, now signalled.
         self.wake_event_waiters();
         if !self.switch_to_next_runnable() {
@@ -380,12 +380,13 @@ impl Cpu {
     /// The main thread's priority from `main.npdm`.
     pub fn set_main_thread_priority(&mut self, priority: u8) {
         self.main_thread_priority = priority.min(LOWEST_PRIORITY);
+        let priority = self.main_thread_priority;
         if let Some(main) = self
             .threads
             .iter_mut()
             .find(|t| t.handle == MAIN_THREAD_HANDLE)
         {
-            main.priority = self.main_thread_priority;
+            main.priority = priority;
         }
     }
 
@@ -396,15 +397,16 @@ impl Cpu {
 
     /// The main thread's core from `main.npdm`, also the process's default core.
     pub fn set_main_thread_core(&mut self, core: u8) {
-        self.main_thread_core = core.min(LAST_CORE);
+        let core = core.min(LAST_CORE);
+        self.main_thread_core = core;
         if let Some(main) = self
             .threads
             .iter_mut()
             .find(|t| t.handle == MAIN_THREAD_HANDLE)
         {
-            main.core = self.main_thread_core;
-            main.ideal_core = i32::from(self.main_thread_core);
-            main.affinity = 1 << self.main_thread_core;
+            main.core = core;
+            main.ideal_core = i32::from(core);
+            main.affinity = 1 << core;
         }
     }
 

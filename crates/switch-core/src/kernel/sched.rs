@@ -42,11 +42,11 @@ impl Cpu {
         let Some(buffer) = self.pending_present else {
             return;
         };
-        match self.nv.gpu.flush_renderers(&mut self.mem) {
+        match self.machine.nv.gpu.flush_renderers(&mut self.mem) {
             Ok(crate::gpu::renderer::Flush::Pending) => {}
             Ok(crate::gpu::renderer::Flush::Done) => {
                 self.pending_present = None;
-                if let Err(e) = self.nv.gpu.present(&self.mem, &buffer) {
+                if let Err(e) = self.machine.nv.gpu.present(&self.mem, &buffer) {
                     self.diagnostic(
                         Level::Error,
                         &format!("[vi] the deferred present failed: {e}"),
@@ -66,7 +66,7 @@ impl Cpu {
 
     pub(crate) fn sleep_until(&mut self, deadline: u64) {
         self.ensure_main_thread();
-        self.threads[self.current_thread].state = ThreadState::Sleeping { deadline };
+        self.machine.threads[self.current_thread].state = ThreadState::Sleeping { deadline };
         self.reschedule();
     }
 
@@ -78,7 +78,7 @@ impl Cpu {
     /// Park on awaited events until one fires or `deadline` passes; the `svc` is reissued.
     pub(crate) fn park_on_events(&mut self, deadline: u64) {
         self.ensure_main_thread();
-        self.threads[self.current_thread].state = ThreadState::WaitEvent { deadline };
+        self.machine.threads[self.current_thread].state = ThreadState::WaitEvent { deadline };
         self.reschedule();
     }
 
@@ -158,7 +158,7 @@ impl Cpu {
     }
 
     fn save_context(&mut self, index: usize) {
-        let thread = &mut self.threads[index];
+        let thread = &mut self.machine.threads[index];
         thread.regs = self.regs;
         thread.pc = self.pc;
         thread.nzcv = self.nzcv;

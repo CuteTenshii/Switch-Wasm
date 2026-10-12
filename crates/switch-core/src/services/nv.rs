@@ -71,7 +71,7 @@ impl Cpu {
                 // Pass the whole buffer: `SUBMIT` sends payloads past its declared size.
                 argp.resize(size.max(argp.len()), 0);
                 let mut inline_out = Vec::new();
-                let error = self.nv.ioctl(
+                let error = self.machine.nv.ioctl(
                     &mut self.mem,
                     fd,
                     request,

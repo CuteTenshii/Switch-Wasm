@@ -32,7 +32,7 @@ impl Cpu {
         if word & !MUTEX_HAS_LISTENERS != owner || owner == 0 {
             return; // stale request; the guest re-reads the word and retries
         }
-        self.threads[self.current_thread].state = ThreadState::WaitMutex(addr);
+        self.machine.threads[self.current_thread].state = ThreadState::WaitMutex(addr);
         self.reschedule();
     }
 
@@ -70,7 +70,7 @@ impl Cpu {
         let _ = self.mem.write_u32(key, CONDVAR_HAS_WAITERS);
         self.arbitrate_unlock(mutex);
         let deadline = self.wait_deadline(timeout);
-        self.threads[self.current_thread].state = ThreadState::WaitKey {
+        self.machine.threads[self.current_thread].state = ThreadState::WaitKey {
             key,
             mutex,
             deadline,
@@ -204,7 +204,8 @@ impl Cpu {
     /// Park on the arbiter word at `addr`, after [`Cpu::arbitrate_address`] decided to wait.
     pub(crate) fn block_on_address(&mut self, addr: u32, timeout: i64) {
         let deadline = self.wait_deadline(timeout);
-        self.threads[self.current_thread].state = ThreadState::WaitAddress { addr, deadline };
+        self.machine.threads[self.current_thread].state =
+            ThreadState::WaitAddress { addr, deadline };
         self.reschedule();
     }
 
