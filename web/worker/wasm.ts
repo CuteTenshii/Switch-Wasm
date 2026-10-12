@@ -45,7 +45,8 @@ export interface WasmExports {
     handle: number, prodPtr: number, prodLen: number,
     titlePtr: number, titleLen: number): number;
   switch_load_font(handle: number, ptr: number, len: number): number;
-  switch_load_nro(handle: number, ptr: number, len: number): bigint;
+  switch_load_nro(
+    handle: number, ptr: number, len: number, pathPtr: number, pathLen: number): bigint;
   switch_load_elf(handle: number, ptr: number, len: number): bigint;
   switch_load_nca(handle: number): bigint;
   switch_load_nca_from_nsp(handle: number, index: number): bigint;

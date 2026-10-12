@@ -137,10 +137,10 @@ export const CMD: CommandHandlers = {
     logLoad(`loaded the shared font (${fmtSize(bytes.length)})`, result);
     return result;
   },
-  load_nro(bytes) {
-    const result =
-      withBytes(bytes, (ptr, len) => Number(api().switch_load_nro(handle(), ptr, len)));
-    logLoad(`loaded an NRO (${fmtSize(bytes.length)})`, result);
+  load_nro(bytes, sdPath) {
+    const result = withBytes(bytes, (ptr, len) => withPath(sdPath ?? '', (pathPtr, pathLen) =>
+      Number(api().switch_load_nro(handle(), ptr, len, pathPtr, pathLen))));
+    logLoad(`loaded an NRO (${fmtSize(bytes.length)})${sdPath ? ' from ' + sdPath : ''}`, result);
     return result;
   },
   load_elf(bytes) {

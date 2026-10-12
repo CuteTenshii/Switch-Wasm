@@ -9,13 +9,26 @@ use switch_core::trace::Level;
 
 use crate::{container, nsp_file_source, session, Added, Dlc};
 
-/// Load an NRO homebrew image into the CPU. Returns entry address or -1.
+/// Load an NRO homebrew image into the CPU, told the SD card path it came from when
+/// `path_len` is not 0. Returns entry address or -1.
 #[no_mangle]
-pub extern "C" fn switch_load_nro(handle: u32, ptr: *const u8, len: u32) -> i64 {
-    let s = session(handle);
+pub extern "C" fn switch_load_nro(
+    handle: u32,
+    ptr: *const u8,
+    len: u32,
+    path_ptr: *const u8,
+    path_len: u32,
+) -> i64 {
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    let s = session(handle);
+    let booted = if path_len == 0 {
+        s.cpu.boot_homebrew(data)
+    } else {
+        s.cpu
+            .boot_homebrew_at(data, &crate::storage::sd_path(path_ptr, path_len))
+    };
     s.control = None;
-    match s.cpu.boot_homebrew(data) {
+    match booted {
         Ok(loaded) => {
             // Cached for display only: homebrew runs in another title's process.
             s.control = switch_core::control::Control::from_nro(data);

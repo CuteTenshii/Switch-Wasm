@@ -204,7 +204,7 @@ if (kind === 'nro' || kind === 'elf') {
   const bytes = readFileSync(containerPath);
   entry =
     kind === 'nro'
-      ? api.switch_load_nro(handle, toWasm(bytes), bytes.length)
+      ? api.switch_load_nro(handle, toWasm(bytes), bytes.length, 0, 0)
       : api.switch_load_elf(handle, toWasm(bytes), bytes.length);
 } else if (kind === 'nsp') {
   if (api.switch_open_nsp(handle, BigInt(containerSize)) !== 0) die('could not open the container');

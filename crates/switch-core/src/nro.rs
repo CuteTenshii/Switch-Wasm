@@ -119,11 +119,10 @@ pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let _ = mem.write_u32(a + 28, 0);
     let _ = mem.write_u64(a + 32, 0xFFFF_FFFF);
     let _ = mem.write_u64(a + 40, 0x4154_4D4F_5350_4852); // "ATMOSPHR"
-    const ARGV_STRING_OFFSET: u32 = 0x100;
     let _ = mem.write_u32(a + 48, ENTRY_ARGV);
     let _ = mem.write_u32(a + 52, 0);
     let _ = mem.write_u64(a + 56, 0);
-    let _ = mem.write_u64(a + 64, (a + ARGV_STRING_OFFSET) as u64);
+    let _ = mem.write_u64(a + 64, u64::from(ARGV_STRING_ADDR));
     // NextLoadPath (Key 2): { path buffer, argv buffer }.
     let _ = mem.write_u32(a + 72, ENTRY_NEXT_LOAD_PATH);
     let _ = mem.write_u32(a + 76, 0);
@@ -135,13 +134,20 @@ pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let _ = mem.write_u32(a + 100, 0);
     let _ = mem.write_u64(a + 104, 0);
     let _ = mem.write_u64(a + 112, 0);
-
-    let path = HOMEBREW_NRO_PATH.as_bytes();
-    for (i, &byte) in path.iter().enumerate() {
-        let _ = mem.write_u8(a + ARGV_STRING_OFFSET + i as u32, byte);
-    }
-    let _ = mem.write_u8(a + ARGV_STRING_OFFSET + path.len() as u32, 0);
+    write_argv0(mem, HOMEBREW_NRO_PATH);
     a
+}
+
+/// Where the environment block keeps the argument string, up to the next-load buffers.
+const ARGV_STRING_ADDR: u32 = ENV_BLOCK_ADDR + 0x100;
+const ARGV_STRING_MAX: usize = (NEXT_LOAD_PATH_ADDR - ARGV_STRING_ADDR) as usize - 1;
+
+/// Make `path` the homebrew's `argv[0]`, the path it reads files beside.
+/// Longer than the block holds, it is cut short.
+pub fn write_argv0(mem: &mut Memory, path: &str) {
+    let path = &path.as_bytes()[..path.len().min(ARGV_STRING_MAX)];
+    let _ = mem.write_bytes(ARGV_STRING_ADDR, path);
+    let _ = mem.write_u8(ARGV_STRING_ADDR + path.len() as u32, 0);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

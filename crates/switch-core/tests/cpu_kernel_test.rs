@@ -1149,3 +1149,48 @@ fn a_heap_bigger_than_its_region_is_refused() {
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), OUT_OF_MEMORY);
 }
+
+/// The smallest homebrew NRO the loader gives an environment block: the
+/// `HOMEBREW` start the libnx crt0 carries, and a header with an empty image.
+fn homebrew_nro() -> Vec<u8> {
+    let mut nro = vec![0u8; 0x110];
+    nro[8..16].copy_from_slice(b"HOMEBREW");
+    let header = [
+        (0x10, u32::from_le_bytes(*b"NRO0")),
+        (0x18, 0x110), // file size
+        (0x24, 0x100), // text size, from 0
+        (0x28, 0x100), // rodata offset
+        (0x30, 0x100), // data offset
+        (0x34, 0x10),  // data size
+    ];
+    for (at, value) in header {
+        nro[at..at + 4].copy_from_slice(&u32::to_le_bytes(value));
+    }
+    nro
+}
+
+/// `argv[0]` from the environment block's argument entry.
+fn argv0(cpu: &Cpu) -> String {
+    let env = switch_core::nro::ENV_BLOCK_ADDR;
+    let at = cpu.mem.read_u64(env + 64).unwrap() as u32;
+    let bytes: Vec<u8> = (at..)
+        .map(|a| cpu.mem.read_u8(a).unwrap())
+        .take_while(|&b| b != 0)
+        .collect();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn homebrew_launched_from_the_sd_card_is_told_its_own_path() {
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.boot_homebrew_at(&homebrew_nro(), "/switch/demo/demo.nro")
+        .unwrap();
+    assert_eq!(argv0(&cpu), "sdmc:/switch/demo/demo.nro");
+
+    // Opened from the host, it is copied to the usual place and told that.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.boot_homebrew(&homebrew_nro()).unwrap();
+    assert_eq!(argv0(&cpu), switch_core::nro::HOMEBREW_NRO_PATH);
+}

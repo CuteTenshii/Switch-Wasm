@@ -230,7 +230,8 @@ export interface Commands {
   vibration(): number;
 
   load_font(bytes: Bytes): number;
-  load_nro(bytes: Bytes): number;
+  // `sdPath`: where on the SD card it came from, told to it as argv[0].
+  load_nro(bytes: Bytes, sdPath?: string): number;
   load_elf(bytes: Bytes): number;
 
   open_nsp(file: File): number;

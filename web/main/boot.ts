@@ -1,7 +1,7 @@
 // Booting from the stage: the Open buttons and file drops. Executables load
 // directly; containers go to `container.ts`. The format comes from the header.
 
-import type { ControlInfo } from '../shared/protocol';
+import type { Bytes, ControlInfo } from '../shared/protocol';
 import { bootContainer } from './container';
 import { $, pickedFile } from './dom';
 import { classify } from './filetype';
@@ -22,11 +22,24 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
   const data = new Uint8Array(await file.arrayBuffer());
   loadPhase(kind === 'nro' ? 'loading the NRO' : 'loading the ELF',
     'mapping the image and seeding the guest');
+  return loadWith(file.name, () => kind === 'nro' ? call('load_nro', data) : call('load_elf', data));
+}
+
+// Launch `data`, the NRO at `path` on the SD card, on a fresh console as hbmenu does.
+export async function launchFromSd(path: string, data: Bytes): Promise<void> {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  if (!(await replaceSession(name))) return;
+  clearConsole();
+  setState('loading');
+  loadPhase('loading the NRO', 'mapping the image and seeding the guest');
+  if (await loadWith(name, () => call('load_nro', data, path))) await run();
+}
+
+// Load with `load`, which answers the entry point, then show the program as booted.
+async function loadWith(name: string, load: () => Promise<number>): Promise<boolean> {
   let entry: number;
   try {
-    entry = kind === 'nro'
-      ? await call('load_nro', data)
-      : await call('load_elf', data);
+    entry = await load();
   } catch (err) {
     setState('fault');
     failLoad('Load failed: ' + (err as Error).message);
@@ -40,8 +53,8 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
     log('Load failed: ' + why, 'err');
     return false;
   }
-  log('Loaded ' + file.name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
-  const title = await homebrewTitle(file.name);
+  log('Loaded ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
+  const title = await homebrewTitle(name);
   setRunning(title);
   loadIdentity(title.name, runningIconUrl());
   noteBooted();
@@ -82,22 +95,27 @@ async function bootFile(file: File): Promise<void> {
     log(verdict.why, 'err');
     return;
   }
-  // A title gets a fresh console. See `recycleSession`.
-  try {
-    beginLoad(file.name, 'replacing the running session');
-    setRunning(null);
-    await recycleSession();
-  } catch (err) {
-    setState('fault');
-    failLoad('The session could not be replaced: ' + (err as Error).message);
-    log('Reset before boot failed: ' + (err as Error).message, 'err');
-    return;
-  }
+  if (!(await replaceSession(file.name))) return;
   if (verdict.format === 'pfs0' || verdict.format === 'xci' || verdict.format === 'nca') {
     await bootContainer(file, verdict.format);
     return;
   }
   if (await loadProgram(file, verdict.format)) await run();
+}
+
+// A title gets a fresh console. See `recycleSession`.
+async function replaceSession(name: string): Promise<boolean> {
+  try {
+    beginLoad(name, 'replacing the running session');
+    setRunning(null);
+    await recycleSession();
+    return true;
+  } catch (err) {
+    setState('fault');
+    failLoad('The session could not be replaced: ' + (err as Error).message);
+    log('Reset before boot failed: ' + (err as Error).message, 'err');
+    return false;
+  }
 }
 
 for (const id of ['nro-file', 'nro-file-2']) {

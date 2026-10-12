@@ -33,6 +33,20 @@ impl Cpu {
     /// Boot a homebrew NRO as HBL does: run the crt0 up to `main`, then the `.init_array`
     /// and main `ThreadVars` setup the skipped `__libnx_init` would provide.
     pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
+        // Expose the NRO at argv[0] on the SD card for `romfsMountSelf`.
+        self.fs
+            .write_file(crate::nro::HOMEBREW_NRO_PATH, data.to_vec());
+        self.boot_nro(data, crate::nro::HOMEBREW_NRO_PATH)
+    }
+
+    /// Boot `data`, the NRO at `path` on the SD card, telling it `sdmc:<path>` as
+    /// `argv[0]` as hbmenu does, so it finds the files beside it.
+    pub fn boot_homebrew_at(&mut self, data: &[u8], path: &str) -> Result<crate::nro::LoadedNro> {
+        let path = path.strip_prefix("sdmc:").unwrap_or(path);
+        self.boot_nro(data, &format!("sdmc:{path}"))
+    }
+
+    fn boot_nro(&mut self, data: &[u8], argv0: &str) -> Result<crate::nro::LoadedNro> {
         self.mem.clear_modules();
         self.module_names.clear();
         let loaded = crate::nro::load_nro(&mut self.mem, data)?;
@@ -42,9 +56,9 @@ impl Cpu {
             .wrapping_add(loaded.data.file_size)
             .wrapping_add(loaded.bss_size);
         self.record_module_name(loaded.base, end, "homebrew");
-        // Expose the NRO at argv[0] on the SD card for `romfsMountSelf`.
-        self.fs
-            .write_file(crate::nro::HOMEBREW_NRO_PATH, data.to_vec());
+        if loaded.env_addr != 0 {
+            crate::nro::write_argv0(&mut self.mem, argv0);
+        }
         self.out.clear();
         self.trace.clear();
         self.halted = false;

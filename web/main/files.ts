@@ -4,8 +4,9 @@ import type { Bytes } from '../shared/protocol';
 import { idbApply, NAND_SAVES, NAND_USERS, nandIdb, SD_STORE, sdIdb, type StoredEntry } from './db';
 import {
   Archive, Database, Download, File, FileArchive, FilePen, FileUp, Folder, FolderPlus, FolderUp,
-  MemoryStick, Package, PackagePlus, Pencil, Save, Trash2, type IconNode,
+  MemoryStick, Package, PackagePlus, Pencil, Play, Save, Trash2, type IconNode,
 } from 'lucide';
+import { launchFromSd } from './boot';
 import { $, el } from './dom';
 import { showView } from './fileview';
 import { fmtSize } from './format';
@@ -473,6 +474,14 @@ async function renderFiles(volume: Volume, dir: string, mine: number): Promise<v
       info.kind === 'dir' ? () => go(into(path)) : () => void openFile(volume, path, name),
     );
     if (info.kind === 'file') {
+      if (place.kind === 'sd' && name.toLowerCase().endsWith('.nro')) {
+        action(actions, 'Launch ' + name, () => void guarded(async () => {
+          const data = (await readEntry(volume, path))?.data;
+          if (!data) return;
+          dialog.close();
+          await launchFromSd(path, data);
+        }), false, Play);
+      }
       action(actions, 'Open ' + name, () => void openFile(volume, path, name), false, FilePen);
       action(actions, 'Download ' + name, () => void guarded(async () => {
         const value = await readEntry(volume, path);
