@@ -101,3 +101,12 @@ test('trace channels record and show only at the debug level', async ({ page }) 
   await page.locator('#log-level').selectOption('log');
   await expect(svcLine).toHaveCount(0);
 });
+
+test('the translation section counts the blocks a program ran', async ({ page }) => {
+  await openPage(page);
+  await page.locator('#btn-panel').click();
+  await page.getByRole('tab', { name: 'Debug' }).click();
+  await bootElf(page, aarch64Elf([SVC_EXIT_PROCESS]));
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
+  await expect(page.locator('#jit-translated')).toHaveText(/^[1-9]\d*$/);
+});

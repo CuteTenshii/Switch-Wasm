@@ -277,14 +277,20 @@
         <span class="section-title">Translation</span>
         <span class="section-note" id="jit-badge">on</span>
       </summary>
-      <div class="section-body">
+      <div class="section-body" id="jit-debug-section">
         <label class="check"><input type="checkbox" id="jit-cb" checked><span>Translate blocks</span></label>
         <p class="muted tiny">Guest code is compiled to pre-decoded blocks the first time it runs, so
           decoding is paid for once instead of on every instruction. Turn it off to run everything
           through the plain interpreter - the two execute identically, so a difference is a bug.</p>
-        <div class="panel-tools">
-          <button id="btn-jitstats" class="btn small">Block stats</button>
-        </div>
+        <dl class="debug-totals" id="jit-debug-data">
+          <div><dt>Blocks cached</dt><dd id="jit-blocks">0</dd></div>
+          <div><dt>Translated</dt><dd id="jit-translated">0</dd></div>
+          <div><dt>Entered</dt><dd id="jit-executed">0</dd></div>
+          <div><dt>Invalidated</dt><dd id="jit-invalidated">0</dd></div>
+          <div><dt>Compiled to wasm</dt><dd id="jit-emitted">0</dd></div>
+          <div><dt>Entered compiled</dt><dd id="jit-entered-emitted">0</dd></div>
+          <div><dt>By a jump from compiled</dt><dd id="jit-chained">0</dd></div>
+        </dl>
       </div>
     </details>
 

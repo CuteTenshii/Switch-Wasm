@@ -85,26 +85,22 @@ jitCb.addEventListener('change', () => {
   if (!jitCb.checked) log('Block translation disabled - running the plain interpreter.');
 });
 
-$('btn-jitstats').addEventListener('click', async () => {
+const jitSection = $('jit-debug-section');
+
+async function updateJitDebug(): Promise<void> {
   const s = await call('jit_stats');
-  openPanel('console');
-  const reuse = s.translated ? (s.executed / s.translated).toFixed(1) : '0';
-  log(
-    `translation: ${s.enabled ? 'on' : 'off'}, ${s.blocks} blocks cached, `
-    + `${s.translated} translated, ${s.executed} entered (${reuse}x each), `
-    + `${s.invalidated} invalidated`,
-  );
-  const emitted = s.emitted ?? 0;
+  const share = (part: number) => s.executed ? ` (${((100 * part) / s.executed).toFixed(1)}%)` : '';
   const entered = s.enteredEmitted ?? 0;
-  const share = s.executed ? ((100 * entered) / s.executed).toFixed(1) : '0';
-  const chained = s.chained ?? 0;
-  log(
-    emitted
-      ? `compiled: ${emitted} blocks, entered ${entered} times (${share}% of entries),`
-      + ` ${chained} of them by a jump from another compiled block`
-      : 'compiled: nothing - every block was interpreted',
-  );
-});
+  $('jit-blocks').textContent = String(s.blocks);
+  $('jit-translated').textContent = String(s.translated);
+  $('jit-executed').textContent = s.translated
+    ? `${s.executed} (${(s.executed / s.translated).toFixed(1)}x each)`
+    : String(s.executed);
+  $('jit-invalidated').textContent = String(s.invalidated);
+  $('jit-emitted').textContent = String(s.emitted ?? 0);
+  $('jit-entered-emitted').textContent = String(entered) + share(entered);
+  $('jit-chained').textContent = String(s.chained ?? 0);
+}
 
 const renderSection = $<HTMLDetailsElement>('render-debug-section');
 
@@ -165,16 +161,19 @@ async function updateRenderDebug(): Promise<void> {
   }
 }
 
-// On screen: the panel shows the debug tab, the Graphics group, and the section is open.
-function renderSectionShown(): boolean {
-  return renderSection.open && renderSection.offsetParent !== null;
+// Rendered, so its panel, tab, group and section are all open.
+function onScreen(node: HTMLElement): boolean {
+  return node.offsetParent !== null;
 }
 
 renderSection.addEventListener('toggle', () => {
-  if (renderSectionShown()) void updateRenderDebug();
+  if (renderSection.open && onScreen(renderSection) && hasSession()) void updateRenderDebug();
 });
+// Live sections ask the worker only while someone can see them.
 setInterval(() => {
-  if (renderSectionShown() && hasSession()) void updateRenderDebug();
+  if (!hasSession()) return;
+  if (renderSection.open && onScreen(renderSection)) void updateRenderDebug();
+  if (onScreen(jitSection)) void updateJitDebug();
 }, 1000);
 
 const displayDebugSection = $<HTMLDetailsElement>('display-debug-section');

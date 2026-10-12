@@ -3,7 +3,7 @@
 //   node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]
 //                               [--seconds=N] [--out=log.txt] [--jit-stats]
 // Serves `dist` (run `make assets` first) with WebGPU enabled and a fresh profile.
-// `--jit-stats` samples the cumulative block stats every interval.
+// `--jit-stats` records the cumulative block stats with every sample.
 import { existsSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -77,6 +77,11 @@ try {
   if (keys) await page.setInputFiles('#prod-keys', keys);
   if (titleKeys) await page.setInputFiles('#title-keys', titleKeys);
   await page.setInputFiles('#nro-file', resolve(container));
+  // The Translation section counts only while it is on screen.
+  if (jitStats) {
+    await page.locator('#btn-panel').click();
+    await page.getByRole('tab', { name: 'Debug' }).click();
+  }
 
   const started = Date.now();
   let lastRows = -1;
@@ -105,7 +110,8 @@ try {
     lastRows = sample.rows;
     lastLine = sample.last;
     if (jitStats) {
-      await page.evaluate(() => document.getElementById('btn-jitstats').click());
+      const blocks = await page.locator('#jit-debug-data').innerText();
+      say(`${at}s blocks: ${blocks.replace(/\n+/g, ' ').replace(/\t/g, ': ')}`);
     }
   }
 
