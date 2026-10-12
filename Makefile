@@ -1,10 +1,15 @@
 .PHONY: all test wasm wasm-release assets clean
 
 TARGET := wasm32-unknown-unknown
-# `wasm` is the dev profile build `bun run dev` serves; `wasm-release` is the shipped, fat-LTO build.
-DEV     := target/$(TARGET)/debug
-RELEASE := target/$(TARGET)/release
-DIST    := dist
+DIST   := dist
+
+# The browser build shares one memory between workers, which needs std rebuilt
+# with atomics, and only nightly can. Host builds and tests stay on stable.
+# Both binaries by path: a stable toolchain on PATH would otherwise supply rustc.
+NIGHTLY       ?= nightly-2026-10-11
+NIGHTLY_CARGO := $(shell rustup which --toolchain $(NIGHTLY) cargo 2>/dev/null)
+NIGHTLY_RUSTC := $(shell rustup which --toolchain $(NIGHTLY) rustc 2>/dev/null)
+NIGHTLY_HINT  := rustup toolchain install $(NIGHTLY) --profile minimal --component rust-src --target $(TARGET)
 
 all: test assets
 
@@ -15,14 +20,17 @@ test:
 	# wgpu device tests share the host adapter; parallel creation can crash software Vulkan.
 	cargo test -p switch-gpu -- --test-threads=1
 
-# The wasm bindings crate with the WebGPU backend. `wasm-bindgen` must match the version in Cargo.lock.
-wasm:
-	cargo build --target $(TARGET) -p switch-wasm --features gpu
-	wasm-bindgen --target web --out-dir $(DEV) $(DEV)/switch_wasm.wasm
-
-wasm-release:
-	cargo build --target $(TARGET) --release -p switch-wasm --features gpu
-	wasm-bindgen --target web --out-dir $(RELEASE) $(RELEASE)/switch_wasm.wasm
+# The bindings crate with the WebGPU backend: `wasm` is the dev build `bun run dev`
+# serves, `wasm-release` the shipped fat-LTO one. `wasm-bindgen` must match Cargo.lock.
+wasm: PROFILE := debug
+wasm-release: PROFILE := release
+wasm-release: RELEASE_FLAG := --release
+wasm wasm-release:
+	$(if $(NIGHTLY_CARGO),,$(error $(NIGHTLY) is not installed; run: $(NIGHTLY_HINT)))
+	RUSTC=$(NIGHTLY_RUSTC) $(NIGHTLY_CARGO) build -Z build-std=std,panic_abort \
+		--target $(TARGET) $(RELEASE_FLAG) -p switch-wasm --features gpu
+	wasm-bindgen --target web --out-dir target/$(TARGET)/$(PROFILE) \
+		target/$(TARGET)/$(PROFILE)/switch_wasm.wasm
 
 # The Vite site in dist, which takes the release core as an input.
 assets: wasm-release

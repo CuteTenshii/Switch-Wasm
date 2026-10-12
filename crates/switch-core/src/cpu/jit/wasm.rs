@@ -519,9 +519,16 @@ impl Module {
         name_bytes(&mut body, "e");
         name_bytes(&mut body, "m");
         body.push(0x02);
-        // Minimum of zero pages; the host memory is already sized.
-        body.push(0x00);
-        uleb(&mut body, 0);
+        // Minimum of zero pages; the host memory is already sized. A shared
+        // memory only matches an import that says so, with a maximum.
+        if cfg!(target_feature = "atomics") {
+            body.push(0x03);
+            uleb(&mut body, 0);
+            uleb(&mut body, 65536);
+        } else {
+            body.push(0x00);
+            uleb(&mut body, 0);
+        }
         if self.table {
             name_bytes(&mut body, "e");
             name_bytes(&mut body, "t");

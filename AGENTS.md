@@ -75,6 +75,10 @@ cargo clippy --workspace --all-targets -- -D warnings
   profile and runs `wasm-bindgen`. The installed CLI version must match
   `Cargo.lock`. `make wasm-release` is the same in the release profile, the
   only build performance results are quoted from.
+- Both wasm builds use the nightly the `Makefile` pins (`NIGHTLY`), with
+  `rust-src`, because the core's memory is shared between workers and stable's
+  prebuilt std has no wasm atomics. Host builds, tests and clippy stay on
+  stable. The `Makefile` prints the `rustup` command when that nightly is missing.
 - `make assets` builds the release WebAssembly and then the Vite site in
   `dist`.
 - There are two cargo profiles, `dev` and `release`. Host examples that run a

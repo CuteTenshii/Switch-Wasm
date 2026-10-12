@@ -13,5 +13,20 @@
 # silently interprets everything it translates. Nothing else about the build
 # looks wrong when that happens, which is why `tools/jit_wasm_check.mjs`
 # checks that blocks are not only compiled but entered.
+#
+# Guest cores run on several workers over one shared memory: atomics and
+# bulk memory, an imported shared 4 GiB memory, and the TLS exports
+# wasm-bindgen starts each thread with. Stable's prebuilt std has no atomics,
+# so `make wasm` builds std on the pinned nightly.
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-feature=+simd128", "-C", "link-arg=--growable-table"]
+rustflags = [
+  "-C", "target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals",
+  "-C", "link-arg=--growable-table",
+  "-C", "link-arg=--shared-memory",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--max-memory=4294967296",
+  "-C", "link-arg=--export=__wasm_init_tls",
+  "-C", "link-arg=--export=__tls_size",
+  "-C", "link-arg=--export=__tls_align",
+  "-C", "link-arg=--export=__tls_base",
+]
