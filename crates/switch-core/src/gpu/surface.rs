@@ -628,6 +628,7 @@ pub struct Codec {
 }
 
 impl Codec {
+    #[inline]
     pub fn decode(&self, raw: u128) -> Result<[f32; 4]> {
         match self.plain8 {
             Some((order, alpha)) => Ok(decode_order8(order, alpha, raw)),
@@ -635,6 +636,7 @@ impl Codec {
         }
     }
 
+    #[inline]
     pub fn encode(&self, rgba: [f32; 4]) -> Result<u128> {
         match self.plain8 {
             Some((order, alpha)) => Ok(encode_order8(order, alpha, rgba)),

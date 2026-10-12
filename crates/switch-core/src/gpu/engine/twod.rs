@@ -4,8 +4,7 @@
 
 use crate::gpu::engine::Registers;
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::surface::{blend, taps, ColorFormat, Layout, Surface};
-use crate::mem::Memory;
+use crate::gpu::surface::{blend, taps, ColorFormat, Layout, Surface, GOB_HEIGHT, GOB_WIDTH};
 use crate::{Error, Result};
 
 const SET_DST_FORMAT: u32 = 0x080;
@@ -56,6 +55,9 @@ pub struct Engine2D {
     /// The texels the last staged copy read, and their source, for reuse.
     resolved: Vec<u8>,
     resolved_from: Option<ResolvedFrom>,
+    /// A filtered blit's source and destination rectangles as plain rows.
+    rows_in: Vec<u8>,
+    rows_out: Vec<u8>,
     /// Blits by source and destination: see [`crate::gpu::activity`].
     pub activity: crate::gpu::activity::GpuActivity,
 }
@@ -68,6 +70,8 @@ impl Engine2D {
             target: Vec::new(),
             resolved: Vec::new(),
             resolved_from: None,
+            rows_in: Vec::new(),
+            rows_out: Vec::new(),
             activity: Default::default(),
         }
     }
@@ -262,15 +266,16 @@ impl Engine2D {
             && u64::from(dst_y0) + u64::from(dst_h) <= u64::from(dst.height);
         if filtered && inside {
             if let (Some(src_base), Some(dst_base)) = (mapped(&src, ctx), mapped(&dst, ctx)) {
-                if disjoint((&src, src_base), (&dst, dst_base)) {
-                    blit_filtered(
+                if disjoint((&src, src_base), (&dst, dst_base))
+                    && self.blit_filtered(
                         ctx,
                         (&src, src_base),
                         (&dst, dst_base),
                         (dst_x0, dst_y0, dst_w, dst_h),
                         (src_x0, src_y0),
                         (du_dx, dv_dy),
-                    )?;
+                    )?
+                {
                     ctx.stats.copies += 1;
                     return Ok(());
                 }
@@ -376,6 +381,119 @@ impl Engine2D {
         self.target = target;
         result
     }
+
+    /// Filtered blit in host memory, decoding each source row once. Surfaces
+    /// must be disjoint and each in one mapping, with the destination rectangle
+    /// inside its surface. Returns false having written nothing where memory
+    /// needs per-access handling.
+    fn blit_filtered(
+        &mut self,
+        ctx: &mut ExecCtx,
+        (src, src_base): (&Surface, u32),
+        (dst, dst_base): (&Surface, u32),
+        (dst_x0, dst_y0, dst_w, dst_h): (u32, u32, u32, u32),
+        (src_x0, src_y0): (f64, f64),
+        (du_dx, dv_dy): (f64, f64),
+    ) -> Result<bool> {
+        if !ctx.mem.plainly_readable(src_base, src.size())
+            || !ctx.mem.plainly_writable(dst_base, dst.size())
+        {
+            return Ok(false);
+        }
+        let last_x = src.width.saturating_sub(1);
+        let last_y = src.height.saturating_sub(1);
+        let columns: Vec<(u32, u32, f32)> = (0..dst_w)
+            .map(|x| {
+                let (x0, fx) = taps(src_x0 + du_dx * x as f64);
+                (x0.min(last_x), x0.saturating_add(1).min(last_x), fx)
+            })
+            .collect();
+        let Some(lo) = columns.iter().map(|c| c.0).min() else {
+            return Ok(true);
+        };
+        let hi = columns.iter().map(|c| c.1).max().unwrap_or(lo);
+        let (src_bpp, dst_bpp) = (src.format.bytes_per_pixel, dst.format.bytes_per_pixel);
+        let (source, target) = (src.format.codec(), dst.format.codec());
+
+        let mut from = std::mem::take(&mut self.source);
+        let mut to = std::mem::take(&mut self.target);
+        let mut rows_in = std::mem::take(&mut self.rows_in);
+        let mut rows_out = std::mem::take(&mut self.rows_out);
+        from.resize(src.size() as usize, 0);
+        to.resize(dst.size() as usize, 0);
+        let in_bytes = ((hi - lo + 1) * src_bpp) as usize;
+        let out_bytes = (dst_w * dst_bpp) as usize;
+        rows_in.resize(in_bytes * src.height as usize, 0);
+        rows_out.resize(out_bytes * dst_h as usize, 0);
+        let mut inside = true;
+        let staged = ctx.mem.read_into(src_base, &mut from).is_ok()
+            && ctx.mem.read_into(dst_base, &mut to).is_ok()
+            && {
+                for_each_run(
+                    src.layout,
+                    src.width_bytes(),
+                    (lo * src_bpp, (hi + 1) * src_bpp),
+                    (0, src.height),
+                    |at, linear, len| match from.get(at..at + len) {
+                        Some(run) => copy_run(&mut rows_in[linear..linear + len], run),
+                        None => inside = false,
+                    },
+                );
+                inside
+            }
+            && {
+                let (src_bpp, dst_bpp) = (src_bpp as usize, dst_bpp as usize);
+                let decode_row = |y: u32, row: &mut Vec<[f32; 4]>| -> Result<()> {
+                    row.clear();
+                    let at = y as usize * in_bytes;
+                    for texel in rows_in[at..at + in_bytes].chunks_exact(src_bpp) {
+                        row.push(source.decode(le(texel))?);
+                    }
+                    Ok(())
+                };
+                let mut rows: [(Option<u32>, Vec<[f32; 4]>); 2] = Default::default();
+                for (y, out) in (0..dst_h).zip(rows_out.chunks_exact_mut(out_bytes)) {
+                    let (y0, fy) = taps(src_y0 + dv_dy * y as f64);
+                    let (top, bottom) = (y0.min(last_y), y0.saturating_add(1).min(last_y));
+                    for want in [top, bottom] {
+                        if rows.iter().all(|(held, _)| *held != Some(want)) {
+                            let keep = rows[0].0 == Some(top) || rows[0].0 == Some(bottom);
+                            let slot = usize::from(keep);
+                            decode_row(want, &mut rows[slot].1)?;
+                            rows[slot].0 = Some(want);
+                        }
+                    }
+                    let upper = &rows[usize::from(rows[1].0 == Some(top))].1;
+                    let lower = &rows[usize::from(rows[1].0 == Some(bottom))].1;
+                    for (&(a, b, fx), texel) in columns.iter().zip(out.chunks_exact_mut(dst_bpp)) {
+                        let (a, b) = ((a - lo) as usize, (b - lo) as usize);
+                        let color = blend(upper[a], upper[b], lower[a], lower[b], fx, fy);
+                        put_le(texel, target.encode(color)?);
+                    }
+                }
+                for_each_run(
+                    dst.layout,
+                    dst.width_bytes(),
+                    (dst_x0 * dst_bpp as u32, (dst_x0 + dst_w) * dst_bpp as u32),
+                    (dst_y0, dst_y0 + dst_h),
+                    |at, linear, len| match to.get_mut(at..at + len) {
+                        Some(run) => copy_run(run, &rows_out[linear..linear + len]),
+                        None => inside = false,
+                    },
+                );
+                inside
+            };
+        let written = if staged {
+            ctx.mem.write_from(dst_base, &to).map(|()| true)
+        } else {
+            Ok(false)
+        };
+        self.source = from;
+        self.target = to;
+        self.rows_in = rows_in;
+        self.rows_out = rows_out;
+        written
+    }
 }
 
 /// What [`Engine2D::resolved`] was read from; equal keys mean the same texels.
@@ -470,63 +588,96 @@ fn scatter<const N: usize>(
     }
 }
 
-/// Filtered blit decoding each source row once. Surfaces must be disjoint and
-/// each in one mapping, with the destination rectangle inside its surface.
-fn blit_filtered(
-    ctx: &mut ExecCtx,
-    (src, src_base): (&Surface, u32),
-    (dst, dst_base): (&Surface, u32),
-    (dst_x0, dst_y0, dst_w, dst_h): (u32, u32, u32, u32),
-    (src_x0, src_y0): (f64, f64),
-    (du_dx, dv_dy): (f64, f64),
-) -> Result<()> {
-    let last_x = src.width.saturating_sub(1);
-    let last_y = src.height.saturating_sub(1);
-    let columns: Vec<(u32, u32, f32)> = (0..dst_w)
-        .map(|x| {
-            let (x0, fx) = taps(src_x0 + du_dx * x as f64);
-            (x0.min(last_x), x0.saturating_add(1).min(last_x), fx)
-        })
+/// Call `visit(offset, linear, len)` for each contiguous run of the rectangle
+/// `x_bytes` by `rows`: `offset` in the surface, `linear` in plain rows of the
+/// rectangle. A block-linear surface is walked a GOB column of a block at a
+/// time, which is its memory order.
+fn for_each_run(
+    layout: Layout,
+    width_bytes: u32,
+    (x0, x1): (u32, u32),
+    (y0, y1): (u32, u32),
+    mut visit: impl FnMut(usize, usize, usize),
+) {
+    let row_bytes = (x1 - x0) as usize;
+    let row_offsets: Vec<usize> = (y0..y1)
+        .map(|y| layout.row_offset(y, width_bytes) as usize)
         .collect();
-    let Some(lo) = columns.iter().map(|c| c.0).min() else {
-        return Ok(());
-    };
-    let hi = columns.iter().map(|c| c.1).max().unwrap_or(lo);
-    let (src_bpp, dst_bpp) = (src.format.bytes_per_pixel, dst.format.bytes_per_pixel);
-    let (src_width, dst_width) = (src.width_bytes(), dst.width_bytes());
-    let (source, target) = (src.format.codec(), dst.format.codec());
-    let decode_row = |mem: &Memory, y: u32, row: &mut Vec<[f32; 4]>| -> Result<()> {
-        row.clear();
-        let at = src_base.wrapping_add(src.layout.row_offset(y, src_width));
-        for x in lo..=hi {
-            let texel = at.wrapping_add(src.layout.column_offset(x * src_bpp));
-            row.push(source.decode(mem.read_le(texel, src_bpp)?)?);
+    // Runs of one row, by column group: (x into the rectangle, length, column offset).
+    let mut groups: Vec<Vec<(usize, usize, usize)>> = Vec::new();
+    let band = match layout {
+        Layout::Pitch { .. } => {
+            groups.push(vec![(0, row_bytes, layout.column_offset(x0) as usize)]);
+            1
         }
-        Ok(())
+        Layout::BlockLinear { block_height_gobs } => {
+            let mut x = x0;
+            while x < x1 {
+                let (_, run) = layout.run_at(x, 0, width_bytes);
+                let len = run.min(x1 - x);
+                if groups.is_empty() || x % GOB_WIDTH == 0 {
+                    groups.push(Vec::new());
+                }
+                if let Some(group) = groups.last_mut() {
+                    group.push((
+                        (x - x0) as usize,
+                        len as usize,
+                        layout.column_offset(x) as usize,
+                    ));
+                }
+                x += len;
+            }
+            GOB_HEIGHT * block_height_gobs.max(1)
+        }
     };
-    let mut rows: [(Option<u32>, Vec<[f32; 4]>); 2] = Default::default();
-    for y in 0..dst_h {
-        let (y0, fy) = taps(src_y0 + dv_dy * y as f64);
-        let (top, bottom) = (y0.min(last_y), y0.saturating_add(1).min(last_y));
-        for want in [top, bottom] {
-            if rows.iter().all(|(held, _)| *held != Some(want)) {
-                let keep = rows[0].0 == Some(top) || rows[0].0 == Some(bottom);
-                let slot = usize::from(keep);
-                decode_row(ctx.mem, want, &mut rows[slot].1)?;
-                rows[slot].0 = Some(want);
+    let mut band_y = y0;
+    while band_y < y1 {
+        let band_end = (band_y - band_y % band + band).min(y1);
+        for group in &groups {
+            for y in band_y..band_end {
+                let i = (y - y0) as usize;
+                for &(x, len, column) in group {
+                    visit(row_offsets[i] + column, i * row_bytes + x, len);
+                }
             }
         }
-        let upper = &rows[usize::from(rows[1].0 == Some(top))].1;
-        let lower = &rows[usize::from(rows[1].0 == Some(bottom))].1;
-        let at = dst_base.wrapping_add(dst.layout.row_offset(dst_y0 + y, dst_width));
-        for (x, &(a, b, fx)) in (dst_x0..).zip(&columns) {
-            let (a, b) = ((a - lo) as usize, (b - lo) as usize);
-            let color = blend(upper[a], upper[b], lower[a], lower[b], fx, fy);
-            let to = at.wrapping_add(dst.layout.column_offset(x * dst_bpp));
-            ctx.mem.write_le(to, dst_bpp, target.encode(color)?)?;
-        }
+        band_y = band_end;
     }
-    Ok(())
+}
+
+/// A texel of `bytes.len()` bytes as a little-endian value.
+#[inline(always)]
+fn le(bytes: &[u8]) -> u128 {
+    match *bytes {
+        [a, b, c, d] => u128::from(u32::from_le_bytes([a, b, c, d])),
+        [a, b, c, d, e, f, g, h] => u128::from(u64::from_le_bytes([a, b, c, d, e, f, g, h])),
+        _ => bytes
+            .iter()
+            .rev()
+            .fold(0, |value, &byte| (value << 8) | u128::from(byte)),
+    }
+}
+
+/// Store `value` little-endian in all of `out`.
+#[inline(always)]
+fn put_le(out: &mut [u8], value: u128) {
+    match out.len() {
+        4 => out.copy_from_slice(&(value as u32).to_le_bytes()),
+        8 => out.copy_from_slice(&(value as u64).to_le_bytes()),
+        len => out.copy_from_slice(&value.to_le_bytes()[..len]),
+    }
+}
+
+/// `from` into `to`, as one 16-byte move when it is a whole block-linear run.
+#[inline(always)]
+fn copy_run(to: &mut [u8], from: &[u8]) {
+    match (
+        <&mut [u8; 16]>::try_from(&mut *to),
+        <&[u8; 16]>::try_from(from),
+    ) {
+        (Ok(to), Ok(from)) => *to = *from,
+        _ => to.copy_from_slice(from),
+    }
 }
 
 fn disjoint((a, a_base): (&Surface, u32), (b, b_base): (&Surface, u32)) -> bool {
@@ -701,10 +852,15 @@ mod tests {
                 (v.fract() * 4_294_967_296.0) as u32,
             )
         };
-        for (step, origin, (w, h)) in [
+        // Block heights of 16 GOBs, of 1 (a band every 8 rows) and pitch rows.
+        let layouts = [(0, BLOCK_16_GOBS), (0, 0), (MEMORY_LAYOUT_PITCH, 0)];
+        for ((step, origin, (w, h)), (memory_layout, block_size)) in [
             ((2.0, 1.0), (0.5, 0.0), (37, 45)),
             ((1.5, 0.75), (0.25, 0.1), (60, 70)),
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|blit| layouts.map(|layout| (blit, layout)))
+        {
             let mut mem = Memory::new();
             mem.map_zero(SRC, 0x8_0000).unwrap();
             for i in 0..0x4_0000 / 4 {
@@ -716,11 +872,12 @@ mod tests {
             let mut host1x = Host1x::new();
             let mut stats = GpuStats::default();
             let mut engine = Engine2D::new();
-            for (format, layout, block, width, height, offset, sw, sh, at) in [
+            for (format, layout, block, pitch, width, height, offset, sw, sh, at) in [
                 (
                     SET_SRC_FORMAT,
                     SET_SRC_MEMORY_LAYOUT,
                     SET_SRC_BLOCK_SIZE,
+                    SET_SRC_PITCH,
                     SET_SRC_WIDTH,
                     SET_SRC_HEIGHT,
                     SET_SRC_OFFSET,
@@ -732,6 +889,7 @@ mod tests {
                     SET_DST_FORMAT,
                     SET_DST_MEMORY_LAYOUT,
                     SET_DST_BLOCK_SIZE,
+                    SET_DST_PITCH,
                     SET_DST_WIDTH,
                     SET_DST_HEIGHT,
                     SET_DST_OFFSET,
@@ -741,8 +899,9 @@ mod tests {
                 ),
             ] {
                 engine.regs.set(format, 0xD5);
-                engine.regs.set(layout, 0);
-                engine.regs.set(block, BLOCK_16_GOBS);
+                engine.regs.set(layout, memory_layout);
+                engine.regs.set(block, block_size);
+                engine.regs.set(pitch, sw * 4 + 12);
                 engine.regs.set(width, sw);
                 engine.regs.set(height, sh);
                 set_iova(&mut engine, offset, at);
@@ -789,7 +948,7 @@ mod tests {
                     let got = ctx
                         .read_pixel(dst.addr + dst.offset(x, y) as u64, 4)
                         .unwrap();
-                    assert_eq!(got, want, "pixel ({x}, {y}) of a {step:?} step");
+                    assert_eq!(got, want, "pixel ({x}, {y}) of a {step:?} step, layout {memory_layout} block {block_size:#x}");
                 }
             }
         }
