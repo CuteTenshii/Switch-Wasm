@@ -69,6 +69,7 @@ fn scratch_func() -> Func {
 const SCRATCH: Layout = Layout {
     regs: 0,
     nzcv: 0,
+    fpsr: 0,
     pc: 0,
     fuel: 0,
     pages: 0,
@@ -90,6 +91,8 @@ pub struct Layout {
     pub regs: u32,
     /// The packed NZCV word, in its architectural bit positions.
     pub nzcv: u32,
+    /// FPSR, whose cumulative exception bits some conversions and divides set.
+    pub fpsr: u32,
     /// The guest program counter, written only by a taken branch leaving the region.
     pub pc: u32,
     /// Instructions blocks left through a branch may still retire, as an `i32`;
@@ -121,6 +124,7 @@ impl Layout {
         Layout {
             regs: std::mem::offset_of!(Cpu, regs) as u32,
             nzcv: std::mem::offset_of!(Cpu, nzcv) as u32,
+            fpsr: std::mem::offset_of!(Cpu, fpsr) as u32,
             pc: std::mem::offset_of!(Cpu, pc) as u32,
             fuel: (std::mem::offset_of!(Cpu, jit)
                 + std::mem::offset_of!(Jit, chain)
@@ -2197,6 +2201,7 @@ mod tests {
     const LAYOUT: Layout = Layout {
         regs: 0,
         nzcv: 2048,
+        fpsr: 2092,
         pc: 2084,
         fuel: 2088,
         pages: 2052,

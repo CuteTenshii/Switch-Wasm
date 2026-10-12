@@ -392,6 +392,12 @@ impl Func {
         uleb(&mut self.code, u64::from(opcode));
     }
 
+    /// A saturating truncation: the `0xFC` prefix and its opcode.
+    pub(super) fn trunc_sat(&mut self, opcode: u32) {
+        self.code.push(0xFC);
+        uleb(&mut self.code, u64::from(opcode));
+    }
+
     /// A SIMD memory access; `align` as for [`Func::i64_load`].
     pub(super) fn simd_mem(&mut self, opcode: u32, align: u8, offset: u32) {
         self.simd(opcode);

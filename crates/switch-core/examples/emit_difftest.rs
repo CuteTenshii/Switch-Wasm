@@ -32,6 +32,7 @@ const PAGES_AT: u32 = 4128;
 const PC_AT: u32 = 4132;
 /// Fuel, read only by branches between blocks, which a single block never takes.
 const FUEL_AT: u32 = 4136;
+const FPSR_AT: u32 = 4140;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 8192;
 
@@ -42,6 +43,7 @@ const TABLE_BYTES: u32 = (1 << 20) * 4;
 const LAYOUT: Layout = Layout {
     regs: REGS_AT,
     nzcv: NZCV_AT,
+    fpsr: FPSR_AT,
     pages: PAGES_AT,
     read_watch_lo: READ_WATCH_LO_AT,
     read_watch_hi: READ_WATCH_HI_AT,
@@ -154,6 +156,7 @@ fn main() {
         }
         let before = cpu.reg_slots();
         let nzcv_before = cpu.nzcv();
+        let fpsr_before = cpu.fpsr();
         cpu.set_pc(pc);
         let mut faulted = false;
         let mut switched = false;
@@ -212,6 +215,7 @@ fn main() {
         // No memory delta, but the marker is still required.
         manifest.push_str(" !");
         manifest.push_str(&vreg_delta(&cpu));
+        let _ = write!(manifest, " fpsr:{fpsr_before:x}:{:x}", cpu.fpsr());
         manifest.push('\n');
         cases += 1;
     }
@@ -219,6 +223,7 @@ fn main() {
     let header = format!(
         "regs_at {REGS_AT}\n\
          nzcv_at {NZCV_AT}\n\
+         fpsr_at {FPSR_AT}\n\
          read_watch_lo_at {READ_WATCH_LO_AT}\n\
          read_watch_hi_at {READ_WATCH_HI_AT}\n\
          watch_lo_at {WATCH_LO_AT}\n\

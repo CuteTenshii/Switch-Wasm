@@ -24,6 +24,7 @@ const HEADER_KEYS = new Set([
   'watch_hi_at', 'readonly_lo_at', 'readonly_hi_at', 'watched_at', 'pages_at',
   'table_at', 'bitmap_at', 'slots', 'code_at', 'read_watch', 'watch',
   'readonly', 'watched_page', 'wasm_pages', 'pc_at', 'discard_slot', 'vregs_at',
+  'fpsr_at',
 ]);
 const header = {};
 // `(guest address, wasm offset)` per mapped page, in `guest.bin` order.
@@ -158,11 +159,14 @@ for (const line of manifest.slice(first)) {
   const after = f.slice(bar + 1, bang).map((h) => BigInt('0x' + h));
   // `vN:hex` per vector register the block changed, then
   // `offset:hex` per run of bytes it changed in the window.
+  // `fpsr:before:after`, when the harness tracks it.
+  const fpsrToken = f.slice(bang + 1).find((t) => t.startsWith('fpsr:'));
+  const [fpsrBefore, fpsrAfter] = fpsrToken ? fpsrToken.slice(5).split(':').map((h) => parseInt(h, 16)) : [];
   const vdelta = new Map(f.slice(bang + 1).filter((t) => t.startsWith('v')).map((t) => {
     const [reg, hex] = t.slice(1).split(':');
     return [Number(reg), BigInt('0x' + hex)];
   }));
-  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v')).map((run) => {
+  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:')).map((run) => {
     const [at, hex] = run.split(':');
     return [Number(at), Uint8Array.from(hex.match(/../g), (b) => parseInt(b, 16))];
   });
@@ -178,6 +182,7 @@ for (const line of manifest.slice(first)) {
     view.setBigUint64(VREGS + i * 16 + 8, vregSeed(i) >> 64n, true);
   }
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
+  if (fpsrToken) view.setUint32(need('fpsr_at'), fpsrBefore, true);
   if (PC_AT >= 0) view.setUint32(PC_AT, NO_PC, true);
 
   let exports;
@@ -241,6 +246,11 @@ for (const line of manifest.slice(first)) {
       if (gotV !== wantV) {
         bad.push(`v${i}: emitted ${gotV.toString(16).padStart(32, '0')}, interpreted ${wantV.toString(16).padStart(32, '0')}`);
       }
+    }
+    if (fpsrToken) {
+      const gotFpsr = view.getUint32(need('fpsr_at'), true) >>> 0;
+      const wantFpsr = (want === after ? fpsrAfter : fpsrBefore) >>> 0;
+      if (gotFpsr !== wantFpsr) bad.push(`fpsr: emitted ${gotFpsr.toString(16)}, interpreted ${wantFpsr.toString(16)}`);
     }
     const gotNzcv = view.getUint32(NZCV, true) >>> 0;
     if (gotNzcv !== (Number(BigInt(wantNzcv)) >>> 0)) {

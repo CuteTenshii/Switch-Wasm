@@ -191,6 +191,27 @@ impl Emitter<'_> {
         let rn = (insn >> 5) & 0x1F;
         let rd = insn & 0x1F;
 
+        // Scalar SCVTF and UCVTF: one lane, converted straight to its width.
+        if insn & 0xDFBF_FC00 == 0x5E21_D800 {
+            let double = size & 1 == 1;
+            self.vget(rn);
+            self.f.simd_lane(
+                if double {
+                    op::I64X2_EXTRACT
+                } else {
+                    op::I32X4_EXTRACT
+                },
+                0,
+            );
+            self.f.op_raw(match (double, u) {
+                (false, false) => 0xB2,
+                (false, true) => 0xB3,
+                (true, false) => 0xB9,
+                (true, true) => 0xBA,
+            });
+            self.fset(rd, double);
+            return true;
+        }
         // Three registers of the same type.
         if insn & 0x9F20_0400 == 0x0E20_0400 {
             return self.three_same(insn, q, u, size, rm, rn, rd);

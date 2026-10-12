@@ -219,6 +219,14 @@ impl Cpu {
         self.nzcv
     }
 
+    pub fn fpsr(&self) -> u32 {
+        self.fpsr
+    }
+
+    pub fn set_fpsr(&mut self, fpsr: u32) {
+        self.fpsr = fpsr;
+    }
+
     #[inline(always)]
     pub(crate) fn condition_holds(&self, cond: u8) -> bool {
         (CONDITION_MASKS[(cond & 0xF) as usize] >> (self.nzcv >> 28)) & 1 == 1

@@ -30,6 +30,8 @@ const WATCHED_AT: u32 = 0x1020;
 const PC_AT: u32 = 0x1024;
 /// Fuel, read only by branches between blocks, which a single block never takes.
 const FUEL_AT: u32 = 0x1028;
+/// FPSR, zeroed before each case.
+const FPSR_AT: u32 = 0x102C;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 0x2000;
 
@@ -169,6 +171,7 @@ fn main() {
                         cpu.set_vreg(i, vreg_seed(i));
                     }
 
+                    cpu.set_fpsr(0);
                     let before = cpu.reg_slots();
                     let nzcv_before = cpu.nzcv();
                     let Ok((module, path)) = cpu.emit_block_at(block_at, LAYOUT) else {
@@ -240,6 +243,7 @@ fn main() {
                     manifest.push_str(" !");
                     manifest.push_str(&memory_delta(&cpu, &start));
                     manifest.push_str(&vreg_delta(&cpu));
+                    let _ = write!(manifest, " fpsr:0:{:x}", cpu.fpsr());
                     manifest.push('\n');
                     cases += 1;
                 }
@@ -258,6 +262,7 @@ fn main() {
     let header = format!(
         "regs_at {REGS_AT}\n\
          nzcv_at {NZCV_AT}\n\
+         fpsr_at {FPSR_AT}\n\
          read_watch_lo_at {READ_WATCH_LO_AT}\n\
          read_watch_hi_at {READ_WATCH_HI_AT}\n\
          watch_lo_at {WATCH_LO_AT}\n\
@@ -304,6 +309,7 @@ fn main() {
 const LAYOUT: Layout = Layout {
     regs: REGS_AT,
     nzcv: NZCV_AT,
+    fpsr: FPSR_AT,
     pages: PAGES_AT,
     read_watch_lo: READ_WATCH_LO_AT,
     read_watch_hi: READ_WATCH_HI_AT,
