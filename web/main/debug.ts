@@ -7,6 +7,7 @@ import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
 import { $, el } from './dom';
+import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
 import { log, logBlock } from './log';
 import { call, hasSession } from './rpc';
@@ -89,17 +90,16 @@ const jitSection = $('jit-debug-section');
 
 async function updateJitDebug(): Promise<void> {
   const s = await call('jit_stats');
-  const share = (part: number) => s.executed ? ` (${((100 * part) / s.executed).toFixed(1)}%)` : '';
-  const entered = s.enteredEmitted ?? 0;
-  $('jit-blocks').textContent = String(s.blocks);
-  $('jit-translated').textContent = String(s.translated);
-  $('jit-executed').textContent = s.translated
-    ? `${s.executed} (${(s.executed / s.translated).toFixed(1)}x each)`
-    : String(s.executed);
-  $('jit-invalidated').textContent = String(s.invalidated);
-  $('jit-emitted').textContent = String(s.emitted ?? 0);
-  $('jit-entered-emitted').textContent = String(entered) + share(entered);
-  $('jit-chained').textContent = String(s.chained ?? 0);
+  const ofEntries = (part: number) =>
+    fmtCount(part) + (s.executed ? ` (${((100 * part) / s.executed).toFixed(1)}%)` : '');
+  $('jit-blocks').textContent = fmtCount(s.blocks);
+  $('jit-translated').textContent = fmtCount(s.translated);
+  $('jit-invalidated').textContent = fmtCount(s.invalidated);
+  $('jit-emitted').textContent = fmtCount(s.emitted ?? 0);
+  $('jit-executed').textContent = fmtCount(s.executed);
+  $('jit-reuse').textContent = s.translated ? fmtCount(s.executed / s.translated) : '-';
+  $('jit-entered-emitted').textContent = ofEntries(s.enteredEmitted ?? 0);
+  $('jit-chained').textContent = ofEntries(s.chained ?? 0);
 }
 
 const renderSection = $<HTMLDetailsElement>('render-debug-section');
@@ -142,11 +142,11 @@ async function updateRenderDebug(): Promise<void> {
   const drawn = g.drawn ?? 0;
   const fallbacks = g.fallbacks ?? 0;
   const share = drawn + fallbacks ? ((drawn * 100) / (drawn + fallbacks)).toFixed(1) : '0';
-  $('render-drawn').textContent = `${drawn} (${share}%)`;
-  $('render-fallbacks').textContent = String(fallbacks);
-  $('render-rejected').textContent = String(g.deviceErrorCount ?? 0);
-  $('render-pipelines').textContent = String(g.pipelines ?? 0);
-  $('render-modules').textContent = String(g.modules ?? 0);
+  $('render-drawn').textContent = `${fmtCount(drawn)} (${share}%)`;
+  $('render-fallbacks').textContent = fmtCount(fallbacks);
+  $('render-rejected').textContent = fmtCount(g.deviceErrorCount ?? 0);
+  $('render-pipelines').textContent = fmtCount(g.pipelines ?? 0);
+  $('render-modules').textContent = fmtCount(g.modules ?? 0);
   $('render-held').textContent = `${g.held ?? 0} (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`;
   const hits = g.textureHits ?? 0;
   const lookups = hits + (g.textureMisses ?? 0);

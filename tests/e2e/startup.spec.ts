@@ -108,5 +108,5 @@ test('the translation section counts the blocks a program ran', async ({ page })
   await page.getByRole('tab', { name: 'Debug' }).click();
   await bootElf(page, aarch64Elf([SVC_EXIT_PROCESS]));
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
-  await expect(page.locator('#jit-translated')).toHaveText(/^[1-9]\d*$/);
+  await expect(page.locator('#jit-translated')).toHaveText(/^[1-9][\d,.]*[MBT]?$/);
 });
