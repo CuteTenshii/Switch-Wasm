@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn a_submit_runs_its_stream_and_reports_where_its_fence_lands() {
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x1000_0000, 0x1000).unwrap();
         let mut nvmap = NvMap::new();
         let handle = nvmap.create(0x1000);

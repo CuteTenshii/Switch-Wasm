@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn an_update_compare_and_branch_is_one_exit() {
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         // add x5, x5, #4; cmp w3, #0x2d0; b.ne -8; ret
         let words = [0x910010a5u32, 0x710b407f, 0x54ffffc1, 0xd65f03c0];
         let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();

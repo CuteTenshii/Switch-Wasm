@@ -1023,7 +1023,7 @@ mod tests {
     const TYPE_2D: u32 = 1 << 23;
 
     fn harness() -> (Memory, AddressSpace, u64) {
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x8000_0000, 0x2000).unwrap();
         let mut vmm = AddressSpace::new();
         let base = vmm

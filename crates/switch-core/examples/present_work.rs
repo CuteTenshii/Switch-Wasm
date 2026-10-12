@@ -61,7 +61,7 @@ fn measure(layout: Layout, buffer: &DisplayBuffer, mem: &Memory, gpu: &mut Gpu) 
 }
 
 fn case(name: &str, width: u32, height: u32, pitch_linear: bool, crop: Crop) {
-    let mut mem = Memory::new();
+    let mem = Memory::new();
     let mut gpu = Gpu::new();
     let layout = if pitch_linear {
         Layout::Pitch { pitch: width * BPP }

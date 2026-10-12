@@ -361,7 +361,7 @@ mod tests {
 
     impl Harness {
         fn new() -> Harness {
-            let mut mem = Memory::new();
+            let mem = Memory::new();
             mem.map_zero(0x3000_0000, 0x8000).unwrap();
             let mut vmm = AddressSpace::new();
             let base = vmm

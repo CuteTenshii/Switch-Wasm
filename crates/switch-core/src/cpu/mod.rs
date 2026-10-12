@@ -430,7 +430,7 @@ impl Default for Cpu {
 
 impl Cpu {
     pub fn new() -> Cpu {
-        let mut cpu = Cpu {
+        let cpu = Cpu {
             mode: ExecMode::A64,
             cpsr_q: false,
             cpsr_ge: 0,

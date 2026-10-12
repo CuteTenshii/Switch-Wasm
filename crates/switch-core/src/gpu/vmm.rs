@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn access_past_the_mapping_end_faults() {
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x2000_0000, 0x2000).unwrap();
         let (vmm, va) = space_with_buffer(0x2000_0000, 0x1000);
         assert!(vmm.read_u32(&mem, va + 0xffe).is_err());

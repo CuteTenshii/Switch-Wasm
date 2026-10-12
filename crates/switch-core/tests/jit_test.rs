@@ -511,7 +511,7 @@ const FIVE: u64 = CODE as u64 + 0x30;
 const SEVEN: u64 = CODE as u64 + 0x38;
 
 fn bound(code: &[u32], jit: bool, target: u64) -> Cpu {
-    let mut cpu = loaded(code, jit);
+    let cpu = loaded(code, jit);
     cpu.mem.write_u64(PLT_SLOT, target).unwrap();
     cpu
 }

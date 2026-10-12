@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn present_deswizzles_a_block_linear_buffer() {
         let mut gpu = Gpu::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x4000_0000, 0x1000).unwrap();
         let handle = gpu.nvmap.create(0x1000);
         gpu.nvmap
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn a_flipped_queue_transform_turns_the_frame_over() {
         let mut gpu = Gpu::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x4000_0000, 0x1000).unwrap();
         let handle = gpu.nvmap.create(0x1000);
         gpu.nvmap
@@ -794,7 +794,7 @@ mod tests {
     #[test]
     fn a_queued_crop_is_the_frame() {
         let mut gpu = Gpu::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x4000_0000, 0x1000).unwrap();
         let handle = gpu.nvmap.create(0x1000);
         gpu.nvmap

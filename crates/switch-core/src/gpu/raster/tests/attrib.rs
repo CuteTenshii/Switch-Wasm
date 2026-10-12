@@ -9,7 +9,7 @@ use crate::gpu::engine::threed::{VertexArray, VertexAttrib};
 use crate::gpu::exec::ExecCtx;
 
 pub(super) fn harness() -> (Memory, AddressSpace, u64) {
-    let mut mem = Memory::new();
+    let mem = Memory::new();
     mem.map_zero(0x6000_0000, 0x1000).unwrap();
     let mut vmm = AddressSpace::new();
     let gpu_va = vmm

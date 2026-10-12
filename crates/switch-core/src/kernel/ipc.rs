@@ -1254,7 +1254,7 @@ pub(crate) mod testing {
     #[test]
     fn the_cmif_header_is_found_past_the_buffer_descriptors() {
         // Buffer descriptors push the CMIF header further in.
-        let mut cpu = Cpu::new();
+        let cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         // type 4, 0 statics, 2 send buffers, 1 recv buffer → the data area is
         // 8 + 3*12 = 44 bytes in, rounded up to 0x30.
@@ -1269,7 +1269,7 @@ pub(crate) mod testing {
 
         // And when the descriptor walk doesn't land exactly on it (0x40 here),
         // the scan of the message buffer still finds it.
-        let mut cpu = Cpu::new();
+        let cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.write_u32(TLS, 4).unwrap();
         cpu.mem.write_u32(TLS + 4, 8).unwrap();
@@ -1331,7 +1331,7 @@ pub(crate) mod testing {
         // The static descriptor sits past the special header's copy and move handles.
         const PATH: u32 = 0x3000;
 
-        let mut cpu = Cpu::new();
+        let cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.map_zero(PATH, 0x100).unwrap();
         for (i, &byte) in b"/save/data.bin\0".iter().enumerate() {
@@ -1491,7 +1491,7 @@ pub(crate) mod testing {
         buffer: u32,
         size: u32,
     ) -> Cpu {
-        let mut cpu = request(false, command_id, payload);
+        let cpu = request(false, command_id, payload);
         // Padding, the CmifInHeader, then the payload.
         let data_words = 2 + 4 + payload.len().div_ceil(4) as u32;
         // recv_static_mode = 2 + one buffer.
@@ -1510,7 +1510,7 @@ pub(crate) mod testing {
         size: u32,
         through_pointer: bool,
     ) -> Cpu {
-        let mut cpu = Cpu::new();
+        let cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         for offset in (0..0x200u32).step_by(4) {
             cpu.mem.write_u32(TLS + offset, 0).unwrap();
@@ -1606,7 +1606,7 @@ pub(crate) mod testing {
 
     /// A CMIF control request (message type 5).
     pub(crate) fn control_request(command_id: u32) -> Cpu {
-        let mut cpu = Cpu::new();
+        let cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.write_u32(TLS, 5).unwrap(); // CmifCommandType_Control
         cpu.mem.write_u32(TLS + 4, 8).unwrap();
