@@ -622,7 +622,20 @@ impl Cpu {
             0x20..=0x23 => {
                 // SendSyncRequest variants: a named service's stub, else the generic reply.
                 let tls = self.tpidr as u32;
-                let handle = self.read_zr(0);
+                let session = self.read_zr(0);
+                // A Close request (type 2) has no command id; it tears down the session.
+                if self.ipc_message_type(tls) == 2 {
+                    self.close_session(session);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])?;
+                    self.write_zr(0, RESULT_OK);
+                    return Ok(());
+                }
+                // A clone reaches its owner's interface and domain objects.
+                let handle = self
+                    .session_owners
+                    .get(&session)
+                    .copied()
+                    .unwrap_or(session);
                 let cmd_id = self.ipc_command_id(tls);
                 let svc_name = self.service_name(handle).map(|s| s.to_string());
                 if crate::trace::enabled(crate::trace::Trace::Ipc) {
@@ -644,28 +657,14 @@ impl Cpu {
                         .collect();
                     crate::traceln!("[ipc]   svc={:#x} tls={:#x} {}", imm, tls, words.join(" "));
                 }
-                // A Close request (type 2) has no command id; it tears down the session.
-                if self.ipc_message_type(tls) == 2 {
-                    self.forget_handle(handle);
-                    self.write_ipc_response(tls, 0, &[], &[], &[])?;
-                    self.write_zr(0, RESULT_OK);
-                    return Ok(());
-                }
                 // CloneCurrentObject (control 2) and its Ex form (4) reply with a new session
-                // handle as a move handle, reaching the same interface and domain objects.
+                // handle as a move handle, sharing this session's interface and domain: objects
+                // opened through either are reachable through both.
                 if self.ipc_is_control_request(tls) && matches!(cmd_id, Some(2) | Some(4)) {
                     if let Some(name) = svc_name.clone() {
                         let clone = self.alloc_handle();
                         self.record_handle(clone, &name);
-                        let objects: Vec<(u32, String)> = self
-                            .domain_objects
-                            .iter()
-                            .filter(|((h, _), _)| *h == handle)
-                            .map(|((_, obj), iface)| (*obj, iface.clone()))
-                            .collect();
-                        for (obj, iface) in objects {
-                            self.record_domain_object(clone, obj, &iface);
-                        }
+                        self.session_owners.insert(clone, handle);
                         self.write_ipc_response(tls, 0, &[clone], &[], &[])?;
                         self.write_zr(0, RESULT_OK);
                         return Ok(());

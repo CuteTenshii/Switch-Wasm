@@ -108,6 +108,11 @@ pub struct Cpu {
     pub(crate) next_object_id: u32,
     /// Fake handles from `ConnectToNamedPort`/`GetService` to their service name.
     pub(crate) service_handles: IdMap<u64, String>,
+    /// Sessions made by `CloneCurrentObject`, by the session whose domain and
+    /// objects they share.
+    pub(crate) session_owners: IdMap<u64, u64>,
+    /// Owners closed while clones of them were still open.
+    pub(crate) closed_owners: std::collections::BTreeSet<u64>,
     /// Next fake handle; 0 is invalid.
     pub(crate) next_handle: u32,
     pub(crate) next_domain_object_id: u32,
@@ -430,6 +435,8 @@ impl Cpu {
             tpidr_rw: 0,
             next_object_id: 1,
             service_handles: IdMap::default(),
+            session_owners: IdMap::default(),
+            closed_owners: std::collections::BTreeSet::new(),
             next_handle: 0x1000,
             next_domain_object_id: 1,
             domain_objects: HashMap::new(),

@@ -508,6 +508,25 @@ impl Cpu {
         self.service_handles.insert(handle, name.to_owned());
     }
 
+    /// Close one session. A clone only stops aliasing its owner; the owner's
+    /// state goes once it and every clone of it are closed.
+    pub(crate) fn close_session(&mut self, session: u64) {
+        let owner = self.session_owners.remove(&session);
+        if owner.is_some() {
+            self.service_handles.remove(&session);
+        }
+        let owner = owner.unwrap_or(session);
+        if self.session_owners.values().any(|&o| o == owner) {
+            if owner == session {
+                self.closed_owners.insert(owner);
+            }
+            return;
+        }
+        if owner == session || self.closed_owners.remove(&owner) {
+            self.forget_handle(owner);
+        }
+    }
+
     /// Drop everything recorded for a closed session.
     pub(crate) fn forget_handle(&mut self, handle: u64) {
         self.service_handles.remove(&handle);

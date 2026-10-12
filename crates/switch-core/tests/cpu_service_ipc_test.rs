@@ -85,6 +85,37 @@ fn control_clone_hands_back_a_working_session() {
 }
 
 #[test]
+fn a_clone_shares_its_owners_domain_objects_both_ways_and_after_it_closes() {
+    // `nn::fs` pools cloned sessions: an object opened through one is used through another.
+    const FS: u64 = 0x9000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(FS, "fsp-srv");
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, FS, 5, None, 0); // ConvertCurrentObjectToDomain
+    let root = cpu.mem.read_u32(tls + 0x20).unwrap();
+    ipc_request(&mut cpu, FS, 5, None, 2); // CloneCurrentObject
+    let clone = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+
+    ipc_request(&mut cpu, clone, 4, Some(root), 18); // OpenSdCardFileSystem
+    let sd = cpu.mem.read_u32(tls + 0x30).unwrap();
+    assert_eq!(
+        cpu.domain_interface_name(FS, sd).as_deref(),
+        Some("fsp-srv-fs")
+    );
+
+    // Closing the clone leaves the object to the owner.
+    build_ipc_request(&mut cpu, 2, None, 0);
+    run_ipc_request(&mut cpu, clone);
+    assert_eq!(
+        cpu.domain_interface_name(FS, sd).as_deref(),
+        Some("fsp-srv-fs")
+    );
+}
+
+#[test]
 fn a_fabricated_reply_fills_both_handle_slots() {
     // An unimplemented command replies with both a move-handle object and a
     // copy-handle event, since the intended out type is unknown and a missing
