@@ -8,6 +8,7 @@ import { recordRunSlice } from './display-metrics';
 import { $ } from './dom';
 import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
+import { dropErrors, pollErrors } from './errors';
 import { dropKeyboard, pollKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log, logBlock, type LogClass } from './log';
@@ -86,7 +87,7 @@ export async function run(): Promise<void> {
       if (done || ++tick % HOUSEKEEPING_EVERY === 0) {
         await Promise.all([
           updatePc(), drainOutput(), drainDiagnostics(), sdFlush(), saveFlush(), pullProfileEdits(),
-          pollKeyboard(),
+          pollKeyboard(), pollErrors(),
         ]);
       }
       schedulePresentIfNewFrame();
@@ -152,6 +153,7 @@ export function abortRun(): void {
   running = false;
   abortDisplay();
   dropKeyboard();
+  dropErrors();
   setRunButton(false);
 }
 

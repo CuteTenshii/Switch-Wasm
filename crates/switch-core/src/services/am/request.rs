@@ -851,11 +851,12 @@ impl Cpu {
                                 .am_applets
                                 .get(&key)
                                 .and_then(LibraryApplet::error_shown);
-                            if let Some(shown) = shown {
+                            if let Some((shown, dialog)) = shown {
                                 self.diagnostic(
                                     Level::Warn,
                                     &format!("[am] the error applet was asked to show {shown}"),
                                 );
+                                self.error_dialogs.push_back(dialog);
                             }
                         }
                         self.forget_keyboard(key);

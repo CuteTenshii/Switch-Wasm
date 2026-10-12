@@ -208,6 +208,12 @@ export interface KeyboardRequest {
   password: boolean;
 }
 
+// What the title asked the error applet to show; `code` is as the console prints it.
+export interface ErrorDialog {
+  code: string | null;
+  message: string;
+}
+
 export interface Commands {
   // Quoted, since unquoted `new()` is a construct signature.
   // eslint-disable-next-line @stylistic/quote-props
@@ -307,6 +313,8 @@ export interface Commands {
   // The users as the session holds them, including guest edits.
   users_read(): UserRecord[];
 
+  // The next error the title asked to show, or null.
+  error_dialog(): ErrorDialog | null;
   // The keyboard waiting for text, or null.
   keyboard_request(): KeyboardRequest | null;
   // Send the typed text, or null to cancel; 1 if a keyboard was waiting.

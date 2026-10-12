@@ -119,6 +119,11 @@ impl LibraryApplet {
 }
 
 impl Cpu {
+    /// The next error an error applet was asked to show the player.
+    pub fn take_error_dialog(&mut self) -> Option<super::ErrorDialog> {
+        self.error_dialogs.pop_front()
+    }
+
     /// The keyboard waiting for text, if any.
     pub fn keyboard_request(&self) -> Option<&KeyboardRequest> {
         self.am_keyboard.as_ref().map(|pending| &pending.request)

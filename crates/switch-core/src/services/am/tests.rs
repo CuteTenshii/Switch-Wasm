@@ -951,3 +951,36 @@ fn an_error_applet_argument_names_its_result_and_its_message() {
         "type 2, code 0x4d2/0x0, \"Unable to connect\""
     );
 }
+
+#[test]
+fn an_error_dialog_shows_the_code_as_the_console_prints_it() {
+    let mut normal = vec![0u8; 0x18];
+    normal[6] = 1;
+    normal[0x10..0x14].copy_from_slice(&0x7D402u32.to_le_bytes());
+    assert_eq!(
+        super::ErrorDialog::from_arg(&normal),
+        super::ErrorDialog {
+            code: Some("2002-1002".into()),
+            message: String::new()
+        }
+    );
+
+    let mut system = vec![0u8; 0x18];
+    system[0] = 1;
+    system.extend_from_slice(b"Could not find lib.zip.\0");
+    assert_eq!(
+        super::ErrorDialog::from_arg(&system),
+        super::ErrorDialog {
+            code: None,
+            message: "Could not find lib.zip.".into()
+        }
+    );
+
+    let mut application = vec![0u8; 0x18];
+    application[0] = 2;
+    application[8..12].copy_from_slice(&1234u32.to_le_bytes());
+    assert_eq!(
+        super::ErrorDialog::from_arg(&application).code.as_deref(),
+        Some("1234")
+    );
+}

@@ -78,9 +78,11 @@ impl LibraryApplet {
     }
 
     /// For an error applet, the error it was asked to show.
-    fn error_shown(&self) -> Option<String> {
-        (self.id == APPLET_ERROR)
-            .then(|| describe_error_arg(self.in_data.last().map_or(&[], |d| d)))
+    fn error_shown(&self) -> Option<(String, ErrorDialog)> {
+        (self.id == APPLET_ERROR).then(|| {
+            let arg = self.in_data.last().map_or(&[][..], |d| d);
+            (describe_error_arg(arg), ErrorDialog::from_arg(arg))
+        })
     }
 }
 
@@ -212,24 +214,57 @@ fn describe_error_arg(arg: &[u8]) -> String {
     } else {
         line += &format!(", code {:#x}/{:#x}", word(8), word(12));
     }
-    let text: String = arg
-        .get(0x18..)
-        .unwrap_or_default()
-        .iter()
-        .take_while(|&&b| b != 0)
-        .map(|&b| {
-            if b.is_ascii_graphic() || b == b' ' {
-                b as char
-            } else {
-                '.'
-            }
-        })
-        .take(200)
-        .collect();
+    let text = error_text(arg, 200);
     if !text.is_empty() {
         line += &format!(", \"{text}\"");
     }
     line
+}
+
+/// The dialog message after the header, the same offset in every type that has one.
+fn error_text(arg: &[u8], limit: usize) -> String {
+    let bytes: Vec<u8> = arg
+        .get(0x18..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|&&b| b != 0)
+        .take(limit)
+        .copied()
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// What an error applet shows the player: the code as the console prints it, and the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorDialog {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl ErrorDialog {
+    pub(crate) fn from_arg(arg: &[u8]) -> ErrorDialog {
+        let byte = |at: usize| arg.get(at).copied().unwrap_or(0);
+        let word = |at: usize| u32::from_le_bytes(std::array::from_fn(|i| byte(at + i)));
+        let code = match byte(0) {
+            // A Result, as `2xxx-yyyy`.
+            0 if byte(6) != 0 => {
+                let r = word(0x10);
+                Some(format!(
+                    "{:04}-{:04}",
+                    2000 + (r & 0x1FF),
+                    (r >> 9) & 0x1FFF
+                ))
+            }
+            // `ErrorApplicationArg`: one number the title chose.
+            2 => (word(8) != 0).then(|| word(8).to_string()),
+            // An `ErrorCode` of category and number.
+            _ => (word(8) != 0 || word(12) != 0).then(|| format!("{:04}-{:04}", word(8), word(12))),
+        };
+        ErrorDialog {
+            code,
+            message: error_text(arg, 0x800),
+        }
+    }
 }
 const APPLET_CONTROLLER: u32 = 0x0C;
 const APPLET_MY_PAGE: u32 = 0x1A;

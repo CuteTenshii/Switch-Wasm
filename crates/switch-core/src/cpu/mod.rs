@@ -48,7 +48,7 @@ pub use jit::{
 
 pub use crate::services::acc::{UserAccount, UsersRefused, MAX_USERS, NICKNAME_LEN};
 pub(crate) use crate::services::acc::{DEFAULT_NICKNAME, DEFAULT_USER_UID};
-pub use crate::services::am::KeyboardRequest;
+pub use crate::services::am::{ErrorDialog, KeyboardRequest};
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
 
@@ -267,6 +267,8 @@ pub struct Machine {
     pub(crate) am_applets: IdMap<u64, am::LibraryApplet>,
     /// The software keyboard waiting on the host for text.
     pub(crate) am_keyboard: Option<am::PendingKeyboard>,
+    /// Error applets started and not yet shown to the player.
+    pub(crate) error_dialogs: VecDeque<am::ErrorDialog>,
     /// The process's own RomFS (`OpenDataStorageByCurrentProcess`), read by range.
     /// `None` for homebrew, which reads RomFS from the SD card.
     pub(crate) romfs: Option<Box<dyn crate::source::ByteSource>>,
@@ -535,6 +537,7 @@ impl Cpu {
                 am_storage_of: IdMap::default(),
                 am_applets: IdMap::default(),
                 am_keyboard: None,
+                error_dialogs: VecDeque::new(),
                 romfs: None,
                 touch_sample_counter: 0,
                 touch_published: 0,

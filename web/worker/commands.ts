@@ -1,7 +1,7 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, KeyboardRequest,
+  CommandHandlers, CrashReport, ErrorDialog, FsChange, GpuReport, IpcGaps, JitStats, KeyboardRequest,
   UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
@@ -557,6 +557,12 @@ export const CMD: CommandHandlers = {
     }));
   },
 
+  error_dialog() {
+    if (handle() < 0) return null;
+    // Taken from the queue; 16 KiB holds any message.
+    return readJson<ErrorDialog | null>(
+      16384, (buf, cap) => api().switch_error_dialog_json(handle(), buf, cap), null);
+  },
   keyboard_request() {
     if (handle() < 0) return null;
     return readJson<KeyboardRequest | null>(

@@ -1376,7 +1376,7 @@ body.resizing {
   }
 }
 
-/* Keyboard dialog: text the running title asked for. */
+/* Keyboard dialog: text the running title asked for. The error dialog uses its frame. */
 .keyboard {
   width: min(420px, calc(100vw - 32px));
   padding: 16px;

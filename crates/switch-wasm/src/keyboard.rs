@@ -1,7 +1,31 @@
-//! The software keyboard: the page reads what the guest asks for and answers it.
+//! The library applets the page shows: the software keyboard, which the page
+//! answers, and the error applet, which it only displays.
 
 use crate::storage::sd_path;
 use crate::{json_escape, session, write_into};
+
+/// The next error applet as JSON, `{"code":"2002-1002","message":""}` with `code` null when
+/// there is none, taken from the queue. Writes nothing when none is waiting. A message is at
+/// most 2 KiB, so 16 KiB holds any escaping.
+#[no_mangle]
+pub extern "C" fn switch_error_dialog_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let Some(dialog) = session(handle).cpu.take_error_dialog() else {
+        return 0;
+    };
+    let mut out = b"{\"code\":".to_vec();
+    match &dialog.code {
+        Some(code) => {
+            out.push(b'"');
+            json_escape(code, &mut out);
+            out.push(b'"');
+        }
+        None => out.extend_from_slice(b"null"),
+    }
+    out.extend_from_slice(b",\"message\":\"");
+    json_escape(&dialog.message, &mut out);
+    out.extend_from_slice(b"\"}");
+    write_into(buf, maxlen, &out)
+}
 
 /// The waiting keyboard as JSON: `{"header":"","sub":"","guide":"","ok":"","maxLength":500,
 /// "minLength":0,"password":false}`. Writes nothing when no keyboard is waiting.
