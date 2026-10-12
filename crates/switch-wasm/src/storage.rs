@@ -282,11 +282,3 @@ pub extern "C" fn switch_save_read_file(
         None => -1,
     }
 }
-
-/// Create a save in a fresh session so the host can restore it. Returns 0.
-#[no_mangle]
-pub extern "C" fn switch_save_create(handle: u32, save_id: u64, user_lo: u64, user_hi: u64) -> i32 {
-    let key = SaveKey::from_halves(save_id, user_lo, user_hi);
-    session(handle).cpu.save_data_mut(key);
-    0
-}

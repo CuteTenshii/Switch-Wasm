@@ -351,9 +351,6 @@ export const CMD: CommandHandlers = {
   get_pc() {
     return api().switch_get_pc(handle());
   },
-  get_cycles() {
-    return Number(api().switch_get_cycles(handle()));
-  },
   get_steps() {
     return Number(api().switch_get_steps(handle()));
   },
@@ -448,9 +445,6 @@ export const CMD: CommandHandlers = {
       });
     });
   },
-  sd_pending_changes() {
-    return handle() < 0 ? 0 : api().switch_sd_pending_changes(handle());
-  },
   sd_take_changes() {
     if (handle() < 0) return [];
     const pending = api().switch_sd_pending_changes(handle());
@@ -472,9 +466,6 @@ export const CMD: CommandHandlers = {
       [],
     );
   },
-  save_pending_changes(id) {
-    return handle() < 0 ? 0 : api().switch_save_pending_changes(handle(), ...saveKey(id));
-  },
   save_take_changes(id) {
     if (handle() < 0) return [];
     const save = saveKey(id);
@@ -485,9 +476,6 @@ export const CMD: CommandHandlers = {
       (buf, cap) => api().switch_save_take_changes_json(handle(), ...save, buf, cap),
       [],
     );
-  },
-  save_create(id) {
-    return api().switch_save_create(handle(), ...saveKey(id));
   },
   save_write_file(id, path, bytes) {
     return withPath(path, (pptr, plen) =>

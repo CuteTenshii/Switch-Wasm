@@ -10,9 +10,9 @@ use crate::debug::{
 };
 use crate::stats::switch_activity_json;
 use crate::storage::{
-    switch_save_create, switch_save_file_size, switch_save_ids_json, switch_save_pending_changes,
-    switch_save_read_file, switch_save_take_changes_json, switch_save_write_file,
-    switch_sd_file_size, switch_sd_pending_changes, switch_sd_read_file,
+    switch_save_create_dir, switch_save_file_size, switch_save_ids_json,
+    switch_save_pending_changes, switch_save_read_file, switch_save_take_changes_json,
+    switch_save_write_file, switch_sd_file_size, switch_sd_pending_changes, switch_sd_read_file,
     switch_sd_take_changes_json, switch_sd_write_file,
 };
 use crate::users::{
@@ -336,8 +336,8 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
         0
     );
 
-    // Opening a save is enough to list it; the shared save is a separate one.
-    switch_save_create(handle, SAVE, 0, 0);
+    // A save with only a directory is listed; the shared save is a separate one.
+    switch_save_create_dir(handle, SAVE, 0, 0, b"/".as_ptr(), 1);
     let mut ids = [0u8; 128];
     let n = switch_save_ids_json(handle, ids.as_mut_ptr(), ids.len() as u32) as usize;
     assert_eq!(

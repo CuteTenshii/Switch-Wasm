@@ -82,7 +82,6 @@ export interface WasmExports {
   switch_crash_report_json(handle: number, buf: number, maxlen: number): number;
   switch_get_pc(handle: number): number;
   switch_get_reg(handle: number, idx: number): bigint;
-  switch_get_cycles(handle: number): bigint;
   switch_get_steps(handle: number): bigint;
   switch_guest_ram(handle: number): bigint;
 
@@ -121,7 +120,6 @@ export interface WasmExports {
   switch_user_picture(
     handle: number, uidLo: bigint, uidHi: bigint, buf: number, maxlen: number): number;
   // A save is keyed by its id and its user's uid in two halves.
-  switch_save_create(handle: number, saveId: bigint, userLo: bigint, userHi: bigint): number;
   switch_save_pending_changes(
     handle: number, saveId: bigint, userLo: bigint, userHi: bigint): number;
   switch_save_take_changes_json(

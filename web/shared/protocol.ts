@@ -275,7 +275,6 @@ export interface Commands {
   crash_report(): CrashReport;
   version(): string;
   get_pc(): number;
-  get_cycles(): number;
   get_steps(): number;
   get_reg(i: number): string;
   ram(): RamUsage;
@@ -295,13 +294,10 @@ export interface Commands {
   sd_create_dir(path: string): number;
   sd_remove(path: string): number;
   sd_read_file(path: string): Bytes | null;
-  sd_pending_changes(): number;
   sd_take_changes(): FsChange[];
 
   save_ids(): string[];
-  save_pending_changes(id: string): number;
   save_take_changes(id: string): FsChange[];
-  save_create(id: string): number;
   save_write_file(id: string, path: string, bytes: Bytes): number;
   save_create_dir(id: string, path: string): number;
   save_remove(id: string, path: string): number;

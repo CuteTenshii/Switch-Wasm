@@ -13,21 +13,6 @@ pub extern "C" fn switch_vibration(handle: u32) -> u32 {
     (scale(high) << 16) | scale(low)
 }
 
-/// Write `len` bytes from `ptr` into emulated memory at `addr` (used for the
-/// memory-mapped input register and similar). Returns 0 on success, -1 on error.
-#[no_mangle]
-pub extern "C" fn switch_write_mem(handle: u32, addr: u32, ptr: *const u8, len: u32) -> i32 {
-    let s = session(handle);
-    let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    match s.cpu.mem.map(addr, data) {
-        Ok(()) => 0,
-        Err(e) => {
-            s.last_error = e.to_string();
-            -1
-        }
-    }
-}
-
 /// Feed gamepad state. `buttons` is a `HidNpadButton` bitfield (A=1<<0, B=1<<1,
 /// X=1<<2, Y=1<<3, StickL=1<<4, StickR=1<<5, L=1<<6, R=1<<7, ZL=1<<8, ZR=1<<9,
 /// Plus=1<<10, Minus=1<<11, DpadLeft=1<<12, DpadUp=1<<13, DpadRight=1<<14,
