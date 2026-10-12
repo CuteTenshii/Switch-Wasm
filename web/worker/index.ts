@@ -8,6 +8,7 @@ import { workerLog } from './log';
 import init from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { api, readWholeJson, state, type WasmExports } from './wasm';
+import type { CoreStart, CoreStarted } from './core';
 
 // `self` is typed as the shared WorkerGlobalScope, which lacks postMessage.
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -167,11 +168,34 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
   }
 };
 
+// Guest cores beyond the one this worker runs: the console gives a title three.
+const CORE_WORKERS = 2;
+
+// Start the core workers on this worker's module and shared memory.
+function startCores(module: WebAssembly.Module, memory: WebAssembly.Memory): void {
+  let started = 0;
+  for (let i = 0; i < CORE_WORKERS; i++) {
+    const worker = new Worker(new URL('./core.ts', import.meta.url), { type: 'module' });
+    worker.onmessage = (e: MessageEvent<CoreStarted>) => {
+      if (!e.data.started) {
+        workerLog(`[core] core worker ${i + 1} did not start: ${e.data.error}`, 'err');
+      } else if (++started === CORE_WORKERS) {
+        workerLog(`[core] ${CORE_WORKERS} core workers started on shared memory`);
+      }
+    };
+    worker.onerror = (e) => workerLog(`[core] core worker ${i + 1} failed: ${e.message}`, 'err');
+    worker.postMessage({ module, memory } satisfies CoreStart);
+  }
+}
+
 void (async () => {
   try {
-    state.exports = await init({ module_or_path: wasmUrl }) as unknown as WasmExports;
+    // Compiled here rather than by the glue, which keeps the module to itself.
+    const module = await WebAssembly.compileStreaming(fetch(wasmUrl));
+    state.exports = await init({ module_or_path: module }) as unknown as WasmExports;
     // Install the panic hook before anything else can panic.
     state.exports.switch_init();
+    startCores(module, state.exports.memory);
     reply({ type: 'ready' });
   } catch (err) {
     reply({ type: 'ready', error: String(err) });

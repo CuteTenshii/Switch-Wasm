@@ -9,8 +9,12 @@ declare module '*?url' {
 // The wasm-bindgen core, declared because it does not exist until `make wasm`.
 declare module '@core/switch_wasm.js' {
   export default function init(
-    options?: { module_or_path: string },
+    options?: { module_or_path: string | WebAssembly.Module },
   ): Promise<Record<string, unknown>>;
+  // Another thread's instance, on the memory the first one made.
+  export function initSync(
+    options: { module: WebAssembly.Module; memory: WebAssembly.Memory },
+  ): Record<string, unknown>;
 }
 
 interface ImportMetaEnv {
