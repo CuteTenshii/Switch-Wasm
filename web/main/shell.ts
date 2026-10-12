@@ -1,4 +1,4 @@
-// The application shell: stage, state chip, and side panel.
+// The application shell: stage and side panel.
 
 import { $ } from './dom';
 
@@ -11,11 +11,12 @@ const ctx = screenEl.getContext('2d', { alpha: false });
 if (!ctx) throw new Error('this browser has no 2d canvas context');
 export const screenCtx = ctx;
 
-const stateEl = $('state');
 const runEl = $<HTMLButtonElement>('btn-run');
+// Readouts that mean nothing without a program.
+const programItems = ['pc-item', 'instructions-item', 'res-item'].map((id) => $(id));
 const stepEl = $<HTMLButtonElement>('btn-step');
 
-// What the top-bar chip says and `[data-state]` styles.
+// The run state, also on `<body data-state>` for the page tests.
 export type EmuState = 'idle' | 'loading' | 'loaded' | 'running' | 'paused' | 'halted' | 'fault';
 
 let state: EmuState = 'idle';
@@ -27,8 +28,8 @@ export function loaded(): boolean {
 
 export function setState(text: EmuState): void {
   state = text;
-  stateEl.textContent = text;
-  stateEl.dataset.state = text;
+  document.body.dataset.state = text;
+  for (const item of programItems) item.hidden = !loaded();
   runEl.disabled = !loaded();
   stepEl.disabled = !loaded();
 }

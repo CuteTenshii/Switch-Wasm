@@ -5,7 +5,7 @@ const SVC_EXIT_PROCESS = 0xd40000e1;
 test('the core starts and names its build', async ({ page }) => {
   await openPage(page);
   await expect(page.locator('#wasm-ver')).toHaveText(/^core \d+\.\d+\.\d+/);
-  await expect(page.locator('#state')).toHaveText('idle');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'idle');
 });
 
 test('the display debugger starts empty and can reset its samples', async ({ page }) => {
@@ -29,7 +29,7 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   await expect(display.locator('#display-debug-data')).toBeHidden();
 
   await bootElf(page, aarch64Elf([SVC_EXIT_PROCESS]));
-  await expect(page.locator('#state')).toHaveText('halted');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await expect(display.locator('#display-debug-badge')).not.toHaveText('no samples');
   await expect(display.locator('#display-debug-data')).toBeVisible();
 
@@ -55,7 +55,7 @@ test('the guest crash screen exposes recovery paths', async ({ page }) => {
   // movz x1, #0xfff0, lsl #16; ldr x0, [x1]: a read above the guest address space.
   await bootElf(page, aarch64Elf([0xd2bffe01, 0xf9400020]));
 
-  await expect(page.locator('#state')).toHaveText('fault');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'fault');
   await expect(crash).toBeVisible();
   await expect(crash.getByRole('heading')).toHaveText('Guest crashed');
   await expect(crash.locator('#crash-message')).toHaveText(
@@ -90,13 +90,13 @@ test('trace channels record and show only at the debug level', async ({ page }) 
 
   await expect(page.locator('#log-level')).toHaveValue('log');
   await bootElf(page, program);
-  await expect(page.locator('#state')).toHaveText('halted');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await page.locator('#btn-panel').click();
   await page.locator('#log-level').selectOption('debug');
   await expect(svcLine).toHaveCount(0);
 
   await bootElf(page, program);
-  await expect(page.locator('#state')).toHaveText('halted');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await expect(svcLine).toHaveCount(1);
   await page.locator('#log-level').selectOption('log');
   await expect(svcLine).toHaveCount(0);

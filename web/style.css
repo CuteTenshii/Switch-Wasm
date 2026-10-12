@@ -252,39 +252,7 @@ body {
   font-size: 14px;
 }
 
-/* status chip + readouts */
-
-.chip {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  text-transform: uppercase;
-  letter-spacing: .6px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--chrome-hi);
-  color: var(--muted);
-}
-.chip[data-state="running"] {
-  color: var(--green);
-  border-color: #22603f;
-  background: #0d1f16;
-}
-.chip[data-state="paused"] {
-  color: var(--amber);
-  border-color: #5c4718;
-  background: #201a0c;
-}
-.chip[data-state="fault"] {
-  color: var(--red);
-  border-color: #5e2626;
-  background: #200f0f;
-}
-.chip[data-state="halted"] {
-  color: var(--accent);
-  border-color: #274168;
-  background: #0d1622;
-}
+/* readouts */
 
 .readout {
   font-family: var(--mono);

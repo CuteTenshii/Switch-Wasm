@@ -10,7 +10,7 @@ import { hasKeys, stageKeys, updateKeysState } from './keys';
 import { clearConsole, log, logLevel, offerPreviousLog, onLogLevel } from './log';
 import { initNand } from './nand';
 import { call, initWorker, setSession, whenReady } from './rpc';
-import { updatePc } from './runloop';
+import { updatePc, updateRam } from './runloop';
 import { saveRestore } from './saves';
 import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence, sdRestore } from './sdcard';
@@ -56,6 +56,7 @@ async function init(): Promise<void> {
     // The NAND needs the keys. Only its index is awaited; archives register later.
     loadPhase('reading the NAND');
     await initNand();
+    await updateRam();
   } catch (err) {
     failLoad('The core could not be started: ' + (err as Error).message);
     log('core failed to start: ' + (err as Error).message, 'err');

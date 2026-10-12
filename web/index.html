@@ -61,7 +61,6 @@
     <div class="spacer"></div>
 
     <div class="topbar-status">
-      <span class="chip" id="state" data-state="idle">idle</span>
       <span class="readout" id="fps" title="Frames presented per second">- fps</span>
       <span class="readout" id="frame-ms"
             title="Wall clock spent emulating each presented frame - the run slices only, not the canvas copy">- ms</span>
@@ -205,10 +204,10 @@
   </dialog>
 
   <footer class="statusbar">
-    <span class="item">PC <b id="pc">-</b></span>
-    <span class="item" title="Guest instructions executed, and how many a second while running">Instructions <b id="instructions">0</b></span>
+    <span class="item" id="pc-item" hidden>PC <b id="pc">-</b></span>
+    <span class="item" id="instructions-item" hidden title="Guest instructions executed, and how many a second while running">Instructions <b id="instructions">0</b></span>
     <span class="item" id="ram-item" title="Guest RAM the emulated console has touched (wasm heap in brackets)">RAM <b id="ram">-</b></span>
-    <span class="item">Res <b id="res">-</b></span>
+    <span class="item" id="res-item" hidden>Res <b id="res">-</b></span>
     <span class="item">Input <b id="input-state">none</b></span>
     <span class="spacer"></span>
     <span class="item dim" id="wasm-ver">starting core…</span>

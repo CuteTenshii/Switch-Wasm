@@ -254,7 +254,7 @@ export async function updatePc(): Promise<void> {
 }
 
 // Guest RAM is pages the guest touched; the wasm figure is the worker's linear memory.
-async function updateRam(): Promise<void> {
+export async function updateRam(): Promise<void> {
   const ram = await call('ram');
   if (!ram) return;
   $('ram').textContent = `${formatBytes(ram.guest)} (${formatBytes(ram.wasm)})`;
