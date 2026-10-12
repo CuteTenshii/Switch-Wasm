@@ -110,16 +110,21 @@ try {
   }
 
   let pageConsole = '(the page crashed, and its console went with it)';
+  let rendering = '(not read)';
   if (!crashed) {
-    // Clicked from script because the debug panel is closed.
-    await page.evaluate(() => document.getElementById('btn-gpustats').click());
+    // The Rendering section refreshes only while it is on screen.
+    if (!(await page.locator('body.panel-open').count())) await page.locator('#btn-panel').click();
+    await page.getByRole('tab', { name: 'Debug' }).click();
+    await page.getByRole('button', { name: 'Graphics' }).click();
     await page.waitForTimeout(3000);
+    rendering = await page.locator('#render-debug-section').innerText();
     pageConsole = await page.evaluate(() =>
       [...document.getElementById('console').children]
         .map((row) => row.textContent + (row.dataset.repeat ? `  (x${row.dataset.repeat})` : ''))
         .join('\n'));
   }
-  const report = `${lines.join('\n')}\n=== the page's console ===\n${pageConsole}\n`;
+  const report = `${lines.join('\n')}\n=== rendering ===\n${rendering}\n`
+    + `=== the page's console ===\n${pageConsole}\n`;
   if (out) {
     writeFileSync(out, report);
     console.log(`wrote ${out}`);

@@ -30,7 +30,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 ## `tools/browser_boot.mjs`
 
-- Samples run state and console row count every 5 s so stalls are observed, then presses "GPU stats" and saves the full console, periodic thread reports included. WebGPU is force-enabled (headless Chromium leaves it off); headless adapters are usually SwiftShader, valid for draw-path coverage but not speed. `--jit-stats` deltas between samples show what the translator and emitter did, which only the browser build can measure. Each run uses a fresh profile so stored keys, SD card, saves and NAND do not leak between runs.
+- Samples run state and console row count every 5 s so stalls are observed, then saves the Debug panel's Rendering section and the full console, periodic thread reports included. WebGPU is force-enabled (headless Chromium leaves it off); headless adapters are usually SwiftShader, valid for draw-path coverage but not speed. `--jit-stats` deltas between samples show what the translator and emitter did, which only the browser build can measure. Each run uses a fresh profile so stored keys, SD card, saves and NAND do not leak between runs.
 
 ## `crates/switch-core/examples/difftest.rs`
 

@@ -844,6 +844,14 @@ body.resizing {
   white-space: nowrap;
 }
 
+.debug-list {
+  margin: 0;
+  padding-left: 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .debug-timings {
   width: 100%;
   table-layout: fixed;

@@ -64,7 +64,7 @@ The `.nro`/`.nsp` files are gitignored.
   paint. The timing table separates the worker run slice, the wait for
   `requestAnimationFrame`, the frame-counter message, the framebuffer transfer,
   and the synchronous canvas write. Renderer work before the worker hands a
-  frame to the page remains under **Renderer stats** beside it.
+  frame to the page is in the **Rendering** section above it.
 - The channels to start from when a title misbehaves without faulting are the
   low-volume ones. `TRACE_FS` names every filesystem request, its path and the
   `Result` it was answered with (`2002-0001` is path-not-found), so a title

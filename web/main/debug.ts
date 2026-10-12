@@ -1,14 +1,15 @@
 // The debug panel: instruction tracing, register dumps, and the trace buffer
 // the emulator also uses for diagnostics.
 
+import type { GpuReport } from '../shared/protocol';
 import type { LogClass } from './log';
 import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
-import { $ } from './dom';
+import { $, el } from './dom';
 import { formatBytes } from './format';
 import { log, logBlock } from './log';
-import { call } from './rpc';
+import { call, hasSession } from './rpc';
 import { openPanel, setNote } from './shell';
 
 const traceCb = $<HTMLInputElement>('trace-cb');
@@ -25,7 +26,10 @@ function selectDebugGroup(name: string): void {
   for (const section of debugSections) {
     section.hidden = section.dataset.debugSection !== name;
   }
-  if (name === 'graphics') updateDisplayDebug();
+  if (name === 'graphics') {
+    updateDisplayDebug();
+    if (hasSession()) void updateRenderDebug();
+  }
 }
 
 for (const button of debugGroups) {
@@ -102,72 +106,76 @@ $('btn-jitstats').addEventListener('click', async () => {
   );
 });
 
-$('btn-gpustats').addEventListener('click', async () => {
-  const g = await call('gpu_report');
-  openPanel('console');
-  if (!g.backend) {
-    log('rendering: the software rasterizer has the frame - no device is installed.');
-    return;
+const renderSection = $<HTMLDetailsElement>('render-debug-section');
+
+const RENDER_PHASES = ['translate', 'upload', 'modules', 'pipeline', 'encode', 'flush'] as const;
+
+// Who draws, in a word for the badge and a sentence for the section.
+function renderState(g: GpuReport): [string, string, boolean] {
+  if (!g.backend) return ['software', 'No device: the software rasterizer draws every frame.', false];
+  if (g.gaveUp) {
+    const why = g.lostBecause ? ` (${g.lostBecause})` : '';
+    return ['lost', `The device was lost${why}: the rasterizer draws every frame.`, false];
   }
+  if (g.softwareFrame) {
+    return ['software', 'A draw fell back, so the rasterizer draws until the device can take whole '
+      + 'frames again.', false];
+  }
+  return ['device', 'The device draws.', true];
+}
+
+function showList(block: string, list: string, items: string[]): void {
+  $(block).hidden = !items.length;
+  $(list).replaceChildren(...items.map((item) => el('li', null, item)));
+}
+
+async function updateRenderDebug(): Promise<void> {
+  const g = await call('gpu_report');
+  const [badge, status, on] = renderState(g);
+  setNote('render-debug-badge', badge, on);
+  const unlatched = g.unlatched ? ` It has handed frames back to the device ${g.unlatched} time(s).` : '';
+  $('render-status').textContent = status + unlatched;
+  $('render-debug-data').hidden = !g.backend;
+  showList('render-reasons-block', 'render-reasons', g.reasons ?? []);
+  const errors = g.deviceErrors ?? [];
+  const repeats = (g.deviceErrorCount ?? 0) - errors.length;
+  showList('render-errors-block', 'render-errors',
+    repeats > 0 ? [...errors, `and ${repeats} repeat(s)`] : errors);
+  if (!g.backend) return;
+
   const drawn = g.drawn ?? 0;
   const fallbacks = g.fallbacks ?? 0;
-  const errors = g.deviceErrorCount ?? 0;
   const share = drawn + fallbacks ? ((drawn * 100) / (drawn + fallbacks)).toFixed(1) : '0';
-  log(
-    `rendering: ${drawn} draws on the device, ${fallbacks} fell back (${share}% device), `
-    + `${errors} rejected, `
-    + `${g.pipelines ?? 0} pipelines, ${g.modules ?? 0} modules, `
-    + `${g.held ?? 0} surfaces held (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`,
-  );
-  if (g.gaveUp) {
-    const why = g.lostBecause ? `: ${g.lostBecause}` : '';
-    log(`rendering: the device was lost - the rasterizer has every frame${why}.`, 'err');
-  } else if (g.softwareFrame) {
-    log('rendering: the software-frame latch has tripped - the rasterizer has the frames until the device could draw them all.', 'err');
-  }
-  if (g.unlatched) log(`rendering: the software-frame latch has let go ${g.unlatched} time(s).`);
-  for (const why of g.reasons ?? []) log('  fell back: ' + why);
-  // A rejected draw is still counted as drawn; this line contradicts a clean 100%.
-  if (errors) {
-    const distinct = g.deviceErrors ?? [];
-    const rest = errors - distinct.length;
-    log(
-      `rendering: the device rejected ${errors} thing(s) - the draws above were counted anyway.`
-      + (rest > 0 ? ` ${distinct.length} distinct, ${rest} repeat(s).` : ''),
-      'err',
-    );
-    for (const e of distinct) log('  device rejected: ' + e, 'err');
-  }
+  $('render-drawn').textContent = `${drawn} (${share}%)`;
+  $('render-fallbacks').textContent = String(fallbacks);
+  $('render-rejected').textContent = String(g.deviceErrorCount ?? 0);
+  $('render-pipelines').textContent = String(g.pipelines ?? 0);
+  $('render-modules').textContent = String(g.modules ?? 0);
+  $('render-held').textContent = `${g.held ?? 0} (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`;
+  const hits = g.textureHits ?? 0;
+  const lookups = hits + (g.textureMisses ?? 0);
+  $('render-texture-hits').textContent = lookups ? `${((hits * 100) / lookups).toFixed(1)}%` : '-';
   const r = g.read;
-  if (r) {
-    const mib = (v: number) => (v / (1024 * 1024)).toFixed(1);
-    log(
-      `  read from guest memory: ${mib(r.textures)} MiB textures, ${mib(r.vertex)} MiB vertices, `
-      + `${mib(r.constants)} MiB constants, ${mib(r.index)} MiB indices`,
-    );
-    const hits = g.textureHits ?? 0;
-    const misses = g.textureMisses ?? 0;
-    const rate = hits + misses ? ((hits * 100) / (hits + misses)).toFixed(1) : '0';
-    log(`  texture cache: ${hits} hits, ${misses} misses (${rate}%)`);
+  $('render-read').textContent = formatBytes(r ? r.textures + r.vertex + r.constants + r.index : 0);
+  const frames = Math.max(g.frames ?? 0, 1);
+  for (const phase of RENDER_PHASES) {
+    const total = g.times?.[phase];
+    $(`render-${phase}-frame`).textContent = total === undefined ? '-' : (total / frames).toFixed(1);
+    $(`render-${phase}-total`).textContent = total === undefined ? '-' : String(total);
   }
-  const t = g.times;
-  if (t) {
-    log(
-      `  device time (${g.frames ?? 0} frames): translate ${t.translate}ms, upload ${t.upload}ms, `
-      + `modules ${t.modules}ms, pipeline ${t.pipeline}ms, encode ${t.encode}ms, `
-      + `flush ${t.flush}ms`,
-    );
-    if (t.flushLand !== undefined) {
-      const frames = Math.max(g.frames ?? 0, 1);
-      const per = (v: number) => (v / frames).toFixed(1);
-      log(
-        `    flush: ask ${t.flushAsk}ms (${per(t.flushAsk ?? 0)}/frame), `
-        + `wait ${t.flushWait}ms (${per(t.flushWait ?? 0)}/frame), `
-        + `land ${t.flushLand}ms (${per(t.flushLand)}/frame)`,
-      );
-    }
-  }
+}
+
+// On screen: the panel shows the debug tab, the Graphics group, and the section is open.
+function renderSectionShown(): boolean {
+  return renderSection.open && renderSection.offsetParent !== null;
+}
+
+renderSection.addEventListener('toggle', () => {
+  if (renderSectionShown()) void updateRenderDebug();
 });
+setInterval(() => {
+  if (renderSectionShown() && hasSession()) void updateRenderDebug();
+}, 1000);
 
 const displayDebugSection = $<HTMLDetailsElement>('display-debug-section');
 

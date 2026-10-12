@@ -30,6 +30,8 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await expect(display.locator('#display-debug-badge')).not.toHaveText('no samples');
   await expect(display.locator('#display-debug-data')).toBeVisible();
+  // The renderer's state shows in its own section, not the log.
+  await expect(page.locator('#render-debug-badge')).toHaveText(/^(device|software|lost)$/);
 
   await display.getByRole('button', { name: 'Reset samples' }).click();
   await expect(display.locator('#display-debug-badge')).toHaveText('no samples');
