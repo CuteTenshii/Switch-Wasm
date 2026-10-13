@@ -295,7 +295,7 @@ stored, not answered: one caller writes, another reads back.
 - Map-alias descriptors are read as low 32 bits only since guest memory is `u32`-indexed.
 - Receive-static descriptors sit after the raw data (`IProfile::Get`'s `AccountUserData`).
 - Copy vs move handles live in different descriptor fields in that order; a copy handle in the move slot reads as 0 (`nnSdk` waited on handle 0 after `GetGpuErrorDetectedSystemEvent`).
-- Reply type field must be 0: libtransistor rejects anything but 0 or 4 (error 0x7E0DD; sdl-hello failed to open fsp-srv).
+- Reply type field must be 0: libtransistor rejects anything but 0 or 4 (error 0x7E0DD; a libtransistor title failed to open fsp-srv).
 - Replies are written over the request, so the declared section is zeroed first: `ListDisplayModes` once read its count from the previous request's bytes and cost the Home Menu a billion instructions.
 - Plain sessions (libtransistor never converts to domains) need a real moved session handle for sub-interfaces; domain objects broke `fsp_srv_open_sd_card_filesystem`.
 - `nnSdk` sends control messages as type 7 (with context) and requests as 6; testing `== 5` made `appletOE`'s first `QueryPointerBufferSize` look like command 3. Domain-ness is the domain header's type byte, not the hipc type. A domain close has no `CmifInHeader`, and the SFCI scan would otherwise find the previous request's command id (`appletExit` looked like many command 0s). `ssl` context counts and Opus decoder state (about 1 MB each) are released on close. `QueryPointerBufferSize` is answered before dispatch in `svc.rs`.

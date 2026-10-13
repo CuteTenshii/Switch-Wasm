@@ -356,7 +356,7 @@ fn movi_modified_immediate_cmodes() {
     // mvni v6.4s, #0x1c  → ~0x1c per word
     let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x6f000786, nop()]);
     assert_eq!(cpu.read_vreg(6), 0xffffffe3_ffffffe3_ffffffe3_ffffffe3);
-    // movi d8, #0  (the encoding sdl-hello hit) → zero, upper half included
+    // movi d8, #0  → zero, upper half included
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(8, u128::MAX);
     let cpu = run_program(cpu, 0x1000, &[0x2f00e408, nop()]);
