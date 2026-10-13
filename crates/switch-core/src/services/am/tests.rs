@@ -557,6 +557,24 @@ fn library_applet(applet_id: u32) -> (Cpu, u64) {
 }
 
 #[test]
+fn a_library_applet_accessor_accepts_command_90() {
+    let (mut cpu, accessor) = library_applet(APPLET_WEB);
+    write_request(&mut cpu, 90, &[0u8; 0x20]);
+    cpu.applet_request(TLS, accessor, Some(90)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+}
+
+#[test]
+fn an_applet_sees_no_current_application() {
+    let mut cpu = request(false, 70, &[]);
+    cpu.register_service_handle(9, "am:library-applet-self-accessor");
+    cpu.mem.write_u64(TLS + 0x20, u64::MAX).unwrap();
+    cpu.applet_request(TLS, 9, Some(70)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+    assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "application id");
+}
+
+#[test]
 fn the_keyboard_and_the_controller_applet_pop_three_storages() {
     const SWKBD: u64 = 0x0100_0000_0000_1008;
     const CONTROLLER: u64 = 0x0100_0000_0000_1003;

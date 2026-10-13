@@ -656,6 +656,8 @@ impl Cpu {
                 }
                 // CanUseApplicationCore.
                 Some(13) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // GetCurrentApplicationId: no application runs beside an applet.
+                Some(70) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
                 // GetMainAppletApplicationDesiredLanguage.
                 Some(60) => {
                     let code = self.system_settings().language_code;
@@ -945,6 +947,8 @@ impl Cpu {
                     }
                     // RequestForAppletToGetForeground.
                     Some(150) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    // 20.0.0+, unnamed: a 32-byte input, no output; qlaunch aborts if it fails.
+                    Some(90) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     // GetIndirectLayerConsumerHandle.
                     _ => self.unimplemented_command(tls, &iface, cmd_id),
                 }
