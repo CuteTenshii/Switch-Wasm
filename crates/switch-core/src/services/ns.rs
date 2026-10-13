@@ -344,6 +344,8 @@ impl Cpu {
             }
             // 20.0.0+, unnamed: one u64 out, 0 (as in Eden).
             Some(4023) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+            // 20.0.0+, unnamed: no input, no output; qlaunch panics if it fails.
+            Some(4053) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             _ => self.unimplemented_command(tls, iface, cmd_id),
         }
     }
@@ -552,6 +554,14 @@ mod tests {
             0,
             "an unrecorded title fails"
         );
+    }
+
+    #[test]
+    fn app_manager_4053_succeeds() {
+        let mut cpu = request(false, 4053, &[]);
+        cpu.register_service_handle(9, "ns:app-manager");
+        cpu.ns_request(TLS, 9, Some(4053)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
     }
 
     #[test]
