@@ -221,6 +221,9 @@ export interface Commands {
   parse_nca(header: Bytes): string;
 
   run(budget: number): number;
+  // The worker runs slices itself until paused, halted or faulted, reporting each.
+  start_loop(tracing: boolean): number;
+  pause_loop(): number;
   halted(): number;
   guest_fatal(): string;
   drain_output(): Bytes;
@@ -249,6 +252,7 @@ export interface Commands {
   sd_take_changes(): FsChange[];
 
   save_ids(): string[];
+  saves_pending(): boolean;
   save_take_changes(id: string): FsChange[];
   save_write_file(id: string, path: string, bytes: Bytes): number;
   save_create_dir(id: string, path: string): number;
@@ -288,9 +292,40 @@ export interface CallRequest {
 // Log level; DevTools mirrors `err`/`warn` as named, `ok` as info, `dim` as debug, none as log.
 export type LogClass = 'err' | 'warn' | 'ok' | 'dim';
 
-// `log` is unprompted worker output, routed through the page's log.
+// What the worker gathers every few slices, so the page polls for nothing.
+export interface Housekeeping {
+  steps: number;
+  ram: { guest: number; wasm: number };
+  // Guest console output and core diagnostics since the last report.
+  output: string;
+  trace: string;
+  // Changed since the last report; the page reads the contents itself.
+  sdChanged: boolean;
+  savesChanged: boolean;
+  profilesEdited: boolean;
+  keyboard: KeyboardRequest | null;
+  errors: ErrorDialog[];
+}
+
+// One slice of the worker's run loop.
+export interface SliceReport {
+  // Retired this slice; fewer than `budget` means the guest halted, negative a fault.
+  steps: number;
+  budget: number;
+  ms: number;
+  // The loop has ended: paused, halted or faulted.
+  stopped: boolean;
+  frame: number;
+  audio: { rate: number; channels: number; pcm: Bytes } | null;
+  housekeeping: Housekeeping | null;
+}
+
+// `log` is unprompted worker output, routed through the page's log; `slice` and
+// `loop_failed` come from the worker's run loop.
 export type WorkerMessage =
   | { type: 'ready'; error?: string }
   | { type: 'log'; text: string; cls?: LogClass }
+  | { type: 'slice'; report: SliceReport }
+  | { type: 'loop_failed'; error: string }
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: string };

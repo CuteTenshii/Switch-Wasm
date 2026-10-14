@@ -2,7 +2,7 @@
 
 import type { ErrorDialog } from '../shared/protocol';
 import { $ } from './dom';
-import { call, hasSession } from './rpc';
+import { hasSession } from './rpc';
 
 const dialogEl = $<HTMLDialogElement>('error-dialog');
 const messageEl = $('error-dialog-message');
@@ -15,14 +15,23 @@ function show(error: ErrorDialog): void {
   dialogEl.showModal();
 }
 
-// Show the next error once the last one is dismissed.
-export async function pollErrors(): Promise<void> {
-  if (dialogEl.open || !hasSession()) return;
-  const error = await call('error_dialog');
-  if (error && !dialogEl.open) show(error);
+// Errors not shown yet; the next appears once the last is dismissed.
+const queued: ErrorDialog[] = [];
+
+function showNext(): void {
+  const next = queued.shift();
+  if (next && hasSession()) show(next);
 }
+
+export function offerErrors(errors: ErrorDialog[]): void {
+  queued.push(...errors);
+  if (!dialogEl.open) showNext();
+}
+
+dialogEl.addEventListener('close', showNext);
 
 // For a session being replaced: its errors go with it.
 export function dropErrors(): void {
+  queued.length = 0;
   dialogEl.close();
 }

@@ -120,6 +120,12 @@ async function stageIfIdle(): Promise<void> {
 // Stores profile edits made by system software through `acc`.
 export async function pullProfileEdits(): Promise<void> {
   if (!hasSession() || !(await call('users_take_edits'))) return;
+  await storeProfileEdits();
+}
+
+// Store the profiles the guest edited, once told it did.
+export async function storeProfileEdits(): Promise<void> {
+  if (!hasSession()) return;
   for (const edited of await call('users_read')) {
     const profile = profiles.find((p) => p.uid === edited.uid);
     if (!profile) continue;

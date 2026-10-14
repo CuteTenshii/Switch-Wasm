@@ -1,7 +1,8 @@
 // The run loop, and the status bar it keeps up to date.
 
 import { Pause, Play } from 'lucide';
-import { pumpAudio } from './audio';
+import type { Housekeeping, SliceReport } from '../shared/protocol';
+import { playAudio } from './audio';
 import { showEmulatorCrash, showGuestCrash } from './crash';
 import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
 import { abortDisplay, countEmulation, flushDisplay, schedulePresentIfNewFrame } from './display';
@@ -10,29 +11,18 @@ import { $ } from './dom';
 import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
 import { icon } from './icons';
-import { dropErrors, pollErrors } from './errors';
-import { dropKeyboard, pollKeyboard } from './keyboard';
+import { dropErrors, offerErrors } from './errors';
+import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log, logBlock, type LogClass } from './log';
-import { call, readLastError } from './rpc';
+import { call, onLoopEvents, readLastError } from './rpc';
 import { saveFlush } from './saves';
 import { sdFlush } from './sdcard';
-import { pullProfileEdits } from './users';
+import { pullProfileEdits, storeProfileEdits } from './users';
 import { loaded, panelOpen, setPanel, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
 
-// Run in worker slices sized to about one display frame, so input and painting interleave.
-const SLICE_TARGET_MS = 16;
-const FIRST_SLICE = 1_000_000;
-const MIN_SLICE = 100_000;
-const MAX_SLICE = 50_000_000;
-// Slices between debug panel refreshes.
-const HOUSEKEEPING_EVERY = 8;
-// Tracing prints a line per instruction.
-const TRACE_SLICE = 5000;
-
 let running = false;
-let pauseRequested = false;
 // Set when the session is being freed, so the loop must not touch it again.
 let aborted = false;
 
@@ -49,81 +39,80 @@ function nothingLoaded(): boolean {
   return true;
 }
 
+// Start the worker's loop, or ask it to pause after the slice in flight.
 export async function run(): Promise<void> {
   if (running) {
-    pauseRequested = true;
+    await call('pause_loop');
     return;
   }
   if (nothingLoaded()) return;
   running = true;
-  pauseRequested = false;
   aborted = false;
   countedAt = 0;
   setRunButton(true);
   setState('running');
   holdWakeLock();
-  const tracing = traceEnabled();
-  let slice = tracing ? TRACE_SLICE : FIRST_SLICE;
-  let steps: number;
-  let tick = 0;
-  try {
-    for (;;) {
-      const sliceAt = performance.now();
-      steps = await call('run', slice);
-      const sliceMs = performance.now() - sliceAt;
-      countEmulation(sliceMs);
-      recordRunSlice(sliceMs);
-      // Reset does not wait for the in-flight slice, so the session may be gone.
-      if (aborted) return;
-      // Yield to the page; display snapshots are paced separately.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      if (aborted) return;
-      // A short slice means the machine halted.
-      const done = steps < 0 || steps < slice;
-      if (!tracing) {
-        const scale = Math.min(2, Math.max(0.5, SLICE_TARGET_MS / Math.max(sliceMs, 0.1)));
-        slice = Math.min(MAX_SLICE, Math.max(MIN_SLICE, Math.round(slice * scale)));
-      }
-      await pumpAudio();
-      if (done || ++tick % HOUSEKEEPING_EVERY === 0) {
-        await Promise.all([
-          updateReadouts(), drainOutput(), drainDiagnostics(), sdFlush(), saveFlush(), pullProfileEdits(),
-          pollKeyboard(), pollErrors(),
-        ]);
-      }
-      schedulePresentIfNewFrame();
-      if (done) break;
-      if (pauseRequested) {
-        endLoad();
-        setState('paused');
-        await flushDisplay();
-        return;
-      }
-    }
-  } catch (err) {
-    // A failure after a reset is expected; anything else is reported.
-    if (!aborted) {
-      setState('fault');
-      // A panic traps as `unreachable`; `switch_last_error` recovers its message.
-      let why = (err as Error).message;
-      try {
-        const captured = await readLastError();
-        if (captured) why += ' - ' + captured;
-      } catch {
-        // The module may be too far gone to answer.
-      }
-      log('The run loop stopped: ' + why, 'err');
-      // Linear memory survives a trap, so the context can still be read.
-      await reportPanicContext();
-      showEmulatorCrash(why);
-    }
+  await call('start_loop', traceEnabled());
+}
+
+function loopEnded(): void {
+  running = false;
+  setRunButton(false);
+  releaseWakeLock();
+}
+
+onLoopEvents({
+  slice: (report) => void onSlice(report),
+  failed: (error) => void onFailed(error),
+});
+
+async function onSlice(report: SliceReport): Promise<void> {
+  countEmulation(report.ms);
+  recordRunSlice(report.ms);
+  // Reset does not wait for the slice in flight, so the session may be gone.
+  if (aborted) return;
+  if (report.audio) void playAudio(report.audio);
+  if (report.housekeeping) applyHousekeeping(report.housekeeping);
+  schedulePresentIfNewFrame();
+  if (!report.stopped) return;
+  loopEnded();
+  if (report.steps >= 0 && report.steps >= report.budget) {
+    endLoad();
+    setState('paused');
+    await flushDisplay();
     return;
-  } finally {
-    running = false;
-    setRunButton(false);
-    releaseWakeLock();
   }
-  await finishRun(steps);
+  await finishRun(report.steps);
+}
+
+function applyHousekeeping(h: Housekeeping): void {
+  showReadouts(h.steps, h.ram);
+  logOutput(h.output);
+  logTrace(h.trace);
+  if (h.sdChanged) void sdFlush();
+  if (h.savesChanged) void saveFlush();
+  if (h.profilesEdited) void storeProfileEdits();
+  offerKeyboard(h.keyboard);
+  offerErrors(h.errors);
+}
+
+async function onFailed(error: string): Promise<void> {
+  loopEnded();
+  // A failure after a reset is expected; anything else is reported.
+  if (aborted) return;
+  setState('fault');
+  // A panic traps as `unreachable`; `switch_last_error` recovers its message.
+  let why = error;
+  try {
+    const captured = await readLastError();
+    if (captured) why += ' - ' + captured;
+  } catch {
+    // The module may be too far gone to answer.
+  }
+  log('The run loop stopped: ' + why, 'err');
+  // Linear memory survives a trap, so the context can still be read.
+  await reportPanicContext();
+  showEmulatorCrash(why);
 }
 
 // Each piece is asked for separately so one failure costs only that piece.
@@ -147,10 +136,9 @@ async function reportPanicContext(): Promise<void> {
     'warn');
 }
 
-// Stops the loop for Reset without waiting for the slice.
+// Stops the loop for Reset without waiting for the slice; freeing the session ends it.
 export function abortRun(): void {
   aborted = true;
-  pauseRequested = true;
   running = false;
   abortDisplay();
   dropKeyboard();
@@ -162,7 +150,7 @@ $('btn-run').addEventListener('click', run);
 
 $('btn-step').addEventListener('click', async () => {
   if (running) {
-    pauseRequested = true;
+    await call('pause_loop');
     return;
   }
   if (nothingLoaded()) return;
@@ -201,8 +189,12 @@ const GUEST_LEVELS: Record<string, LogClass> = {
 
 export async function drainOutput(): Promise<void> {
   const bytes = await call('drain_output');
-  if (!bytes || !bytes.length) return;
-  for (const line of new TextDecoder().decode(bytes).replace(/\n$/, '').split('\n')) {
+  if (bytes && bytes.length) logOutput(new TextDecoder().decode(bytes));
+}
+
+function logOutput(text: string): void {
+  if (!text) return;
+  for (const line of text.replace(/\n$/, '').split('\n')) {
     log(line, GUEST_LEVELS[/^\[lm\/([A-Z]+)/.exec(line)?.[1] ?? '']);
   }
 }
@@ -239,8 +231,11 @@ let countedInstructions = 0;
 let countedAt = 0;
 
 export async function updateReadouts(): Promise<void> {
-  // Instructions retired, not the clock, which jumps while threads idle.
-  const instructions = await call('get_steps');
+  showReadouts(await call('get_steps'), await call('ram'));
+}
+
+// Instructions retired, not the clock, which jumps while threads idle.
+function showReadouts(instructions: number, ram: Housekeeping['ram']): void {
   const at = performance.now();
   // Only while running; a count that went backwards is a new session.
   const seconds = (at - countedAt) / 1000;
@@ -251,12 +246,14 @@ export async function updateReadouts(): Promise<void> {
   $('instructions').textContent = fmtCount(instructions) + rate;
   countedInstructions = instructions;
   countedAt = at;
-  await updateRam();
+  showRam(ram);
 }
 
 // Guest RAM is pages the guest touched; the wasm figure is the worker's linear memory.
 export async function updateRam(): Promise<void> {
-  const ram = await call('ram');
-  if (!ram) return;
+  showRam(await call('ram'));
+}
+
+function showRam(ram: Housekeeping['ram']): void {
   $('ram').textContent = `${formatBytes(ram.guest)} (${formatBytes(ram.wasm)})`;
 }

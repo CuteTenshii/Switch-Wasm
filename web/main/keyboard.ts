@@ -47,10 +47,8 @@ async function answer(text: string | null): Promise<void> {
 }
 
 // Open the dialog when the guest starts waiting for text.
-export async function pollKeyboard(): Promise<void> {
-  if (shown || !hasSession()) return;
-  const request = await call('keyboard_request');
-  if (request && !shown) show(request);
+export function offerKeyboard(request: KeyboardRequest | null): void {
+  if (request && !shown && hasSession()) show(request);
 }
 
 // For a session being replaced: its keyboard goes with it.

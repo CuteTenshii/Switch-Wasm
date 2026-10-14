@@ -1,14 +1,11 @@
 // Schedules the guest's PCM back to back; underruns restart slightly ahead of
 // `currentTime`. Playback stats go to the log at most once a second.
 
+import type { SliceReport } from '../shared/protocol';
 import { log } from './log';
-import { call } from './rpc';
 
 let audioCtx: AudioContext | null = null;
 let audioCursor = 0;
-// One second of 48 kHz stereo, matching the core's queue cap.
-const AUDIO_MAX_PULL = 96000;
-
 const REPORT_EVERY_MS = 1000;
 
 // Played seconds and gaps since the last report.
@@ -44,14 +41,9 @@ function reportPlayback(): void {
   silence = 0;
 }
 
-export async function pumpAudio(): Promise<void> {
-  const packed = await call('audio_format');
-  if (!packed) return;
-  const rate = packed & 0x00ffffff;
-  const channels = packed >>> 24;
-  if (!rate || !channels) return;
-  const bytes = await call('audio_pull', AUDIO_MAX_PULL);
-  if (!bytes || bytes.length < channels * 2) return;
+// Schedule what one slice produced.
+export async function playAudio({ rate, channels, pcm: bytes }: NonNullable<SliceReport['audio']>,
+): Promise<void> {
   if (!audioCtx) {
     const Ctx = window.AudioContext
       || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;

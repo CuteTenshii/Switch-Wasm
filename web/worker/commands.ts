@@ -8,6 +8,7 @@ import { fmtSize } from '../shared/format';
 import { noteRegistered, resetActivity } from './activity';
 import { addHostFile, openHostFile, resetHostFiles } from './hostfiles';
 import { workerLog } from './log';
+import { pauseLoop, startLoop, stopLoop } from './loop';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
   api,
@@ -91,6 +92,7 @@ export const CMD: CommandHandlers = {
     return state.handle;
   },
   free_session() {
+    stopLoop();
     api().switch_free_session(handle());
     state.handle = -1;
     resetInput();
@@ -304,6 +306,14 @@ export const CMD: CommandHandlers = {
     releaseLatchIfSeen();
     return steps;
   },
+  start_loop(tracing) {
+    startLoop(tracing);
+    return 0;
+  },
+  pause_loop() {
+    pauseLoop();
+    return 0;
+  },
   halted() {
     return api().switch_halted(handle());
   },
@@ -436,6 +446,11 @@ export const CMD: CommandHandlers = {
       (buf, cap) => api().switch_save_ids_json(handle(), buf, cap),
       [],
     );
+  },
+  saves_pending() {
+    if (handle() < 0) return false;
+    const ids = CMD.save_ids() as string[];
+    return ids.some((id) => api().switch_save_pending_changes(handle(), ...saveKey(id)) !== 0);
   },
   save_take_changes(id) {
     if (handle() < 0) return [];

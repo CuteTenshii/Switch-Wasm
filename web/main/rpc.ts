@@ -1,6 +1,6 @@
 // Promise-based RPC to the emulator worker over postMessage.
 
-import type { CallRequest, Commands, WorkerMessage } from '../shared/protocol';
+import type { CallRequest, Commands, SliceReport, WorkerMessage } from '../shared/protocol';
 import { log } from './log';
 
 let worker: Worker | null = null;
@@ -12,6 +12,16 @@ const readyPromise = new Promise<void>((r) => {
 
 // Mirrors the worker's session handle.
 let session = -1;
+
+// The run loop's handlers for what the worker's loop reports; set by `runloop.ts`.
+let loopEvents: {
+  slice: (report: SliceReport) => void;
+  failed: (error: string) => void;
+} | null = null;
+
+export function onLoopEvents(handlers: NonNullable<typeof loopEvents>): void {
+  loopEvents = handlers;
+}
 
 let msgId = 0;
 const pending = new Map<number, {
@@ -58,6 +68,14 @@ export function initWorker(): void {
     const d = e.data;
     if ('type' in d && d.type === 'log') {
       log(d.text, d.cls);
+      return;
+    }
+    if ('type' in d && d.type === 'slice') {
+      loopEvents?.slice(d.report);
+      return;
+    }
+    if ('type' in d && d.type === 'loop_failed') {
+      loopEvents?.failed(d.error);
       return;
     }
     if ('type' in d) {
