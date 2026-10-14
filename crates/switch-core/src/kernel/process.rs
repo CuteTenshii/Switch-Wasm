@@ -17,7 +17,7 @@ pub(crate) enum Ending {
     Terminated,
 }
 
-/// The pid of the process a session boots.
+/// The pid of the process a session starts with.
 pub(crate) const ROOT_PID: u64 = 1;
 
 #[derive(Debug)]
@@ -219,10 +219,10 @@ impl Process {
 }
 
 impl Cpu {
-    /// End the running process. The booted title ending halts the console; any other
+    /// End the running process. The title ending halts the console; any other
     /// process ends once the `svc` that ended it has replied.
     pub(crate) fn exit_process(&mut self, ending: Ending) {
-        if self.pid == ROOT_PID {
+        if self.pid == self.root {
             self.halted = true;
         } else {
             self.process_ending = Some(ending);
@@ -265,7 +265,14 @@ impl Cpu {
                 return;
             }
         }
-        let ended = self.machine.processes.remove(&pid).expect("checked above");
+        self.drop_process(pid);
+    }
+
+    /// Free process `pid`: its memory, handles, translated code, GPU files and layer.
+    fn drop_process(&mut self, pid: u64) {
+        let Some(ended) = self.machine.processes.remove(&pid) else {
+            return;
+        };
         self.release_handles(ended.handles.into_keys());
         self.forget_translations(pid);
         self.machine.nv.close_process(pid);
@@ -273,6 +280,63 @@ impl Cpu {
         if self.pending_present.is_some_and(|(owner, _)| owner == pid) {
             self.pending_present = None;
         }
+    }
+
+    /// End the title and every process it started, leaving an empty process for the next
+    /// title to boot into. Storage, users, settings and devices stay as they are.
+    pub fn end_title(&mut self) {
+        let ended = self.pids();
+        let pid = self.create_process();
+        self.enter_process(pid);
+        self.root = pid;
+        for old in ended {
+            self.drop_process(old);
+        }
+        // The core's own registers belonged to the ended title's running thread.
+        self.mode = ExecMode::A64;
+        self.cpsr_q = false;
+        self.cpsr_ge = 0;
+        self.fpscr_nzcv = 0;
+        self.regs = [0; REG_FILE];
+        self.regs[SP_SLOT] = STACK_TOP;
+        self.pc = 0;
+        self.nzcv = 0;
+        self.vregs = VRegs::default();
+        self.fpcr = 0;
+        self.fpsr = 0;
+        self.tpidr = u64::from(MAIN_THREAD_TLS_BASE);
+        self.tpidr_rw = 0;
+        self.current_thread = 0;
+        self.exclusive = None;
+        self.process_ending = None;
+        self.pending_yield = false;
+        self.pending_sleep = None;
+        self.halted = false;
+        self.forget_title_state();
+    }
+
+    /// Console state that only meant something to the ended title.
+    fn forget_title_state(&mut self) {
+        self.display = crate::display::BufferQueue::new();
+        let (width, height) = self.operation_mode.display_size();
+        self.display.set_default_size(width, height);
+        self.shared_buffer = None;
+        self.shared_buffer_slot = 0;
+        // Frames count the title's presents; the host waits for its first.
+        self.nv.gpu.frames = 0;
+        self.last_vsync_frame = 0;
+        self.npad_style_set = 0;
+        self.npad_joy_hold_type = 0;
+        self.vibration = (0.0, 0.0);
+        self.error_dialogs.clear();
+        self.am_terminate_result = 0;
+        self.audio_pcm.clear();
+        self.audio_format = (0, 0);
+        self.thread_log.clear();
+        self.thread_log_dropped = 0;
+        // So the next title is told about what it asks for that nothing answers.
+        self.unimplemented_ipc.clear();
+        self.stubbed_ipc.clear();
     }
 
     pub(crate) fn pids(&self) -> Vec<u64> {
@@ -386,5 +450,56 @@ mod tests {
     #[test]
     fn translated_code_stays_with_its_process() {
         two_processes_storing(true);
+    }
+
+    #[test]
+    fn ending_a_title_leaves_one_fresh_process_and_the_console_as_it_was() {
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        store_forever(&mut cpu, 1);
+        cpu.pc = CODE;
+        cpu.regs[0] = u64::from(WORD);
+        let applet = cpu.create_process();
+        let session = cpu.alloc_handle();
+        cpu.record_handle(session, "lm");
+        cpu.grant_handle(session);
+        let vsync = cpu.alloc_console_event("test:vsync", true);
+        cpu.fs.write_file("/save.txt", b"kept".to_vec());
+        cpu.run(TIME_SLICE).unwrap();
+
+        cpu.end_title();
+
+        assert_eq!(
+            cpu.pids(),
+            vec![applet + 1],
+            "one new process, the old ones gone"
+        );
+        assert_eq!(cpu.root, applet + 1);
+        assert_eq!(cpu.nv.gpu.frames, 0, "the frame count carried over");
+        assert_eq!(
+            cpu.service_name(session),
+            None,
+            "the title's session outlived it"
+        );
+        assert!(
+            cpu.event_signaled(vsync).is_some(),
+            "a console event went with the title"
+        );
+        assert_eq!(
+            cpu.fs.file("/save.txt"),
+            Some(&b"kept"[..]),
+            "the SD card went with the title"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(WORD).unwrap(),
+            0,
+            "the new process sees the old one's memory"
+        );
+
+        // The next title runs, and its exit halts the console.
+        cpu.mem.write_u32(CODE, 0xD400_00E1).unwrap(); // svc #7
+        cpu.pc = CODE;
+        cpu.run(TIME_SLICE).unwrap();
+        assert!(cpu.halted, "the new title's exit did not halt the console");
     }
 }

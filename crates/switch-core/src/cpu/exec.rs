@@ -119,7 +119,7 @@ impl Cpu {
         loop {
             match self.run_engine(max_steps) {
                 // A library applet's fault ends it; its caller goes on.
-                Err(e) if self.pid != ROOT_PID => {
+                Err(e) if self.pid != self.root => {
                     self.end_process(self.pid, Ending::Faulted(e.to_string()))
                 }
                 ran => return ran,

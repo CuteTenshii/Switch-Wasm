@@ -311,6 +311,8 @@ pub struct Machine {
     pub(crate) thread_log_dropped: u64,
     /// Running processes by pid; see [`Cpu::process`].
     pub(crate) processes: BTreeMap<u64, Process>,
+    /// The running title's pid; its ending halts the console.
+    pub(crate) root: u64,
 }
 
 pub const RECENT_LEN: usize = 64;
@@ -521,6 +523,7 @@ impl Cpu {
                 thread_log_dropped: 0,
 
                 processes: BTreeMap::from([(ROOT_PID, Process::new(mem))]),
+                root: ROOT_PID,
             }),
         };
         // Pre-map the fixed framebuffer and input regions.

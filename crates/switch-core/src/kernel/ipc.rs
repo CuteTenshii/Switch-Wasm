@@ -534,6 +534,12 @@ impl Cpu {
     pub(crate) fn forget_handle(&mut self, handle: u64) {
         self.service_handles.remove(&handle);
         self.domain_objects.retain(|&(owner, _), _| owner != handle);
+        self.vi_ifaces.remove(&handle);
+        self.fabricated_objects
+            .retain(|&(session, _), _| session != handle);
+        // Kept events are filed by session or by `object_key` on it.
+        self.service_events
+            .retain(|&(_, object), _| object != handle && object >> 32 != handle);
         let session = handle << 32;
         self.process_mut()
             .fs_files

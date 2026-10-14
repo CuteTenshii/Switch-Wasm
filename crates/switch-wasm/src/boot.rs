@@ -8,6 +8,15 @@ use switch_core::trace::Level;
 
 use crate::{container, nsp_file_source, session, Added, Dlc};
 
+/// End the running title and its applets, leaving the console ready for the next one.
+#[no_mangle]
+pub extern "C" fn switch_end_title(handle: u32) {
+    let s = session(handle);
+    s.cpu.end_title();
+    s.control = None;
+    s.last_error.clear();
+}
+
 /// Load an NRO homebrew image into the CPU, told the SD card path it came from when
 /// `path_len` is not 0. Returns entry address or -1.
 #[no_mangle]
