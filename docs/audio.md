@@ -67,4 +67,5 @@
 
 ## `web/main/audio.ts`
 
-- Each pump schedules everything queued since the last as one buffer, butted against the previous one. The emulator rarely runs retail titles in real time, so underruns are normal: the cursor restarts slightly ahead of `currentTime` instead of stretching audio.
+- Audio never crosses a message: the worker moves the guest's queued samples into a ring in its shared linear memory after each slice (`switch_audio_feed`), and an `AudioWorklet` (`pcm-worklet.ts`) plays straight out of it, resampling to the output rate and downmixing 5.1. The ring's address comes once at startup.
+- More than 200 ms queued is dropped from the front, so latency stays low. Below full speed the guest produces less than real time and the worklet plays silence in the gaps; it reports played time and gaps once a second for the `[audio] page:` lines.

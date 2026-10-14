@@ -36,5 +36,5 @@ Game images and keys (`.nro`, `.nsp`, `.xci`, `.nca`, `.keys`) are gitignored.
 
 - `make wasm` once, then `bun run dev`.
 - **Debug > Graphics > Rendering** shows which renderer is drawing and why, device totals, device time per frame, fallback reasons and device errors.
-- **Debug > Graphics > Display** is the browser display path. Guest frames and canvas updates say whether the page is dropping intermediate frames; merged requests say how often several run slices shared one browser paint. The timing table separates the worker run slice, the wait for `requestAnimationFrame`, the frame-counter message, the framebuffer transfer, and the synchronous canvas write.
+- **Debug > Graphics > Display** is the display path. Guest frames against canvas updates say how many presents were never painted; the timing table separates the worker's run slice from painting its newest frame on the canvas.
 - **Debug > CPU > Translation** counts blocks translated, compiled to wasm, entered and chained.

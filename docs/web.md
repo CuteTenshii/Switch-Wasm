@@ -16,7 +16,8 @@ The page, the worker, and the wasm bindings between them.
 - NRO control data is cached for display only, not via `cache_control`: homebrew runs in another title's process, so its NACP never governs saves.
 - Boot reports ExeFS hash coverage and the module list next to what loaded (a missing `sdk`/`subsdk0` looks like a missing service otherwise). The NPDM system resource size picks the address space layout and must precede the boot (`nn::init` reads it immediately); the 32/64-bit flag changes the entry ABI.
 - `switch_gpu_report_json` and `switch_activity_json` exist because `eprintln!` and env vars are unavailable on wasm32. Activity lists are fitted to `maxlen` in whole entries so the JSON always parses.
-- `switch_fb_snapshot` forces opaque alpha: titles leave arbitrary alpha (Just Dance 2019 uses 0) and Chromium/macOS `putImageData` multiplies by it even with `alpha: false`.
+- `switch_present` (and `switch_fb_snapshot`) force opaque alpha: titles leave arbitrary alpha (Just Dance 2019 uses 0) and Chromium/macOS `putImageData` multiplies by it even with `alpha: false`.
+- The page hands its canvas to the worker once (`transferControlToOffscreen`); `screen.rs` paints each new frame on it through `web_sys` after the slice that presented it, into one reused `ImageData`. The page never reads pixels, and maps touches with the size the slice report carries.
 - SD and save host writes are not reported as changes (restores would otherwise be written straight back). Drains happen even if the JSON does not fit.
 - `gpu_channel_open`: no device is built before the title opens a channel, because wgpu's web backend frees nothing on drop. The backend installs on the session's single `Gpu`, not a channel (Asphalt 9 opens four).
 
@@ -73,23 +74,23 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/main/index.ts`, `boot.ts`, `dock.ts`, `wakelock.ts`
 
-- After a homebrew load the screen is shown but the loading screen stays over it until `display.renderFb` has a real frame (homebrew can run a long time before presenting).
+- After a homebrew load the screen is shown but the loading screen stays over it until `display.noteFrame` sees a real frame (homebrew can run a long time before presenting).
 - Init awaits only the NAND index; archives register in the background so a firmware dump does not delay the first boot. A core that fails to start keeps the loading screen with the error rather than an idle splash.
 - Operation mode affects `vi` resolution, `am`/`apm` performance mode, `clkrst` GPU clock and touchscreen presence. Titles read it once, so changes queue the two AM messages a real dock sends.
 - Screen Wake Lock needs a secure context (missing in Firefox and Safari before 16.4). The browser drops the lock when the document is hidden and does not return it, so it is re-taken on visibility; a lock acquired after the run ended is released immediately.
 - Icons are Lucide (`icons.ts`), imported per icon so the bundle carries only those used.
 
-## `web/main/runloop.ts`
+## `web/worker/loop.ts` and `web/main/runloop.ts`
 
-- Slices are sized by wall time to about one display frame: input reaches the worker only between slices, and each slice costs a worker round trip.
-- Housekeeping (readouts, output, SD and save flushes, dialog polls; several round trips) runs every 8 slices.
-- Reset aborts without waiting for the in-flight slice; the loop must not call into a freed session afterwards.
+- The worker runs the loop: slices back to back, each queued as a `MessageChannel` task so input and commands still get in between them (a `setTimeout` chain is clamped to 4 ms). Slices are sized by wall time to about one display frame.
+- After each slice the worker posts one report: steps, timing, frame count and size, audio format, and every 8 slices the housekeeping (readouts, guest output, diagnostics, whether the SD card, saves or profiles changed, keyboard and error dialogs). The page reacts and polls nothing; it reads file contents only when told they changed.
+- Run starts the loop and Pause asks it to stop after the slice in flight. Freeing the session stops it, and the page ignores reports that arrive after a reset.
 - The release profile aborts on panic, which on wasm is an empty `unreachable` trap; the panic hook stores the message and `switch_last_error` returns it without a live session. Linear memory survives the trap, so panic context is collected afterwards, each piece separately.
 - The status bar shows instructions retired, not the guest clock, which jumps forward when all threads are blocked.
 
 ## `web/main/loading.ts`
 
-- The loading screen only owns its markup. `awaitFirstFrame` is the one open-ended phase, ended by `display.renderFb` on the first painted frame or by the run loop on a fault, halt or pause. Failures keep the screen up with the reason rather than revealing a black stage.
+- The loading screen only owns its markup. `awaitFirstFrame` is the one open-ended phase, ended by `display.noteFrame` on the first painted frame or by the run loop on a fault, halt or pause. Failures keep the screen up with the reason rather than revealing a black stage.
 
 ## `web/main/input.ts`
 
