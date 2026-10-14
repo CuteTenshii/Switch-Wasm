@@ -136,15 +136,14 @@ export interface WasmExports {
     pathPtr: number, pathLen: number, offset: bigint, buf: number, maxlen: number): bigint;
 }
 
-// One object rather than exported `let`s so importers see the live session.
-export const state: { exports: WasmExports | null; handle: number } = {
-  exports: null,
-  handle: -1,
-};
+export const state = { handle: -1 };
 
-export function api(): WasmExports {
-  if (!state.exports) throw new Error('the emulator core did not load');
-  return state.exports;
+// The core's exports, set once at load; every command runs after that. A live binding:
+// importers see the assignment.
+export let core = null as unknown as WasmExports;
+
+export function setCore(exports: WasmExports): void {
+  core = exports;
 }
 
 export function handle(): number {
@@ -153,22 +152,22 @@ export function handle(): number {
 
 // A refused allocation returns 0. `>>> 0` because the i32 reads signed past 2 GiB.
 export function alloc(len: number): number {
-  const ptr = api().switch_alloc(len) >>> 0;
+  const ptr = core.switch_alloc(len) >>> 0;
   if (!ptr) throw new Error('cannot allocate ' + len + ' bytes in the emulator');
   return ptr;
 }
 
 export function free(ptr: number, len: number): void {
-  api().switch_free(ptr, len);
+  core.switch_free(ptr, len);
 }
 
 export function toWasm(jsbuf: Bytes, ptr: number): void {
-  const view = new Uint8Array(api().memory.buffer, ptr, jsbuf.length);
+  const view = new Uint8Array(core.memory.buffer, ptr, jsbuf.length);
   view.set(jsbuf);
 }
 
 export function fromWasm(ptr: number, len: number): Bytes {
-  return new Uint8Array(api().memory.buffer, ptr, len).slice();
+  return new Uint8Array(core.memory.buffer, ptr, len).slice();
 }
 
 // Stage `bytes` in wasm for `body`, always freeing it. Empty still allocates one byte.
@@ -248,7 +247,7 @@ export function readJson<T>(
 }
 
 export function lastError(): string {
-  const s = readString(2048, (buf, cap) => api().switch_last_error(state.handle, buf, cap));
+  const s = readString(2048, (buf, cap) => core.switch_last_error(state.handle, buf, cap));
   // The buffer is NUL-padded past the message.
   const end = s.indexOf('\0');
   return end < 0 ? s : s.slice(0, end);

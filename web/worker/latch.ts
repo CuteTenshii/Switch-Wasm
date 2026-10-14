@@ -1,7 +1,7 @@
 // Input latch: a press is held until the guest frame counter advances twice,
 // so taps between run slices are not lost. Keys still down publish live.
 
-import { alloc, api, handle } from './wasm';
+import { alloc, core, handle } from './wasm';
 
 let heldButtons = 0n; // what the host says is physically down right now
 let latchedButtons = 0n; // pressed, but not yet guaranteed seen by the guest
@@ -31,7 +31,7 @@ function publishInput(): void {
   if (handle() < 0) return;
   // Live deflection wins; a latched flick stands in once the stick recentres.
   const s = latchedSticks && !deflected(sticks) ? latchedSticks : sticks;
-  api().switch_set_input(handle(), heldButtons | latchedButtons, s[0], s[1], s[2], s[3]);
+  core.switch_set_input(handle(), heldButtons | latchedButtons, s[0], s[1], s[2], s[3]);
   publishTouch();
 }
 
@@ -43,10 +43,10 @@ function publishTouch(): void {
   if (count === 0 && publishedTouches === 0) return;
   if (!touchScratch) touchScratch = alloc(TOUCH_MAX * 3 * 4);
   if (count > 0) {
-    new Uint32Array(api().memory.buffer, touchScratch, count * 3)
+    new Uint32Array(core.memory.buffer, touchScratch, count * 3)
       .set(src.subarray(0, count * 3));
   }
-  api().switch_set_touch(handle(), touchScratch, count);
+  core.switch_set_touch(handle(), touchScratch, count);
   publishedTouches = count;
 }
 
@@ -66,7 +66,7 @@ export function resetInput(): void {
 
 // Start or restart the wait; restarting extends it for earlier presses too.
 function armLatch(): void {
-  latchFrame = handle() < 0 ? -1 : api().switch_frame_count(handle());
+  latchFrame = handle() < 0 ? -1 : core.switch_frame_count(handle());
   latchSlices = 0;
 }
 
@@ -74,7 +74,7 @@ function armLatch(): void {
 export function releaseLatchIfSeen(): void {
   if (handle() < 0) return;
   if (latchedButtons === 0n && !latchedSticks && !latchedTouches) return;
-  const frames = api().switch_frame_count(handle());
+  const frames = core.switch_frame_count(handle());
   if (frames - latchFrame < LATCH_FRAMES && ++latchSlices < MAX_LATCH_SLICES) return;
   latchedButtons = 0n;
   latchedSticks = null;

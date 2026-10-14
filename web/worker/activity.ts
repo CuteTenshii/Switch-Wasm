@@ -5,7 +5,7 @@
 import { fmtCount, fmtSize } from '../shared/format';
 import { takeHostIo, type HostIo } from './hostfiles';
 import { workerLog } from './log';
-import { api, readJson, state } from './wasm';
+import { core, readJson, state } from './wasm';
 
 // Reads and writes through one guest file or storage since the last reading.
 interface FileActivity {
@@ -222,7 +222,7 @@ export function reportActivity(now = false): void {
   try {
     const current = readJson<Activity | null>(
       ACTIVITY_CAP,
-      (buf, cap) => api().switch_activity_json(state.handle, buf, cap),
+      (buf, cap) => core.switch_activity_json(state.handle, buf, cap),
       null,
     );
     if (!current) return;
@@ -571,8 +571,8 @@ const WASM_WARN = 3.5 * 1024 * 1024 * 1024;
 
 function logMemory(): void {
   if (state.handle < 0) return;
-  const guest = Number(api().switch_guest_ram(state.handle));
-  const wasm = api().memory.buffer.byteLength;
+  const guest = Number(core.switch_guest_ram(state.handle));
+  const wasm = core.memory.buffer.byteLength;
   if (Math.abs(guest - memoryLogged.guest) < MEMORY_STEP && Math.abs(wasm - memoryLogged.wasm) < MEMORY_STEP) {
     return;
   }

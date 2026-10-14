@@ -9,7 +9,7 @@ import { tryGpu } from './gpu';
 import { workerLog } from './log';
 import init, { switch_attach_screen } from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
-import { state, type WasmExports } from './wasm';
+import { core, setCore, state, type WasmExports } from './wasm';
 import type { CoreStart, CoreStarted } from './core';
 
 // `self` is typed as the shared WorkerGlobalScope, which lacks postMessage.
@@ -93,10 +93,10 @@ void (async () => {
   try {
     // Compiled here rather than by the glue, which keeps the module to itself.
     const module = await WebAssembly.compileStreaming(fetch(wasmUrl));
-    state.exports = await init({ module_or_path: module }) as unknown as WasmExports;
+    setCore(await init({ module_or_path: module }) as unknown as WasmExports);
     // Install the panic hook before anything else can panic.
-    state.exports.switch_init();
-    startCores(module, state.exports.memory);
+    core.switch_init();
+    startCores(module, core.memory);
     reply({ type: 'ready' });
   } catch (err) {
     reply({ type: 'ready', error: String(err) });

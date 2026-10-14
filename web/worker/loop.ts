@@ -5,7 +5,7 @@ import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
 import { switch_present } from '@core/switch_wasm.js';
-import { api, state } from './wasm';
+import { core, state } from './wasm';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -83,9 +83,9 @@ function slice(): void {
     budget,
     ms,
     stopped,
-    frame: api().switch_frame_count(state.handle),
-    width: api().switch_fb_width(state.handle),
-    height: api().switch_fb_height(state.handle),
+    frame: core.switch_frame_count(state.handle),
+    width: core.switch_fb_width(state.handle),
+    height: core.switch_fb_height(state.handle),
     paintMs,
     audio,
     housekeeping: stopped || ++tick % HOUSEKEEPING_EVERY === 0 ? housekeeping() : null,
@@ -110,7 +110,7 @@ export function paint(): number | null {
 }
 
 function pullAudio(): SliceReport['audio'] {
-  const packed = api().switch_audio_format(state.handle);
+  const packed = core.switch_audio_format(state.handle);
   const rate = packed & 0x00ffffff;
   const channels = packed >>> 24;
   if (!rate || !channels) return null;
@@ -134,7 +134,7 @@ function housekeeping(): Housekeeping {
     ram: CMD.ram() as Housekeeping['ram'],
     output: decode(CMD.drain_output()),
     trace: decode(CMD.drain_trace()),
-    sdChanged: api().switch_sd_pending_changes(h) !== 0,
+    sdChanged: core.switch_sd_pending_changes(h) !== 0,
     savesChanged: CMD.saves_pending() as boolean,
     profilesEdited: CMD.users_take_edits() as boolean,
     keyboard: CMD.keyboard_request() as Housekeeping['keyboard'],

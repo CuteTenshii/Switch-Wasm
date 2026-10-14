@@ -1,7 +1,8 @@
 // Installing the WebGPU backend between run slices, and replacing a lost device.
 
+import { switch_gpu_open } from '@core/switch_wasm.js';
 import { workerLog } from './log';
-import { api, readWholeJson, state } from './wasm';
+import { core, readWholeJson, state } from './wasm';
 
 // GPU install state. Installed between run slices, once the title has opened a
 // channel: opening a device needs promises a slice cannot await.
@@ -59,10 +60,7 @@ let gpuReopens = 0;
 // Cheaper than parsing the JSON report after every slice.
 function gpuLost(): boolean {
   if (state.handle < 0) return false;
-  const lost = (state.exports as unknown as {
-    switch_gpu_lost?: (handle: number) => number;
-  }).switch_gpu_lost;
-  return !!lost && lost(state.handle) !== 0;
+  return core.switch_gpu_lost(state.handle) !== 0;
 }
 
 export function tryGpu(): void {
@@ -85,7 +83,7 @@ export function tryGpu(): void {
     gpu = 'no';
     const report = readWholeJson<{ lostBecause?: string | null }>(
       2048,
-      (buf, cap) => api().switch_gpu_report_json(state.handle, buf, cap),
+      (buf, cap) => core.switch_gpu_report_json(state.handle, buf, cap),
       {},
     );
     const why = report.lostBecause ? ` (${report.lostBecause})` : '';
@@ -95,10 +93,7 @@ export function tryGpu(): void {
   if (gpu === 'done' && state.handle !== gpuSession) gpu = 'no';
   if (gpu !== 'no' || state.handle < 0) return;
   gpu = 'trying';
-  const open = (state.exports as unknown as {
-    switch_gpu_open: (handle: number, deviceMsaa: boolean, interleave: boolean) => Promise<string>;
-  }).switch_gpu_open;
-  open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then(async (what) => {
+  switch_gpu_open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then(async (what) => {
     if (what.startsWith(RENDERING_ON)) {
       gpu = 'done';
       gpuSession = state.handle;

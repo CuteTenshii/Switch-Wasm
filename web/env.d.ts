@@ -15,6 +15,9 @@ declare module '@core/switch_wasm.js' {
   export function initSync(
     options: { module: WebAssembly.Module; memory: WebAssembly.Memory },
   ): Record<string, unknown>;
+  // `crates/switch-wasm/src/gpu.rs`: what it renders on, or why it cannot.
+  export function switch_gpu_open(
+    handle: number, deviceMsaa: boolean, interleave: boolean): Promise<string>;
   // `crates/switch-wasm/src/screen.rs`; the first throws when the canvas has no 2d context.
   export function switch_attach_screen(canvas: OffscreenCanvas): void;
   export function switch_present(handle: number): boolean;

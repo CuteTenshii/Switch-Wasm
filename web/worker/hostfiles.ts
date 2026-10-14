@@ -1,7 +1,7 @@
 // Host files the wasm side reads by range through the synchronous `host_read` import.
 
 import { workerLog } from './log';
-import { api } from './wasm';
+import { core } from './wasm';
 
 // File 0 is the container being run; the rest are system data archives.
 let hostFiles: (Blob | null)[] = [];
@@ -111,7 +111,7 @@ export function hostRead(
   const end = Math.min(at + len, file.size);
   if (at >= end) return 0;
   // Not cached: growing the heap detaches it.
-  const out = new Uint8Array(api().memory.buffer, ptr, end - at);
+  const out = new Uint8Array(core.memory.buffer, ptr, end - at);
   let written = 0;
   const stats = ioOf(fileIndex);
   stats.reads++;
