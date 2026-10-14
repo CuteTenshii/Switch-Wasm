@@ -107,11 +107,6 @@ impl Gpu {
         format!("{:?}", self.device.limits().max_texture_dimension_2d)
     }
 
-    /// Release the device; dropping it does not on the web.
-    pub fn destroy(&self) {
-        self.device.destroy();
-    }
-
     pub(super) fn fall_back(&mut self, why: String) {
         self.fallbacks += 1;
         self.fell_back_this_frame = true;

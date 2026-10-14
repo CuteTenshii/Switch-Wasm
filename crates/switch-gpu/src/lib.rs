@@ -390,6 +390,15 @@ impl Drop for Gpu {
                 ms(t.flush_land),
             );
         }
+        // The web backend frees nothing on drop, so a freed session or a replaced device
+        // destroys what it made.
+        let current = std::mem::take(&mut self.space);
+        let parked: Vec<Space> = self.parked.drain().map(|(_, space)| space).collect();
+        for space in std::iter::once(current).chain(parked) {
+            self.drop_space(space);
+        }
+        self.release_scratch();
+        self.device.destroy();
     }
 }
 

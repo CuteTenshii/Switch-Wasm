@@ -8,6 +8,8 @@
 
 **Each GPU address space has its own surfaces and caches.** Processes map different memory at the same GPU addresses, so held surfaces, readbacks and the texture and shader caches live in a `Space` per address space; every renderer entry enters the `ExecCtx`'s (`Gpu::enter_space`) and parks the rest, a flush writes back only its own space's surfaces, and a closed address space's device textures are destroyed (`Renderer::address_space_closed`). The texture cache's byte limit is shared, and reaching it clears every space.
 
+**Dropping the backend destroys what it made.** wgpu's web backend frees nothing on drop and leaves it to the garbage collector, so `Gpu`'s `Drop` destroys every space's textures, the scratch resources and the device, which happens when a session is freed or a lost device is replaced.
+
 **A copy out of a held surface flushes first.** The 2D blitter, the copy engine and compute read guest memory, so `channel.rs` hands the surfaces back before `Engine2D::LAUNCHES_BLIT`, `copy::LAUNCH_DMA` and `compute::SEND_SIGNALING_PCAS_B`.
 
 **Depth, clears and multisampling all run on the device.** A depth surface is held like a colour one, as `depth16unorm` or `depth32float` (see `upload.rs` in [gpu.md](gpu.md)); stencil stays in guest memory and is put back around the depth bytes, since neither renderer tests it. Clears are a pass's load operation where they cover the whole surface and a scissored fullscreen draw where they do not.
