@@ -101,6 +101,13 @@ The page, the worker, and the wasm bindings between them.
 - hid reports touch in the console's 1280x720 digitizer space regardless of the guest's presentation size. Taps are mapped through the `object-fit: contain` rect, not the element box. A touch slot (finger id) stays fixed for a contact's life, claimed from the lowest free slot.
 - Stick Y axes are negated (Horizon's points up); the core derives stick pseudo-buttons from these values, so the sign convention matters.
 
+## `web/main/touchpad.ts`
+
+- The on-screen controller shows on a coarse pointer with no gamepad connected, while a program is loaded, running or paused. Portrait puts it below a 16:9 game; landscape lays it over the game's sides, inside the safe area.
+- Each finger is hit-tested again as it moves, so a thumb slides across the D-pad or face buttons; a stick keeps the finger that started on it. `input.ts` ORs the held buttons into its mask and takes the sticks unless a gamepad is connected.
+- Landscape phones (height 500px and below) hide the top and status bars while a program is loaded; the chevron at the top shows them again.
+- Chromium's mobile emulation sends no pointer events for mouse input, so `tests/e2e/touchpad.spec.ts` drives fingers through CDP touch events.
+
 ## `web/main/container.ts`
 
 - Updates are paired, not opened: an update's Program NCA has the patched modules in full but its RomFS is ranges indexed against the base game's. A held update waits until its title is open and is applied at Launch. Pairing lives in the page because the session refuses to launch a container whose update is for another title, and a held update for another game must not make the open one unlaunchable. Add-on content is always handed to the session (a title mounts what is numbered against it).

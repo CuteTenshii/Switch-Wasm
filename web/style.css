@@ -306,6 +306,135 @@ body {
   user-select: none;
 }
 
+/* On-screen controller: over the game's sides in landscape, below it in portrait. */
+.touchpad {
+  display: none;
+  position: absolute;
+  inset: 0;
+  justify-content: space-between;
+  padding:
+    8px max(12px, env(safe-area-inset-right))
+    max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  pointer-events: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) .touchpad {
+  display: flex;
+}
+.tp-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: auto;
+}
+.tp-right { align-items: flex-end; }
+.tp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tp-btn {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 50%;
+  background: rgb(255 255 255 / 10%);
+  color: rgb(255 255 255 / 80%);
+  font-size: 15px;
+  font-weight: 600;
+}
+.tp-btn.is-down { background: rgb(255 255 255 / 32%); }
+.tp-shoulder {
+  width: 64px;
+  height: 40px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+.tp-small {
+  width: 40px;
+  height: 40px;
+  font-size: 20px;
+}
+/* The D-pad and the face buttons: four around an empty middle. */
+.tp-cross {
+  display: grid;
+  grid-template: repeat(3, 48px) / repeat(3, 48px);
+}
+.tp-cross:not(.tp-face) .tp-btn { border-radius: 10px; }
+.tp-up { grid-area: 1 / 2; }
+.tp-west { grid-area: 2 / 1; }
+.tp-east { grid-area: 2 / 3; }
+.tp-down { grid-area: 3 / 2; }
+.tp-stick {
+  display: grid;
+  place-items: center;
+  width: 104px;
+  height: 104px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 50%;
+  background: rgb(255 255 255 / 6%);
+}
+.tp-knob {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 28%);
+  pointer-events: none;
+}
+
+/* Portrait: the game on top, the controller in the room below it. */
+@media (orientation: portrait) {
+  body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) .stage {
+    display: flex;
+    flex-direction: column;
+  }
+  body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) #screen {
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+  body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) .touchpad {
+    position: static;
+    flex: 1 1 auto;
+    align-items: center;
+  }
+  .tp-side { gap: 20px; }
+}
+
+/* Landscape phones: the bars give the game the full height while a program runs. */
+.chrome-toggle { display: none; }
+
+@media (orientation: landscape) and (height <= 500px) {
+  body:is([data-state="loaded"], [data-state="running"], [data-state="paused"]):not(.chrome-shown) .topbar,
+  body:is([data-state="loaded"], [data-state="running"], [data-state="paused"]):not(.chrome-shown) .statusbar {
+    display: none;
+  }
+  body:is([data-state="loaded"], [data-state="running"], [data-state="paused"]):not(.chrome-shown) .app {
+    grid-template-rows: minmax(0, 1fr);
+  }
+  body:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) .chrome-toggle {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 28px;
+    padding: 0;
+    transform: translateX(-50%);
+    border: 1px solid rgb(255 255 255 / 18%);
+    border-top: none;
+    border-radius: 0 0 10px 10px;
+    background: rgb(0 0 0 / 45%);
+    color: rgb(255 255 255 / 75%);
+  }
+  body.chrome-shown .chrome-toggle svg { transform: rotate(180deg); }
+}
+
 /* Idle overlay: the "insert cartridge" state. */
 .overlay {
   position: absolute;

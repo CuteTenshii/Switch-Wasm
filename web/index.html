@@ -85,6 +85,32 @@
   <main class="stage" id="stage">
     <canvas id="screen" width="1280" height="720"></canvas>
 
+    <!-- Touch devices without a gamepad; read by touchpad.ts. Keyboard users have the keys. -->
+    <div class="touchpad" id="touchpad" aria-hidden="true">
+      <div class="tp-side tp-left">
+        <div class="tp-row"><span class="tp-btn tp-shoulder" data-button="ZL">ZL</span><span class="tp-btn tp-shoulder" data-button="L">L</span></div>
+        <div class="tp-cross">
+          <span class="tp-btn tp-up" data-button="UP"></span>
+          <span class="tp-btn tp-west" data-button="LEFT"></span>
+          <span class="tp-btn tp-east" data-button="RIGHT"></span>
+          <span class="tp-btn tp-down" data-button="DOWN"></span>
+        </div>
+        <div class="tp-row"><span class="tp-stick" data-stick="left"><span class="tp-knob"></span></span><span class="tp-btn tp-small" data-button="MINUS">−</span></div>
+      </div>
+      <div class="tp-side tp-right">
+        <div class="tp-row"><span class="tp-btn tp-shoulder" data-button="R">R</span><span class="tp-btn tp-shoulder" data-button="ZR">ZR</span></div>
+        <div class="tp-cross tp-face">
+          <span class="tp-btn tp-up" data-button="X">X</span>
+          <span class="tp-btn tp-west" data-button="Y">Y</span>
+          <span class="tp-btn tp-east" data-button="A">A</span>
+          <span class="tp-btn tp-down" data-button="B">B</span>
+        </div>
+        <div class="tp-row"><span class="tp-btn tp-small" data-button="PLUS">+</span><span class="tp-stick" data-stick="right"><span class="tp-knob"></span></span></div>
+      </div>
+    </div>
+
+    <button class="chrome-toggle" id="btn-chrome" aria-label="Show the toolbar" aria-expanded="false"></button>
+
     <div class="overlay" id="overlay">
       <div class="overlay-inner">
         <h1>Drop a homebrew <code>.nro</code> or a title <code>.nsp</code> / <code>.xci</code> to boot</h1>
@@ -96,7 +122,7 @@
           retail <code>.nsp</code> or cartridge image never has to fit in memory. It needs <code>prod.keys</code>,
           which the Files panel takes.</p>
         <p class="muted tiny">Keyboard: arrows = D-pad · Z/X = A/B · A/S = X/Y · Q/E = L/R · Enter = + · Shift = −.
-          A connected gamepad is used automatically.</p>
+          A connected gamepad is used automatically, and a touchscreen gets an on-screen controller.</p>
       </div>
     </div>
 

@@ -15,7 +15,7 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Mobile
 
-- Mobile support: layout, touch controls and performance on phones and tablets.
+- Performance on phones and tablets.
 
 ## Open gaps
 

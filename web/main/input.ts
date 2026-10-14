@@ -1,4 +1,4 @@
-// Keyboard, gamepad and touch input, pushed to the emulator as one state.
+// Keyboard, gamepad, on-screen controller and touch input, pushed to the emulator as one state.
 
 import { $ } from './dom';
 import { log } from './log';
@@ -6,9 +6,10 @@ import { call, hasSession, isReady } from './rpc';
 import { pullVibration } from './rumble';
 import { screenSize } from './display';
 import { screenEl } from './shell';
+import { touchpadActive, touchpadButtons, touchpadStick } from './touchpad';
 
 // HidNpadButton bits, in Horizon's order.
-const BTN = {
+const BTN: Record<string, number> = {
   A: 1 << 0, B: 1 << 1, X: 1 << 2, Y: 1 << 3,
   STICK_L: 1 << 4, STICK_R: 1 << 5,
   L: 1 << 6, R: 1 << 7, ZL: 1 << 8, ZR: 1 << 9,
@@ -167,7 +168,9 @@ function pushInput(): void {
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   const pad = pads.find((p) => p && p.connected);
   let mask = keyboardMask();
-  let slx = 0, sly = 0, srx = 0, sry = 0;
+  for (const name of touchpadButtons()) mask |= BTN[name];
+  let { x: slx, y: sly } = touchpadStick('left');
+  let { x: srx, y: sry } = touchpadStick('right');
   if (pad) {
     // Standard order: 0-3 B/A/Y/X, 4-7 L/R/ZL/ZR, 8-9 select/start, 10-11 sticks, 12-17 dpad.
     if (pad.buttons[0]?.pressed) mask |= BTN.B;
@@ -195,6 +198,8 @@ function pushInput(): void {
     srx = Math.round(axis(2) * 32767);
     sry = Math.round(-axis(3) * 32767);
     showPad(pad);
+  } else if (touchpadActive()) {
+    inputStatus('touch controls');
   } else if (mask) {
     inputStatus('keyboard');
   }
