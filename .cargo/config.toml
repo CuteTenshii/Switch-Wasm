@@ -1,27 +1,9 @@
-# The browser build uses wasm SIMD. Without it LLVM has no 128-bit vectors
-# to lower to, so every fill, copy and `u128` vector-register operation in the
-# emulator is scalar. Every engine the site targets has had SIMD since 2023
-# (Safari 16.4 was the last), and Just Dance 2019 runs 2.4% faster a frame.
-#
-# `--growable-table` is what lets the JIT exist. An emitted block is installed
-# by putting its `run` export in this module's own function table and calling
-# the slot, because a function pointer here *is* a table index and that makes
-# entering a block one `call_indirect` rather than a call out to JS. The
-# linker emits the table with its maximum equal to its minimum unless told
-# otherwise, and a table that cannot grow has nowhere to put a block:
-# `table.grow` fails, every install answers "could not", and the translator
-# silently interprets everything it translates. Nothing else about the build
-# looks wrong when that happens, which is why `tools/jit_wasm_check.mjs`
-# checks that blocks are not only compiled but entered.
-#
-# Guest cores run on several workers over one shared memory: atomics and
-# bulk memory, an imported shared 4 GiB memory, and the TLS exports
-# wasm-bindgen starts each thread with. Stable's prebuilt std has no atomics,
-# so `make wasm` builds std on the pinned nightly.
 [target.wasm32-unknown-unknown]
 rustflags = [
   "-C", "target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals",
+  # The JIT installs blocks in the function table; see docs/progress.md.
   "-C", "link-arg=--growable-table",
+  # One shared memory and TLS for the guest core workers.
   "-C", "link-arg=--shared-memory",
   "-C", "link-arg=--import-memory",
   "-C", "link-arg=--max-memory=4294967296",
