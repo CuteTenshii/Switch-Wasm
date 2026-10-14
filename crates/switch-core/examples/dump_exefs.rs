@@ -29,11 +29,11 @@ fn main() {
         fs::write(format!("{out_dir}/raw_{}", file.name), raw).expect("write the raw module");
     }
 
-    let mut mem = switch_core::mem::Memory::new();
+    let mem = switch_core::mem::Memory::new();
     let mut base = switch_core::nso::NSO_BASE;
     let mut syms: Vec<(u32, u32, String, String)> = Vec::new();
     for (name, nso) in title.modules() {
-        let m = switch_core::nso::load_nso(&mut mem, nso, base).expect("load the module");
+        let m = switch_core::nso::load_nso(&mem, nso, base).expect("load the module");
         let image_end = m.data.mem_addr + m.data.file_size + m.bss_size;
         let mut flat = Vec::with_capacity((image_end - base) as usize);
         for a in base..image_end {

@@ -6,6 +6,7 @@ pub(crate) mod ipc;
 pub(crate) mod layout;
 pub(crate) mod machine;
 pub(crate) mod process;
+pub(crate) mod program;
 pub(crate) mod sched;
 pub(crate) mod svc;
 pub(crate) mod sync;

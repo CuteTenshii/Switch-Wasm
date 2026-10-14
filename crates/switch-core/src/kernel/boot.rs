@@ -8,14 +8,19 @@ impl Cpu {
     /// Map a runtime environment and point SP at a stack, as the loader does before
     /// jumping to a program's entry point. Only hosts booting real homebrew call this.
     pub fn bootstrap(&mut self) {
+        self.map_runtime();
+        self.regs[SP_SLOT] = STACK_TOP;
+        // TLS base, clear of the heap, the stack and the GPU driver's own allocations.
+        self.tpidr = u64::from(MAIN_THREAD_TLS_BASE);
+    }
+
+    /// The address-space half of [`Cpu::bootstrap`]: the stack and the exit trampolines.
+    pub(crate) fn map_runtime(&mut self) {
         // The whole guest space is lazily mapped: reads see zeros, writes allocate on first touch.
         self.mem.soft_map_zero(0, GUEST_SPACE_END);
         let _ = self
             .mem
             .map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
-        self.regs[SP_SLOT] = STACK_TOP;
-        // TLS base, clear of the heap, the stack and the GPU driver's own allocations.
-        self.tpidr = u64::from(MAIN_THREAD_TLS_BASE);
         // LR points at a stub that calls ExitProcess (svc 0x07), so returning from main exits cleanly.
         let _ = self.mem.map_zero(SELF_RETURN_TRAMPOLINE, 0x10);
         self.mem.write_u32(SELF_RETURN_TRAMPOLINE, 0xD400_00E1).ok(); // svc #7
@@ -49,7 +54,7 @@ impl Cpu {
     fn boot_nro(&mut self, data: &[u8], argv0: &str) -> Result<crate::nro::LoadedNro> {
         self.mem.clear_modules();
         self.process_mut().module_names.clear();
-        let loaded = crate::nro::load_nro(&mut self.mem, data)?;
+        let loaded = crate::nro::load_nro(&self.mem, data)?;
         let end = loaded
             .data
             .mem_addr
@@ -57,7 +62,7 @@ impl Cpu {
             .wrapping_add(loaded.bss_size);
         self.record_module_name(loaded.base, end, "homebrew");
         if loaded.env_addr != 0 {
-            crate::nro::write_argv0(&mut self.mem, argv0);
+            crate::nro::write_argv0(&self.mem, argv0);
         }
         self.out.clear();
         self.trace.clear();
@@ -141,8 +146,6 @@ impl Cpu {
         self.halted = false;
         self.process_mut().guest_fatal = None;
         self.trace_enabled = false;
-        self.mem.clear_modules();
-        self.process_mut().module_names.clear();
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }
@@ -157,6 +160,20 @@ impl Cpu {
             self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
         }
 
+        let loaded = self.load_modules(modules)?;
+        self.set_pc(loaded[0].entry);
+        self.seed_applet_launch_arguments();
+        self.seed_launch_parameters();
+        Ok(loaded)
+    }
+
+    /// Load `modules` back to back from [`crate::nso::NSO_BASE`] into the running process.
+    pub(crate) fn load_modules(
+        &mut self,
+        modules: &[(&str, &[u8])],
+    ) -> Result<Vec<crate::nso::LoadedNso>> {
+        self.mem.clear_modules();
+        self.process_mut().module_names.clear();
         const MODULE_ALIGN: u32 = 0x1000;
         let mut base = crate::nso::NSO_BASE;
         let mut loaded = Vec::with_capacity(modules.len());
@@ -166,7 +183,7 @@ impl Cpu {
             &format!("[loader] program {:#018x}", self.process().program_id),
         );
         for (name, data) in modules {
-            let module = crate::nso::load_nso(&mut self.mem, data, base).map_err(|e| {
+            let module = crate::nso::load_nso(&self.mem, data, base).map_err(|e| {
                 Error::Cpu(format!("loading module {:?} at {:#x}: {}", name, base, e))
             })?;
             let image_end = module
@@ -192,13 +209,9 @@ impl Cpu {
             base = image_end.wrapping_add(MODULE_ALIGN - 1) & !(MODULE_ALIGN - 1);
             loaded.push(module);
         }
-        let entry = loaded
-            .first()
-            .ok_or_else(|| Error::Cpu("no modules to boot".into()))?
-            .entry;
-        self.set_pc(entry);
-        self.seed_applet_launch_arguments();
-        self.seed_launch_parameters();
+        if loaded.is_empty() {
+            return Err(Error::Cpu("no modules to boot".into()));
+        }
         Ok(loaded)
     }
 

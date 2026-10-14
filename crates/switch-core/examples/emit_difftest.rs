@@ -33,6 +33,8 @@ const PC_AT: u32 = 4132;
 /// Fuel, read only by branches between blocks, which a single block never takes.
 const FUEL_AT: u32 = 4136;
 const FPSR_AT: u32 = 4140;
+/// A zero word: the `Memory` address, so the offsets above are absolute.
+const MEMORY_AT: u32 = 4144;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 8192;
 
@@ -44,6 +46,7 @@ const LAYOUT: Layout = Layout {
     regs: REGS_AT,
     nzcv: NZCV_AT,
     fpsr: FPSR_AT,
+    memory: MEMORY_AT,
     pages: PAGES_AT,
     read_watch_lo: READ_WATCH_LO_AT,
     read_watch_hi: READ_WATCH_HI_AT,

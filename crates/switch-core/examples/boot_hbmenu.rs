@@ -17,7 +17,7 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    let loaded = load_nro(&mut cpu.mem, &data).expect("load nro");
+    let loaded = load_nro(&cpu.mem, &data).expect("load nro");
     println!("entry = {:#010x}, watching {watch:#x}", loaded.entry);
     for reg in 0..=30u8 {
         cpu.set_reg(reg, 0);

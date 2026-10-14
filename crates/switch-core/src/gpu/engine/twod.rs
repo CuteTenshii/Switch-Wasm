@@ -1003,7 +1003,7 @@ mod tests {
         engine.regs.set(DST_HEIGHT, 32);
         engine.regs.set(DU_DX_INT, 2);
         engine.regs.set(DV_DY_INT, 2);
-        let mut blit = |mem: &mut Memory| {
+        let mut blit = |mem: &Memory| {
             let mut ctx = ExecCtx {
                 mem,
                 vmm: &vmm,

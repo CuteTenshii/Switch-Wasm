@@ -100,7 +100,7 @@ fn a_10_10_10_2_colour_reaches_the_same_pixels_on_both_renderers() {
             let vertices = h.base + 0x400;
             for vertex in 0..3u64 {
                 h.vmm
-                    .write_u32(&mut h.mem, vertices + vertex * 32 + 16, word)
+                    .write_u32(&h.mem, vertices + vertex * 32 + 16, word)
                     .unwrap();
             }
         };

@@ -25,9 +25,9 @@ fn a_solid_colour_triangle_matches_a_clear_color_equivalent_fill() {
     let vbuf_addr = engine.vertex_array(0).start;
     let color = [0.2f32, 0.4, 0.6, 1.0];
     // Screen (0,0)-(16,0)-(0,8), w = 1: the upper triangle half.
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
 
     let mut host1x = Host1x::new();
     let mut stats = Default::default();
@@ -63,7 +63,7 @@ fn a_shuffling_fragment_shader_reads_the_pixel_beside_it() {
     let vbuf_addr = engine.vertex_array(0).start;
     // Red is `(x + 0.5) / 16`, so neighbours differ by 1/16.
     write_vertex(
-        &mut mem,
+        &mem,
         &vmm,
         vbuf_addr,
         0,
@@ -71,7 +71,7 @@ fn a_shuffling_fragment_shader_reads_the_pixel_beside_it() {
         [0.0, 0.0, 0.0, 1.0],
     );
     write_vertex(
-        &mut mem,
+        &mem,
         &vmm,
         vbuf_addr,
         1,
@@ -79,7 +79,7 @@ fn a_shuffling_fragment_shader_reads_the_pixel_beside_it() {
         [1.0, 0.0, 0.0, 1.0],
     );
     write_vertex(
-        &mut mem,
+        &mem,
         &vmm,
         vbuf_addr,
         2,
@@ -149,7 +149,7 @@ fn a_masked_channel_keeps_what_the_target_already_held() {
         .into_iter()
         .enumerate()
         {
-            write_vertex(&mut mem, &vmm, vbuf_addr, i as u32, pos, full);
+            write_vertex(&mem, &vmm, vbuf_addr, i as u32, pos, full);
         }
 
         let mut host1x = Host1x::new();
@@ -198,9 +198,9 @@ fn a_multisampled_edge_covers_some_samples_of_a_pixel_and_not_others() {
     engine.regs.set(0x574, 2); // MultisampleMode = 2x2
     let vbuf_addr = engine.vertex_array(0).start;
     let color = [1.0f32, 1.0, 1.0, 1.0];
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
 
     let mut host1x = Host1x::new();
     let mut stats = Default::default();
@@ -239,16 +239,16 @@ fn a_multisampled_edge_covers_some_samples_of_a_pixel_and_not_others() {
 
 /// 8x4 pixels of 2x2 samples, pixel (0, 0) wholly covered.
 fn multisampled_harness() -> (Memory, AddressSpace, Engine3D) {
-    let (mut mem, vmm, mut engine) = pipeline_harness();
+    let (mem, vmm, mut engine) = pipeline_harness();
     engine.regs.set(0x300, 8 << 16); // viewport width, in pixels
     engine.regs.set(0x301, 4 << 16); // viewport height, in pixels
     engine.regs.set(0x54D, 1); // MultisampleEnable
     engine.regs.set(0x574, 2); // MultisampleMode = 2x2
     let vbuf_addr = engine.vertex_array(0).start;
     let color = [1.0f32, 1.0, 1.0, 1.0];
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
     (mem, vmm, engine)
 }
 
@@ -285,9 +285,9 @@ fn alpha_to_coverage_turns_half_alpha_into_half_the_samples() {
     engine.regs.set(0x54F, 1); // MultisampleControl: AlphaToCoverage
     let vbuf_addr = engine.vertex_array(0).start;
     let color = [1.0f32, 1.0, 1.0, 0.5];
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
 
     let mut host1x = Host1x::new();
     let mut stats = Default::default();
@@ -344,9 +344,9 @@ fn a_draw_follows_the_render_target_control_mapping() {
 
     let vbuf_addr = engine.vertex_array(0).start;
     let color = [1.0f32, 1.0, 1.0, 1.0];
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
 
     let mut host1x = Host1x::new();
     let mut stats = Default::default();
@@ -383,9 +383,9 @@ fn an_indexed_draw_reads_its_vertices_through_the_index_buffer() {
     let (mut mem, vmm, mut engine) = pipeline_harness();
     let vbuf_addr = engine.vertex_array(0).start;
     let color = [0.2f32, 0.4, 0.6, 1.0];
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, -1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, -1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, 1.0, 0.0, 1.0], color);
 
     // A u16 index buffer of [2, 1, 0], right after the vertex data.
     let ibuf_addr = vbuf_addr + 3 * 32;
@@ -444,9 +444,9 @@ fn back_face_culling_drops_the_wrongly_wound_triangle() {
     let vbuf_addr = engine.vertex_array(0).start;
     let color = [0.2f32, 0.4, 0.6, 1.0];
     // Clockwise in window space through the mirroring viewport: the back face.
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
 
     // OGL_SET_CULL enable, front = CCW, cull = BACK.
     engine.regs.set(0x646, 1);

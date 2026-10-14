@@ -107,7 +107,7 @@ pub const NEXT_LOAD_BUFFER_SIZE: usize = 0x300;
 
 /// Write a minimal homebrew ABI environment block for the crt0's `envSetup`,
 /// using 24-byte `ConfigEntry`s. Returns [`ENV_BLOCK_ADDR`].
-pub fn setup_env_block(mem: &mut Memory) -> u32 {
+pub fn setup_env_block(mem: &Memory) -> u32 {
     let a = ENV_BLOCK_ADDR;
     // MainThreadHandle (Key 1): required by __libnx_init_thread.
     let _ = mem.write_u32(a, ENTRY_MAIN_THREAD_HANDLE);
@@ -144,7 +144,7 @@ const ARGV_STRING_MAX: usize = (NEXT_LOAD_PATH_ADDR - ARGV_STRING_ADDR) as usize
 
 /// Make `path` the homebrew's `argv[0]`, the path it reads files beside.
 /// Longer than the block holds, it is cut short.
-pub fn write_argv0(mem: &mut Memory, path: &str) {
+pub fn write_argv0(mem: &Memory, path: &str) {
     let path = &path.as_bytes()[..path.len().min(ARGV_STRING_MAX)];
     let _ = mem.write_bytes(ARGV_STRING_ADDR, path);
     let _ = mem.write_u8(ARGV_STRING_ADDR + path.len() as u32, 0);
@@ -377,12 +377,7 @@ pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
 
 /// Force libtransistor's live `_trn_runconf_heap_mode` (found by decoding
 /// `_sbrk_r`) to NORMAL, so a tiny OVERRIDE heap does not fail the first malloc.
-fn patch_libtransistor_runconf(
-    mem: &mut Memory,
-    data: &[u8],
-    base: u32,
-    text_end: u32,
-) -> Result<()> {
+fn patch_libtransistor_runconf(mem: &Memory, data: &[u8], base: u32, text_end: u32) -> Result<()> {
     if let Some(off) = symbol_value(data, "_trn_runconf_heap_mode") {
         let addr = base.wrapping_add(off as u32);
         let _ = mem.write_u32(addr, 1);
@@ -452,7 +447,7 @@ fn is_b_cond(insn: u32, cond: u8) -> bool {
 }
 
 /// Find `_sbrk_r` from its `bl` to `svc #1` and patch the heap mode it reads.
-fn patch_sbrk_runconf_via_code(mem: &mut Memory, base: u32, text_end: u32) -> Result<()> {
+fn patch_sbrk_runconf_via_code(mem: &Memory, base: u32, text_end: u32) -> Result<()> {
     let mut svc_addr = None;
     let mut addr = base;
     while addr < text_end {
@@ -598,7 +593,7 @@ pub fn init_array_entries(data: &[u8]) -> Vec<u32> {
 
 /// Apply RELR relocations, stopping at the first backward or out-of-range
 /// address (some sections end in garbage).
-fn apply_relr(mem: &mut Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()> {
+fn apply_relr(mem: &Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()> {
     let mut addr: u32 = 0;
     let mut last: u32 = 0;
     for chunk in relr.chunks(8) {
@@ -635,7 +630,7 @@ fn apply_relr(mem: &mut Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result
 }
 
 /// Apply the image's RELR relocations, if any.
-fn apply_nro_relocations(mem: &mut Memory, data: &[u8], image_end: u32) -> Result<()> {
+fn apply_nro_relocations(mem: &Memory, data: &[u8], image_end: u32) -> Result<()> {
     let mod0 = match find_mod0(data) {
         Some(m) => m,
         None => return Ok(()),
@@ -683,7 +678,7 @@ fn has_self_relocating_crt0(data: &[u8]) -> bool {
 }
 
 /// Load an NRO into `mem` at [`NRO_BASE`], returning its entry point.
-pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
+pub fn load_nro(mem: &Memory, data: &[u8]) -> Result<LoadedNro> {
     let h = NroHeader::parse(data)?;
     let build_id = h.build_id(data);
     let is_64bit = h.is_64bit(data);
@@ -740,7 +735,7 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     })
 }
 
-fn copy_segment(mem: &mut Memory, data: &[u8], off: u32, size: u32, addr: u32) -> Result<()> {
+fn copy_segment(mem: &Memory, data: &[u8], off: u32, size: u32, addr: u32) -> Result<()> {
     if size == 0 {
         return Ok(());
     }
@@ -844,8 +839,8 @@ mod tests {
         let text = [0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
         let data = [0xDE, 0xAD, 0xBE, 0xEF];
         let nro = build_nro(&text, &data);
-        let mut mem = Memory::new();
-        let loaded = load_nro(&mut mem, &nro).unwrap();
+        let mem = Memory::new();
+        let loaded = load_nro(&mem, &nro).unwrap();
         assert_eq!(loaded.entry, NRO_BASE);
         assert_eq!(mem.read_u32(NRO_BASE).unwrap(), 0x01);
         assert_eq!(mem.read_u32(NRO_BASE + 4).unwrap(), 0x02);
@@ -864,8 +859,8 @@ mod tests {
         let text = [0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
         let data = [0xDE, 0xAD, 0xBE, 0xEF];
         let nro = build_nro(&text, &data);
-        let mut mem = Memory::new();
-        let loaded = load_nro(&mut mem, &nro).unwrap();
+        let mem = Memory::new();
+        let loaded = load_nro(&mem, &nro).unwrap();
         // this was locked down) now faults instead of silently succeeding.
         assert!(mem.write_u32(loaded.text.mem_addr, 0xDEAD_BEEF).is_err());
         assert_eq!(mem.read_u32(loaded.text.mem_addr).unwrap(), 0x01);
@@ -875,7 +870,7 @@ mod tests {
 
     #[test]
     fn apply_relr_relocates_and_stops_at_backward_jump() {
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(NRO_BASE, 0x2000).unwrap();
         mem.write_u64(NRO_BASE + 0x1000, 0x1234).unwrap();
         mem.write_u64(NRO_BASE + 0x1008, 0x5678).unwrap();
@@ -884,7 +879,7 @@ mod tests {
         relr.extend_from_slice(&0x1000u64.to_le_bytes());
         relr.extend_from_slice(&0b101u64.to_le_bytes()); // bitmap: bit0=1, bit2 → +8
         relr.extend_from_slice(&0u64.to_le_bytes()); // address 0 → backwards → stop
-        apply_relr(&mut mem, NRO_BASE, NRO_BASE + 0x2000, &relr).unwrap();
+        apply_relr(&mem, NRO_BASE, NRO_BASE + 0x2000, &relr).unwrap();
         assert_eq!(
             mem.read_u64(NRO_BASE + 0x1000).unwrap(),
             0x1234 + NRO_BASE as u64

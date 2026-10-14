@@ -2,15 +2,29 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use crate::cpu::{MemoryLayout, SaveKey, ThreadContext, DEFAULT_THREAD_PRIORITY, MAIN_THREAD_ID};
+use crate::cpu::*;
+use crate::mem::AddressSpace;
 use crate::services::*;
+use crate::trace::Level;
 use crate::IdMap;
+
+/// How a process ended.
+#[derive(Debug)]
+pub(crate) enum Ending {
+    Exited,
+    Faulted(String),
+    /// Ended by the process that started it.
+    Terminated,
+}
 
 /// The pid of the process a session boots.
 pub(crate) const ROOT_PID: u64 = 1;
 
 #[derive(Debug)]
 pub(crate) struct Process {
+    pub(crate) mem: AddressSpace,
+    /// For a library applet: the process that started it and the accessor it answers through.
+    pub(crate) caller: Option<(u64, u64)>,
     /// The last `fatal:u` report, kept to classify a later `ExitProcess` as a crash.
     pub(crate) guest_fatal: Option<String>,
     /// AM's message queue for the running applet; each state change is queued once.
@@ -130,8 +144,10 @@ pub(crate) struct Process {
 }
 
 impl Process {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(mem: AddressSpace) -> Self {
         Self {
+            mem,
+            caller: None,
             guest_fatal: None,
             applet_messages: VecDeque::new(),
             sleep_lock_event: None,
@@ -193,5 +209,170 @@ impl Process {
             process_core_mask: crate::npdm::APPLICATION_CORE_MASK,
             next_thread_id: MAIN_THREAD_ID + 1,
         }
+    }
+}
+
+impl Cpu {
+    /// End the running process. The booted title ending halts the console; any other
+    /// process ends once the `svc` that ended it has replied.
+    pub(crate) fn exit_process(&mut self, ending: Ending) {
+        if self.pid == ROOT_PID {
+            self.halted = true;
+        } else {
+            self.process_ending = Some(ending);
+        }
+    }
+
+    /// Tear down process `pid` and finish the accessor its caller waits on.
+    pub(crate) fn end_process(&mut self, pid: u64, ending: Ending) {
+        let Some(process) = self.processes.get(&pid) else {
+            return;
+        };
+        let (program, caller) = (process.program_id, process.caller);
+        let (level, why) = match &ending {
+            Ending::Exited => (Level::Info, "exited".to_owned()),
+            Ending::Faulted(why) => (
+                Level::Error,
+                format!("faulted, so it ends cancelled: {why}"),
+            ),
+            Ending::Terminated => (Level::Info, "was terminated by its caller".to_owned()),
+        };
+        self.diagnostic(
+            level,
+            &format!("[kernel] process {pid} ({program:016x}) {why}"),
+        );
+        for thread in &mut self.machine.process_mut(pid).threads {
+            thread.state = ThreadState::Finished;
+        }
+        if let Some((caller, accessor)) = caller {
+            let exited = matches!(ending, Ending::Exited);
+            self.in_process(caller, |cpu| cpu.finish_library_applet(accessor, exited));
+        }
+        if self.pid == pid {
+            self.reschedule();
+            if self.pid == pid {
+                self.diagnostic(
+                    Level::Error,
+                    &format!("[kernel] nothing can run after process {pid} ended"),
+                );
+                self.halted = true;
+                return;
+            }
+        }
+        self.machine.processes.remove(&pid);
+        self.forget_translations(pid);
+    }
+
+    pub(crate) fn pids(&self) -> Vec<u64> {
+        self.processes.keys().copied().collect()
+    }
+
+    /// A process with an empty address space; nothing runs in it until its main thread starts.
+    pub(crate) fn create_process(&mut self) -> u64 {
+        let pid = self
+            .processes
+            .keys()
+            .next_back()
+            .map_or(ROOT_PID, |last| last + 1);
+        self.machine
+            .processes
+            .insert(pid, Process::new(AddressSpace::new()));
+        self.in_process(pid, Cpu::map_runtime);
+        pid
+    }
+
+    /// Start process `pid`'s main thread at `entry` with `arg` in x0 and its handle in x1,
+    /// as the loader does.
+    pub(crate) fn start_main_thread(&mut self, pid: u64, entry: u32, arg: u64) {
+        let cycles = self.cycles;
+        let process = self.machine.process_mut(pid);
+        let mut regs = [0; REG_FILE];
+        regs[0] = arg;
+        regs[1] = MAIN_THREAD_HANDLE;
+        regs[30] = u64::from(SELF_RETURN_TRAMPOLINE);
+        regs[SP_SLOT] = STACK_TOP;
+        let (priority, core) = (process.main_thread_priority, process.main_thread_core);
+        process.threads.push(ThreadContext {
+            handle: MAIN_THREAD_HANDLE,
+            id: MAIN_THREAD_ID,
+            state: ThreadState::Runnable,
+            paused: false,
+            regs,
+            pc: entry,
+            nzcv: 0,
+            mode: ExecMode::A64,
+            cpsr_q: false,
+            cpsr_ge: 0,
+            fpscr_nzcv: 0,
+            vregs: VRegs::default(),
+            fpcr: 0,
+            fpsr: 0,
+            tpidr: u64::from(MAIN_THREAD_TLS_BASE),
+            tpidr_rw: 0,
+            priority,
+            core,
+            ideal_core: i32::from(core),
+            affinity: 1 << core,
+            passed_over: 0,
+            entry,
+            arg,
+            ran: 0,
+            switches: 0,
+            busy_at: cycles,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CODE: u32 = 0x0800_0000;
+    const WORD: u32 = 0x0900_0000;
+
+    /// `movz w1, #value; str w1, [x0]; b .-8`
+    fn store_forever(cpu: &mut Cpu, value: u32) {
+        for (i, insn) in [0x5280_0001 | (value << 5), 0xB900_0001, 0x17FF_FFFE]
+            .into_iter()
+            .enumerate()
+        {
+            cpu.mem.write_u32(CODE + 4 * i as u32, insn).unwrap();
+        }
+    }
+
+    fn two_processes_storing(jit: bool) {
+        let mut cpu = Cpu::new();
+        cpu.set_jit_enabled(jit);
+        cpu.bootstrap();
+        store_forever(&mut cpu, 1);
+        cpu.pc = CODE;
+        cpu.regs[0] = u64::from(WORD);
+        let other = cpu.create_process();
+        cpu.in_process(other, |cpu| store_forever(cpu, 2));
+        cpu.start_main_thread(other, CODE, u64::from(WORD));
+
+        cpu.run(4 * TIME_SLICE).unwrap();
+
+        let word = |pid: u64| cpu.processes[&pid].mem.read_u32(WORD).unwrap();
+        assert_eq!(
+            word(ROOT_PID),
+            1,
+            "the first process did not run, or saw the other's store"
+        );
+        assert_eq!(
+            word(other),
+            2,
+            "the second process did not run, or saw the other's store"
+        );
+    }
+
+    #[test]
+    fn two_processes_take_turns_each_in_its_own_memory() {
+        two_processes_storing(false);
+    }
+
+    #[test]
+    fn translated_code_stays_with_its_process() {
+        two_processes_storing(true);
     }
 }

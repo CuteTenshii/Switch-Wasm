@@ -116,6 +116,18 @@ impl Cpu {
     /// Run up to `max_steps` instructions, stopping early on halt or error. Uses the JIT
     /// when enabled, except with full tracing, which needs the interpreter.
     pub fn run(&mut self, max_steps: u64) -> Result<RunReport> {
+        loop {
+            match self.run_engine(max_steps) {
+                // A library applet's fault ends it; its caller goes on.
+                Err(e) if self.pid != ROOT_PID => {
+                    self.end_process(self.pid, Ending::Faulted(e.to_string()))
+                }
+                ran => return ran,
+            }
+        }
+    }
+
+    fn run_engine(&mut self, max_steps: u64) -> Result<RunReport> {
         self.complete_pending_present();
         if self.jit_enabled && !self.trace_enabled && self.mode == ExecMode::A64 {
             return self.run_jit(max_steps);

@@ -96,7 +96,7 @@ pub fn parse_elf(data: &[u8]) -> Result<LoadedElf> {
 }
 
 /// Map an ELF's `PT_LOAD` segments into `mem`.
-pub fn load_elf(mem: &mut Memory, data: &[u8]) -> Result<LoadedElf> {
+pub fn load_elf(mem: &Memory, data: &[u8]) -> Result<LoadedElf> {
     let elf = parse_elf(data)?;
     for seg in &elf.segments {
         if seg.filesz > 0 {

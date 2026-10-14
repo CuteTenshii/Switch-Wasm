@@ -62,7 +62,7 @@ fn read_segment(data: &[u8], at: usize) -> RawSegment {
 }
 
 /// Load an NSO0 image into `mem` at `base`, decompressing LZ4 segments.
-pub fn load_nso(mem: &mut Memory, data: &[u8], base: u32) -> Result<LoadedNso> {
+pub fn load_nso(mem: &Memory, data: &[u8], base: u32) -> Result<LoadedNso> {
     if data.len() < HEADER_SIZE {
         return Err(Error::Truncated {
             what: "NSO header".into(),
@@ -217,8 +217,8 @@ mod tests {
         let rodata = [0xAA, 0xBB, 0xCC, 0xDD];
         let data = [0xDE, 0xAD, 0xBE, 0xEF];
         let nso = build_nso(&text, &rodata, &data, 0x100);
-        let mut mem = Memory::new();
-        let loaded = load_nso(&mut mem, &nso, NSO_BASE).unwrap();
+        let mem = Memory::new();
+        let loaded = load_nso(&mem, &nso, NSO_BASE).unwrap();
         // No ModulePtr/MOD0 signature, so entry is the raw `.text` start.
         assert_eq!(loaded.entry, NSO_BASE);
         assert_eq!(mem.read_u32(NSO_BASE).unwrap(), 0x01);
@@ -235,8 +235,8 @@ mod tests {
     fn text_is_read_only() {
         let text = [0x01, 0x00, 0x00, 0x00];
         let nso = build_nso(&text, &[], &[0xEFu8], 0);
-        let mut mem = Memory::new();
-        let loaded = load_nso(&mut mem, &nso, NSO_BASE).unwrap();
+        let mem = Memory::new();
+        let loaded = load_nso(&mem, &nso, NSO_BASE).unwrap();
         assert!(mem.write_u32(loaded.text.mem_addr, 0xDEAD_BEEF).is_err());
     }
 
@@ -257,8 +257,8 @@ mod tests {
         out[0x60..0x64].copy_from_slice(&(compressed.len() as u32).to_le_bytes());
         out[text_off..].copy_from_slice(&compressed);
 
-        let mut mem = Memory::new();
-        let loaded = load_nso(&mut mem, &out, NSO_BASE).unwrap();
+        let mem = Memory::new();
+        let loaded = load_nso(&mem, &out, NSO_BASE).unwrap();
         for (i, &b) in plain_text.iter().enumerate() {
             assert_eq!(mem.read_u8(loaded.text.mem_addr + i as u32).unwrap(), b);
         }
@@ -270,8 +270,8 @@ mod tests {
         text[4..8].copy_from_slice(&8u32.to_le_bytes()); // ModulePtr -> MOD0 at +8
         text[8..12].copy_from_slice(&MOD0_MAGIC.to_le_bytes());
         let nso = build_nso(&text, &[], &[], 0);
-        let mut mem = Memory::new();
-        let loaded = load_nso(&mut mem, &nso, NSO_BASE).unwrap();
+        let mem = Memory::new();
+        let loaded = load_nso(&mem, &nso, NSO_BASE).unwrap();
         assert_eq!(loaded.entry, NSO_BASE + NSO_ENTRY_OFFSET);
     }
 
@@ -280,7 +280,7 @@ mod tests {
         let mut nso = build_nso(&[0u8; 4], &[], &[], 0);
         nso[0] = b'X';
         assert!(matches!(
-            load_nso(&mut Memory::new(), &nso, NSO_BASE),
+            load_nso(&Memory::new(), &nso, NSO_BASE),
             Err(Error::BadMagic { .. })
         ));
     }
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn rejects_truncated() {
         assert!(matches!(
-            load_nso(&mut Memory::new(), &[0u8; 0x20], NSO_BASE),
+            load_nso(&Memory::new(), &[0u8; 0x20], NSO_BASE),
             Err(Error::Truncated { .. })
         ));
     }

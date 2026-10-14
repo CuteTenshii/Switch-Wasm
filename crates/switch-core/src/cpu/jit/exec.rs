@@ -99,7 +99,7 @@ impl Cpu {
     /// Turning the translator off drops the cache.
     pub fn set_jit_enabled(&mut self, on: bool) {
         if !on {
-            self.jit.clear();
+            self.jit_flush();
         }
         self.jit_enabled = on;
     }
@@ -112,6 +112,7 @@ impl Cpu {
     /// behind [`crate::mem::Memory`]'s back.
     pub fn jit_flush(&mut self) {
         self.jit.clear();
+        self.parked_jits.clear();
     }
 
     /// [`Cpu::run`] over translated blocks. The step budget is exact: a block
@@ -120,6 +121,8 @@ impl Cpu {
         let mut steps = 0u64;
         // The last block, moved out and back so a self-loop skips lookup and refcount.
         let mut held: Option<Rc<Block>> = None;
+        // The process `held` belongs to: another's code is not linked to.
+        let mut held_pid = self.pid;
         // Block entries counted in locals and committed once, on the way out.
         let mut executed = 0u64;
         let mut linked = 0u64;
@@ -130,6 +133,10 @@ impl Cpu {
                 self.yield_thread();
             }
             self.sweep_timed_waits();
+            if self.pid != held_pid {
+                held = None;
+                held_pid = self.pid;
+            }
             let pc = self.pc;
             // A store to translated code disables the fast paths until
             // `jit_block_at` drains the dirty list.
@@ -169,6 +176,7 @@ impl Cpu {
                     || self.halted
                     || self.slice_used >= TIME_SLICE
                     || self.mem.has_dirty_code()
+                    || self.pid != held_pid
                 {
                     None
                 } else {

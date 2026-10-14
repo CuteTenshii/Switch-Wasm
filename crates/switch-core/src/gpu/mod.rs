@@ -196,7 +196,7 @@ impl Gpu {
     pub fn submit(
         &mut self,
         channel_id: u32,
-        mem: &mut Memory,
+        mem: &Memory,
         entries: &[u64],
         increments: u32,
     ) -> Result<NvFence> {
@@ -281,7 +281,7 @@ impl Gpu {
     }
 
     /// Writes back anything the backend holds, so the next reader of a render target sees it.
-    pub fn flush_renderers(&mut self, mem: &mut Memory) -> Result<renderer::Flush> {
+    pub fn flush_renderers(&mut self, mem: &Memory) -> Result<renderer::Flush> {
         let Some(channel_id) = self.flush_channel() else {
             return Ok(renderer::Flush::Done);
         };
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn a_later_channel_reaches_the_backend() {
         let mut gpu = Gpu::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x1000).unwrap();
         let as_id = gpu.create_address_space();
         let gpu_va = gpu
@@ -660,7 +660,7 @@ mod tests {
         gpu.channel_mut(second).unwrap().as_id = Some(as_id);
 
         let entry = gpu_va | ((words.len() as u64) << 42);
-        gpu.submit(second, &mut mem, &[entry], 1).unwrap();
+        gpu.submit(second, &mem, &[entry], 1).unwrap();
         assert_eq!(
             flushes.get(),
             1,
@@ -676,15 +676,15 @@ mod tests {
     #[test]
     fn submit_needs_an_address_space() {
         let mut gpu = Gpu::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let id = gpu.create_channel().unwrap();
-        assert!(gpu.submit(id, &mut mem, &[], 1).is_err());
+        assert!(gpu.submit(id, &mem, &[], 1).is_err());
     }
 
     #[test]
     fn submit_advances_the_channel_fence() {
         let mut gpu = Gpu::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x1000).unwrap();
         let as_id = gpu.create_address_space();
         gpu.address_space_mut(as_id)
@@ -694,10 +694,10 @@ mod tests {
         let id = gpu.create_channel().unwrap();
         gpu.channel_mut(id).unwrap().as_id = Some(as_id);
 
-        let fence = gpu.submit(id, &mut mem, &[], 1).unwrap();
+        let fence = gpu.submit(id, &mem, &[], 1).unwrap();
         assert_eq!(fence.value, 1);
         assert!(gpu.host1x.is_expired(fence.id, fence.value).unwrap());
-        let second = gpu.submit(id, &mut mem, &[], 1).unwrap();
+        let second = gpu.submit(id, &mem, &[], 1).unwrap();
         assert_eq!(second.value, 2);
     }
 

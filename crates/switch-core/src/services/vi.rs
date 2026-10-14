@@ -324,7 +324,7 @@ impl Cpu {
                     crop,
                 };
                 // GPU backends keep render targets on the device; the display reads guest memory.
-                if self.machine.nv.gpu.flush_renderers(&mut self.mem)?
+                if self.machine.nv.gpu.flush_renderers(&self.mem)?
                     == crate::gpu::renderer::Flush::Done
                 {
                     self.machine.nv.gpu.present(&self.mem, &buffer)?;
@@ -417,8 +417,7 @@ impl Cpu {
         if let crate::display::Action::Present(buffer) = action {
             // A device-backed surface may not be ready yet;
             // `Cpu::complete_pending_present` presents it later.
-            if self.machine.nv.gpu.flush_renderers(&mut self.mem)?
-                == crate::gpu::renderer::Flush::Done
+            if self.machine.nv.gpu.flush_renderers(&self.mem)? == crate::gpu::renderer::Flush::Done
             {
                 self.machine.nv.gpu.present(&self.mem, &buffer)?;
                 if crate::trace::enabled(crate::trace::Trace::Nv) {

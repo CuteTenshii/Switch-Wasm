@@ -234,7 +234,7 @@ impl NvDrv {
     /// `inline_out` receives `nvIoctl3`'s extra output, which `nnSdk` reads payloads from.
     pub fn ioctl(
         &mut self,
-        mem: &mut Memory,
+        mem: &Memory,
         fd: u32,
         request: u32,
         data: &mut [u8],
@@ -885,7 +885,7 @@ impl NvDrv {
 
     fn channel_ioctl(
         &mut self,
-        mem: &mut Memory,
+        mem: &Memory,
         channel_id: u32,
         ioc_type: u32,
         nr: u32,
@@ -1101,7 +1101,7 @@ mod tests {
 
     const IOWR: u32 = 3;
 
-    fn ioctl(drv: &mut NvDrv, mem: &mut Memory, fd: u32, ty: u32, nr: u32, data: &mut [u8]) -> u32 {
+    fn ioctl(drv: &mut NvDrv, mem: &Memory, fd: u32, ty: u32, nr: u32, data: &mut [u8]) -> u32 {
         let mut inline_out = Vec::new();
         let request = make_ioctl(IOWR, ty, nr, data.len() as u32);
         drv.ioctl(mem, fd, request, data, &[], &mut inline_out)
@@ -1136,13 +1136,13 @@ mod tests {
     #[test]
     fn nvmap_create_alloc_and_param() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvmap").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x2000);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x01, &mut create),
+            ioctl(&mut drv, &mem, fd, TYPE_NVMAP, 0x01, &mut create),
             NV_OK
         );
         let handle = read_u32(&create, 4);
@@ -1154,7 +1154,7 @@ mod tests {
         alloc[0x10] = 0xFE;
         write_u64(&mut alloc, 0x18, 0x3000_0000);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x04, &mut alloc),
+            ioctl(&mut drv, &mem, fd, TYPE_NVMAP, 0x04, &mut alloc),
             NV_OK
         );
 
@@ -1162,7 +1162,7 @@ mod tests {
         write_u32(&mut param, 0, handle);
         write_u32(&mut param, 4, 3); // Base
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x09, &mut param),
+            ioctl(&mut drv, &mem, fd, TYPE_NVMAP, 0x09, &mut param),
             NV_OK
         );
         assert_eq!(read_u32(&param, 8), 0x3000_0000);
@@ -1171,7 +1171,7 @@ mod tests {
     /// [`ioctl`], also returning the out-of-line reply.
     fn ioctl_out(
         drv: &mut NvDrv,
-        mem: &mut Memory,
+        mem: &Memory,
         fd: u32,
         ty: u32,
         nr: u32,
@@ -1189,10 +1189,10 @@ mod tests {
     fn the_virtual_sm_map_names_a_gpc_and_a_tpc_for_every_shader_unit() {
         // The VsmsMapping buffer is sized from `GetCharacteristics`' TPC count.
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
         let mut arg = [0u8; 8];
-        let (code, map) = ioctl_out(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x13, &mut arg);
+        let (code, map) = ioctl_out(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x13, &mut arg);
         assert_eq!(code, NV_OK);
         assert_eq!(map, vec![0, 0, 0, 1], "a (gpc, tpc) pair per TPC of GPC 0");
         assert_eq!(
@@ -1202,12 +1202,12 @@ mod tests {
         );
 
         let mut chars = [0u8; 0xB0];
-        let (code, gc) = ioctl_out(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x05, &mut chars);
+        let (code, gc) = ioctl_out(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x05, &mut chars);
         assert_eq!(code, NV_OK);
         assert_eq!(read_u32(&gc, 0x0C), GPU_NUM_GPC, "num_gpc");
         assert_eq!(read_u32(&gc, 0x20), GPU_TPC_PER_GPC, "num_tpc_per_gpc");
         let mut masks = [0u8; 0x18];
-        let (code, tpc) = ioctl_out(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x06, &mut masks);
+        let (code, tpc) = ioctl_out(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x06, &mut masks);
         assert_eq!(code, NV_OK);
         assert_eq!(
             read_u32(&tpc, 0).count_ones(),
@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn the_zbc_table_hands_back_the_clear_values_it_was_given() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
 
         // ZbcSetTable { color_ds[4], color_l2[4], depth, format, type }.
@@ -1232,12 +1232,12 @@ mod tests {
         write_u32(&mut set, 0x24, 0x0A); // format
         write_u32(&mut set, 0x28, ZBC_TYPE_COLOR);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
+            ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
             NV_OK
         );
         // The same value again takes a second reference, not a second slot.
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
+            ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
             NV_OK
         );
         assert_eq!(drv.zbc_color.used(), 1);
@@ -1251,7 +1251,7 @@ mod tests {
         write_u32(&mut query, 0x2C, ZBC_TYPE_COLOR);
         write_u32(&mut query, 0x30, 0);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut query),
+            ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x04, &mut query),
             NV_OK
         );
         assert_eq!(read_u32(&query, 0x00), 0x1111_1111);
@@ -1265,7 +1265,7 @@ mod tests {
         // Type 0 asks for the size only, as libnx's wrapper sends.
         let mut size_only = [0u8; 0x34];
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut size_only),
+            ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x04, &mut size_only),
             NV_OK
         );
         assert_eq!(read_u32(&size_only, 0x30), ZBC_TABLE_SIZE as u32);
@@ -1274,7 +1274,7 @@ mod tests {
         write_u32(&mut query, 0x2C, ZBC_TYPE_COLOR);
         write_u32(&mut query, 0x30, ZBC_TABLE_SIZE as u32);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut query),
+            ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x04, &mut query),
             NV_BAD_PARAMETER
         );
     }
@@ -1282,20 +1282,20 @@ mod tests {
     #[test]
     fn a_full_zbc_table_is_refused_rather_than_silently_dropping_entries() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
         let mut set = [0u8; 0x2C];
         write_u32(&mut set, 0x28, ZBC_TYPE_DEPTH);
         for i in 0..ZBC_TABLE_SIZE as u32 {
             write_u32(&mut set, 0x20, i + 1);
             assert_eq!(
-                ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
+                ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
                 NV_OK
             );
         }
         write_u32(&mut set, 0x20, 0xFFFF);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
+            ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
             NV_INSUFFICIENT_MEMORY
         );
         assert_eq!(drv.zbc_depth.used(), ZBC_TABLE_SIZE);
@@ -1305,7 +1305,7 @@ mod tests {
     #[test]
     fn get_config_refuses_every_key() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvhost-ctrl").unwrap();
 
         // domain[0x41], key[0x41], value[0x101].
@@ -1314,7 +1314,7 @@ mod tests {
         arg[0x41..0x41 + 24].copy_from_slice(b"NVRM_GPU_NVGPU_NO_ZCULL\0");
 
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1B, &mut arg),
+            ioctl(&mut drv, &mem, fd, TYPE_NVHOST, 0x1B, &mut arg),
             NV_CONFIG_VAR_NOT_FOUND
         );
         // The keys the caller asked about are left where they were.
@@ -1325,13 +1325,13 @@ mod tests {
     #[test]
     fn an_event_is_signalled_by_the_ioctls_that_say_so() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvhost-ctrl").unwrap();
 
         let mut arg = [0u8; 0x10];
         write_u32(&mut arg, 0, 3); // EventRegister slot 3
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1F, &mut arg),
+            ioctl(&mut drv, &mem, fd, TYPE_NVHOST, 0x1F, &mut arg),
             NV_OK
         );
         assert!(!drv.gpu.host1x.events[3].signalled);
@@ -1341,7 +1341,7 @@ mod tests {
         write_u32(&mut arg, 4, 5); // threshold
         write_u32(&mut arg, 0x0C, 3); // slot
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1E, &mut arg),
+            ioctl(&mut drv, &mem, fd, TYPE_NVHOST, 0x1E, &mut arg),
             NV_OK
         );
         assert!(drv.gpu.host1x.events[3].signalled);
@@ -1351,12 +1351,12 @@ mod tests {
         let mut signal = [0u8; 4];
         write_u32(&mut signal, 0, 64);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1C, &mut signal),
+            ioctl(&mut drv, &mem, fd, TYPE_NVHOST, 0x1C, &mut signal),
             NV_BAD_PARAMETER
         );
         write_u32(&mut signal, 0, 7);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1C, &mut signal),
+            ioctl(&mut drv, &mem, fd, TYPE_NVHOST, 0x1C, &mut signal),
             NV_OK
         );
         assert!(drv.gpu.host1x.events[7].signalled);
@@ -1366,19 +1366,19 @@ mod tests {
     fn remap_fills_a_reserved_range_and_a_zero_handle_clears_it() {
         // `REMAP` names the GPU VA outright and counts in big pages.
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x2_0000).unwrap();
         let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
         let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x2_0000);
-        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
+        ioctl(&mut drv, &mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
         let handle = read_u32(&create, 4);
         let mut alloc = [0u8; 0x20];
         write_u32(&mut alloc, 0, handle);
         write_u64(&mut alloc, 0x18, 0x3000_0000);
-        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
+        ioctl(&mut drv, &mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
 
         // One op: the handle's second big page at GPU VA 0x8_0000, kind 0xFE.
         let mut op = [0u8; 0x14];
@@ -1388,7 +1388,7 @@ mod tests {
         write_u32(&mut op, 0x0C, 8); // gpu offset
         write_u32(&mut op, 0x10, 1); // one big page
         assert_eq!(
-            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x14, &mut op),
+            ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x14, &mut op),
             NV_OK
         );
 
@@ -1402,7 +1402,7 @@ mod tests {
 
         write_u32(&mut op, 4, 0); // no handle: unmap the range again
         assert_eq!(
-            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x14, &mut op),
+            ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x14, &mut op),
             NV_OK
         );
         assert_eq!(
@@ -1418,25 +1418,25 @@ mod tests {
     fn map_buffer_ex_remaps_a_sub_range_without_an_nvmap_handle() {
         // deko3d re-maps block-linear ranges with `MODIFY`, the existing offset and handle 0.
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x4000).unwrap();
         let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
         let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x4000);
-        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
+        ioctl(&mut drv, &mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
         let handle = read_u32(&create, 4);
         let mut alloc = [0u8; 0x20];
         write_u32(&mut alloc, 0, handle);
         write_u64(&mut alloc, 0x18, 0x3000_0000);
-        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
+        ioctl(&mut drv, &mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
 
         let mut map = [0u8; 0x28];
         write_u32(&mut map, 8, handle);
         write_u64(&mut map, 0x18, 0x4000);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut map),
+            ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x06, &mut map),
             NV_OK
         );
         let gpu_va = read_u64(&map, 0x20);
@@ -1449,7 +1449,7 @@ mod tests {
         write_u64(&mut remap, 0x18, 0x1000); // mapping_size
         write_u64(&mut remap, 0x20, gpu_va);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut remap),
+            ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x06, &mut remap),
             NV_OK
         );
         assert_eq!(read_u64(&remap, 0x20), gpu_va + 0x1000);
@@ -1480,7 +1480,7 @@ mod tests {
         write_u64(&mut orphan, 0x18, 0x1000);
         write_u64(&mut orphan, 0x20, gpu_va + 0x10_0000);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut orphan),
+            ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x06, &mut orphan),
             NV_BAD_PARAMETER
         );
     }
@@ -1488,11 +1488,11 @@ mod tests {
     #[test]
     fn get_characteristics_reports_the_gm20b() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
         let mut data = [0u8; 0x10 + 0xA0];
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x05, &mut data),
+            ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x05, &mut data),
             NV_OK
         );
         assert_eq!(read_u32(&data, 0x10), 0x120); // arch
@@ -1503,25 +1503,25 @@ mod tests {
     #[test]
     fn map_buffer_ex_places_a_buffer_in_the_address_space() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x1000).unwrap();
         let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
         let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x1000);
-        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
+        ioctl(&mut drv, &mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
         let handle = read_u32(&create, 4);
         let mut alloc = [0u8; 0x20];
         write_u32(&mut alloc, 0, handle);
         write_u64(&mut alloc, 0x18, 0x3000_0000);
-        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
+        ioctl(&mut drv, &mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
 
         let mut map = [0u8; 0x28];
         write_u32(&mut map, 8, handle);
         write_u64(&mut map, 0x18, 0x1000); // mapping size
         assert_eq!(
-            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut map),
+            ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x06, &mut map),
             NV_OK
         );
         let gpu_va = read_u64(&map, 0x20);
@@ -1539,14 +1539,14 @@ mod tests {
     #[test]
     fn bind_channel_links_the_address_space() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
         let (chan_fd, _) = drv.open("/dev/nvhost-gpu").unwrap();
 
         let mut bind = [0u8; 4];
         write_u32(&mut bind, 0, chan_fd);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x01, &mut bind),
+            ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x01, &mut bind),
             NV_OK
         );
 
@@ -1559,7 +1559,7 @@ mod tests {
     #[test]
     fn submit_gpfifo_runs_the_pushbuffer_and_returns_a_fence() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x1000).unwrap();
 
         let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
@@ -1568,21 +1568,21 @@ mod tests {
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x1000);
-        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
+        ioctl(&mut drv, &mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
         let handle = read_u32(&create, 4);
         let mut alloc = [0u8; 0x20];
         write_u32(&mut alloc, 0, handle);
         write_u64(&mut alloc, 0x18, 0x3000_0000);
-        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
+        ioctl(&mut drv, &mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
         let mut map = [0u8; 0x28];
         write_u32(&mut map, 8, handle);
         write_u64(&mut map, 0x18, 0x1000);
-        ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut map);
+        ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x06, &mut map);
         let gpu_va = read_u64(&map, 0x20);
 
         let mut bind = [0u8; 4];
         write_u32(&mut bind, 0, chan_fd);
-        ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x01, &mut bind);
+        ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x01, &mut bind);
 
         // A pushbuffer that binds the 3D class and sets a clear-colour word.
         let words = [
@@ -1599,7 +1599,7 @@ mod tests {
         write_u32(&mut submit, 8, 1); // num_entries
         write_u64(&mut submit, 0x18, entry);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, chan_fd, TYPE_CHANNEL, 0x08, &mut submit),
+            ioctl(&mut drv, &mem, chan_fd, TYPE_CHANNEL, 0x08, &mut submit),
             NV_OK
         );
 
@@ -1624,13 +1624,13 @@ mod tests {
     #[test]
     fn syncpt_read_reflects_submissions() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (ctrl_fd, _) = drv.open("/dev/nvhost-ctrl").unwrap();
         drv.gpu.host1x.set(9, 3).unwrap();
         let mut data = [0u8; 8];
         write_u32(&mut data, 0, 9);
         assert_eq!(
-            ioctl(&mut drv, &mut mem, ctrl_fd, TYPE_NVHOST, 0x14, &mut data),
+            ioctl(&mut drv, &mem, ctrl_fd, TYPE_NVHOST, 0x14, &mut data),
             NV_OK
         );
         assert_eq!(read_u32(&data, 4), 3);
@@ -1639,11 +1639,11 @@ mod tests {
     #[test]
     fn unknown_ioctl_is_reported_not_implemented() {
         let mut drv = NvDrv::new();
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvmap").unwrap();
         let mut data = [0u8; 8];
         assert_eq!(
-            ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x7F, &mut data),
+            ioctl(&mut drv, &mem, fd, TYPE_NVMAP, 0x7F, &mut data),
             NV_NOT_IMPLEMENTED
         );
     }

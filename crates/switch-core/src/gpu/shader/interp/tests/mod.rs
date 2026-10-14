@@ -261,7 +261,7 @@ fn memory_constants_reads_a_real_bound_buffer_out_of_gpu_memory() {
             0,
         )
         .unwrap();
-    vmm.write_u32(&mut mem, gpu_va + 0x10, 42.5f32.to_bits())
+    vmm.write_u32(&mem, gpu_va + 0x10, 42.5f32.to_bits())
         .unwrap();
 
     let mut host1x = Host1x::new();

@@ -1,7 +1,9 @@
 //! `am`: the applet framework (`appletOE`/`appletAE`), the proxies and channels
 //! they hand out, and the library applets a title can launch.
 
-use crate::cpu::{AppletMessage, Cpu, SHARED_BUFFER_USABLE_SLOTS};
+use std::collections::VecDeque;
+
+use crate::cpu::{AppletMessage, Cpu, Ending, SHARED_BUFFER_USABLE_SLOTS};
 use crate::trace::Level;
 use crate::Result;
 
@@ -32,7 +34,8 @@ pub(crate) fn preselected_user_parameter(user: [u8; 16]) -> Vec<u8> {
     data
 }
 
-/// A library applet created through `ILibraryAppletCreator`. No process runs behind it.
+/// A library applet created through `ILibraryAppletCreator`: answered here, or run as a
+/// process of its own once started.
 #[derive(Debug, Default)]
 pub(crate) struct LibraryApplet {
     id: u32,
@@ -40,11 +43,16 @@ pub(crate) struct LibraryApplet {
     mode: u32,
     finished: bool,
     events: [Option<u64>; 3],
-    /// Ends with this result storage instead of cancelled.
-    answer: Option<Vec<u8>>,
-    answer_popped: bool,
+    /// Ended with a result rather than cancelled.
+    answered: bool,
+    /// Storages it pushed out, not yet popped.
+    answers: VecDeque<Vec<u8>>,
+    /// Interactive storages it pushed out, not yet popped.
+    interactive_out: VecDeque<Vec<u8>>,
     /// Storages the caller pushed with `PushInData`, in order.
     in_data: Vec<Vec<u8>>,
+    /// The process running it, once started.
+    process: Option<u64>,
 }
 
 impl LibraryApplet {
@@ -52,21 +60,21 @@ impl LibraryApplet {
         Self {
             id,
             mode,
-            answer,
+            answered: answer.is_some(),
+            answers: answer.into_iter().collect(),
             ..Self::default()
         }
     }
 
-    fn take_answer(&mut self) -> Option<Vec<u8>> {
-        if !self.finished || self.answer_popped {
-            return None;
-        }
-        self.answer_popped = true;
-        self.answer.clone()
+    fn answer_with(&mut self, storage: Vec<u8>) {
+        self.answered = true;
+        self.answers.push_back(storage);
     }
 
+    /// A storage the caller can pop: one a running applet pushed, or a host answer once
+    /// the applet has ended.
     fn has_unpopped_answer(&self) -> bool {
-        self.finished && !self.answer_popped && self.answer.is_some()
+        !self.answers.is_empty() && (self.finished || self.process.is_some())
     }
 
     fn finish(&mut self) {
@@ -375,6 +383,18 @@ fn applet_result_summary(program_id: u64, data: &[u8]) -> String {
 }
 
 /// `AppletIdentityInfo { AppletId, pad, u64 title_id }` for the home menu.
+/// `AppletIdentityInfo` for the running applet's caller, the home menu when none started it.
+fn caller_identity(cpu: &Cpu) -> [u8; 16] {
+    let Some((caller, _)) = cpu.process().caller else {
+        return home_menu_identity();
+    };
+    let program = cpu.processes[&caller].program_id;
+    let mut info = [0u8; 16];
+    info[..4].copy_from_slice(&applet_id_for(program).to_le_bytes());
+    info[8..].copy_from_slice(&program.to_le_bytes());
+    info
+}
+
 fn home_menu_identity() -> [u8; 16] {
     const QLAUNCH_TITLE_ID: u64 = 0x0100_0000_0000_1000;
     const SYSTEM_APPLET_MENU: u32 = 3;
@@ -444,9 +464,144 @@ fn applet_id_for(program_id: u64) -> u32 {
 }
 
 impl Cpu {
-    /// Library applets installed on the NAND, by program id.
-    pub fn set_launchable_applets(&mut self, programs: impl IntoIterator<Item = u64>) {
-        self.launchable_applets = programs.into_iter().collect();
+    /// Start the installed applet behind `accessor` as a process with what its caller
+    /// pushed. False if it is not installed or answered here instead.
+    fn start_installed_applet(&mut self, accessor: u64) -> bool {
+        let Some(applet) = self.process().am_applets.get(&accessor) else {
+            return false;
+        };
+        if applet.answered || applet.id == APPLET_ERROR {
+            return false;
+        }
+        let Some(program) =
+            library_applet_program_id(applet.id).filter(|&program| self.is_installed(program))
+        else {
+            return false;
+        };
+        let (name, in_data) = (applet_name(applet.id), applet.in_data.clone());
+        match self.spawn_installed(program) {
+            Ok(pid) => {
+                let caller = self.pid;
+                let process = self.machine.process_mut(pid);
+                process.caller = Some((caller, accessor));
+                process.am_in_data = in_data.into();
+                if let Some(applet) = self.process_mut().am_applets.get_mut(&accessor) {
+                    applet.process = Some(pid);
+                }
+                self.diagnostic(
+                    Level::Info,
+                    &format!("[am] started the {name} applet as process {pid}"),
+                );
+                true
+            }
+            Err(e) => {
+                self.diagnostic(
+                    Level::Error,
+                    &format!("[am] the {name} applet could not start, so it ends cancelled: {e}"),
+                );
+                false
+            }
+        }
+    }
+
+    /// End the applet behind `accessor`, with a result when it `exited` rather than crashed.
+    pub(crate) fn finish_library_applet(&mut self, accessor: u64, exited: bool) {
+        let Some(applet) = self.process_mut().am_applets.get_mut(&accessor) else {
+            return;
+        };
+        applet.answered |= exited;
+        applet.process = None;
+        applet.finish();
+        self.signal_library_applet_event(accessor, STATE_CHANGED_EVENT);
+    }
+
+    /// Hand a storage the running applet pushed to its caller's accessor; false if no
+    /// caller started it.
+    fn push_to_caller(&mut self, storage: Vec<u8>, interactive: bool) -> bool {
+        let Some((caller, accessor)) = self.process().caller else {
+            return false;
+        };
+        self.in_process(caller, |cpu| {
+            let Some(applet) = cpu.process_mut().am_applets.get_mut(&accessor) else {
+                return;
+            };
+            let slot = if interactive {
+                applet.interactive_out.push_back(storage);
+                POP_INTERACTIVE_OUT_DATA_EVENT
+            } else {
+                applet.answer_with(storage);
+                POP_OUT_DATA_EVENT
+            };
+            cpu.signal_library_applet_event(accessor, slot);
+        });
+        true
+    }
+
+    /// Ask the applet process behind `accessor` to exit; false if none runs.
+    fn request_library_applet_exit(&mut self, accessor: u64) -> bool {
+        let Some(pid) = self
+            .process()
+            .am_applets
+            .get(&accessor)
+            .and_then(|applet| applet.process)
+        else {
+            return false;
+        };
+        self.in_process(pid, |cpu| {
+            cpu.queue_applet_message(AppletMessage::ExitRequest)
+        });
+        true
+    }
+
+    /// End the applet process behind `accessor` at once, if one runs.
+    fn terminate_library_applet(&mut self, accessor: u64) {
+        let running = self
+            .process_mut()
+            .am_applets
+            .get_mut(&accessor)
+            .and_then(|applet| applet.process.take());
+        if let Some(pid) = running {
+            self.end_process(pid, Ending::Terminated);
+        }
+    }
+
+    /// Pop the front storage an applet pushed out, or 2128-0003 if there is none.
+    fn pop_library_applet_storage(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        accessor: u64,
+        interactive: bool,
+    ) -> Result<()> {
+        const NO_DATA: u32 = 128 | (3 << 9);
+        let slot = if interactive {
+            POP_INTERACTIVE_OUT_DATA_EVENT
+        } else {
+            POP_OUT_DATA_EVENT
+        };
+        let popped = self
+            .process_mut()
+            .am_applets
+            .get_mut(&accessor)
+            .filter(|applet| applet.finished || applet.process.is_some())
+            .and_then(|applet| {
+                let queue = if interactive {
+                    &mut applet.interactive_out
+                } else {
+                    &mut applet.answers
+                };
+                let storage = queue.pop_front()?;
+                Some((storage, applet.events[slot].filter(|_| queue.is_empty())))
+            });
+        let Some((storage, drained_event)) = popped else {
+            return self.write_ipc_response(tls, NO_DATA, &[], &[], &[]);
+        };
+        if let Some(event) = drained_event {
+            self.clear_event(event);
+        }
+        let key = self.reply_with_interface(tls, handle, "am:storage")?;
+        self.process_mut().am_storages.insert(key, storage);
+        Ok(())
     }
 
     /// The event an `ILibraryAppletAccessor` hands out for `slot`, allocated once.

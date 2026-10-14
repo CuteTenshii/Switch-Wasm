@@ -25,7 +25,7 @@ fn fetch_attribute_reads_a_float32_vec4_by_stride() {
     let stride = 16u32;
     let addr = base + stride as u64;
     for (i, v) in [1.0f32, 2.0, 3.0, 4.0].iter().enumerate() {
-        vmm.write_u32(&mut mem, addr + i as u64 * 4, v.to_bits())
+        vmm.write_u32(&mem, addr + i as u64 * 4, v.to_bits())
             .unwrap();
     }
     let mut stats = Default::default();
@@ -64,7 +64,7 @@ fn fetch_attribute_reads_a_float32_vec4_by_stride() {
 fn fetch_attribute_unpacks_10_10_10_2() {
     let (mut mem, vmm, base) = harness();
     let word = 0x3ff | 0x1ff << 10 | 0b10 << 30;
-    vmm.write_u32(&mut mem, base, word).unwrap();
+    vmm.write_u32(&mem, base, word).unwrap();
     let mut stats = Default::default();
     let mut host1x = Host1x::new();
     let ctx = ExecCtx {
@@ -115,7 +115,7 @@ fn fetch_attribute_past_the_limit_reads_zeros() {
     for vertex in 0..2u64 {
         for i in 0..4u64 {
             let at = base + vertex * u64::from(stride) + i * 4;
-            vmm.write_u32(&mut mem, at, 7.0f32.to_bits()).unwrap();
+            vmm.write_u32(&mem, at, 7.0f32.to_bits()).unwrap();
         }
     }
     let mut stats = Default::default();
@@ -164,7 +164,7 @@ fn fetch_attribute_unpacks_unorm8_and_honours_is_bgra() {
     let (mut mem, vmm, base) = harness();
     // Packed BGRA8: B=0x40, G=0x80, R=0xff, A=0x00 (little-endian word).
     let packed = 0x00u32 << 24 | 0xffu32 << 16 | 0x80u32 << 8 | 0x40u32;
-    vmm.write_u32(&mut mem, base, packed).unwrap();
+    vmm.write_u32(&mem, base, packed).unwrap();
     let mut stats = Default::default();
     let mut host1x = Host1x::new();
     let ctx = ExecCtx {
@@ -201,7 +201,7 @@ fn fetch_attribute_unpacks_the_eight_bit_integer_and_normalised_types() {
     let (mut mem, vmm, base) = harness();
     // 0x7F, 0x80, 0x01, 0xFF as four bytes: signed 127, -128, 1, -1.
     let packed = 0xFFu32 << 24 | 0x01u32 << 16 | 0x80u32 << 8 | 0x7Fu32;
-    vmm.write_u32(&mut mem, base, packed).unwrap();
+    vmm.write_u32(&mem, base, packed).unwrap();
     let mut stats = Default::default();
     let mut host1x = Host1x::new();
     let ctx = ExecCtx {
@@ -270,9 +270,9 @@ fn fetch_attribute_unpacks_the_sixteen_bit_types() {
         .iter()
         .enumerate()
         .fold(0u64, |acc, (i, &h)| acc | u64::from(h) << (i * 16));
-    vmm.write_u64(&mut mem, base, packed).unwrap();
+    vmm.write_u64(&mem, base, packed).unwrap();
     // The signed pattern eight bytes on: 0x8000 is -1, as is 0x8001; 0x7FFF is +1.
-    vmm.write_u64(&mut mem, base + 8, 0x0001_7FFF_8000_8001)
+    vmm.write_u64(&mem, base + 8, 0x0001_7FFF_8000_8001)
         .unwrap();
     let mut stats = Default::default();
     let mut host1x = Host1x::new();
@@ -351,7 +351,7 @@ fn fetch_attribute_unpacks_the_narrow_eight_bit_shapes() {
     // At the mapping's end, so a whole-word read would fault.
     let at = base + 0xffd;
     // 0x80, 0x7f, 0xff in the three bytes from `at`.
-    vmm.write_u32(&mut mem, at - 1, 0xff7f_8000).unwrap();
+    vmm.write_u32(&mem, at - 1, 0xff7f_8000).unwrap();
     let mut stats = Default::default();
     let mut host1x = Host1x::new();
     let ctx = ExecCtx {

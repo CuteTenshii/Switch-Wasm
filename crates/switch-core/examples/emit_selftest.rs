@@ -32,6 +32,8 @@ const PC_AT: u32 = 0x1024;
 const FUEL_AT: u32 = 0x1028;
 /// FPSR, zeroed before each case.
 const FPSR_AT: u32 = 0x102C;
+/// A zero word: the `Memory` address, so the offsets above are absolute.
+const MEMORY_AT: u32 = 0x1030;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 0x2000;
 
@@ -310,6 +312,7 @@ const LAYOUT: Layout = Layout {
     regs: REGS_AT,
     nzcv: NZCV_AT,
     fpsr: FPSR_AT,
+    memory: MEMORY_AT,
     pages: PAGES_AT,
     read_watch_lo: READ_WATCH_LO_AT,
     read_watch_hi: READ_WATCH_HI_AT,

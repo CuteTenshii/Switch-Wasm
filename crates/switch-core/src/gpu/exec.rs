@@ -33,7 +33,7 @@ pub struct GpuStats {
 }
 
 pub struct ExecCtx<'a> {
-    pub mem: &'a mut Memory,
+    pub mem: &'a Memory,
     pub vmm: &'a AddressSpace,
     pub host1x: &'a mut Host1x,
     pub stats: &'a mut GpuStats,

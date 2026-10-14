@@ -347,11 +347,11 @@ impl AddressSpace {
         mem.read_u64(self.cpu_addr(gpu_va, 8)?)
     }
 
-    pub fn write_u32(&self, mem: &mut Memory, gpu_va: u64, value: u32) -> Result<()> {
+    pub fn write_u32(&self, mem: &Memory, gpu_va: u64, value: u32) -> Result<()> {
         mem.write_u32(self.cpu_addr(gpu_va, 4)?, value)
     }
 
-    pub fn write_u64(&self, mem: &mut Memory, gpu_va: u64, value: u64) -> Result<()> {
+    pub fn write_u64(&self, mem: &Memory, gpu_va: u64, value: u64) -> Result<()> {
         mem.write_u64(self.cpu_addr(gpu_va, 8)?, value)
     }
 
@@ -426,10 +426,10 @@ mod tests {
 
     #[test]
     fn read_write_through_translation() {
-        let mut mem = Memory::new();
+        let mem = Memory::new();
         mem.map_zero(0x2000_0000, 0x1000).unwrap();
         let (vmm, va) = space_with_buffer(0x2000_0000, 0x1000);
-        vmm.write_u32(&mut mem, va + 8, 0xDEAD_BEEF).unwrap();
+        vmm.write_u32(&mem, va + 8, 0xDEAD_BEEF).unwrap();
         assert_eq!(vmm.read_u32(&mem, va + 8).unwrap(), 0xDEAD_BEEF);
         assert_eq!(mem.read_u32(0x2000_0008).unwrap(), 0xDEAD_BEEF);
     }

@@ -92,6 +92,12 @@ impl Cpu {
 
     /// Wake every timed wait whose deadline has passed; `nn::os` rechecks its predicate.
     pub(crate) fn expire_timed_waits(&mut self) {
+        for pid in self.pids() {
+            self.in_process(pid, Cpu::expire_own_timed_waits);
+        }
+    }
+
+    fn expire_own_timed_waits(&mut self) {
         let now = self.cycles;
         for index in 0..self.process().threads.len() {
             let state = self.process().threads[index].state;
@@ -264,9 +270,9 @@ impl Cpu {
 
     /// The soonest timed-wait deadline: the furthest the clock may idle forward.
     pub(crate) fn earliest_deadline(&self) -> Option<u64> {
-        self.process()
-            .threads
-            .iter()
+        self.processes
+            .values()
+            .flat_map(|process| &process.threads)
             .filter(|t| !t.paused)
             .filter_map(|t| match t.state {
                 ThreadState::WaitKey { deadline, .. }

@@ -278,11 +278,13 @@ impl Cpu {
     }
 
     pub(crate) fn has_other_runnable(&self) -> bool {
-        self.process()
-            .threads
-            .iter()
-            .enumerate()
-            .any(|(i, t)| i != self.current_thread && t.state == ThreadState::Runnable && !t.paused)
+        self.processes.iter().any(|(&pid, process)| {
+            process.threads.iter().enumerate().any(|(i, t)| {
+                (pid, i) != (self.pid, self.current_thread)
+                    && t.state == ThreadState::Runnable
+                    && !t.paused
+            })
+        })
     }
 
     /// End the running thread and switch away; the process ends only when the main thread exits.
@@ -295,7 +297,7 @@ impl Cpu {
         );
         self.log_thread(line);
         if self.current_thread == 0 {
-            self.halted = true;
+            self.exit_process(Ending::Exited);
             return;
         }
         self.machine.process_mut(self.pid).threads[self.current_thread].state =
@@ -311,19 +313,20 @@ impl Cpu {
 
     /// Give the CPU to [`Cpu::pick_next`]'s choice, unless the running thread should keep it.
     pub(crate) fn yield_thread(&mut self) {
-        if self.process().threads.len() < 2 || !self.has_other_runnable() {
+        if !self.has_other_runnable() {
             return;
         }
+        self.ensure_main_thread();
         let current = self.current_thread;
         let still_runnable = self.process().threads[current].state == ThreadState::Runnable
             && !self.process().threads[current].paused;
         if still_runnable {
-            if let Some(next) = self.pick_next() {
-                let other = &self.process().threads[next];
+            if let Some((pid, next)) = self.pick_next() {
+                let other = &self.processes[&pid].threads[next];
                 if other.passed_over < STARVE_DECISIONS
                     && self.process().threads[current].priority < other.priority
                 {
-                    self.pass_over_all_but(current);
+                    self.pass_over_all_but((self.pid, current));
                     return;
                 }
             }
@@ -331,21 +334,35 @@ impl Cpu {
         self.switch_to_next_runnable();
     }
 
-    /// Next thread to run: a starved one first, then by priority, round-robin among equals.
-    pub(crate) fn pick_next(&self) -> Option<usize> {
-        let count = self.process().threads.len();
-        let start = self.current_thread;
-        let mut best: Option<usize> = None;
-        for step in 1..count {
-            let candidate = (start + step) % count;
-            let thread = &self.process().threads[candidate];
-            if thread.state != ThreadState::Runnable || thread.paused {
+    /// Next thread to run, as `(pid, index)`: a starved one first, then by priority,
+    /// round-robin among equals across every process.
+    pub(crate) fn pick_next(&self) -> Option<(u64, usize)> {
+        let order: Vec<(u64, usize)> = self
+            .processes
+            .iter()
+            .flat_map(|(&pid, process)| (0..process.threads.len()).map(move |i| (pid, i)))
+            .collect();
+        let count = order.len();
+        // The running thread is not a candidate, when it has a slot yet.
+        let (start, steps) = match order
+            .iter()
+            .position(|&at| at == (self.pid, self.current_thread))
+        {
+            Some(at) => (at, 1..count),
+            None => (0, 0..count),
+        };
+        let thread = |(pid, index): (u64, usize)| &self.processes[&pid].threads[index];
+        let mut best: Option<(u64, usize)> = None;
+        for step in steps {
+            let candidate = order[(start + step) % count];
+            let t = thread(candidate);
+            if t.state != ThreadState::Runnable || t.paused {
                 continue;
             }
-            if thread.passed_over >= STARVE_DECISIONS {
+            if t.passed_over >= STARVE_DECISIONS {
                 return Some(candidate);
             }
-            if best.is_none_or(|b| thread.priority < self.process().threads[b].priority) {
+            if best.is_none_or(|b| t.priority < thread(b).priority) {
                 best = Some(candidate);
             }
         }
@@ -353,12 +370,14 @@ impl Cpu {
     }
 
     /// Count a passed-over decision against every runnable thread except `chosen`.
-    pub(crate) fn pass_over_all_but(&mut self, chosen: usize) {
-        for (index, thread) in self.process_mut().threads.iter_mut().enumerate() {
-            if index == chosen {
-                thread.passed_over = 0;
-            } else if thread.state == ThreadState::Runnable && !thread.paused {
-                thread.passed_over = thread.passed_over.saturating_add(1);
+    pub(crate) fn pass_over_all_but(&mut self, chosen: (u64, usize)) {
+        for (&pid, process) in self.machine.processes.iter_mut() {
+            for (index, thread) in process.threads.iter_mut().enumerate() {
+                if (pid, index) == chosen {
+                    thread.passed_over = 0;
+                } else if thread.state == ThreadState::Runnable && !thread.paused {
+                    thread.passed_over = thread.passed_over.saturating_add(1);
+                }
             }
         }
     }

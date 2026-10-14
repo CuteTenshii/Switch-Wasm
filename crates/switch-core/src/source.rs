@@ -78,6 +78,15 @@ impl<T: ByteSource + ?Sized> ByteSource for Box<T> {
     }
 }
 
+impl<T: ByteSource + ?Sized> ByteSource for std::rc::Rc<T> {
+    fn len(&self) -> u64 {
+        (**self).len()
+    }
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+        (**self).read_at(offset, out)
+    }
+}
+
 /// A source over bytes already in memory (native examples and tests only).
 #[derive(Debug, Clone, Copy)]
 pub struct SliceSource<'a>(pub &'a [u8]);

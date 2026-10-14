@@ -11,8 +11,8 @@ const CONTEXT: u32 = 32;
 fn main() {
     let data = common::read(common::arg(1, USAGE));
     let pc = common::hex(&common::arg(2, USAGE));
-    let mut mem = Memory::new();
-    let loaded = load_nro(&mut mem, &data).expect("load nro");
+    let mem = Memory::new();
+    let loaded = load_nro(&mem, &data).expect("load nro");
     println!(
         "base={:#x} text_off={:#x} text_size={:#x}",
         loaded.base, loaded.text.file_offset, loaded.text.file_size

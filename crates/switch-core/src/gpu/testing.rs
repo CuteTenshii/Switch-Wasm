@@ -188,7 +188,7 @@ pub const DEPTH_TEST_FUNC: u32 = 0x4C3;
 
 /// Write one vertex: `vec4` position at offset 0, `vec4` colour at 16, stride 32.
 pub fn write_vertex(
-    mem: &mut Memory,
+    mem: &Memory,
     vmm: &AddressSpace,
     base: u64,
     index: u32,
@@ -313,7 +313,7 @@ impl Harness {
     pub fn draw_with(&mut self, renderer: &mut dyn Renderer) -> crate::Result<()> {
         let engine = &self.engine;
         let mut ctx = ExecCtx {
-            mem: &mut self.mem,
+            mem: &self.mem,
             vmm: &self.vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
@@ -329,7 +329,7 @@ impl Harness {
     ) -> crate::Result<()> {
         let engine = &self.engine;
         let mut ctx = ExecCtx {
-            mem: &mut self.mem,
+            mem: &self.mem,
             vmm: &self.vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
@@ -342,7 +342,7 @@ impl Harness {
     pub fn clear_depth_with(&mut self, renderer: &mut dyn Renderer) -> crate::Result<()> {
         let engine = &self.engine;
         let mut ctx = ExecCtx {
-            mem: &mut self.mem,
+            mem: &self.mem,
             vmm: &self.vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
@@ -355,7 +355,7 @@ impl Harness {
     pub fn flush_with(&mut self, renderer: &mut dyn Renderer) {
         for _ in 0..64 {
             let mut ctx = ExecCtx {
-                mem: &mut self.mem,
+                mem: &self.mem,
                 vmm: &self.vmm,
                 host1x: &mut self.host1x,
                 stats: &mut self.stats,
@@ -372,7 +372,7 @@ impl Harness {
 
     pub fn ctx(&mut self) -> ExecCtx<'_> {
         ExecCtx {
-            mem: &mut self.mem,
+            mem: &self.mem,
             vmm: &self.vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
@@ -386,7 +386,7 @@ impl Harness {
 
     pub fn write_vertex(&mut self, index: u32, pos: [f32; 4], color: [f32; 4]) {
         let base = self.vertices();
-        write_vertex(&mut self.mem, &self.vmm, base, index, pos, color);
+        write_vertex(&self.mem, &self.vmm, base, index, pos, color);
     }
 
     /// A one-colour triangle covering the upper-left half of the target.
@@ -428,7 +428,7 @@ impl Harness {
         for (i, colour) in colours.iter().enumerate() {
             for (c, v) in colour.iter().enumerate() {
                 let at = addr + i as u64 * 16 + c as u64 * 4;
-                self.vmm.write_u32(&mut self.mem, at, v.to_bits()).unwrap();
+                self.vmm.write_u32(&self.mem, at, v.to_bits()).unwrap();
             }
         }
         // VertexAttribState[1] = aColor: buffer 1, offset 0, 4x32 float.
@@ -521,7 +521,7 @@ impl Harness {
         self.engine.regs.set(0x558, sampler_pool as u32);
         // Bind the constant buffer to the fragment stage's slot 4.
         let mut ctx = ExecCtx {
-            mem: &mut self.mem,
+            mem: &self.mem,
             vmm: &self.vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,

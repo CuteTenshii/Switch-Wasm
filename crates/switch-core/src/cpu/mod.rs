@@ -1,7 +1,7 @@
 //! AArch64 (A64) interpreter core: decode and execute, with instruction groups,
 //! A32 in `a32`, and the block JIT in `jit`.
 
-use crate::mem::Memory;
+use crate::mem::AddressSpace;
 use crate::trace::Level;
 use crate::IdMap;
 use crate::{Error, Result};
@@ -21,7 +21,8 @@ mod regs;
 mod simd;
 mod system;
 
-pub(crate) use crate::kernel::process::{Process, ROOT_PID};
+pub(crate) use crate::kernel::process::{Ending, Process, ROOT_PID};
+pub use crate::kernel::program::{Installed, Program};
 use crate::services::*;
 
 pub(crate) use crate::kernel::events::*;
@@ -61,7 +62,8 @@ pub struct RunReport {
 
 #[derive(Debug)]
 pub struct Cpu {
-    pub mem: Memory,
+    /// The address space of the process this core runs.
+    pub mem: AddressSpace,
     /// X0..=X30 and the three meanings of register 31; see [`REG_SLOTS`].
     pub(crate) regs: [u64; REG_FILE],
     pub(crate) pc: u32,
@@ -110,6 +112,8 @@ pub struct Cpu {
     /// Next cycle at which [`Cpu::sweep_timed_waits`] checks deadlines.
     pub(crate) next_expiry: u64,
     jit: jit::Jit,
+    /// Translated code of the other processes this core has run, by pid.
+    parked_jits: BTreeMap<u64, jit::Jit>,
     /// Whether [`Cpu::run`] uses the JIT. `SWITCH_NO_JIT` disables it on the host;
     /// see [`Cpu::set_jit_enabled`].
     jit_enabled: bool,
@@ -121,6 +125,8 @@ pub struct Cpu {
     pub(crate) switched_in_at: u64,
     /// The process this core runs.
     pub(crate) pid: u64,
+    /// How the running process ended, acted on once the `svc` that ended it replied.
+    pub(crate) process_ending: Option<crate::kernel::process::Ending>,
     /// Kernel and service state: one per console, shared by its cores.
     pub(crate) machine: Box<Machine>,
 }
@@ -194,8 +200,8 @@ pub struct Machine {
     pub fs_activity: FsActivity,
     /// Each card slot's `IEventNotifier` event, by opening command.
     pub(crate) fs_detection_events: BTreeMap<u32, u64>,
-    /// Library applets installed on the NAND, by program id.
-    pub(crate) launchable_applets: std::collections::BTreeSet<u64>,
+    /// Programs on the NAND the kernel can start, by program id.
+    pub(crate) installed: BTreeMap<u64, crate::kernel::program::Installed>,
     /// Error applets started and not yet shown to the player.
     pub(crate) error_dialogs: VecDeque<am::ErrorDialog>,
     /// Supported npad styles and joy-con hold type, read back by their getters.
@@ -309,6 +315,37 @@ impl Cpu {
     pub(crate) fn process_mut(&mut self) -> &mut Process {
         self.machine.process_mut(self.pid)
     }
+
+    /// Point this core at process `pid`: its address space and its translated code.
+    pub(crate) fn enter_process(&mut self, pid: u64) {
+        if pid == self.pid {
+            return;
+        }
+        let jit = self.parked_jits.remove(&pid).unwrap_or_default();
+        let left = std::mem::replace(&mut self.jit, jit);
+        self.parked_jits.insert(self.pid, left);
+        self.mem = self.machine.processes[&pid].mem.clone();
+        self.pid = pid;
+    }
+
+    /// Drop the code this core translated for a process that ended.
+    pub(crate) fn forget_translations(&mut self, pid: u64) {
+        self.parked_jits.remove(&pid);
+    }
+
+    /// Run kernel bookkeeping in process `pid`'s address space, then come back.
+    pub(crate) fn in_process<R>(&mut self, pid: u64, f: impl FnOnce(&mut Cpu) -> R) -> R {
+        if pid == self.pid {
+            return f(self);
+        }
+        let (pid_was, mem_was) = (self.pid, self.mem.clone());
+        self.mem = self.machine.processes[&pid].mem.clone();
+        self.pid = pid;
+        let result = f(self);
+        self.pid = pid_was;
+        self.mem = mem_was;
+        result
+    }
 }
 
 impl Machine {
@@ -342,12 +379,13 @@ impl Default for Cpu {
 
 impl Cpu {
     pub fn new() -> Cpu {
+        let mem = AddressSpace::new();
         let cpu = Cpu {
             mode: ExecMode::A64,
             cpsr_q: false,
             cpsr_ge: 0,
             fpscr_nzcv: 0,
-            mem: Memory::new(),
+            mem: mem.clone(),
             regs: [0; REG_FILE],
             pc: 0,
             nzcv: 0,
@@ -371,11 +409,13 @@ impl Cpu {
             slice_used: 0,
             next_expiry: 0,
             jit: jit::Jit::default(),
+            parked_jits: BTreeMap::new(),
             jit_enabled: !crate::env_flag!("SWITCH_NO_JIT"),
             pending_yield: false,
             pending_sleep: None,
             switched_in_at: 0,
             pid: ROOT_PID,
+            process_ending: None,
             machine: Box::new(Machine {
                 next_object_id: 1,
                 service_handles: IdMap::default(),
@@ -410,7 +450,7 @@ impl Cpu {
                 last_ipc_result: None,
                 fs_activity: FsActivity::default(),
                 fs_detection_events: BTreeMap::new(),
-                launchable_applets: std::collections::BTreeSet::new(),
+                installed: BTreeMap::new(),
                 error_dialogs: VecDeque::new(),
                 touch_sample_counter: 0,
                 touch_published: 0,
@@ -467,7 +507,7 @@ impl Cpu {
                 thread_log: Vec::new(),
                 thread_log_dropped: 0,
 
-                processes: BTreeMap::from([(ROOT_PID, Process::new())]),
+                processes: BTreeMap::from([(ROOT_PID, Process::new(mem))]),
             }),
         };
         // Pre-map the fixed framebuffer and input regions.

@@ -42,7 +42,7 @@ impl Cpu {
         let Some(buffer) = self.pending_present else {
             return;
         };
-        match self.machine.nv.gpu.flush_renderers(&mut self.mem) {
+        match self.machine.nv.gpu.flush_renderers(&self.mem) {
             Ok(crate::gpu::renderer::Flush::Pending) => {}
             Ok(crate::gpu::renderer::Flush::Done) => {
                 self.pending_present = None;
@@ -100,6 +100,13 @@ impl Cpu {
             }
         }
         // No deadline either: wake everything rather than hang.
+        for pid in self.pids() {
+            self.in_process(pid, Cpu::wake_all_waiters);
+        }
+        self.switch_to_next_runnable();
+    }
+
+    fn wake_all_waiters(&mut self) {
         for index in 0..self.process().threads.len() {
             match self.process().threads[index].state {
                 ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
@@ -111,7 +118,6 @@ impl Cpu {
                 _ => {}
             }
         }
-        self.switch_to_next_runnable();
     }
 
     /// Account one retired instruction: a cycle and a step. Both engines call this.
@@ -147,14 +153,16 @@ impl Cpu {
     /// Switch to the thread [`Cpu::pick_next`] chooses. Returns false if there
     /// is none (in which case the running thread keeps going).
     pub(crate) fn switch_to_next_runnable(&mut self) -> bool {
-        let start = self.current_thread;
-        let Some(candidate) = self.pick_next() else {
+        let Some((pid, candidate)) = self.pick_next() else {
             return false;
         };
-        self.pass_over_all_but(candidate);
+        self.ensure_main_thread();
+        let start = self.current_thread;
+        self.pass_over_all_but((pid, candidate));
         self.account_slice(start);
-        self.process_mut().threads[candidate].switches += 1;
         self.save_context(start);
+        self.enter_process(pid);
+        self.process_mut().threads[candidate].switches += 1;
         self.load_context(candidate);
         true
     }

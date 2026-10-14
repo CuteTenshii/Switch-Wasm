@@ -514,13 +514,22 @@ impl Nca {
         keys: &crate::keys::KeySet,
         index: usize,
     ) -> Result<Vec<u8>, Error> {
+        self.pfs0_from_section(self.section_source(nca, keys, index)?, index)
+    }
+
+    /// [`Nca::read_pfs0_section`] from section `index` already decrypted, as
+    /// [`Nca::section_source`] reads it.
+    pub fn pfs0_from_section<S: ByteSource>(
+        &self,
+        section: S,
+        index: usize,
+    ) -> Result<Vec<u8>, Error> {
         let fs = self
             .fs_headers
             .get(index)
             .and_then(|o| o.as_ref())
             .copied()
             .ok_or_else(|| Error::Nca(format!("no FS header for section {}", index)))?;
-        let section = self.section_source(nca, keys, index)?;
         let mut plain = section.read_vec(0, section.len())?;
         self.verify_section_hash(&plain, index)?;
         let start = crate::source::alloc_len(fs.data_offset, "PFS0 region offset")?;

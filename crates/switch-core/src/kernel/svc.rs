@@ -14,7 +14,11 @@ impl Cpu {
             self.halted = true;
             return Ok(());
         }
-        self.horizon_syscall(imm)
+        self.horizon_syscall(imm)?;
+        if let Some(ending) = self.process_ending.take() {
+            self.end_process(self.pid, ending);
+        }
+        Ok(())
     }
 
     /// Horizon syscalls by libnx's numbering (`nx/source/kernel/svc.s`).
@@ -199,7 +203,7 @@ impl Cpu {
                     let line = format!("{line}\n{}", self.trail_text());
                     self.diagnostic(crate::trace::Level::Error, &line);
                 }
-                self.halted = true;
+                self.exit_process(crate::cpu::Ending::Exited);
                 Ok(())
             }
             0x0A => {
@@ -840,9 +844,8 @@ impl Cpu {
                         }
                         // acc, the user accounts.
                         "acc:u0" | "acc:u1" | "acc:su" | "acc:profile" | "acc:profile-editor"
-                        | "acc:manager" | "acc:async-context" | "acc:notifier" => {
-                            self.acc_request(tls, handle, cmd_id)?
-                        }
+                        | "acc:manager" | "acc:administrator" | "acc:async-context"
+                        | "acc:notifier" => self.acc_request(tls, handle, cmd_id)?,
                         // ns, installed content.
                         "ns:am"
                         | "ns:am2"
@@ -1141,7 +1144,8 @@ impl Cpu {
                     let _ = writeln!(msg, "  {addr:#010x}");
                 }
                 self.out.extend_from_slice(msg.as_bytes());
-                self.halted = true;
+                let first = msg.lines().next().unwrap_or_default().to_owned();
+                self.exit_process(crate::cpu::Ending::Faulted(first));
                 Ok(())
             }
             0x27 => {

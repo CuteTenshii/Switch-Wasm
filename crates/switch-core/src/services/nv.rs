@@ -72,7 +72,7 @@ impl Cpu {
                 argp.resize(size.max(argp.len()), 0);
                 let mut inline_out = Vec::new();
                 let error = self.machine.nv.ioctl(
-                    &mut self.mem,
+                    &self.mem,
                     fd,
                     request,
                     &mut argp,

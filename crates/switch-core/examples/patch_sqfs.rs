@@ -12,7 +12,7 @@ fn main() {
     let data = common::read(common::arg(1, "patch_sqfs <path.nro>"));
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    load_nro(&mut cpu.mem, &data).expect("load nro");
+    load_nro(&cpu.mem, &data).expect("load nro");
 
     let sqfs_init = symbol_value(&data, "sqfs_init").expect("sqfs_init") as u32 + BASE;
     println!("patching sqfs_init at {sqfs_init:#x} to return 0");

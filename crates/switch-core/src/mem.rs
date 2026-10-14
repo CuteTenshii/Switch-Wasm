@@ -186,6 +186,46 @@ pub struct Memory {
 unsafe impl Sync for Memory {}
 unsafe impl Send for Memory {}
 
+/// A process's address space as a core holds it: shared with the process, with the
+/// `Memory` address first so emitted code reaches it in one load.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct AddressSpace {
+    at: *const Memory,
+    shared: std::sync::Arc<Memory>,
+}
+
+// SAFETY: `at` points into `shared`, which this keeps alive, and `Memory` is `Sync`.
+unsafe impl Sync for AddressSpace {}
+unsafe impl Send for AddressSpace {}
+
+impl AddressSpace {
+    pub fn new() -> Self {
+        let shared = std::sync::Arc::new(Memory::new());
+        Self {
+            at: std::sync::Arc::as_ptr(&shared),
+            shared,
+        }
+    }
+
+    /// Where the core keeps the `Memory` address, from the start of an `AddressSpace`.
+    pub(crate) const MEMORY_AT: u32 = std::mem::offset_of!(AddressSpace, at) as u32;
+}
+
+impl Default for AddressSpace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Deref for AddressSpace {
+    type Target = Memory;
+
+    fn deref(&self) -> &Memory {
+        &self.shared
+    }
+}
+
 impl Drop for Memory {
     fn drop(&mut self) {
         for entry in self.pages.iter() {
@@ -1692,7 +1732,7 @@ mod tests {
     #[test]
     fn a_bulk_write_stops_and_reports_where_bytewise_writes_would() {
         let data: Vec<u8> = (1..=0x40u8).collect();
-        let bytewise = |m: &mut Memory, at: u32| -> Result<()> {
+        let bytewise = |m: &Memory, at: u32| -> Result<()> {
             for (i, &b) in data.iter().enumerate() {
                 m.write_u8(at + i as u32, b)?;
             }

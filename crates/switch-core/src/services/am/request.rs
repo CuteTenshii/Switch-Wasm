@@ -652,9 +652,9 @@ impl Cpu {
                 }
                 // ShouldSetGpuTimeSliceManually.
                 Some(150) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                // GetMainAppletIdentityInfo / GetCallerAppletIdentityInfo: the home menu.
+                // GetMainAppletIdentityInfo / GetCallerAppletIdentityInfo.
                 Some(12) | Some(14) => {
-                    let info = home_menu_identity();
+                    let info = caller_identity(self);
                     self.write_ipc_response(tls, 0, &[], &info, &[])
                 }
                 // CanUseApplicationCore.
@@ -666,9 +666,9 @@ impl Cpu {
                     let code = self.system_settings().language_code;
                     self.write_ipc_response(tls, 0, &[], &code.to_le_bytes(), &[])
                 }
-                // GetCallerAppletIdentityInfoStack: the home menu as the single entry.
+                // GetCallerAppletIdentityInfoStack: the caller as the single entry.
                 Some(17) => {
-                    let info = home_menu_identity();
+                    let info = caller_identity(self);
                     let (addr, size) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
                     let room = if addr == 0 {
                         0
@@ -688,7 +688,7 @@ impl Cpu {
                     let layout = self.system_settings().keyboard_layout;
                     self.write_ipc_response(tls, 0, &[], &layout.to_le_bytes(), &[])
                 }
-                // PushOutData(IStorage): kept for [`Cpu::library_applet_results`].
+                // PushOutData(IStorage): to the caller, or kept for the host.
                 Some(1) => {
                     let data = self
                         .ipc_input_object_key(tls, handle, 0)
@@ -705,18 +705,22 @@ impl Cpu {
                             applet_name(applet_id_for(self.program_id()))
                         ),
                     );
-                    self.process_mut()
-                        .am_out_data
-                        .push(data.unwrap_or_default());
+                    let data = data.unwrap_or_default();
+                    if !self.push_to_caller(data.clone(), false) {
+                        self.process_mut().am_out_data.push(data);
+                    }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // PushInteractiveOutData(IStorage): kept for the host.
+                // PushInteractiveOutData(IStorage): to the caller, or kept for the host.
                 Some(3) => {
                     let data = self
                         .ipc_input_object_key(tls, handle, 0)
                         .and_then(|key| self.process().am_storages.get(&key))
                         .cloned()
                         .unwrap_or_default();
+                    if self.push_to_caller(data.clone(), true) {
+                        return self.write_ipc_response(tls, 0, &[], &[], &[]);
+                    }
                     if self
                         .unimplemented_ipc
                         .insert(("am:applet-interactive-output".to_string(), cmd_id))
@@ -749,7 +753,7 @@ impl Cpu {
                 }
                 // ExitProcessAndReturn.
                 Some(10) => {
-                    self.halted = true;
+                    self.exit_process(Ending::Exited);
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // An unnamed init-time setter taking 16 bytes.
@@ -789,19 +793,23 @@ impl Cpu {
                                 "[am] CreateLibraryApplet: error (mode {mode}); the page shows it"
                             ),
                         );
+                    } else if library_applet_program_id(id)
+                        .is_some_and(|program| self.is_installed(program))
+                    {
+                        self.diagnostic(
+                            Level::Info,
+                            &format!(
+                                "[am] CreateLibraryApplet: {} (mode {mode}); it runs from the \
+                                 NAND once started",
+                                applet_name(id)
+                            ),
+                        );
                     } else {
-                        let installed = library_applet_program_id(id)
-                            .is_some_and(|program| self.launchable_applets.contains(&program));
-                        let why = if installed {
-                            "this kernel cannot run it beside its caller yet"
-                        } else {
-                            "it is not on the NAND"
-                        };
                         self.diagnostic(
                             Level::Warn,
                             &format!(
-                                "[am] CreateLibraryApplet: {} (mode {mode}); {why}, so it will \
-                                 report itself cancelled",
+                                "[am] CreateLibraryApplet: {} (mode {mode}); it is not on the \
+                                 NAND, so it will report itself cancelled",
                                 applet_name(id)
                             ),
                         );
@@ -869,8 +877,19 @@ impl Cpu {
                     {
                         self.write_ipc_response(tls, 0, &[], &[], &[])
                     }
+                    // Start: run as a process of its own.
+                    Some(10) if self.start_installed_applet(key) => {
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
+                    // RequestExit: an applet that runs is asked to exit, and answers by exiting.
+                    Some(20) if self.request_library_applet_exit(key) => {
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
                     // Start / RequestExit / Terminate.
                     Some(10) | Some(20) | Some(25) => {
+                        if cmd_id == Some(25) {
+                            self.terminate_library_applet(key);
+                        }
                         if cmd_id == Some(10) {
                             let shown = self
                                 .process()
@@ -903,7 +922,7 @@ impl Cpu {
                             .process()
                             .am_applets
                             .get(&key)
-                            .is_some_and(|applet| applet.finished && applet.answer.is_some());
+                            .is_some_and(|applet| applet.finished && applet.answered);
                         let result = if answered { 0 } else { CANCELLED };
                         self.write_ipc_response(tls, result, &[], &[], &[])
                     }
@@ -919,36 +938,32 @@ impl Cpu {
                         }
                         self.write_ipc_response(tls, 0, &[], &[], &[])
                     }
-                    // PushExtraStorage / PushInteractiveInData: dropped.
-                    Some(102) | Some(103) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                    // PopOutData: the answer, once.
-                    Some(101) => {
-                        let answer = self
-                            .process_mut()
-                            .am_applets
-                            .get_mut(&key)
-                            .and_then(LibraryApplet::take_answer);
-                        let Some(answer) = answer else {
-                            const NO_DATA: u32 = 128 | (3 << 9);
-                            return self.write_ipc_response(tls, NO_DATA, &[], &[], &[]);
-                        };
-                        if let Some(event) = self
+                    // PushInteractiveInData: to the applet's process while it runs.
+                    Some(103) => {
+                        let data = self
+                            .ipc_input_object_key(tls, handle, 0)
+                            .and_then(|storage| self.process().am_storages.get(&storage))
+                            .cloned()
+                            .unwrap_or_default();
+                        let running = self
                             .process()
                             .am_applets
                             .get(&key)
-                            .and_then(|a| a.events[POP_OUT_DATA_EVENT])
-                        {
-                            self.clear_event(event);
+                            .and_then(|applet| applet.process);
+                        if let Some(pid) = running {
+                            self.in_process(pid, |cpu| {
+                                cpu.process_mut().am_interactive_in.push_back(data);
+                                cpu.refresh_applet_pop_events();
+                            });
                         }
-                        let storage = self.reply_with_interface(tls, handle, "am:storage")?;
-                        self.process_mut().am_storages.insert(storage, answer);
-                        Ok(())
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
                     }
-                    // PopInteractiveOutData: nothing produced.
-                    Some(104) => {
-                        const NO_DATA: u32 = 128 | (3 << 9);
-                        self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
-                    }
+                    // PushExtraStorage: dropped.
+                    Some(102) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    // PopOutData.
+                    Some(101) => self.pop_library_applet_storage(tls, handle, key, false),
+                    // PopInteractiveOutData.
+                    Some(104) => self.pop_library_applet_storage(tls, handle, key, true),
                     // GetPopOutDataEvent / GetPopInteractiveOutDataEvent.
                     Some(105) => {
                         let event = self.library_applet_event(key, POP_OUT_DATA_EVENT);

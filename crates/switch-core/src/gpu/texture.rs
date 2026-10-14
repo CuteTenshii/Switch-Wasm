@@ -1045,20 +1045,20 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         let tex_addr = base + 0x400;
         // dword0: COMPONENTS_SIZES=A8B8G8R8(0x08), R_DATA_TYPE=UNORM(2)@bit7.
-        vmm.write_u32(&mut mem, base, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
+        vmm.write_u32(&mem, base, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
             .unwrap();
         // dword1: pitch-aligned low address bits (32B units).
-        vmm.write_u32(&mut mem, base + 4, ((tex_addr as u32) >> 5) << 5)
+        vmm.write_u32(&mem, base + 4, ((tex_addr as u32) >> 5) << 5)
             .unwrap();
         // dword2: HEADER_VERSION=PITCH(2)@bits21-23, plus address hi16.
-        vmm.write_u32(&mut mem, base + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+        vmm.write_u32(&mem, base + 8, ((tex_addr >> 32) as u32) | (2 << 21))
             .unwrap();
         // dword3: pitch = 64 bytes, in 32B units -> 2.
-        vmm.write_u32(&mut mem, base + 12, 2).unwrap();
+        vmm.write_u32(&mem, base + 12, 2).unwrap();
         // dword4: width - 1 = 15 (width 16).
-        vmm.write_u32(&mut mem, base + 16, 15 | TYPE_2D).unwrap();
+        vmm.write_u32(&mem, base + 16, 15 | TYPE_2D).unwrap();
         // dword5: height - 1 = 7 (height 8).
-        vmm.write_u32(&mut mem, base + 20, 7).unwrap();
+        vmm.write_u32(&mem, base + 20, 7).unwrap();
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
@@ -1094,26 +1094,22 @@ mod tests {
         let tex_addr = base + 0x400;
 
         const UINT: u32 = 4;
-        vmm.write_u32(&mut mem, tic_addr, 0x29 | (UINT << 7) | IDENTITY_SWIZZLE)
+        vmm.write_u32(&mem, tic_addr, 0x29 | (UINT << 7) | IDENTITY_SWIZZLE)
             .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+        vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
             .unwrap();
-        vmm.write_u32(
-            &mut mem,
-            tic_addr + 8,
-            ((tex_addr >> 32) as u32) | (2 << 21),
-        )
-        .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 16, 1 | TYPE_2D).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 20, 0).unwrap();
+        vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 12, 1).unwrap();
+        vmm.write_u32(&mem, tic_addr + 16, 1 | TYPE_2D).unwrap();
+        vmm.write_u32(&mem, tic_addr + 20, 0).unwrap();
         // Left: stencil 3, depth 0. Right: stencil 200, depth 1.
-        vmm.write_u32(&mut mem, tex_addr, 3).unwrap();
-        vmm.write_u32(&mut mem, tex_addr + 4, 0xffff_ff00 | 200)
+        vmm.write_u32(&mem, tex_addr, 3).unwrap();
+        vmm.write_u32(&mem, tex_addr + 4, 0xffff_ff00 | 200)
             .unwrap();
         // Linear on both filters, clamped.
-        vmm.write_u32(&mut mem, tsc_addr, 2 | (2 << 3)).unwrap();
-        vmm.write_u32(&mut mem, tsc_addr + 4, 2 | (2 << 4)).unwrap();
+        vmm.write_u32(&mem, tsc_addr, 2 | (2 << 3)).unwrap();
+        vmm.write_u32(&mem, tsc_addr + 4, 2 | (2 << 4)).unwrap();
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
@@ -1143,7 +1139,7 @@ mod tests {
             0x00000060,
         ];
         let (mut mem, vmm, base) = harness();
-        let read = |mem: &mut Memory, words: [u32; 8]| {
+        let read = |mem: &Memory, words: [u32; 8]| {
             for (i, word) in words.iter().enumerate() {
                 vmm.write_u32(mem, base + i as u64 * 4, *word).unwrap();
             }
@@ -1180,7 +1176,7 @@ mod tests {
 
     /// Write a BC1 TIC for a `width` x `height` texel image at `tex_addr`.
     fn write_bc1_tic(
-        mem: &mut Memory,
+        mem: &Memory,
         vmm: &AddressSpace,
         tic_addr: u64,
         tex_addr: u64,
@@ -1218,14 +1214,14 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         let tic_addr = base;
         let tex_addr = base + 0x400;
-        write_bc1_tic(&mut mem, &vmm, tic_addr, tex_addr, 16, 8, Some(32));
+        write_bc1_tic(&mem, &vmm, tic_addr, tex_addr, 16, 8, Some(32));
 
         // Row 0: red, green, blue, white. Row 1 starts one 32-byte pitch on.
         for (i, colour) in [RED, GREEN, BLUE, WHITE].into_iter().enumerate() {
-            vmm.write_u64(&mut mem, tex_addr + i as u64 * 8, flat_bc1_block(colour))
+            vmm.write_u64(&mem, tex_addr + i as u64 * 8, flat_bc1_block(colour))
                 .unwrap();
         }
-        vmm.write_u64(&mut mem, tex_addr + 32, flat_bc1_block(GREEN))
+        vmm.write_u64(&mem, tex_addr + 32, flat_bc1_block(GREEN))
             .unwrap();
 
         let mut host1x = Host1x::new();
@@ -1276,10 +1272,10 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         let tic_addr = base;
         let tex_addr = base + 0x600; // 512-byte aligned, as BLOCKLINEAR requires
-        write_bc1_tic(&mut mem, &vmm, tic_addr, tex_addr, 16, 8, None);
+        write_bc1_tic(&mem, &vmm, tic_addr, tex_addr, 16, 8, None);
 
         let width_bytes = 4 * 8; // four blocks per row, eight bytes each
-        let place = |mem: &mut Memory, bx: u32, by: u32, colour: u16| {
+        let place = |mem: &Memory, bx: u32, by: u32, colour: u16| {
             let at = block_linear_offset(bx * 8, by, width_bytes, 1);
             vmm.write_u64(mem, tex_addr + at as u64, flat_bc1_block(colour))
                 .unwrap();
@@ -1325,23 +1321,18 @@ mod tests {
         let tic_addr = base;
         let tex_addr = base + 0x400;
         // COMPONENTS_SIZES = ASTC_2D_8X5 (0x55), UNORM, pitch layout.
-        vmm.write_u32(&mut mem, tic_addr, 0x55 | (2 << 7) | IDENTITY_SWIZZLE)
+        vmm.write_u32(&mem, tic_addr, 0x55 | (2 << 7) | IDENTITY_SWIZZLE)
             .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+        vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
             .unwrap();
-        vmm.write_u32(
-            &mut mem,
-            tic_addr + 8,
-            ((tex_addr >> 32) as u32) | (2 << 21),
-        )
-        .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // pitch 32 bytes = two blocks
-        vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D)
-            .unwrap(); // width 16
-        vmm.write_u32(&mut mem, tic_addr + 20, 9).unwrap(); // height 10
+        vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 12, 1).unwrap(); // pitch 32 bytes = two blocks
+        vmm.write_u32(&mem, tic_addr + 16, 15 | TYPE_2D).unwrap(); // width 16
+        vmm.write_u32(&mem, tic_addr + 20, 9).unwrap(); // height 10
 
         // Void-extent blocks: one flat colour each.
-        let place = |mem: &mut Memory, at: u64, r: u16, g: u16, b: u16| {
+        let place = |mem: &Memory, at: u64, r: u16, g: u16, b: u16| {
             let low: u64 =
                 0x1FC | (0x1FFF << 12) | (0x1FFF << 25) | (0x1FFF << 38) | (0x1FFF << 51);
             let high: u64 =
@@ -1402,9 +1393,9 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         let tic_addr = base;
         let tex_addr = base + 0x400;
-        write_bc1_tic(&mut mem, &vmm, tic_addr, tex_addr, 16, 8, Some(32));
+        write_bc1_tic(&mem, &vmm, tic_addr, tex_addr, 16, 8, Some(32));
         // Mid grey: 0x8410 is RGB565's closest to 50% in every channel.
-        vmm.write_u64(&mut mem, tex_addr, flat_bc1_block(0x8410))
+        vmm.write_u64(&mem, tex_addr, flat_bc1_block(0x8410))
             .unwrap();
 
         let mut host1x = Host1x::new();
@@ -1421,7 +1412,7 @@ mod tests {
         let plain = linear.texel_cached(0, 0, 0, &ctx).unwrap()[0];
 
         // Set the sRGB bit and read the same bytes again.
-        vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D | (1 << 22))
+        vmm.write_u32(&mem, tic_addr + 16, 15 | TYPE_2D | (1 << 22))
             .unwrap();
         let ctx = ExecCtx {
             mem: &mut mem,
@@ -1547,27 +1538,23 @@ mod tests {
         let tsc_addr = base + 0x100;
         let tex_addr = base + 0x400;
 
-        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
+        vmm.write_u32(&mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
             .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+        vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
             .unwrap();
-        vmm.write_u32(
-            &mut mem,
-            tic_addr + 8,
-            ((tex_addr >> 32) as u32) | (2 << 21),
-        )
-        .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // pitch 32
-        vmm.write_u32(&mut mem, tic_addr + 16, 3 | TYPE_2D).unwrap(); // width 4
-        vmm.write_u32(&mut mem, tic_addr + 20, 0).unwrap(); // height 1
-                                                            // MIRROR on u, clamp on v; nearest on both.
-        vmm.write_u32(&mut mem, tsc_addr, 1 | (2 << 3)).unwrap();
-        vmm.write_u32(&mut mem, tsc_addr + 4, 1 | (1 << 4)).unwrap();
+        vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 12, 1).unwrap(); // pitch 32
+        vmm.write_u32(&mem, tic_addr + 16, 3 | TYPE_2D).unwrap(); // width 4
+        vmm.write_u32(&mem, tic_addr + 20, 0).unwrap(); // height 1
+                                                        // MIRROR on u, clamp on v; nearest on both.
+        vmm.write_u32(&mem, tsc_addr, 1 | (2 << 3)).unwrap();
+        vmm.write_u32(&mem, tsc_addr + 4, 1 | (1 << 4)).unwrap();
         for (i, colour) in [0xFF0000FFu32, 0xFF00FF00, 0xFFFF0000, 0xFFFFFFFF]
             .iter()
             .enumerate()
         {
-            vmm.write_u32(&mut mem, tex_addr + 4 * i as u64, *colour)
+            vmm.write_u32(&mem, tex_addr + 4 * i as u64, *colour)
                 .unwrap();
         }
 
@@ -1602,9 +1589,9 @@ mod tests {
     fn reads_a_sampler_and_maps_repeat_and_linear() {
         let (mut mem, vmm, base) = harness();
         // ADDRESS_U=REPEAT(0), ADDRESS_V=CLAMP_TO_EDGE(2)@bits3-5.
-        vmm.write_u32(&mut mem, base, 0 | (2 << 3)).unwrap();
+        vmm.write_u32(&mem, base, 0 | (2 << 3)).unwrap();
         // MAG_FILTER=LINEAR(2), MIN_FILTER=LINEAR(2)@bits4-5.
-        vmm.write_u32(&mut mem, base + 4, 2 | (2 << 4)).unwrap();
+        vmm.write_u32(&mem, base + 4, 2 | (2 << 4)).unwrap();
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
@@ -1629,29 +1616,25 @@ mod tests {
         let tsc_addr = base + 0x100;
         let tex_addr = base + 0x400;
 
-        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
+        vmm.write_u32(&mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
             .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+        vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
             .unwrap();
-        vmm.write_u32(
-            &mut mem,
-            tic_addr + 8,
-            ((tex_addr >> 32) as u32) | (2 << 21),
-        )
-        .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // PITCH_BITS_20_TO_5 = 1 -> pitch = 32
-        vmm.write_u32(&mut mem, tic_addr + 16, 1 | TYPE_2D).unwrap(); // width - 1 = 1 (width 2)
-        vmm.write_u32(&mut mem, tic_addr + 20, 1).unwrap(); // height - 1 = 1 (height 2)
+        vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 12, 1).unwrap(); // PITCH_BITS_20_TO_5 = 1 -> pitch = 32
+        vmm.write_u32(&mem, tic_addr + 16, 1 | TYPE_2D).unwrap(); // width - 1 = 1 (width 2)
+        vmm.write_u32(&mem, tic_addr + 20, 1).unwrap(); // height - 1 = 1 (height 2)
 
         // NEAREST filtering, both axes clamp-to-edge.
-        vmm.write_u32(&mut mem, tsc_addr, 2 | (2 << 3)).unwrap();
-        vmm.write_u32(&mut mem, tsc_addr + 4, 1 | (1 << 4)).unwrap();
+        vmm.write_u32(&mem, tsc_addr, 2 | (2 << 3)).unwrap();
+        vmm.write_u32(&mem, tsc_addr + 4, 1 | (1 << 4)).unwrap();
 
         // A 2x2 RGBA8 texture: (0,0)=red, (1,0)=green, (0,1)=blue, (1,1)=white.
-        vmm.write_u32(&mut mem, tex_addr, 0xFF0000FF).unwrap(); // r=1,g=0,b=0,a=1 (R in low byte)
-        vmm.write_u32(&mut mem, tex_addr + 4, 0xFF00FF00).unwrap(); // g=1
-        vmm.write_u32(&mut mem, tex_addr + 32, 0xFFFF0000).unwrap(); // b=1
-        vmm.write_u32(&mut mem, tex_addr + 36, 0xFFFFFFFF).unwrap(); // white
+        vmm.write_u32(&mem, tex_addr, 0xFF0000FF).unwrap(); // r=1,g=0,b=0,a=1 (R in low byte)
+        vmm.write_u32(&mem, tex_addr + 4, 0xFF00FF00).unwrap(); // g=1
+        vmm.write_u32(&mem, tex_addr + 32, 0xFFFF0000).unwrap(); // b=1
+        vmm.write_u32(&mem, tex_addr + 36, 0xFFFFFFFF).unwrap(); // white
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
@@ -1681,34 +1664,30 @@ mod tests {
         let tex_addr = base + 0x400;
 
         // A 2x2 R32F image: the left column is near, the right column far.
-        vmm.write_u32(&mut mem, tic_addr, 0x0F | (7 << 7) | IDENTITY_SWIZZLE)
+        vmm.write_u32(&mem, tic_addr, 0x0F | (7 << 7) | IDENTITY_SWIZZLE)
             .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+        vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
             .unwrap();
-        vmm.write_u32(
-            &mut mem,
-            tic_addr + 8,
-            ((tex_addr >> 32) as u32) | (2 << 21),
-        )
-        .unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 16, 1 | TYPE_2D).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 20, 1).unwrap();
+        vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 12, 1).unwrap();
+        vmm.write_u32(&mem, tic_addr + 16, 1 | TYPE_2D).unwrap();
+        vmm.write_u32(&mem, tic_addr + 20, 1).unwrap();
         for (offset, depth) in [(0, 0.0f32), (4, 1.0), (32, 0.0), (36, 1.0)] {
-            vmm.write_u32(&mut mem, tex_addr + offset, depth.to_bits())
+            vmm.write_u32(&mem, tex_addr + offset, depth.to_bits())
                 .unwrap();
         }
 
         // Clamp on both axes, `depth_compare_enable` with `less`.
         let compare_less = 1u32 << 9 | (1 << 10);
-        let write_tsc = |mem: &mut Memory, linear: bool| {
+        let write_tsc = |mem: &Memory, linear: bool| {
             vmm.write_u32(mem, tsc_addr, 2 | (2 << 3) | compare_less)
                 .unwrap();
             let filter = if linear { 2 | (2 << 4) } else { 1 | (1 << 4) };
             vmm.write_u32(mem, tsc_addr + 4, filter).unwrap();
         };
 
-        let sample_at = |mem: &mut Memory, u: f64, reference: f32| {
+        let sample_at = |mem: &Memory, u: f64, reference: f32| {
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
             let ctx = ExecCtx {

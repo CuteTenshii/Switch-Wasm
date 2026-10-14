@@ -3,7 +3,6 @@
 use switch_core::cpu::Cpu;
 use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
-use switch_core::nsp::Pfs0;
 use switch_core::source::ByteSource;
 use switch_core::trace::Level;
 
@@ -43,23 +42,6 @@ pub extern "C" fn switch_load_nro(
             -1
         }
     }
-}
-
-/// ExeFS modules in load order (`rtld`, `main`, `subsdk0..9`, `sdk`), skipping absent ones.
-fn collect_modules<'a>(pfs0: &Pfs0, exefs: &'a [u8]) -> Vec<(&'static str, &'a [u8])> {
-    const MODULE_ORDER: &[&str] = &[
-        "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5",
-        "subsdk6", "subsdk7", "subsdk8", "subsdk9", "sdk",
-    ];
-    MODULE_ORDER
-        .iter()
-        .filter_map(|&name| {
-            let f = pfs0.find(name)?;
-            let start = f.offset as usize;
-            let end = start + f.size as usize; // Pfs0::parse already bounds-checked every entry
-            Some((name, &exefs[start..end]))
-        })
-        .collect()
 }
 
 /// Decrypt a Program NCA's ExeFS from `nca_src`, load it and boot. Returns entry or -1.
@@ -141,38 +123,13 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
         ),
     }
 
-    let pfs0 = match Pfs0::parse(&exefs) {
+    let program = match switch_core::cpu::Program::parse(program.program_id, exefs) {
         Ok(p) => p,
         Err(e) => {
             *last_error = e.to_string();
             return -1;
         }
     };
-    // Reported by `pm`; applets derive their `AppletId` from it.
-    cpu.set_program_id(program.program_id);
-
-    let modules = collect_modules(&pfs0, &exefs);
-    // Report what the ExeFS holds next to what was loaded.
-    cpu.diagnostic(
-        Level::Info,
-        &format!(
-            "[exefs] entries: {}, loading: {}",
-            pfs0.files
-                .iter()
-                .map(|f| f.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            modules
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    );
-    if !modules.iter().any(|(name, _)| *name == "main") {
-        *last_error = "no 'main' executable in this NCA's ExeFS".into();
-        return -1;
-    }
 
     // RomFS is optional and failures do not block booting; it is read by range.
     match update {
@@ -199,49 +156,12 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
         }
     }
 
-    // The address space layout from the NPDM system resource size; must precede the boot.
-    let system_resource = switch_core::npdm::Npdm::system_resource_size_of(&pfs0, &exefs);
-    cpu.diagnostic(
-        Level::Info,
-        &format!(
-            "[npdm] system resource {system_resource:#x}: {}",
-            if system_resource == 0 {
-                "plain heap"
-            } else {
-                "virtual address memory"
-            }
-        ),
-    );
-    cpu.set_system_resource_size(system_resource);
-
-    // Main thread priority.
-    if let Some(priority) = switch_core::npdm::Npdm::main_thread_priority_of(&pfs0, &exefs) {
-        cpu.set_main_thread_priority(priority);
-    }
-    // Main thread core.
-    if let Some(core) = switch_core::npdm::Npdm::main_thread_core_of(&pfs0, &exefs) {
-        cpu.set_main_thread_core(core);
-    }
-    // Allowed cores.
-    if let Some(mask) = switch_core::npdm::Npdm::core_mask_of(&pfs0, &exefs) {
-        cpu.set_process_core_mask(mask);
-    }
-
-    // 32- or 64-bit, from the NPDM flags; the entry ABI differs.
-    if !switch_core::npdm::Npdm::is_64_bit_of(&pfs0, &exefs) {
-        cpu.diagnostic(
-            Level::Info,
-            "[npdm] AArch32 title: running the A32 interpreter",
-        );
-        cpu.set_mode(switch_core::cpu::ExecMode::A32);
-    }
-
-    match cpu.boot_retail_program(&modules) {
+    match cpu.boot_program(&program) {
         Ok(loaded) => {
             // After the modules: booting clears the diagnostic buffer.
             mount_add_on_content(cpu, keys, added.dlc);
             last_error.clear();
-            loaded[0].entry as i64
+            i64::from(loaded[0].entry)
         }
         Err(e) => {
             *last_error = e.to_string();
@@ -367,7 +287,7 @@ pub extern "C" fn switch_load_elf(handle: u32, ptr: *const u8, len: u32) -> i64 
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     // An ELF carries no control data.
     s.control = None;
-    match load_elf(&mut s.cpu.mem, data) {
+    match load_elf(&s.cpu.mem, data) {
         Ok(elf) => {
             s.cpu.set_pc(elf.entry as u32);
             boot_entry_regs(&mut s.cpu, 0);

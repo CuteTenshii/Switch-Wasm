@@ -14,7 +14,7 @@ fn main() {
     let out = common::arg(2, USAGE);
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    load_nro(&mut cpu.mem, &data).expect("load nro");
+    load_nro(&cpu.mem, &data).expect("load nro");
 
     let start = symbol_value(&data, "_libtransistor_squashfs_image").expect("start symbol") as u32;
     let end = symbol_value(&data, "_libtransistor_squashfs_image_end").expect("end symbol") as u32;

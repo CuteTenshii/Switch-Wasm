@@ -1039,33 +1039,11 @@ impl Title {
         if env::var("DOCKED").is_ok() {
             cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
         }
-        cpu.set_system_resource_size(switch_core::npdm::Npdm::system_resource_size_of(
-            &self.exefs_pfs0,
-            &self.exefs,
-        ));
-        cpu.set_program_id(self.nca.program_id);
-        if let Some(priority) =
-            switch_core::npdm::Npdm::main_thread_priority_of(&self.exefs_pfs0, &self.exefs)
-        {
-            cpu.set_main_thread_priority(priority);
-        }
-        if let Some(core) =
-            switch_core::npdm::Npdm::main_thread_core_of(&self.exefs_pfs0, &self.exefs)
-        {
-            cpu.set_main_thread_core(core);
-        }
-        if let Some(mask) = switch_core::npdm::Npdm::core_mask_of(&self.exefs_pfs0, &self.exefs) {
-            cpu.set_process_core_mask(mask);
-        }
-        // Before the boot, which lays out the entry ABI per instruction set.
-        if !switch_core::npdm::Npdm::is_64_bit_of(&self.exefs_pfs0, &self.exefs) {
-            eprintln!("[npdm] AArch32 title: running the A32 interpreter");
-            cpu.set_mode(switch_core::cpu::ExecMode::A32);
-        }
-        let modules = self.modules();
+        let program = switch_core::cpu::Program::parse(self.nca.program_id, self.exefs.clone())
+            .unwrap_or_else(|e| die(&format!("the ExeFS is not a PFS0: {e}")));
         let loaded = cpu
-            .boot_retail_program(&modules)
-            .unwrap_or_else(|e| die(&format!("booting {} modules: {e:?}", modules.len())));
+            .boot_program(&program)
+            .unwrap_or_else(|e| die(&format!("booting the program: {e:?}")));
         // After the program id and the modules: booting clears the diagnostics.
         mount_add_on_content(cpu, &self.keys);
         loaded

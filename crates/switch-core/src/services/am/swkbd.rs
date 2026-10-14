@@ -142,7 +142,7 @@ impl Cpu {
         let Some(applet) = self.process_mut().am_applets.get_mut(&pending.accessor) else {
             return false;
         };
-        applet.answer = Some(storage);
+        applet.answer_with(storage);
         applet.finish();
         self.signal_library_applet_event(pending.accessor, STATE_CHANGED_EVENT);
         self.signal_library_applet_event(pending.accessor, POP_OUT_DATA_EVENT);

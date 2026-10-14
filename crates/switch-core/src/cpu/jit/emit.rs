@@ -72,6 +72,7 @@ const SCRATCH: Layout = Layout {
     fpsr: 0,
     pc: 0,
     fuel: 0,
+    memory: 0,
     pages: 0,
     read_watch_lo: 0,
     read_watch_hi: 0,
@@ -100,6 +101,9 @@ pub struct Layout {
     pub fuel: u32,
     /// Start of the `[u128; 32]` SIMD&FP register file.
     pub vregs: u32,
+    /// Where the running process's `Memory` address is kept; the fields below are
+    /// offsets from that address.
+    pub memory: u32,
     /// Where the page table's pointer is kept (the table itself is boxed).
     pub pages: u32,
     /// The read watchpoint, as the two `u32`s of its `[start, end)`.
@@ -119,7 +123,6 @@ pub struct Layout {
 impl Layout {
     /// Where that state sits inside a real [`Cpu`].
     pub const fn of_cpu() -> Layout {
-        let mem = std::mem::offset_of!(Cpu, mem) as u32;
         let m = crate::mem::Offsets::OF_MEMORY;
         Layout {
             regs: std::mem::offset_of!(Cpu, regs) as u32,
@@ -130,14 +133,15 @@ impl Layout {
                 + std::mem::offset_of!(Jit, chain)
                 + std::mem::offset_of!(Chain, fuel)) as u32,
             vregs: std::mem::offset_of!(Cpu, vregs) as u32,
-            pages: mem + m.pages,
-            read_watch_lo: mem + m.read_watch_lo,
-            read_watch_hi: mem + m.read_watch_hi,
-            watch_lo: mem + m.watch_lo,
-            watch_hi: mem + m.watch_hi,
-            readonly_lo: mem + m.readonly_lo,
-            readonly_hi: mem + m.readonly_hi,
-            watched: mem + m.watched,
+            memory: std::mem::offset_of!(Cpu, mem) as u32 + crate::mem::AddressSpace::MEMORY_AT,
+            pages: m.pages,
+            read_watch_lo: m.read_watch_lo,
+            read_watch_hi: m.read_watch_hi,
+            watch_lo: m.watch_lo,
+            watch_hi: m.watch_hi,
+            readonly_lo: m.readonly_lo,
+            readonly_hi: m.readonly_hi,
+            watched: m.watched,
         }
     }
 }
@@ -703,9 +707,15 @@ impl Emitter<'_> {
             f.i32_load(ALIGN_4, self.layout.fuel);
             f.local_set(L_FUEL);
         }
+        if self.env.iter().any(Option::is_some) {
+            // `L_ADDR` is free until the body sets it.
+            f.local_get(STATE);
+            f.i32_load(ALIGN_4, self.layout.memory);
+            f.local_set(L_ADDR);
+        }
         for (slot, offset) in self.env.iter().enumerate() {
             if let Some(offset) = *offset {
-                f.local_get(STATE);
+                f.local_get(L_ADDR);
                 f.i32_load(ALIGN_4, offset);
                 f.local_set(L_ENV + slot as u32);
             }
@@ -2204,6 +2214,7 @@ mod tests {
         fpsr: 2092,
         pc: 2084,
         fuel: 2088,
+        memory: 2096,
         pages: 2052,
         read_watch_lo: 2056,
         read_watch_hi: 2060,
@@ -2255,14 +2266,19 @@ mod tests {
         // SAFETY: every read is at an in-bounds offset from a live `Cpu`, of
         // the type the field there holds.
         unsafe {
-            let u32_at = |off: u32| *((base + off as usize) as *const u32);
+            let memory = *((base + layout.memory as usize) as *const usize);
+            let u32_at = |off: u32| *((memory + off as usize) as *const u32);
 
             assert_eq!(
                 *((base + layout.regs as usize + 8 * SLOT as usize) as *const u64),
                 VALUE,
                 "the register file is not where an emitted block reads it"
             );
-            assert_eq!(u32_at(layout.nzcv), 0xC000_0000, "NZCV moved");
+            assert_eq!(
+                *((base + layout.nzcv as usize) as *const u32),
+                0xC000_0000,
+                "NZCV moved"
+            );
 
             assert_eq!(
                 (u32_at(layout.read_watch_lo), u32_at(layout.read_watch_hi)),
@@ -2281,7 +2297,7 @@ mod tests {
             );
 
             // Marking a page allocates the bitmap and sets the bit stores test.
-            let watched = *((base + layout.watched as usize) as *const *const u64);
+            let watched = *((memory + layout.watched as usize) as *const *const u64);
             assert!(!watched.is_null(), "the watched-page bitmap is not there");
             let page = (ADDR >> PAGE_BITS) as usize;
             assert_ne!(
@@ -2291,7 +2307,7 @@ mod tests {
             );
 
             // The page-table walk: table pointer, entry, byte at the offset.
-            let table = *((base + layout.pages as usize) as *const *const u8);
+            let table = *((memory + layout.pages as usize) as *const *const u8);
             let entry = *(table.add(page * ENTRY) as *const *const u8);
             assert!(!entry.is_null(), "a written page has no storage");
             assert_eq!(

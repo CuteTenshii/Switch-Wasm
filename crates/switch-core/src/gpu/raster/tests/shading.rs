@@ -24,9 +24,9 @@ fn three_vertex_colours_interpolate_correctly_at_a_known_interior_point() {
     let red = [1.0f32, 0.0, 0.0, 1.0];
     let green = [0.0f32, 1.0, 0.0, 1.0];
     let blue = [0.0f32, 0.0, 1.0, 1.0];
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], red);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], green);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], blue);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], red);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], green);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], blue);
 
     let mut host1x = Host1x::new();
     let mut stats = Default::default();
@@ -250,7 +250,7 @@ fn an_instanced_vertex_array_advances_with_the_instance_not_the_vertex() {
     let (mut mem, vmm, base) = harness();
     // Four consecutive floats, one per element of a divisor-2 array.
     for (i, v) in [10.0f32, 20.0, 30.0, 40.0].iter().enumerate() {
-        vmm.write_u32(&mut mem, base + i as u64 * 4, v.to_bits())
+        vmm.write_u32(&mem, base + i as u64 * 4, v.to_bits())
             .unwrap();
     }
     use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
@@ -455,7 +455,7 @@ fn a_depth_only_pass_draws_without_a_colour_target() {
     .into_iter()
     .enumerate()
     {
-        write_vertex(&mut mem, &vmm, vbuf_addr, i as u32, pos, color);
+        write_vertex(&mem, &vmm, vbuf_addr, i as u32, pos, color);
     }
 
     let mut host1x = Host1x::new();
@@ -515,9 +515,9 @@ fn depth_test_keeps_the_nearer_of_two_overlapping_triangles() {
     let far = [0.8f32, 0.2, 0.2, 1.0];
 
     // Far triangle first, at NDC z = 0.5 (covers the whole target).
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.5, 1.0], far);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.5, 1.0], far);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.5, 1.0], far);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.5, 1.0], far);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.5, 1.0], far);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.5, 1.0], far);
     {
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
@@ -531,9 +531,9 @@ fn depth_test_keeps_the_nearer_of_two_overlapping_triangles() {
         draw(&engine, &mut ctx).unwrap();
     }
     // Near triangle second, at NDC z = -0.5 (closer, smaller depth).
-    write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, -0.5, 1.0], near);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, -0.5, 1.0], near);
-    write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, -0.5, 1.0], near);
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, -0.5, 1.0], near);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, -0.5, 1.0], near);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, -0.5, 1.0], near);
     let mut host1x = Host1x::new();
     let mut stats = Default::default();
     let mut ctx = ExecCtx {

@@ -378,7 +378,7 @@ mod tests {
 
         fn ctx(&mut self) -> ExecCtx<'_> {
             ExecCtx {
-                mem: &mut self.mem,
+                mem: &self.mem,
                 vmm: &self.vmm,
                 host1x: &mut self.host1x,
                 stats: &mut self.stats,

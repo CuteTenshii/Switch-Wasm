@@ -16,6 +16,8 @@ pub(crate) struct Event {
 /// The AM messages queued for the running applet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppletMessage {
+    /// Asks a library applet to exit.
+    ExitRequest = 4,
     /// Queued once at startup, then only on a real change.
     FocusStateChanged = 15,
     /// For an applet that called `SetHandlesRequestToDisplay`.
@@ -74,10 +76,14 @@ impl Cpu {
         // Default buffer queue geometry; sizes a guest already dequeued are kept.
         let (width, height) = mode.display_size();
         self.display.set_default_size(width, height);
-        self.queue_applet_message(AppletMessage::OperationModeChanged);
-        self.queue_applet_message(AppletMessage::PerformanceModeChanged);
-        if let Some(event) = self.process().display_resolution_event {
-            self.signal_event(event);
+        for pid in self.pids() {
+            self.in_process(pid, |cpu| {
+                cpu.queue_applet_message(AppletMessage::OperationModeChanged);
+                cpu.queue_applet_message(AppletMessage::PerformanceModeChanged);
+                if let Some(event) = cpu.process().display_resolution_event {
+                    cpu.signal_event(event);
+                }
+            });
         }
     }
 
@@ -118,7 +124,12 @@ impl Cpu {
 
     /// Wake every thread parked in `svcWaitSynchronization`; each reissues its wait.
     pub(crate) fn wake_event_waiters(&mut self) {
-        for thread in &mut self.process_mut().threads {
+        let threads = self
+            .machine
+            .processes
+            .values_mut()
+            .flat_map(|p| &mut p.threads);
+        for thread in threads {
             if matches!(thread.state, ThreadState::WaitEvent { .. }) {
                 thread.state = ThreadState::Runnable;
             }
