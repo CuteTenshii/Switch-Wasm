@@ -51,6 +51,14 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
       return;
     }
     const result = handler(...args);
+    // IndexedDB work answers when it is done.
+    if (result instanceof Promise) {
+      result.then(
+        (value: unknown) => reply({ id, ok: true, result: value }),
+        (err: unknown) => reply({ id, ok: false, error: String(err) }),
+      );
+      return;
+    }
     const stopped = cmd === 'run' && typeof result === 'number' && result < Number(args[0]);
     if (result instanceof Uint8Array) {
       reply({ id, ok: true, result }, [result.buffer as ArrayBuffer]);

@@ -11,7 +11,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Browser bindings
 
-- Write SD-card and save changes to IndexedDB from the worker, which has IndexedDB, instead of the page asking the worker for each changed file.
 - Stretch audio when emulation runs below full speed, so it plays slowed down rather than in bursts with gaps.
 
 ## Mobile

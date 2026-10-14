@@ -8,7 +8,7 @@ import {
   NAND_TITLES,
   nandIdb,
   type NandEntry,
-} from './db';
+} from '../shared/db';
 import { $, el } from './dom';
 import { beginLoad, failLoad } from './loading';
 import { log } from './log';

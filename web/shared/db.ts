@@ -1,6 +1,6 @@
-// The page's IndexedDB databases and shared transaction helpers.
+// The IndexedDB databases and transaction helpers, shared by the page and the worker.
 
-import type { Bytes } from '../shared/protocol';
+import type { Bytes } from './protocol';
 
 export const SD_DB_NAME = 'switch-wasm-sd';
 export const SD_STORE = 'entries';

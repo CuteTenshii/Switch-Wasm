@@ -1,7 +1,7 @@
 // Each opened title's NACP and icon, so ns can describe it to other programs.
 
 import type { Bytes } from '../shared/protocol';
-import { idbApply, idbGetAll, NAND_CONTROLS, nandIdb } from './db';
+import { idbApply, idbGetAll, NAND_CONTROLS, nandIdb } from '../shared/db';
 import { log } from './log';
 import { call } from './rpc';
 

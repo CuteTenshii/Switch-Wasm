@@ -1,7 +1,7 @@
 // The file manager: the SD card, save data and NAND titles as stored in this browser.
 
 import type { Bytes } from '../shared/protocol';
-import { idbApply, NAND_SAVES, NAND_USERS, nandIdb, SD_STORE, sdIdb, type StoredEntry } from './db';
+import { idbApply, NAND_SAVES, NAND_USERS, nandIdb, SD_STORE, sdIdb, type StoredEntry } from '../shared/db';
 import {
   Archive, Database, Download, File, FileArchive, FilePen, FileUp, Folder, FolderPlus, FolderUp,
   MemoryStick, Package, PackagePlus, Pencil, Play, Save, Trash2, type IconNode,
@@ -13,8 +13,6 @@ import { fmtSize } from './format';
 import { icon } from './icons';
 import { listNandTitles, readNandContent, removeNandTitle, titleLabel } from './nand';
 import { call, hasSession } from './rpc';
-import { saveFlush } from './saves';
-import { sdFlush } from './sdcard';
 import { zip, type ZipEntry } from './zip';
 
 interface Info {
@@ -28,7 +26,7 @@ interface Volume {
   store: string;
   // Key prefix in front of the path: a save's id, nothing for the SD card.
   prefix: string;
-  flush(): Promise<void>;
+  flush(): Promise<unknown>;
   write(path: string, data: Bytes): Promise<unknown>;
   mkdir(path: string): Promise<unknown>;
   remove(path: string): Promise<unknown>;
@@ -44,7 +42,7 @@ const sdVolume: Volume = {
   db: sdIdb,
   store: SD_STORE,
   prefix: '',
-  flush: sdFlush,
+  flush: () => call('flush_storage'),
   write: (path, data) => call('sd_write_file', path, data),
   mkdir: (path) => call('sd_create_dir', path),
   remove: (path) => call('sd_remove', path),
@@ -55,7 +53,7 @@ function saveVolume(id: string): Volume {
     db: nandIdb,
     store: NAND_SAVES,
     prefix: id,
-    flush: saveFlush,
+    flush: () => call('flush_storage'),
     write: (path, data) => call('save_write_file', id, path, data),
     mkdir: (path) => call('save_create_dir', id, path),
     remove: (path) => call('save_remove', id, path),
@@ -537,7 +535,7 @@ async function rename(volume: Volume, all: Map<string, Info>, from: string, to: 
 
 async function renderSaves(mine: number): Promise<void> {
   const db = await nandIdb();
-  await saveFlush();
+  await call('flush_storage');
   const keys = await new Promise<string[]>((resolve, reject) => {
     const tx = db.transaction(NAND_SAVES, 'readonly');
     const req = tx.objectStore(NAND_SAVES).getAllKeys();

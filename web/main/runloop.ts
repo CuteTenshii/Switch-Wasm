@@ -16,8 +16,6 @@ import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log, logBlock, type LogClass } from './log';
 import { call, onLoopEvents, readLastError } from './rpc';
-import { saveFlush } from './saves';
-import { sdFlush } from './sdcard';
 import { pullProfileEdits, storeProfileEdits } from './users';
 import { loaded, panelOpen, setPanel, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
@@ -88,8 +86,6 @@ function applyHousekeeping(h: Housekeeping): void {
   showReadouts(h.steps, h.ram);
   logOutput(h.output);
   logTrace(h.trace);
-  if (h.sdChanged) void sdFlush();
-  if (h.savesChanged) void saveFlush();
   if (h.profilesEdited) void storeProfileEdits();
   offerKeyboard(h.keyboard);
   offerErrors(h.errors);
@@ -221,7 +217,7 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     showGuestCrash('The guest stopped unexpectedly.');
   }
   await Promise.all([
-    drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), updateReadouts(),
+    drainOutput(), call('flush_storage'), pullProfileEdits(), updateReadouts(),
   ]);
 }
 

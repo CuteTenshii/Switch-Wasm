@@ -224,6 +224,9 @@ export interface Commands {
   // The worker runs slices itself until paused, halted or faulted, reporting each.
   start_loop(tracing: boolean): number;
   pause_loop(): number;
+  // The SD card and saves: loaded from IndexedDB into the core, and written back.
+  restore_storage(): number;
+  flush_storage(): number;
   clear_screen(): number;
   halted(): number;
   guest_fatal(): string;
@@ -278,7 +281,7 @@ export type CommandName = keyof Commands;
 export type CommandHandlers = {
   [K in CommandName]: (
     ...args: Parameters<Commands[K]>
-  ) => ReturnType<Commands[K]> | { error: string };
+  ) => ReturnType<Commands[K]> | Promise<ReturnType<Commands[K]>> | { error: string };
 };
 
 export interface CallRequest {
@@ -297,9 +300,7 @@ export interface Housekeeping {
   // Guest console output and core diagnostics since the last report.
   output: string;
   trace: string;
-  // Changed since the last report; the page reads the contents itself.
-  sdChanged: boolean;
-  savesChanged: boolean;
+  // Changed since the last report; the page reads the profiles itself.
   profilesEdited: boolean;
   keyboard: KeyboardRequest | null;
   errors: ErrorDialog[];

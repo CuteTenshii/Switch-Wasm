@@ -1,12 +1,6 @@
-// Persists the guest-changed paths of the emulated SD card to IndexedDB.
+// Asks the browser to keep the SD card and saves; the worker stores them.
 
-import { idbApply, idbGetAll, SD_STORE, sdIdb, type StoredEntry } from './db';
-import { log, logStored } from './log';
-import { call, hasSession } from './rpc';
-
-// Drained but unstored entries by path; IndexedDB refusals wait for the next flush.
-const sdBacklog = new Map<string, StoredEntry | null>();
-let sdFlushing = false;
+import { log } from './log';
 
 // Ask the browser not to evict the card under storage pressure.
 export async function sdRequestPersistence(): Promise<void> {
@@ -17,48 +11,4 @@ export async function sdRequestPersistence(): Promise<void> {
       log('SD card: storage is not marked persistent - the browser may evict it.', 'dim');
     }
   } catch { /* not fatal: the card still works for this session */ }
-}
-
-// Restore the stored card through host entry points, which are not guest changes.
-export async function sdRestore(): Promise<void> {
-  let entries: [string, StoredEntry][];
-  try {
-    entries = await idbGetAll<StoredEntry>(await sdIdb(), SD_STORE);
-  } catch (err) {
-    log('SD card: could not be read (' + String(err) + ')', 'err');
-    return;
-  }
-  if (!entries.length) return;
-  // Directories first, so empty ones survive.
-  entries.sort((a, b) => (a[1].kind === b[1].kind ? 0 : a[1].kind === 'dir' ? -1 : 1));
-  for (const [path, value] of entries) {
-    if (value.kind === 'dir') await call('sd_create_dir', path);
-    else await call('sd_write_file', path, value.data || new Uint8Array(0));
-  }
-  log('SD card: restored ' + entries.length + ' entries', 'dim');
-}
-
-// Write back what the guest changed.
-export async function sdFlush(): Promise<void> {
-  if (sdFlushing || !hasSession()) return;
-  sdFlushing = true;
-  try {
-    for (const change of await call('sd_take_changes')) {
-      if (change.kind === 'deleted') sdBacklog.set(change.path, null);
-      else if (change.kind === 'dir') sdBacklog.set(change.path, { kind: 'dir' });
-      else {
-        const data = await call('sd_read_file', change.path);
-        sdBacklog.set(change.path, { kind: 'file', data: data || new Uint8Array(0) });
-      }
-    }
-    if (sdBacklog.size) {
-      await idbApply(await sdIdb(), SD_STORE, [...sdBacklog]);
-      logStored('SD card', sdBacklog);
-      sdBacklog.clear();
-    }
-  } catch (err) {
-    log('SD card: could not be written (' + String(err) + ') - retrying on the next flush.', 'err');
-  } finally {
-    sdFlushing = false;
-  }
 }

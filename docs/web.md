@@ -116,9 +116,10 @@ The page, the worker, and the wasm bindings between them.
 - Data archives and library applets (`add_applet`) are registered per session; a rebuilt session needs them again (`restoreArchives` is awaited on rebuild because a title mounting an archive still being registered will not find it). A generation ticket lets a newer restore cancel an older one.
 - A launched program is booted from full bytes (the loader maps the whole image); archives and applets are range-read, and the core runs an applet as a process beside its caller.
 
-## `web/main/sdcard.ts`
+## `web/worker/persist.ts`
 
-- The emulated SD card lives in session memory; IndexedDB persists it as a path -> bytes map, flushing only guest-changed paths. Restores go through host entry points (not recorded as changes) so restoring does not queue a full write-back. Drained changes cannot be returned to the core, so IndexedDB failures (quota) stay in a per-path backlog until the next flush. Persistent storage is requested so the card is not evicted.
+- The worker owns the SD card's and saves' persistence: it restores them from IndexedDB into the core when a session starts and stores guest-changed paths as its housekeeping finds them, so no file crosses to the page. Restores go through host entry points (not recorded as changes) so restoring does not queue a full write-back. Drained changes cannot be returned to the core, so IndexedDB failures (quota) stay in a per-path backlog until the next flush. Flushes run one after another, so one that resolves has stored its changes.
+- The page asks for persistent storage (`navigator.storage.persist`, main thread only) so the card is not evicted.
 
 ## `web/main/files.ts`
 

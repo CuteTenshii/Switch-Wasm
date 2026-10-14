@@ -10,8 +10,6 @@ import { log } from './log';
 import { call, setSession } from './rpc';
 import { abortRun } from './runloop';
 import { restoreArchives } from './nand';
-import { saveRestore } from './saves';
-import { sdRestore } from './sdcard';
 import { stageUsers } from './users';
 
 // Held across sessions; only the staging repeats.
@@ -66,8 +64,7 @@ export async function recycleSession({ reopen, force = false }: Recycle = {}): P
   // Independent, except the archives, which need the keys.
   await Promise.all([
     stageFont(),
-    sdRestore(),
-    saveRestore(),
+    call('restore_storage'),
     controlRestore(),
     stageUsers(),
     (hasKeys() ? stageKeys() : Promise.resolve()).then(restoreArchives),

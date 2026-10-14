@@ -11,9 +11,8 @@ import { clearConsole, log, logLevel, offerPreviousLog, onLogLevel } from './log
 import { initNand } from './nand';
 import { attachScreen, call, initWorker, setSession, whenReady } from './rpc';
 import { updateReadouts, updateRam } from './runloop';
-import { saveRestore } from './saves';
 import { loadProfiles, stageUsers } from './users';
-import { sdRequestPersistence, sdRestore } from './sdcard';
+import { sdRequestPersistence } from './sdcard';
 import { screenEl, setState, showOverlay } from './shell';
 import { reopenContainer } from './container';
 import { recycleSession, stageFont } from './session';
@@ -42,8 +41,8 @@ async function init(): Promise<void> {
     // Independent of each other once the session exists.
     await Promise.all([
       stageFont(),
-      sdRequestPersistence().then(sdRestore),
-      saveRestore(),
+      sdRequestPersistence(),
+      call('restore_storage'),
       controlRestore(),
       loadProfiles().then(stageUsers),
       offerPreviousLog(),

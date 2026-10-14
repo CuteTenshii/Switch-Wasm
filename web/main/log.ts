@@ -2,8 +2,7 @@
 
 import { $, el } from './dom';
 import type { LogClass } from '../shared/protocol';
-import { LOG_KEY, LOG_STORE, idbApply, idbGet, logIdb, type StoredEntry } from './db';
-import { fmtSize } from './format';
+import { LOG_KEY, LOG_STORE, idbApply, idbGet, logIdb } from '../shared/db';
 import { openPanel } from './shell';
 
 export type { LogClass } from '../shared/protocol';
@@ -122,25 +121,6 @@ function renderConsole(): void {
   }
   consoleEl.replaceChildren(...rows.reverse());
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
-}
-
-const STORED_NAMED_MAX = 8;
-
-// `null` in the map is a deletion.
-export function logStored(what: string, changes: Map<string, StoredEntry | null>): void {
-  let bytes = 0;
-  const named: string[] = [];
-  for (const [path, entry] of changes) {
-    if (entry?.kind === 'file') bytes += entry.data?.length ?? 0;
-    if (named.length < STORED_NAMED_MAX) {
-      named.push(entry ? path : path + ' (deleted)');
-    }
-  }
-  const more = changes.size > named.length ? `, and ${changes.size - named.length} more` : '';
-  log(
-    `[io] ${what}: stored ${changes.size} changes (${fmtSize(bytes)}) in IndexedDB: `
-    + named.join(', ') + more,
-  );
 }
 
 // One entry per line, at one level.

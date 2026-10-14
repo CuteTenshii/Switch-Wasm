@@ -10,6 +10,7 @@ import { addHostFile, openHostFile, resetHostFiles } from './hostfiles';
 import { workerLog } from './log';
 import { switch_clear_screen } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
+import { flushStorage, restoreStorage } from './persist';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
   core,
@@ -304,6 +305,13 @@ export const CMD: CommandHandlers = {
   },
   pause_loop() {
     pauseLoop();
+    return 0;
+  },
+  restore_storage() {
+    return restoreStorage();
+  },
+  async flush_storage() {
+    await flushStorage();
     return 0;
   },
   clear_screen() {

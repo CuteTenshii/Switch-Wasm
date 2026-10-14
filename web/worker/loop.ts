@@ -4,6 +4,7 @@ import type { ErrorDialog, Housekeeping, SliceReport, WorkerMessage } from '../s
 import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
+import { flushStorage } from './persist';
 import { switch_present } from '@core/switch_wasm.js';
 import { core, state } from './wasm';
 
@@ -108,10 +109,10 @@ export function paint(): number | null {
 const text = new TextDecoder();
 
 function housekeeping(): Housekeeping {
+  void flushStorage();
   const decode = (bytes: unknown) => (bytes instanceof Uint8Array && bytes.length
     ? text.decode(bytes)
     : '');
-  const h = state.handle;
   const errors: ErrorDialog[] = [];
   for (let error = CMD.error_dialog(); error; error = CMD.error_dialog()) {
     errors.push(error as ErrorDialog);
@@ -121,8 +122,6 @@ function housekeeping(): Housekeeping {
     ram: CMD.ram() as Housekeeping['ram'],
     output: decode(CMD.drain_output()),
     trace: decode(CMD.drain_trace()),
-    sdChanged: core.switch_sd_pending_changes(h) !== 0,
-    savesChanged: CMD.saves_pending() as boolean,
     profilesEdited: CMD.users_take_edits() as boolean,
     keyboard: CMD.keyboard_request() as Housekeeping['keyboard'],
     errors,

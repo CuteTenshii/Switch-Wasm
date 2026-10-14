@@ -1,7 +1,7 @@
 // User profiles and the picker the top bar opens.
 
 import type { Bytes, UserRecord } from '../shared/protocol';
-import { NAND_SAVES, NAND_USERS, nandIdb } from './db';
+import { NAND_SAVES, NAND_USERS, nandIdb } from '../shared/db';
 import { $, el, pickedFile } from './dom';
 import { log } from './log';
 import { call, hasSession } from './rpc';
