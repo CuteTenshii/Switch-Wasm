@@ -312,6 +312,12 @@ impl Cpu {
                 | Some(49900) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // GetPlayHistoryStatistics(Uid) -> 0x10 bytes.
                 Some(20701) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
+                // GetUserPresenceView / LoadUserSetting (V1, V2) -> a zeroed struct: offline,
+                // every setting at zero.
+                Some(20600) | Some(20601) | Some(20800) | Some(20802) => {
+                    self.zero_output_buffer(tls, 0);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             "friend:notification" => match cmd_id {
@@ -555,6 +561,35 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::kernel::ipc::testing::*;
+
+    #[test]
+    fn a_user_presence_and_setting_read_back_zeroed() {
+        const BUFFER: u32 = 0x4000;
+        for command in [20600, 20601, 20800, 20802] {
+            let mut cpu = request_with_recv_static(command, &[0xAB; 16], BUFFER, 0x40);
+            cpu.mem.map_zero(BUFFER, 0x1000).unwrap();
+            for offset in 0..0x40 {
+                cpu.mem.write_u8(BUFFER + offset, 0xEE).unwrap();
+            }
+            cpu.register_service_handle(9, "friend:service");
+            cpu.friend_request(TLS, 9, Some(command)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "command {command}"
+            );
+            assert_eq!(
+                cpu.read_bytes(BUFFER, 0x40),
+                vec![0u8; 0x40],
+                "command {command} left stale bytes"
+            );
         }
     }
 }

@@ -349,6 +349,13 @@ impl Cpu {
                 self.acc_profile_request(tls, handle, &iface, cmd_id)
             }
             "acc:manager" => self.acc_manager_request(tls, handle, cmd_id),
+            "acc:administrator" => match cmd_id {
+                // IsRegistered: the network service account `GetAccountId` reports.
+                Some(200) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
+                // IsLinkedWithNintendoAccount: no Nintendo Account here.
+                Some(250) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                _ => self.acc_manager_request(tls, handle, cmd_id),
+            },
             "acc:async-context" => self.acc_async_context_request(tls, cmd_id),
             // `INotifier::GetSystemEvent`: a real event that is never signalled.
             "acc:notifier" => match cmd_id {
@@ -445,6 +452,11 @@ impl Cpu {
             Some(205) if iface == "acc:su" => {
                 self.acc_open_profile(tls, handle, "acc:profile-editor")
             }
+            // GetBaasAccountAdministrator(AccountUid) -> IAdministrator.
+            Some(250) if iface == "acc:su" => {
+                self.reply_with_interface(tls, handle, "acc:administrator")?;
+                Ok(())
+            }
             _ => self.unimplemented_command(tls, iface, cmd_id),
         }
     }
@@ -536,7 +548,7 @@ impl Cpu {
         }
     }
 
-    /// `IManagerForApplication`/`IManagerForSystemService`.
+    /// `IManagerForApplication`/`IManagerForSystemService`, and what `IAdministrator` shares.
     fn acc_manager_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         match cmd_id {
             // CheckAvailability -> success, as `nifm` reports a link; tokens are empty.
@@ -761,6 +773,25 @@ mod tests {
             vec![0u8; 0x30],
             "stale uids left behind"
         );
+    }
+
+    #[test]
+    fn the_administrator_is_registered_and_not_linked() {
+        let mut cpu = request(false, 250, &super::DEFAULT_USER_UID);
+        acc(&mut cpu, "acc:su", 250);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+        let administrator = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.service_name(administrator), Some("acc:administrator"));
+
+        for (command, answer) in [(200, 1), (250, 0)] {
+            write_request(&mut cpu, command, &[]);
+            cpu.acc_request(TLS, administrator, Some(command)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u8(TLS + 0x20).unwrap(),
+                answer,
+                "command {command}"
+            );
+        }
     }
 
     #[test]
