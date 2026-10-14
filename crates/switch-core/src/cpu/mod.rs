@@ -241,6 +241,10 @@ pub struct Machine {
     pub(crate) erpt_attachments: Vec<erpt::ErrorReportAttachment>,
     /// The journal id, created on first request.
     pub(crate) erpt_journal_id: Option<[u8; erpt::ERPT_UUID_SIZE]>,
+    /// hid's shared memory, written here and mapped by each process that asks for it.
+    pub(crate) hid_shmem: std::sync::Arc<crate::mem::SharedPages>,
+    /// Whether any process has mapped it, so there is someone to publish to.
+    pub(crate) hid_mapped: bool,
     /// Sampling number for hid npad LIFO entries.
     pub(crate) sample_counter: u64,
     /// Last pad and contacts, republished by [`Cpu::hid_tick`].
@@ -476,6 +480,8 @@ impl Cpu {
                 erpt_reports: Vec::new(),
                 erpt_attachments: Vec::new(),
                 erpt_journal_id: None,
+                hid_shmem: crate::mem::SharedPages::new(HID_SHMEM_SIZE as usize),
+                hid_mapped: false,
                 sample_counter: 0,
                 last_gamepad: (0, 0, 0, 0, 0),
                 last_touches: Vec::new(),

@@ -117,6 +117,8 @@ struct Meta {
     watch: (u32, u32),
     /// The same for reads.
     read_watch: (u32, u32),
+    /// Shared memory mapped here, as `(first page, block)`; its pages are the block's.
+    shared: Vec<(usize, std::sync::Arc<SharedPages>)>,
 }
 
 /// The last address a watchpoint saw, or none.
@@ -226,11 +228,62 @@ impl std::ops::Deref for AddressSpace {
     }
 }
 
+/// Pages several address spaces map at once: a shared memory object.
+pub struct SharedPages {
+    pages: Box<[Page]>,
+}
+
+// SAFETY: as for `Memory`'s pages, races on the bytes are the guest's.
+unsafe impl Sync for SharedPages {}
+unsafe impl Send for SharedPages {}
+
+impl std::fmt::Debug for SharedPages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SharedPages({} pages)", self.pages.len())
+    }
+}
+
+impl SharedPages {
+    /// `size` bytes, rounded up to whole pages, zeroed.
+    pub fn new(size: usize) -> std::sync::Arc<SharedPages> {
+        let pages = std::iter::repeat_with(|| UnsafeCell::new([0u8; PAGE_SIZE]))
+            .take(size.div_ceil(PAGE_SIZE))
+            .collect();
+        std::sync::Arc::new(SharedPages { pages })
+    }
+
+    /// Write `bytes` at `offset` into the block.
+    pub fn write(&self, offset: u32, bytes: &[u8]) -> Result<()> {
+        let end = offset as usize + bytes.len();
+        if end > self.pages.len() * PAGE_SIZE {
+            return Err(Error::Cpu(format!(
+                "shared memory write at {offset:#x} runs past its {:#x} bytes",
+                self.pages.len() * PAGE_SIZE
+            )));
+        }
+        for (i, &byte) in bytes.iter().enumerate() {
+            let at = offset as usize + i;
+            // SAFETY: in bounds, checked above; races are the guest's, as for any page.
+            unsafe { (*self.pages[at / PAGE_SIZE].get())[at % PAGE_SIZE] = byte };
+        }
+        Ok(())
+    }
+
+    pub fn write_u32(&self, offset: u32, value: u32) -> Result<()> {
+        self.write(offset, &value.to_le_bytes())
+    }
+
+    pub fn write_u64(&self, offset: u32, value: u64) -> Result<()> {
+        self.write(offset, &value.to_le_bytes())
+    }
+}
+
 impl Drop for Memory {
     fn drop(&mut self) {
-        for entry in self.pages.iter() {
+        let shared = self.shared_pages();
+        for (idx, entry) in self.pages.iter().enumerate() {
             let page = entry.swap(std::ptr::null_mut(), Relaxed);
-            if !page.is_null() {
+            if !page.is_null() && !shared.contains(&idx) {
                 // SAFETY: allocated by `Box::into_raw` and unreachable from here on.
                 drop(unsafe { Box::from_raw(page) });
             }
@@ -268,6 +321,7 @@ impl Memory {
                 max_mapped_pages: MAX_MAPPED_PAGES,
                 watch: (1, 0),
                 read_watch: (1, 0),
+                shared: Vec::new(),
             }),
             zero: Box::new([0u8; PAGE_SIZE]),
             mapped_pages: AtomicUsize::new(0),
@@ -1437,21 +1491,60 @@ impl Memory {
         self.map(dst, &buf)
     }
 
+    /// Page indices whose storage belongs to a shared memory block.
+    fn shared_pages(&self) -> Vec<usize> {
+        self.meta()
+            .shared
+            .iter()
+            .flat_map(|(first, block)| *first..first + block.pages.len())
+            .collect()
+    }
+
+    /// Map shared memory `block` at page-aligned `addr`; stores through either side show
+    /// in every address space that maps it. Runs while the other cores are paused.
+    pub fn map_shared(&self, addr: u32, block: &std::sync::Arc<SharedPages>) -> Result<()> {
+        let first = addr as usize >> PAGE_BITS;
+        if addr as usize & (PAGE_SIZE - 1) != 0 || first + block.pages.len() > PAGE_COUNT {
+            return Err(Error::Cpu(format!("shared memory cannot map at {addr:#x}")));
+        }
+        self.unmap(addr, block.pages.len() * PAGE_SIZE);
+        for (i, page) in block.pages.iter().enumerate() {
+            let idx = first + i;
+            self.pages[idx].store(page as *const Page as *mut Page, Relaxed);
+            self.mapped_pages.fetch_add(1, Relaxed);
+            self.block_mapped[idx / BLOCK_PAGES].fetch_add(1, Relaxed);
+        }
+        self.meta_mut()
+            .shared
+            .push((first, std::sync::Arc::clone(block)));
+        Ok(())
+    }
+
     /// Drop whole backed pages in a range; partial end pages are kept.
     pub fn unmap(&self, addr: u32, size: usize) {
         self.dirty_code_range(addr, size);
         // In page indices: byte counts overflow a 32-bit usize.
         let first = (addr as u64 + PAGE_SIZE as u64 - 1) >> PAGE_BITS;
         let last = (addr as u64 + size as u64) >> PAGE_BITS;
+        let shared = self.shared_pages();
         for idx in first..last.min(PAGE_COUNT as u64) {
-            let page = self.pages[idx as usize].swap(std::ptr::null_mut(), Relaxed);
-            if !page.is_null() {
+            let idx = idx as usize;
+            let page = self.pages[idx].swap(std::ptr::null_mut(), Relaxed);
+            if page.is_null() {
+                continue;
+            }
+            if !shared.contains(&idx) {
                 // SAFETY: unmapping happens while no other core runs, so nothing holds the page.
                 drop(unsafe { Box::from_raw(page) });
-                self.mapped_pages.fetch_sub(1, Relaxed);
-                self.block_mapped[idx as usize / BLOCK_PAGES].fetch_sub(1, Relaxed);
             }
+            self.mapped_pages.fetch_sub(1, Relaxed);
+            self.block_mapped[idx / BLOCK_PAGES].fetch_sub(1, Relaxed);
         }
+        // A block stays alive while any of its pages is still mapped here.
+        let pages = &self.pages;
+        self.meta_mut().shared.retain(|(first, block)| {
+            (*first..first + block.pages.len()).any(|idx| !pages[idx].load(Relaxed).is_null())
+        });
     }
 
     pub fn dump(&self, addr: u32, len: usize) -> Result<Vec<u8>> {
@@ -1466,6 +1559,39 @@ impl Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_block_is_one_set_of_pages_and_outlives_a_mapping() {
+        let block = SharedPages::new(2 * PAGE_SIZE);
+        let a = Memory::new();
+        let b = Memory::new();
+        a.map_shared(0x1000_0000, &block).unwrap();
+        b.map_shared(0x2000_0000, &block).unwrap();
+        a.write_u32(0x1000_1004, 7).unwrap();
+        assert_eq!(
+            b.read_u32(0x2000_1004).unwrap(),
+            7,
+            "a store did not show in the other mapping"
+        );
+        block.write_u32(8, 9).unwrap();
+        assert_eq!(
+            a.read_u32(0x1000_0008).unwrap(),
+            9,
+            "the block's own write did not show"
+        );
+
+        a.unmap(0x1000_0000, 2 * PAGE_SIZE);
+        assert!(
+            a.read_u32(0x1000_1004).is_err(),
+            "the unmapped range still reads"
+        );
+        drop(a);
+        assert_eq!(
+            b.read_u32(0x2000_1004).unwrap(),
+            7,
+            "unmapping freed the shared pages"
+        );
+    }
 
     #[test]
     fn mapped_bytes_counts_pages_as_they_are_backed() {

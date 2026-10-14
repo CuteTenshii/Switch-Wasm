@@ -114,22 +114,27 @@ impl Cpu {
                 Ok(())
             }
             0x13 => {
-                // MapSharedMemory(handle, addr, size, perm): zeroed backing. hid's gets a
-                // connected pad published at once; pl's gets the shared font.
+                // MapSharedMemory(handle, addr, size, perm): hid's is the console's block, with a
+                // connected pad published at once; others are zeroed, pl's with the shared font.
                 let addr = self.read_zr(1) as u32;
                 let size = self.read_zr(2) as u32;
-                self.mem.map_zero(addr, size as usize)?;
                 // Prefer `hid`'s handle; the size match is a fallback.
                 if Some(self.read_zr(0)) == self.process().hid_shmem_handle
                     || size == HID_SHMEM_SIZE
                 {
+                    let block = self.hid_shmem.clone();
+                    self.mem.map_shared(addr, &block)?;
                     self.process_mut().hid_shmem_addr = addr;
+                    self.hid_mapped = true;
                     self.set_gamepad_state(0, 0, 0, 0, 0);
                     // An empty touch sample: a zeroed LIFO header is a ring with no capacity.
                     self.set_touch_state(&[]);
-                } else if size == PL_SHMEM_SIZE {
-                    self.process_mut().pl_shmem_addr = addr;
-                    self.write_shared_font(addr);
+                } else {
+                    self.mem.map_zero(addr, size as usize)?;
+                    if size == PL_SHMEM_SIZE {
+                        self.process_mut().pl_shmem_addr = addr;
+                        self.write_shared_font(addr);
+                    }
                 }
                 self.write_zr(0, RESULT_OK);
                 Ok(())

@@ -262,6 +262,7 @@ impl Cpu {
 
 #[cfg(test)]
 mod tests {
+    use crate::cpu::Cpu;
     use crate::kernel::ipc::testing::*;
 
     #[test]
@@ -285,6 +286,38 @@ mod tests {
         }
     }
 
+    /// Map the console's hid block at `addr`, as `svcMapSharedMemory` does.
+    fn map_hid(cpu: &mut Cpu, addr: u32) {
+        let block = cpu.hid_shmem.clone();
+        cpu.mem.map_shared(addr, &block).unwrap();
+        cpu.process_mut().hid_shmem_addr = addr;
+        cpu.hid_mapped = true;
+    }
+
+    #[test]
+    fn every_process_that_maps_hid_sees_the_same_pad() {
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u32 = 0x3000_0000;
+        const BUTTONS: u64 = 0x5;
+
+        let mut cpu = Cpu::new();
+        map_hid(&mut cpu, SHMEM);
+        let other = cpu.create_process();
+        cpu.in_process(other, |cpu| map_hid(cpu, SHMEM));
+        cpu.set_gamepad_state(BUTTONS, 0, 0, 0, 0);
+
+        let entry = SHMEM + h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE;
+        for pid in [crate::cpu::ROOT_PID, other] {
+            let mem = &cpu.processes[&pid].mem;
+            let lifo = entry + h::SYSTEM_EXT_LIFO + h::LIFO_STORAGE;
+            assert_eq!(
+                mem.read_u64(lifo + h::STATE_BUTTONS).unwrap(),
+                BUTTONS,
+                "process {pid} does not see the pad"
+            );
+        }
+    }
+
     #[test]
     fn the_pad_is_published_in_a_style_the_title_actually_asked_for() {
         // A title that supports Joy-Con pairs but not Pro Controllers must find a style it asked for.
@@ -292,8 +325,7 @@ mod tests {
         const SHMEM: u32 = 0x3000_0000;
 
         let mut cpu = request(false, 100, &h::STYLE_JOY_DUAL.to_le_bytes());
-        cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
-        cpu.process_mut().hid_shmem_addr = SHMEM;
+        map_hid(&mut cpu, SHMEM);
         cpu.register_service_handle(9, "hid");
         cpu.hid_request(TLS, 9, Some(100)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
@@ -335,8 +367,7 @@ mod tests {
         const SHMEM: u32 = 0x3000_0000;
 
         let mut cpu = request(false, 100, &h::STYLE_JOY_DUAL.to_le_bytes());
-        cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
-        cpu.process_mut().hid_shmem_addr = SHMEM;
+        map_hid(&mut cpu, SHMEM);
         cpu.register_service_handle(9, "hid");
         cpu.hid_request(TLS, 9, Some(100)).unwrap();
         cpu.set_gamepad_state(0x3, 1000, -2000, 3000, -4000);
@@ -405,8 +436,7 @@ mod tests {
         const HORIZONTAL: u64 = 1;
 
         let mut cpu = request(false, 120, &[]);
-        cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
-        cpu.process_mut().hid_shmem_addr = SHMEM;
+        map_hid(&mut cpu, SHMEM);
         cpu.register_service_handle(9, "hid");
         cpu.set_gamepad_state(0, 0, 0, 0, 0);
 

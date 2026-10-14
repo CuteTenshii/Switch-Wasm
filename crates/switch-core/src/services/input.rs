@@ -238,7 +238,7 @@ impl Cpu {
         let _ = self.mem.write_u32(crate::INPUT_ADDR + 16, stick_rx as u32);
         let _ = self.mem.write_u32(crate::INPUT_ADDR + 20, stick_ry as u32);
 
-        if self.process().hid_shmem_addr == 0 {
+        if !self.hid_mapped {
             return;
         }
         self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
@@ -246,7 +246,7 @@ impl Cpu {
 
     /// Publish a fresh `hid` sample when the 200 Hz timer comes round.
     pub(crate) fn hid_tick(&mut self) {
-        if self.process().hid_shmem_addr == 0
+        if !self.hid_mapped
             || self.cycles.wrapping_sub(self.last_hid_cycles) < HID_SAMPLE_PERIOD_CYCLES
         {
             return;
@@ -308,19 +308,18 @@ impl Cpu {
     /// Publish `nn::hid::NpadCondition`, including the stored joy-con hold type.
     pub(crate) fn write_npad_condition(&mut self) {
         use hid_shmem as h;
-        if self.process().hid_shmem_addr == 0 {
+        if !self.hid_mapped {
             return;
         }
-        let at = self
-            .process()
-            .hid_shmem_addr
-            .wrapping_add(h::NPAD_CONDITION);
-        let _ = self.mem.write_u32(at + h::NPAD_CONDITION_INITIALIZED, 1);
-        let _ = self.mem.write_u32(
+        let at = h::NPAD_CONDITION;
+        let _ = self
+            .hid_shmem
+            .write_u32(at + h::NPAD_CONDITION_INITIALIZED, 1);
+        let _ = self.hid_shmem.write_u32(
             at + h::NPAD_CONDITION_HOLD_TYPE,
             self.npad_joy_hold_type as u32,
         );
-        let _ = self.mem.write_u32(at + h::NPAD_CONDITION_VALID, 1);
+        let _ = self.hid_shmem.write_u32(at + h::NPAD_CONDITION_VALID, 1);
     }
 
     fn write_npad_slot(
@@ -332,27 +331,25 @@ impl Cpu {
         sticks: (i32, i32, i32, i32),
     ) {
         use hid_shmem as h;
-        let base = self
-            .process()
-            .hid_shmem_addr
-            .wrapping_add(h::NPAD)
-            .wrapping_add(slot.wrapping_mul(h::ENTRY_SIZE));
-        let _ = self.mem.write_u32(base + h::STYLE_SET, presentation.style);
+        let base = h::NPAD.wrapping_add(slot.wrapping_mul(h::ENTRY_SIZE));
         let _ = self
-            .mem
+            .hid_shmem
+            .write_u32(base + h::STYLE_SET, presentation.style);
+        let _ = self
+            .hid_shmem
             .write_u32(base + h::JOY_ASSIGNMENT_MODE, presentation.joy_assignment);
         let _ = self
-            .mem
+            .hid_shmem
             .write_u32(base + h::DEVICE_TYPE, presentation.device_type);
 
         // Report external power and a full battery for the pad and each half; zero reads as flat.
-        let _ = self.mem.write_u32(
+        let _ = self.hid_shmem.write_u32(
             base + h::SYSTEM_PROPERTIES,
             h::SYSTEM_PROP_POWER_CONNECTED | h::SYSTEM_PROP_FULL_BUTTONS,
         );
         for info in 0..h::POWER_INFO_COUNT {
             let _ = self
-                .mem
+                .hid_shmem
                 .write_u32(base + h::BATTERY_LEVEL + info * 4, h::BATTERY_FULL);
         }
 
@@ -386,22 +383,34 @@ impl Cpu {
         use hid_shmem as h;
         let (lx, ly, rx, ry) = sticks;
         let _ = self
-            .mem
+            .hid_shmem
             .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
-        let _ = self.mem.write_u64(lifo + h::LIFO_TAIL, 0);
-        let _ = self.mem.write_u64(lifo + h::LIFO_COUNT, 1);
+        let _ = self.hid_shmem.write_u64(lifo + h::LIFO_TAIL, 0);
+        let _ = self.hid_shmem.write_u64(lifo + h::LIFO_COUNT, 1);
 
         let entry = lifo.wrapping_add(h::LIFO_STORAGE);
         let _ = self
-            .mem
+            .hid_shmem
             .write_u64(entry + h::STORAGE_SAMPLING_NUMBER, sample << 1);
-        let _ = self.mem.write_u64(entry + h::STATE_SAMPLING_NUMBER, sample);
-        let _ = self.mem.write_u64(entry + h::STATE_BUTTONS, buttons);
-        let _ = self.mem.write_u32(entry + h::STATE_STICK_L, lx as u32);
-        let _ = self.mem.write_u32(entry + h::STATE_STICK_L + 4, ly as u32);
-        let _ = self.mem.write_u32(entry + h::STATE_STICK_R, rx as u32);
-        let _ = self.mem.write_u32(entry + h::STATE_STICK_R + 4, ry as u32);
-        let _ = self.mem.write_u32(entry + h::STATE_ATTRIBUTES, attributes);
+        let _ = self
+            .hid_shmem
+            .write_u64(entry + h::STATE_SAMPLING_NUMBER, sample);
+        let _ = self.hid_shmem.write_u64(entry + h::STATE_BUTTONS, buttons);
+        let _ = self
+            .hid_shmem
+            .write_u32(entry + h::STATE_STICK_L, lx as u32);
+        let _ = self
+            .hid_shmem
+            .write_u32(entry + h::STATE_STICK_L + 4, ly as u32);
+        let _ = self
+            .hid_shmem
+            .write_u32(entry + h::STATE_STICK_R, rx as u32);
+        let _ = self
+            .hid_shmem
+            .write_u32(entry + h::STATE_STICK_R + 4, ry as u32);
+        let _ = self
+            .hid_shmem
+            .write_u32(entry + h::STATE_ATTRIBUTES, attributes);
     }
 
     /// Publish touchscreen contacts for `hidGetTouchScreenStates`. New ids get
@@ -409,26 +418,28 @@ impl Cpu {
     /// contacts are reported, but the sample still advances.
     pub fn set_touch_state(&mut self, touches: &[TouchPoint]) {
         self.last_touches = touches.to_vec();
-        if self.process().hid_shmem_addr == 0 {
+        if !self.hid_mapped {
             return;
         }
         use hid_shmem as h;
         self.touch_sample_counter = self.touch_sample_counter.wrapping_add(1);
         let sample = self.touch_sample_counter;
 
-        let lifo = self.process().hid_shmem_addr.wrapping_add(h::TOUCH_SCREEN);
+        let lifo = h::TOUCH_SCREEN;
         let _ = self
-            .mem
+            .hid_shmem
             .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
-        let _ = self.mem.write_u64(lifo + h::LIFO_TAIL, 0);
-        let _ = self.mem.write_u64(lifo + h::LIFO_COUNT, 1);
+        let _ = self.hid_shmem.write_u64(lifo + h::LIFO_TAIL, 0);
+        let _ = self.hid_shmem.write_u64(lifo + h::LIFO_COUNT, 1);
 
         let storage = lifo.wrapping_add(h::LIFO_STORAGE);
         let _ = self
-            .mem
+            .hid_shmem
             .write_u64(storage + h::STORAGE_SAMPLING_NUMBER, sample << 1);
         let state = storage.wrapping_add(h::TOUCH_STATE);
-        let _ = self.mem.write_u64(state + h::TOUCH_SAMPLING_NUMBER, sample);
+        let _ = self
+            .hid_shmem
+            .write_u64(state + h::TOUCH_SAMPLING_NUMBER, sample);
 
         // Docked: every contact is gone.
         let down: &[TouchPoint] = match self.operation_mode {
@@ -456,29 +467,39 @@ impl Cpu {
         self.touch_down = down.iter().take(TOUCH_MAX).copied().collect();
 
         let count = published.len();
-        let _ = self.mem.write_u32(state + h::TOUCH_COUNT, count as u32);
+        let _ = self
+            .hid_shmem
+            .write_u32(state + h::TOUCH_COUNT, count as u32);
         let slot = |i: usize| state + h::TOUCH_TOUCHES + i as u32 * h::TOUCH_SIZE;
         for (i, (touch, attributes)) in published.iter().enumerate() {
             let e = slot(i);
             // delta_time is not measured.
-            let _ = self.mem.write_u64(e + h::TOUCH_DELTA_TIME, 0);
-            let _ = self.mem.write_u32(e + h::TOUCH_ATTRIBUTES, *attributes);
-            let _ = self.mem.write_u32(e + h::TOUCH_FINGER_ID, touch.finger_id);
+            let _ = self.hid_shmem.write_u64(e + h::TOUCH_DELTA_TIME, 0);
             let _ = self
-                .mem
+                .hid_shmem
+                .write_u32(e + h::TOUCH_ATTRIBUTES, *attributes);
+            let _ = self
+                .hid_shmem
+                .write_u32(e + h::TOUCH_FINGER_ID, touch.finger_id);
+            let _ = self
+                .hid_shmem
                 .write_u32(e + h::TOUCH_X, touch.x.min(TOUCH_SCREEN_WIDTH - 1));
             let _ = self
-                .mem
+                .hid_shmem
                 .write_u32(e + h::TOUCH_Y, touch.y.min(TOUCH_SCREEN_HEIGHT - 1));
-            let _ = self.mem.write_u32(e + h::TOUCH_DIAMETER_X, TOUCH_DIAMETER);
-            let _ = self.mem.write_u32(e + h::TOUCH_DIAMETER_Y, TOUCH_DIAMETER);
-            let _ = self.mem.write_u32(e + h::TOUCH_ROTATION_ANGLE, 0);
+            let _ = self
+                .hid_shmem
+                .write_u32(e + h::TOUCH_DIAMETER_X, TOUCH_DIAMETER);
+            let _ = self
+                .hid_shmem
+                .write_u32(e + h::TOUCH_DIAMETER_Y, TOUCH_DIAMETER);
+            let _ = self.hid_shmem.write_u32(e + h::TOUCH_ROTATION_ANGLE, 0);
         }
         // Clear slots a previous larger sample left.
         for i in count..self.touch_published {
             let e = slot(i);
             for off in (0..h::TOUCH_SIZE).step_by(4) {
-                let _ = self.mem.write_u32(e + off, 0);
+                let _ = self.hid_shmem.write_u32(e + off, 0);
             }
         }
         self.touch_published = count;
