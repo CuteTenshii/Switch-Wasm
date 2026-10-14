@@ -33,7 +33,7 @@ impl Gpu {
         });
         Gpu {
             _instance: instance,
-            _adapter: adapter,
+            adapter,
             device,
             queue,
             space_id: 0,

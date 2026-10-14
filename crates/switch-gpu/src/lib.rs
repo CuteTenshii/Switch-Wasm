@@ -243,7 +243,7 @@ struct Space {
 pub struct Gpu {
     /// Never read, but must be held: a browser loses the device once the instance is dropped.
     _instance: wgpu::Instance,
-    _adapter: wgpu::Adapter,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     /// The address space draws now run in, and its surfaces and caches.
@@ -540,6 +540,18 @@ impl Renderer for Gpu {
         self.release_scratch();
         match attempt {
             Ok(()) => {
+                if self.drawn == 0 {
+                    let name = self.adapter.get_info().name;
+                    let adapter = if name.is_empty() {
+                        "an adapter the browser does not name".to_owned()
+                    } else {
+                        format!("the adapter \"{name}\"")
+                    };
+                    switch_core::trace::emit_at(
+                        switch_core::trace::Level::Info,
+                        &format!("[gpu] the device is rendering, on {adapter}"),
+                    );
+                }
                 self.drawn += 1;
                 match route {
                     Some(Render::Direct) => self.direct += 1,

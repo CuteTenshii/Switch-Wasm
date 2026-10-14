@@ -66,13 +66,10 @@ export function tryGpu(): void {
   if (gpu !== 'no' || state.handle < 0) return;
   gpu = 'trying';
   switch_gpu_open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then((what) => {
-    if (what.startsWith(INSTALLED)) {
+    if (what === INSTALLED) {
+      // The backend logs once its first draw has rendered on the device.
       gpu = 'done';
       gpuSession = state.handle;
-      // The adapter wgpu opened; Chrome on macOS and Firefox leave its description empty.
-      const name = what.slice(INSTALLED.length).trim();
-      const adapter = name ? `the adapter "${name}"` : 'an adapter the browser does not name';
-      workerLog(`[gpu] the WebGPU backend is installed on ${adapter}`, 'ok');
     } else if (what === NO_CHANNEL_YET) {
       gpu = 'no';
     } else {

@@ -59,7 +59,7 @@ impl Gpu {
         // The adapter's answer applies only with `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`.
         let features = self.device.features();
         let flags = if features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
-            self._adapter.get_texture_format_features(format).flags
+            self.adapter.get_texture_format_features(format).flags
         } else {
             format.guaranteed_format_features(features).flags
         };

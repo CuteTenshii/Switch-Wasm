@@ -202,12 +202,17 @@ const PENDING_CAP: usize = 256 * 1024;
 
 /// Emit one line to stderr and the host sink. Callers gate on [`enabled`].
 pub fn emit(line: &str) {
+    emit_at(Level::Debug, line);
+}
+
+/// [`emit`] at `level`, for diagnostics from code with no [`crate::cpu::Cpu`] in reach.
+pub fn emit_at(level: Level, line: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("{line}");
     let Ok(mut pending) = PENDING.lock() else {
         return;
     };
-    pending.push(Level::Debug.marker());
+    pending.push(level.marker());
     pending.extend_from_slice(line.as_bytes());
     pending.push(b'\n');
     if pending.len() > PENDING_CAP {

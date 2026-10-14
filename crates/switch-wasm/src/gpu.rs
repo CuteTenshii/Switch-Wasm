@@ -4,7 +4,7 @@
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
-/// The prefix the worker matches on, followed by the adapter's name if the browser gives one.
+/// What the worker matches on.
 const INSTALLED: &str = "installed";
 
 /// Open a device and install the backend on session `handle`'s `Gpu`,
@@ -34,12 +34,10 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
         Ok(pair) => pair,
         Err(e) => return format!("no device: {e}"),
     };
-    // The browser's `description`, empty on some browsers.
-    let name = adapter.get_info().name;
     // Hand over the instance and adapter; see `switch_gpu::Gpu::_instance`.
     let mut gpu = switch_gpu::Gpu::with_device(instance, adapter, device, queue);
     gpu.set_device_msaa(device_msaa);
     gpu.set_interleave(interleave);
     crate::install_gpu(handle, gpu);
-    format!("{INSTALLED} {name}")
+    INSTALLED.to_string()
 }
