@@ -141,3 +141,13 @@ test('file pickers elsewhere keep their extension filter', async ({ page }) => {
   await openPage(page);
   await expect(page.locator('#nro-file')).toHaveAttribute('accept', /\.nsp/);
 });
+
+test('the idle screen\'s Open button boots what it picks', async ({ page }) => {
+  await openPage(page);
+  const chooser = page.waitForEvent('filechooser');
+  await page.locator('.overlay-actions label').click();
+  await (await chooser).setFiles({
+    name: 'test.elf', mimeType: 'application/octet-stream', buffer: aarch64Elf([0xd4000001]),
+  });
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
+});

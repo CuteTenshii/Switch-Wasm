@@ -116,13 +116,11 @@ async function replaceSession(name: string): Promise<boolean> {
   }
 }
 
-for (const id of ['nro-file', 'nro-file-2']) {
-  $(id).addEventListener('change', async (e) => {
-    const f = pickedFile(e);
-    (e.target as HTMLInputElement).value = '';
-    if (f) await bootFile(f);
-  });
-}
+$('nro-file').addEventListener('change', async (e) => {
+  const f = pickedFile(e);
+  (e.target as HTMLInputElement).value = '';
+  if (f) await bootFile(f);
+});
 
 // Drop an NRO anywhere on the stage to boot it.
 let dragDepth = 0;
