@@ -17,7 +17,7 @@ import { endLoad } from './loading';
 import { log, type LogLevel } from './log';
 import { call, onLoopEvents, readLastError } from './rpc';
 import { pullProfileEdits, storeProfileEdits } from './users';
-import { loaded, panelOpen, setPanel, setState } from './shell';
+import { loaded, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
 
 let running = false;
@@ -152,22 +152,6 @@ $('btn-step').addEventListener('click', async () => {
   await finishRun(r, true);
   if (traceEnabled() && r >= 0) {
     logTrace(await drainTrace());
-  }
-});
-
-// Space toggles run/pause and backtick toggles the panel, except while typing.
-window.addEventListener('keydown', (e) => {
-  const focused = document.activeElement;
-  if (/^(INPUT|SELECT|TEXTAREA)$/.test(focused?.tagName || '')) return;
-  if (document.querySelector('dialog[open]')) return;
-  if (e.code === 'Space') {
-    // Space only reaches the transport when nothing else has focus.
-    if (focused && focused !== document.body && focused !== document.documentElement) return;
-    e.preventDefault();
-    void run();
-  } else if (e.code === 'Backquote') {
-    e.preventDefault();
-    setPanel(!panelOpen());
   }
 });
 
