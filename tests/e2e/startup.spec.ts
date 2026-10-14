@@ -151,3 +151,25 @@ test('the idle screen\'s Open button boots what it picks', async ({ page }) => {
   });
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
 });
+
+test('a narrow bar moves its secondary controls into the More menu and back', async ({ page }) => {
+  await openPage(page);
+  const more = page.locator('#btn-more');
+  const menu = page.locator('#more-menu');
+  const dock = page.locator('#btn-dock');
+  await expect(more).toBeHidden();
+  await expect(page.locator('.topbar-actions #btn-dock')).toHaveCount(1);
+
+  await page.setViewportSize({ width: 412, height: 800 });
+  await expect(page.locator('#more-menu #btn-dock')).toHaveCount(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(412);
+  await more.click();
+  await expect(menu).toBeVisible();
+  await dock.click();
+  await expect(dock).toHaveAttribute('aria-pressed', 'true');
+  await expect(menu).toBeHidden();
+
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(page.locator('.topbar-actions #btn-dock')).toHaveCount(1);
+  await expect(more).toBeHidden();
+});

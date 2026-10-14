@@ -1,6 +1,6 @@
 // The application shell: stage and side panel.
 
-import { Maximize, PanelRight, X } from 'lucide';
+import { Ellipsis, Maximize, PanelRight, X } from 'lucide';
 import { $ } from './dom';
 import { icon } from './icons';
 import { call } from './rpc';
@@ -149,11 +149,36 @@ gripEl.addEventListener('keydown', (e) => {
 });
 
 for (const [id, glyph] of [
-  ['btn-fullscreen', Maximize], ['btn-panel', PanelRight], ['btn-panel-close', X],
+  ['btn-fullscreen', Maximize], ['btn-panel', PanelRight], ['btn-more', Ellipsis], ['btn-panel-close', X],
   ['btn-profiles-close', X], ['btn-files-close', X],
 ] as const) {
-  $(id).append(icon(glyph));
+  $(id).prepend(icon(glyph));
 }
+
+// Below the breakpoint, the bar's secondary controls live in the More menu.
+const moreMenu = $('more-menu');
+const narrowBar = window.matchMedia('(width <= 900px)');
+// Each with a marker where it sits in the bar, to go back to.
+const moreItems = ['btn-profile', 'btn-dock', 'btn-fullscreen', 'btn-step'].map((id) => {
+  const item = $(id);
+  const home = document.createComment(id);
+  item.before(home);
+  return { item, home };
+});
+
+function placeMoreItems(): void {
+  for (const { item, home } of moreItems) {
+    if (narrowBar.matches) moreMenu.append(item);
+    else home.after(item);
+  }
+  if (!narrowBar.matches) moreMenu.hidePopover();
+}
+
+placeMoreItems();
+narrowBar.addEventListener('change', placeMoreItems);
+moreMenu.addEventListener('click', (e) => {
+  if ((e.target as Element).closest('button')) moreMenu.hidePopover();
+});
 
 $('btn-fullscreen').addEventListener('click', () => {
   if (document.fullscreenElement) void document.exitFullscreen();

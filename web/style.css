@@ -120,15 +120,39 @@ body {
   gap: 6px;
 }
 
-.topbar-status {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
 .topbar-actions {
   display: flex;
   gap: 6px;
 }
+
+/* Narrow screens only; see `placeMoreItems`. */
+.topbar .more-button { display: none; }
+
+@media (width <= 900px) {
+  .topbar .more-button { display: inline-flex; }
+}
+.more-menu {
+  position: fixed;
+  inset: calc(var(--topbar-h) + 4px) 8px auto auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+  margin: 0;
+  padding: 6px;
+  background: var(--chrome);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.more-menu:popover-open { display: flex; }
+.more-menu .btn {
+  min-height: 44px;
+  justify-content: flex-start;
+}
+.more-menu .profile-button { padding: 3px 12px 3px 4px; }
+.more-menu .profile-button-name { display: inline; }
+.menu-label { display: none; }
+.more-menu .menu-label { display: inline; }
 
 /* buttons */
 
@@ -515,6 +539,8 @@ body {
   overflow: hidden;
 }
 .statusbar .item { white-space: nowrap; }
+/* Right-aligned, so the edge holds still as the digits change. */
+.statusbar .readout { text-align: right; }
 .statusbar b {
   color: var(--text);
   font-family: var(--mono);
@@ -1351,6 +1377,7 @@ body.resizing {
       transform: none;
     }
   }
+  .brand .name { display: none; }
   .transport .btn span:not(.glyph) { display: none; }
   /* Only for titles with no icon to identify them. */
   .running.has-icon .running-meta { display: none; }
@@ -1362,7 +1389,7 @@ body.resizing {
   }
   .running-name { max-width: 14ch; }
   .topbar { gap: 8px; }
-  .statusbar .item:nth-child(n+3) { display: none; }
+  #instructions-item, #res-item, #input-item { display: none; }
   .profile-button-name { display: none; }
   .profile-button { padding: 3px 4px; }
 

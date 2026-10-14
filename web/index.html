@@ -62,12 +62,6 @@
 
     <div class="spacer"></div>
 
-    <div class="topbar-status">
-      <span class="readout" id="fps" title="Frames presented per second">- fps</span>
-      <span class="readout" id="frame-ms"
-            title="Wall clock spent emulating each presented frame - the run slices only, not the canvas copy">- ms</span>
-    </div>
-
     <div class="topbar-actions">
       <button id="btn-profile" class="btn profile-button" aria-haspopup="dialog"
               title="Choose the profile">Player</button>
@@ -76,11 +70,16 @@
       <label class="btn" for="nro-file" title="Open an .nro, .elf, .nsp, .nsz, .xci or .nca">Open</label>
       <input type="file" id="nro-file" accept=".nro,.elf,.bin,.nsp,.nsz,.xci,.nca" hidden>
       <button id="btn-fullscreen" class="btn icon" title="Fullscreen" aria-label="Fullscreen">
+        <span class="menu-label">Fullscreen</span>
       </button>
       <button id="btn-panel" class="btn icon" title="Toggle panel" aria-label="Toggle panel"
               aria-expanded="false">
       </button>
+      <button id="btn-more" class="btn icon more-button" popovertarget="more-menu" title="More" aria-label="More"></button>
     </div>
+
+    <!-- Narrow screens: the bar's secondary controls, moved here by shell.ts. -->
+    <div class="more-menu" id="more-menu" popover></div>
   </header>
 
   <main class="stage" id="stage">
@@ -211,7 +210,11 @@
     <span class="item" id="instructions-item" hidden title="Guest instructions executed, and how many a second while running">Instructions <b id="instructions">0</b></span>
     <span class="item" id="ram-item" title="Guest RAM the emulated console has touched (wasm heap in brackets)">RAM <b id="ram">-</b></span>
     <span class="item" id="res-item" hidden>Res <b id="res">-</b></span>
-    <span class="item">Input <b id="input-state">none</b></span>
+    <span class="item" id="input-item">Input <b id="input-state">none</b></span>
+    <span class="spacer"></span>
+    <span class="item readout" id="fps" title="Frames presented per second">- fps</span>
+    <span class="item readout" id="frame-ms"
+          title="Wall clock spent emulating each presented frame - the run slices only, not the canvas copy">- ms</span>
   </footer>
 
 </div>

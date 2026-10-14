@@ -80,6 +80,10 @@ The page, the worker, and the wasm bindings between them.
 - Screen Wake Lock needs a secure context (missing in Firefox and Safari before 16.4). The browser drops the lock when the document is hidden and does not return it, so it is re-taken on visibility; a lock acquired after the run ended is released immediately.
 - Icons are Lucide (`icons.ts`), imported per icon so the bundle carries only those used.
 
+## `web/main/shell.ts`
+
+- At 900px and below the top bar doesn't fit, so `placeMoreItems` moves profile, dock, fullscreen and Step into the More popover, and back beside comment markers when the window widens. Moving the nodes keeps their listeners and the desktop order exactly.
+
 ## `web/worker/loop.ts` and `web/main/runloop.ts`
 
 - The worker runs the loop: slices back to back, each queued as a `MessageChannel` task so input and commands still get in between them (a `setTimeout` chain is clamped to 4 ms). Slices are sized by wall time to about one display frame.
