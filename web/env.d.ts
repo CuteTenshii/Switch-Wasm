@@ -1,6 +1,11 @@
 // Module declarations for what the bundler adds; vite/client is not used since
 // half of the frontend compiles against the WebWorker library.
 
+declare module '*?worker&url' {
+  const url: string;
+  export default url;
+}
+
 declare module '*?url' {
   const url: string;
   export default url;

@@ -97,6 +97,12 @@ void (async () => {
     // Install the panic hook before anything else can panic.
     core.switch_init();
     startCores(module, core.memory);
+    reply({
+      type: 'audio_ring',
+      buffer: core.memory.buffer as unknown as SharedArrayBuffer,
+      at: core.switch_audio_ring(),
+      samples: core.switch_audio_ring_samples(),
+    });
     reply({ type: 'ready' });
   } catch (err) {
     reply({ type: 'ready', error: String(err) });

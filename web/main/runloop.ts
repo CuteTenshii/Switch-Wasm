@@ -2,7 +2,7 @@
 
 import { Pause, Play } from 'lucide';
 import type { Housekeeping, SliceReport } from '../shared/protocol';
-import { playAudio } from './audio';
+import { noteAudio } from './audio';
 import { showEmulatorCrash, showGuestCrash } from './crash';
 import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
 import { countEmulation, noteFrame } from './display';
@@ -71,7 +71,7 @@ async function onSlice(report: SliceReport): Promise<void> {
   recordRunSlice(report.ms);
   // Reset does not wait for the slice in flight, so the session may be gone.
   if (aborted) return;
-  if (report.audio) void playAudio(report.audio);
+  noteAudio(report.audioFormat);
   if (report.housekeeping) applyHousekeeping(report.housekeeping);
   noteFrame(report);
   if (!report.stopped) return;

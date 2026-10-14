@@ -6,6 +6,15 @@ use crate::{session, write_into};
 #[no_mangle]
 pub extern "C" fn switch_run(handle: u32, max_steps: u64) -> i64 {
     let s = session(handle);
+    // The page's clock and time zone, read here rather than handed in before every slice.
+    #[cfg(all(target_arch = "wasm32", feature = "jit"))]
+    {
+        let now = js_sys::Date::new_0();
+        s.cpu
+            .set_utc_offset(-(now.get_timezone_offset() as i32) * 60);
+        s.cpu
+            .set_unix_time((now.get_time() / 1000.0).floor() as i64);
+    }
     match s.cpu.run(max_steps) {
         Ok(report) => report.steps as i64,
         Err(e) => {

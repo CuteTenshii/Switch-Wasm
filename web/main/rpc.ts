@@ -1,6 +1,7 @@
 // Promise-based RPC to the emulator worker over postMessage.
 
 import type { CallRequest, Commands, SliceReport, WorkerMessage } from '../shared/protocol';
+import { setAudioRing } from './audio';
 import { log } from './log';
 
 let worker: Worker | null = null;
@@ -76,6 +77,10 @@ export function initWorker(): void {
     }
     if ('type' in d && d.type === 'loop_failed') {
       loopEvents?.failed(d.error);
+      return;
+    }
+    if ('type' in d && d.type === 'audio_ring') {
+      setAudioRing(d);
       return;
     }
     if ('type' in d) {

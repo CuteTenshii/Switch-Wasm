@@ -18,8 +18,6 @@ const MAX_SLICE = 50_000_000;
 const TRACE_SLICE = 5000;
 // Slices between housekeeping reports.
 const HOUSEKEEPING_EVERY = 8;
-// A second of 48 kHz stereo, past what one slice produces.
-const AUDIO_MAX_PULL = 96000;
 
 let running = false;
 let pauseRequested = false;
@@ -51,10 +49,6 @@ export function stopLoop(): void {
   running = false;
 }
 
-function post(message: WorkerMessage, transfer: Transferable[] = []): void {
-  ctx.postMessage(message, transfer);
-}
-
 function slice(): void {
   if (!running || state.handle < 0) {
     running = false;
@@ -66,7 +60,7 @@ function slice(): void {
     steps = CMD.run(budget) as number;
   } catch (err) {
     running = false;
-    post({ type: 'loop_failed', error: String(err) });
+    ctx.postMessage({ type: 'loop_failed', error: String(err) } satisfies WorkerMessage);
     return;
   }
   const ms = performance.now() - at;
@@ -77,7 +71,7 @@ function slice(): void {
   reportActivity(done);
   const paintMs = paint();
 
-  const audio = pullAudio();
+  core.switch_audio_feed(state.handle);
   const report: SliceReport = {
     steps,
     budget,
@@ -87,10 +81,10 @@ function slice(): void {
     width: core.switch_fb_width(state.handle),
     height: core.switch_fb_height(state.handle),
     paintMs,
-    audio,
+    audioFormat: core.switch_audio_format(state.handle),
     housekeeping: stopped || ++tick % HOUSEKEEPING_EVERY === 0 ? housekeeping() : null,
   };
-  post({ type: 'slice', report }, audio ? [audio.pcm.buffer] : []);
+  ctx.postMessage({ type: 'slice', report } satisfies WorkerMessage);
 
   if (!tracing) {
     const scale = Math.min(2, Math.max(0.5, SLICE_TARGET_MS / Math.max(ms, 0.1)));
@@ -107,15 +101,6 @@ function slice(): void {
 export function paint(): number | null {
   const at = performance.now();
   return switch_present(state.handle) ? performance.now() - at : null;
-}
-
-function pullAudio(): SliceReport['audio'] {
-  const packed = core.switch_audio_format(state.handle);
-  const rate = packed & 0x00ffffff;
-  const channels = packed >>> 24;
-  if (!rate || !channels) return null;
-  const pcm = CMD.audio_pull(AUDIO_MAX_PULL) as Uint8Array<ArrayBuffer> | null;
-  return pcm && pcm.length >= channels * 2 ? { rate, channels, pcm } : null;
 }
 
 const text = new TextDecoder();

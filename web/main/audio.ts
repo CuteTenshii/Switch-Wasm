@@ -1,67 +1,79 @@
-// Schedules the guest's PCM back to back; underruns restart slightly ahead of
-// `currentTime`. Playback stats go to the log at most once a second.
+// Sound: an AudioWorklet plays the worker's audio ring straight out of shared memory.
 
-import type { SliceReport } from '../shared/protocol';
+import type { RingOptions } from './pcm-worklet';
+import workletUrl from './pcm-worklet.ts?worker&url';
 import { log } from './log';
 
+let ring: RingOptions | null = null;
 let audioCtx: AudioContext | null = null;
-let audioCursor = 0;
-const REPORT_EVERY_MS = 1000;
-
-// Played seconds and gaps since the last report.
-let played = 0;
-let gaps = 0;
-let silence = 0;
-let reportedAt = 0;
-let lastFormat = '';
+// Opening is tried once per page: a failure is reported and sound stays off.
+let opening = false;
+let unavailable = false;
+let lastFormat = 0;
 // Warnings already given, so a persisting state is reported once.
 let saidSuspended = false;
-let saidUnsupported = false;
 
-export function resetAudio(): void {
-  audioCursor = 0;
-  played = 0;
-  gaps = 0;
-  silence = 0;
-  reportedAt = 0;
-  lastFormat = '';
-  saidSuspended = false;
+export function setAudioRing(options: RingOptions): void {
+  ring = options;
 }
 
-function reportPlayback(): void {
-  const now = performance.now();
-  if (reportedAt && now - reportedAt < REPORT_EVERY_MS) return;
-  reportedAt = now;
-  if (!played && !gaps) return;
-  const parts = [`${played.toFixed(2)} s played`];
-  if (gaps) parts.push(`${gaps} ${gaps === 1 ? 'gap' : 'gaps'} (${Math.round(silence * 1000)} ms of silence)`);
-  log(`[audio] page: ${parts.join(', ')}`);
-  played = 0;
-  gaps = 0;
-  silence = 0;
-}
-
-// Schedule what one slice produced.
-export async function playAudio({ rate, channels, pcm: bytes }: NonNullable<SliceReport['audio']>,
-): Promise<void> {
+// Each slice's audio format; the first sound opens the output.
+export function noteAudio(format: number): void {
+  if (!format || !ring) return;
   if (!audioCtx) {
-    const Ctx = window.AudioContext
-      || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!Ctx) {
-      if (!saidUnsupported) log('[audio] this browser has no Web Audio: sound is off', 'warn');
-      saidUnsupported = true;
-      return;
-    }
-    audioCtx = new Ctx();
+    if (!opening && !unavailable) void open(ring);
+    return;
   }
-  const format = `${rate} Hz, ${channels === 2 ? 'stereo' : channels === 1 ? 'mono' : `${channels} channels`}`;
   if (format !== lastFormat) {
-    log(`[audio] page: playing ${format} through a ${audioCtx.sampleRate} Hz output`);
+    const rate = format & 0xffffff;
+    const channels = format >>> 24;
+    const layout = channels === 2 ? 'stereo' : channels === 1 ? 'mono' : `${channels} channels`;
+    log(`[audio] page: playing ${rate} Hz, ${layout} through a ${audioCtx.sampleRate} Hz output`);
     lastFormat = format;
   }
-  // Autoplay policy: a context created before a gesture starts suspended.
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
-  if (audioCtx.state === 'suspended') {
+  if (audioCtx.state === 'suspended') void resume(audioCtx);
+}
+
+async function open(options: RingOptions): Promise<void> {
+  opening = true;
+  try {
+    const Ctx = window.AudioContext
+      || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx || !('audioWorklet' in Ctx.prototype)) {
+      unavailable = true;
+      log('[audio] this browser has no audio worklets: sound is off', 'warn');
+      return;
+    }
+    const ctx = new Ctx();
+    await ctx.audioWorklet.addModule(workletUrl);
+    const node = new AudioWorkletNode(ctx, 'ring-player', {
+      numberOfInputs: 0,
+      outputChannelCount: [2],
+      processorOptions: options,
+    });
+    node.port.onmessage = (e: MessageEvent<{ played: number; gaps: number; silence: number }>) => {
+      const { played, gaps, silence } = e.data;
+      if (!played && !gaps) return;
+      const parts = [`${played.toFixed(2)} s played`];
+      if (gaps) {
+        parts.push(`${gaps} ${gaps === 1 ? 'gap' : 'gaps'} (${Math.round(silence * 1000)} ms of silence)`);
+      }
+      log(`[audio] page: ${parts.join(', ')}`);
+    };
+    node.connect(ctx.destination);
+    audioCtx = ctx;
+  } catch (err) {
+    unavailable = true;
+    log('[audio] sound is off: the output could not be opened (' + (err as Error).message + ')', 'err');
+  } finally {
+    opening = false;
+  }
+}
+
+// Autoplay policy: a context created before a gesture starts suspended.
+async function resume(ctx: AudioContext): Promise<void> {
+  await ctx.resume();
+  if (ctx.state === 'suspended') {
     if (!saidSuspended) {
       log('[audio] page: the browser is holding sound back until you click or press a key', 'warn');
     }
@@ -70,26 +82,13 @@ export async function playAudio({ rate, channels, pcm: bytes }: NonNullable<Slic
     log('[audio] page: sound released');
     saidSuspended = false;
   }
-  const pcm = bytes.byteOffset % 2
-    ? new Int16Array(bytes.slice().buffer)
-    : new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1);
-  const frames = Math.floor(pcm.length / channels);
-  if (!frames) return;
-  const buffer = audioCtx.createBuffer(channels, frames, rate);
-  for (let c = 0; c < channels; c++) {
-    const out = buffer.getChannelData(c);
-    for (let i = 0; i < frames; i++) out[i] = pcm[i * channels + c] / 32768;
-  }
-  const src = audioCtx.createBufferSource();
-  src.buffer = buffer;
-  src.connect(audioCtx.destination);
-  const start = Math.max(audioCtx.currentTime + 0.05, audioCursor);
-  if (audioCursor && start > audioCursor) {
-    gaps++;
-    silence += start - audioCursor;
-  }
-  src.start(start);
-  audioCursor = start + buffer.duration;
-  played += buffer.duration;
-  reportPlayback();
+}
+
+// For a session being replaced: drop what its guest queued.
+export function resetAudio(): void {
+  lastFormat = 0;
+  saidSuspended = false;
+  if (!ring) return;
+  const head = new Uint32Array(ring.buffer, ring.at, 2);
+  Atomics.store(head, 1, Atomics.load(head, 0));
 }

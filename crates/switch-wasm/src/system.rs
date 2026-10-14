@@ -23,12 +23,6 @@ pub extern "C" fn switch_set_operation_mode(handle: u32, docked: u32) {
     session(handle).cpu.set_operation_mode(mode);
 }
 
-/// Set the wall-clock time `time:u`/`time:s` report, as POSIX seconds (UTC).
-#[no_mangle]
-pub extern "C" fn switch_set_time(handle: u32, unix_seconds: i64) {
-    session(handle).cpu.set_unix_time(unix_seconds);
-}
-
 /// Set the battery level `psm` reports.
 #[no_mangle]
 pub extern "C" fn switch_set_battery(handle: u32, percent: u32, charging: u32) {

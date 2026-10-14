@@ -63,7 +63,6 @@ export interface WasmExports {
     handle: number, buttons: bigint,
     stickLx: number, stickLy: number, stickRx: number, stickRy: number): void;
   switch_set_touch(handle: number, ptr: number, count: number): void;
-  switch_set_time(handle: number, unixSeconds: bigint): void;
   switch_set_battery(handle: number, percent: number, charging: number): void;
   switch_set_operation_mode(handle: number, docked: number): void;
   switch_vibration(handle: number): number;
@@ -85,7 +84,9 @@ export interface WasmExports {
   switch_fb_snapshot(handle: number, buf: number, maxlen: number): number;
 
   switch_audio_format(handle: number): number;
-  switch_audio_pull(handle: number, buf: number, maxSamples: number): number;
+  switch_audio_feed(handle: number): void;
+  switch_audio_ring(): number;
+  switch_audio_ring_samples(): number;
 
   switch_sd_write_file(
     handle: number, pathPtr: number, pathLen: number,
@@ -144,10 +145,6 @@ export let core = null as unknown as WasmExports;
 
 export function setCore(exports: WasmExports): void {
   core = exports;
-}
-
-export function handle(): number {
-  return state.handle;
 }
 
 // A refused allocation returns 0. `>>> 0` because the i32 reads signed past 2 GiB.

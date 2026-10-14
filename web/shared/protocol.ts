@@ -243,9 +243,6 @@ export interface Commands {
   frame_count(): number;
   fb_snapshot(len: number): Bytes | null;
 
-  audio_format(): number;
-  audio_pull(maxSamples: number): Bytes | null;
-
   sd_write_file(path: string, bytes: Bytes): number;
   sd_create_dir(path: string): number;
   sd_remove(path: string): number;
@@ -321,7 +318,8 @@ export interface SliceReport {
   width: number;
   height: number;
   paintMs: number | null;
-  audio: { rate: number; channels: number; pcm: Bytes } | null;
+  // `(channels << 24) | rate` of the audio in the ring; 0 before a device opens.
+  audioFormat: number;
   housekeeping: Housekeeping | null;
 }
 
@@ -332,5 +330,7 @@ export type WorkerMessage =
   | { type: 'log'; text: string; cls?: LogClass }
   | { type: 'slice'; report: SliceReport }
   | { type: 'loop_failed'; error: string }
+  // Once at startup: the ring audio is written to, in the worker's shared memory.
+  | { type: 'audio_ring'; buffer: SharedArrayBuffer; at: number; samples: number }
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: string };

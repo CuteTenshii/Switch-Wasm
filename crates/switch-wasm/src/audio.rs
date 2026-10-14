@@ -1,8 +1,12 @@
 //! Audio output.
 
+use std::sync::atomic::AtomicI16;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+
 use crate::session;
 
-/// The PCM format `switch_audio_pull` returns, packed as `(channels << 24) | sample_rate`.
+/// The PCM format the guest produces, packed as `(channels << 24) | sample_rate`.
 /// Zero until the guest opens an audio device.
 #[no_mangle]
 pub extern "C" fn switch_audio_format(handle: u32) -> u32 {
@@ -13,15 +17,59 @@ pub extern "C" fn switch_audio_format(handle: u32) -> u32 {
     (channels << 24) | (rate & 0x00ff_ffff)
 }
 
-/// Move up to `max_samples` interleaved 16-bit samples into `buf`, returning the count.
+/// Samples the ring holds, a power of two: about 0.68 s of 48 kHz stereo.
+const RING_SAMPLES: usize = 1 << 16;
+
+/// Where audio goes: a ring in linear memory that the page's audio worklet reads over the
+/// shared buffer, so no message carries samples. The worklet advances `read`.
+#[repr(C)]
+struct Ring {
+    written: AtomicU32,
+    read: AtomicU32,
+    /// `(channels << 24) | rate` of what is in the ring; 0 before a device opens.
+    format: AtomicU32,
+    samples: [AtomicI16; RING_SAMPLES],
+}
+
+static RING: Ring = Ring {
+    written: AtomicU32::new(0),
+    read: AtomicU32::new(0),
+    format: AtomicU32::new(0),
+    samples: [const { AtomicI16::new(0) }; RING_SAMPLES],
+};
+
+/// The ring's address and capacity in samples, for the worklet.
 #[no_mangle]
-pub extern "C" fn switch_audio_pull(handle: u32, buf: *mut u8, max_samples: u32) -> u32 {
+pub extern "C" fn switch_audio_ring() -> u32 {
+    &RING as *const Ring as u32
+}
+
+#[no_mangle]
+pub extern "C" fn switch_audio_ring_samples() -> u32 {
+    RING_SAMPLES as u32
+}
+
+/// Move what the guest queued into the ring, as far as it has room.
+#[no_mangle]
+pub extern "C" fn switch_audio_feed(handle: u32) {
     let s = session(handle);
-    let mut samples = vec![0i16; max_samples as usize];
-    let n = s.cpu.take_audio(&mut samples);
-    let out = unsafe { std::slice::from_raw_parts_mut(buf, n * 2) };
-    for (chunk, sample) in out.as_chunks_mut::<2>().0.iter_mut().zip(samples.iter()) {
-        *chunk = sample.to_le_bytes();
+    RING.format.store(switch_audio_format(handle), Relaxed);
+    let written = RING.written.load(Relaxed);
+    let free = RING_SAMPLES - written.wrapping_sub(RING.read.load(Acquire)) as usize;
+    const CHUNK: usize = 4096;
+    let mut chunk = [0i16; CHUNK];
+    let mut moved = 0;
+    while moved < free {
+        let n = s.cpu.take_audio(&mut chunk[..(free - moved).min(CHUNK)]);
+        if n == 0 {
+            break;
+        }
+        for (i, &sample) in chunk[..n].iter().enumerate() {
+            let at = written.wrapping_add((moved + i) as u32) as usize & (RING_SAMPLES - 1);
+            RING.samples[at].store(sample, Relaxed);
+        }
+        moved += n;
     }
-    n as u32
+    RING.written
+        .store(written.wrapping_add(moved as u32), Release);
 }
