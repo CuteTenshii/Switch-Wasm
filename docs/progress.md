@@ -13,7 +13,7 @@ Title files are gitignored, so no row re-runs from a clean checkout. "measured" 
 | `JKSV.nro` | full UI: text, icons | yes | measured |
 | `Checkpoint.nro` | full UI, text included | yes | measured |
 | `sysinfo` / `NX-Fetch` | render | yes | measured |
-| Home Menu (`qlaunch`) | draws; 88 draws a frame on the WebGPU backend | yes | carried |
+| Home Menu (`qlaunch`, 21.1.0) | its lock screen, 100 frames by 111M steps | yes | measured |
 | "A Short Hike" (NSP) | frame 150 by 4.3B steps, about 10 draws a frame: a white square on navy, never a scene | partial | measured |
 | "Minecraft" (NSP) | the world at frame 20 (16.4B steps, 110 draws), on the device with no fallbacks | yes | measured |
 | "Mario Kart 8 Deluxe" 1.0 (NSP, A32) | its title screen, 146 frames by 4.4B steps | yes | measured |

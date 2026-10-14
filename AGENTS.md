@@ -33,8 +33,9 @@ the TypeScript frontend plus the Rust core compiled to `wasm32-unknown-unknown`.
   TypeScript builds.
 - `docs`: subsystem details and reproduction notes. Read the relevant document
   before changing GPU, audio, services, decoding, or debugging workflows.
-- `PROGRESS.md`: implementation history, failures, and lessons that should not
-  be rediscovered.
+- `docs/progress.md`: implementation history, failures, and lessons that should
+  not be rediscovered.
+- `TODO.md`: planned work and known gaps.
 
 `web` is source and `dist` is generated. Files in `web/public` are copied as-is;
 other assets must be imported so Vite can hash and rewrite their URLs.
