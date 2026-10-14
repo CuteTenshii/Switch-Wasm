@@ -19,7 +19,7 @@ The page, the worker, and the wasm bindings between them.
 - `switch_present` (and `switch_fb_snapshot`) force opaque alpha: titles leave arbitrary alpha (Just Dance 2019 uses 0) and Chromium/macOS `putImageData` multiplies by it even with `alpha: false`.
 - The page hands its canvas to the worker once (`transferControlToOffscreen`); `screen.rs` paints each new frame on it through `web_sys` after the slice that presented it, into one reused `ImageData`. The page never reads pixels, and maps touches with the size the slice report carries.
 - SD and save host writes are not reported as changes (restores would otherwise be written straight back). Drains happen even if the JSON does not fit.
-- `gpu_channel_open`: no device is built before the title opens a channel, because wgpu's web backend frees nothing on drop. The backend installs on the session's single `Gpu`, not a channel (Asphalt 9 opens four).
+- The device opens as the run loop starts, between slices since it is a promise. The backend installs on the session's single `Gpu`, not a channel (Asphalt 9 opens four).
 
 ## `crates/switch-wasm/src/gpu.rs`
 

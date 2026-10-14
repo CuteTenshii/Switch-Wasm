@@ -12,10 +12,6 @@ const INSTALLED: &str = "installed";
 /// `GPU_DEVICE_MSAA` and `GPU_INTERLEAVE`.
 #[wasm_bindgen]
 pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -> String {
-    // Check the channel before opening: a dropped device frees nothing on the web backend.
-    if !crate::gpu_channel_open(handle) {
-        return crate::NO_CHANNEL_YET.to_string();
-    }
     let instance = switch_gpu::wgpu::Instance::new(
         switch_gpu::wgpu::InstanceDescriptor::new_without_display_handle(),
     );

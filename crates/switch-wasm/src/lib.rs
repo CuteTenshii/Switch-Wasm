@@ -459,23 +459,6 @@ fn write_into(buf: *mut u8, maxlen: u32, data: &[u8]) -> u32 {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 
-/// What [`crate::gpu::switch_gpu_open`] answers before a channel exists; the worker retries on it.
-#[cfg(feature = "gpu")]
-pub(crate) const NO_CHANNEL_YET: &str = "the title has not opened a channel yet";
-
-/// Whether the guest has opened a 3D channel, so a device is not built before it can be used.
-#[cfg(feature = "gpu")]
-pub(crate) fn gpu_channel_open(handle: u32) -> bool {
-    session(handle)
-        .cpu
-        .nv
-        .gpu
-        .channels
-        .values()
-        .next()
-        .is_some()
-}
-
 /// Install a GPU backend on the session's `Gpu` (not a channel).
 #[cfg(feature = "gpu")]
 fn install_gpu(handle: u32, gpu: switch_gpu::Gpu) {

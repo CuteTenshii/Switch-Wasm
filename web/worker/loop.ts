@@ -36,6 +36,8 @@ export function startLoop(trace: boolean): void {
   tracing = trace;
   budget = trace ? TRACE_SLICE : FIRST_SLICE;
   tick = 0;
+  // Every title draws: open the device as it starts rather than once it asks.
+  tryGpu();
   wake.port2.postMessage(null);
 }
 

@@ -4,14 +4,12 @@ import { switch_gpu_open } from '@core/switch_wasm.js';
 import { workerLog } from './log';
 import { core, readWholeJson, state } from './wasm';
 
-// GPU install state. Installed between run slices, once the title has opened a
-// channel: opening a device needs promises a slice cannot await.
+// GPU install state. Installed as the loop starts, between slices: opening a device
+// needs promises a slice cannot await.
 let gpu: 'no' | 'trying' | 'done' | 'never' = 'no';
 
 // The session the backend was installed on; a new session needs its own.
 let gpuSession = -1;
-
-const NO_CHANNEL_YET = 'the title has not opened a channel yet';
 
 const INSTALLED = 'installed';
 
@@ -70,8 +68,6 @@ export function tryGpu(): void {
       // The backend logs once its first draw has rendered on the device.
       gpu = 'done';
       gpuSession = state.handle;
-    } else if (what === NO_CHANNEL_YET) {
-      gpu = 'no';
     } else {
       // No adapter or device: stop asking, which costs an instance and console
       // warnings per slice.
