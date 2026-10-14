@@ -22,19 +22,19 @@ NCA, NSP/XCI, RomFS, tickets, NSO/NRO, NPDM and the range-reading stack.
 
 ## `crates/switch-core/examples/romfs_selftest.rs`
 
-- RomFS has no IVFC verification, so wrong bytes from the HostSource -> NCA window -> AES-CTR -> compression/cache stack are silently served. The self-test relies on the invariant that a range's bytes must not depend on how it is read (whole, chunked, reversed, with evicting reads between). Samples target file edges and 16 KiB compression-block boundaries (`CACHED_BLOCKS` is 4). `SEED`, `WINDOW`, and `INJECT=1` (canary that must be detected) control it.
+- RomFS has no IVFC verification, so wrong bytes from the HostSource -> NCA window -> AES-CTR -> compression/cache stack are silently served. The self-test relies on the invariant that a range's bytes must not depend on how it is read (whole, chunked, reversed, with evicting reads between). Samples target file edges and 64 KiB block boundaries (`compressed.rs` caches `CACHED_BLOCKS`, 4). `SEED`, `WINDOW`, and `INJECT=1` (canary that must be detected) control it.
 
 ## `crates/switch-core/src/nsp.rs`
 
 - PFS0 and HFS0 share one parser: only the magic and entry stride differ. File offsets are resolved to absolute positions in the source so XCI partitions and `.nsp` look the same to the rest of the stack.
 - Header size math is done in `u64` and sizes are `u64`: on wasm32 `usize` truncation let entries past 4 GiB pass bounds checks and read wrong bytes.
 - Only the header is read from the source; `files` is not preallocated from the untrusted count (allocation failure aborts on wasm).
-- Some repack tools write absolute entry offsets. The absolute reading is chosen only when the relative reading overruns the image and the absolute one fits (and no entry points into the header). It used to key on "an entry points into the header", which missed repacks with a padded/aligned payload area (e.g. a 7 GiB Just Dance 2022 `.nsp`). The fallback is never applied to nested partitions (written by the cartridge master).
+- Some repack tools write absolute entry offsets. The absolute reading is chosen only when the relative reading overruns the image and the absolute one fits without pointing into the header. Keying on "an entry points into the header" missed repacks with a padded payload area (a 7 GiB Just Dance 2022 `.nsp`). The fallback is never applied to nested partitions (written by the cartridge master).
 
 ## `crates/switch-core/src/bucket.rs`
 
 - Compression, sparse and BKTR tables share one bucket-tree layout, differing in node size and entry format.
-- Only entry sets are read, into one sorted list with binary search; the index nodes are skipped. A large retail table is ~2.3 MiB / 98,846 entries, cheap next to a multi-GB container.
+- Only entry sets are read, into one sorted list with binary search; the index nodes are skipped. A large retail table is a few MiB, cheap next to a multi-GB container.
 - `MAX_TABLE` exists only so a corrupt header cannot request an impossible allocation in the browser.
 
 ## `crates/switch-core/src/compressed.rs`
@@ -55,7 +55,7 @@ NCA, NSP/XCI, RomFS, tickets, NSO/NRO, NPDM and the range-reading stack.
 - Wrong keys are undetectable by CTR itself. PFS0/ExeFS sections are checked against the master hash and then every per-block hash (otherwise one bad byte boots and faults later in crt0); verification is skipped for unrecognized geometry rather than failing. RomFS only checks the header's `header_size == 0x50`; full IVFC verification is not implemented.
 - An update's Program NCA carries the base title id; only its patch (`AesCtrEx`) RomFS marks it as unbootable alone.
 - Container NCAs have hash names, so finding the Program NCA requires decrypting each header (needs `header_key`).
-- RomFS is served range-by-range through `romfs_source`; `read_section`/`read_romfs` hold whole sections and are for small ExeFS or native tools only.
+- RomFS is served range-by-range through `romfs_source`; `decrypt_section`/`decrypt_romfs_section` hold whole sections in memory and are for small sections or native tools only.
 
 ## `crates/switch-core/src/crypto.rs`
 
@@ -73,8 +73,8 @@ NCA, NSP/XCI, RomFS, tickets, NSO/NRO, NPDM and the range-reading stack.
 ## `crates/switch-core/src/nro.rs`
 
 - NROs load at 0x08000000 because devkitA64/libnx homebrew is linked against HBL's load address; absolute pointers assume it.
-- The environment block is at 0x00100000, outside the image so crt0 BSS zeroing never touches it. HosVersion entry uses 0xFFFFFFFF with the "ATMOSPHR" magic so libnx keeps it and version gates pass. Argv's `argv[0]` must be `sdmc:/switch/homebrew.nro` and that file must exist, because `romfsMountSelf` reopens the running NRO by argv[0]. hbmenu's `launchInit()` fails without the NextLoadPath buffers (0x300 each, as hbloader).
-- Self-relocating "HOME BREW" crt0s apply RELR themselves; applying it in the loader too double-relocates. Plain NROs (e.g. the sdl demo) need the loader to do it. hbmenu writes the RELR byte size into DT_RELRCOUNT; the loader takes the larger of RELRSZ/RELRCOUNT, and stops at the first non-monotonic entry (hbmenu's section has trailing garbage).
+- The environment block is at 0x00100000, outside the image so crt0 BSS zeroing never touches it. HosVersion entry uses 0xFFFFFFFF with the "ATMOSPHR" magic so libnx keeps it and version gates pass. `argv[0]` must name a file that exists, because `romfsMountSelf` reopens the running NRO by it: a dropped NRO is written to `sdmc:/switch/homebrew.nro`, one launched from the SD card is told `sdmc:<its path>`. hbmenu's `launchInit()` fails without the NextLoadPath buffers (0x300 each, as hbloader).
+- Self-relocating "HOME BREW" crt0s apply RELR themselves; applying it in the loader too double-relocates. Plain NROs (no `HOME BREW` crt0) need the loader to do it. hbmenu writes the RELR byte size into DT_RELRCOUNT; the loader takes the larger of RELRSZ/RELRCOUNT, and stops at the first non-monotonic entry (hbmenu's section has trailing garbage).
 - `.text` is marked read-only after load so wild guest writes fault instead of corrupting code; `.rodata` stays writable because a self-relocating crt0 may patch `.data.rel.ro` there.
 - libtransistor NROs may set `_trn_runconf_heap_mode` to OVERRIDE with a tiny heap; the loader finds the live (possibly strong, not the exported weak) mode pointer by decoding `_sbrk_r` and forces NORMAL so it calls `svcSetHeapSize`.
 - Asset parts whose (offset, size) run past the file are dropped individually (half an icon is not an icon). `nro_size` is measured from file start, not the magic, so builds with a boot stub still find the section.
@@ -90,7 +90,7 @@ NCA, NSP/XCI, RomFS, tickets, NSO/NRO, NPDM and the range-reading stack.
 
 - `env_flag!` caches per call site in a `OnceLock`: `std::env::var` scans the whole environment, and these switches sit on per-syscall/IPC/draw paths (`getenv` was 37% of a Home Menu run). `TRACE_*` diagnostics are not env flags; they live in `trace`'s runtime mask, which the environment only seeds, because browsers have no environment.
 - `IdHasher` (fxhash-style) replaces SipHash for self-minted keys: SipHash was 18.7% of a Home Menu run. Iteration order was already nondeterministic with the default hasher. `finish` must fold the high half down because one multiply moves entropy upward only and `HashMap` buckets by low bits; without it 4096 page-aligned addresses shared one bucket.
-- `FB_BASE`/`INPUT_ADDR` sit above every region a Horizon process is given (see `cpu::GUEST_SPACE_END`); they moved from 0x3F00_0000 when the heap region grew into that space. `switch_fb_snapshot` prefers the GPU framebuffer and falls back to `FB_BASE`.
+- `FB_BASE`/`INPUT_ADDR` sit above the heap and alias regions and below `GUEST_SPACE_END` (`kernel/layout.rs`); a region that grows must not reach them. `switch_fb_snapshot` prefers the GPU framebuffer and falls back to `FB_BASE`.
 
 ## `crates/switch-core/src/romfs.rs`
 

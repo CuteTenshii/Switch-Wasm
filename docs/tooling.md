@@ -5,9 +5,9 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 ## `tools/wasm_bench.mjs`
 
 - Host timings are not a scaled version of browser timings: removing a libcall only wasm pays for was about 1.15x natively and 1.44x in the browser. Use host examples (`frame_work`) for work counts, and this tool for milliseconds.
-- The bench mirrors `web/worker/hostfiles.ts`'s 1 MiB LRU (same chunk size, depth, and large-read bypass) so the wasm side sees the shipped access pattern, even though node's `readSync` is cheaper than `FileReaderSync`.
-- Frames are timed by sampling the frame counter between slices of a single run, because boot time (first frame around step 900M on retail) varies by seconds between runs. One extra frame is timed and dropped because it absorbs the warmup's tail.
-- Running without the shared font understates frame cost (no text is drawn).
+- The bench mirrors `web/worker/hostfiles.ts`'s per-file LRU (same 1 MiB chunks, depth, and large-read bypass) so the wasm side sees the shipped access pattern, even though node's `readSync` is cheaper than `FileReaderSync`.
+- Frames are timed by sampling the frame counter between slices of a single run, because boot time varies by seconds between runs. One extra frame is timed and dropped because it absorbs the warmup's tail.
+- Running without `web/font.ttf` understates frame cost (no text is drawn).
 
 ## `Cargo.toml`
 
@@ -17,40 +17,42 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 ## `Makefile`
 
-- The wasm build always includes the WebGPU backend: `wgpu` reaches WebGPU through `wasm-bindgen`, so the artifact is a wasm-bindgen module with glue. Shipping one shape of core is cheaper than maintaining two loaders. Without WebGPU the backend fails to open a device and the software rasterizer takes the frame.
-- `wasm` is the incremental dev profile; `wasm-release` is fat LTO in one codegen unit (slow to build), and the only build performance is quoted from.
+- The wasm build always includes the WebGPU backend: `wgpu` reaches WebGPU through `wasm-bindgen`, so the artifact is a wasm-bindgen module with glue, and shipping one shape of core is cheaper than maintaining two loaders. Without WebGPU the backend fails to open a device and the software rasterizer takes the frame.
+- Both wasm builds use the pinned `NIGHTLY` with `-Z build-std`: the core's memory is shared between workers, which needs `+atomics`, and stable's prebuilt std has none.
 - `make assets` exists because the core is an input to the Vite build, and only make knows how to build it.
 - `switch-gpu` tests run with `--test-threads=1`: parallel device creation can crash the software Vulkan driver on headless CI.
+
+## `lefthook.yml`
+
+- The rustfmt hook runs `cargo fmt --all --check` rather than rustfmt on staged files, because `include!`d files (generated ASTC tables) are formatted by bare rustfmt but not by cargo fmt. Clippy covers the whole workspace and all targets since switch-core changes break switch-wasm lints. Hooks read the working tree since cargo can't build from the index.
 
 ## `crates/switch-core/examples/screenshot_title.rs`
 
 - Stops at the Nth presented frame rather than a step budget (a title needs billions of steps before its first frame).
-- Knobs: `SWITCH_FIRMWARE=<dir>` system data archives (applets need fonts/icons/settings); `STEPS=<n>` cap; `PROFILE=<interval>` samples hot pcs/pages/threads, `STACKS=1` adds a return-address histogram (implies interval 4096); `COVER=<lo>:<hi>` records executed instructions in a range; `WATCH_MEM=<addr>` reports first step a 4 KiB window becomes non-zero; `SCAN_MEM=<addr>:<size>[,...]` lists non-zero spans at the end; `DUMP_VERTS=<addr>[,...]` reads three 60-byte rows as floats; `DUMP_SURFACE=<addr>:<w>x<h>:<format>[:<block height>][,...]` writes a block-linear colour surface to `<out>.<addr>.ppm` (format as in the draw trace, block height in GOBs, default 16; float channels clamped, max reported); `POKE_U32=<addr>:<value>` writes every tick or once at `POKE_AT=<step>`; `GATE_SNIFF=1` finds the applet frame-skip gate (`ldr w8, [xN, #0x3e8]`) and holds it at zero (on 18.0.1 qlaunch this yields 0 draws instead of 8); `FIND_MAGIC=SARC` scans memory for a magic.
-- Any hook forces `Pace::Instructions` (about half speed); without hooks the run uses the block translator like the frontend.
+- Knobs beyond the shared debugging ones (see [repro.md](repro.md)): `SWITCH_FIRMWARE=<dir>` registers system data archives; `STEPS=<n>` caps the run; `PROFILE=<interval>` samples hot pcs, pages and threads, and `STACKS=1` adds a return-address histogram (interval 4096 if `PROFILE` is unset); `COVER=<lo>:<hi>` records executed instructions in a range; `WATCH_MEM=<addr>` reports the first step a 4 KiB window becomes non-zero; `SCAN_MEM=<addr>:<size>[,...]` lists non-zero spans at the end; `DUMP_VERTS=<addr>[,...]` reads three 60-byte rows as floats; `DUMP_SURFACE=<addr>:<w>x<h>:<format>[:<block height>][,...]` writes a block-linear colour surface to `<out>.<addr>.ppm` (format as in the draw trace, block height in GOBs, default 16; float channels clamped, brightest reported); `POKE_U32=<addr>:<value>` writes every 4096 steps, or once at `POKE_AT=<step>`; `GATE_SNIFF=1` finds the applet frame-skip gate (`ldr w8, [xN, #0x3e8]`) and holds it at zero; `FIND_MAGIC=SARC` scans memory for a magic.
+- `PROFILE`, `STACKS`, `COVER`, `POKE_U32`, `GATE_SNIFF`, `TRAP_WRITE`, `TRAP_READ` and `WATCH_PC` force `Pace::Instructions`; otherwise the run uses the block translator like the frontend.
 
 ## `tools/browser_boot.mjs`
 
-- Samples run state and console row count every 5 s so stalls are observed, then saves the Debug panel's Rendering section and the full console, periodic thread reports included. WebGPU is force-enabled (headless Chromium leaves it off); headless adapters are usually SwiftShader, valid for draw-path coverage but not speed. `--jit-stats` deltas between samples show what the translator and emitter did, which only the browser build can measure. Each run uses a fresh profile so stored keys, SD card, saves and NAND do not leak between runs.
+- Samples the run state (`body[data-state]`) and the page's console every 5 s so stalls are observed, then saves the Debug panel's Rendering section and the full console, periodic activity and thread reports included. `--jit-stats` adds the Translation section's block stats to every sample, which only the browser build can measure.
+- WebGPU is force-enabled (headless Chromium leaves it off); headless adapters are usually SwiftShader, valid for draw-path coverage but not speed. Each run uses a fresh profile so stored keys, SD card, saves and NAND do not leak between runs.
 
 ## `crates/switch-core/examples/difftest.rs`
 
-- Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, reports the first differing register (found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.
+- Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, and reports the first differing register (found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.
 
 ## `crates/switch-core/examples/hotspots.rs`
 
-- The group table mirrors `jit::decode`'s arms, so it ranks work inside the translator (loads/stores walk the page table; SIMD/FP re-derive operands each execution). `jit_coverage` measures what has no op (under 1.5% on homebrew and retail); this measures what has an op and still costs. NRO rankings do not transfer to retail. hbmenu spends most of a frame in its own software gradient fill. Addresses are keyed by page, not a fixed 16 MiB window, since retail modules load anywhere.
+- The group table mirrors `jit::decode`'s arms, so it ranks work inside the translator (loads and stores walk the page table; SIMD/FP re-derive operands each execution). `jit_coverage` measures what has no op; this measures what has an op and still costs. NRO rankings do not transfer to retail. Addresses are keyed by page, not a fixed window, since retail modules load anywhere.
 
 ## `crates/switch-core/examples/frame_work.rs`
 
 - Work counts (instructions, blocks, interpreter fallbacks, draws, pixels) are identical under native and V8; use them to decide what to fix and prove a fix landed, and `tools/wasm_bench.mjs` for what it was worth. A change that moves no count but looks faster on the host only made the host faster.
-- Startup frames (loader, allocator, first upload) are skipped so they don't skew the steady-state mean. NRO workloads don't rank like retail titles.
-
-## `lefthook.yml`
-
-- rustfmt hook runs `cargo fmt --all --check` rather than rustfmt on staged files, because `include!`d files (generated ASTC tables) are formatted by bare rustfmt but not cargo fmt. Clippy covers the whole workspace and all targets since switch-core changes break switch-wasm lints (~9 s warm). Hooks read the working tree since cargo can't build from the index.
+- Startup frames (loader, allocator, first upload) are skipped so they don't skew the steady-state mean.
 
 ## `tools/make_font.py`
 
-- The guest renders the shared font with its own FreeType, so it must be a real TTF/OTF. The charset is subset to keep it small (full CJK is tens of MB).
-- Hinting is stripped: hinted glyphs rendered collapsed horizontally under the emulator, and hinting bytecode cost about 8x more emulated instructions per frame.
-- Nintendo's private-use button glyphs (0xE0Ax dark theme, 0xE0Ex light theme, used by nx-hbmenu) are mapped to similar letters/signs; otherwise hints render as wrong glyphs.
+- `web/font.ttf` is a stand-in shared font, built by this script. The guest renders the shared font with its own FreeType, so it must be a real TTF/OTF; `pl:u` serves the firmware's fonts instead when their system data archives are registered.
+- The charset is subset to keep it small (full CJK is tens of MB).
+- Hinting is stripped (`--no-hinting`): hinted glyphs rendered collapsed horizontally under the emulator, and hinting bytecode cost about 8x more emulated instructions per frame.
+- Nintendo's private-use button glyphs (the dark and light theme sets nx-hbmenu uses) are mapped to matching letters and signs; otherwise hints render as wrong glyphs.

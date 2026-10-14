@@ -1,84 +1,40 @@
 # Reproducing and debugging
 
-Every tool for getting a title to misbehave outside a browser, and what each
-one is for. AGENTS.md's *Commands* covers the build; this covers the runs.
+Every tool for getting a title to misbehave outside a browser, and what each one is for. AGENTS.md's *Commands* covers the build; this covers the runs.
 
-The `.nro`/`.nsp` files are gitignored.
+Game images and keys (`.nro`, `.nsp`, `.xci`, `.nca`, `.keys`) are gitignored.
 
-- `--example screenshot <nro> out.ppm 3` - writes the third presented frame,
-  feeding in `web/font.ttf` as the shared font unless told otherwise.
-- `--example boot_nx <nro>` - shortest path to "does it halt cleanly".
-- `--example boot_nsp <nsp> <prod.keys> [title.keys] [steps]` - the browser's
-  Launch button, without a browser. `SHOT=<f.ppm>` writes a frame; prefer it
-  over reading `frames presented: 0` off a budget too short to reach one.
-  `UPDATE=<update.nsp>` runs the title patched and `DLC=<a.nsp>,<b.nsp>` mounts
-  its add-on content, which is the page's pairing of the containers with no
-  page in the way.
-- **The shared debugging knobs**, on `boot_nsp` and `screenshot_title`
-  alike: `TRAP_WRITE=<addr>:<hex size>` and `TRAP_READ=…` name
-  the code that writes to or reads a region, `WATCH_PC=<addr>[,...]` the code
-  that reaches one, and `DUMP=<base>[+<hex>][:<hex len>][,...]` hex-dumps guest
-  memory wherever the run stopped, `<base>` being a register, `sp`, `pc` or an
-  address, as in `DUMP=x23+0x1830:0x40`. Each used to live in one tool and be
-  spelled differently in the next.
-- Every tool that reads a container takes `<container> <prod.keys>
-  [title.keys]`, in that order: the container may be an NSP, an XCI or a bare
-  NCA (decided by its header, not its name), and `title.keys` may be left out
-  when `prod.keys` already opens the title. A cartridge image is read through
-  its `secure` partition; its `update` partition is a firmware bundle and is
-  never the title.
-- `--example dump_exefs …` - flat module images at their real load addresses
-  plus a sorted `symbols.txt`. **This is what makes a retail backtrace
-  readable.** `--example disasm_flat` disassembles them there.
-- `--example retail_trace …` - a ring buffer of the last N instructions, dumped
-  on halt or fault. `RING_MIN` past `rtld` (`0x08004000`), whose lazy-binding
-  resolver would otherwise fill the whole ring. `MARK`/`MARK_DUMP` watch an API
-  being called in order without recording the steps between.
-- `--example jit_bisect <container> <prod.keys> [title.keys]` - the
-  translator and the interpreter in lockstep on a retail title, narrowed to the
-  first 4096-instruction slice they disagree on. Exact until the first thread
-  switch: after that the two engines interleave threads differently, both
-  correctly, and a disagreement means only that.
-- `node tools/browser_boot.mjs <container> --keys=… --title-keys=…` - the same
-  boot in a real browser, sampling the page's run state every five seconds and
-  saving the page's console, with its periodic thread reports, and the worker's output.
-- `--example jit_difftest <nro>` - both engines, with every state difference.
-  `SWITCH_NO_JIT=1` disables translation for host tools.
-- `--example screenshot_title <container> <prod.keys> [title.keys] out.ppm [n]` -
-  the Nth *presented* frame of a retail title, either container kind. Stops
-  at the frame rather than at a step budget, which `boot_nsp SHOT=` cannot: a
-  title needs billions of steps to reach its first, and picking a budget that
-  lands after it is guesswork. Was `screenshot_nsp` and `screenshot_nca`.
-- **Checking the WebGPU backend**: run `screenshot_title` and `switch-gpu`'s
-  `screenshot_gpu` over the same frame and `cmp` the PPMs. `GPU_ONLY=<i>` puts
-  only the i-th draw on the device, so a difference is exactly one draw's.
-- Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`,
-  `TRACE_NV`, `TRACE_GPU`, ...). The environment seeds it, so a CLI run sets
-  them exactly as it always did. `std::env::var` always fails on wasm, so in
-  the browser the console's log level decides: **Debug** turns every channel
-  in `switch_core::trace::ALL` on, any other level turns them off. Debug is
-  slow on a busy title; leave it on Log unless a channel is needed.
-- **The browser display path** is under **Debug > Graphics > Display**. Guest
-  frames and canvas updates say whether the page is dropping intermediate
-  frames; merged requests say how often several run slices shared one browser
-  paint. The timing table separates the worker run slice, the wait for
-  `requestAnimationFrame`, the frame-counter message, the framebuffer transfer,
-  and the synchronous canvas write. Renderer work before the worker hands a
-  frame to the page is in the **Rendering** section above it.
-- The channels to start from when a title misbehaves without faulting are the
-  low-volume ones. `TRACE_FS` names every filesystem request, its path and the
-  `Result` it was answered with (`2002-0001` is path-not-found), so a title
-  looking for content it cannot find says so. `TRACE_IO` is the host side of
-  the same reads: each range pulled out of the container. `TRACE_DRAW` is one
-  line per draw and clear with the surface it lands in, on either backend;
-  `TRACE_COPY` the DMA copies, inline uploads and 2D blits between them; and
-  `TRACE_PRESENT` one line per frame scanned out. `TRACE_GPU` prints the
-  draw, copy and present lines too, among every method write.
-- `--example opus_testvectors <dir>` - the Opus decoder against the RFC 8251
-  vectors (`opus_testvectors-rfc8251.tar.gz` from opus-codec.org). It fails on
-  the first packet whose range coder state disagrees with the encoder's, and
-  writes `<name>.rs.dec` beside each vector for `opus_compare` to score.
-  `--example opus_difftest <dir>` does the same against a reference decode you
-  generate yourself, which is how the output rates below 48 kHz and the
-  multi-stream layouts get covered.
-- Browser: `make wasm` once, then `bun run dev`. Tests: `make test`.
+## Arguments and environment
+
+- Every tool that reads a container takes `<container> <prod.keys> [title.keys]`, in that order. The container may be an NSP, an XCI or a bare NCA, told apart by header (a bare NCA's header is encrypted, so its `.nca` name decides), and `title.keys` may be left out when `prod.keys` or a bundled ticket already opens the title. A cartridge image's partitions are read as one file table without its `update` partition, a firmware bundle that is never the title.
+- Tools that run a title to its frames (`boot_nsp`, `screenshot_title`, `screenshot_gpu`, `jit_bisect`, `shader_coverage`, `steady_state`) take `SWITCH_FIRMWARE=<dir>` naming a firmware dump whose NCAs `prod.keys` can open. Without the system data archives a title quits early on the one it mounts. NCAs that fail to open are skipped silently.
+- Every tool that boots a retail title takes `UPDATE=<update.nsp>` to run it patched, `DLC=<a.nsp>,<b.nsp>` to mount its add-on content (the page's pairing with no page in the way), and `DOCKED=1` to boot docked.
+- The shared font is `web/font.ttf` unless a tool is given another; firmware fonts replace it when `SWITCH_FIRMWARE` holds them.
+- **The shared debugging knobs**, on `boot_nsp`, `screenshot`, `screenshot_title` and `screenshot_gpu` alike: `TRAP_WRITE=<addr>:<hex size>` and `TRAP_READ=…` name the code that writes to or reads a region (`TRAP_ZERO=1` includes zero writes, `TRAP_LAST=<n>` prints only the last n when the run stops), `WATCH_PC=<addr>[,...]` the code that reaches one (`WATCH_REGS=1`, `WATCH_DUMP=<spec>`, `WATCH_LAST=<n>`), and `DUMP=<base>[+<hex>][:<hex len>][,...]` hex-dumps guest memory wherever the run stopped, `<base>` being a register, `sp`, `pc` or an address (a leading `*` follows the pointer), as in `DUMP=x23+0x1830:0x40`.
+- `SWITCH_NO_JIT=1` disables translation for host tools.
+
+## Tools
+
+- `--example screenshot <nro> out.ppm 3 [font.ttf]`: writes the third presented frame of a homebrew.
+- `--example boot_nx <nro>`: shortest path to "does it halt cleanly".
+- `--example boot_nsp <container> <prod.keys> [title.keys] [steps]`: the browser's Launch button, without a browser. `SHOT=<f.ppm>` writes the last presented frame; prefer it over reading `frames presented: 0` off a budget too short to reach one. `PRESS=<buttons>@<interval>` taps buttons periodically (e.g. `PRESS=A+DOWN@300000000`); `PROFILE=<interval>` samples pcs by thread, page and caller.
+- `--example screenshot_title <container> <prod.keys> [title.keys] out.ppm [n]`: the Nth *presented* frame of a retail title. Stops at the frame rather than at a step budget, which `boot_nsp SHOT=` cannot: a title needs billions of steps to reach its first, and picking a budget that lands after it is guesswork. Its own knobs are in [tooling.md](tooling.md).
+- `--example dump_exefs <container> <prod.keys> [title.keys] <out_dir>`: flat module images at their real load addresses plus a sorted `symbols.txt`. **This is what makes a retail backtrace readable.** `--example disasm_flat <file.bin> <base> <addr> [count]` disassembles them there.
+- `--example retail_trace <container> <prod.keys> [title.keys] [tail_len] [max_steps]`: a ring buffer of the last N instructions, dumped on halt or fault. Set `RING_MIN=<pc>` past `rtld`, whose lazy-binding resolver would otherwise fill the whole ring; `RING_FROM` and `RING_STOP_AFTER` bound the recording. `MARK`/`MARK_DUMP` watch an API being called in order without recording the steps between.
+- `--example jit_bisect <container> <prod.keys> [title.keys] [max_steps] [window]`: the translator and the interpreter in lockstep on a retail title, narrowed to the first slice they disagree on. Exact until the first thread switch: after that the two engines interleave threads differently, both correctly, and a disagreement means only that.
+- `--example jit_difftest <nro> [instructions] [font.ttf]`: both engines on homebrew, with every state difference.
+- `node tools/browser_boot.mjs <container> --keys=… --title-keys=…`: the same boot in a real browser, sampling the run state and console every five seconds and saving it, with its periodic thread reports, the worker's output and the Rendering section.
+- **Checking the WebGPU backend**: run `screenshot_title` and `switch-gpu`'s `screenshot_gpu` over the same frame and `cmp` the PPMs. `GPU_ONLY=<i>` (or `<a>..<b>`) puts only those draws on the device, so a difference is exactly theirs.
+- `--example opus_testvectors <dir> [out dir]`: the Opus decoder against the RFC 8251 vectors (`opus_testvectors-rfc8251.tar.gz` from opus-codec.org), in stereo and mono. It reports the first packet of each vector whose range coder state disagrees with the encoder's, and writes `<name>.rs.dec` (and `<name>m.rs.dec`) into the out dir, `<dir>` by default, for `opus_compare` to score. `--example opus_difftest <dir>` does the same against a reference decode you generate yourself, which is how the output rates below 48 kHz and the multi-stream layouts get covered.
+
+## Tracing
+
+- Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, ...; the list is `switch_core::trace::ALL`). The environment seeds it on the host. `std::env::var` always fails on wasm, so in the browser the console's log level decides: **Debug** turns every channel on, any other level turns them off. Debug is slow on a busy title; leave it on Log unless a channel is needed.
+- The channels to start from when a title misbehaves without faulting are the low-volume ones. `TRACE_FS` names every filesystem request, its path and the `Result` it was answered with (`2002-0001` is path-not-found), so a title looking for content it cannot find says so. `TRACE_IO` is the host side of the same reads: each range pulled out of the container. `TRACE_DRAW` is one line per draw and clear with the surface it lands in, on either backend; `TRACE_COPY` the DMA copies, inline uploads and 2D blits between them; and `TRACE_PRESENT` one line per frame scanned out. `TRACE_GPU` prints the draw, copy and present lines too, among every method write.
+
+## In the browser
+
+- `make wasm` once, then `bun run dev`.
+- **Debug > Graphics > Rendering** shows which renderer is drawing and why, device totals, device time per frame, fallback reasons and device errors.
+- **Debug > Graphics > Display** is the browser display path. Guest frames and canvas updates say whether the page is dropping intermediate frames; merged requests say how often several run slices shared one browser paint. The timing table separates the worker run slice, the wait for `requestAnimationFrame`, the frame-counter message, the framebuffer transfer, and the synchronous canvas write.
+- **Debug > CPU > Translation** counts blocks translated, compiled to wasm, entered and chained.

@@ -1,11 +1,11 @@
 # Compatibility
 
-How far each title gets, judged from screenshots of what it shows. Captured on 2026-10-07 between `104b595` and `9575393`, on the host:
+How far each title gets, judged from screenshots of what it shows, on the host. The Measured column dates each row:
 
-- Retail: `screenshot_gpu` (the WebGPU backend, natively) at presented frames 300 and 1500, and `boot_nsp` up to 25B instructions (about 25 s of guest time), untouched and with <kbd>A</kbd> tapped every second.
-- Homebrew: `screenshot` at frame 120, with no input.
+- 2026-10-13: `screenshot` (homebrew) and `screenshot_title` (retail), firmware 21.1.0.
+- 2026-10-07: retail with `screenshot_gpu` (the WebGPU backend, natively) at presented frames 300 and 1500, and `boot_nsp` up to 25B instructions (about 25 s of guest time), untouched and with <kbd>A</kbd> tapped every second; homebrew with `screenshot` at frame 120, with no input.
 
-Playability needs a browser run; nothing below has been judged for it. Retail titles currently run at about 4-5 fps in the browser.
+Playability needs a browser run; nothing below has been judged for it. On 2026-10-07 retail titles ran at about 4-5 fps in the browser.
 
 Status, lowest to highest:
 
@@ -17,26 +17,27 @@ Status, lowest to highest:
 
 ## Retail
 
-| Title | Title ID | Version | Status | How far it gets |
-|---|---|---|---|---|
-| Minecraft | 0100D71004694000 | 1.0.0 | Menus | Mojang logo, the Autosave notice over the title world, and with <kbd>A</kbd> the Play screen (Worlds, Friends, Servers). Creating a world needs menu navigation, so gameplay is untested. The software renderer draws blocky tile glitches on the right half of the title world. |
-| Just Dance 2017 | 0100BCE000598000 | 1.0.0 | Menus | In the browser (2026-10-07): dancer card creation and the song carousel. Its VP8 videos play correctly since `ce3870d` (blocky and green before). |
-| Asphalt 9: Legends | 01007B000C834000 | 1.3.1 | Boots | Title splash, then "Connection error: could not connect to the server to launch Asphalt 9 (error 2)". It needs Gameloft's servers. |
-| Just Dance 2019 | 010075600AE96000 | 284652.419607 | Boots | A white screen on both renderers through frame 6000 (about 100 s of guest time), with or without <kbd>A</kbd>. It keeps presenting frames, but is too slow in the browser to see further. |
-| A Short Hike | 01004890117B2000 | 1.0.0 | Boots | A white square on a dark screen, then black through 7840 frames, with or without <kbd>A</kbd>. |
+| Title | Title ID | Version | Status | How far it gets | Measured |
+|---|---|---|---|---|---|
+| Minecraft | 0100D71004694000 | 1.0.0 | Menus | Frame 20 (16.4B steps, 110 draws) shows the world cleanly on the WebGPU device; the software rasterizer draws the right half wrong. On 2026-10-07, with <kbd>A</kbd>, it reached the Play screen (Worlds, Friends, Servers); creating a world needs menu navigation, so gameplay is untested. | 2026-10-13 |
+| Mario Kart 8 Deluxe | 0100152000022000 | 1.0.0 | Menus | Its title screen, at frame 146 by 4.4B steps. | 2026-10-13 |
+| Just Dance 2017 | 0100BCE000598000 | 1.0.0 | Menus | In the browser: dancer card creation and the song carousel, with its VP8 videos playing correctly. | 2026-10-07 |
+| Asphalt 9: Legends | 01007B000C834000 | 1.3.1 | Boots | Title splash, then "Connection error: could not connect to the server to launch Asphalt 9 (error 2)". It needs Gameloft's servers. | 2026-10-07 |
+| Just Dance 2019 | 010075600AE96000 | 284652.419607 | Boots | A white screen on both renderers through frame 6000 (about 100 s of guest time), with or without <kbd>A</kbd>. It keeps presenting frames, but is too slow in the browser to see further. | 2026-10-07 |
+| A Short Hike | 01004890117B2000 | 1.0.0 | Boots | Presents 150 frames by 4.3B steps, but frame 150 is a white square on navy, with no scene. | 2026-10-13 |
 
 ## Homebrew
 
-| Title | Status | How far it gets |
-|---|---|---|
-| `hbmenu.nro` | Menus | Its full menu. |
-| `JKSV.nro` | Menus | Its menu; the user tile is empty. |
-| `Checkpoint.nro` | Menus | Its menu, showing "No saves". |
-| `sysinfo.nro` | Menus | Its full system information screen. |
-| `NX-Fetch.nro` | Menus | Its full screen. |
-| `reset_parental_controls.nro` | Menus | Its menu. |
-| `SnakeNX.nro` | Menus | Title screen, "Press <kbd>A</kbd> to start"; gameplay untested. |
-| `DDLC-LOVE-Switch.nro` | Boots | LÖVE's own "Cannot load game at `sdmc:/switch/game`": the game data is not on the SD card. |
-| `dino.nro` | Boots | Its console output, then "webConfigShow failed with code 0x5d59": the web applet it runs in is not implemented. |
-| `NX-Shell.nro` | Fails | Faults at 224M instructions in Dear ImGui's font index, before a frame. |
-| `MilkOutside.nro` | Fails | No frame in 3B instructions; it waits after asking for the error applet. |
+| Title | Status | How far it gets | Measured |
+|---|---|---|---|
+| `hbmenu.nro` | Menus | Its full menu, entry label included. | 2026-10-13 |
+| `NX-Shell.nro` | Menus | Its file browser, presenting steadily without a fault. | 2026-10-13 |
+| `JKSV.nro` | Menus | Its full UI. | 2026-10-13 |
+| `Checkpoint.nro` | Menus | Its full UI, text included. | 2026-10-13 |
+| `sysinfo.nro` | Menus | Its system information screen, rendered. | 2026-10-13 |
+| `NX-Fetch.nro` | Menus | Its screen, rendered. | 2026-10-13 |
+| `reset_parental_controls.nro` | Menus | Its menu. | 2026-10-07 |
+| `SnakeNX.nro` | Menus | Title screen, "Press <kbd>A</kbd> to start"; gameplay untested. | 2026-10-07 |
+| `DDLC-LOVE-Switch.nro` | Boots | LÖVE's own "Cannot load game at `sdmc:/switch/game`": the game data is not on the SD card. | 2026-10-07 |
+| `dino.nro` | Boots | Its console output, then "webConfigShow failed with code 0x5d59": the web applet it runs in is not implemented. Needs a re-run now that NAND applets run as processes. | 2026-10-07 |
+| `MilkOutside.nro` | Fails | No frame in 3B instructions; it waits after asking for the error applet. Needs a re-run now that NAND applets run as processes. | 2026-10-07 |

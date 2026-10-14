@@ -8,7 +8,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 1. Per-process handle tables, and shared memory objects with aliased pages (hid, `pl` font, shared framebuffer, transfer memory). Until then input reaches whichever process is running when it arrives.
 2. GPU and display: per-process nvdrv fds, nvmap handles and address spaces; a vi layer table; layers composited by z-order into one frame, in software and wgpu. Until then the last process to present owns the screen.
 3. am focus: the caller is told it lost and regained focus, and `GetCurrentFocusState` answers per process.
-4. Docs: `kernel.md`, `services.md`, `multicore.md`, `gpu.md`.
 
 ## Browser bindings
 
@@ -23,4 +22,7 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 - `npns:s` cmd 3 (Receive) is refused; qlaunch polls it constantly. Needs the empty-queue result from switchbrew.
 - `ssl:s` cmd 5 is stubbed and the `ssl:s` name is not routed like `ssl`.
+- The `crates/switch-wasm/src/heap.rs` allocator can be entered concurrently by core workers at startup (unsynchronized dlmalloc under `+atomics`; `__wbindgen_start` allocates their stack and TLS).
+- Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
+- Minecraft frame 20 is clean on the WebGPU device but the software rasterizer differs from it, mostly in the right half.
