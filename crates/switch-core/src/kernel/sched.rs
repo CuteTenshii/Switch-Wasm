@@ -66,7 +66,8 @@ impl Cpu {
 
     pub(crate) fn sleep_until(&mut self, deadline: u64) {
         self.ensure_main_thread();
-        self.machine.threads[self.current_thread].state = ThreadState::Sleeping { deadline };
+        self.machine.process_mut(self.pid).threads[self.current_thread].state =
+            ThreadState::Sleeping { deadline };
         self.reschedule();
     }
 
@@ -78,7 +79,8 @@ impl Cpu {
     /// Park on awaited events until one fires or `deadline` passes; the `svc` is reissued.
     pub(crate) fn park_on_events(&mut self, deadline: u64) {
         self.ensure_main_thread();
-        self.machine.threads[self.current_thread].state = ThreadState::WaitEvent { deadline };
+        self.machine.process_mut(self.pid).threads[self.current_thread].state =
+            ThreadState::WaitEvent { deadline };
         self.reschedule();
     }
 
@@ -98,13 +100,13 @@ impl Cpu {
             }
         }
         // No deadline either: wake everything rather than hang.
-        for index in 0..self.threads.len() {
-            match self.threads[index].state {
+        for index in 0..self.process().threads.len() {
+            match self.process().threads[index].state {
                 ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
                 ThreadState::WaitMutex(_)
                 | ThreadState::WaitAddress { .. }
                 | ThreadState::WaitEvent { .. } => {
-                    self.threads[index].state = ThreadState::Runnable;
+                    self.process_mut().threads[index].state = ThreadState::Runnable;
                 }
                 _ => {}
             }
@@ -151,14 +153,14 @@ impl Cpu {
         };
         self.pass_over_all_but(candidate);
         self.account_slice(start);
-        self.threads[candidate].switches += 1;
+        self.process_mut().threads[candidate].switches += 1;
         self.save_context(start);
         self.load_context(candidate);
         true
     }
 
     fn save_context(&mut self, index: usize) {
-        let thread = &mut self.machine.threads[index];
+        let thread = &mut self.machine.process_mut(self.pid).threads[index];
         thread.regs = self.regs;
         thread.pc = self.pc;
         thread.nzcv = self.nzcv;
@@ -177,7 +179,7 @@ impl Cpu {
         self.slice_used = 0;
         // A switch clears the local monitor.
         self.exclusive = None;
-        let thread = self.threads[index].clone();
+        let thread = self.process().threads[index].clone();
         self.regs = thread.regs;
         self.pc = thread.pc;
         self.nzcv = thread.nzcv;
@@ -194,14 +196,15 @@ impl Cpu {
     }
 
     pub fn current_thread_handle(&self) -> u64 {
-        self.threads
+        self.process()
+            .threads
             .get(self.current_thread)
             .map_or(MAIN_THREAD_HANDLE, |t| t.handle)
     }
 
     /// Threads created, including the main thread.
     pub fn thread_count(&self) -> usize {
-        self.threads.len().max(1)
+        self.process().threads.len().max(1)
     }
 }
 
@@ -230,7 +233,7 @@ mod tests {
 
     /// Run `rounds` yielding decisions and count how often each thread got the CPU.
     fn shares(cpu: &mut Cpu, rounds: usize) -> Vec<usize> {
-        let mut held = vec![0; cpu.threads.len()];
+        let mut held = vec![0; cpu.process().threads.len()];
         for _ in 0..rounds {
             cpu.yield_thread();
             held[cpu.current_thread] += 1;

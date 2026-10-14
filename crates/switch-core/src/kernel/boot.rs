@@ -48,7 +48,7 @@ impl Cpu {
 
     fn boot_nro(&mut self, data: &[u8], argv0: &str) -> Result<crate::nro::LoadedNro> {
         self.mem.clear_modules();
-        self.module_names.clear();
+        self.process_mut().module_names.clear();
         let loaded = crate::nro::load_nro(&mut self.mem, data)?;
         let end = loaded
             .data
@@ -62,7 +62,7 @@ impl Cpu {
         self.out.clear();
         self.trace.clear();
         self.halted = false;
-        self.guest_fatal = None;
+        self.process_mut().guest_fatal = None;
         self.trace_enabled = false;
         for i in 0..=30u8 {
             self.set_reg(i, 0);
@@ -139,10 +139,10 @@ impl Cpu {
         self.out.clear();
         self.trace.clear();
         self.halted = false;
-        self.guest_fatal = None;
+        self.process_mut().guest_fatal = None;
         self.trace_enabled = false;
         self.mem.clear_modules();
-        self.module_names.clear();
+        self.process_mut().module_names.clear();
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }
@@ -163,7 +163,7 @@ impl Cpu {
         // Name the title, so fault addresses are read against the right binary.
         self.diagnostic(
             Level::Info,
-            &format!("[loader] program {:#018x}", self.program_id),
+            &format!("[loader] program {:#018x}", self.process().program_id),
         );
         for (name, data) in modules {
             let module = crate::nso::load_nso(&mut self.mem, data, base).map_err(|e| {
@@ -205,24 +205,24 @@ impl Cpu {
     /// Seed `am`'s launch parameters as a console's launcher would, including the
     /// `PreselectedUser` that `nn::account::OpenPreselectedUser` requires.
     pub(crate) fn seed_launch_parameters(&mut self) {
-        self.am_launch_parameters.clear();
-        if crate::services::am::is_library_applet(self.program_id) {
+        self.process_mut().am_launch_parameters.clear();
+        if crate::services::am::is_library_applet(self.process().program_id) {
             return;
         }
-        self.machine.am_launch_parameters.insert(
-            crate::services::am::LAUNCH_PARAMETER_PRESELECTED_USER,
-            crate::services::am::preselected_user_parameter(self.current_user().uid),
-        );
+        let user = crate::services::am::preselected_user_parameter(self.current_user().uid);
+        self.process_mut()
+            .am_launch_parameters
+            .insert(crate::services::am::LAUNCH_PARAMETER_PRESELECTED_USER, user);
     }
 
     /// Queue what a library applet's caller would push: `LibAppletCommonArguments`, then
     /// the applet's own launch structs (see [`crate::services::am::applet_launch_storages`]).
     pub(crate) fn seed_applet_launch_arguments(&mut self) {
-        self.am_in_data.clear();
-        self.am_out_data.clear();
-        self.am_interactive_in.clear();
-        self.am_interactive_out.clear();
-        if !crate::services::am::is_library_applet(self.program_id) {
+        self.process_mut().am_in_data.clear();
+        self.process_mut().am_out_data.clear();
+        self.process_mut().am_interactive_in.clear();
+        self.process_mut().am_interactive_out.clear();
+        if !crate::services::am::is_library_applet(self.process().program_id) {
             return;
         }
         const COMMON_ARGS_VERSION: u32 = 1;
@@ -232,7 +232,7 @@ impl Cpu {
         args.extend_from_slice(&COMMON_ARGS_SIZE.to_le_bytes());
         // LaVersion: the applet's own interface revision.
         args.extend_from_slice(
-            &crate::services::am::applet_interface_version(self.program_id).to_le_bytes(),
+            &crate::services::am::applet_interface_version(self.process().program_id).to_le_bytes(),
         );
         // ExpectedThemeColor: 0 is the basic white theme.
         args.extend_from_slice(&0u32.to_le_bytes());
@@ -240,11 +240,12 @@ impl Cpu {
         args.resize(0x18, 0);
         // The tick the caller started the applet at.
         args.extend_from_slice(&0u64.to_le_bytes());
-        self.am_in_data.push_back(args);
+        self.process_mut().am_in_data.push_back(args);
         // Then the applet's own launch structs.
         let user = self.current_user().uid;
-        for storage in crate::services::am::applet_launch_storages(self.program_id, user) {
-            self.am_in_data.push_back(storage);
+        for storage in crate::services::am::applet_launch_storages(self.process().program_id, user)
+        {
+            self.process_mut().am_in_data.push_back(storage);
         }
     }
 }

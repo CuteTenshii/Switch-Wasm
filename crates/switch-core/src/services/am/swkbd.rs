@@ -126,17 +126,20 @@ impl Cpu {
 
     /// The keyboard waiting for text, if any.
     pub fn keyboard_request(&self) -> Option<&KeyboardRequest> {
-        self.am_keyboard.as_ref().map(|pending| &pending.request)
+        self.process()
+            .am_keyboard
+            .as_ref()
+            .map(|pending| &pending.request)
     }
 
     /// Answer the waiting keyboard with `text`, or cancel it with `None`. Returns
     /// whether a keyboard was waiting.
     pub fn answer_keyboard(&mut self, text: Option<&str>) -> bool {
-        let Some(pending) = self.am_keyboard.take() else {
+        let Some(pending) = self.process_mut().am_keyboard.take() else {
             return false;
         };
         let storage = result_storage(text, pending.request.max_length, pending.utf8);
-        let Some(applet) = self.am_applets.get_mut(&pending.accessor) else {
+        let Some(applet) = self.process_mut().am_applets.get_mut(&pending.accessor) else {
             return false;
         };
         applet.answer = Some(storage);
@@ -155,6 +158,7 @@ impl Cpu {
     /// Start a host keyboard from its pushed `KeyboardConfig`; false if it has none.
     pub(super) fn start_keyboard(&mut self, accessor: u64) -> bool {
         let parsed = self
+            .process()
             .am_applets
             .get(&accessor)
             .and_then(|applet| applet.in_data.get(1))
@@ -163,7 +167,7 @@ impl Cpu {
             return false;
         };
         self.diagnostic(Level::Info, "[am] swkbd: waiting for the page to send text");
-        self.am_keyboard = Some(PendingKeyboard {
+        self.process_mut().am_keyboard = Some(PendingKeyboard {
             accessor,
             request,
             utf8,
@@ -174,11 +178,12 @@ impl Cpu {
     /// Drop a waiting keyboard whose applet is being ended.
     pub(super) fn forget_keyboard(&mut self, accessor: u64) {
         if self
+            .process()
             .am_keyboard
             .as_ref()
             .is_some_and(|pending| pending.accessor == accessor)
         {
-            self.am_keyboard = None;
+            self.process_mut().am_keyboard = None;
         }
     }
 }

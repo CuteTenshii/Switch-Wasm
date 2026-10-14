@@ -160,11 +160,11 @@ impl Cpu {
                 }
                 // GetEventHandle: signalled while a message is queued.
                 Some(0) => {
-                    let h = match self.applet_event {
+                    let h = match self.process().applet_event {
                         Some(h) => h,
                         None => {
                             let h = self.alloc_event("am:applet-message", true);
-                            self.applet_event = Some(h);
+                            self.process_mut().applet_event = Some(h);
                             h
                         }
                     };
@@ -198,26 +198,26 @@ impl Cpu {
                 Some(8) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // GetAcquiredSleepLockEvent: never signalled.
                 Some(13) => {
-                    let h = match self.sleep_lock_event {
+                    let h = match self.process().sleep_lock_event {
                         Some(h) => h,
                         None => {
                             let h = self.alloc_event("am:sleep-lock", false);
-                            self.sleep_lock_event = Some(h);
+                            self.process_mut().sleep_lock_event = Some(h);
                             h
                         }
                     };
-                    if self.sleep_lock_acquired {
+                    if self.process().sleep_lock_acquired {
                         self.signal_event(h);
                     }
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // GetDefaultDisplayResolutionChangeEvent: fired on dock or undock.
                 Some(61) => {
-                    let h = match self.display_resolution_event {
+                    let h = match self.process().display_resolution_event {
                         Some(h) => h,
                         None => {
                             let h = self.alloc_event("am:display-resolution-changed", true);
-                            self.display_resolution_event = Some(h);
+                            self.process_mut().display_resolution_event = Some(h);
                             h
                         }
                     };
@@ -233,16 +233,16 @@ impl Cpu {
                 }
                 // RequestToAcquireSleepLock: granted at once.
                 Some(10) => {
-                    self.sleep_lock_acquired = true;
-                    if let Some(h) = self.sleep_lock_event {
+                    self.process_mut().sleep_lock_acquired = true;
+                    if let Some(h) = self.process().sleep_lock_event {
                         self.signal_event(h);
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // ReleaseSleepLock / ReleaseSleepLockTransiently.
                 Some(11) | Some(12) => {
-                    self.sleep_lock_acquired = false;
-                    if let Some(h) = self.sleep_lock_event {
+                    self.process_mut().sleep_lock_acquired = false;
+                    if let Some(h) = self.process().sleep_lock_event {
                         self.clear_event(h);
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -264,10 +264,10 @@ impl Cpu {
                 Some(1) => {
                     const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9);
                     let kind = self.mem.read_u32(self.ipc_request_data(tls))?;
-                    match self.am_launch_parameters.remove(&kind) {
+                    match self.process_mut().am_launch_parameters.remove(&kind) {
                         Some(data) => {
                             let key = self.reply_with_interface(tls, handle, "am:storage")?;
-                            self.am_storages.insert(key, data);
+                            self.process_mut().am_storages.insert(key, data);
                             Ok(())
                         }
                         None => {
@@ -291,23 +291,24 @@ impl Cpu {
                 // ExtendSaveData(u8 type, u128 uid, s64 size, s64 journal): granted and remembered.
                 Some(25) => {
                     let data = self.ipc_request_data(tls);
-                    self.save_data_quota.size = self.mem.read_u64(data.wrapping_add(0x18))? as i64;
-                    self.save_data_quota.journal_size =
+                    self.process_mut().save_data_quota.size =
+                        self.mem.read_u64(data.wrapping_add(0x18))? as i64;
+                    self.process_mut().save_data_quota.journal_size =
                         self.mem.read_u64(data.wrapping_add(0x20))? as i64;
                     self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
                 }
                 // GetSaveDataSize(u8 type, u128 uid) -> two s64s.
                 Some(26) => {
-                    let quota = self.save_data_quota;
+                    let quota = self.process().save_data_quota;
                     self.write_save_data_pair(tls, quota.size, quota.journal_size)
                 }
                 // GetSaveDataSizeMax / GetDeviceSaveDataSizeMax.
                 Some(28) => {
-                    let quota = self.save_data_quota;
+                    let quota = self.process().save_data_quota;
                     self.write_save_data_pair(tls, quota.size_max, quota.journal_size_max)
                 }
                 Some(35) => {
-                    let quota = self.save_data_quota;
+                    let quota = self.process().save_data_quota;
                     self.write_save_data_pair(
                         tls,
                         quota.device_size_max,
@@ -316,7 +317,7 @@ impl Cpu {
                 }
                 // GetCacheStorageMax -> s32, then s64 at +8.
                 Some(29) => {
-                    let quota = self.save_data_quota;
+                    let quota = self.process().save_data_quota;
                     let mut out = Vec::with_capacity(16);
                     out.extend_from_slice(&quota.cache_storage_index_max.to_le_bytes());
                     out.extend_from_slice(&[0u8; 4]);
@@ -393,11 +394,11 @@ impl Cpu {
                 // 210 (20.0.0+, unnamed): one out event, never signalled.
                 Some(210) => {
                     self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
-                    let h = match self.application_functions_210_event {
+                    let h = match self.process().application_functions_210_event {
                         Some(h) => h,
                         None => {
                             let h = self.alloc_event("am:application-functions-210", true);
-                            self.application_functions_210_event = Some(h);
+                            self.process_mut().application_functions_210_event = Some(h);
                             h
                         }
                     };
@@ -415,20 +416,22 @@ impl Cpu {
                 // Set/GetIdleTimeDetectionExtension, SetAutoSleepDisabled / IsAutoSleepDisabled.
                 Some(62) => {
                     let data = self.ipc_request_data(tls);
-                    self.idle_time_detection_extension = self.mem.read_u32(data).unwrap_or(0);
+                    self.process_mut().idle_time_detection_extension =
+                        self.mem.read_u32(data).unwrap_or(0);
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 Some(63) => {
-                    let extension = self.idle_time_detection_extension;
+                    let extension = self.process().idle_time_detection_extension;
                     self.write_ipc_response(tls, 0, &[], &extension.to_le_bytes(), &[])
                 }
                 Some(68) => {
                     let data = self.ipc_request_data(tls);
-                    self.auto_sleep_disabled = self.mem.read_u8(data).unwrap_or(0) != 0;
+                    self.process_mut().auto_sleep_disabled =
+                        self.mem.read_u8(data).unwrap_or(0) != 0;
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 Some(69) => {
-                    let disabled = u8::from(self.auto_sleep_disabled);
+                    let disabled = u8::from(self.process().auto_sleep_disabled);
                     self.write_ipc_response(tls, 0, &[], &[disabled], &[])
                 }
                 // SetHandlesRequestToDisplay: queues `RequestToDisplay`.
@@ -539,12 +542,12 @@ impl Cpu {
                 // Set/GetHomeButtonDoubleClickEnabled.
                 Some(50) => {
                     let data = self.ipc_request_data(tls);
-                    self.home_button_double_click_enabled =
+                    self.process_mut().home_button_double_click_enabled =
                         self.mem.read_u8(data).unwrap_or(0) != 0;
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 Some(51) => {
-                    let enabled = u8::from(self.home_button_double_click_enabled);
+                    let enabled = u8::from(self.process().home_button_double_click_enabled);
                     self.write_ipc_response(tls, 0, &[], &[enabled], &[])
                 }
                 // SetCpuBoostRequestPriority.
@@ -569,11 +572,11 @@ impl Cpu {
                 Some(20) => self.write_ipc_response(tls, AM_NO_DATA_IN_CHANNEL, &[], &[], &[]),
                 // GetPopFromGeneralChannelEvent: never signalled.
                 Some(21) => {
-                    let h = match self.general_channel_event {
+                    let h = match self.process().general_channel_event {
                         Some(h) => h,
                         None => {
                             let h = self.alloc_event("am:general-channel", true);
-                            self.general_channel_event = Some(h);
+                            self.process_mut().general_channel_event = Some(h);
                             h
                         }
                     };
@@ -689,7 +692,7 @@ impl Cpu {
                 Some(1) => {
                     let data = self
                         .ipc_input_object_key(tls, handle, 0)
-                        .and_then(|key| self.am_storages.get(&key))
+                        .and_then(|key| self.process().am_storages.get(&key))
                         .cloned();
                     let summary = match &data {
                         Some(data) => applet_result_summary(self.program_id(), data),
@@ -702,14 +705,16 @@ impl Cpu {
                             applet_name(applet_id_for(self.program_id()))
                         ),
                     );
-                    self.am_out_data.push(data.unwrap_or_default());
+                    self.process_mut()
+                        .am_out_data
+                        .push(data.unwrap_or_default());
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // PushInteractiveOutData(IStorage): kept for the host.
                 Some(3) => {
                     let data = self
                         .ipc_input_object_key(tls, handle, 0)
-                        .and_then(|key| self.am_storages.get(&key))
+                        .and_then(|key| self.process().am_storages.get(&key))
                         .cloned()
                         .unwrap_or_default();
                     if self
@@ -725,9 +730,9 @@ impl Cpu {
                             ),
                         );
                     }
-                    self.am_interactive_out.push(data);
-                    if self.am_interactive_out.len() > MAX_INTERACTIVE_MESSAGES {
-                        self.am_interactive_out.remove(0);
+                    self.process_mut().am_interactive_out.push(data);
+                    if self.process().am_interactive_out.len() > MAX_INTERACTIVE_MESSAGES {
+                        self.process_mut().am_interactive_out.remove(0);
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
@@ -803,7 +808,8 @@ impl Cpu {
                     }
                     let key =
                         self.reply_with_interface(tls, handle, "am:library-applet-accessor")?;
-                    self.am_applets
+                    self.process_mut()
+                        .am_applets
                         .insert(key, LibraryApplet::new(id, mode, answer));
                     Ok(())
                 }
@@ -827,7 +833,9 @@ impl Cpu {
                         self.warn_stub(&iface, cmd_id, "zeros, not the transfer memory's contents");
                     }
                     let key = self.reply_with_interface(tls, handle, "am:storage")?;
-                    self.am_storages.insert(key, vec![0u8; size as usize]);
+                    self.process_mut()
+                        .am_storages
+                        .insert(key, vec![0u8; size as usize]);
                     Ok(())
                 }
                 // CreateHandleStorage: no backing memory to read.
@@ -853,6 +861,7 @@ impl Cpu {
                     // Start: a host keyboard waits for the page, anything else ends now.
                     Some(10)
                         if self
+                            .process()
                             .am_applets
                             .get(&key)
                             .is_some_and(LibraryApplet::is_host_keyboard)
@@ -864,6 +873,7 @@ impl Cpu {
                     Some(10) | Some(20) | Some(25) => {
                         if cmd_id == Some(10) {
                             let shown = self
+                                .process()
                                 .am_applets
                                 .get(&key)
                                 .and_then(LibraryApplet::error_shown);
@@ -876,7 +886,7 @@ impl Cpu {
                             }
                         }
                         self.forget_keyboard(key);
-                        if let Some(applet) = self.am_applets.get_mut(&key) {
+                        if let Some(applet) = self.process_mut().am_applets.get_mut(&key) {
                             applet.finish();
                         }
                         self.signal_library_applet_event(key, STATE_CHANGED_EVENT);
@@ -890,6 +900,7 @@ impl Cpu {
                         /// `am` description 22, `LibAppletExitReason_Canceled`.
                         const CANCELLED: u32 = 128 | (22 << 9);
                         let answered = self
+                            .process()
                             .am_applets
                             .get(&key)
                             .is_some_and(|applet| applet.finished && applet.answer.is_some());
@@ -900,10 +911,10 @@ impl Cpu {
                     Some(100) => {
                         let data = self
                             .ipc_input_object_key(tls, handle, 0)
-                            .and_then(|storage| self.am_storages.get(&storage))
+                            .and_then(|storage| self.process().am_storages.get(&storage))
                             .cloned()
                             .unwrap_or_default();
-                        if let Some(applet) = self.am_applets.get_mut(&key) {
+                        if let Some(applet) = self.process_mut().am_applets.get_mut(&key) {
                             applet.in_data.push(data);
                         }
                         self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -913,6 +924,7 @@ impl Cpu {
                     // PopOutData: the answer, once.
                     Some(101) => {
                         let answer = self
+                            .process_mut()
                             .am_applets
                             .get_mut(&key)
                             .and_then(LibraryApplet::take_answer);
@@ -921,6 +933,7 @@ impl Cpu {
                             return self.write_ipc_response(tls, NO_DATA, &[], &[], &[]);
                         };
                         if let Some(event) = self
+                            .process()
                             .am_applets
                             .get(&key)
                             .and_then(|a| a.events[POP_OUT_DATA_EVENT])
@@ -928,7 +941,7 @@ impl Cpu {
                             self.clear_event(event);
                         }
                         let storage = self.reply_with_interface(tls, handle, "am:storage")?;
-                        self.am_storages.insert(storage, answer);
+                        self.process_mut().am_storages.insert(storage, answer);
                         Ok(())
                     }
                     // PopInteractiveOutData: nothing produced.
@@ -953,7 +966,7 @@ impl Cpu {
                     // GetLibraryAppletInfo.
                     Some(120) => {
                         let mut info = [0u8; 8];
-                        if let Some(applet) = self.am_applets.get(&key) {
+                        if let Some(applet) = self.process().am_applets.get(&key) {
                             info[..4].copy_from_slice(&applet.id.to_le_bytes());
                             info[4..].copy_from_slice(&applet.mode.to_le_bytes());
                         }
@@ -973,13 +986,14 @@ impl Cpu {
                 Some(0) => {
                     let storage = self.ipc_object_key(tls, handle);
                     let accessor = self.reply_with_interface(tls, handle, "am:storage-accessor")?;
-                    self.am_storage_of.insert(accessor, storage);
+                    self.process_mut().am_storage_of.insert(accessor, storage);
                     Ok(())
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             "am:storage-accessor" => {
                 let storage = self
+                    .process()
                     .am_storage_of
                     .get(&self.ipc_object_key(tls, handle))
                     .copied()
@@ -987,7 +1001,11 @@ impl Cpu {
                 match cmd_id {
                     // GetSize -> s64.
                     Some(0) => {
-                        let size = self.am_storages.get(&storage).map_or(0, |d| d.len()) as u64;
+                        let size = self
+                            .process()
+                            .am_storages
+                            .get(&storage)
+                            .map_or(0, |d| d.len()) as u64;
                         self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
                     }
                     // Write(s64 offset, buffer<in>) / Read(s64 offset, buffer<out>).
@@ -1000,7 +1018,7 @@ impl Cpu {
                         for i in 0..len {
                             bytes.push(self.mem.read_u8(addr.wrapping_add(i))?);
                         }
-                        let data = self.am_storages.entry(storage).or_default();
+                        let data = self.process_mut().am_storages.entry(storage).or_default();
                         if data.len() < offset + bytes.len() {
                             data.resize(offset + bytes.len(), 0);
                         }
@@ -1009,7 +1027,12 @@ impl Cpu {
                     }
                     Some(11) => {
                         let offset = self.mem.read_u64(self.ipc_request_data(tls))? as usize;
-                        let data = self.am_storages.get(&storage).cloned().unwrap_or_default();
+                        let data = self
+                            .process()
+                            .am_storages
+                            .get(&storage)
+                            .cloned()
+                            .unwrap_or_default();
                         if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
                             let end = data.len().min(offset.saturating_add(len as usize));
                             let chunk = if offset < end {

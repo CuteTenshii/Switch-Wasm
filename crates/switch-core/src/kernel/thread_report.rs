@@ -45,7 +45,7 @@ impl Cpu {
     /// Charge instructions retired since the last switch to thread `index`.
     pub(crate) fn account_slice(&mut self, index: usize) {
         let ran = self.steps.wrapping_sub(self.switched_in_at);
-        if let Some(thread) = self.threads.get_mut(index) {
+        if let Some(thread) = self.process_mut().threads.get_mut(index) {
             thread.ran += ran;
         }
         self.switched_in_at = self.steps;
@@ -60,18 +60,24 @@ impl Cpu {
     }
 
     pub(crate) fn record_module_name(&mut self, start: u32, end: u32, name: &str) {
-        self.module_names
+        self.process_mut()
+            .module_names
             .retain(|&(s, e, _)| e <= start || s >= end);
-        self.module_names.push((start, end, name.to_owned()));
+        self.process_mut()
+            .module_names
+            .push((start, end, name.to_owned()));
     }
 
     pub(crate) fn forget_module_name(&mut self, start: u32) {
-        self.module_names.retain(|&(s, _, _)| s != start);
+        self.process_mut()
+            .module_names
+            .retain(|&(s, _, _)| s != start);
     }
 
     /// An address as `module+offset`, or bare when no loaded module holds it.
     pub fn locate(&self, addr: u32) -> String {
         match self
+            .process()
             .module_names
             .iter()
             .find(|&&(start, end, _)| (start..end).contains(&addr))
@@ -87,7 +93,7 @@ impl Cpu {
         let log = std::mem::take(&mut self.thread_log);
         let dropped = std::mem::take(&mut self.thread_log_dropped);
         // Without any created thread, everything ran on the main thread.
-        if self.threads.is_empty() {
+        if self.process().threads.is_empty() {
             let ran = self.steps.wrapping_sub(self.switched_in_at);
             self.switched_in_at = self.steps;
             let main = ThreadReport {
@@ -97,7 +103,7 @@ impl Cpu {
                 entry: "the process entry".to_owned(),
                 at: self.where_is(0),
                 state: "running".to_owned(),
-                priority: self.main_thread_priority,
+                priority: self.process().main_thread_priority,
                 running: true,
                 ran,
                 switches: 0,
@@ -106,9 +112,9 @@ impl Cpu {
             return (vec![main], log, dropped);
         }
         self.account_slice(self.current_thread);
-        let mut reports = Vec::with_capacity(self.threads.len());
-        for index in 0..self.threads.len() {
-            let thread = &self.threads[index];
+        let mut reports = Vec::with_capacity(self.process().threads.len());
+        for index in 0..self.process().threads.len() {
+            let thread = &self.process().threads[index];
             let entry = if index == 0 {
                 "the process entry".to_owned()
             } else {
@@ -130,7 +136,10 @@ impl Cpu {
         }
         let hz = u64::from(crate::services::power::CLOCK_RATES_HZ[0]).max(1);
         let now = self.cycles;
-        for (report, thread) in reports.iter_mut().zip(self.threads.iter_mut()) {
+        for (report, thread) in reports
+            .iter_mut()
+            .zip(self.process_mut().threads.iter_mut())
+        {
             report.ran = std::mem::take(&mut thread.ran);
             report.switches = std::mem::take(&mut thread.switches);
             if report.ran >= IDLE_WORK {
@@ -146,7 +155,7 @@ impl Cpu {
 
     /// Thread `index`'s pc, then its frames' return addresses, innermost first.
     fn where_is(&self, index: usize) -> String {
-        let (pc, regs, mode) = match self.threads.get(index) {
+        let (pc, regs, mode) = match self.process().threads.get(index) {
             Some(thread) if index != self.current_thread => (thread.pc, &thread.regs, thread.mode),
             _ => (self.pc, &self.regs, self.mode),
         };
@@ -168,7 +177,7 @@ impl Cpu {
     /// The name `nn::os` gave thread `index`: found via the first word in its
     /// `ThreadType` that points back into the struct at readable text.
     fn thread_name(&self, index: usize) -> Option<String> {
-        let base = u32::try_from(self.threads.get(index)?.arg).ok()?;
+        let base = u32::try_from(self.process().threads.get(index)?.arg).ok()?;
         if base == 0 {
             return None;
         }
@@ -213,7 +222,7 @@ impl Cpu {
 
     /// What a blocked thread is blocked on and, where known, who holds it.
     fn describe_thread(&self, index: usize) -> String {
-        let thread = &self.threads[index];
+        let thread = &self.process().threads[index];
         let running = index == self.current_thread;
         let hz = u64::from(crate::services::power::CLOCK_RATES_HZ[0]).max(1);
         let until = |deadline: u64| {
@@ -277,7 +286,12 @@ impl Cpu {
     }
 
     fn thread_named_by(&self, handle: u64) -> String {
-        match self.threads.iter().position(|t| t.handle == handle) {
+        match self
+            .process()
+            .threads
+            .iter()
+            .position(|t| t.handle == handle)
+        {
             Some(index) => match self.thread_name(index) {
                 Some(name) => format!("thread {index} ({})", self.name_text(&name)),
                 None => format!("thread {index}"),
@@ -288,10 +302,15 @@ impl Cpu {
 
     /// A thread as lifecycle lines name it: number, name, and entry point.
     pub(crate) fn thread_label(&self, handle: u64) -> String {
-        match self.threads.iter().position(|t| t.handle == handle) {
+        match self
+            .process()
+            .threads
+            .iter()
+            .position(|t| t.handle == handle)
+        {
             Some(0) => "thread 0 (main)".to_owned(),
             Some(index) => {
-                let entry = self.locate(self.threads[index].entry);
+                let entry = self.locate(self.process().threads[index].entry);
                 match self.thread_name(index) {
                     Some(name) => {
                         format!("thread {index} ({}, via {entry})", self.name_text(&name))
@@ -329,14 +348,14 @@ mod tests {
         let handle = cpu.create_thread(0x0800_0100, 0, 0x1000_0000, 44, 0);
         assert!(cpu.start_thread(handle));
         cpu.take_thread_report();
-        cpu.threads[1].state = ThreadState::WaitEvent { deadline: u64::MAX };
+        cpu.process_mut().threads[1].state = ThreadState::WaitEvent { deadline: u64::MAX };
         let hz = u64::from(crate::services::power::CLOCK_RATES_HZ[0]);
         cpu.cycles += hz * 3;
         let (threads, ..) = cpu.take_thread_report();
         assert_eq!(threads[1].idle_ms, 3000, "three seconds without work");
 
         // A report that finds real work resets it.
-        cpu.threads[1].ran = super::IDLE_WORK;
+        cpu.process_mut().threads[1].ran = super::IDLE_WORK;
         cpu.cycles += hz;
         let (threads, ..) = cpu.take_thread_report();
         assert_eq!(threads[1].idle_ms, 0);
@@ -432,13 +451,13 @@ mod tests {
         assert_eq!(cpu.waitable_signaled(handle), Some(false), "running");
 
         // The main thread parks on the handle; the worker then exits.
-        cpu.threads[0].state = ThreadState::WaitEvent { deadline: u64::MAX };
+        cpu.process_mut().threads[0].state = ThreadState::WaitEvent { deadline: u64::MAX };
         cpu.current_thread = 1;
         cpu.exit_thread();
-        assert_eq!(cpu.threads[1].state, ThreadState::Finished);
+        assert_eq!(cpu.process().threads[1].state, ThreadState::Finished);
         assert_eq!(cpu.waitable_signaled(handle), Some(true), "exited");
         assert_eq!(
-            cpu.threads[0].state,
+            cpu.process().threads[0].state,
             ThreadState::Runnable,
             "the joiner is woken to recheck its handle"
         );

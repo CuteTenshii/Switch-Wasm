@@ -146,7 +146,7 @@ impl Cpu {
                 let handle = self.alloc_handle();
                 self.record_handle(handle, "audout:iaudioout");
                 let event = self.alloc_event("audout:buffer", true);
-                self.audio_outs.insert(
+                self.process_mut().audio_outs.insert(
                     handle,
                     AudioOut {
                         sample_rate,
@@ -196,6 +196,7 @@ impl Cpu {
             // GetAudioOutState.
             Some(0) => {
                 let started = self
+                    .process()
                     .audio_outs
                     .get(&handle)
                     .map(|d| d.started)
@@ -210,7 +211,7 @@ impl Cpu {
             // StartAudioOut / StopAudioOut.
             Some(1) | Some(2) => {
                 let started = cmd_id == Some(1);
-                if let Some(device) = self.audio_outs.get_mut(&handle) {
+                if let Some(device) = self.process_mut().audio_outs.get_mut(&handle) {
                     device.started = started;
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -219,7 +220,7 @@ impl Cpu {
             Some(3) | Some(7) => self.audio_out_append(tls, handle),
             // RegisterBufferEvent.
             Some(4) => {
-                let Some(event) = self.audio_outs.get(&handle).map(|d| d.event) else {
+                let Some(event) = self.process().audio_outs.get(&handle).map(|d| d.event) else {
                     return self.unimplemented_command(tls, "audout:iaudioout", cmd_id);
                 };
                 self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
@@ -231,6 +232,7 @@ impl Cpu {
                 let data = self.ipc_request_data(tls);
                 let tag = self.mem.read_u64(data).unwrap_or(0);
                 let held = self
+                    .process()
                     .audio_outs
                     .get(&handle)
                     .map(|d| d.queued.iter().any(|&(queued, _)| queued == tag))
@@ -240,6 +242,7 @@ impl Cpu {
             // GetAudioOutBufferCount: buffers appended and not yet collected.
             Some(9) => {
                 let count = self
+                    .process()
                     .audio_outs
                     .get(&handle)
                     .map(|d| d.queued.len() as u32)
@@ -249,6 +252,7 @@ impl Cpu {
             // GetAudioOutPlayedSampleCount.
             Some(10) => {
                 let frames = self
+                    .process()
                     .audio_outs
                     .get(&handle)
                     .map(|d| d.played_frames)
@@ -261,7 +265,7 @@ impl Cpu {
             Some(12) => {
                 let data = self.ipc_request_data(tls);
                 let volume = f32::from_bits(self.mem.read_u32(data).unwrap_or(0));
-                if let Some(device) = self.audio_outs.get_mut(&handle) {
+                if let Some(device) = self.process_mut().audio_outs.get_mut(&handle) {
                     device.volume = if volume.is_finite() {
                         volume.clamp(0.0, 1.0)
                     } else {
@@ -272,6 +276,7 @@ impl Cpu {
             }
             Some(13) => {
                 let volume = self
+                    .process()
                     .audio_outs
                     .get(&handle)
                     .map(|d| d.volume)
@@ -288,7 +293,7 @@ impl Cpu {
         let now = self.cycles;
         let mut fire = Vec::new();
         let mut next = None;
-        for device in self.audio_outs.values() {
+        for device in self.process().audio_outs.values() {
             let Some(&(_, done_at)) = device.queued.front() else {
                 continue;
             };
@@ -346,7 +351,7 @@ impl Cpu {
                 );
             }
         }
-        let Some(device) = self.audio_outs.get_mut(&handle) else {
+        let Some(device) = self.process_mut().audio_outs.get_mut(&handle) else {
             return self.unimplemented_command(tls, "audout:iaudioout", Some(3));
         };
         let channels = device.channel_count.max(1) as usize;
@@ -387,7 +392,7 @@ impl Cpu {
         let room = out.map(|(_, size)| size / 8).unwrap_or(0);
         let addr = out.map(|(address, _)| address);
         let mut tags = Vec::new();
-        if let Some(device) = self.audio_outs.get_mut(&handle) {
+        if let Some(device) = self.process_mut().audio_outs.get_mut(&handle) {
             while (tags.len() as u32) < room {
                 match device.queued.front() {
                     Some(&(tag, done_at)) if done_at <= now => {

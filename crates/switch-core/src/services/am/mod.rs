@@ -452,6 +452,7 @@ impl Cpu {
     /// The event an `ILibraryAppletAccessor` hands out for `slot`, allocated once.
     fn library_applet_event(&mut self, key: u64, slot: usize) -> u64 {
         if let Some(event) = self
+            .process()
             .am_applets
             .get(&key)
             .and_then(|applet| applet.events[slot])
@@ -460,21 +461,21 @@ impl Cpu {
         }
         // Not auto-clearing: an ended applet stays ended.
         let event = self.alloc_event(LIBRARY_APPLET_EVENT_NAMES[slot], false);
-        self.am_applets.entry(key).or_default().events[slot] = Some(event);
+        self.process_mut().am_applets.entry(key).or_default().events[slot] = Some(event);
         event
     }
 
     /// Pop the front of a library applet's queue as an `IStorage`, or 2128-0003 if empty.
     fn pop_applet_storage(&mut self, tls: u32, handle: u64, queue: AppletQueue) -> Result<()> {
         let data = match queue {
-            AppletQueue::InData => self.am_in_data.pop_front(),
-            AppletQueue::InteractiveInData => self.am_interactive_in.pop_front(),
+            AppletQueue::InData => self.process_mut().am_in_data.pop_front(),
+            AppletQueue::InteractiveInData => self.process_mut().am_interactive_in.pop_front(),
         };
         self.refresh_applet_pop_events();
         match data {
             Some(data) => {
                 let key = self.reply_with_interface(tls, handle, "am:storage")?;
-                self.am_storages.insert(key, data);
+                self.process_mut().am_storages.insert(key, data);
                 Ok(())
             }
             None => {
@@ -492,23 +493,23 @@ impl Cpu {
 
     /// The event a pop queue hands out, allocated once and not auto-clearing.
     fn applet_queue_event(&mut self, queue: AppletQueue) -> u64 {
-        if let Some(event) = self.am_pop_events[queue.slot()] {
+        if let Some(event) = self.process().am_pop_events[queue.slot()] {
             return event;
         }
         let event = self.alloc_event(queue.event_name(), false);
-        self.am_pop_events[queue.slot()] = Some(event);
+        self.process_mut().am_pop_events[queue.slot()] = Some(event);
         event
     }
 
     /// Signal each pop event whose queue is non-empty and clear the rest.
     pub(crate) fn refresh_applet_pop_events(&mut self) {
         for queue in AppletQueue::ALL {
-            let Some(event) = self.am_pop_events[queue.slot()] else {
+            let Some(event) = self.process().am_pop_events[queue.slot()] else {
                 continue;
             };
             let waiting = match queue {
-                AppletQueue::InData => !self.am_in_data.is_empty(),
-                AppletQueue::InteractiveInData => !self.am_interactive_in.is_empty(),
+                AppletQueue::InData => !self.process().am_in_data.is_empty(),
+                AppletQueue::InteractiveInData => !self.process().am_interactive_in.is_empty(),
             };
             if waiting {
                 self.signal_event(event);
@@ -521,6 +522,7 @@ impl Cpu {
     /// Fire one of an applet's events, if the caller has taken it.
     fn signal_library_applet_event(&mut self, key: u64, slot: usize) {
         if let Some(event) = self
+            .process()
             .am_applets
             .get(&key)
             .and_then(|applet| applet.events[slot])
@@ -531,26 +533,28 @@ impl Cpu {
 
     /// Whether the applet behind an accessor has ended with a storage not yet popped.
     fn library_applet_has_answer(&self, key: u64) -> bool {
-        self.am_applets
+        self.process()
+            .am_applets
             .get(&key)
             .is_some_and(LibraryApplet::has_unpopped_answer)
     }
 
     /// Whether the applet behind an accessor has ended.
     fn library_applet_finished(&self, key: u64) -> bool {
-        self.am_applets
+        self.process()
+            .am_applets
             .get(&key)
             .is_some_and(LibraryApplet::is_finished)
     }
 
     /// The `ILockAccessor` event, created signalled and manual-reset.
     fn am_lock_accessor_event(&mut self) -> u64 {
-        match self.lock_accessor_event {
+        match self.process().lock_accessor_event {
             Some(h) => h,
             None => {
                 let h = self.alloc_event("am:lock-accessor", false);
                 self.signal_event(h);
-                self.lock_accessor_event = Some(h);
+                self.process_mut().lock_accessor_event = Some(h);
                 h
             }
         }

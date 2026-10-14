@@ -532,14 +532,20 @@ impl Cpu {
         self.service_handles.remove(&handle);
         self.domain_objects.retain(|&(owner, _), _| owner != handle);
         let session = handle << 32;
-        self.fs_files
+        self.process_mut()
+            .fs_files
             .retain(|&key, _| key & !0xFFFF_FFFF != session);
-        self.fs_dirs.retain(|&key, _| key & !0xFFFF_FFFF != session);
-        self.acc_profiles
+        self.process_mut()
+            .fs_dirs
             .retain(|&key, _| key & !0xFFFF_FFFF != session);
-        self.erpt_readers
+        self.process_mut()
+            .acc_profiles
             .retain(|&key, _| key & !0xFFFF_FFFF != session);
-        self.opus_decoders
+        self.process_mut()
+            .erpt_readers
+            .retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.process_mut()
+            .opus_decoders
             .retain(|&key, _| key & !0xFFFF_FFFF != session);
     }
 
@@ -659,9 +665,10 @@ impl Cpu {
     ) -> Result<()> {
         // Closes never reach `ssl_request`, so its context count drops here.
         if self.domain_interface(handle, object_id) == Some("ssl:context") {
-            self.ssl_contexts = self.ssl_contexts.saturating_sub(1);
+            self.process_mut().ssl_contexts = self.process().ssl_contexts.saturating_sub(1);
         }
-        self.opus_decoders
+        self.process_mut()
+            .opus_decoders
             .remove(&Self::object_key(handle, object_id));
         self.domain_objects.remove(&(handle, object_id));
         self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -956,7 +963,7 @@ impl Cpu {
             // IInformationInterface::GetProgramId(u64 pid) -> u64 program_id.
             "pm:info" => match cmd_id {
                 Some(0) => {
-                    let program_id = self.program_id;
+                    let program_id = self.process().program_id;
                     self.write_ipc_response(tls, 0, &[], &program_id.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -1398,13 +1405,14 @@ pub(crate) mod testing {
         let mut cpu = Cpu::new();
         cpu.record_handle(9, "fsp-srv");
         cpu.record_domain_object(9, 1, "fsp-srv-fs");
-        cpu.fs_files
+        cpu.process_mut()
+            .fs_files
             .insert(Cpu::object_key(9, 1), "/a.txt".to_owned());
         cpu.record_handle(10, "vi:m");
         cpu.forget_handle(9);
         assert!(cpu.service_name(9).is_none());
         assert!(cpu.domain_interface(9, 1).is_none());
-        assert!(cpu.fs_files.is_empty());
+        assert!(cpu.process().fs_files.is_empty());
         assert_eq!(cpu.service_name(10), Some("vi:m"));
     }
 

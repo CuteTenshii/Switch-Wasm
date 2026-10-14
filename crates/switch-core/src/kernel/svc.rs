@@ -116,13 +116,15 @@ impl Cpu {
                 let size = self.read_zr(2) as u32;
                 self.mem.map_zero(addr, size as usize)?;
                 // Prefer `hid`'s handle; the size match is a fallback.
-                if Some(self.read_zr(0)) == self.hid_shmem_handle || size == HID_SHMEM_SIZE {
-                    self.hid_shmem_addr = addr;
+                if Some(self.read_zr(0)) == self.process().hid_shmem_handle
+                    || size == HID_SHMEM_SIZE
+                {
+                    self.process_mut().hid_shmem_addr = addr;
                     self.set_gamepad_state(0, 0, 0, 0, 0);
                     // An empty touch sample: a zeroed LIFO header is a ring with no capacity.
                     self.set_touch_state(&[]);
                 } else if size == PL_SHMEM_SIZE {
-                    self.pl_shmem_addr = addr;
+                    self.process_mut().pl_shmem_addr = addr;
                     self.write_shared_font(addr);
                 }
                 self.write_zr(0, RESULT_OK);
@@ -224,8 +226,8 @@ impl Cpu {
                     return Ok(());
                 }
                 let core = match core as u32 as i32 {
-                    IDEAL_CORE_USE_PROCESS_VALUE => self.main_thread_core,
-                    core @ 0..=3 if self.process_core_mask >> core & 1 != 0 => core as u8,
+                    IDEAL_CORE_USE_PROCESS_VALUE => self.process().main_thread_core,
+                    core @ 0..=3 if self.process().process_core_mask >> core & 1 != 0 => core as u8,
                     _ => {
                         self.write_zr(0, RESULT_INVALID_CORE_ID);
                         return Ok(());
@@ -443,10 +445,12 @@ impl Cpu {
                 };
                 let checked = match requested {
                     IDEAL_CORE_USE_PROCESS_VALUE => Ok((
-                        i32::from(self.main_thread_core),
-                        1u64 << self.main_thread_core,
+                        i32::from(self.process().main_thread_core),
+                        1u64 << self.process().main_thread_core,
                     )),
-                    _ if affinity & !self.process_core_mask != 0 => Err(RESULT_INVALID_CORE_ID),
+                    _ if affinity & !self.process().process_core_mask != 0 => {
+                        Err(RESULT_INVALID_CORE_ID)
+                    }
                     _ if affinity == 0 => Err(RESULT_INVALID_COMBINATION),
                     core @ 0..=3 if affinity & (1 << core) == 0 => Err(RESULT_INVALID_COMBINATION),
                     core @ 0..=3 => Ok((core, affinity)),
@@ -1159,8 +1163,8 @@ impl Cpu {
                 let info_type = self.read_zr(1);
                 let value = match info_type {
                     // Core/priority masks from the NPDM; 0 makes `nnSdk` assert.
-                    0 => self.process_core_mask, // CoreMask
-                    1 => 0x0FFF_FFFF_F000_0000,  // PriorityMask: 28..=59
+                    0 => self.process().process_core_mask, // CoreMask
+                    1 => 0x0FFF_FFFF_F000_0000,            // PriorityMask: 28..=59
                     // Alias/heap regions from the layout, below 4 GiB (`u32` guest addresses).
                     2 => u64::from(layout.alias_addr), // AliasRegionAddress
                     3 => u64::from(layout.alias_size), // AliasRegionSize

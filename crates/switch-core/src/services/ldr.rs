@@ -58,7 +58,7 @@ impl Cpu {
             Some(3) => {
                 const NOT_REGISTERED: u32 = RO_RESULT_MODULE | (1029 << 9);
                 let nrr_address = args[0] as u32;
-                match self.ro_registrations.remove(&nrr_address) {
+                match self.process_mut().ro_registrations.remove(&nrr_address) {
                     Some(_) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     None => self.write_ipc_response(tls, NOT_REGISTERED, &[], &[], &[]),
                 }
@@ -132,7 +132,7 @@ impl Cpu {
                 Level::Warn,
                 &format!(
                     "[ro] no room for a {size:#x}-byte module: {} already mapped",
-                    self.ro_modules.len()
+                    self.process().ro_modules.len()
                 ),
             );
             return self.write_ipc_response(tls, OUT_OF_ADDRESS_SPACE, &[], &[], &[]);
@@ -163,7 +163,7 @@ impl Cpu {
             base.wrapping_add(size),
             &format!("ro@{nro_address:#x}"),
         );
-        self.ro_modules.insert(
+        self.process_mut().ro_modules.insert(
             base,
             RoModule {
                 source: nro_address as u32,
@@ -197,15 +197,16 @@ impl Cpu {
     fn ldr_ro_unload_module(&mut self, tls: u32, address: u64) -> Result<()> {
         const NOT_LOADED: u32 = RO_RESULT_MODULE | (1028 << 9);
         let address = address as u32;
-        let base = if self.ro_modules.contains_key(&address) {
+        let base = if self.process().ro_modules.contains_key(&address) {
             Some(address)
         } else {
-            self.ro_modules
+            self.process()
+                .ro_modules
                 .values()
                 .find(|m| m.source == address)
                 .map(|m| m.base)
         };
-        let Some(module) = base.and_then(|base| self.ro_modules.remove(&base)) else {
+        let Some(module) = base.and_then(|base| self.process_mut().ro_modules.remove(&base)) else {
             return self.write_ipc_response(tls, NOT_LOADED, &[], &[], &[]);
         };
         self.mem.unmark_readonly(module.text.0, module.text.1);
@@ -247,7 +248,8 @@ impl Cpu {
             self.diagnostic(Level::Warn, &format!("[ro] no NRR at {nrr_address:#010x}"));
             return self.write_ipc_response(tls, INVALID_NRR, &[], &[], &[]);
         }
-        self.ro_registrations
+        self.process_mut()
+            .ro_registrations
             .insert(nrr_address as u32, nrr_size as u32);
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
@@ -257,7 +259,7 @@ impl Cpu {
         let region_end =
             crate::cpu::RO_MODULE_REGION_ADDR.wrapping_add(crate::cpu::RO_MODULE_REGION_SIZE);
         let mut candidate = crate::cpu::RO_MODULE_REGION_ADDR;
-        for module in self.ro_modules.values() {
+        for module in self.process().ro_modules.values() {
             if size <= module.base.saturating_sub(candidate) {
                 return Some(candidate);
             }

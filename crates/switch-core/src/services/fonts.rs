@@ -70,8 +70,8 @@ impl Cpu {
         self.pl_shmem_image.clear();
         self.shared_font_regions.clear();
         // Refill in place if the guest already mapped the region.
-        if self.pl_shmem_addr != 0 {
-            self.write_shared_font(self.pl_shmem_addr);
+        if self.process().pl_shmem_addr != 0 {
+            self.write_shared_font(self.process().pl_shmem_addr);
         }
     }
 

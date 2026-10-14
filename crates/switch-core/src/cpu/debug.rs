@@ -50,7 +50,7 @@ impl Cpu {
     pub fn thread_dump(&self) -> String {
         let mut out = String::new();
         // Report the implicit main thread for a program that never created one.
-        if self.threads.is_empty() {
+        if self.process().threads.is_empty() {
             out.push_str(&format!(
                 "  [0]* handle={MAIN_THREAD_HANDLE:#x} state=Runnable paused=false pc={:#x}\n  \
                  (the main thread, which has no slot of its own until the guest creates a \
@@ -59,7 +59,7 @@ impl Cpu {
             ));
             return out;
         }
-        for (index, thread) in self.threads.iter().enumerate() {
+        for (index, thread) in self.process().threads.iter().enumerate() {
             let running = index == self.current_thread;
             out.push_str(&format!(
                 "  [{index}]{} handle={:#x} priority={} state={:?} paused={} pc={:#x}\n",

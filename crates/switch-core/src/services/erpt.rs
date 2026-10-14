@@ -607,7 +607,7 @@ impl Cpu {
                 let mut stored = [0u8; ERPT_ID_SIZE];
                 let len = id.len().min(ERPT_ID_SIZE);
                 stored[..len].copy_from_slice(&id[..len]);
-                self.erpt_readers.insert(
+                self.process_mut().erpt_readers.insert(
                     key,
                     ErrorReportReader {
                         id: stored,
@@ -618,7 +618,7 @@ impl Cpu {
             }
             // Read: returns 0 once drained.
             Some(1) => {
-                let Some(reader) = self.erpt_readers.get(&key).cloned() else {
+                let Some(reader) = self.process().erpt_readers.get(&key).cloned() else {
                     return self.write_ipc_response(tls, ERPT_NOT_FOUND, &[], &[], &[]);
                 };
                 let Some(body) = self.erpt_body(&reader.id, attachment) else {
@@ -626,7 +626,7 @@ impl Cpu {
                 };
                 let rest = body[reader.offset.min(body.len())..].to_vec();
                 let written = self.write_output_buffer(tls, 0, &rest);
-                if let Some(reader) = self.erpt_readers.get_mut(&key) {
+                if let Some(reader) = self.process_mut().erpt_readers.get_mut(&key) {
                     reader.offset += written as usize;
                 }
                 self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
@@ -634,7 +634,7 @@ impl Cpu {
             // SetFlags / GetFlags
             Some(2) => {
                 let flags = self.ipc_arg_u32(tls, 0);
-                let Some(reader) = self.erpt_readers.get(&key).cloned() else {
+                let Some(reader) = self.process().erpt_readers.get(&key).cloned() else {
                     return self.write_ipc_response(tls, ERPT_NOT_FOUND, &[], &[], &[]);
                 };
                 if !self.erpt_set_flags(&reader.id, attachment, flags) {
@@ -643,7 +643,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             Some(3) => {
-                let Some(reader) = self.erpt_readers.get(&key).cloned() else {
+                let Some(reader) = self.process().erpt_readers.get(&key).cloned() else {
                     return self.write_ipc_response(tls, ERPT_NOT_FOUND, &[], &[], &[]);
                 };
                 let Some(flags) = self.erpt_flags(&reader.id, attachment) else {
@@ -653,12 +653,12 @@ impl Cpu {
             }
             // Close: the object may be opened again.
             Some(4) => {
-                self.erpt_readers.remove(&key);
+                self.process_mut().erpt_readers.remove(&key);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // GetSize -> s64
             Some(5) => {
-                let Some(reader) = self.erpt_readers.get(&key).cloned() else {
+                let Some(reader) = self.process().erpt_readers.get(&key).cloned() else {
                     return self.write_ipc_response(tls, ERPT_NOT_FOUND, &[], &[], &[]);
                 };
                 let Some(body) = self.erpt_body(&reader.id, attachment) else {

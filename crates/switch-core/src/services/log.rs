@@ -14,13 +14,13 @@ impl Cpu {
         let report = format!(
             "[fatal] {result:#010x} = {module}-{description:04} (cmd {cmd_id:?}) bt={trace:x?}"
         );
-        self.guest_fatal = Some(report.clone());
+        self.process_mut().guest_fatal = Some(report.clone());
         self.diagnostic(Level::Error, &report);
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
     pub fn guest_fatal(&self) -> Option<&str> {
-        self.guest_fatal.as_deref()
+        self.process().guest_fatal.as_deref()
     }
 
     /// `lm`, the log manager behind `NN_LOG`. `ILogger::Log` carries one LogPacket:

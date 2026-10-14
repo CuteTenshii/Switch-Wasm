@@ -68,6 +68,7 @@ impl Cpu {
     /// Every open audio device and renderer, and the samples queued for the host.
     pub fn audio_activity(&self) -> AudioActivity {
         let mut outputs: Vec<AudioOutActivity> = self
+            .process()
             .audio_outs
             .iter()
             .map(|(&handle, device)| AudioOutActivity {
@@ -86,6 +87,7 @@ impl Cpu {
             .collect();
         outputs.sort_by_key(|device| device.handle);
         let mut renderers: Vec<AudioRendererActivity> = self
+            .process()
             .audren_renderers
             .iter()
             .map(|(&handle, renderer)| AudioRendererActivity {

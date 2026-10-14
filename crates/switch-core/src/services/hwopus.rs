@@ -220,7 +220,7 @@ impl Cpu {
             return self.write_ipc_response(tls, OPUS_INVALID_SAMPLE_RATE, &[], &[], &[]);
         };
         let key = self.reply_with_interface(tls, handle, "hwopus:decoder")?;
-        self.opus_decoders.insert(
+        self.process_mut().opus_decoders.insert(
             key,
             HwOpus {
                 decoder: Decoder::Single(Box::new(decoder)),
@@ -300,7 +300,7 @@ impl Cpu {
             return self.write_ipc_response(tls, OPUS_INVALID_CHANNEL_COUNT, &[], &[], &[]);
         };
         let key = self.reply_with_interface(tls, handle, "hwopus:decoder")?;
-        self.opus_decoders.insert(
+        self.process_mut().opus_decoders.insert(
             key,
             HwOpus {
                 decoder: Decoder::Multi(decoder),
@@ -350,7 +350,7 @@ impl Cpu {
             .ipc_output_buffer(tls, 0)
             .map_or(0, |(_, size)| size as usize);
 
-        let Some(decoder) = self.opus_decoders.get_mut(&key) else {
+        let Some(decoder) = self.process_mut().opus_decoders.get_mut(&key) else {
             return self.write_ipc_response(tls, OPUS_INVALID_PACKET, &[], &[], &[]);
         };
         if reset {

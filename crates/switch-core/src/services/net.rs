@@ -219,18 +219,18 @@ impl Cpu {
             "ssl:service" => match cmd_id {
                 // CreateContext(SslVersion, pid placeholder) -> ISslContext.
                 Some(0) => {
-                    self.ssl_contexts += 1;
+                    self.process_mut().ssl_contexts += 1;
                     self.reply_with_interface(tls, handle, "ssl:context")?;
                     Ok(())
                 }
                 // GetContextCount.
                 Some(1) => {
-                    let count = self.ssl_contexts;
+                    let count = self.process().ssl_contexts;
                     self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
                 }
                 // SetInterfaceVersion(u32).
                 Some(5) => {
-                    self.ssl_interface_version = self.mem.read_u32(data)?;
+                    self.process_mut().ssl_interface_version = self.mem.read_u32(data)?;
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // GetCertificateBufSize(ids in a buffer) -> u32 size.
@@ -256,13 +256,18 @@ impl Cpu {
                     let option = self.mem.read_u32(data)?;
                     let value = self.mem.read_u32(data.wrapping_add(4))?;
                     let key = Self::object_key(handle, object_id);
-                    self.ssl_options.insert((key, option), value);
+                    self.process_mut().ssl_options.insert((key, option), value);
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 Some(1) => {
                     let option = self.mem.read_u32(data)?;
                     let key = Self::object_key(handle, object_id);
-                    let value = self.ssl_options.get(&(key, option)).copied().unwrap_or(0);
+                    let value = self
+                        .process()
+                        .ssl_options
+                        .get(&(key, option))
+                        .copied()
+                        .unwrap_or(0);
                     self.write_ipc_response(tls, 0, &[], &value.to_le_bytes(), &[])
                 }
                 // GetConnectionCount: none.
@@ -486,7 +491,7 @@ impl Cpu {
             Some(2) | Some(3) => {
                 let socket = BsdSocket::new(word(self, 0), word(self, 1));
                 let fd = self.alloc_bsd_fd();
-                self.bsd_sockets.insert(fd, socket);
+                self.process_mut().bsd_sockets.insert(fd, socket);
                 self.bsd_reply(tls, fd, 0)
             }
             // Select(nfds, timeval timeout, bool null_timeout), sets in buffers 0, 1 and 2.
@@ -560,7 +565,7 @@ impl Cpu {
             // length in the third reply word. EAGAIN when empty.
             Some(12) => {
                 let fd = word(self, 0) as i32;
-                let accepted = match self.bsd_sockets.get_mut(&fd) {
+                let accepted = match self.process_mut().bsd_sockets.get_mut(&fd) {
                     None => return self.bsd_reply(tls, -1, BSD_EBADF),
                     Some(socket) if !socket.listening => {
                         return self.bsd_reply(tls, -1, BSD_EINVAL)
@@ -581,11 +586,11 @@ impl Cpu {
                     None => Vec::new(),
                 };
                 let fd = word(self, 0) as i32;
-                if !self.bsd_sockets.contains_key(&fd) {
+                if !self.process().bsd_sockets.contains_key(&fd) {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
                 }
                 let address = self.bsd_normalize_bind(address);
-                if let Some(socket) = self.bsd_sockets.get_mut(&fd) {
+                if let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) {
                     socket.bound = address;
                 }
                 self.bsd_reply(tls, 0, 0)
@@ -602,7 +607,7 @@ impl Cpu {
             // GetPeerName(fd).
             Some(15) => {
                 let fd = word(self, 0) as i32;
-                match self.bsd_sockets.get(&fd) {
+                match self.process().bsd_sockets.get(&fd) {
                     None => return self.bsd_reply(tls, -1, BSD_EBADF),
                     Some(socket) if socket.peer.is_none() => {
                         return self.bsd_reply(tls, -1, BSD_ENOTCONN)
@@ -617,7 +622,7 @@ impl Cpu {
             // (length) is required; nnSdk passes it on to the next call.
             Some(16) => {
                 let fd = word(self, 0) as i32;
-                let address = match self.bsd_sockets.get(&fd) {
+                let address = match self.process().bsd_sockets.get(&fd) {
                     None => return self.bsd_reply(tls, -1, BSD_EBADF),
                     Some(socket) if !socket.bound.is_empty() => socket.bound.clone(),
                     Some(_) => Self::bsd_local_address(),
@@ -628,10 +633,11 @@ impl Cpu {
             // GetSockOpt(fd, level, option): stored value in the output buffer, length in the third word.
             Some(17) => {
                 let (fd, level, option) = (word(self, 0) as i32, word(self, 1), word(self, 2));
-                if !self.bsd_sockets.contains_key(&fd) {
+                if !self.process().bsd_sockets.contains_key(&fd) {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
                 }
                 let value = self
+                    .process()
                     .bsd_socket_options
                     .get(&(fd, level, option))
                     .copied()
@@ -648,7 +654,7 @@ impl Cpu {
             // Listen(fd, backlog).
             Some(18) => {
                 let fd = word(self, 0) as i32;
-                match self.bsd_sockets.get_mut(&fd) {
+                match self.process_mut().bsd_sockets.get_mut(&fd) {
                     None => self.bsd_reply(tls, -1, BSD_EBADF),
                     Some(socket) => {
                         socket.listening = true;
@@ -663,7 +669,7 @@ impl Cpu {
                     Some((addr, size)) if size >= 4 => self.mem.read_u32(addr).unwrap_or(0) != 0,
                     _ => false,
                 };
-                match self.bsd_sockets.get_mut(&fd) {
+                match self.process_mut().bsd_sockets.get_mut(&fd) {
                     None => self.bsd_reply(tls, -1, BSD_EBADF),
                     Some(socket) if request == BSD_FIONBIO => {
                         if nonblocking {
@@ -680,7 +686,7 @@ impl Cpu {
             // differs between FreeBSD, newlib and Linux.
             Some(20) => {
                 let (fd, command, arg) = (word(self, 0) as i32, word(self, 1), word(self, 2));
-                match self.bsd_sockets.get_mut(&fd) {
+                match self.process_mut().bsd_sockets.get_mut(&fd) {
                     None => self.bsd_reply(tls, -1, BSD_EBADF),
                     Some(socket) => match command {
                         BSD_F_GETFL => {
@@ -698,21 +704,23 @@ impl Cpu {
             // SetSockOpt(fd, level, option, value).
             Some(21) => {
                 let (fd, level, option) = (word(self, 0) as i32, word(self, 1), word(self, 2));
-                if !self.bsd_sockets.contains_key(&fd) {
+                if !self.process().bsd_sockets.contains_key(&fd) {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
                 }
                 let value = match self.ipc_input_buffer(tls, 0) {
                     Some((addr, size)) if size >= 4 => self.mem.read_u32(addr).unwrap_or(0),
                     _ => 0,
                 };
-                self.bsd_socket_options.insert((fd, level, option), value);
+                self.process_mut()
+                    .bsd_socket_options
+                    .insert((fd, level, option), value);
                 self.bsd_reply(tls, 0, 0)
             }
             // Shutdown(fd, how): `SHUT_WR` and `SHUT_RDWR` end the peer's reading.
             Some(22) => {
                 const SHUT_RD: u32 = 0;
                 let (fd, how) = (word(self, 0) as i32, word(self, 1));
-                if !self.bsd_sockets.contains_key(&fd) {
+                if !self.process().bsd_sockets.contains_key(&fd) {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
                 }
                 if how != SHUT_RD {
@@ -730,7 +738,11 @@ impl Cpu {
             }
             // Close(fd). The peer then reads end-of-file.
             Some(26) => {
-                if !self.bsd_sockets.contains_key(&(word(self, 0) as i32)) {
+                if !self
+                    .process()
+                    .bsd_sockets
+                    .contains_key(&(word(self, 0) as i32))
+                {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
                 }
                 let fd = word(self, 0) as i32;
@@ -740,7 +752,7 @@ impl Cpu {
             // DuplicateSocket(fd): copies local state (family, address, flags), not the connection.
             Some(27) => {
                 let fd = word(self, 0) as i32;
-                let Some(socket) = self.bsd_sockets.get(&fd) else {
+                let Some(socket) = self.process().bsd_sockets.get(&fd) else {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
                 };
                 let mut copy = BsdSocket::new(socket.domain, socket.kind);
@@ -748,7 +760,7 @@ impl Cpu {
                 copy.flags = socket.flags;
                 copy.listening = socket.listening;
                 let duplicate = self.alloc_bsd_fd();
-                self.bsd_sockets.insert(duplicate, copy);
+                self.process_mut().bsd_sockets.insert(duplicate, copy);
                 self.bsd_reply(tls, duplicate, 0)
             }
             _ => self.unimplemented_command(tls, "bsd:u", cmd_id),
@@ -784,14 +796,14 @@ impl Cpu {
 
     /// The next descriptor; monotonic.
     fn alloc_bsd_fd(&mut self) -> i32 {
-        let fd = self.next_bsd_fd;
-        self.next_bsd_fd = self.next_bsd_fd.wrapping_add(1);
+        let fd = self.process().next_bsd_fd;
+        self.process_mut().next_bsd_fd = self.process().next_bsd_fd.wrapping_add(1);
         fd
     }
 
     /// Every open descriptor, sorted for deterministic runs.
     fn bsd_descriptors(&self) -> Vec<i32> {
-        let mut fds: Vec<i32> = self.bsd_sockets.keys().copied().collect();
+        let mut fds: Vec<i32> = self.process().bsd_sockets.keys().copied().collect();
         fds.sort_unstable();
         fds
     }
@@ -803,8 +815,12 @@ impl Cpu {
 
     /// The peer's address, for `GetPeerName`, `Accept` and `RecvFrom`.
     fn bsd_peer_address(&self, fd: i32) -> Vec<u8> {
-        let peer = self.bsd_sockets.get(&fd).and_then(|socket| socket.peer);
-        match peer.and_then(|peer| self.bsd_sockets.get(&peer)) {
+        let peer = self
+            .process()
+            .bsd_sockets
+            .get(&fd)
+            .and_then(|socket| socket.peer);
+        match peer.and_then(|peer| self.process().bsd_sockets.get(&peer)) {
             Some(peer) if !peer.bound.is_empty() => peer.bound.clone(),
             _ => Self::bsd_local_address(),
         }
@@ -853,6 +869,7 @@ impl Cpu {
                 candidate + 1
             };
             let taken = self
+                .process()
                 .bsd_sockets
                 .values()
                 .any(|socket| sockaddr_in(&socket.bound).is_some_and(|(_, p)| p == candidate));
@@ -867,7 +884,7 @@ impl Cpu {
 
     fn bsd_listener_on(&self, port: u16) -> Option<i32> {
         self.bsd_descriptors().into_iter().find(|fd| {
-            self.bsd_sockets.get(fd).is_some_and(|socket| {
+            self.process().bsd_sockets.get(fd).is_some_and(|socket| {
                 socket.listening && sockaddr_in(&socket.bound).is_some_and(|(_, p)| p == port)
             })
         })
@@ -876,7 +893,7 @@ impl Cpu {
     /// `Connect(fd, sockaddr)`. Completes immediately to a listener of this process;
     /// anything else is `ECONNREFUSED`.
     fn bsd_connect(&mut self, tls: u32, fd: i32, address: &[u8]) -> Result<()> {
-        let (domain, kind) = match self.bsd_sockets.get(&fd) {
+        let (domain, kind) = match self.process().bsd_sockets.get(&fd) {
             None => return self.bsd_reply(tls, -1, BSD_EBADF),
             Some(socket) if socket.peer.is_some() => return self.bsd_reply(tls, -1, BSD_EISCONN),
             Some(socket) if socket.kind == BSD_SOCK_DGRAM => {
@@ -893,28 +910,30 @@ impl Cpu {
         // The accepted end answers on the listener's address.
         let mut accepted = BsdSocket::new(domain, kind);
         accepted.bound = self
+            .process()
             .bsd_sockets
             .get(&listener)
             .map(|l| l.bound.clone())
             .unwrap_or_default();
         accepted.peer = Some(fd);
         let accepted_fd = self.alloc_bsd_fd();
-        self.bsd_sockets.insert(accepted_fd, accepted);
+        self.process_mut().bsd_sockets.insert(accepted_fd, accepted);
 
         // An unbound client gets an address now, for `GetPeerName` on the accepted end.
         let unbound = self
+            .process()
             .bsd_sockets
             .get(&fd)
             .is_some_and(|socket| socket.bound.is_empty());
         let client_address =
             unbound.then(|| sockaddr_in_bytes(BSD_LOOPBACK_IP, self.bsd_assign_port()));
-        if let Some(socket) = self.bsd_sockets.get_mut(&fd) {
+        if let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) {
             if let Some(address) = client_address {
                 socket.bound = address;
             }
             socket.peer = Some(accepted_fd);
         }
-        if let Some(listener) = self.bsd_sockets.get_mut(&listener) {
+        if let Some(listener) = self.process_mut().bsd_sockets.get_mut(&listener) {
             listener.incoming.push_back(accepted_fd);
         }
         self.bsd_reply(tls, 0, 0)
@@ -922,7 +941,7 @@ impl Cpu {
 
     /// `Send`/`SendTo`/`Write`: everything goes into the peer's queue at once.
     fn bsd_send(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
-        let peer = match self.bsd_sockets.get(&fd) {
+        let peer = match self.process().bsd_sockets.get(&fd) {
             None => return self.bsd_reply(tls, -1, BSD_EBADF),
             Some(socket) if socket.peer_closed => return self.bsd_reply(tls, -1, BSD_EPIPE),
             Some(socket) => match socket.peer {
@@ -935,7 +954,7 @@ impl Cpu {
             None => Vec::new(),
         };
         let sent = bytes.len() as i32;
-        if let Some(peer) = self.bsd_sockets.get_mut(&peer) {
+        if let Some(peer) = self.process_mut().bsd_sockets.get_mut(&peer) {
             peer.rx.extend(bytes);
         }
         self.bsd_reply(tls, sent, 0)
@@ -944,6 +963,7 @@ impl Cpu {
     /// `SendTo` from a datagram socket with no peer: the link takes it and drops it.
     fn bsd_send_datagram(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
         let datagram = self
+            .process()
             .bsd_sockets
             .get(&fd)
             .is_some_and(|socket| socket.kind == BSD_SOCK_DGRAM);
@@ -978,7 +998,7 @@ impl Cpu {
     /// Drain the peer's bytes into the caller's buffer. An empty live queue is
     /// `EAGAIN` plus a yield.
     fn bsd_receive_bytes(&mut self, tls: u32, fd: i32) -> Result<(i32, i32)> {
-        match self.bsd_sockets.get(&fd) {
+        match self.process().bsd_sockets.get(&fd) {
             None => return Ok((-1, BSD_EBADF)),
             // A stream socket needs a connection; a datagram socket just has an empty queue.
             Some(socket)
@@ -993,7 +1013,7 @@ impl Cpu {
         let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
             return Ok((-1, BSD_EINVAL));
         };
-        let Some(socket) = self.bsd_sockets.get_mut(&fd) else {
+        let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) else {
             return Ok((-1, BSD_EBADF));
         };
         let take = size.min(socket.rx.len() as u32) as usize;
@@ -1014,7 +1034,7 @@ impl Cpu {
 
     /// The error for a send with no destination.
     fn bsd_unconnected(&mut self, tls: u32, fd: i32) -> Result<()> {
-        match self.bsd_sockets.get(&fd) {
+        match self.process().bsd_sockets.get(&fd) {
             None => self.bsd_reply(tls, -1, BSD_EBADF),
             Some(socket) if socket.kind == BSD_SOCK_DGRAM => {
                 self.bsd_reply(tls, -1, BSD_ENETUNREACH)
@@ -1043,7 +1063,7 @@ impl Cpu {
                 continue;
             }
             // Unknown descriptors are reported not ready.
-            let is_ready = match self.bsd_sockets.get(&(fd as i32)) {
+            let is_ready = match self.process().bsd_sockets.get(&(fd as i32)) {
                 Some(socket) if index == 0 => socket.readable(),
                 Some(socket) if index == 1 => socket.writable(),
                 _ => false,
@@ -1065,7 +1085,7 @@ impl Cpu {
         const POLLIN: u16 = 0x0001;
         const POLLOUT: u16 = 0x0004;
         const POLLHUP: u16 = 0x0010;
-        let Some(socket) = self.bsd_sockets.get(&fd) else {
+        let Some(socket) = self.process().bsd_sockets.get(&fd) else {
             return 0;
         };
         let mut revents = 0;
@@ -1083,22 +1103,31 @@ impl Cpu {
 
     /// Tell `fd`'s peer nothing more is coming. The link is kept for `GetPeerName`.
     fn bsd_orphan_peer(&mut self, fd: i32) {
-        let Some(peer) = self.bsd_sockets.get(&fd).and_then(|socket| socket.peer) else {
+        let Some(peer) = self
+            .process()
+            .bsd_sockets
+            .get(&fd)
+            .and_then(|socket| socket.peer)
+        else {
             return;
         };
-        if let Some(peer) = self.bsd_sockets.get_mut(&peer) {
+        if let Some(peer) = self.process_mut().bsd_sockets.get_mut(&peer) {
             peer.peer_closed = true;
         }
     }
 
     /// Drop a descriptor; a listener takes its unaccepted connections with it.
     fn bsd_close(&mut self, fd: i32) {
-        let Some(socket) = self.bsd_sockets.remove(&fd) else {
+        let Some(socket) = self.process_mut().bsd_sockets.remove(&fd) else {
             return;
         };
-        self.bsd_socket_options
+        self.process_mut()
+            .bsd_socket_options
             .retain(|&(owner, _, _), _| owner != fd);
-        if let Some(peer) = socket.peer.and_then(|peer| self.bsd_sockets.get_mut(&peer)) {
+        if let Some(peer) = socket
+            .peer
+            .and_then(|peer| self.process_mut().bsd_sockets.get_mut(&peer))
+        {
             peer.peer_closed = true;
         }
         for pending in socket.incoming {

@@ -238,7 +238,7 @@ impl Cpu {
         let _ = self.mem.write_u32(crate::INPUT_ADDR + 16, stick_rx as u32);
         let _ = self.mem.write_u32(crate::INPUT_ADDR + 20, stick_ry as u32);
 
-        if self.hid_shmem_addr == 0 {
+        if self.process().hid_shmem_addr == 0 {
             return;
         }
         self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
@@ -246,7 +246,7 @@ impl Cpu {
 
     /// Publish a fresh `hid` sample when the 200 Hz timer comes round.
     pub(crate) fn hid_tick(&mut self) {
-        if self.hid_shmem_addr == 0
+        if self.process().hid_shmem_addr == 0
             || self.cycles.wrapping_sub(self.last_hid_cycles) < HID_SAMPLE_PERIOD_CYCLES
         {
             return;
@@ -308,10 +308,13 @@ impl Cpu {
     /// Publish `nn::hid::NpadCondition`, including the stored joy-con hold type.
     pub(crate) fn write_npad_condition(&mut self) {
         use hid_shmem as h;
-        if self.hid_shmem_addr == 0 {
+        if self.process().hid_shmem_addr == 0 {
             return;
         }
-        let at = self.hid_shmem_addr.wrapping_add(h::NPAD_CONDITION);
+        let at = self
+            .process()
+            .hid_shmem_addr
+            .wrapping_add(h::NPAD_CONDITION);
         let _ = self.mem.write_u32(at + h::NPAD_CONDITION_INITIALIZED, 1);
         let _ = self.mem.write_u32(
             at + h::NPAD_CONDITION_HOLD_TYPE,
@@ -330,6 +333,7 @@ impl Cpu {
     ) {
         use hid_shmem as h;
         let base = self
+            .process()
             .hid_shmem_addr
             .wrapping_add(h::NPAD)
             .wrapping_add(slot.wrapping_mul(h::ENTRY_SIZE));
@@ -405,14 +409,14 @@ impl Cpu {
     /// contacts are reported, but the sample still advances.
     pub fn set_touch_state(&mut self, touches: &[TouchPoint]) {
         self.last_touches = touches.to_vec();
-        if self.hid_shmem_addr == 0 {
+        if self.process().hid_shmem_addr == 0 {
             return;
         }
         use hid_shmem as h;
         self.touch_sample_counter = self.touch_sample_counter.wrapping_add(1);
         let sample = self.touch_sample_counter;
 
-        let lifo = self.hid_shmem_addr.wrapping_add(h::TOUCH_SCREEN);
+        let lifo = self.process().hid_shmem_addr.wrapping_add(h::TOUCH_SCREEN);
         let _ = self
             .mem
             .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
@@ -497,6 +501,6 @@ impl Cpu {
     }
 
     pub fn hid_shmem_addr(&self) -> u32 {
-        self.hid_shmem_addr
+        self.process().hid_shmem_addr
     }
 }

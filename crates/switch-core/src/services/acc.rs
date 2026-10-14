@@ -460,6 +460,7 @@ impl Cpu {
         // An object this service did not hand out is taken to be the playing user's.
         let key = self.ipc_object_key(tls, handle);
         let uid = self
+            .process()
             .acc_profiles
             .get(&key)
             .copied()
@@ -607,7 +608,7 @@ impl Cpu {
             return self.write_ipc_response(tls, ACCOUNT_USER_NOT_EXIST, &[], &[], &[]);
         }
         let key = self.reply_with_interface(tls, handle, iface)?;
-        self.acc_profiles.insert(key, uid);
+        self.process_mut().acc_profiles.insert(key, uid);
         Ok(())
     }
 
@@ -671,9 +672,14 @@ impl Cpu {
             .collect();
         self.current_user = current;
         let preselected = super::am::LAUNCH_PARAMETER_PRESELECTED_USER;
-        if self.am_launch_parameters.contains_key(&preselected) {
+        if self
+            .process()
+            .am_launch_parameters
+            .contains_key(&preselected)
+        {
             let uid = self.current_user().uid;
-            self.am_launch_parameters
+            self.process_mut()
+                .am_launch_parameters
                 .insert(preselected, super::am::preselected_user_parameter(uid));
         }
         Ok(())

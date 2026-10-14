@@ -180,11 +180,11 @@ impl Cpu {
             Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // GetAddOnContentListChangedEvent (and …WithProcessId): never signalled.
             Some(8) | Some(10) => {
-                let event = match self.aoc_list_changed_event {
+                let event = match self.process().aoc_list_changed_event {
                     Some(event) => event,
                     None => {
                         let event = self.alloc_event("aoc:list-changed", true);
-                        self.aoc_list_changed_event = Some(event);
+                        self.process_mut().aoc_list_changed_event = Some(event);
                         event
                     }
                 };

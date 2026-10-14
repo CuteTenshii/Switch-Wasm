@@ -39,7 +39,7 @@ fn the_system_process_common_functions_chain_hands_back_real_sessions() {
     );
 
     // Neither opens a proxy, so the applet-kind flag is unchanged.
-    assert!(!cpu.applet_is_application);
+    assert!(!cpu.process().applet_is_application);
 }
 
 /// Marshal a `PushOutData`-shaped request carrying one object.
@@ -69,7 +69,8 @@ fn the_applet_result_is_kept_rather_than_dropped() {
     cpu.set_program_id(CONTROLLER);
     cpu.register_service_handle(9, "am:library-applet-self-accessor");
     cpu.register_service_handle(STORAGE, "am:storage");
-    cpu.am_storages
+    cpu.process_mut()
+        .am_storages
         .insert(Cpu::object_key(STORAGE, 0), result.clone());
     push_storage(&mut cpu, PUSH_OUT_DATA, STORAGE);
     cpu.applet_request(TLS, 9, Some(PUSH_OUT_DATA)).unwrap();
@@ -81,7 +82,8 @@ fn the_applet_result_is_kept_rather_than_dropped() {
     cpu.set_program_id(CONTROLLER);
     cpu.record_domain_object(9, 7, "am:library-applet-self-accessor");
     cpu.record_domain_object(9, STORAGE_OBJECT, "am:storage");
-    cpu.am_storages
+    cpu.process_mut()
+        .am_storages
         .insert(Cpu::object_key(9, STORAGE_OBJECT), result.clone());
     // num_in_objects, then a `data_size` of just the `CmifInHeader`.
     cpu.mem.write_u8(TLS + 0x11, 1).unwrap();
@@ -119,7 +121,8 @@ fn the_applet_can_be_answered_by_the_host_that_started_it() {
     // `u64 size` then the text.
     let mut message = 4u64.to_le_bytes().to_vec();
     message.extend_from_slice(&[0x68, 0, 0x69, 0]);
-    cpu.am_storages
+    cpu.process_mut()
+        .am_storages
         .insert(Cpu::object_key(STORAGE, 0), message.clone());
     push_storage(&mut cpu, PUSH_INTERACTIVE_OUT_DATA, STORAGE);
     cpu.applet_request(TLS, 9, Some(PUSH_INTERACTIVE_OUT_DATA))
@@ -151,7 +154,10 @@ fn the_applet_can_be_answered_by_the_host_that_started_it() {
     assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "pop refused");
     let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
     assert_eq!(cpu.service_name(storage), Some("am:storage"));
-    assert_eq!(cpu.am_storages[&Cpu::object_key(storage, 0)], answer);
+    assert_eq!(
+        cpu.process().am_storages[&Cpu::object_key(storage, 0)],
+        answer
+    );
 
     assert_eq!(cpu.event_signaled(event), Some(false), "still signalled");
 }
@@ -346,7 +352,7 @@ fn the_preselected_user_is_handed_over_once_and_then_it_is_gone() {
     assert_eq!(cpu.service_name(storage), Some("am:storage"));
 
     // Magic, version, and a non-zero uid at offset 8.
-    let data = cpu.am_storages[&Cpu::object_key(storage, 0)].clone();
+    let data = cpu.process().am_storages[&Cpu::object_key(storage, 0)].clone();
     assert_eq!(data.len(), 0x88);
     assert_eq!(
         u32::from_le_bytes(data[..4].try_into().unwrap()),
@@ -771,7 +777,10 @@ fn created_storage_is_as_long_as_the_caller_asked_for() {
     cpu.applet_request(TLS, 9, Some(10)).unwrap();
     let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
     assert_eq!(cpu.service_name(storage), Some("am:storage"));
-    assert_eq!(cpu.am_storages[&Cpu::object_key(storage, 0)].len(), 0x1000);
+    assert_eq!(
+        cpu.process().am_storages[&Cpu::object_key(storage, 0)].len(),
+        0x1000
+    );
 
     write_request(&mut cpu, 10, &u64::MAX.to_le_bytes());
     cpu.applet_request(TLS, 9, Some(10)).unwrap();
@@ -801,7 +810,7 @@ fn the_ex_form_of_a_creation_is_the_same_creation() {
         cpu.service_name(accessor),
         Some("am:library-applet-accessor")
     );
-    let applet = &cpu.am_applets[&Cpu::object_key(accessor, 0)];
+    let applet = &cpu.process().am_applets[&Cpu::object_key(accessor, 0)];
     assert_eq!(applet.id, APPLET_WEB);
     assert_eq!(applet.mode, FOREGROUND);
 }
@@ -828,7 +837,7 @@ fn player_select_with_one_user_hands_back_that_user() {
     cpu.applet_request(TLS, accessor, Some(101)).unwrap();
     assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
     let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
-    let data = &cpu.am_storages[&Cpu::object_key(storage, 0)];
+    let data = &cpu.process().am_storages[&Cpu::object_key(storage, 0)];
     assert_eq!(data[..8], [0; 8], "PselUiReturnArg result");
     assert_eq!(data[8..], uid);
     assert_eq!(cpu.event_signaled(out_event), Some(false));
@@ -894,7 +903,10 @@ fn a_transfer_memory_storage_is_as_long_as_the_memory() {
     assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
     let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
     assert_eq!(cpu.service_name(storage), Some("am:storage"));
-    assert_eq!(cpu.am_storages[&Cpu::object_key(storage, 0)].len(), 0x8000);
+    assert_eq!(
+        cpu.process().am_storages[&Cpu::object_key(storage, 0)].len(),
+        0x8000
+    );
 }
 
 #[test]
@@ -910,7 +922,9 @@ fn the_keyboard_waits_for_the_host_and_hands_back_its_text() {
     config[0x3AC..0x3B0].copy_from_slice(&8u32.to_le_bytes());
     for (storage, data) in [(ARGS, vec![0u8; 0x20]), (CONFIG, config)] {
         cpu.register_service_handle(storage, "am:storage");
-        cpu.am_storages.insert(Cpu::object_key(storage, 0), data);
+        cpu.process_mut()
+            .am_storages
+            .insert(Cpu::object_key(storage, 0), data);
         push_storage(&mut cpu, 100, storage);
         cpu.applet_request(TLS, accessor, Some(100)).unwrap();
     }
@@ -934,7 +948,7 @@ fn the_keyboard_waits_for_the_host_and_hands_back_its_text() {
     write_request(&mut cpu, 101, &[]);
     cpu.applet_request(TLS, accessor, Some(101)).unwrap();
     let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
-    let data = &cpu.am_storages[&Cpu::object_key(storage, 0)];
+    let data = &cpu.process().am_storages[&Cpu::object_key(storage, 0)];
     assert_eq!(&data[..4], &[0; 4], "SwkbdResult_Ok");
     assert_eq!(&data[4..14], &[b'L', 0, b'i', 0, b'n', 0, b'k', 0, 0, 0]);
 }

@@ -21,7 +21,7 @@ mod regs;
 mod simd;
 mod system;
 
-use crate::kernel::*;
+pub(crate) use crate::kernel::process::{Process, ROOT_PID};
 use crate::services::*;
 
 pub(crate) use crate::kernel::events::*;
@@ -119,6 +119,8 @@ pub struct Cpu {
     pub(crate) pending_sleep: Option<u64>,
     /// `steps` when the running thread was last scheduled.
     pub(crate) switched_in_at: u64,
+    /// The process this core runs.
+    pub(crate) pid: u64,
     /// Kernel and service state: one per console, shared by its cores.
     pub(crate) machine: Box<Machine>,
 }
@@ -127,8 +129,6 @@ pub struct Cpu {
 /// [`Cpu`] reaches it through `Deref`.
 #[derive(Debug)]
 pub struct Machine {
-    /// The last `fatal:u` report, kept to classify a later `ExitProcess` as a crash.
-    pub(crate) guest_fatal: Option<String>,
     /// Next domain IPC out-object id.
     pub(crate) next_object_id: u32,
     /// Fake handles from `ConnectToNamedPort`/`GetService` to their service name.
@@ -145,51 +145,19 @@ pub struct Machine {
     pub(crate) domain_objects: HashMap<(u64, u32), String>,
     /// Non-domain vi session handles to their sub-interface.
     pub(crate) vi_ifaces: IdMap<u64, String>,
-    /// AM's message queue for the running applet; each state change is queued once.
-    pub(crate) applet_messages: VecDeque<u32>,
-    /// Shared `GetEventHandle` event, signalled when a message is queued.
-    pub(crate) applet_event: Option<u64>,
-    /// Whether the startup focus message has been handed out.
-    pub(crate) applet_focus_announced: bool,
-    /// The applet's sleep-lock event and whether the lock is held.
-    pub(crate) sleep_lock_event: Option<u64>,
-    pub(crate) sleep_lock_acquired: bool,
-    /// Events for `IApplicationFunctions` 210 and `aoc` list changes.
-    pub(crate) application_functions_210_event: Option<u64>,
-    pub(crate) aoc_list_changed_event: Option<u64>,
-    /// `GetDefaultDisplayResolutionChangeEvent`, fired on dock changes.
-    pub(crate) display_resolution_event: Option<u64>,
     /// `GetApplicationRecordUpdateSystemEvent`; starts signalled, as the Home Menu waits on it.
     pub(crate) application_record_event: Option<u64>,
     /// `IApplicationManagerInterface`'s SD and game card events, by command id; never fired.
     pub(crate) ns_manager_events: BTreeMap<u32, u64>,
     /// `NsApplicationControlData` (NACP, then icon) by application id.
     pub(crate) application_controls: BTreeMap<u64, Vec<u8>>,
-    /// `GetPopFromGeneralChannelEvent`; never fired.
-    pub(crate) general_channel_event: Option<u64>,
-    /// The `ILockAccessor` event: always signalled. See `Cpu::am_lock_accessor_event`.
-    pub(crate) lock_accessor_event: Option<u64>,
     /// `IHOSBinderDriver::GetNativeHandle`'s event, always signalled.
     pub(crate) binder_event: Option<u64>,
-    /// The title's NACP save quota, reported by `IApplicationFunctions`; set through
-    /// [`Cpu::set_save_data_quota`] and not enforced.
-    pub(crate) save_data_quota: fs::SaveDataQuota,
-    /// Chosen from the NPDM system resource size and program id.
-    pub(crate) memory_layout: MemoryLayout,
-    /// Kept because the layout also depends on the program id, which may arrive later.
-    pub(crate) system_resource_size: u32,
     /// The system shared buffer's nvmap `(handle, id)` and the next slot to acquire.
     pub(crate) shared_buffer: Option<(u32, u32)>,
     pub(crate) shared_buffer_slot: u32,
     /// See [`Cpu::set_operation_mode`].
     pub(crate) operation_mode: OperationMode,
-    /// Application proxy (told `FocusStateChanged`) vs applet (told `ChangeIntoForeground`).
-    pub(crate) applet_is_application: bool,
-    /// `ISelfController` auto-sleep settings, stored so getters read them back.
-    pub(crate) idle_time_detection_extension: u32,
-    pub(crate) auto_sleep_disabled: bool,
-    /// Stored so the getter reads it back.
-    pub(crate) home_button_double_click_enabled: bool,
     /// Last `SetTerminateResult`, read back by `GetLastApplicationExitReason`.
     pub(crate) am_terminate_result: u32,
     /// Count of `BuildRandom` Miis; picks the face and stamps the create id.
@@ -205,10 +173,6 @@ pub struct Machine {
     /// Reused objects for [`Cpu::reply_with_fabricated_object`], by `(session, command)`:
     /// domain object id, sub-session handle, event.
     pub(crate) fabricated_objects: HashMap<(u64, u32), (u32, u64, u64)>,
-    /// NROs mapped by `ldr:ro`, by mapped address; see [`Cpu::ldr_ro_request`].
-    pub(crate) ro_modules: BTreeMap<u32, ldr::RoModule>,
-    /// Registered NRRs, by address. Signatures are not checked.
-    pub(crate) ro_registrations: BTreeMap<u32, u32>,
     /// Handles modelled as kernel events. Other handles are treated as always signalled
     /// by `WaitSynchronization`.
     pub(crate) events: IdMap<u64, Event>,
@@ -217,26 +181,10 @@ pub struct Machine {
     pub(crate) last_vsync_frame: u64,
     /// For the refresh that fires without a present.
     pub(crate) last_vsync_cycles: u64,
-    /// Open SD directory handles to the entries not yet yielded.
-    pub(crate) fs_dirs: IdMap<u64, Vec<crate::vfs::DirEntry>>,
-    /// Open `IFile` objects: domain object id to path.
-    pub(crate) fs_files: IdMap<u64, String>,
-    /// `am` `IStorage` contents, by object.
-    pub(crate) am_storages: IdMap<u64, Vec<u8>>,
     /// System data archives by data id, as sources.
     pub(crate) data_archives: IdMap<u64, Box<dyn crate::source::ByteSource>>,
-    /// DLC indices `aoc:u` reports; the content is in `data_archives`.
-    pub(crate) add_on_content: std::collections::BTreeSet<u32>,
-    /// Base DLC id from the NACP; zero means derive it from the program id.
-    pub(crate) add_on_content_base_id: u64,
     /// Save data, by save key.
     pub(crate) saves: HashMap<SaveKey, crate::vfs::Vfs>,
-    /// The save an `fsp-srv` object addresses; absent for the SD card.
-    pub(crate) fs_mount: IdMap<u64, SaveKey>,
-    /// The data archive an open `IStorage` serves; absent for the process's own RomFS.
-    pub(crate) fs_storage_archive: IdMap<u64, u64>,
-    /// `FsSaveDataInfo` records an open save scan has yet to yield.
-    pub(crate) fs_save_infos: IdMap<u64, VecDeque<[u8; crate::services::fs::SAVE_DATA_INFO_SIZE]>>,
     /// `SetGlobalAccessLogMode`'s value; round-trips because `nnSdk` reads it at startup.
     pub(crate) fs_access_log_mode: u32,
     /// `SetSpeedEmulationMode`'s value; round-trips, no effect.
@@ -244,40 +192,12 @@ pub struct Machine {
     /// Result of the most recent IPC reply, for `TRACE_FS`.
     pub(crate) last_ipc_result: Option<u32>,
     pub fs_activity: FsActivity,
-    /// RomFS file index per storage (`None` key for the process's own RomFS);
-    /// `None` value for unreadable tables.
-    pub(crate) romfs_indexes: BTreeMap<Option<u64>, Option<crate::romfs::RomFsIndex>>,
     /// Each card slot's `IEventNotifier` event, by opening command.
     pub(crate) fs_detection_events: BTreeMap<u32, u64>,
-    /// Storages queued for `PopInData`.
-    pub(crate) am_in_data: VecDeque<Vec<u8>>,
-    /// What a directly run library applet pushed through `PushOutData`, for the host.
-    pub(crate) am_out_data: Vec<Vec<u8>>,
-    /// Storages queued for `PopInteractiveInData`, filled by [`Cpu::push_applet_interactive_in_data`].
-    pub(crate) am_interactive_in: VecDeque<Vec<u8>>,
-    /// The applet's interactive output, capped.
-    pub(crate) am_interactive_out: Vec<Vec<u8>>,
-    /// `GetPopInDataEvent`/`GetPopInteractiveInDataEvent` events, by [`am::AppletQueue`] slot.
-    pub(crate) am_pop_events: [Option<u64>; 2],
-    /// Launch parameters by `LaunchParameterKind`, each delivered once.
-    pub(crate) am_launch_parameters: IdMap<u32, Vec<u8>>,
-    /// The storage an `IStorageAccessor` addresses.
-    pub(crate) am_storage_of: IdMap<u64, u64>,
-    /// Library applets created through `ILibraryAppletCreator`, by accessor object.
-    pub(crate) am_applets: IdMap<u64, am::LibraryApplet>,
-    /// The software keyboard waiting on the host for text.
-    pub(crate) am_keyboard: Option<am::PendingKeyboard>,
     /// Library applets installed on the NAND, by program id.
     pub(crate) launchable_applets: std::collections::BTreeSet<u64>,
     /// Error applets started and not yet shown to the player.
     pub(crate) error_dialogs: VecDeque<am::ErrorDialog>,
-    /// The process's own RomFS (`OpenDataStorageByCurrentProcess`), read by range.
-    /// `None` for homebrew, which reads RomFS from the SD card.
-    pub(crate) romfs: Option<Box<dyn crate::source::ByteSource>>,
-    /// Guest address of hid shared memory; 0 until mapped.
-    pub(crate) hid_shmem_addr: u32,
-    /// Handle used to recognise hid's shared memory in `svcMapSharedMemory`.
-    pub(crate) hid_shmem_handle: Option<u64>,
     /// Supported npad styles and joy-con hold type, read back by their getters.
     pub(crate) npad_style_set: u32,
     /// `AcquireNpadStyleSetUpdateEventHandle`'s auto-clearing event.
@@ -285,10 +205,6 @@ pub struct Machine {
     pub(crate) npad_joy_hold_type: u64,
     /// Rumble amplitudes (low band, high band).
     pub(crate) vibration: (f32, f32),
-    /// `ssl` state: interface revision, context count, and per-context options.
-    pub(crate) ssl_interface_version: u32,
-    pub(crate) ssl_contexts: u32,
-    pub(crate) ssl_options: HashMap<(u64, u32), u32>,
     /// Built-in CA certificates, loaded on first use; empty if the store is missing.
     pub(crate) ssl_certificates: Option<Vec<net::SslCertificate>>,
     /// Next imported PKI id; 0 means "nothing imported".
@@ -317,7 +233,6 @@ pub struct Machine {
     pub(crate) erpt_contexts: Vec<erpt::ErrorContext>,
     pub(crate) erpt_reports: Vec<erpt::ErrorReport>,
     pub(crate) erpt_attachments: Vec<erpt::ErrorReportAttachment>,
-    pub(crate) erpt_readers: IdMap<u64, erpt::ErrorReportReader>,
     /// The journal id, created on first request.
     pub(crate) erpt_journal_id: Option<[u8; erpt::ERPT_UUID_SIZE]>,
     /// Sampling number for hid npad LIFO entries.
@@ -338,14 +253,6 @@ pub struct Machine {
     pub(crate) pl_shmem_image: Vec<u8>,
     /// Each font's place in [`Cpu::pl_shmem_image`], in `PlSharedFontType` order.
     pub(crate) shared_font_regions: Vec<FontRegion>,
-    /// Guest address of pl's shared memory; 0 until mapped.
-    pub(crate) pl_shmem_addr: u32,
-    /// Per-`IAudioRenderer` state from `OpenAudioRenderer`, used to size update replies.
-    pub(crate) audren_renderers: IdMap<u64, audren::AudioRenderer>,
-    /// Open `IAudioOut`s, by session handle.
-    pub(crate) audio_outs: IdMap<u64, audout::AudioOut>,
-    /// Open `IHardwareOpusDecoder`s; the guest work buffer is unused.
-    pub(crate) opus_decoders: IdMap<u64, hwopus::HwOpus>,
     /// Bounded queue of interleaved 16-bit PCM not yet taken by the host.
     pub(crate) audio_pcm: VecDeque<i16>,
     /// Samples produced, taken and dropped; see [`Cpu::audio_activity`].
@@ -360,23 +267,14 @@ pub struct Machine {
     pub(crate) users: Vec<UserAccount>,
     /// Index of the playing user in `users`.
     pub(crate) current_user: usize,
-    /// The user each `IProfile`/`IProfileEditor` object was opened for.
-    pub(crate) acc_profiles: IdMap<u64, [u8; 16]>,
     /// See [`Cpu::take_profile_edits`].
     pub(crate) profiles_edited: bool,
-    /// Program id for `pm:info`; defaults to the Album applet's, as hbmenu homebrew runs as.
-    pub(crate) program_id: u64,
     /// Clock rate last set per module; default in `CLOCK_RATES_HZ`.
     pub(crate) clock_rates: IdMap<u32, u32>,
     /// `mm:u` requests by id: (module, floor).
     pub(crate) mm_requests: IdMap<u32, (u32, u32)>,
     /// `csrng` state, seeded lazily from the clock; zero means unseeded.
     pub(crate) rng_state: u64,
-    /// Open `bsd` sockets and their options.
-    pub(crate) bsd_sockets: HashMap<i32, net::BsdSocket>,
-    pub(crate) bsd_socket_options: HashMap<(i32, u32, u32), u32>,
-    /// Next descriptor; starts at 3, past the standard streams.
-    pub(crate) next_bsd_fd: i32,
     /// Next ephemeral port, from the bottom of IANA's range.
     pub(crate) next_bsd_port: u16,
     /// `ApmPerformanceConfiguration` for Normal and Boost.
@@ -389,8 +287,6 @@ pub struct Machine {
     pub nv: crate::gpu::nvdrv::NvDrv,
     /// The window buffer queue frames are presented through.
     pub display: crate::display::BufferQueue,
-    /// Guest threads; index 0 is main. The running thread's slot is stale while it runs.
-    pub(crate) threads: Vec<ThreadContext>,
     /// See [`Cpu::pace_present`].
     pub(crate) last_present_cycles: u64,
     /// A presented frame awaiting the GPU backend; see [`Cpu::complete_pending_present`].
@@ -398,19 +294,31 @@ pub struct Machine {
     /// Thread lifecycle events since the host last asked; see [`ThreadReport`].
     pub(crate) thread_log: Vec<String>,
     pub(crate) thread_log_dropped: u64,
-    /// Every loaded module's `(start, end, name)`.
-    pub(crate) module_names: Vec<(u32, u32, String)>,
-    /// See [`Cpu::set_main_thread_priority`].
-    pub(crate) main_thread_priority: u8,
-    /// See [`Cpu::set_main_thread_core`].
-    pub(crate) main_thread_core: u8,
-    /// See [`Cpu::set_process_core_mask`].
-    pub(crate) process_core_mask: u64,
-    /// Next thread id; the main thread is 1.
-    pub(crate) next_thread_id: u64,
+    /// Running processes by pid; see [`Cpu::process`].
+    pub(crate) processes: BTreeMap<u64, Process>,
 }
 
 pub const RECENT_LEN: usize = 64;
+
+impl Cpu {
+    /// The process this core runs.
+    pub(crate) fn process(&self) -> &Process {
+        &self.machine.processes[&self.pid]
+    }
+
+    pub(crate) fn process_mut(&mut self) -> &mut Process {
+        self.machine.process_mut(self.pid)
+    }
+}
+
+impl Machine {
+    /// Process `pid`, borrowing only the machine so a core's registers stay usable.
+    pub(crate) fn process_mut(&mut self, pid: u64) -> &mut Process {
+        self.processes
+            .get_mut(&pid)
+            .expect("the running process exists")
+    }
+}
 
 impl Deref for Cpu {
     type Target = Machine;
@@ -467,8 +375,8 @@ impl Cpu {
             pending_yield: false,
             pending_sleep: None,
             switched_in_at: 0,
+            pid: ROOT_PID,
             machine: Box::new(Machine {
-                guest_fatal: None,
                 next_object_id: 1,
                 service_handles: IdMap::default(),
                 session_owners: IdMap::default(),
@@ -477,83 +385,40 @@ impl Cpu {
                 next_domain_object_id: 1,
                 domain_objects: HashMap::new(),
                 vi_ifaces: IdMap::default(),
-                applet_messages: VecDeque::new(),
-                sleep_lock_event: None,
-                sleep_lock_acquired: false,
-                application_functions_210_event: None,
                 application_record_event: None,
                 ns_manager_events: BTreeMap::new(),
                 application_controls: BTreeMap::new(),
-                general_channel_event: None,
-                lock_accessor_event: None,
                 binder_event: None,
-                aoc_list_changed_event: None,
-                display_resolution_event: None,
-                save_data_quota: fs::SaveDataQuota::default(),
-                memory_layout: MemoryLayout::PLAIN,
-                system_resource_size: 0,
                 shared_buffer: None,
                 shared_buffer_slot: 0,
-                applet_focus_announced: false,
-                applet_is_application: true,
-                idle_time_detection_extension: 0,
-                auto_sleep_disabled: false,
                 am_terminate_result: 0,
                 mii_random_sequence: 0,
-                home_button_double_click_enabled: false,
                 operation_mode: OperationMode::default(),
-                applet_event: None,
                 unimplemented_ipc: HashSet::new(),
                 stubbed_ipc: HashSet::new(),
                 gap_calls: BTreeMap::new(),
                 nv_errors: BTreeMap::new(),
                 fabricated_objects: HashMap::new(),
-                ro_modules: BTreeMap::new(),
-                ro_registrations: BTreeMap::new(),
                 events: IdMap::default(),
                 vsync_event: None,
                 last_vsync_frame: 0,
                 last_vsync_cycles: 0,
-                fs_dirs: IdMap::default(),
-                fs_files: IdMap::default(),
                 data_archives: IdMap::default(),
-                add_on_content: std::collections::BTreeSet::new(),
-                add_on_content_base_id: 0,
                 saves: HashMap::new(),
-                fs_mount: IdMap::default(),
-                fs_storage_archive: IdMap::default(),
-                fs_save_infos: IdMap::default(),
                 fs_access_log_mode: 0,
                 fs_speed_emulation_mode: 0,
                 last_ipc_result: None,
                 fs_activity: FsActivity::default(),
-                romfs_indexes: BTreeMap::new(),
                 fs_detection_events: BTreeMap::new(),
-                am_in_data: VecDeque::new(),
-                am_out_data: Vec::new(),
-                am_interactive_in: VecDeque::new(),
-                am_interactive_out: Vec::new(),
-                am_pop_events: [None; 2],
-                am_launch_parameters: IdMap::default(),
-                am_storages: IdMap::default(),
-                am_storage_of: IdMap::default(),
-                am_applets: IdMap::default(),
-                am_keyboard: None,
                 launchable_applets: std::collections::BTreeSet::new(),
                 error_dialogs: VecDeque::new(),
-                romfs: None,
                 touch_sample_counter: 0,
                 touch_published: 0,
                 touch_down: Vec::new(),
-                hid_shmem_addr: 0,
-                hid_shmem_handle: None,
                 npad_style_set: 0,
                 npad_style_update_event: None,
                 npad_joy_hold_type: 0,
                 vibration: (0.0, 0.0),
-                ssl_interface_version: 0,
-                ssl_contexts: 0,
-                ssl_options: HashMap::new(),
                 ssl_certificates: None,
                 ssl_next_pki_id: 1,
                 service_events: HashMap::new(),
@@ -570,7 +435,6 @@ impl Cpu {
                 erpt_contexts: Vec::new(),
                 erpt_reports: Vec::new(),
                 erpt_attachments: Vec::new(),
-                erpt_readers: IdMap::default(),
                 erpt_journal_id: None,
                 sample_counter: 0,
                 last_gamepad: (0, 0, 0, 0, 0),
@@ -579,10 +443,6 @@ impl Cpu {
                 shared_font: Vec::new(),
                 pl_shmem_image: Vec::new(),
                 shared_font_regions: Vec::new(),
-                pl_shmem_addr: 0,
-                audren_renderers: IdMap::default(),
-                audio_outs: IdMap::default(),
-                opus_decoders: IdMap::default(),
                 audio_pcm: VecDeque::new(),
                 audio_produced: 0,
                 audio_taken: 0,
@@ -591,32 +451,23 @@ impl Cpu {
                 unix_time: 0,
                 users: vec![UserAccount::new(DEFAULT_USER_UID, DEFAULT_NICKNAME, None)],
                 current_user: 0,
-                acc_profiles: IdMap::default(),
                 profiles_edited: false,
                 apm_configuration: power::APM_DEFAULT_CONFIGURATION,
-                program_id: ipc::DEFAULT_PROGRAM_ID,
                 clock_rates: IdMap::default(),
                 mm_requests: IdMap::default(),
                 rng_state: 0,
-                bsd_sockets: HashMap::new(),
-                bsd_socket_options: HashMap::new(),
-                next_bsd_fd: 3,
                 next_bsd_port: net::BSD_FIRST_EPHEMERAL_PORT,
                 battery_percent: 100,
                 battery_charging: true,
                 fs: crate::vfs::Vfs::new(),
                 nv: crate::gpu::nvdrv::NvDrv::new(),
                 display: crate::display::BufferQueue::new(),
-                threads: Vec::new(),
                 last_present_cycles: 0,
                 pending_present: None,
                 thread_log: Vec::new(),
                 thread_log_dropped: 0,
-                module_names: Vec::new(),
-                main_thread_priority: DEFAULT_THREAD_PRIORITY,
-                main_thread_core: 0,
-                process_core_mask: crate::npdm::APPLICATION_CORE_MASK,
-                next_thread_id: MAIN_THREAD_ID + 1,
+
+                processes: BTreeMap::from([(ROOT_PID, Process::new())]),
             }),
         };
         // Pre-map the fixed framebuffer and input regions.

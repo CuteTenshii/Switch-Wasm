@@ -250,7 +250,7 @@ impl Cpu {
             "hid:applet-resource" => match cmd_id {
                 Some(0) => {
                     let shmem = self.alloc_handle();
-                    self.hid_shmem_handle = Some(shmem);
+                    self.process_mut().hid_shmem_handle = Some(shmem);
                     self.write_ipc_reply(tls, 0, &[shmem], &[], &[], &[])
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -293,7 +293,7 @@ mod tests {
 
         let mut cpu = request(false, 100, &h::STYLE_JOY_DUAL.to_le_bytes());
         cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
-        cpu.hid_shmem_addr = SHMEM;
+        cpu.process_mut().hid_shmem_addr = SHMEM;
         cpu.register_service_handle(9, "hid");
         cpu.hid_request(TLS, 9, Some(100)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
@@ -336,7 +336,7 @@ mod tests {
 
         let mut cpu = request(false, 100, &h::STYLE_JOY_DUAL.to_le_bytes());
         cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
-        cpu.hid_shmem_addr = SHMEM;
+        cpu.process_mut().hid_shmem_addr = SHMEM;
         cpu.register_service_handle(9, "hid");
         cpu.hid_request(TLS, 9, Some(100)).unwrap();
         cpu.set_gamepad_state(0x3, 1000, -2000, 3000, -4000);
@@ -406,7 +406,7 @@ mod tests {
 
         let mut cpu = request(false, 120, &[]);
         cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
-        cpu.hid_shmem_addr = SHMEM;
+        cpu.process_mut().hid_shmem_addr = SHMEM;
         cpu.register_service_handle(9, "hid");
         cpu.set_gamepad_state(0, 0, 0, 0, 0);
 

@@ -411,7 +411,7 @@ impl Cpu {
             }
             // 200 = OpenDataStorageByCurrentProcess: the title's RomFS as a raw `IStorage`.
             Some(200) => {
-                if self.romfs.is_none() {
+                if self.process().romfs.is_none() {
                     // No RomFS this session.
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
@@ -438,7 +438,7 @@ impl Cpu {
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
-                self.fs_storage_archive.insert(key, data_id);
+                self.process_mut().fs_storage_archive.insert(key, data_id);
                 if crate::trace::enabled(Trace::Fs) {
                     let size = self.storage_source(Some(data_id)).map_or(0, |s| s.len());
                     crate::traceln!("[fs] data archive {data_id:016x} -> {size:#x} bytes");
@@ -477,7 +477,7 @@ impl Cpu {
                     _ => self.save_data_infos(Some(space), filter),
                 };
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
-                self.fs_save_infos.insert(key, infos);
+                self.process_mut().fs_save_infos.insert(key, infos);
                 Ok(())
             }
             // 400 = OpenDeviceOperator.
@@ -565,7 +565,7 @@ impl Cpu {
                 let key = self.ipc_object_key(tls, handle);
                 let (addr, len) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
                 let room = len as usize / SAVE_DATA_INFO_SIZE;
-                let infos = self.fs_save_infos.entry(key).or_default();
+                let infos = self.process_mut().fs_save_infos.entry(key).or_default();
                 let batch: Vec<_> = infos.drain(..room.min(infos.len())).collect();
                 for (i, info) in batch.iter().enumerate() {
                     self.mem
@@ -778,7 +778,7 @@ impl Cpu {
                 let key = cpu.ipc_object_key(tls, handle);
                 format!(
                     " {}",
-                    storage_text(cpu.fs_storage_archive.get(&key).copied())
+                    storage_text(cpu.process().fs_storage_archive.get(&key).copied())
                 )
             },
             |cpu| cpu.fs_storage_dispatch(tls, handle, cmd_id),
@@ -788,6 +788,7 @@ impl Cpu {
     fn fs_storage_dispatch(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         // The process's RomFS (200) or a system data archive (202).
         let archive = self
+            .process()
             .fs_storage_archive
             .get(&self.ipc_object_key(tls, handle))
             .copied();
@@ -855,16 +856,15 @@ impl Cpu {
     /// Charge a storage read to the RomFS files it overlaps; bytes outside every
     /// file are the header and tables.
     fn tally_storage_read(&mut self, archive: Option<u64>, offset: u64, len: u64) {
-        if !self.romfs_indexes.contains_key(&archive) {
+        if !self.process().romfs_indexes.contains_key(&archive) {
             let index = self
                 .storage_source(archive)
                 .and_then(|src| crate::romfs::RomFsIndex::read(src).ok());
-            self.romfs_indexes.insert(archive, index);
+            self.process_mut().romfs_indexes.insert(archive, index);
         }
         let storage = storage_text(archive);
         let activity = &mut self.machine.fs_activity;
-        let Some(index) = self
-            .machine
+        let Some(index) = self.machine.processes[&self.pid]
             .romfs_indexes
             .get(&archive)
             .and_then(Option::as_ref)
@@ -885,7 +885,7 @@ impl Cpu {
     fn storage_source(&self, archive: Option<u64>) -> Option<&dyn crate::source::ByteSource> {
         match archive {
             Some(id) => self.data_archives.get(&id).map(|b| b.as_ref()),
-            None => self.romfs.as_deref(),
+            None => self.process().romfs.as_deref(),
         }
     }
 
@@ -948,7 +948,7 @@ impl Cpu {
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-fs-file")?;
-                self.fs_files.insert(key, path);
+                self.process_mut().fs_files.insert(key, path);
                 self.set_mount(key, mount);
                 Ok(())
             }
@@ -956,7 +956,7 @@ impl Cpu {
             Some(9) => match self.vfs_for(mount).read_dir(&path) {
                 Some(entries) => {
                     let key = self.reply_with_interface(tls, handle, "fsp-srv-fs-dir")?;
-                    self.fs_dirs.insert(key, entries);
+                    self.process_mut().fs_dirs.insert(key, entries);
                     Ok(())
                 }
                 None => self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]),
@@ -985,7 +985,7 @@ impl Cpu {
             directory_command,
             false,
             |cpu| {
-                let entries = cpu.fs_dirs.get(&key).map_or(0, Vec::len);
+                let entries = cpu.process().fs_dirs.get(&key).map_or(0, Vec::len);
                 format!(" ({entries} entries left)")
             },
             |cpu| cpu.fs_dir_dispatch(tls, cmd_id, key),
@@ -997,7 +997,7 @@ impl Cpu {
         const ENTRY_SIZE: u32 = 0x310;
         match cmd_id {
             Some(0) => {
-                let entries = self.fs_dirs.remove(&key).unwrap_or_default();
+                let entries = self.process_mut().fs_dirs.remove(&key).unwrap_or_default();
                 if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
                     for (i, entry) in entries.iter().enumerate() {
                         let base = buf.wrapping_add(i as u32 * ENTRY_SIZE);
@@ -1014,7 +1014,12 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
             }
             Some(1) => {
-                let count = self.fs_dirs.get(&key).map(|v| v.len() as u64).unwrap_or(0);
+                let count = self
+                    .process()
+                    .fs_dirs
+                    .get(&key)
+                    .map(|v| v.len() as u64)
+                    .unwrap_or(0);
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -1034,7 +1039,7 @@ impl Cpu {
             file_command,
             false,
             |cpu| {
-                let path = cpu.fs_files.get(&key).map_or("", String::as_str);
+                let path = cpu.process().fs_files.get(&key).map_or("", String::as_str);
                 format!(" {path:?} on {}", mount_text(cpu.mount_of(key)))
             },
             |cpu| cpu.fs_file_dispatch(tls, cmd_id, key),
@@ -1042,7 +1047,12 @@ impl Cpu {
     }
 
     fn fs_file_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
-        let path = self.fs_files.get(&key).cloned().unwrap_or_default();
+        let path = self
+            .process()
+            .fs_files
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         let mount = self.mount_of(key);
         match cmd_id {
             // Read(u32 option, u64 offset, u64 size) -> u64 bytes_read
@@ -1165,7 +1175,9 @@ mod tests {
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.map_zero(0x3000, 0x100).unwrap();
         assert!(cpu.fs.create_file("/switch/cfg.json", 0));
-        cpu.fs_files.insert(key, "/switch/cfg.json".to_owned());
+        cpu.process_mut()
+            .fs_files
+            .insert(key, "/switch/cfg.json".to_owned());
 
         // fsFileWrite { u32 option, u32 pad, s64 offset, u64 size }
         for (i, &byte) in br#"{"v":5}"#.iter().enumerate() {

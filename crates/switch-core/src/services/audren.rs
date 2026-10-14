@@ -332,7 +332,7 @@ impl Cpu {
                 } else {
                     sample_count
                 };
-                self.audren_renderers.insert(
+                self.process_mut().audren_renderers.insert(
                     renderer,
                     AudioRenderer {
                         revision_magic,
@@ -450,7 +450,7 @@ impl Cpu {
         match cmd_id {
             // GetSampleRate / GetSampleCount / GetMixBufferCount.
             Some(0) | Some(1) | Some(2) => {
-                let renderer = self.audren_renderers.get(&handle);
+                let renderer = self.process().audren_renderers.get(&handle);
                 let value = match (cmd_id, renderer) {
                     (Some(0), Some(r)) => r.sample_rate,
                     (Some(1), Some(r)) => r.sample_count,
@@ -462,6 +462,7 @@ impl Cpu {
             // GetState: 0 running, 1 stopped.
             Some(3) => {
                 let started = self
+                    .process()
                     .audren_renderers
                     .get(&handle)
                     .map(|r| r.started)
@@ -479,7 +480,7 @@ impl Cpu {
             Some(5) | Some(6) => {
                 let started = cmd_id == Some(5);
                 let now = self.cycles;
-                if let Some(renderer) = self.audren_renderers.get_mut(&handle) {
+                if let Some(renderer) = self.process_mut().audren_renderers.get_mut(&handle) {
                     renderer.started = started;
                     // Restart the clock from now; a stopped renderer owes no backlog.
                     renderer.rendered_through = now;
@@ -490,6 +491,7 @@ impl Cpu {
             // QuerySystemEvent: the frame event fired by `Cpu::audren_tick`, as a copy handle.
             Some(7) => {
                 let event = match self
+                    .process()
                     .audren_renderers
                     .get(&handle)
                     .and_then(|r| r.frame_event)
@@ -497,7 +499,8 @@ impl Cpu {
                     Some(event) => event,
                     None => {
                         let event = self.alloc_event("audren:frame", true);
-                        if let Some(renderer) = self.audren_renderers.get_mut(&handle) {
+                        if let Some(renderer) = self.process_mut().audren_renderers.get_mut(&handle)
+                        {
                             renderer.frame_event = Some(event);
                         }
                         event
@@ -518,7 +521,7 @@ impl Cpu {
         let now = self.cycles;
         let mut fire = Vec::new();
         let mut next = None;
-        for renderer in self.audren_renderers.values_mut() {
+        for renderer in self.process_mut().audren_renderers.values_mut() {
             let Some(event) = renderer.frame_event else {
                 continue;
             };
@@ -541,7 +544,7 @@ impl Cpu {
 
     /// `RequestUpdateAudioRenderer`: parse the state, render due frames, reply.
     fn audren_update(&mut self, tls: u32, handle: u64) -> Result<()> {
-        if let Some(renderer) = self.audren_renderers.get_mut(&handle) {
+        if let Some(renderer) = self.process_mut().audren_renderers.get_mut(&handle) {
             renderer.updates += 1;
         }
         if let Some((addr, size)) = self.ipc_input_buffer(tls, 0) {
@@ -553,13 +556,13 @@ impl Cpu {
 
     /// Read one update's input buffer, walking sections by the guest's declared sizes.
     fn audren_parse_update(&mut self, handle: u64, addr: u32, size: u32) {
-        let Some(mut renderer) = self.audren_renderers.remove(&handle) else {
+        let Some(mut renderer) = self.process_mut().audren_renderers.remove(&handle) else {
             return;
         };
         let read_u32 = |cpu: &Cpu, at: u32| cpu.mem.read_u32(at).unwrap_or(0);
 
         if size < HEADER_SZ {
-            self.audren_renderers.insert(handle, renderer);
+            self.process_mut().audren_renderers.insert(handle, renderer);
             return;
         }
         let behavior_sz = read_u32(self, addr.wrapping_add(0x04));
@@ -586,7 +589,7 @@ impl Cpu {
         at = at.wrapping_add(mixes_sz);
         self.audren_parse_sinks(&mut renderer, at, sinks_sz);
 
-        self.audren_renderers.insert(handle, renderer);
+        self.process_mut().audren_renderers.insert(handle, renderer);
     }
 
     /// `AudioRendererMemPoolInfoIn[]`. Attach and detach requests are acknowledged.
@@ -823,19 +826,19 @@ impl Cpu {
     /// Render every 5 ms frame that has come due and queue the result for the host.
     fn audren_render(&mut self, handle: u64) {
         let now = self.cycles;
-        let Some(mut renderer) = self.audren_renderers.remove(&handle) else {
+        let Some(mut renderer) = self.process_mut().audren_renderers.remove(&handle) else {
             return;
         };
         if !renderer.started {
             renderer.rendered_through = now;
-            self.audren_renderers.insert(handle, renderer);
+            self.process_mut().audren_renderers.insert(handle, renderer);
             return;
         }
         let elapsed = now.saturating_sub(renderer.rendered_through);
         let due = (elapsed / FRAME_CYCLES).min(MAX_CATCHUP_FRAMES);
         renderer.rendered_through = now;
         if due == 0 {
-            self.audren_renderers.insert(handle, renderer);
+            self.process_mut().audren_renderers.insert(handle, renderer);
             return;
         }
 
@@ -860,7 +863,7 @@ impl Cpu {
             );
         }
         let format = (renderer.sample_rate, channels);
-        self.audren_renderers.insert(handle, renderer);
+        self.process_mut().audren_renderers.insert(handle, renderer);
         if !pcm.is_empty() {
             self.audio_format = format;
             self.queue_audio(pcm.into_iter());
@@ -870,7 +873,7 @@ impl Cpu {
     /// `RequestUpdateAudioRenderer`'s reply. The guest checks every `_sz` field
     /// against sizes computed from the open counts and aborts on mismatch.
     pub(crate) fn audren_write_update_reply(&mut self, tls: u32, handle: u64) -> Result<()> {
-        let Some(renderer) = self.audren_renderers.get(&handle) else {
+        let Some(renderer) = self.process().audren_renderers.get(&handle) else {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         };
         let voice_count = renderer.voice_count;

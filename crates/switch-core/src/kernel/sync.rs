@@ -32,24 +32,25 @@ impl Cpu {
         if word & !MUTEX_HAS_LISTENERS != owner || owner == 0 {
             return; // stale request; the guest re-reads the word and retries
         }
-        self.machine.threads[self.current_thread].state = ThreadState::WaitMutex(addr);
+        self.machine.process_mut(self.pid).threads[self.current_thread].state =
+            ThreadState::WaitMutex(addr);
         self.reschedule();
     }
 
     /// `svcArbitrateUnlock`: hand the mutex to a waiter, or clear it.
     pub(crate) fn arbitrate_unlock(&mut self, addr: u32) {
         self.ensure_main_thread();
-        let waiters: Vec<usize> = (0..self.threads.len())
-            .filter(|&i| self.threads[i].state == ThreadState::WaitMutex(addr))
+        let waiters: Vec<usize> = (0..self.process().threads.len())
+            .filter(|&i| self.process().threads[i].state == ThreadState::WaitMutex(addr))
             .collect();
         match waiters.first() {
             Some(&next) => {
-                let mut handle = self.threads[next].handle as u32;
+                let mut handle = self.process().threads[next].handle as u32;
                 if waiters.len() > 1 {
                     handle |= MUTEX_HAS_LISTENERS;
                 }
                 let _ = self.mem.write_u32(addr, handle);
-                self.threads[next].state = ThreadState::Runnable;
+                self.process_mut().threads[next].state = ThreadState::Runnable;
             }
             None => {
                 let _ = self.mem.write_u32(addr, 0);
@@ -70,11 +71,12 @@ impl Cpu {
         let _ = self.mem.write_u32(key, CONDVAR_HAS_WAITERS);
         self.arbitrate_unlock(mutex);
         let deadline = self.wait_deadline(timeout);
-        self.machine.threads[self.current_thread].state = ThreadState::WaitKey {
-            key,
-            mutex,
-            deadline,
-        };
+        self.machine.process_mut(self.pid).threads[self.current_thread].state =
+            ThreadState::WaitKey {
+                key,
+                mutex,
+                deadline,
+            };
         self.reschedule();
     }
 
@@ -91,8 +93,8 @@ impl Cpu {
     /// Wake every timed wait whose deadline has passed; `nn::os` rechecks its predicate.
     pub(crate) fn expire_timed_waits(&mut self) {
         let now = self.cycles;
-        for index in 0..self.threads.len() {
-            let state = self.threads[index].state;
+        for index in 0..self.process().threads.len() {
+            let state = self.process().threads[index].state;
             let deadline = match state {
                 ThreadState::WaitKey { deadline, .. }
                 | ThreadState::WaitAddress { deadline, .. } => deadline,
@@ -106,22 +108,22 @@ impl Cpu {
             }
             match state {
                 ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
-                _ => self.threads[index].state = ThreadState::Runnable,
+                _ => self.process_mut().threads[index].state = ThreadState::Runnable,
             }
         }
     }
 
     /// Dequeue a condvar waiter holding (or queued for) its mutex, as the kernel does on every wake.
     pub(crate) fn wake_condvar_waiter(&mut self, index: usize, mutex: u32) {
-        let handle = self.threads[index].handle as u32;
+        let handle = self.process().threads[index].handle as u32;
         let owner = self.mem.read_u32(mutex).unwrap_or(0);
         if owner == 0 {
             let _ = self.mem.write_u32(mutex, handle);
-            self.threads[index].state = ThreadState::Runnable;
+            self.process_mut().threads[index].state = ThreadState::Runnable;
         } else {
             // Contended: queue up and mark the word so the owner arbitrates its unlock.
             let _ = self.mem.write_u32(mutex, owner | MUTEX_HAS_LISTENERS);
-            self.threads[index].state = ThreadState::WaitMutex(mutex);
+            self.process_mut().threads[index].state = ThreadState::WaitMutex(mutex);
         }
     }
 
@@ -129,7 +131,7 @@ impl Cpu {
     pub(crate) fn signal_process_wide_key(&mut self, key: u32, count: i32) {
         self.ensure_main_thread();
         let mut woken = 0;
-        for i in 0..self.threads.len() {
+        for i in 0..self.process().threads.len() {
             if count >= 0 && woken >= count {
                 break;
             }
@@ -137,7 +139,7 @@ impl Cpu {
                 key: waiting,
                 mutex,
                 ..
-            } = self.threads[i].state
+            } = self.process().threads[i].state
             {
                 if waiting != key {
                     continue;
@@ -147,7 +149,7 @@ impl Cpu {
             }
         }
         // Clear the word once the queue is empty.
-        let queued = self.threads.iter().any(
+        let queued = self.process().threads.iter().any(
             |t| matches!(t.state, ThreadState::WaitKey { key: waiting, .. } if waiting == key),
         );
         if !queued {
@@ -204,7 +206,7 @@ impl Cpu {
     /// Park on the arbiter word at `addr`, after [`Cpu::arbitrate_address`] decided to wait.
     pub(crate) fn block_on_address(&mut self, addr: u32, timeout: i64) {
         let deadline = self.wait_deadline(timeout);
-        self.machine.threads[self.current_thread].state =
+        self.machine.process_mut(self.pid).threads[self.current_thread].state =
             ThreadState::WaitAddress { addr, deadline };
         self.reschedule();
     }
@@ -220,6 +222,7 @@ impl Cpu {
     ) -> bool {
         self.ensure_main_thread();
         let waiting = self
+            .process()
             .threads
             .iter()
             .filter(|t| matches!(t.state, ThreadState::WaitAddress { addr: a, .. } if a == addr))
@@ -246,13 +249,13 @@ impl Cpu {
             let _ = self.mem.write_u32(addr, updated as u32);
         }
         let mut woken = 0;
-        for i in 0..self.threads.len() {
+        for i in 0..self.process().threads.len() {
             if count >= 0 && woken >= count {
                 break;
             }
-            if matches!(self.threads[i].state, ThreadState::WaitAddress { addr: a, .. } if a == addr)
+            if matches!(self.process().threads[i].state, ThreadState::WaitAddress { addr: a, .. } if a == addr)
             {
-                self.threads[i].state = ThreadState::Runnable;
+                self.process_mut().threads[i].state = ThreadState::Runnable;
                 woken += 1;
             }
         }
@@ -261,7 +264,8 @@ impl Cpu {
 
     /// The soonest timed-wait deadline: the furthest the clock may idle forward.
     pub(crate) fn earliest_deadline(&self) -> Option<u64> {
-        self.threads
+        self.process()
+            .threads
             .iter()
             .filter(|t| !t.paused)
             .filter_map(|t| match t.state {

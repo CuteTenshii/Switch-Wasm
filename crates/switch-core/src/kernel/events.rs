@@ -52,8 +52,8 @@ impl Cpu {
 
     /// Queue an applet message and wake whatever polls for one.
     pub(crate) fn queue_applet_message(&mut self, message: AppletMessage) {
-        self.applet_messages.push_back(message as u32);
-        if let Some(handle) = self.applet_event {
+        self.process_mut().applet_messages.push_back(message as u32);
+        if let Some(handle) = self.process().applet_event {
             self.signal_event(handle);
         }
     }
@@ -76,31 +76,31 @@ impl Cpu {
         self.display.set_default_size(width, height);
         self.queue_applet_message(AppletMessage::OperationModeChanged);
         self.queue_applet_message(AppletMessage::PerformanceModeChanged);
-        if let Some(event) = self.display_resolution_event {
+        if let Some(event) = self.process().display_resolution_event {
             self.signal_event(event);
         }
     }
 
     /// Record the proxy kind, which selects the focus message.
     pub(crate) fn set_applet_is_application(&mut self, is_application: bool) {
-        self.applet_is_application = is_application;
+        self.process_mut().applet_is_application = is_application;
     }
 
     /// Next AM message; the startup focus transition comes first, once.
     pub(crate) fn next_applet_message(&mut self) -> Option<u32> {
-        if !self.applet_focus_announced {
-            self.applet_focus_announced = true;
-            return Some(if self.applet_is_application {
+        if !self.process().applet_focus_announced {
+            self.process_mut().applet_focus_announced = true;
+            return Some(if self.process().applet_is_application {
                 AppletMessage::FocusStateChanged as u32
             } else {
                 AppletMessage::ChangeIntoForeground as u32
             });
         }
-        self.applet_messages.pop_front()
+        self.process_mut().applet_messages.pop_front()
     }
 
     pub(crate) fn has_applet_message(&self) -> bool {
-        !self.applet_focus_announced || !self.applet_messages.is_empty()
+        !self.process().applet_focus_announced || !self.process().applet_messages.is_empty()
     }
 
     /// Fire an event and wake every parked waiter; each rechecks its own handles.
@@ -118,7 +118,7 @@ impl Cpu {
 
     /// Wake every thread parked in `svcWaitSynchronization`; each reissues its wait.
     pub(crate) fn wake_event_waiters(&mut self) {
-        for thread in &mut self.threads {
+        for thread in &mut self.process_mut().threads {
             if matches!(thread.state, ThreadState::WaitEvent { .. }) {
                 thread.state = ThreadState::Runnable;
             }
@@ -130,7 +130,8 @@ impl Cpu {
         if let Some(signaled) = self.event_signaled(handle) {
             return Some(signaled);
         }
-        self.threads
+        self.process()
+            .threads
             .iter()
             .find(|thread| thread.handle == handle)
             .map(|thread| thread.state == ThreadState::Finished)
