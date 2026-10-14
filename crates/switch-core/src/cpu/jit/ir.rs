@@ -642,6 +642,39 @@ impl Block {
         exits.chain(end)
     }
 
+    /// Where a terminator whose target is a register has recently gone, from the links.
+    pub(super) fn observed(&self) -> Vec<u32> {
+        match self.term {
+            Some(
+                Term::Br { .. }
+                | Term::Blr { .. }
+                | Term::Ret { .. }
+                | Term::BlPlt { .. }
+                | Term::BPlt { .. },
+            ) => self
+                .link
+                .borrow()
+                .iter()
+                .filter(|(pc, block)| *pc != NO_LINK && block.strong_count() > 0)
+                .map(|&(pc, _)| pc)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The blocks a region may compile in with this one: [`Block::successors`],
+    /// where a call goes and returns to, and what [`Block::observed`] saw.
+    pub(super) fn region_successors(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = self.successors().collect();
+        match self.term {
+            Some(Term::Bl { target, ret_pc }) => out.extend([target, ret_pc]),
+            Some(Term::Blr { ret_pc, .. } | Term::BlPlt { ret_pc, .. }) => out.push(ret_pc),
+            _ => {}
+        }
+        out.extend(self.observed());
+        out
+    }
+
     /// Pages this block's compiled region was read from, its members' included.
     pub(super) fn region_pages(&self) -> Vec<u32> {
         let mut pages = self.pages.clone();

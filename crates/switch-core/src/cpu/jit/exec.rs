@@ -590,7 +590,7 @@ impl Cpu {
             return members;
         }
         let mut seen = vec![head.start];
-        let mut queue: std::collections::VecDeque<u32> = head.successors().collect();
+        let mut queue: std::collections::VecDeque<u32> = head.region_successors().into();
         while let Some(pc) = queue.pop_front() {
             if members.len() + 1 >= MAX_REGION_BLOCKS {
                 break;
@@ -608,7 +608,7 @@ impl Cpu {
                 Code::Never => false,
             };
             if warm {
-                queue.extend(next.successors());
+                queue.extend(next.region_successors());
                 members.push(next);
             }
         }

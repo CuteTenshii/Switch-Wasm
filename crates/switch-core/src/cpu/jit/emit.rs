@@ -314,6 +314,8 @@ struct Emitter<'a> {
     epilogue: u32,
     /// The loop head that dispatches on `L_NEXT`, when a branch stays inside.
     top: Option<u32>,
+    /// Per member, the label whose end its code follows, while that is open.
+    starts: Vec<u32>,
     /// Register slots the region touches, loaded on entry.
     used: u64,
     /// Register slots it writes, stored on the way out.
@@ -323,6 +325,8 @@ struct Emitter<'a> {
     next_local: u32,
     /// Whether a watchpoint was armed when the region was emitted.
     watches: bool,
+    /// Where the region's calls return to: what a `RET` in it is compared with.
+    returns: Vec<u32>,
     flags_used: bool,
     flags_written: bool,
     fuel_used: bool,
@@ -342,10 +346,12 @@ impl<'a> Emitter<'a> {
             chain,
             simd: true,
             watches: true,
+            returns: Vec::new(),
             targets,
             member: 0,
             epilogue,
             top: None,
+            starts: Vec::new(),
             used: 0,
             written: 0,
             locals: [0; REG_SLOTS],
@@ -481,6 +487,10 @@ impl Emitter<'_> {
         if fall && k == self.member + 1 {
             return;
         }
+        if k > self.member {
+            self.f.br(self.starts[k]);
+            return;
+        }
         self.f.i32_const(k as i32);
         self.f.local_set(L_NEXT);
         let top = self.top.expect("`inside` answers only with a loop head");
@@ -488,8 +498,10 @@ impl Emitter<'_> {
     }
 
     /// Leave through `term`, which follows `len` instructions of the block,
-    /// linking `x30` for a call.
-    fn term(&mut self, term: &Term, len: usize) {
+    /// linking `x30` for a call. A register target that is one of `observed`
+    /// (or, for a `RET`, where one of the region's calls returns) and in the
+    /// region is branched to inside it.
+    fn term(&mut self, term: &Term, len: usize, observed: &[u32]) {
         let retired = len + term_retires(term);
         match *term {
             Term::B { target } => self.goto(retired, target, true),
@@ -516,6 +528,12 @@ impl Emitter<'_> {
                     self.f.i64_const(i64::from(ret_pc));
                     self.store_reg(30);
                 }
+                let mut candidates = observed.to_vec();
+                if let Term::Ret { .. } = term {
+                    let returns = self.returns.iter().filter(|pc| !observed.contains(pc));
+                    candidates.extend(returns);
+                }
+                self.predict(&candidates, retired);
                 self.exit_with(self.answer(retired) | LEFT);
             }
             // The stub's `adrp`/`ldr`/`add`/`br` as `exec`'s fold does them: x16 the
@@ -538,9 +556,25 @@ impl Emitter<'_> {
                     self.f.i64_const(i64::from(ret_pc));
                     self.store_reg(30);
                 }
+                self.predict(observed, retired);
                 self.exit_with(self.answer(retired) | LEFT);
             }
             _ => unreachable!("writes_term accepts only branches"),
+        }
+    }
+
+    /// Branch to whichever of `observed` the region has when `L_TARGET` is it.
+    fn predict(&mut self, observed: &[u32], retired: usize) {
+        for &pc in observed {
+            let Some(k) = self.inside(pc) else {
+                continue;
+            };
+            self.f.local_get(L_TARGET);
+            self.f.i32_const(pc as i32);
+            self.f.i32_eq();
+            self.f.if_void();
+            self.edge(retired, k, false);
+            self.f.end();
         }
     }
 
@@ -576,7 +610,7 @@ impl Emitter<'_> {
         }
         let len = block.ops.len();
         match block.term {
-            Some(ref term) if writes_term(term) => self.term(term, len),
+            Some(ref term) if writes_term(term) => self.term(term, len, &block.observed()),
             // Off the end of a block cut at its length or page limit.
             None => self.goto_or_stop(len, block.pc_at(len)),
             // `exec` runs the terminator.
@@ -2082,17 +2116,27 @@ pub(super) fn emit_region(
     };
     let looped = blocks
         .iter()
-        .any(|b| b.successors().any(|pc| targets.contains(&pc)));
+        .any(|b| b.region_successors().iter().any(|pc| targets.contains(pc)));
     let n = blocks.len();
     let mut f = scratch_func();
     let mut e = Emitter::new(&mut f, layout, chain, targets);
     e.simd = simd;
     e.watches = watches;
+    e.returns = blocks
+        .iter()
+        .filter_map(|b| match b.term {
+            Some(
+                Term::Bl { ret_pc, .. } | Term::Blr { ret_pc, .. } | Term::BlPlt { ret_pc, .. },
+            ) => Some(ret_pc),
+            _ => None,
+        })
+        .collect();
     if looped {
         e.top = Some(e.f.loop_void());
         if n > 1 {
-            for _ in 0..n {
-                e.f.block_void();
+            e.starts = vec![0; n];
+            for j in (0..n).rev() {
+                e.starts[j] = e.f.block_void();
             }
             e.f.local_get(L_NEXT);
             let table: Vec<u32> = (0..n as u32).collect();
