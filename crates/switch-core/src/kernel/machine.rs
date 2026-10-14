@@ -7,6 +7,12 @@ impl Cpu {
     /// Set the POSIX time (UTC) `time:u`/`time:s` report; the epoch until the host sets it.
     pub fn set_unix_time(&mut self, seconds: i64) {
         self.unix_time = seconds;
+        self.publish_time();
+    }
+
+    /// Set the local time's offset from UTC, in seconds east, for calendar conversions.
+    pub fn set_utc_offset(&mut self, seconds: i32) {
+        self.utc_offset = seconds;
     }
 
     pub fn unix_time(&self) -> i64 {

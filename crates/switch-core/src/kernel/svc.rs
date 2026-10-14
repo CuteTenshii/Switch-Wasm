@@ -129,6 +129,9 @@ impl Cpu {
                     self.set_gamepad_state(0, 0, 0, 0, 0);
                     // An empty touch sample: a zeroed LIFO header is a ring with no capacity.
                     self.set_touch_state(&[]);
+                } else if Some(self.read_zr(0)) == self.process().time_shmem_handle {
+                    let block = self.time_shmem.clone();
+                    self.mem.map_shared(addr, &block)?;
                 } else {
                     self.mem.map_zero(addr, size as usize)?;
                     if size == PL_SHMEM_SIZE {

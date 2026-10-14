@@ -107,6 +107,8 @@ pub(crate) struct Process {
     pub(crate) hid_shmem_addr: u32,
     /// Handle used to recognise hid's shared memory in `svcMapSharedMemory`.
     pub(crate) hid_shmem_handle: Option<u64>,
+    /// The handle `time`'s `GetSharedMemoryNativeHandle` gave this process.
+    pub(crate) time_shmem_handle: Option<u64>,
     /// `ssl` state: interface revision, context count, and per-context options.
     pub(crate) ssl_interface_version: u32,
     pub(crate) ssl_contexts: u32,
@@ -189,6 +191,7 @@ impl Process {
             romfs: None,
             hid_shmem_addr: 0,
             hid_shmem_handle: None,
+            time_shmem_handle: None,
             ssl_interface_version: 0,
             ssl_contexts: 0,
             ssl_options: HashMap::new(),

@@ -273,6 +273,10 @@ pub struct Machine {
     pub(crate) audio_format: (u32, u32),
     /// POSIX seconds for `time:u`/`time:s`; the epoch until [`Cpu::set_unix_time`].
     pub(crate) unix_time: i64,
+    /// See [`Cpu::set_utc_offset`].
+    pub(crate) utc_offset: i32,
+    /// `time`'s shared memory, mapped by each process that asks for it.
+    pub(crate) time_shmem: std::sync::Arc<crate::mem::SharedPages>,
     /// User accounts in `acc` order; never empty.
     pub(crate) users: Vec<UserAccount>,
     /// Index of the playing user in `users`.
@@ -496,6 +500,8 @@ impl Cpu {
                 audio_dropped: 0,
                 audio_format: (0, 0),
                 unix_time: 0,
+                utc_offset: 0,
+                time_shmem: crate::mem::SharedPages::new(crate::services::time::SHARED_MEMORY_SIZE),
                 users: vec![UserAccount::new(DEFAULT_USER_UID, DEFAULT_NICKNAME, None)],
                 current_user: 0,
                 profiles_edited: false,
