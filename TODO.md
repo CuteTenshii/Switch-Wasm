@@ -13,6 +13,10 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 6. am across processes: Start creates the applet process with the pushed storages, out and interactive data reach the other side, exit finishes the caller's accessor, focus messages, the real caller identity.
 7. Docs: `kernel.md`, `services.md`, `multicore.md`, `gpu.md`.
 
+## Browser bindings
+
+- Call browser APIs from Rust through `js_sys` and `web_sys` instead of hand-written JS glue, to avoid needless JS/wasm round trips.
+
 ## Open gaps
 
 - `npns:s` cmd 3 (Receive) is refused; qlaunch polls it constantly. Needs the empty-queue result from switchbrew.
