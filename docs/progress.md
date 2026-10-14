@@ -135,6 +135,14 @@ Declaring every register local up front ran about a third slower than allocating
 
 The SIMD sweep found two interpreter bugs (ORR/BIC immediate, XZR register offsets) and, being host timing under shared load, the benchmarks above were only trusted as best-of-three alternated runs; one binary measured anywhere from 122 to 295M/s.
 
+## Emitted code size and region entry (October 2026)
+
+- **Minecraft's steady frames are its two "Streaming Pool" threads**: 97% of instructions, reading assets one byte at a time through a virtual `read(buf, 1)`, a trampoline and a PLT `memcpy`. The vsync is 17M cycles and every runnable thread advances the clock, so a frame costs 17M instructions whatever the main thread needs.
+- **Regions are large**: median 29 KB of wasm, about 84 bytes per guest op (stores 32%, loads 28%, terminators 12%, add/sub 11%, conditional exits 10%). By 4B instructions of Minecraft V8 had compiled 2,100 regions in Liftoff, lazily on first call on the emulator thread (about 10% of steady time, charged to `enter_emitted`), and tiered 1,409 up for 67 s of background TurboFan CPU. A smaller tiering budget made it slower.
+- The hottest region's TurboFan code is 30,000 instructions; its prologue loads about 30 guest registers and spills many straight to the stack.
+- Rejected: registers written through to the `Cpu` and loaded per block (tight loops twice as slow) or on edges between blocks (tight loops 40% slower, Minecraft unchanged); one combined deopt test per access with the bitmap always allocated (6% fewer bytes, no gain); region caps of 16 and 64 blocks (no signal).
+- Measuring: `wasm_bench --shot` frames differ between runs of one build (hbmenu's clock, all of a Minecraft loading frame), so byte-identical comparison needs a deterministic setup. Under shared load wall-clock A/B runs swung ±20%; the emulator thread's `process.threadCpuUsage` swings less.
+
 ## Tuning the IR executor
 
 Emitted regions sit on top of the IR executor (`exec_block`/`exec_op`), which still runs every cold or refused block. About seventy experiments on it (September 2026, `wasm_bench` under V8, hbmenu around 290M instructions/s) came down to this.
