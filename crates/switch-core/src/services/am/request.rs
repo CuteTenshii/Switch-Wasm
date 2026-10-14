@@ -777,12 +777,26 @@ impl Cpu {
                             Level::Info,
                             "[am] CreateLibraryApplet: swkbd (mode 0); the page asks for the text",
                         );
+                    } else if id == APPLET_ERROR {
+                        self.diagnostic(
+                            Level::Info,
+                            &format!(
+                                "[am] CreateLibraryApplet: error (mode {mode}); the page shows it"
+                            ),
+                        );
                     } else {
+                        let installed = library_applet_program_id(id)
+                            .is_some_and(|program| self.launchable_applets.contains(&program));
+                        let why = if installed {
+                            "this kernel cannot run it beside its caller yet"
+                        } else {
+                            "it is not on the NAND"
+                        };
                         self.diagnostic(
                             Level::Warn,
                             &format!(
-                                "[am] CreateLibraryApplet: {} (mode {mode}); nothing here runs \
-                                 it, so it will report itself cancelled",
+                                "[am] CreateLibraryApplet: {} (mode {mode}); {why}, so it will \
+                                 report itself cancelled",
                                 applet_name(id)
                             ),
                         );

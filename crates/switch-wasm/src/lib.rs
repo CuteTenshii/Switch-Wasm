@@ -28,6 +28,7 @@ mod heap;
 #[cfg(all(feature = "jit", target_arch = "wasm32"))]
 mod jit;
 
+mod applets;
 mod audio;
 mod boot;
 mod container;
@@ -66,6 +67,8 @@ struct Session {
     staged_users: Vec<switch_core::cpu::UserAccount>,
     cpu: Cpu,
     last_error: String,
+    /// Installed library applet Program NCAs by title id.
+    applets: std::collections::BTreeMap<u64, HostSource>,
 }
 
 // Single-threaded wasm: every export runs to completion, so unsynchronized access is safe
@@ -298,6 +301,7 @@ pub extern "C" fn switch_new() -> u32 {
         staged_users: Vec::new(),
         cpu,
         last_error: String::new(),
+        applets: std::collections::BTreeMap::new(),
     })
 }
 

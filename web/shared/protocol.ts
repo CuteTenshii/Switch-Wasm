@@ -195,6 +195,7 @@ export interface Commands {
   open_nsp(file: File): number;
   open_nca(file: File): number;
   add_archive(file: Blob): number;
+  add_applet(file: Blob): number;
   add_update(file: File): string;
   update_version(): string;
   add_dlc(file: File): number;

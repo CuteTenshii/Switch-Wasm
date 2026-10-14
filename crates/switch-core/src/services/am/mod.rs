@@ -412,6 +412,18 @@ fn controller_support_arg() -> Vec<u8> {
     arg
 }
 
+/// The title id of the library applet an `AppletId` names, the inverse of [`applet_id_for`].
+fn library_applet_program_id(applet_id: u32) -> Option<u64> {
+    const BASE: u64 = 0x0100_0000_0000_0000;
+    let low = match applet_id {
+        0x0A..=0x14 => 0x1001 + u64::from(applet_id - 0x0A),
+        0x15..=0x19 => 0x100D + u64::from(applet_id - 0x15),
+        APPLET_MY_PAGE => 0x1013,
+        _ => return None,
+    };
+    Some(BASE | low)
+}
+
 /// The `AppletId` a system applet reports for itself, from its title id.
 fn applet_id_for(program_id: u64) -> u32 {
     if program_id & !0xFFFF != 0x0100_0000_0000_0000 {
@@ -432,6 +444,11 @@ fn applet_id_for(program_id: u64) -> u32 {
 }
 
 impl Cpu {
+    /// Library applets installed on the NAND, by program id.
+    pub fn set_launchable_applets(&mut self, programs: impl IntoIterator<Item = u64>) {
+        self.launchable_applets = programs.into_iter().collect();
+    }
+
     /// The event an `ILibraryAppletAccessor` hands out for `slot`, allocated once.
     fn library_applet_event(&mut self, key: u64, slot: usize) -> u64 {
         if let Some(event) = self

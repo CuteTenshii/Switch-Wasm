@@ -170,6 +170,12 @@ export const CMD: CommandHandlers = {
     } else noteRegistered('system archives', file.size);
     return result;
   },
+  // Register a library applet's Program NCA from the NAND.
+  add_applet(file) {
+    const result = api().switch_add_applet(handle(), addHostFile(file), BigInt(file.size));
+    if (result < 0) workerLog(`[io] applet ${describe(file)}: refused (${lastError()})`, 'warn');
+    return result;
+  },
   // Returns the base title id the update patches, or '' if it is not an update.
   add_update(file) {
     const index = addHostFile(file);

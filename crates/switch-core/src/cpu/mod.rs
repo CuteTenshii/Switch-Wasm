@@ -267,6 +267,8 @@ pub struct Machine {
     pub(crate) am_applets: IdMap<u64, am::LibraryApplet>,
     /// The software keyboard waiting on the host for text.
     pub(crate) am_keyboard: Option<am::PendingKeyboard>,
+    /// Library applets installed on the NAND, by program id.
+    pub(crate) launchable_applets: std::collections::BTreeSet<u64>,
     /// Error applets started and not yet shown to the player.
     pub(crate) error_dialogs: VecDeque<am::ErrorDialog>,
     /// The process's own RomFS (`OpenDataStorageByCurrentProcess`), read by range.
@@ -537,6 +539,7 @@ impl Cpu {
                 am_storage_of: IdMap::default(),
                 am_applets: IdMap::default(),
                 am_keyboard: None,
+                launchable_applets: std::collections::BTreeSet::new(),
                 error_dialogs: VecDeque::new(),
                 romfs: None,
                 touch_sample_counter: 0,

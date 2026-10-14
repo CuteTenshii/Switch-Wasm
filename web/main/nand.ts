@@ -41,6 +41,10 @@ const SYSTEM_TITLES: Record<string, string> = {
   '0100000000001013': 'My Page',
 };
 
+// Library applets a title or the Home Menu can start.
+const LIBRARY_APPLETS = new Set(Object.keys(SYSTEM_TITLES).filter((id) =>
+  !['0100000000001000', '010000000000100c', '0100000000001012'].includes(id)));
+
 // Content and index entry go in one transaction so the index never names missing content.
 function nandInstall(name: string, content: Blob, titleId: string, kind: number) {
   return nandIdb().then((db) => new Promise<void>((resolve, reject) => {
@@ -110,7 +114,22 @@ async function registerArchives(gen: number): Promise<number | null> {
   restoreProgress = null;
   archiveCount = registered;
   updateFirmwareState();
+  await registerApplets(gen);
   return registered;
+}
+
+// Hand the stored library applets to the current session.
+async function registerApplets(gen: number): Promise<void> {
+  const applets = nandTitles.filter(([id, entry]) => entry.kind === 0 && LIBRARY_APPLETS.has(id));
+  for (const [, entry] of applets) {
+    if (gen !== restoreGen) return;
+    try {
+      const content = await nandContent(entry.name);
+      if (gen !== restoreGen) return;
+      const named = content instanceof File ? content : content && new File([content], entry.name);
+      if (named) await call('add_applet', named);
+    } catch { /* that applet just ends cancelled */ }
+  }
 }
 
 // Resolves to the number of archives registered, or null if superseded.
