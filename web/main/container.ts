@@ -11,6 +11,7 @@ import { call, readLastError } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { noteBooted, recycleSession } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
+import { holdUrl, releaseUrl } from './objecturl';
 import { setRunning } from './title';
 
 // What a launch puts on the loading screen.
@@ -373,11 +374,10 @@ export function clearNsp(): void {
   holdTitle(null, null);
 }
 
-// Exactly one icon URL is alive at a time; replacing the identity revokes it.
 let heldTitle: LaunchIdentity | null = null;
 
 function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity | null {
-  if (heldTitle?.iconUrl) URL.revokeObjectURL(heldTitle.iconUrl);
+  if (heldTitle?.icon) releaseUrl(heldTitle.icon);
   const blob = info && icon && icon.length
     ? new Blob([icon], { type: info.icon_mime })
     : null;
@@ -386,7 +386,7 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
         name: info.name,
         publisher: info.publisher || '',
         titleId: info.title_id,
-        iconUrl: blob ? URL.createObjectURL(blob) : null,
+        iconUrl: blob ? holdUrl(blob) : null,
         icon: blob,
         version: info.version || '',
       }

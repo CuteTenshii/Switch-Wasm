@@ -14,9 +14,13 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 - Call browser APIs from Rust through `js_sys` and `web_sys` instead of hand-written JS glue, to avoid needless JS/wasm round trips.
 
+## Mobile
+
+- Mobile support: layout, touch controls and performance on phones and tablets.
+- iOS greys out every file in the picker, `.nro` included, with the extension-only `accept` lists in `web/index.html`.
+
 ## Open gaps
 
 - `npns:s` cmd 3 (Receive) is refused; qlaunch polls it constantly. Needs the empty-queue result from switchbrew.
 - `ssl:s` cmd 5 is stubbed and the `ssl:s` name is not routed like `ssl`.
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
-- The title icon gets two object URLs for one Blob (`web/main/container.ts` and `web/main/title.ts`), so the browser fetches it twice.

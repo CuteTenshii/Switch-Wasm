@@ -1,5 +1,6 @@
 // The running title, shown on the top bar and in the tab.
 import { $ } from './dom';
+import { holdUrl, releaseUrl } from './objecturl';
 
 export interface RunningTitle {
   name: string;
@@ -17,13 +18,14 @@ const versionEl = $('running-version');
 const PAGE_TITLE = document.title;
 const SHORT_TITLE = PAGE_TITLE.split(' - ')[0];
 
-// Owned here: `container.ts` revokes its own URL when another container opens.
+let icon: Blob | null = null;
 let iconUrl: string | null = null;
 
 // Pass `null` when the session is discarded.
 export function setRunning(title: RunningTitle | null): void {
-  if (iconUrl) URL.revokeObjectURL(iconUrl);
-  iconUrl = title?.icon ? URL.createObjectURL(title.icon) : null;
+  if (icon) releaseUrl(icon);
+  icon = title?.icon ?? null;
+  iconUrl = icon ? holdUrl(icon) : null;
   rootEl.hidden = !title;
   rootEl.title = title
     ? title.name + (title.version ? ' - v' + title.version : '')
