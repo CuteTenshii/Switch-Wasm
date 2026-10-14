@@ -130,6 +130,7 @@ impl Cpu {
     ) -> u64 {
         self.ensure_main_thread();
         let handle = self.alloc_handle();
+        self.grant_handle(handle);
         let index = self.process().threads.len() as u32;
         let tls = THREAD_TLS_BASE + index * THREAD_TLS_STRIDE;
         let _ = self.mem.map_zero(tls, THREAD_TLS_STRIDE as usize);

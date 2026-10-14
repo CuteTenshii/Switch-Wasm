@@ -2,6 +2,7 @@
 
 pub(crate) mod boot;
 pub(crate) mod events;
+pub(crate) mod handles;
 pub(crate) mod ipc;
 pub(crate) mod layout;
 pub(crate) mod machine;

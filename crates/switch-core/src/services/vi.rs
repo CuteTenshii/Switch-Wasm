@@ -75,7 +75,7 @@ impl Cpu {
                     Some(103) => self.vi_out_session(tls, "vi:ihosbdind"),
                     // GetDisplayVsyncEvent: a copy handle, signalled per presented frame.
                     Some(5202) => {
-                        let h = self.alloc_event("vi:vsync", true);
+                        let h = self.alloc_console_event("vi:vsync", true);
                         self.vsync_event = Some(h);
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
@@ -115,7 +115,7 @@ impl Cpu {
                     }
                     // GetDisplayVsyncEvent: a copy handle, signalled per presented frame.
                     Some(5202) => {
-                        let h = self.alloc_event("vi:vsync", true);
+                        let h = self.alloc_console_event("vi:vsync", true);
                         self.vsync_event = Some(h);
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
@@ -496,7 +496,7 @@ impl Cpu {
         match self.binder_event {
             Some(h) => h,
             None => {
-                let h = self.alloc_event("vi:binder", false);
+                let h = self.alloc_console_event("vi:binder", false);
                 self.signal_event(h);
                 self.binder_event = Some(h);
                 h

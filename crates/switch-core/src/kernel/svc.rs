@@ -25,7 +25,6 @@ impl Cpu {
     /// X0 carries the Result; out-handles and values come back in X1.
     pub(crate) fn horizon_syscall(&mut self, imm: u16) -> Result<()> {
         const RESULT_OK: u64 = 0;
-        const FAKE_HANDLE: u64 = 0x1000;
         const RESULT_INVALID_MEMORY_RANGE: u64 = 0x8000_DC01;
         // Kernel (module 1) description 114: invalid handle.
         const RESULT_INVALID_HANDLE: u64 = 1 | (114 << 9);
@@ -485,8 +484,14 @@ impl Cpu {
                 self.write_zr(0, result);
                 Ok(())
             }
-            0x16 | 0x17 | 0x28 | 0x5F => {
-                // CloseHandle / CancelSynchronization / ReturnFromException / FlushProcessDataCache
+            0x16 => {
+                // CloseHandle(handle)
+                self.close_handle(self.read_zr(0));
+                self.write_zr(0, RESULT_OK);
+                Ok(())
+            }
+            0x17 | 0x28 | 0x5F => {
+                // CancelSynchronization / ReturnFromException / FlushProcessDataCache
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
@@ -523,9 +528,11 @@ impl Cpu {
                 Ok(())
             }
             0x15 => {
-                // CreateTransferMemory
+                // CreateTransferMemory: a handle of its own, as nothing models the object.
+                let handle = self.alloc_handle();
+                self.grant_handle(handle);
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, FAKE_HANDLE);
+                self.write_zr(1, handle);
                 Ok(())
             }
             0x18 => {
@@ -631,6 +638,7 @@ impl Cpu {
                 };
                 let handle = self.alloc_handle();
                 self.record_handle(handle, &name);
+                self.grant_handle(handle);
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, handle);
                 Ok(())

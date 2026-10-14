@@ -365,6 +365,9 @@ impl Cpu {
         domain_objects: &[u32],
     ) -> Result<()> {
         self.last_ipc_result = Some(result);
+        for &handle in copy_handles.iter().chain(move_handles) {
+            self.grant_handle(handle);
+        }
         if result != 0 && crate::trace::enabled(crate::trace::Trace::Ipc) {
             let module = result & 0x1FF;
             let description = (result >> 9) & 0x1FFF;

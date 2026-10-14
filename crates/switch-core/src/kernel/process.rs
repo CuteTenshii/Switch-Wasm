@@ -23,6 +23,8 @@ pub(crate) const ROOT_PID: u64 = 1;
 #[derive(Debug)]
 pub(crate) struct Process {
     pub(crate) mem: AddressSpace,
+    /// The handles it holds, with how many copies of each.
+    pub(crate) handles: BTreeMap<u64, u32>,
     /// For a library applet: the process that started it and the accessor it answers through.
     pub(crate) caller: Option<(u64, u64)>,
     /// The last `fatal:u` report, kept to classify a later `ExitProcess` as a crash.
@@ -149,6 +151,7 @@ impl Process {
     pub(crate) fn new(mem: AddressSpace) -> Self {
         Self {
             mem,
+            handles: BTreeMap::from([(MAIN_THREAD_HANDLE, 1)]),
             caller: None,
             guest_fatal: None,
             applet_messages: VecDeque::new(),
@@ -262,7 +265,8 @@ impl Cpu {
                 return;
             }
         }
-        self.machine.processes.remove(&pid);
+        let ended = self.machine.processes.remove(&pid).expect("checked above");
+        self.release_handles(ended.handles.into_keys());
         self.forget_translations(pid);
         self.machine.nv.close_process(pid);
         self.machine.nv.gpu.remove_layer(pid);

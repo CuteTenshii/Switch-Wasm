@@ -11,6 +11,8 @@ pub(crate) struct Event {
     pub(crate) signaled: bool,
     /// Whether a successful wait consumes the signal (auto-clear).
     pub(crate) auto_clear: bool,
+    /// The process it was made for; `None` for the console's own.
+    pub(crate) owner: Option<u64>,
 }
 
 /// The AM messages queued for the running applet.
@@ -31,8 +33,17 @@ pub(crate) enum AppletMessage {
 }
 
 impl Cpu {
-    /// Allocate an event handle; it must reach the guest as a copy handle.
+    /// Allocate an event for the running process; it must reach the guest as a copy handle.
     pub(crate) fn alloc_event(&mut self, name: &'static str, auto_clear: bool) -> u64 {
+        self.insert_event(name, auto_clear, Some(self.pid))
+    }
+
+    /// An event the console keeps for every process, which outlives any of them.
+    pub(crate) fn alloc_console_event(&mut self, name: &'static str, auto_clear: bool) -> u64 {
+        self.insert_event(name, auto_clear, None)
+    }
+
+    fn insert_event(&mut self, name: &'static str, auto_clear: bool, owner: Option<u64>) -> u64 {
         let handle = self.alloc_handle();
         self.events.insert(
             handle,
@@ -40,6 +51,7 @@ impl Cpu {
                 name,
                 signaled: false,
                 auto_clear,
+                owner,
             },
         );
         if crate::trace::enabled(crate::trace::Trace::Wait) {

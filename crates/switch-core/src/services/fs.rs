@@ -714,7 +714,7 @@ impl Cpu {
                 let event = match self.fs_detection_events.get(&slot) {
                     Some(&event) => event,
                     None => {
-                        let event = self.alloc_event(name, false);
+                        let event = self.alloc_console_event(name, false);
                         self.fs_detection_events.insert(slot, event);
                         event
                     }

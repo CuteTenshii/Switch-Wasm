@@ -262,7 +262,7 @@ impl Cpu {
                 let h = match self.application_record_event {
                     Some(h) => h,
                     None => {
-                        let h = self.alloc_event("ns:record-update", false);
+                        let h = self.alloc_console_event("ns:record-update", false);
                         self.application_record_event = Some(h);
                         h
                     }
@@ -295,7 +295,7 @@ impl Cpu {
                             52 => "ns:gamecard-update",
                             _ => "ns:gamecard-mount-failure",
                         };
-                        let h = self.alloc_event(name, false);
+                        let h = self.alloc_console_event(name, false);
                         self.ns_manager_events.insert(cmd, h);
                         h
                     }

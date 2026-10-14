@@ -70,7 +70,7 @@ impl Cpu {
                     let event = match self.npad_style_update_event {
                         Some(event) => event,
                         None => {
-                            let event = self.alloc_event("hid:npad-style-update", true);
+                            let event = self.alloc_console_event("hid:npad-style-update", true);
                             self.npad_style_update_event = Some(event);
                             event
                         }
