@@ -46,12 +46,21 @@ export function titleBooted(): boolean {
 export interface Recycle {
   // Re-open the container the Files panel shows; supplied by the caller to avoid an import cycle.
   reopen?: () => Promise<void>;
-  // Rebuild even if nothing has been booted, as Reset wants.
+  // Rebuild even if nothing has been booted, as Stop wants.
   force?: boolean;
 }
 
+// The rebuild in flight; the next one waits for it, so a boot never lands mid-rebuild.
+let rebuilding: Promise<void> = Promise.resolve();
+
 // Replace the running session, restaging everything it was given. Throws on failure.
-export async function recycleSession({ reopen, force = false }: Recycle = {}): Promise<void> {
+export function recycleSession(options: Recycle = {}): Promise<void> {
+  const next = rebuilding.then(() => recycle(options));
+  rebuilding = next.catch(() => undefined);
+  return next;
+}
+
+async function recycle({ reopen, force = false }: Recycle): Promise<void> {
   if (!booted && !force) return;
   booted = false;
   abortRun();

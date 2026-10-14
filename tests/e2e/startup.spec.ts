@@ -110,3 +110,20 @@ test('the translation section counts the blocks a program ran', async ({ page })
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await expect(page.locator('#jit-translated')).toHaveText(/^[1-9][\d,.]*[MBT]?$/);
 });
+
+test('Stop ends a running program without a loading screen, and the next boot runs', async ({ page }) => {
+  await openPage(page);
+  const stop = page.locator('#btn-stop');
+  await expect(stop).toBeDisabled();
+  // b .
+  await bootElf(page, aarch64Elf([0x14000000]));
+  await expect(stop).toBeEnabled();
+  await stop.click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'idle');
+  await expect(page.locator('#loading')).toBeHidden();
+  await expect(stop).toBeDisabled();
+
+  await bootElf(page, aarch64Elf([0xd4000001]));
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
+  await expect(page.locator('#console .error')).toHaveCount(0);
+});

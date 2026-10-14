@@ -308,7 +308,7 @@ function renderRow(profile: Profile): HTMLElement {
       const del = el('button', 'btn small ghost danger', 'Delete');
       del.type = 'button';
       del.disabled = locked;
-      if (locked) del.title = 'Reset the console to delete the profile the running title is playing as';
+      if (locked) del.title = 'Stop the title to delete the profile the running title is playing as';
       del.addEventListener('click', () => {
         confirming = profile.uid;
         renaming = null;

@@ -67,7 +67,7 @@ onLoopEvents({
 async function onSlice(report: SliceReport): Promise<void> {
   countEmulation(report.ms);
   recordRunSlice(report.ms);
-  // Reset does not wait for the slice in flight, so the session may be gone.
+  // Stop does not wait for the slice in flight, so the session may be gone.
   if (aborted) return;
   noteAudio(report.audioFormat);
   if (report.housekeeping) applyHousekeeping(report.housekeeping);
@@ -93,7 +93,7 @@ function applyHousekeeping(h: Housekeeping): void {
 
 async function onFailed(error: string): Promise<void> {
   loopEnded();
-  // A failure after a reset is expected; anything else is reported.
+  // A failure after Stop is expected; anything else is reported.
   if (aborted) return;
   setState('fault');
   // A panic traps as `unreachable`; `switch_last_error` recovers its message.
@@ -127,11 +127,11 @@ async function reportPanicContext(): Promise<void> {
       log(`The module could not be asked for its ${what}.`);
     }
   }
-  log('Take a crash report from the debug panel before resetting - a reset is what loses this.',
+  log('Take a crash report from the debug panel before stopping - Stop is what loses this.',
     'warn');
 }
 
-// Stops the loop for Reset without waiting for the slice; freeing the session ends it.
+// Stops the loop for Stop without waiting for the slice; freeing the session ends it.
 export function abortRun(): void {
   aborted = true;
   running = false;

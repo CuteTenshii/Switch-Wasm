@@ -1,5 +1,5 @@
 // switch-wasm browser frontend entry: starts the worker, restores a session
-// and wires Reset.
+// and wires Stop.
 
 import { resetAudio } from './audio';
 import { watchBattery } from './battery';
@@ -17,7 +17,7 @@ import { screenEl, setState, showOverlay } from './shell';
 import { reopenContainer } from './container';
 import { recycleSession, stageFont } from './session';
 import { setRunning } from './title';
-import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
+import { endLoad, failLoad, loadPhase } from './loading';
 
 // Imported for their side effects: each binds its own part of the page.
 import './boot';
@@ -62,26 +62,24 @@ async function init(): Promise<void> {
   endLoad();
 }
 
-$('btn-reset').addEventListener('click', async () => {
-  // `recycleSession` stops the run and disowns the session first.
-  beginLoad('resetting', 'freeing the session');
-  try {
-    // `force`: a new console even if nothing booted.
-    await recycleSession({ reopen: reopenContainer, force: true });
-  } catch (err) {
-    failLoad('The session could not be rebuilt: ' + (err as Error).message);
-    log('Reset failed: ' + (err as Error).message, 'error');
-    return;
-  }
+$('btn-stop').addEventListener('click', async () => {
+  // Stops the run and disowns the session before any slice report is handled.
+  const rebuilt = recycleSession({ reopen: reopenContainer, force: true });
+  endLoad();
   resetAudio();
   clearConsole();
   resetDisplay();
   setRunning(null);
   setState('idle');
   showOverlay(true);
+  try {
+    await rebuilt;
+  } catch (err) {
+    log('Stop failed: ' + (err as Error).message, 'error');
+    return;
+  }
   await call('clear_screen');
   await updateReadouts();
-  endLoad();
 });
 
 watchBattery();

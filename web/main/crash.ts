@@ -31,9 +31,9 @@ export function hideCrash(): void {
 saveEl.addEventListener('click', saveLog);
 
 $('crash-console').addEventListener('click', () => openPanel('console'));
-$('crash-reset').addEventListener('click', () => {
-  const resetEl = $<HTMLButtonElement>('btn-reset');
+$('crash-stop').addEventListener('click', () => {
+  const stopEl = $<HTMLButtonElement>('btn-stop');
   hideCrash();
-  resetEl.focus();
-  resetEl.click();
+  stopEl.focus();
+  stopEl.click();
 });

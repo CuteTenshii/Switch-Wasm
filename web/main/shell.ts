@@ -14,6 +14,7 @@ const runEl = $<HTMLButtonElement>('btn-run');
 // Readouts that mean nothing without a program.
 const programItems = ['instructions-item', 'res-item'].map((id) => $(id));
 const stepEl = $<HTMLButtonElement>('btn-step');
+const stopEl = $<HTMLButtonElement>('btn-stop');
 
 // The run state, also on `<body data-state>` for the page tests.
 export type EmuState = 'idle' | 'loading' | 'loaded' | 'running' | 'paused' | 'halted' | 'fault';
@@ -31,6 +32,7 @@ export function setState(text: EmuState): void {
   for (const item of programItems) item.hidden = !loaded();
   runEl.disabled = !loaded();
   stepEl.disabled = !loaded();
+  stopEl.disabled = !loaded();
 }
 
 setState('idle');

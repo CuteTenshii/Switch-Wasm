@@ -110,7 +110,7 @@ actual browser run, not just host tests.
   the `ByteSource` range-reading stack and per-file caching.
 - Do not retain typed-array views across operations that can grow WebAssembly
   memory. Free staging buffers after use.
-- Reset must invalidate the main-thread session before the worker frees the
+- Stop must invalidate the main-thread session before the worker frees the
   handle, and an aborted run slice must not call into a freed session.
 - Browser GPU work must not synchronously wait for promises. Unsupported GPU
   behavior falls back to the software renderer, and renderer changes must be

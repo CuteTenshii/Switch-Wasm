@@ -627,7 +627,7 @@ export async function doLaunchNca(
   } catch (err) {
     setState('fault');
     failLoad('The session could not be replaced: ' + (err as Error).message);
-    log('Reset before launch failed: ' + (err as Error).message, 'error');
+    log('A new console could not be prepared for the launch: ' + (err as Error).message, 'error');
     return;
   }
   let entry: number;

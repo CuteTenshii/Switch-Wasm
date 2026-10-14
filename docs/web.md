@@ -6,7 +6,7 @@ The page, the worker, and the wasm bindings between them.
 
 - Exports are `extern "C"` taking pointers JS owns for the call; marking them `unsafe fn` would not help a JS caller, hence `#![allow(clippy::not_unsafe_ptr_arg_deref)]`.
 - The session table uses `SyncCell` (an `UnsafeCell`), not `Mutex`: a reentrant `lock()` deadlocks and a panic while held leaves it locked. It is sound only because one worker calls exports; the core workers on the shared memory only instantiate. Host tests serialize on a `HOST` mutex because `cargo test` is multi-threaded, and a panic crossing `extern "C"` aborts the harness.
-- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing (so do `switch_new` and `switch_alloc`), so panics before the first session are captured instead of trapping as bare `unreachable`. Panic and trace state is cleared on each new session, otherwise the first error after Reset described the dead session.
+- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing (so do `switch_new` and `switch_alloc`), so panics before the first session are captured instead of trapping as bare `unreachable`. Panic and trace state is cleared on each new session, otherwise the first error after Stop described the dead session.
 - With the `gpu` feature the host read is a wasm-bindgen import (`@host/files`, resolved by Vite) because wasm-bindgen owns the whole import object.
 - `switch_alloc` returns null rather than trapping for sizes above `isize::MAX` (2 GiB on wasm32).
 - `nul_reserved`: the terminating NUL takes a byte of the buffer, not of the message.
@@ -70,7 +70,7 @@ The page, the worker, and the wasm bindings between them.
 ## `web/main/session.ts`
 
 - A session is a whole console (RAM, threads, handles) and nothing is cleared per title, so every boot recycles the session first. Loading into the running session left the previous title's pages mapped (hundreds of MiB for retail), and after a few swaps guest RAM hit the cap and failed inside unrelated code.
-- `recycleSession` invalidates the main-thread session (`setSession(-1)`) before posting the free so timers stop immediately, then restages font, SD card, saves, controls, users, keys, then archives and library applets (both need keys). A never-booted session is not recycled unless forced (Reset). `reopen` is passed by the caller to avoid a `container.ts` import cycle.
+- `recycleSession` invalidates the main-thread session (`setSession(-1)`) before posting the free so timers stop immediately, then restages font, SD card, saves, controls, users, keys, then archives and library applets (both need keys). A never-booted session is not recycled unless forced (Stop). Rebuilds run one at a time, so a boot started while Stop rebuilds in the background waits for it. `reopen` is passed by the caller to avoid a `container.ts` import cycle.
 
 ## `web/main/index.ts`, `boot.ts`, `dock.ts`, `wakelock.ts`
 
@@ -84,7 +84,7 @@ The page, the worker, and the wasm bindings between them.
 
 - The worker runs the loop: slices back to back, each queued as a `MessageChannel` task so input and commands still get in between them (a `setTimeout` chain is clamped to 4 ms). Slices are sized by wall time to about one display frame.
 - After each slice the worker posts one report: steps, timing, frame count and size, audio format, and every 8 slices the housekeeping (readouts, guest output, diagnostics, whether the SD card, saves or profiles changed, keyboard and error dialogs). The page reacts and polls nothing; it reads file contents only when told they changed.
-- Run starts the loop and Pause asks it to stop after the slice in flight. Freeing the session stops it, and the page ignores reports that arrive after a reset.
+- Run starts the loop and Pause asks it to stop after the slice in flight. Freeing the session stops it, and the page ignores reports that arrive after Stop.
 - The release profile aborts on panic, which on wasm is an empty `unreachable` trap; the panic hook stores the message and `switch_last_error` returns it without a live session. Linear memory survives the trap, so panic context is collected afterwards, each piece separately.
 - The status bar shows instructions retired, not the guest clock, which jumps forward when all threads are blocked.
 
@@ -101,7 +101,7 @@ The page, the worker, and the wasm bindings between them.
 
 - Updates are paired, not opened: an update's Program NCA has the patched modules in full but its RomFS is ranges indexed against the base game's. A held update waits until its title is open and is applied at Launch. Pairing lives in the page because the session refuses to launch a container whose update is for another title, and a held update for another game must not make the open one unlaunchable. Add-on content is always handed to the session (a title mounts what is numbered against it).
 - The page remembers (localStorage `switch-wasm:updates` / `switch-wasm:dlc`) which update or DLC a title last ran with, since files do not survive a reload, so it can say so instead of launching unpatched silently.
-- Reset re-hands the open container to the new session; the page still shows it, so "no container is open" would be wrong.
+- Stop re-hands the open container to the new session; the page still shows it, so "no container is open" would be wrong.
 - NSP files are named by hash, so the boot finds the Program NCA by content type. XCI partitions are flattened by the wasm side, so the page treats them like NSPs.
 - Without prod.keys the Control NCA cannot be identified (content type is in the encrypted header); a container without one (update or DLC) is a dim note, not an error.
 

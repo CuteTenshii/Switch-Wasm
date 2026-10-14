@@ -162,7 +162,7 @@ screenEl.addEventListener('pointerup', liftTouch);
 screenEl.addEventListener('pointercancel', liftTouch);
 
 function pushInput(): void {
-  // Reset frees the session first; swallow rejections from these fire-and-forget calls.
+  // Stop frees the session first; swallow rejections from these fire-and-forget calls.
   if (!isReady() || !hasSession()) return;
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   const pad = pads.find((p) => p && p.connected);

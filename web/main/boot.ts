@@ -111,7 +111,7 @@ async function replaceSession(name: string): Promise<boolean> {
   } catch (err) {
     setState('fault');
     failLoad('The session could not be replaced: ' + (err as Error).message);
-    log('Reset before boot failed: ' + (err as Error).message, 'error');
+    log('A new console could not be prepared for the boot: ' + (err as Error).message, 'error');
     return false;
   }
 }
