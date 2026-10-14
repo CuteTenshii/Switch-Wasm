@@ -11,7 +11,8 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Browser bindings
 
-- Call browser APIs from Rust through `js_sys` and `web_sys` instead of hand-written JS glue, to avoid needless JS/wasm round trips.
+- Write SD-card and save changes to IndexedDB from the worker, which has IndexedDB, instead of the page asking the worker for each changed file.
+- Stretch audio when emulation runs below full speed, so it plays slowed down rather than in bursts with gaps.
 
 ## Mobile
 
