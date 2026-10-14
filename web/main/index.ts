@@ -25,6 +25,14 @@ import './dock';
 import './files';
 import './input';
 
+// iOS greys out every file whose extension it has no type for, which is all of ours.
+// iPadOS reports itself as a Mac, told apart by its touchscreen.
+const ios = /iPhone|iPad|iPod/.test(navigator.userAgent)
+  || (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1);
+if (ios) {
+  for (const input of document.querySelectorAll('input[type=file][accept^="."]')) input.removeAttribute('accept');
+}
+
 // Diagnostic channels record only at debug log level.
 onLogLevel((level) => void call('set_trace_channels', level === 'debug'));
 

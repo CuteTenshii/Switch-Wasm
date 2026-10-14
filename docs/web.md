@@ -108,6 +108,7 @@ The page, the worker, and the wasm bindings between them.
 ## `web/main/filetype.ts`
 
 - `accept` on an input is defeated by the picker's "All files" option and ignored by drops, so files are identified by header, not name. CDN NCAs are the exception: their header is encrypted until keys are loaded.
+- iOS greys out every file whose extension it has no type for, which is all of ours, so on iPhone and iPad (iPadOS reports a Mac with a touchscreen) `index.ts` removes the extension `accept` lists at startup.
 - Keys files are validated as `name = hex` lines so a binary picked by mistake is not stored as keys.
 
 ## `web/main/nand.ts`

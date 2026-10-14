@@ -127,3 +127,17 @@ test('Stop ends a running program without a loading screen, and the next boot ru
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await expect(page.locator('#console .error')).toHaveCount(0);
 });
+
+test.describe('on iOS', () => {
+  test.use({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1' });
+
+  test('file pickers take any file, since iOS greys out unknown extensions', async ({ page }) => {
+    await openPage(page);
+    await expect(page.locator('input[type=file][accept^="."]')).toHaveCount(0);
+  });
+});
+
+test('file pickers elsewhere keep their extension filter', async ({ page }) => {
+  await openPage(page);
+  await expect(page.locator('#nro-file')).toHaveAttribute('accept', /\.nsp/);
+});

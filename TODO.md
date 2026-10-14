@@ -16,7 +16,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 ## Mobile
 
 - Mobile support: layout, touch controls and performance on phones and tablets.
-- iOS greys out every file in the picker, `.nro` included, with the extension-only `accept` lists in `web/index.html`.
 
 ## Open gaps
 
