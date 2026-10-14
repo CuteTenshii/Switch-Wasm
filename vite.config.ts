@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { fileURLToPath, URL } from 'node:url';
-import { defineConfig } from 'vite';
+import { minify } from 'html-minifier-terser';
+import { defineConfig, type Plugin } from 'vite';
 
 // Frontend build: `web/` is the root, `web/public` is copied verbatim.
 
@@ -26,7 +27,25 @@ function buildId(): string {
   }
 }
 
+// Vite minifies scripts and styles but leaves `index.html` as written.
+const minifyHtml: Plugin = {
+  name: 'minify-html',
+  apply: 'build',
+  transformIndexHtml: {
+    order: 'post',
+    handler: (html) => minify(html, {
+      collapseWhitespace: true,
+      conservativeCollapse: true,
+      removeComments: true,
+      removeRedundantAttributes: true,
+      minifyCSS: true,
+      minifyJS: true,
+    }),
+  },
+};
+
 export default defineConfig(({ command }) => ({
+  plugins: [minifyHtml],
   define: { __BUILD__: JSON.stringify(buildId()) },
   root: 'web',
   // Relative: the site is published below a host path.
