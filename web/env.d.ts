@@ -15,6 +15,10 @@ declare module '@core/switch_wasm.js' {
   export function initSync(
     options: { module: WebAssembly.Module; memory: WebAssembly.Memory },
   ): Record<string, unknown>;
+  // `crates/switch-wasm/src/screen.rs`; the first throws when the canvas has no 2d context.
+  export function switch_attach_screen(canvas: OffscreenCanvas): void;
+  export function switch_present(handle: number): boolean;
+  export function switch_clear_screen(): void;
 }
 
 // The commit the site was built from; see `vite.config.ts`.

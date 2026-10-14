@@ -27,6 +27,8 @@ mod gpu;
 mod heap;
 #[cfg(all(feature = "jit", target_arch = "wasm32"))]
 mod jit;
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+mod screen;
 
 mod applets;
 mod audio;

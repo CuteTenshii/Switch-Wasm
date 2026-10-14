@@ -8,6 +8,7 @@ import { fmtSize } from '../shared/format';
 import { noteRegistered, resetActivity } from './activity';
 import { addHostFile, openHostFile, resetHostFiles } from './hostfiles';
 import { workerLog } from './log';
+import { switch_clear_screen } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
@@ -312,6 +313,10 @@ export const CMD: CommandHandlers = {
   },
   pause_loop() {
     pauseLoop();
+    return 0;
+  },
+  clear_screen() {
+    switch_clear_screen();
     return 0;
   },
   halted() {

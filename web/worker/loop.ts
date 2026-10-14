@@ -4,6 +4,7 @@ import type { ErrorDialog, Housekeeping, SliceReport, WorkerMessage } from '../s
 import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
+import { switch_present } from '@core/switch_wasm.js';
 import { api, state } from './wasm';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -74,6 +75,7 @@ function slice(): void {
   const stopped = done || pauseRequested;
   tryGpu();
   reportActivity(done);
+  const paintMs = paint();
 
   const audio = pullAudio();
   const report: SliceReport = {
@@ -82,6 +84,9 @@ function slice(): void {
     ms,
     stopped,
     frame: api().switch_frame_count(state.handle),
+    width: api().switch_fb_width(state.handle),
+    height: api().switch_fb_height(state.handle),
+    paintMs,
     audio,
     housekeeping: stopped || ++tick % HOUSEKEEPING_EVERY === 0 ? housekeeping() : null,
   };
@@ -96,6 +101,12 @@ function slice(): void {
     return;
   }
   wake.port2.postMessage(null);
+}
+
+// Paint a new frame on the page's canvas; how long it took, or null if there was none.
+export function paint(): number | null {
+  const at = performance.now();
+  return switch_present(state.handle) ? performance.now() - at : null;
 }
 
 function pullAudio(): SliceReport['audio'] {

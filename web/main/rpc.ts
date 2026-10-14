@@ -97,6 +97,11 @@ export function initWorker(): void {
   };
 }
 
+// Give the worker the canvas; it paints every frame from then on.
+export function attachScreen(canvas: OffscreenCanvas): void {
+  worker?.postMessage({ type: 'screen', canvas }, [canvas]);
+}
+
 export async function readLastError(): Promise<string> {
   return await call('last_error');
 }

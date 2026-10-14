@@ -3,15 +3,12 @@
 import { Maximize, PanelRight, X } from 'lucide';
 import { $ } from './dom';
 import { icon } from './icons';
+import { call } from './rpc';
 
 export const stageEl = $('stage');
 export const screenEl = $<HTMLCanvasElement>('screen');
 export const overlayEl = $('overlay');
 export const dropveilEl = $('dropveil');
-
-const ctx = screenEl.getContext('2d', { alpha: false });
-if (!ctx) throw new Error('this browser has no 2d canvas context');
-export const screenCtx = ctx;
 
 const runEl = $<HTMLButtonElement>('btn-run');
 // Readouts that mean nothing without a program.
@@ -42,9 +39,9 @@ export function showOverlay(show: boolean): void {
   overlayEl.classList.toggle('hidden', !show);
 }
 
-// Uncover the canvas and blank it (black, since the context is alpha-less).
+// Uncover the canvas and blank it; the worker paints it.
 export function showScreen(): void {
-  screenCtx.clearRect(0, 0, screenEl.width, screenEl.height);
+  void call('clear_screen');
   showOverlay(false);
 }
 

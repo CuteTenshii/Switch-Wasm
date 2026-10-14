@@ -5,7 +5,7 @@ import type { Housekeeping, SliceReport } from '../shared/protocol';
 import { playAudio } from './audio';
 import { showEmulatorCrash, showGuestCrash } from './crash';
 import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
-import { abortDisplay, countEmulation, flushDisplay, schedulePresentIfNewFrame } from './display';
+import { countEmulation, noteFrame } from './display';
 import { recordRunSlice } from './display-metrics';
 import { $ } from './dom';
 import { fmtCount } from '../shared/format';
@@ -73,13 +73,12 @@ async function onSlice(report: SliceReport): Promise<void> {
   if (aborted) return;
   if (report.audio) void playAudio(report.audio);
   if (report.housekeeping) applyHousekeeping(report.housekeeping);
-  schedulePresentIfNewFrame();
+  noteFrame(report);
   if (!report.stopped) return;
   loopEnded();
   if (report.steps >= 0 && report.steps >= report.budget) {
     endLoad();
     setState('paused');
-    await flushDisplay();
     return;
   }
   await finishRun(report.steps);
@@ -140,7 +139,6 @@ async function reportPanicContext(): Promise<void> {
 export function abortRun(): void {
   aborted = true;
   running = false;
-  abortDisplay();
   dropKeyboard();
   dropErrors();
   setRunButton(false);
@@ -223,7 +221,7 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     showGuestCrash('The guest stopped unexpectedly.');
   }
   await Promise.all([
-    drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), flushDisplay(), updateReadouts(),
+    drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), updateReadouts(),
   ]);
 }
 

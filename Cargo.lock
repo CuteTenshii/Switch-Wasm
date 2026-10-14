@@ -776,6 +776,7 @@ dependencies = [
  "switch-gpu",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

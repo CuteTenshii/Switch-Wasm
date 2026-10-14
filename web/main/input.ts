@@ -4,6 +4,7 @@ import { $ } from './dom';
 import { log } from './log';
 import { call, hasSession, isReady } from './rpc';
 import { pullVibration } from './rumble';
+import { screenSize } from './display';
 import { screenEl } from './shell';
 
 // HidNpadButton bits, in Horizon's order.
@@ -101,7 +102,7 @@ function claimTouchSlot(): number {
 // Map through the `object-fit: contain` rect; null for a tap on the letterbox.
 function touchAt(e: PointerEvent): { x: number; y: number } | null {
   const rect = screenEl.getBoundingClientRect();
-  const iw = screenEl.width, ih = screenEl.height;
+  const { width: iw, height: ih } = screenSize();
   if (!iw || !ih || !rect.width || !rect.height) return null;
   const scale = Math.min(rect.width / iw, rect.height / ih);
   const dw = iw * scale, dh = ih * scale;

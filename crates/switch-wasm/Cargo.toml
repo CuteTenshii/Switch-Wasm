@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 [features]
 default = []
 # WebGPU backend; makes the artifact a wasm-bindgen module.
-gpu = ["dep:switch-gpu", "dep:wasm-bindgen-futures", "jit"]
+gpu = ["dep:switch-gpu", "dep:wasm-bindgen-futures", "dep:web-sys", "jit"]
 
 # Compile and run the core's emitted wasm instead of interpreting it.
 jit = ["dep:wasm-bindgen", "dep:js-sys"]
@@ -38,6 +38,11 @@ optional = true
 [dependencies.js-sys]
 version = "0.3"
 optional = true
+
+[dependencies.web-sys]
+version = "0.3"
+optional = true
+features = ["ImageData", "OffscreenCanvas", "OffscreenCanvasRenderingContext2d"]
 
 [lints]
 workspace = true

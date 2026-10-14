@@ -224,6 +224,7 @@ export interface Commands {
   // The worker runs slices itself until paused, halted or faulted, reporting each.
   start_loop(tracing: boolean): number;
   pause_loop(): number;
+  clear_screen(): number;
   halted(): number;
   guest_fatal(): string;
   drain_output(): Bytes;
@@ -316,6 +317,10 @@ export interface SliceReport {
   // The loop has ended: paused, halted or faulted.
   stopped: boolean;
   frame: number;
+  // The frame's size, and how long painting it took if this slice painted.
+  width: number;
+  height: number;
+  paintMs: number | null;
   audio: { rate: number; channels: number; pcm: Bytes } | null;
   housekeeping: Housekeeping | null;
 }

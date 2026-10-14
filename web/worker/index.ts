@@ -4,9 +4,10 @@
 import type { CallRequest, WorkerMessage } from '../shared/protocol';
 import { reportActivity } from './activity';
 import { CMD } from './commands';
+import { paint } from './loop';
 import { tryGpu } from './gpu';
 import { workerLog } from './log';
-import init from '@core/switch_wasm.js';
+import init, { switch_attach_screen } from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { state, type WasmExports } from './wasm';
 import type { CoreStart, CoreStarted } from './core';
@@ -19,12 +20,26 @@ function reply(message: WorkerMessage, transfer?: Transferable[]): void {
   else ctx.postMessage(message);
 }
 
+// The page's canvas, handed over once at startup.
+interface ScreenHandoff {
+  type: 'screen';
+  canvas: OffscreenCanvas;
+}
+
 // Commands valid with no session open.
 const SESSIONLESS = new Set([
-  'new', 'set_battery', 'last_error',
+  'new', 'set_battery', 'last_error', 'clear_screen',
 ]);
 
-ctx.onmessage = (e: MessageEvent<CallRequest>) => {
+ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
+  if ('type' in e.data) {
+    try {
+      switch_attach_screen(e.data.canvas);
+    } catch (err) {
+      workerLog('[display] the screen could not be attached: ' + String(err), 'err');
+    }
+    return;
+  }
   const { id, cmd, args } = e.data;
   try {
     const handler = CMD[cmd] as ((...a: unknown[]) => unknown) | undefined;
@@ -45,6 +60,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
       reply({ id, ok: true, result });
     }
     if (cmd === 'run') {
+      paint();
       tryGpu();
       reportActivity(stopped);
     }

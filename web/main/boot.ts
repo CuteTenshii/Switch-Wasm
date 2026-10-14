@@ -59,7 +59,7 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
   loadIdentity(title.name, runningIconUrl());
   noteBooted();
   setState('loaded');
-  // The loading screen stays over it until `display.renderFb` has a real frame.
+  // The loading screen stays over it until the first real frame (`display.noteFrame`).
   showScreen();
   awaitFirstFrame();
   await updateReadouts();

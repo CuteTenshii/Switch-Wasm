@@ -4,17 +4,17 @@
 import { resetAudio } from './audio';
 import { watchBattery } from './battery';
 import { controlRestore } from './controls';
-import { initFbSize, resetDisplay } from './display';
+import { resetDisplay } from './display';
 import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
 import { clearConsole, log, logLevel, offerPreviousLog, onLogLevel } from './log';
 import { initNand } from './nand';
-import { call, initWorker, setSession, whenReady } from './rpc';
+import { attachScreen, call, initWorker, setSession, whenReady } from './rpc';
 import { updateReadouts, updateRam } from './runloop';
 import { saveRestore } from './saves';
 import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence, sdRestore } from './sdcard';
-import { screenCtx, screenEl, setState, showOverlay } from './shell';
+import { screenEl, setState, showOverlay } from './shell';
 import { reopenContainer } from './container';
 import { recycleSession, stageFont } from './session';
 import { setRunning } from './title';
@@ -34,6 +34,8 @@ async function init(): Promise<void> {
   try {
     initWorker();
     await whenReady();
+    // The worker paints the screen from here on.
+    attachScreen(screenEl.transferControlToOffscreen());
     loadPhase('creating a session');
     setSession(await call('new'));
     loadPhase('restoring the SD card, saves, profiles and keys');
@@ -44,7 +46,6 @@ async function init(): Promise<void> {
       saveRestore(),
       controlRestore(),
       loadProfiles().then(stageUsers),
-      initFbSize(),
       offerPreviousLog(),
       call('set_trace_channels', logLevel() === 'debug'),
       hasKeys() ? stageKeys() : undefined,
@@ -79,7 +80,7 @@ $('btn-reset').addEventListener('click', async () => {
   setRunning(null);
   setState('idle');
   showOverlay(true);
-  screenCtx.clearRect(0, 0, screenEl.width, screenEl.height);
+  await call('clear_screen');
   await updateReadouts();
   endLoad();
 });

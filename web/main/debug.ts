@@ -180,9 +180,6 @@ const displayDebugSection = $<HTMLDetailsElement>('display-debug-section');
 
 const DISPLAY_TIMINGS: [keyof DisplayMetrics, string][] = [
   ['runSlice', 'slice'],
-  ['paintWait', 'paint'],
-  ['frameCounter', 'counter'],
-  ['snapshot', 'snapshot'],
   ['canvasWrite', 'canvas'],
 ];
 
@@ -195,7 +192,7 @@ function showTiming(name: string, sample: DisplayTiming): void {
 
 function updateDisplayDebug(): void {
   const metrics = displayMetrics();
-  const sampled = metrics.runSlice.count > 0 || metrics.frameCounter.count > 0;
+  const sampled = metrics.runSlice.count > 0;
   $('display-debug-empty').hidden = sampled;
   $('display-debug-data').hidden = !sampled;
   setNote(
@@ -207,8 +204,6 @@ function updateDisplayDebug(): void {
   $('display-guest-frames').textContent = String(metrics.guestFrames);
   $('display-canvas-updates').textContent = String(metrics.canvasUpdates);
   $('display-skipped-frames').textContent = String(metrics.skippedFrames);
-  $('display-merged-requests').textContent = String(metrics.mergedRequests);
-  $('display-snapshot-bytes').textContent = formatBytes(metrics.snapshotBytes);
   for (const [key, name] of DISPLAY_TIMINGS) {
     showTiming(name, metrics[key] as DisplayTiming);
   }
