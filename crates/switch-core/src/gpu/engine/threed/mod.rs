@@ -282,7 +282,7 @@ pub struct ScissorRect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CullState {
     pub enabled: bool,
-    /// Whether counter-clockwise winding (in NDC) is the front face.
+    /// Whether counter-clockwise winding in window space is the front face.
     pub front_ccw: bool,
     pub cull_front: bool,
     pub cull_back: bool,

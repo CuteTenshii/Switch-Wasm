@@ -23,7 +23,7 @@ let latchSlices = 0;
 const LATCH_FRAMES = 2;
 const MAX_LATCH_SLICES = 64;
 
-// Matches HID_STICK_THRESHOLD in cpu/mod.rs; a flick latches like a press.
+// Matches HID_STICK_THRESHOLD in services/input.rs; a flick latches like a press.
 const STICK_THRESHOLD = 0x4000;
 const deflected = (s: number[]) => s.some((v) => Math.abs(v) > STICK_THRESHOLD);
 

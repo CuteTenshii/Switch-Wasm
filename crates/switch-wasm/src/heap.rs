@@ -9,7 +9,7 @@ const GRANULARITY: usize = 4 << 20;
 
 struct Heap(UnsafeCell<Dlmalloc>);
 
-// SAFETY: the module is built without `atomics`, so there is only one thread.
+// SAFETY: only the system worker allocates after startup (core-worker start is a known race, see TODO.md).
 unsafe impl Sync for Heap {}
 
 #[global_allocator]
@@ -21,7 +21,7 @@ static HEAP: Heap = Heap(UnsafeCell::new(
     },
 ));
 
-// SAFETY: forwards to `Dlmalloc` with the caller's layout; single-threaded per `Sync` above.
+// SAFETY: forwards to `Dlmalloc` with the caller's layout; exclusive per `Sync` above.
 unsafe impl GlobalAlloc for Heap {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {

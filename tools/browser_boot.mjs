@@ -92,7 +92,7 @@ try {
     let sample;
     try {
       sample = await page.evaluate(() => ({
-        state: document.getElementById('state')?.textContent,
+        state: document.body.dataset.state,
         rows: document.getElementById('console')?.childElementCount ?? 0,
         last: document.getElementById('console')?.lastElementChild?.textContent ?? '',
       }));

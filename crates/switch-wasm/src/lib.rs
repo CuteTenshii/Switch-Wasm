@@ -8,7 +8,7 @@
 use std::alloc::{alloc, dealloc, Layout};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// A `Sync` wrapper for single-threaded interior mutability (wasm).
+/// A `Sync` wrapper for interior mutability touched only by the worker that calls exports.
 #[repr(transparent)]
 struct SyncCell<T>(std::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for SyncCell<T> {}
@@ -69,11 +69,10 @@ struct Session {
     last_error: String,
 }
 
-// Single-threaded wasm: every export runs to completion, so unsynchronized access is safe
-// (a `Mutex` would abort on reentry).
+// Only the system worker calls exports, each to completion; a `Mutex` would deadlock on reentry.
 static SESSIONS: SyncCell<Vec<Option<Session>>> = SyncCell::new(Vec::new());
 
-/// Last panic message, in a fixed buffer so the hook never allocates.
+/// Last panic message, in a fixed buffer readable without a live session.
 static PANIC_MSG: SyncCell<[u8; 2048]> = SyncCell::new([0u8; 2048]);
 
 /// The largest `n <= limit` at which `s` may be cut on a char boundary.
@@ -92,7 +91,7 @@ fn floor_char_boundary(s: &str, limit: usize) -> usize {
 static HANDLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn session(handle: u32) -> &'static mut Session {
-    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     let slots = unsafe { &mut *SESSIONS.get() };
     let len = slots.len();
     let slot = slots
@@ -104,7 +103,7 @@ fn session(handle: u32) -> &'static mut Session {
 
 fn new_handle(session: Session) -> u32 {
     let id = HANDLE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     let slots = unsafe { &mut *SESSIONS.get() };
     if id as usize >= slots.len() {
         slots.push(Some(session));
@@ -147,7 +146,7 @@ unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
     if file != 0 {
         return 0; // host builds serve only the container
     }
-    // SAFETY: single-threaded; host builds hold the test lock.
+    // SAFETY: only the system worker calls exports; host builds hold the test lock.
     let data = unsafe { &*HOST_CONTAINER.get() };
     if offset >= data.len() as u64 {
         return 0;
@@ -164,7 +163,7 @@ static HOST_CONTAINER: SyncCell<Vec<u8>> = SyncCell::new(Vec::new());
 /// Install the bytes host builds serve as the open container.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn set_host_container(data: Vec<u8>) {
-    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     unsafe { *HOST_CONTAINER.get() = data };
 }
 
@@ -262,7 +261,7 @@ fn install_panic_hook() {
     ONCE.call_once(|| {
         std::panic::set_hook(Box::new(|info| {
             let msg = format!("PANIC: {info}");
-            // SAFETY: single-threaded wasm; the hook runs once per panic.
+            // SAFETY: only the system worker runs guest code, so panics do not overlap.
             let guard = unsafe { &mut *PANIC_MSG.get() };
             // Truncate by character so the page's UTF-8 decoder gets a whole string.
             let n = floor_char_boundary(&msg, guard.len() - 1);
@@ -274,7 +273,7 @@ fn install_panic_hook() {
 
 /// Clear module-level state (panic message, pending traces) left by the previous session.
 fn forget_the_last_session() {
-    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     unsafe { &mut *PANIC_MSG.get() }.fill(0);
     // Drop traces the previous session left.
     let _ = switch_core::trace::take_pending();
@@ -305,7 +304,7 @@ pub extern "C" fn switch_new() -> u32 {
 /// Drop a machine.
 #[no_mangle]
 pub extern "C" fn switch_free_session(handle: u32) {
-    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     let slots = unsafe { &mut *SESSIONS.get() };
     if let Some(slot) = slots.get_mut(handle as usize) {
         *slot = None;
@@ -322,7 +321,7 @@ fn nul_reserved(maxlen: u32) -> usize {
 #[no_mangle]
 pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     // A captured panic takes priority and needs no valid handle.
-    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     let panicked = unsafe { &mut *PANIC_MSG.get() };
     if panicked[0] != 0 {
         let len = panicked

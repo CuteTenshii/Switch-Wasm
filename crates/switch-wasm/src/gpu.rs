@@ -7,7 +7,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// The prefix the worker matches on; the whole message when the adapter is unnamed.
 const RENDERING_ON: &str = "rendering on";
 
-/// Open a device and install the backend on session `handle`'s 3D channel,
+/// Open a device and install the backend on session `handle`'s `Gpu`,
 /// returning a message. `device_msaa` and `interleave` are the browser's
 /// `GPU_DEVICE_MSAA` and `GPU_INTERLEAVE`.
 #[wasm_bindgen]

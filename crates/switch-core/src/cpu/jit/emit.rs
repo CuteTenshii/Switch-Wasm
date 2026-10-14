@@ -146,16 +146,11 @@ impl Layout {
     }
 }
 
-/// Log2 bytes per page-table entry. An entry is an `Option<Box<_>>`, a bare
-/// pointer with `None` as null, and only `wasm32` runs emitted code.
+/// Log2 bytes per page-table entry, an `AtomicPtr` that is null when unmapped; only `wasm32` runs emitted code.
 const PAGE_ENTRY_SHIFT: i32 = 2;
-const _: () = assert!(
-    std::mem::size_of::<Option<Box<[u8; PAGE_SIZE]>>>() == std::mem::size_of::<*const u8>(),
-    "an unmapped page is emitted as a null entry, which needs Option<Box<_>> to be one pointer"
-);
 #[cfg(target_arch = "wasm32")]
 const _: () = assert!(
-    std::mem::size_of::<Option<Box<[u8; PAGE_SIZE]>>>() == 1 << PAGE_ENTRY_SHIFT,
+    std::mem::size_of::<std::sync::atomic::AtomicPtr<[u8; PAGE_SIZE]>>() == 1 << PAGE_ENTRY_SHIFT,
     "emitted code indexes the page table by this shift, so it has to be the entry's size"
 );
 
@@ -176,7 +171,7 @@ pub enum Refused {
 }
 
 /// Set in `run`'s result when the region left at a taken branch; the guest `pc`
-/// holds the target. A block never spans a page, so counts stay below 1,024.
+/// holds the target. A block retires at most `MAX_WHOLE`, so counts fit `COUNT_MASK`.
 pub const LEFT: u32 = 1 << 31;
 
 /// The retired count in `run`'s result.
