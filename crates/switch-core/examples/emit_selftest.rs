@@ -22,8 +22,6 @@ const READ_WATCH_HI_AT: u32 = 0x1008;
 const PAGES_AT: u32 = 0x100C;
 const WATCH_LO_AT: u32 = 0x1010;
 const WATCH_HI_AT: u32 = 0x1014;
-const READONLY_LO_AT: u32 = 0x1018;
-const READONLY_HI_AT: u32 = 0x101C;
 /// Where the pointer to the watched-page bitmap is.
 const WATCHED_AT: u32 = 0x1020;
 /// Where the guest `pc` is; unused here but required by `Layout`.
@@ -75,7 +73,8 @@ const WATCH_BYTES: u32 = 0x40;
 /// The cached page; stores there must hand back. Re-armed per case.
 const WATCHED_PAGE_AT: u32 = 3 * PAGE_BYTES;
 
-/// Two write-protected ranges with a writable gap, to exercise the envelope test.
+/// Two write-protected pages with writable pages between, which stores see
+/// through the cached-pages bitmap.
 const READONLY_ONE: (u32, u32) = (5 * PAGE_BYTES, 6 * PAGE_BYTES);
 const READONLY_TWO: (u32, u32) = (8 * PAGE_BYTES, 9 * PAGE_BYTES);
 
@@ -269,8 +268,6 @@ fn main() {
          read_watch_hi_at {READ_WATCH_HI_AT}\n\
          watch_lo_at {WATCH_LO_AT}\n\
          watch_hi_at {WATCH_HI_AT}\n\
-         readonly_lo_at {READONLY_LO_AT}\n\
-         readonly_hi_at {READONLY_HI_AT}\n\
          watched_at {WATCHED_AT}\n\
          pages_at {PAGES_AT}\n\
          discard_slot {DISCARD_SLOT}\n\
@@ -282,15 +279,14 @@ fn main() {
          code_at {CODE_AT}\n\
          read_watch {READ_WATCH_AT} {}\n\
          watch {WATCH_AT} {}\n\
-         readonly {} {}\n\
-         watched_page {WATCHED_PAGE_AT}\n\
+         watched_page {WATCHED_PAGE_AT} {} {}\n\
          wasm_pages {}\n\
          {}",
         Cpu::new().reg_slots().len(),
         READ_WATCH_AT + READ_WATCH_BYTES,
         WATCH_AT + WATCH_BYTES,
         READONLY_ONE.0,
-        READONLY_TWO.1,
+        READONLY_TWO.0,
         (BITMAP_AT + BITMAP_BYTES).div_ceil(64 * 1024),
         page_lines(),
     );
@@ -318,8 +314,6 @@ const LAYOUT: Layout = Layout {
     read_watch_hi: READ_WATCH_HI_AT,
     watch_lo: WATCH_LO_AT,
     watch_hi: WATCH_HI_AT,
-    readonly_lo: READONLY_LO_AT,
-    readonly_hi: READONLY_HI_AT,
     watched: WATCHED_AT,
     pc: PC_AT,
     fuel: FUEL_AT,

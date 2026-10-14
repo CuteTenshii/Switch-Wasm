@@ -78,8 +78,6 @@ const SCRATCH: Layout = Layout {
     read_watch_hi: 0,
     watch_lo: 0,
     watch_hi: 0,
-    readonly_lo: 0,
-    readonly_hi: 0,
     watched: 0,
     vregs: 0,
 };
@@ -112,11 +110,8 @@ pub struct Layout {
     /// The write watchpoint, likewise.
     pub watch_lo: u32,
     pub watch_hi: u32,
-    /// The envelope of the write-protected ranges, likewise.
-    pub readonly_lo: u32,
-    pub readonly_hi: u32,
     /// Where the pointer to the cached-pages bitmap is kept; null until
-    /// something watches a page.
+    /// something watches a page. Write-protected pages are set in it too.
     pub watched: u32,
 }
 
@@ -139,8 +134,6 @@ impl Layout {
             read_watch_hi: m.read_watch_hi,
             watch_lo: m.watch_lo,
             watch_hi: m.watch_hi,
-            readonly_lo: m.readonly_lo,
-            readonly_hi: m.readonly_hi,
             watched: m.watched,
         }
     }
@@ -328,6 +321,8 @@ struct Emitter<'a> {
     /// Each slot's local, or 0 before it has one.
     locals: [u32; REG_SLOTS],
     next_local: u32,
+    /// Whether a watchpoint was armed when the region was emitted.
+    watches: bool,
     flags_used: bool,
     flags_written: bool,
     fuel_used: bool,
@@ -346,6 +341,7 @@ impl<'a> Emitter<'a> {
             layout,
             chain,
             simd: true,
+            watches: true,
             targets,
             member: 0,
             epilogue,
@@ -1217,45 +1213,41 @@ impl Emitter<'_> {
 
     /// Leave the page `L_ADDR` is on in `L_PAGE`, or leave the block if
     /// reading `n` bytes there needs more than the page table
-    /// ([`crate::mem::Memory::peek`]'s checks, in its order).
+    /// ([`crate::mem::Memory::peek`]'s checks).
     fn page_for_read(&mut self, n: u32, retired: usize) {
         self.page_number();
         let crosses = n > 1;
         if crosses {
             self.crosses_page(n);
         }
-        self.covers(n, self.layout.read_watch_lo, self.layout.read_watch_hi);
-        if crosses {
-            self.f.i32_or();
+        if self.watches {
+            self.covers(n, self.layout.read_watch_lo, self.layout.read_watch_hi);
+            if crosses {
+                self.f.i32_or();
+            }
         }
-        self.deopt_if(retired);
+        if crosses || self.watches {
+            self.deopt_if(retired);
+        }
         self.page_or_defer(retired);
     }
 
     /// The same for a store, with [`crate::mem::Memory::poke`]'s checks.
     fn page_for_write(&mut self, n: u32, retired: usize) {
-        self.page_for_write_halves(n, &[], retired);
-    }
-
-    /// [`Emitter::page_for_write`] for several stores in one page, also testing
-    /// write protection at each of `starts`, as [`crate::mem::Memory::poke_pair`] does.
-    fn page_for_write_halves(&mut self, n: u32, starts: &[u32], retired: usize) {
         self.page_number();
         let crosses = n > 1;
         if crosses {
             self.crosses_page(n);
         }
-        self.within(self.layout.readonly_lo, self.layout.readonly_hi, 0);
-        if crosses {
-            self.f.i32_or();
+        if self.watches {
+            self.covers(n, self.layout.watch_lo, self.layout.watch_hi);
+            if crosses {
+                self.f.i32_or();
+            }
         }
-        for &at in starts {
-            self.within(self.layout.readonly_lo, self.layout.readonly_hi, at);
-            self.f.i32_or();
+        if crosses || self.watches {
+            self.deopt_if(retired);
         }
-        self.covers(n, self.layout.watch_lo, self.layout.watch_hi);
-        self.f.i32_or();
-        self.deopt_if(retired);
         self.owes_a_report(retired);
         self.page_or_defer(retired);
     }
@@ -1279,25 +1271,6 @@ impl Emitter<'_> {
         self.f.local_tee(L_PAGE);
         self.f.i32_eqz();
         self.deopt_if(retired);
-    }
-
-    /// Push whether `L_ADDR` is inside the write-protected envelope `[lo, hi)`;
-    /// the full path decides the exact ranges.
-    fn within(&mut self, lo: u32, hi: u32, at: u32) {
-        let addr = |e: &mut Self| {
-            e.f.local_get(L_ADDR);
-            if at != 0 {
-                e.f.i32_const(at as i32);
-                e.f.i32_add();
-            }
-        };
-        addr(self);
-        self.env(lo);
-        self.f.i32_ge_u();
-        addr(self);
-        self.env(hi);
-        self.f.i32_lt_u();
-        self.f.i32_and();
     }
 
     /// Leave the block if anything has cached page `L_IDX`'s contents, when
@@ -1412,10 +1385,9 @@ impl Emitter<'_> {
         }
     }
 
-    /// A store of two `n`-byte registers to `L_ADDR`, with
-    /// [`crate::mem::Memory::poke_pair`]'s checks.
+    /// A store of two `n`-byte registers to `L_ADDR`, checked as one access.
     fn store_pair(&mut self, rt: u8, rt2: u8, n: u32, retired: usize) {
-        self.page_for_write_halves(2 * n, &[n], retired);
+        self.page_for_write(2 * n, retired);
         for (slot, at) in [(rt, 0), (rt2, n)] {
             self.in_page();
             self.read_reg_raw(slot);
@@ -1443,9 +1415,9 @@ impl Emitter<'_> {
         }
     }
 
-    /// `STP` of two Q registers: four 8-byte stores, each checked as the interpreter's.
+    /// `STP` of two Q registers, checked as one 32-byte access.
     fn store_pair_q(&mut self, rt: u8, rt2: u8, retired: usize) {
-        self.page_for_write_halves(32, &[8, 16, 24], retired);
+        self.page_for_write(32, retired);
         for (i, reg) in [rt, rt, rt2, rt2].into_iter().enumerate() {
             self.in_page();
             let at = self.vreg_half(reg, i as u32 & 1);
@@ -2086,20 +2058,22 @@ pub fn tail_call_probe() -> Vec<u8> {
 }
 
 /// Emit `block` alone as a module exporting `run`, leaving at every branch.
-pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refused> {
-    emit_region(&[block], layout, false, false, true).map_err(|(_, refused)| refused)
+pub(super) fn emit_block(block: &Block, layout: Layout, watches: bool) -> Result<Vec<u8>, Refused> {
+    emit_region(&[block], layout, false, false, true, watches).map_err(|(_, refused)| refused)
 }
 
 /// Emit the region `blocks`, entered at the first, as a module exporting
 /// `run`. `inside` lets branches between them stay in the function; `chain`
 /// jumps into compiled successors through the function table it imports;
-/// `simd` writes Advanced SIMD as SIMD128. A refusal names the block that caused it.
+/// `simd` writes Advanced SIMD as SIMD128; `watches` tests the watchpoints. A
+/// refusal names the block that caused it.
 pub(super) fn emit_region(
     blocks: &[&Block],
     layout: Layout,
     chain: bool,
     inside: bool,
     simd: bool,
+    watches: bool,
 ) -> Result<Vec<u8>, (usize, Refused)> {
     let targets: Vec<u32> = if inside {
         blocks.iter().map(|b| b.start).collect()
@@ -2113,6 +2087,7 @@ pub(super) fn emit_region(
     let mut f = scratch_func();
     let mut e = Emitter::new(&mut f, layout, chain, targets);
     e.simd = simd;
+    e.watches = watches;
     if looped {
         e.top = Some(e.f.loop_void());
         if n > 1 {
@@ -2158,7 +2133,7 @@ impl Cpu {
     /// instruction and the one after.
     pub fn emit_block_at(&self, pc: u32, layout: Layout) -> Result<(Vec<u8>, Vec<u32>), Refused> {
         let block = translate(&self.mem, pc);
-        let bytes = emit_block(&block, layout)?;
+        let bytes = emit_block(&block, layout, self.mem.watchpoints_armed())?;
         let mut jumps = block.exits.iter().filter_map(|branch| match branch.exit {
             Exit::Jump { target } => Some((branch.at as usize + branch.span as usize, target)),
             _ => None,
@@ -2215,8 +2190,6 @@ mod tests {
         read_watch_hi: 2060,
         watch_lo: 2064,
         watch_hi: 2068,
-        readonly_lo: 2072,
-        readonly_hi: 2076,
         watched: 2080,
         vregs: 4096,
     };
@@ -2224,7 +2197,7 @@ mod tests {
     #[test]
     fn an_unwritable_op_refuses_the_whole_block() {
         let good = block_of(vec![Op::MovConst { rd: 0, val: 7 }]);
-        assert!(emit_block(&good, LAYOUT).is_ok());
+        assert!(emit_block(&good, LAYOUT, true).is_ok());
 
         let ops = vec![
             Op::MovConst { rd: 0, val: 7 },
@@ -2232,7 +2205,7 @@ mod tests {
         ];
         let words = vec![0, 0xD503201F];
         let bad = Block::new(0x1000, ops, words, Vec::new(), None, vec![1]);
-        assert_eq!(emit_block(&bad, LAYOUT), Err(Refused::Op(0xD503201F)));
+        assert_eq!(emit_block(&bad, LAYOUT, true), Err(Refused::Op(0xD503201F)));
     }
 
     /// Walks guest state from the `Cpu`'s address by [`Layout::of_cpu`]
@@ -2285,11 +2258,6 @@ mod tests {
                 (0x2000, 0x2080),
                 "the write watchpoint moved"
             );
-            assert_eq!(
-                (u32_at(layout.readonly_lo), u32_at(layout.readonly_hi)),
-                (0x3000, 0x4000),
-                "the write-protected envelope moved"
-            );
 
             // Marking a page allocates the bitmap and sets the bit stores test.
             let watched = *((memory + layout.watched as usize) as *const *const u64);
@@ -2299,6 +2267,12 @@ mod tests {
                 *watched.add(page >> 6) & (1u64 << (page & 63)),
                 0,
                 "the marked page's bit is not where an emitted store looks"
+            );
+            let protected = 0x3000 >> PAGE_BITS;
+            assert_ne!(
+                *watched.add(protected >> 6) & (1u64 << (protected & 63)),
+                0,
+                "a write-protected page is not set where an emitted store looks"
             );
 
             // The page-table walk: table pointer, entry, byte at the offset.
@@ -2350,7 +2324,7 @@ mod tests {
         let ops = vec![Op::Nop, Op::MovConst { rd: 0, val: 7 }];
         let exits = vec![Branch::new(0, Exit::Jump { target: 0x2000 })];
         let b = Block::new(0x1000, ops, vec![0, 0], exits, None, vec![1]);
-        assert!(emit_block(&b, LAYOUT).is_ok());
+        assert!(emit_block(&b, LAYOUT, true).is_ok());
     }
 
     #[test]
@@ -2360,7 +2334,7 @@ mod tests {
         let ops = vec![Op::MovConst { rd: 0, val: 7 }];
         let exits = vec![Branch::new(4, Exit::Cond { cond: 0, target: 8 })];
         let b = Block::new(0x1000, ops, vec![0], exits, None, vec![1]);
-        assert_eq!(emit_block(&b, LAYOUT), Err(Refused::ControlFlow));
+        assert_eq!(emit_block(&b, LAYOUT, true), Err(Refused::ControlFlow));
     }
 
     #[test]
@@ -2407,7 +2381,7 @@ mod tests {
             let exits = vec![Branch::new(1, exit)];
             let b = Block::new(0x1000, ops, vec![0; 3], exits, None, vec![1]);
             assert!(
-                emit_block(&b, LAYOUT).is_ok(),
+                emit_block(&b, LAYOUT, true).is_ok(),
                 "{exit:?} was not written out"
             );
         }
@@ -2438,7 +2412,7 @@ mod tests {
             None,
             vec![1],
         );
-        let bytes = emit_block(&b, LAYOUT).expect("a fused compare is written");
+        let bytes = emit_block(&b, LAYOUT, true).expect("a fused compare is written");
         // `2 | LEFT` as the signed LEB128 `i32.const` operand.
         let mut want = Vec::new();
         super::super::wasm::sleb(&mut want, i64::from((2u32 | LEFT) as i32));

@@ -910,7 +910,7 @@ impl Emitter<'_> {
                 self.vset(reg);
             }
         } else {
-            self.page_for_write_halves(2 * bytes, &[bytes], retired);
+            self.page_for_write(2 * bytes, retired);
             for (reg, at) in [(rt, 0), (rt2, bytes)] {
                 self.in_page();
                 self.vget(reg);

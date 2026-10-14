@@ -24,8 +24,6 @@ const READ_WATCH_LO_AT: u32 = 4100;
 const READ_WATCH_HI_AT: u32 = 4104;
 const WATCH_LO_AT: u32 = 4108;
 const WATCH_HI_AT: u32 = 4112;
-const READONLY_LO_AT: u32 = 4116;
-const READONLY_HI_AT: u32 = 4120;
 const WATCHED_AT: u32 = 4124;
 const PAGES_AT: u32 = 4128;
 /// Guest `pc` offset, written by a taken branch.
@@ -52,8 +50,6 @@ const LAYOUT: Layout = Layout {
     read_watch_hi: READ_WATCH_HI_AT,
     watch_lo: WATCH_LO_AT,
     watch_hi: WATCH_HI_AT,
-    readonly_lo: READONLY_LO_AT,
-    readonly_hi: READONLY_HI_AT,
     watched: WATCHED_AT,
     pc: PC_AT,
     fuel: FUEL_AT,
@@ -231,8 +227,6 @@ fn main() {
          read_watch_hi_at {READ_WATCH_HI_AT}\n\
          watch_lo_at {WATCH_LO_AT}\n\
          watch_hi_at {WATCH_HI_AT}\n\
-         readonly_lo_at {READONLY_LO_AT}\n\
-         readonly_hi_at {READONLY_HI_AT}\n\
          watched_at {WATCHED_AT}\n\
          pages_at {PAGES_AT}\n\
          discard_slot {DISCARD_SLOT}\n\

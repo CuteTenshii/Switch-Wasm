@@ -292,10 +292,6 @@ impl Func {
         self.op(0x4B);
     }
 
-    pub(super) fn i32_ge_u(&mut self) {
-        self.op(0x4F);
-    }
-
     pub(super) fn i64_add(&mut self) {
         self.op(0x7C);
     }

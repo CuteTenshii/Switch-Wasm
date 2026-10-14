@@ -79,6 +79,8 @@ pub(in crate::cpu) struct Jit {
     pub(super) entered_emitted: u64,
     pub(super) chained: u64,
     pub(super) chain: Chain,
+    /// Whether emitted code tests the watchpoints: one was armed when it was written.
+    pub(super) watches: bool,
 }
 
 /// What the translator has been doing, for host-side diagnostics.
@@ -119,6 +121,7 @@ impl Default for Jit {
             entered_emitted: 0,
             chained: 0,
             chain: Chain::default(),
+            watches: false,
         }
     }
 }

@@ -126,6 +126,11 @@ impl Cpu {
         // Block entries counted in locals and committed once, on the way out.
         let mut executed = 0u64;
         let mut linked = 0u64;
+        let watches = self.mem.watchpoints_armed();
+        if watches != self.jit.watches {
+            self.jit.clear();
+            self.jit.watches = watches;
+        }
         while steps < max_steps && !self.halted {
             // Preemption point, between blocks.
             if self.slice_used >= TIME_SLICE {
@@ -539,7 +544,15 @@ impl Cpu {
             let blocks: Vec<&Block> = std::iter::once(block)
                 .chain(members.iter().map(|m| &**m))
                 .collect();
-            match emit_region(&blocks, Layout::of_cpu(), chains, true, host::simd()) {
+            let watches = self.jit.watches;
+            match emit_region(
+                &blocks,
+                Layout::of_cpu(),
+                chains,
+                true,
+                host::simd(),
+                watches,
+            ) {
                 Ok(code) => break Some(code),
                 Err((0, _)) => break None,
                 Err((j, Refused::TooLong)) => members.truncate(j - 1),

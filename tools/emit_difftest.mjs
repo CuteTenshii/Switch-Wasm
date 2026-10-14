@@ -21,9 +21,9 @@ for (let at = 0; at < raw.length;) {
 
 const HEADER_KEYS = new Set([
   'regs_at', 'nzcv_at', 'read_watch_lo_at', 'read_watch_hi_at', 'watch_lo_at',
-  'watch_hi_at', 'readonly_lo_at', 'readonly_hi_at', 'watched_at', 'pages_at',
-  'table_at', 'bitmap_at', 'slots', 'code_at', 'read_watch', 'watch',
-  'readonly', 'watched_page', 'wasm_pages', 'pc_at', 'discard_slot', 'vregs_at',
+  'watch_hi_at', 'watched_at', 'pages_at', 'table_at', 'bitmap_at', 'slots',
+  'code_at', 'read_watch', 'watch', 'watched_page', 'wasm_pages', 'pc_at',
+  'discard_slot', 'vregs_at',
   'fpsr_at',
 ]);
 const header = {};
@@ -56,8 +56,6 @@ const RW_LO_AT = need('read_watch_lo_at');
 const RW_HI_AT = need('read_watch_hi_at');
 const WATCH_LO_AT = need('watch_lo_at');
 const WATCH_HI_AT = need('watch_hi_at');
-const READONLY_LO_AT = need('readonly_lo_at');
-const READONLY_HI_AT = need('readonly_hi_at');
 const WATCHED_AT = need('watched_at');
 const PAGES_AT = need('pages_at');
 const VREGS = need('vregs_at');
@@ -83,18 +81,15 @@ const view = new DataView(memory.buffer);
 const bytes = new Uint8Array(memory.buffer);
 
 view.setUint32(PAGES_AT, TABLE_AT, true);
-// `(1, 0)` disarms a watchpoint; `(0xffffffff, 0)` is an empty protected range.
+// `(1, 0)` disarms a watchpoint.
 const [readLo, readHi] = header.read_watch ?? [1, 0];
 view.setUint32(RW_LO_AT, readLo, true);
 view.setUint32(RW_HI_AT, readHi, true);
 const [writeLo, writeHi] = header.watch ?? [1, 0];
 view.setUint32(WATCH_LO_AT, writeLo, true);
 view.setUint32(WATCH_HI_AT, writeHi, true);
-const [roLo, roHi] = header.readonly ?? [0xffffffff, 0];
-view.setUint32(READONLY_LO_AT, roLo, true);
-view.setUint32(READONLY_HI_AT, roHi, true);
 
-// Pages whose contents something has cached; null when none are watched.
+// Pages whose contents something has cached or that are write-protected; null when none are.
 if (header.watched_page) {
   const bitmap = need('bitmap_at');
   view.setUint32(WATCHED_AT, bitmap, true);

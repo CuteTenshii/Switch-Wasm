@@ -69,8 +69,6 @@ pub(crate) struct Offsets {
     pub(crate) read_watch_hi: u32,
     pub(crate) watch_lo: u32,
     pub(crate) watch_hi: u32,
-    pub(crate) readonly_lo: u32,
-    pub(crate) readonly_hi: u32,
     pub(crate) watched: u32,
 }
 
@@ -81,8 +79,6 @@ impl Offsets {
         read_watch_hi: Self::meta(std::mem::offset_of!(Meta, read_watch.1)),
         watch_lo: Self::meta(std::mem::offset_of!(Meta, watch.0)),
         watch_hi: Self::meta(std::mem::offset_of!(Meta, watch.1)),
-        readonly_lo: Self::meta(std::mem::offset_of!(Meta, readonly_span.0)),
-        readonly_hi: Self::meta(std::mem::offset_of!(Meta, readonly_span.1)),
         watched: std::mem::offset_of!(Memory, watched_pages) as u32,
     };
 
@@ -426,6 +422,10 @@ impl Memory {
         };
         if words[idx >> 6].fetch_and(!bit, Relaxed) & bit != 0 {
             self.report_written(idx);
+            let start = (idx << PAGE_BITS) as u32;
+            if self.readonly_intersects(start, start.saturating_add(PAGE_SIZE as u32)) {
+                words[idx >> 6].fetch_or(bit, Relaxed);
+            }
         }
     }
 
@@ -540,6 +540,13 @@ impl Memory {
     pub fn mark_readonly(&self, start: u32, end: u32) {
         self.meta_mut().readonly.push((start, end));
         self.refresh_readonly_span();
+        // Emitted stores test only the cached-pages bitmap.
+        if start < end {
+            let watched = Self::words(&self.watched_pages);
+            for idx in (start >> PAGE_BITS) as usize..=((end - 1) >> PAGE_BITS) as usize {
+                watched[idx >> 6].fetch_or(1u64 << (idx & 63), Relaxed);
+            }
+        }
     }
 
     fn refresh_readonly_span(&self) {
@@ -1324,6 +1331,11 @@ impl Memory {
         self.read_u32(pc)
     }
 
+    /// Whether either watchpoint is armed; emitted code tests them only then.
+    pub fn watchpoints_armed(&self) -> bool {
+        self.meta().watch != (1, 0) || self.meta().read_watch != (1, 0)
+    }
+
     /// Arm the write watchpoint over `[start, start + size)`; zero disarms it.
     pub fn watch_writes(&self, start: u32, size: u32) {
         self.meta_mut().watch = if size == 0 {
@@ -1778,6 +1790,19 @@ mod tests {
         m.map_zero(0x2000, PAGE_SIZE).unwrap();
         m.write_u32(0x2000, 3).unwrap();
         assert_eq!(m.read_u32(0x2000).unwrap(), 3);
+    }
+
+    /// Emitted stores see write protection only through the cached-pages bit.
+    #[test]
+    fn a_read_only_page_stays_watched_through_loader_writes() {
+        let m = Memory::new();
+        m.map_zero(0x1000, 3 * PAGE_SIZE).unwrap();
+        m.mark_readonly(0x1800, 0x2800);
+        assert!(!m.poke(0x1000, [0u8; 4]));
+        assert!(!m.poke(0x2000, [0u8; 4]));
+        assert!(m.poke(0x3000, [0u8; 4]));
+        m.map(0x1000, &[1; 2 * PAGE_SIZE]).unwrap();
+        assert!(m.watches_code(1) && m.watches_code(2));
     }
 
     #[test]
