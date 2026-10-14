@@ -13,7 +13,7 @@ let gpuSession = -1;
 
 const NO_CHANNEL_YET = 'the title has not opened a channel yet';
 
-const RENDERING_ON = 'rendering on';
+const INSTALLED = 'installed';
 
 const GPU_BACKEND_READY = true;
 
@@ -24,34 +24,6 @@ const GPU_DEVICE_MSAA = false;
 // Allow software fallback draws inside a device frame. Off: they race the
 // readback and corrupt pixels.
 const GPU_INTERLEAVE = false;
-
-// Fallback adapter name: Chrome leaves `description` empty on macOS, and
-// Firefox blanks every field against fingerprinting.
-type AdapterInfo = {
-  vendor?: string;
-  architecture?: string;
-  device?: string;
-  description?: string;
-};
-
-type WebGpu = { requestAdapter(): Promise<{ info?: AdapterInfo } | null> };
-
-const UNNAMED_ADAPTER = 'an unnamed adapter';
-
-async function adapterName(): Promise<string> {
-  try {
-    const webgpu = (navigator as unknown as { gpu?: WebGpu }).gpu;
-    if (!webgpu) return UNNAMED_ADAPTER;
-    const info = (await webgpu.requestAdapter())?.info;
-    if (!info) return UNNAMED_ADAPTER;
-    const named = info.description || info.device;
-    if (named) return named;
-    return [info.vendor, info.architecture].filter(Boolean).join(' ') || UNNAMED_ADAPTER;
-  } catch {
-    // Failing to label a running device is not worth reporting.
-    return UNNAMED_ADAPTER;
-  }
-}
 
 // Lost-device replacements before the rasterizer keeps the session.
 const GPU_REOPENS = 3;
@@ -93,12 +65,14 @@ export function tryGpu(): void {
   if (gpu === 'done' && state.handle !== gpuSession) gpu = 'no';
   if (gpu !== 'no' || state.handle < 0) return;
   gpu = 'trying';
-  switch_gpu_open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then(async (what) => {
-    if (what.startsWith(RENDERING_ON)) {
+  switch_gpu_open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then((what) => {
+    if (what.startsWith(INSTALLED)) {
       gpu = 'done';
       gpuSession = state.handle;
-      const named = what.slice(RENDERING_ON.length).trim();
-      workerLog('[gpu] ' + RENDERING_ON + ' ' + (named || await adapterName()), 'ok');
+      // The adapter wgpu opened; Chrome on macOS and Firefox leave its description empty.
+      const name = what.slice(INSTALLED.length).trim();
+      const adapter = name ? `the adapter "${name}"` : 'an adapter the browser does not name';
+      workerLog(`[gpu] the WebGPU backend is installed on ${adapter}`, 'ok');
     } else if (what === NO_CHANNEL_YET) {
       gpu = 'no';
     } else {

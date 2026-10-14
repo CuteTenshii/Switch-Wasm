@@ -4,8 +4,8 @@
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
-/// The prefix the worker matches on; the whole message when the adapter is unnamed.
-const RENDERING_ON: &str = "rendering on";
+/// The prefix the worker matches on, followed by the adapter's name if the browser gives one.
+const INSTALLED: &str = "installed";
 
 /// Open a device and install the backend on session `handle`'s `Gpu`,
 /// returning a message. `device_msaa` and `interleave` are the browser's
@@ -34,16 +34,12 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
         Ok(pair) => pair,
         Err(e) => return format!("no device: {e}"),
     };
-    // Empty on some browsers; the worker names those.
+    // The browser's `description`, empty on some browsers.
     let name = adapter.get_info().name;
     // Hand over the instance and adapter; see `switch_gpu::Gpu::_instance`.
     let mut gpu = switch_gpu::Gpu::with_device(instance, adapter, device, queue);
     gpu.set_device_msaa(device_msaa);
     gpu.set_interleave(interleave);
     crate::install_gpu(handle, gpu);
-    if name.is_empty() {
-        RENDERING_ON.to_string()
-    } else {
-        format!("{RENDERING_ON} {name}")
-    }
+    format!("{INSTALLED} {name}")
 }
