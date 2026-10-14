@@ -261,6 +261,11 @@ impl Cpu {
         }
         self.machine.processes.remove(&pid);
         self.forget_translations(pid);
+        self.machine.nv.close_process(pid);
+        self.machine.nv.gpu.remove_layer(pid);
+        if self.pending_present.is_some_and(|(owner, _)| owner == pid) {
+            self.pending_present = None;
+        }
     }
 
     pub(crate) fn pids(&self) -> Vec<u64> {

@@ -69,11 +69,11 @@ impl Gpu {
         let dirty = ctx.mem.dirty_gpu_pages();
         self.evict_shaders(&dirty);
         for page in dirty {
-            let Some(keys) = self.page_owners.remove(&page) else {
+            let Some(keys) = self.space.page_owners.remove(&page) else {
                 continue;
             };
             for key in keys {
-                if let Some(bytes) = self.texture_cache.remove(&key) {
+                if let Some(bytes) = self.space.texture_cache.remove(&key) {
                     self.cached_bytes -= bytes.len() as u64;
                     self.drop_gpu_texture(&key, bytes.len() as u64);
                 }
@@ -83,7 +83,7 @@ impl Gpu {
 
     /// Destroy a cached texture's device copy.
     fn drop_gpu_texture(&mut self, key: &TextureKey, bytes: u64) {
-        if let Some(made) = self.gpu_textures.remove(key) {
+        if let Some(made) = self.space.gpu_textures.remove(key) {
             for (_, texture) in made {
                 texture.destroy();
                 self.gpu_texture_bytes = self.gpu_texture_bytes.saturating_sub(bytes);
@@ -95,10 +95,10 @@ impl Gpu {
     pub(super) fn remember_textures(&mut self, ctx: &mut ExecCtx) {
         for (page, key) in std::mem::take(&mut self.shader_to_watch) {
             ctx.mem.mark_gpu_page(page << PAGE_BITS);
-            self.shader_pages.entry(page).or_default().push(key);
+            self.space.shader_pages.entry(page).or_default().push(key);
         }
         for (key, bytes, source_len) in std::mem::take(&mut self.to_remember) {
-            if self.texture_cache.contains_key(&key) {
+            if self.space.texture_cache.contains_key(&key) {
                 continue;
             }
             self.texture_misses += 1;
@@ -122,24 +122,26 @@ impl Gpu {
             if pages.is_empty() {
                 continue;
             }
-            // Whole-cache eviction: reaching the limit means the textures changed wholesale.
+            // Whole-cache eviction, every address space's: the limit is shared.
             let len = bytes.len() as u64;
             if self.cached_bytes + len > TEXTURE_CACHE_BYTES {
-                for (_, made) in self.gpu_textures.drain() {
-                    for (_, texture) in made {
-                        texture.destroy();
+                for space in std::iter::once(&mut self.space).chain(self.parked.values_mut()) {
+                    for (_, made) in space.gpu_textures.drain() {
+                        for (_, texture) in made {
+                            texture.destroy();
+                        }
                     }
+                    space.texture_cache.clear();
+                    space.page_owners.clear();
                 }
                 self.gpu_texture_bytes = 0;
-                self.texture_cache.clear();
-                self.page_owners.clear();
                 self.cached_bytes = 0;
             }
             for &page in &pages {
                 ctx.mem.mark_gpu_page(page << PAGE_BITS);
-                self.page_owners.entry(page).or_default().push(key);
+                self.space.page_owners.entry(page).or_default().push(key);
             }
-            self.texture_cache.insert(key, bytes);
+            self.space.texture_cache.insert(key, bytes);
             self.cached_bytes += len;
         }
     }

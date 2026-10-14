@@ -216,6 +216,29 @@ struct CachedShader {
 }
 
 /// A device, and the rasterizer to fall back to.
+/// What the device holds for one GPU address space: a process's surfaces and caches,
+/// which another process's addresses must not reach. See [`Gpu::enter_space`].
+#[derive(Debug, Default)]
+struct Space {
+    /// Surfaces this is holding, by guest address.
+    held: std::collections::HashMap<u64, Held>,
+    /// Surfaces the guest rebound, still owing a write-back.
+    evicted: Vec<Held>,
+    /// Readbacks asked for and not yet collected.
+    pending: Vec<Pending>,
+    /// Deswizzled texture bytes, evicted when the guest writes their pages.
+    texture_cache: std::collections::HashMap<TextureKey, std::sync::Arc<[u8]>>,
+    /// Translated shaders by address and stage.
+    shader_cache: std::collections::HashMap<(u64, ShaderStage), CachedShader>,
+    /// Which cached translations a guest page holds program words for.
+    shader_pages: std::collections::HashMap<u32, Vec<(u64, ShaderStage)>>,
+    /// Which cached textures a guest page holds bytes for.
+    page_owners: std::collections::HashMap<u32, Vec<TextureKey>>,
+    /// Device copies of cached textures; only keys `texture_cache` also holds.
+    gpu_textures:
+        std::collections::HashMap<TextureKey, Vec<(wgpu::TextureViewDimension, wgpu::Texture)>>,
+}
+
 #[derive(Debug)]
 pub struct Gpu {
     /// Never read, but must be held: a browser loses the device once the instance is dropped.
@@ -223,14 +246,13 @@ pub struct Gpu {
     _adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    /// Surfaces this is holding, by guest address.
-    held: std::collections::HashMap<u64, Held>,
+    /// The address space draws now run in, and its surfaces and caches.
+    space_id: u32,
+    space: Space,
+    /// Every other address space's, by id.
+    parked: std::collections::HashMap<u32, Space>,
     /// Per-draw resources, destroyed after submission: a browser only frees dropped resources on GC.
     scratch: Vec<Scratch>,
-    /// Surfaces the guest rebound, still owing a write-back.
-    evicted: Vec<Held>,
-    /// Readbacks asked for and not yet collected.
-    pending: Vec<Pending>,
     /// Compiled shader modules, keyed by a hash of the WGSL source.
     modules: std::collections::HashMap<u64, wgpu::ShaderModule>,
     /// Render pipelines, by everything they were built from.
@@ -299,19 +321,8 @@ pub struct Gpu {
     times: Option<Times>,
     /// What every draw's `Uploads::of` read, by category.
     uploaded: UploadBytes,
-    /// Deswizzled texture bytes, evicted when the guest writes their pages.
-    texture_cache: std::collections::HashMap<TextureKey, std::sync::Arc<[u8]>>,
-    /// Translated shaders by address and stage.
-    shader_cache: std::collections::HashMap<(u64, ShaderStage), CachedShader>,
-    /// Which cached translations a guest page holds program words for.
-    shader_pages: std::collections::HashMap<u32, Vec<(u64, ShaderStage)>>,
     /// Pages to watch once a mutable `ExecCtx` is available.
     shader_to_watch: Vec<(u32, (u64, ShaderStage))>,
-    /// Which cached textures a guest page holds bytes for.
-    page_owners: std::collections::HashMap<u32, Vec<TextureKey>>,
-    /// Device copies of cached textures; only keys `texture_cache` also holds.
-    gpu_textures:
-        std::collections::HashMap<TextureKey, Vec<(wgpu::TextureViewDimension, wgpu::Texture)>>,
     cached_bytes: u64,
     pub texture_hits: u64,
     pub texture_misses: u64,
@@ -493,6 +504,7 @@ struct Prepared {
 
 impl Renderer for Gpu {
     fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
+        self.enter_space(ctx.as_id);
         if self.give_up() {
             return self.software.draw(engine, ctx);
         }
@@ -553,6 +565,7 @@ impl Renderer for Gpu {
         layer: u32,
         channels: [bool; 4],
     ) -> Result<()> {
+        self.enter_space(ctx.as_id);
         // A frame starts at its clear.
         self.in_frame = 0;
         if self.deferred_readbacks
@@ -600,6 +613,7 @@ impl Renderer for Gpu {
         depth: bool,
         stencil: bool,
     ) -> Result<()> {
+        self.enter_space(ctx.as_id);
         if self.give_up() || self.software_frame {
             self.flush(ctx)?;
             return self
@@ -627,12 +641,25 @@ impl Renderer for Gpu {
     }
 
     fn flush(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
+        self.enter_space(ctx.as_id);
         let at = self.times.map(|_| web_time::Instant::now());
         let result = self.flush_inner(ctx);
         if let (Some(at), Some(t)) = (at, self.times.as_mut()) {
             t.flush += at.elapsed().as_micros();
         }
         result
+    }
+
+    fn address_space_closed(&mut self, as_id: u32) {
+        let closed = if as_id == self.space_id {
+            std::mem::take(&mut self.space)
+        } else {
+            match self.parked.remove(&as_id) {
+                Some(space) => space,
+                None => return,
+            }
+        };
+        self.drop_space(closed);
     }
 
     fn lost(&self) -> bool {
@@ -678,9 +705,9 @@ impl Renderer for Gpu {
             self.fallbacks,
             self.pipelines.len(),
             self.modules.len(),
-            self.held.len(),
-            self.evicted.len(),
-            self.pending.len(),
+            self.space.held.len(),
+            self.space.evicted.len(),
+            self.space.pending.len(),
             self.uploaded.textures,
             self.uploaded.vertex,
             self.uploaded.constants,

@@ -198,7 +198,7 @@ impl Gpu {
         let mut layers = Vec::new();
         for layer in 0..upload.layers.max(1) {
             let addr = upload.key.addr + u64::from(layer) * u64::from(upload.key.layer_stride);
-            let Some(held) = self.held.get(&addr) else {
+            let Some(held) = self.space.held.get(&addr) else {
                 continue;
             };
             // A held `ZF32` is copied through a buffer into an `R32` view; a depth texture cannot copy to colour.
@@ -477,16 +477,17 @@ impl Gpu {
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
     ) -> std::result::Result<wgpu::Texture, String> {
-        if let Some(made) = self.gpu_textures.get(&upload.key) {
+        if let Some(made) = self.space.gpu_textures.get(&upload.key) {
             if let Some((_, texture)) = made.iter().find(|(v, _)| *v == view) {
                 return Ok(texture.clone());
             }
         }
         let (texture, len) = self.upload_texture(upload, view)?;
         // Kept only alongside its cached bytes, which a guest write evicts.
-        if self.texture_cache.contains_key(&upload.key) {
+        if self.space.texture_cache.contains_key(&upload.key) {
             self.gpu_texture_bytes += len as u64;
-            self.gpu_textures
+            self.space
+                .gpu_textures
                 .entry(upload.key)
                 .or_default()
                 .push((view, texture.clone()));
@@ -576,10 +577,10 @@ impl Gpu {
             };
             let address = (u64::from(hi) << 32) | u64::from(lo);
             if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {
-                if let Some(h) = self
-                    .held
-                    .values()
-                    .find(|h| (h.target.addr..h.target.addr + h.target.len()).contains(&address))
+                if let Some(h) =
+                    self.space.held.values().find(|h| {
+                        (h.target.addr..h.target.addr + h.target.len()).contains(&address)
+                    })
                 {
                     switch_core::traceln!(
                         "[gpu-tex] ldg buffer of {stage:?} at {address:#x} is inside the held \

@@ -1016,6 +1016,7 @@ mod tests {
             ExecCtx {
                 mem: &self.mem,
                 vmm: &self.vmm,
+                as_id: 0,
                 host1x: &mut self.host1x,
                 stats: &mut self.stats,
                 trace: false,

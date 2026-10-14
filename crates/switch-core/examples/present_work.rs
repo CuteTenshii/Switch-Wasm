@@ -50,7 +50,7 @@ fn measure(layout: Layout, buffer: &DisplayBuffer, mem: &Memory, gpu: &mut Gpu) 
         }
     }
 
-    gpu.present(mem, buffer).expect("present");
+    gpu.present(0, mem, buffer).expect("present");
     Work {
         surface_bytes,
         unsampled_bytes: sampled.iter().filter(|seen| !**seen).count() as u32,

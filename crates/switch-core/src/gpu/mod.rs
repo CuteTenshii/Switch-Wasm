@@ -131,7 +131,11 @@ pub struct Gpu {
     /// The channel the backend was last lent to, whose address space a flush uses.
     last_channel: Option<u32>,
     pub stats: GpuStats,
+    /// The screen: every layer composited bottom to top.
     pub framebuffer: Framebuffer,
+    /// Each presenting process's last frame by layer, lowest first. A layer alone on
+    /// screen keeps its pixels in `framebuffer` and an empty entry here.
+    layers: std::collections::BTreeMap<u64, Framebuffer>,
     /// Reused between frames to avoid a per-frame allocation.
     scan_out: Vec<u8>,
     pub frames: u64,
@@ -157,6 +161,7 @@ impl Gpu {
             last_channel: None,
             stats: GpuStats::default(),
             framebuffer: Framebuffer::default(),
+            layers: std::collections::BTreeMap::new(),
             scan_out: Vec::new(),
             frames: 0,
             next_as_id: 1,
@@ -178,11 +183,20 @@ impl Gpu {
     }
 
     /// Create a channel with its own host1x syncpoint.
-    pub fn create_channel(&mut self) -> Result<u32> {
+    /// Drop an address space and whatever the backend holds for it.
+    pub fn close_address_space(&mut self, as_id: u32) {
+        self.address_spaces.remove(&as_id);
+        self.renderer.address_space_closed(as_id);
+    }
+
+    /// A channel for process `owner`.
+    pub fn create_channel(&mut self, owner: u64) -> Result<u32> {
         let id = self.next_channel_id;
         self.next_channel_id += 1;
         let syncpt = self.host1x.allocate()?;
-        self.channels.insert(id, Channel::new(id, syncpt));
+        let mut channel = Channel::new(id, syncpt);
+        channel.owner = owner;
+        self.channels.insert(id, channel);
         Ok(id)
     }
 
@@ -225,6 +239,7 @@ impl Gpu {
         let mut ctx = ExecCtx {
             mem,
             vmm,
+            as_id,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
             trace: crate::trace::enabled(crate::trace::Trace::Gpu),
@@ -265,13 +280,15 @@ impl Gpu {
         self.renderer.lost()
     }
 
-    /// The channel that last submitted, or any channel still holding an address space.
-    fn flush_channel(&self) -> Option<u32> {
+    /// Process `owner`'s channel that last submitted, or any of its channels still holding
+    /// an address space.
+    fn flush_channel(&self, owner: u64) -> Option<u32> {
         let usable = |id: u32| {
             self.channels.get(&id).is_some_and(|channel| {
-                channel
-                    .as_id
-                    .is_some_and(|as_id| self.address_spaces.contains_key(&as_id))
+                channel.owner == owner
+                    && channel
+                        .as_id
+                        .is_some_and(|as_id| self.address_spaces.contains_key(&as_id))
             })
         };
         if self.last_channel.is_some_and(usable) {
@@ -280,9 +297,10 @@ impl Gpu {
         self.channels.keys().copied().find(|&id| usable(id))
     }
 
-    /// Writes back anything the backend holds, so the next reader of a render target sees it.
-    pub fn flush_renderers(&mut self, mem: &Memory) -> Result<renderer::Flush> {
-        let Some(channel_id) = self.flush_channel() else {
+    /// Writes back what the backend holds for process `owner`, whose memory is `mem`, so
+    /// the next reader of a render target sees it.
+    pub fn flush_renderers(&mut self, owner: u64, mem: &Memory) -> Result<renderer::Flush> {
+        let Some(channel_id) = self.flush_channel(owner) else {
             return Ok(renderer::Flush::Done);
         };
         let channel = self
@@ -300,6 +318,7 @@ impl Gpu {
         let mut ctx = ExecCtx {
             mem,
             vmm,
+            as_id,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
             trace: crate::trace::enabled(crate::trace::Trace::Gpu),
@@ -309,8 +328,8 @@ impl Gpu {
         flushed
     }
 
-    /// Scan-out: convert a display surface to the RGBA8888 [`Framebuffer`].
-    pub fn present(&mut self, mem: &Memory, buffer: &DisplayBuffer) -> Result<()> {
+    /// Scan-out: convert a display surface on `layer` to RGBA8888 and composite the screen.
+    pub fn present(&mut self, layer: u64, mem: &Memory, buffer: &DisplayBuffer) -> Result<()> {
         let handle = self.nvmap.by_id(buffer.nvmap_id).ok_or_else(|| {
             Error::Gpu(format!(
                 "present: no nvmap object with id {}",
@@ -500,13 +519,89 @@ impl Gpu {
             }
         }
         self.scan_out = raw_bytes;
-        self.framebuffer = Framebuffer {
-            width: out_width,
-            height: out_height,
-            pixels,
-        };
+        self.show(
+            layer,
+            Framebuffer {
+                width: out_width,
+                height: out_height,
+                pixels,
+            },
+        );
         self.frames += 1;
         Ok(())
+    }
+
+    /// Put `frame` on `layer` and composite the screen.
+    fn show(&mut self, layer: u64, frame: Framebuffer) {
+        if self.layers.keys().all(|&other| other == layer) {
+            self.layers.insert(layer, Framebuffer::default());
+            self.framebuffer = frame;
+            return;
+        }
+        if let Some(alone) = self
+            .layers
+            .values_mut()
+            .find(|other| other.pixels.is_empty())
+        {
+            *alone = std::mem::take(&mut self.framebuffer);
+        }
+        self.layers.insert(layer, frame);
+        self.composite();
+    }
+
+    /// Take `layer` off the screen, as when its process ends.
+    pub fn remove_layer(&mut self, layer: u64) {
+        if self.layers.remove(&layer).is_none() {
+            return;
+        }
+        match self.layers.len() {
+            0 => {}
+            1 => {
+                let alone = self.layers.values_mut().next().expect("one layer");
+                self.framebuffer = std::mem::take(alone);
+            }
+            _ => self.composite(),
+        }
+        self.frames += 1;
+    }
+
+    /// Blend every layer, lowest first, over the largest one's extent.
+    fn composite(&mut self) {
+        let width = self.layers.values().map(|l| l.width).max().unwrap_or(0);
+        let height = self.layers.values().map(|l| l.height).max().unwrap_or(0);
+        let mut pixels = vec![0u32; (width * height) as usize];
+        for layer in self.layers.values() {
+            for y in 0..layer.height {
+                let src = &layer.pixels[(y * layer.width) as usize..][..layer.width as usize];
+                let dst = &mut pixels[(y * width) as usize..][..layer.width as usize];
+                for (d, &s) in dst.iter_mut().zip(src) {
+                    *d = blend_over(s, *d);
+                }
+            }
+        }
+        self.framebuffer = Framebuffer {
+            width,
+            height,
+            pixels,
+        };
+    }
+}
+
+/// `src` over `dst`, RGBA8888 with red in the low byte.
+fn blend_over(src: u32, dst: u32) -> u32 {
+    let alpha = src >> 24;
+    match alpha {
+        255 => src,
+        0 => dst,
+        _ => {
+            let channel = |shift: u32| {
+                let s = (src >> shift) & 0xFF;
+                let d = (dst >> shift) & 0xFF;
+                ((s * alpha + d * (255 - alpha) + 127) / 255) << shift
+            };
+            let out_alpha = alpha + (dst >> 24) * (255 - alpha) / 255;
+            channel(0) | channel(8) | channel(16) | (out_alpha << 24)
+        }
     }
 }
 
@@ -544,8 +639,8 @@ mod tests {
     #[test]
     fn channels_get_distinct_syncpoints() {
         let mut gpu = Gpu::new();
-        let a = gpu.create_channel().unwrap();
-        let b = gpu.create_channel().unwrap();
+        let a = gpu.create_channel(1).unwrap();
+        let b = gpu.create_channel(1).unwrap();
         let syncpt_a = gpu.channel_mut(a).unwrap().syncpt;
         let syncpt_b = gpu.channel_mut(b).unwrap().syncpt;
         assert_ne!(syncpt_a, syncpt_b);
@@ -601,12 +696,12 @@ mod tests {
     #[test]
     fn the_backend_outlives_more_channels_and_a_close() {
         let mut gpu = Gpu::new();
-        let first = gpu.create_channel().unwrap();
+        let first = gpu.create_channel(1).unwrap();
         gpu.set_renderer(Box::new(Stub {
             flushes: std::rc::Rc::new(std::cell::Cell::new(0)),
         }));
         for _ in 0..3 {
-            gpu.create_channel().unwrap();
+            gpu.create_channel(1).unwrap();
         }
         assert_eq!(
             gpu.renderer_report(),
@@ -655,8 +750,8 @@ mod tests {
         gpu.set_renderer(Box::new(Stub {
             flushes: flushes.clone(),
         }));
-        let _first = gpu.create_channel().unwrap();
-        let second = gpu.create_channel().unwrap();
+        let _first = gpu.create_channel(1).unwrap();
+        let second = gpu.create_channel(1).unwrap();
         gpu.channel_mut(second).unwrap().as_id = Some(as_id);
 
         let entry = gpu_va | ((words.len() as u64) << 42);
@@ -677,7 +772,7 @@ mod tests {
     fn submit_needs_an_address_space() {
         let mut gpu = Gpu::new();
         let mem = Memory::new();
-        let id = gpu.create_channel().unwrap();
+        let id = gpu.create_channel(1).unwrap();
         assert!(gpu.submit(id, &mem, &[], 1).is_err());
     }
 
@@ -691,7 +786,7 @@ mod tests {
             .unwrap()
             .map(0x3000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
             .unwrap();
-        let id = gpu.create_channel().unwrap();
+        let id = gpu.create_channel(1).unwrap();
         gpu.channel_mut(id).unwrap().as_id = Some(as_id);
 
         let fence = gpu.submit(id, &mem, &[], 1).unwrap();
@@ -718,6 +813,7 @@ mod tests {
         mem.write_u32(at(0, 1), 0x0000_00FF).unwrap();
 
         gpu.present(
+            0,
             &mem,
             &DisplayBuffer {
                 nvmap_id: id,
@@ -739,6 +835,68 @@ mod tests {
         assert_eq!(gpu.framebuffer.pixels[1], 0xFF00_0000);
         assert_eq!(gpu.framebuffer.pixels[16], 0x0000_00FF);
         assert_eq!(gpu.frames, 1);
+    }
+
+    /// Each process's frame is a layer; the screen is them blended in layer order.
+    #[test]
+    fn layers_composite_lowest_first_and_a_removed_layer_uncovers_the_rest() {
+        const RED: u32 = 0xFF00_00FF;
+        const BLUE: u32 = 0xFFFF_0000;
+        let mut gpu = Gpu::new();
+        let handle = gpu.nvmap.create(0x1000);
+        gpu.nvmap
+            .alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000)
+            .unwrap();
+        let id = gpu.nvmap.get(handle).unwrap().id;
+        let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
+        let buffer = DisplayBuffer {
+            nvmap_id: id,
+            offset: 0,
+            width: 16,
+            height: 8,
+            pitch: 64,
+            layout: NV_LAYOUT_BLOCK_LINEAR,
+            block_height_log2: 0,
+            color_format: 0x0100_5321_20,
+            transform: 0,
+            crop: Crop::ALL,
+        };
+        // Two processes with a surface at the same address.
+        let below = Memory::new();
+        below.map_zero(0x4000_0000, 0x1000).unwrap();
+        for y in 0..8 {
+            for x in 0..16 {
+                below.write_u32(at(x, y), RED).unwrap();
+            }
+        }
+        let above = Memory::new();
+        above.map_zero(0x4000_0000, 0x1000).unwrap();
+        above.write_u32(at(1, 0), BLUE).unwrap();
+        above.write_u32(at(2, 0), 0x80FF_0000).unwrap();
+
+        gpu.present(1, &below, &buffer).unwrap();
+        assert_eq!(gpu.framebuffer.pixels[1], RED, "a lone layer is the screen");
+        gpu.present(2, &above, &buffer).unwrap();
+        assert_eq!(
+            gpu.framebuffer.pixels[0], RED,
+            "a transparent pixel shows the layer below"
+        );
+        assert_eq!(gpu.framebuffer.pixels[1], BLUE, "an opaque pixel covers it");
+        assert_eq!(
+            gpu.framebuffer.pixels[2], 0xFF80_007F,
+            "half alpha blends the two"
+        );
+        gpu.present(1, &below, &buffer).unwrap();
+        assert_eq!(
+            gpu.framebuffer.pixels[1], BLUE,
+            "the lower layer presenting stays under"
+        );
+
+        gpu.remove_layer(2);
+        assert_eq!(
+            gpu.framebuffer.pixels[1], RED,
+            "removing the top layer uncovers the rest"
+        );
     }
 
     /// `FLIP_V` is applied at scan-out.
@@ -769,11 +927,11 @@ mod tests {
             crop: Crop::ALL,
         };
 
-        gpu.present(&mem, &buffer(0)).unwrap();
+        gpu.present(0, &mem, &buffer(0)).unwrap();
         assert_eq!(gpu.framebuffer.pixels[0], 0xFF00_0000);
         assert_eq!(gpu.framebuffer.pixels[7 * 16], 0x0000_00FF);
 
-        gpu.present(&mem, &buffer(TRANSFORM_FLIP_V)).unwrap();
+        gpu.present(0, &mem, &buffer(TRANSFORM_FLIP_V)).unwrap();
         assert_eq!(
             gpu.framebuffer.pixels[0], 0x0000_00FF,
             "the last row is shown first"
@@ -782,12 +940,12 @@ mod tests {
 
         // Left to right, about the same image.
         mem.write_u32(at(15, 0), 0x00FF_0000).unwrap();
-        gpu.present(&mem, &buffer(TRANSFORM_FLIP_H)).unwrap();
+        gpu.present(0, &mem, &buffer(TRANSFORM_FLIP_H)).unwrap();
         assert_eq!(gpu.framebuffer.pixels[15], 0xFF00_0000);
         assert_eq!(gpu.framebuffer.pixels[0], 0x00FF_0000);
 
         // A rotation is refused rather than shown the wrong shape.
-        assert!(gpu.present(&mem, &buffer(TRANSFORM_ROT_90)).is_err());
+        assert!(gpu.present(0, &mem, &buffer(TRANSFORM_ROT_90)).is_err());
     }
 
     /// Only the queued crop window is scanned out.
@@ -825,7 +983,7 @@ mod tests {
             bottom: 6,
         };
 
-        gpu.present(&mem, &buffer(window, 0)).unwrap();
+        gpu.present(0, &mem, &buffer(window, 0)).unwrap();
         assert_eq!((gpu.framebuffer.width, gpu.framebuffer.height), (8, 4));
         assert_eq!(gpu.framebuffer.pixels[0], 0xFF00_0000);
         assert_eq!(gpu.framebuffer.pixels[3 * 8 + 7], 0x0000_00FF);
@@ -835,7 +993,7 @@ mod tests {
         );
 
         // The flip is about the window, not the surface.
-        gpu.present(&mem, &buffer(window, TRANSFORM_FLIP_V))
+        gpu.present(0, &mem, &buffer(window, TRANSFORM_FLIP_V))
             .unwrap();
         assert_eq!(gpu.framebuffer.pixels[3 * 8], 0xFF00_0000);
         assert_eq!(gpu.framebuffer.pixels[7], 0x0000_00FF);
@@ -856,7 +1014,7 @@ mod tests {
                 bottom: 8,
             },
         ] {
-            gpu.present(&mem, &buffer(crop, 0)).unwrap();
+            gpu.present(0, &mem, &buffer(crop, 0)).unwrap();
             assert_eq!((gpu.framebuffer.width, gpu.framebuffer.height), (16, 8));
         }
     }
@@ -866,6 +1024,7 @@ mod tests {
         let mut gpu = Gpu::new();
         let mem = Memory::new();
         let err = gpu.present(
+            0,
             &mem,
             &DisplayBuffer {
                 nvmap_id: 99,

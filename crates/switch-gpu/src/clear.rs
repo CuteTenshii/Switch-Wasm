@@ -47,6 +47,7 @@ impl Gpu {
                 self.resolve_companion(target.addr)?;
             }
             let held = self
+                .space
                 .held
                 .get_mut(&target.addr)
                 .ok_or("the surface was not held")?;
@@ -224,18 +225,18 @@ impl Gpu {
 
     /// Hold a surface without reading it, for a clear that writes every texel.
     fn hold_blank(&mut self, target: &Target) -> Result<()> {
-        match self.held.get(&target.addr) {
+        match self.space.held.get(&target.addr) {
             // Already held: clear it in place.
             Some(held) if held.target == *target => return Ok(()),
             Some(_) => {
-                if let Some(held) = self.held.remove(&target.addr) {
-                    self.evicted.push(held);
+                if let Some(held) = self.space.held.remove(&target.addr) {
+                    self.space.evicted.push(held);
                 }
             }
             None => {}
         }
         let texture = self.blank_target(target)?;
-        self.held.insert(
+        self.space.held.insert(
             target.addr,
             Held {
                 texture,

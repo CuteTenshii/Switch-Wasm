@@ -1,7 +1,7 @@
 //! Opening the device, falling back, and backend settings.
 
 use crate::stats::{DeviceErrors, Times, UploadBytes};
-use crate::{device_descriptor, draw_range, Gpu};
+use crate::{device_descriptor, draw_range, Gpu, Space};
 use switch_core::gpu::engine::threed::Engine3D;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Software;
@@ -36,10 +36,10 @@ impl Gpu {
             _adapter: adapter,
             device,
             queue,
-            held: std::collections::HashMap::new(),
+            space_id: 0,
+            space: Space::default(),
+            parked: std::collections::HashMap::new(),
             scratch: Vec::new(),
-            evicted: Vec::new(),
-            pending: Vec::new(),
             modules: std::collections::HashMap::new(),
             pipelines: std::collections::HashMap::new(),
             samplers: std::collections::HashMap::new(),
@@ -76,12 +76,7 @@ impl Gpu {
             times: (cfg!(target_arch = "wasm32") || switch_core::env_flag!("GPU_TIMES"))
                 .then(Times::default),
             uploaded: UploadBytes::default(),
-            texture_cache: std::collections::HashMap::new(),
-            shader_cache: std::collections::HashMap::new(),
-            shader_pages: std::collections::HashMap::new(),
             shader_to_watch: Vec::new(),
-            page_owners: std::collections::HashMap::new(),
-            gpu_textures: std::collections::HashMap::new(),
             cached_bytes: 0,
             texture_hits: 0,
             shader_hits: 0,
@@ -139,9 +134,8 @@ impl Gpu {
         let said = format!("the device was lost ({why}); the rasterizer has the frame from here");
         eprintln!("[gpu] {said}");
         self.report = Some(said);
-        self.held.clear();
-        self.evicted.clear();
-        self.pending.clear();
+        self.space = Space::default();
+        self.parked.clear();
         self.scratch.clear();
         true
     }

@@ -73,12 +73,21 @@ impl Gpu {
         shape: Shape,
         grid: SampleGrid,
     ) -> std::result::Result<(), String> {
-        match self.held.get(&addr).and_then(|h| h.companion.as_ref()) {
+        match self
+            .space
+            .held
+            .get(&addr)
+            .and_then(|h| h.companion.as_ref())
+        {
             Some(have) if have.shape == shape && have.grid == grid => return Ok(()),
             Some(_) => self.resolve_companion(addr)?,
             None => {}
         }
-        let held = self.held.get(&addr).ok_or("the surface was not held")?;
+        let held = self
+            .space
+            .held
+            .get(&addr)
+            .ok_or("the surface was not held")?;
         let (width, height) = grid.pixels(held.target.width, held.target.height);
         let samples = match shape {
             Shape::Multisampled(n) => n,
@@ -103,6 +112,7 @@ impl Gpu {
         });
         // Fill the companion from the surface.
         let source = self
+            .space
             .held
             .get(&addr)
             .ok_or("the surface was not held")?
@@ -124,7 +134,11 @@ impl Gpu {
             },
             grid,
         )?;
-        let held = self.held.get_mut(&addr).ok_or("the surface was not held")?;
+        let held = self
+            .space
+            .held
+            .get_mut(&addr)
+            .ok_or("the surface was not held")?;
         held.companion = Some(Companion {
             shape,
             texture: companion,
@@ -135,7 +149,7 @@ impl Gpu {
 
     /// Drop the companion without resolving it, for a caller about to overwrite the surface.
     pub(super) fn discard_companion(&mut self, addr: u64) {
-        if let Some(held) = self.held.get_mut(&addr) {
+        if let Some(held) = self.space.held.get_mut(&addr) {
             if let Some(companion) = held.companion.take() {
                 companion.texture.destroy();
             }
@@ -144,7 +158,7 @@ impl Gpu {
 
     /// Resolve the companion back into the surface and drop it.
     pub(super) fn resolve_companion(&mut self, addr: u64) -> std::result::Result<(), String> {
-        let Some(held) = self.held.get_mut(&addr) else {
+        let Some(held) = self.space.held.get_mut(&addr) else {
             return Ok(());
         };
         let Some(companion) = held.companion.take() else {

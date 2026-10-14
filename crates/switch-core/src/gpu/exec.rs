@@ -35,6 +35,8 @@ pub struct GpuStats {
 pub struct ExecCtx<'a> {
     pub mem: &'a Memory,
     pub vmm: &'a AddressSpace,
+    /// Which address space `vmm` is, for backends that keep state per address space.
+    pub as_id: u32,
     pub host1x: &'a mut Host1x,
     pub stats: &'a mut GpuStats,
     /// Emit a per-method trace to stderr (`TRACE_GPU`).

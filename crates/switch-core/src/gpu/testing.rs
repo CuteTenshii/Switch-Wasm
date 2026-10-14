@@ -214,6 +214,9 @@ pub struct Harness {
     pub stats: GpuStats,
     /// Mapping start, also the colour target's address.
     pub base: u64,
+    /// The address space the harness stands for; harnesses with different ids are
+    /// different processes to a backend.
+    pub as_id: u32,
 }
 
 pub const TARGET_WIDTH: u32 = 16;
@@ -243,6 +246,7 @@ impl Harness {
             let mut ctx = ExecCtx {
                 mem: &mut mem,
                 vmm: &vmm,
+                as_id: 0,
                 host1x: &mut host1x,
                 stats: &mut stats,
                 trace: false,
@@ -307,6 +311,7 @@ impl Harness {
             host1x: Host1x::new(),
             stats: GpuStats::default(),
             base,
+            as_id: 0,
         }
     }
 
@@ -315,6 +320,7 @@ impl Harness {
         let mut ctx = ExecCtx {
             mem: &self.mem,
             vmm: &self.vmm,
+            as_id: self.as_id,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
             trace: false,
@@ -331,6 +337,7 @@ impl Harness {
         let mut ctx = ExecCtx {
             mem: &self.mem,
             vmm: &self.vmm,
+            as_id: self.as_id,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
             trace: false,
@@ -344,6 +351,7 @@ impl Harness {
         let mut ctx = ExecCtx {
             mem: &self.mem,
             vmm: &self.vmm,
+            as_id: self.as_id,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
             trace: false,
@@ -357,6 +365,7 @@ impl Harness {
             let mut ctx = ExecCtx {
                 mem: &self.mem,
                 vmm: &self.vmm,
+                as_id: self.as_id,
                 host1x: &mut self.host1x,
                 stats: &mut self.stats,
                 trace: false,
@@ -374,6 +383,7 @@ impl Harness {
         ExecCtx {
             mem: &self.mem,
             vmm: &self.vmm,
+            as_id: self.as_id,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
             trace: false,
@@ -523,6 +533,7 @@ impl Harness {
         let mut ctx = ExecCtx {
             mem: &self.mem,
             vmm: &self.vmm,
+            as_id: self.as_id,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
             trace: false,

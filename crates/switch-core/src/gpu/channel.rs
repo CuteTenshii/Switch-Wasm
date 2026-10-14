@@ -135,6 +135,8 @@ struct Pfifo {
 #[derive(Debug)]
 pub struct Channel {
     pub id: u32,
+    /// The process that opened it, whose memory its address space maps.
+    pub owner: u64,
     /// The address space bound with `NVGPU_AS_IOCTL_BIND_CHANNEL`.
     pub as_id: Option<u32>,
     pub syncpt: u32,
@@ -156,6 +158,7 @@ impl Channel {
         subchannel_class[SUBCHANNEL_GPFIFO] = CLASS_GPFIFO;
         Channel {
             id,
+            owner: 0,
             as_id: None,
             syncpt,
             subchannel_class,
@@ -415,6 +418,7 @@ mod tests {
             ExecCtx {
                 mem: &self.mem,
                 vmm: &self.vmm,
+                as_id: 0,
                 host1x: &mut self.host1x,
                 stats: &mut self.stats,
                 trace: false,

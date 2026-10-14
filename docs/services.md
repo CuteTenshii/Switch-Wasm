@@ -5,7 +5,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 ## The services
 
 - **`sm:`** - `GetService` (1) hands out a handle for any name, an empty one included; a name with no implementation then gets the fabricated replies (see `kernel/ipc.rs` below). Commands it does not implement are refused, Atmosphère's `HasService` (65100) included.
-- **`nvdrv`** - the real `INvDrvServices`, dispatched into `gpu::nvdrv`.
+- **`nvdrv`** - the real `INvDrvServices`, dispatched into `gpu::nvdrv`. Each fd belongs to the process that opened it: another process's ioctl or close is refused, and a process's files close when it ends, with their channels and address spaces.
 - **`hid`** is the *negotiation*, not the input: the data lives in a 256 KiB shared memory region the guest reads with no IPC per frame (`CreateAppletResource` → `GetSharedMemoryHandle`). The region is one console-wide `SharedPages` block that every process maps, so input is written once and the Home Menu and a running applet read the same pad. The `Set*`/`Get*` pairs must read back. Vibration goes `SendVibrationValue` → `Cpu::vibration` → the Gamepad API's `dual-rumble`.
 - **`pl:u`/`pl:s`** - the shared fonts; see `pl.rs` below.
 - **`lm`** carries a title's `NN_LOG` output: a 0x18-byte LogPacket header then TLV chunks (key 2 message, key 6 module), split across packets with `flags` bit 0 head / bit 1 tail. Retail builds often compile logging out, so an empty log is not evidence of a bug.

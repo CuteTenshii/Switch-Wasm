@@ -39,14 +39,18 @@ impl Cpu {
 
     /// Present a frame whose surface was still on the device, once it has come back.
     pub(crate) fn complete_pending_present(&mut self) {
-        let Some(buffer) = self.pending_present else {
+        let Some((pid, buffer)) = self.pending_present else {
             return;
         };
-        match self.machine.nv.gpu.flush_renderers(&self.mem) {
+        let Some(mem) = self.machine.processes.get(&pid).map(|p| p.mem.clone()) else {
+            self.pending_present = None;
+            return;
+        };
+        match self.machine.nv.gpu.flush_renderers(pid, &mem) {
             Ok(crate::gpu::renderer::Flush::Pending) => {}
             Ok(crate::gpu::renderer::Flush::Done) => {
                 self.pending_present = None;
-                if let Err(e) = self.machine.nv.gpu.present(&self.mem, &buffer) {
+                if let Err(e) = self.machine.nv.gpu.present(pid, &mem, &buffer) {
                     self.diagnostic(
                         Level::Error,
                         &format!("[vi] the deferred present failed: {e}"),

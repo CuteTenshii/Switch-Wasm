@@ -17,7 +17,8 @@ The Maxwell engines, shader translation, the software rasterizer and texture han
 
 ## `crates/switch-core/src/gpu/mod.rs`
 
-- The renderer backend lives on `Gpu`, not on a `Channel`: every `open("/dev/nvhost-gpu")` creates a channel (Asphalt 9 opens four) and `nvClose` destroys one, so installing on a channel lost the device. It is lent to the executing channel for each submission and taken back even on a fault. Flushes go through the last submitting channel's address space.
+- Every presenting process has a layer (`Gpu::present` takes it, by pid), and the screen is the layers blended in pid order, so an applet sits above its caller. A layer alone on screen is the framebuffer itself with no copy; `remove_layer` uncovers what was below when a process ends.
+- The renderer backend lives on `Gpu`, not on a `Channel`: every `open("/dev/nvhost-gpu")` creates a channel (Asphalt 9 opens four) and `nvClose` destroys one, so installing on a channel lost the device. It is lent to the executing channel for each submission and taken back even on a fault. A flush goes through the presenting process's last submitting channel, with that process's memory.
 - Scan-out honors the queued `transform` (Minecraft queues `FLIP_V` every frame) and `crop` (A Short Hike renders 1280x720 into a 1920x1080 buffer). `ROT_90` is refused rather than shown wrong. Empty or off-surface crops mean the whole surface; crops are clamped since they are guest data.
 - Scan-out reads the whole surface with one page-table walk (`read_into`) into a buffer reused across frames, computes row/column swizzle halves once, and clamps the slice so per-pixel bounds checks are elided. Per-pixel `read_le` was the full cost of a frame in titles that draw nothing.
 

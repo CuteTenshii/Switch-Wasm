@@ -1065,6 +1065,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1116,6 +1117,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1148,6 +1150,7 @@ mod tests {
             let ctx = ExecCtx {
                 mem,
                 vmm: &vmm,
+                as_id: 0,
                 host1x: &mut host1x,
                 stats: &mut stats,
                 trace: false,
@@ -1229,6 +1232,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1289,6 +1293,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1350,6 +1355,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1403,6 +1409,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1417,6 +1424,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1563,6 +1571,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1598,6 +1607,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1641,6 +1651,7 @@ mod tests {
         let ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -1693,6 +1704,7 @@ mod tests {
             let ctx = ExecCtx {
                 mem,
                 vmm: &vmm,
+                as_id: 0,
                 host1x: &mut host1x,
                 stats: &mut stats,
                 trace: false,

@@ -6,7 +6,7 @@ Library applets must run as processes beside their caller, in one kernel with on
 Each stage builds, passes `make test` and clippy, keeps every title in `docs/progress.md` booting to the same frames, and is committed on its own.
 
 1. Per-process handle tables, and shared memory for the shared framebuffer and transfer memory.
-2. GPU and display: per-process nvdrv fds, nvmap handles and address spaces; a vi layer table; layers composited by z-order into one frame, in software and wgpu. Until then the last process to present owns the screen.
+2. nvmap handles are console-wide and name a CPU address in the allocating process; a handle another process maps or presents is read from that process's memory at the same address.
 3. am focus: the caller is told it lost and regained focus, and `GetCurrentFocusState` answers per process.
 
 ## Browser bindings

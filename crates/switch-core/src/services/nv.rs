@@ -45,7 +45,7 @@ impl Cpu {
                     Some(&(addr, size)) => self.read_string(addr, size),
                     None => String::new(),
                 };
-                let (fd, error) = self.nv.open(&path)?;
+                let (fd, error) = self.machine.nv.open(self.pid, &path)?;
                 let mut raw = [0u8; 8];
                 raw[..4].copy_from_slice(&fd.to_le_bytes());
                 raw[4..].copy_from_slice(&error.to_le_bytes());
@@ -72,6 +72,7 @@ impl Cpu {
                 argp.resize(size.max(argp.len()), 0);
                 let mut inline_out = Vec::new();
                 let error = self.machine.nv.ioctl(
+                    self.pid,
                     &self.mem,
                     fd,
                     request,
@@ -123,7 +124,7 @@ impl Cpu {
             // Close(u32 fd) -> u32 error
             Some(2) => {
                 let fd = self.mem.read_u32(data)?;
-                let error = self.nv.close(fd);
+                let error = self.machine.nv.close(self.pid, fd);
                 self.write_ipc_response(tls, 0, &[], &error.to_le_bytes(), &[])
             }
             // Initialize(u32 transfer_mem_size, handles) -> u32 error.

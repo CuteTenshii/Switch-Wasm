@@ -34,6 +34,7 @@ fn a_solid_colour_triangle_matches_a_clear_color_equivalent_fill() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: true,
@@ -92,6 +93,7 @@ fn a_shuffling_fragment_shader_reads_the_pixel_beside_it() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -157,6 +159,7 @@ fn a_masked_channel_keeps_what_the_target_already_held() {
         let mut ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -207,6 +210,7 @@ fn a_multisampled_edge_covers_some_samples_of_a_pixel_and_not_others() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -262,6 +266,7 @@ fn a_sample_mask_keeps_only_the_samples_it_names() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -294,6 +299,7 @@ fn alpha_to_coverage_turns_half_alpha_into_half_the_samples() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -353,6 +359,7 @@ fn a_draw_follows_the_render_target_control_mapping() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -395,6 +402,7 @@ fn an_indexed_draw_reads_its_vertices_through_the_index_buffer() {
         let mut ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -417,6 +425,7 @@ fn an_indexed_draw_reads_its_vertices_through_the_index_buffer() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: true,
@@ -458,6 +467,7 @@ fn back_face_culling_drops_the_wrongly_wound_triangle() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: true,

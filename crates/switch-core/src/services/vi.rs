@@ -324,10 +324,10 @@ impl Cpu {
                     crop,
                 };
                 // GPU backends keep render targets on the device; the display reads guest memory.
-                if self.machine.nv.gpu.flush_renderers(&self.mem)?
+                if self.machine.nv.gpu.flush_renderers(self.pid, &self.mem)?
                     == crate::gpu::renderer::Flush::Done
                 {
-                    self.machine.nv.gpu.present(&self.mem, &buffer)?;
+                    self.machine.nv.gpu.present(self.pid, &self.mem, &buffer)?;
                     if crate::trace::enabled(crate::trace::Trace::Nv) {
                         crate::traceln!(
                             "[vi] presented shared frame {} from slot {slot}",
@@ -335,7 +335,7 @@ impl Cpu {
                         );
                     }
                 } else {
-                    self.pending_present = Some(buffer);
+                    self.pending_present = Some((self.pid, buffer));
                 }
                 let _ = SHARED_BUFFER_ADDR;
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -417,9 +417,10 @@ impl Cpu {
         if let crate::display::Action::Present(buffer) = action {
             // A device-backed surface may not be ready yet;
             // `Cpu::complete_pending_present` presents it later.
-            if self.machine.nv.gpu.flush_renderers(&self.mem)? == crate::gpu::renderer::Flush::Done
+            if self.machine.nv.gpu.flush_renderers(self.pid, &self.mem)?
+                == crate::gpu::renderer::Flush::Done
             {
-                self.machine.nv.gpu.present(&self.mem, &buffer)?;
+                self.machine.nv.gpu.present(self.pid, &self.mem, &buffer)?;
                 if crate::trace::enabled(crate::trace::Trace::Nv) {
                     crate::traceln!(
                         "[vi] presented frame {} ({}x{})",
@@ -429,7 +430,7 @@ impl Cpu {
                     );
                 }
             } else {
-                self.pending_present = Some(buffer);
+                self.pending_present = Some((self.pid, buffer));
             }
             // Paced to the refresh rate either way.
             self.pace_present();

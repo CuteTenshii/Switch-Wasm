@@ -299,8 +299,9 @@ pub struct Machine {
     pub display: crate::display::BufferQueue,
     /// See [`Cpu::pace_present`].
     pub(crate) last_present_cycles: u64,
-    /// A presented frame awaiting the GPU backend; see [`Cpu::complete_pending_present`].
-    pub(crate) pending_present: Option<crate::gpu::DisplayBuffer>,
+    /// A presented frame awaiting the GPU backend, and the process presenting it; see
+    /// [`Cpu::complete_pending_present`].
+    pub(crate) pending_present: Option<(u64, crate::gpu::DisplayBuffer)>,
     /// Thread lifecycle events since the host last asked; see [`ThreadReport`].
     pub(crate) thread_log: Vec<String>,
     pub(crate) thread_log_dropped: u64,

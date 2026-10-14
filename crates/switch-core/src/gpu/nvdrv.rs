@@ -119,7 +119,8 @@ impl ZbcTable {
 #[derive(Debug)]
 pub struct NvDrv {
     pub gpu: Gpu,
-    files: HashMap<u32, NvFile>,
+    /// Open files by fd, each with the process that opened it.
+    files: HashMap<u32, (u64, NvFile)>,
     next_fd: u32,
     pub transfer_mem_size: u32,
     /// The applet from `SetAruid`; recorded only.
@@ -153,12 +154,12 @@ impl NvDrv {
     }
 
     pub fn file(&self, fd: u32) -> Option<&NvFile> {
-        self.files.get(&fd)
+        self.files.get(&fd).map(|(_, file)| file)
     }
 
     /// The device node `fd` was opened on, for diagnostics.
     pub fn device_name(&self, fd: u32) -> &str {
-        match self.files.get(&fd) {
+        match self.file(fd) {
             Some(NvFile::NvMap) => "/dev/nvmap",
             Some(NvFile::NvHostCtrl) => "/dev/nvhost-ctrl",
             Some(NvFile::NvHostCtrlGpu) => "/dev/nvhost-ctrl-gpu",
@@ -170,8 +171,8 @@ impl NvDrv {
         }
     }
 
-    /// `nvOpen`. Returns `(fd, error)`.
-    pub fn open(&mut self, path: &str) -> Result<(u32, u32)> {
+    /// `nvOpen` from process `owner`. Returns `(fd, error)`.
+    pub fn open(&mut self, owner: u64, path: &str) -> Result<(u32, u32)> {
         let file = match path {
             "/dev/nvmap" => NvFile::NvMap,
             "/dev/nvhost-ctrl" => NvFile::NvHostCtrl,
@@ -180,7 +181,7 @@ impl NvDrv {
                 as_id: self.gpu.create_address_space(),
             },
             "/dev/nvhost-gpu" => NvFile::Channel {
-                channel_id: self.gpu.create_channel()?,
+                channel_id: self.gpu.create_channel(owner)?,
             },
             other => match Engine::from_node(other) {
                 Some(engine) => NvFile::Multimedia {
@@ -195,7 +196,7 @@ impl NvDrv {
         let unsupported = matches!(file, NvFile::Unsupported { .. });
         let fd = self.next_fd;
         self.next_fd += 1;
-        self.files.insert(fd, file);
+        self.files.insert(fd, (owner, file));
         if crate::trace::enabled(crate::trace::Trace::Nv) {
             crate::traceln!(
                 "[nv] open {} -> fd {}{}",
@@ -207,11 +208,18 @@ impl NvDrv {
         Ok((fd, if unsupported { NV_NOT_SUPPORTED } else { NV_OK }))
     }
 
-    /// `nvClose`.
-    pub fn close(&mut self, fd: u32) -> u32 {
-        match self.files.remove(&fd) {
+    /// `nvClose` from process `owner`; another process's fd is not its to close.
+    pub fn close(&mut self, owner: u64, fd: u32) -> u32 {
+        if self
+            .files
+            .get(&fd)
+            .is_none_or(|&(opener, _)| opener != owner)
+        {
+            return NV_BAD_PARAMETER;
+        }
+        match self.files.remove(&fd).map(|(_, file)| file) {
             Some(NvFile::AddressSpace { as_id }) => {
-                self.gpu.address_spaces.remove(&as_id);
+                self.gpu.close_address_space(as_id);
                 NV_OK
             }
             Some(NvFile::Channel { channel_id }) => {
@@ -229,11 +237,25 @@ impl NvDrv {
         }
     }
 
+    /// Close every file process `owner` left open, as its exit does.
+    pub fn close_process(&mut self, owner: u64) {
+        let fds: Vec<u32> = self
+            .files
+            .iter()
+            .filter(|(_, (opener, _))| *opener == owner)
+            .map(|(&fd, _)| fd)
+            .collect();
+        for fd in fds {
+            self.close(owner, fd);
+        }
+    }
+
     /// `nvIoctl` / `nvIoctl2` / `nvIoctl3`. `data` is the argument struct (plus trailing
     /// records for video `SUBMIT`), `inline_in` is `nvIoctl2`'s extra input and
     /// `inline_out` receives `nvIoctl3`'s extra output, which `nnSdk` reads payloads from.
     pub fn ioctl(
         &mut self,
+        owner: u64,
         mem: &Memory,
         fd: u32,
         request: u32,
@@ -244,8 +266,8 @@ impl NvDrv {
         let ioc_type = (request >> 8) & 0xFF;
         let nr = request & 0xFF;
         let file = match self.files.get(&fd) {
-            Some(file) => file.clone(),
-            None => return Ok(NV_BAD_PARAMETER),
+            Some((opener, file)) if *opener == owner => file.clone(),
+            _ => return Ok(NV_BAD_PARAMETER),
         };
         if crate::trace::enabled(crate::trace::Trace::Nv) {
             crate::traceln!(
@@ -626,7 +648,7 @@ impl NvDrv {
             // BindChannel { in u32 fd }
             0x01 => {
                 let channel_fd = read_u32(data, 0);
-                match self.files.get(&channel_fd) {
+                match self.file(channel_fd) {
                     Some(NvFile::Channel { channel_id }) => {
                         let channel_id = *channel_id;
                         self.gpu.channel_mut(channel_id)?.as_id = Some(as_id);
@@ -1104,23 +1126,23 @@ mod tests {
     fn ioctl(drv: &mut NvDrv, mem: &Memory, fd: u32, ty: u32, nr: u32, data: &mut [u8]) -> u32 {
         let mut inline_out = Vec::new();
         let request = make_ioctl(IOWR, ty, nr, data.len() as u32);
-        drv.ioctl(mem, fd, request, data, &[], &mut inline_out)
+        drv.ioctl(1, mem, fd, request, data, &[], &mut inline_out)
             .unwrap()
     }
 
     #[test]
     fn open_maps_known_device_nodes() {
         let mut drv = NvDrv::new();
-        let (map_fd, err) = drv.open("/dev/nvmap").unwrap();
+        let (map_fd, err) = drv.open(1, "/dev/nvmap").unwrap();
         assert_eq!(err, NV_OK);
         assert_eq!(drv.file(map_fd), Some(&NvFile::NvMap));
-        let (as_fd, err) = drv.open("/dev/nvhost-as-gpu").unwrap();
+        let (as_fd, err) = drv.open(1, "/dev/nvhost-as-gpu").unwrap();
         assert_eq!(err, NV_OK);
         assert!(matches!(drv.file(as_fd), Some(NvFile::AddressSpace { .. })));
-        let (chan_fd, err) = drv.open("/dev/nvhost-gpu").unwrap();
+        let (chan_fd, err) = drv.open(1, "/dev/nvhost-gpu").unwrap();
         assert_eq!(err, NV_OK);
         assert!(matches!(drv.file(chan_fd), Some(NvFile::Channel { .. })));
-        let (dec_fd, err) = drv.open("/dev/nvhost-nvdec").unwrap();
+        let (dec_fd, err) = drv.open(1, "/dev/nvhost-nvdec").unwrap();
         assert_eq!(err, NV_OK);
         assert!(matches!(
             drv.file(dec_fd),
@@ -1129,15 +1151,51 @@ mod tests {
                 ..
             })
         ));
-        let (_, err) = drv.open("/dev/nvhost-nvjpg").unwrap();
+        let (_, err) = drv.open(1, "/dev/nvhost-nvjpg").unwrap();
         assert_eq!(err, NV_NOT_SUPPORTED);
+    }
+
+    #[test]
+    fn a_file_answers_only_the_process_that_opened_it_and_goes_with_it() {
+        const OTHER: u64 = 2;
+        let mut drv = NvDrv::new();
+        let mem = Memory::new();
+        let (fd, _) = drv.open(1, "/dev/nvmap").unwrap();
+        let mut create = [0u8; 8];
+        write_u32(&mut create, 0, 0x2000);
+        let request = make_ioctl(IOWR, TYPE_NVMAP, 0x01, 8);
+        let mut out = Vec::new();
+        assert_eq!(
+            drv.ioctl(OTHER, &mem, fd, request, &mut create, &[], &mut out)
+                .unwrap(),
+            NV_BAD_PARAMETER
+        );
+        assert_eq!(drv.close(OTHER, fd), NV_BAD_PARAMETER);
+        assert_eq!(
+            ioctl(&mut drv, &mem, fd, TYPE_NVMAP, 0x01, &mut create),
+            NV_OK
+        );
+
+        let (channel_fd, _) = drv.open(OTHER, "/dev/nvhost-gpu").unwrap();
+        drv.close_process(OTHER);
+        assert_eq!(
+            drv.file(channel_fd),
+            None,
+            "an ended process's file stayed open"
+        );
+        assert!(drv.gpu.channels.is_empty(), "its channel outlived it");
+        assert_eq!(
+            drv.file(fd),
+            Some(&NvFile::NvMap),
+            "another process's file closed"
+        );
     }
 
     #[test]
     fn nvmap_create_alloc_and_param() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (fd, _) = drv.open("/dev/nvmap").unwrap();
+        let (fd, _) = drv.open(1, "/dev/nvmap").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x2000);
@@ -1180,7 +1238,7 @@ mod tests {
         let mut inline_out = Vec::new();
         let request = make_ioctl(IOWR, ty, nr, data.len() as u32);
         let code = drv
-            .ioctl(mem, fd, request, data, &[], &mut inline_out)
+            .ioctl(1, mem, fd, request, data, &[], &mut inline_out)
             .unwrap();
         (code, inline_out)
     }
@@ -1190,7 +1248,7 @@ mod tests {
         // The VsmsMapping buffer is sized from `GetCharacteristics`' TPC count.
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
+        let (fd, _) = drv.open(1, "/dev/nvhost-ctrl-gpu").unwrap();
         let mut arg = [0u8; 8];
         let (code, map) = ioctl_out(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x13, &mut arg);
         assert_eq!(code, NV_OK);
@@ -1220,7 +1278,7 @@ mod tests {
     fn the_zbc_table_hands_back_the_clear_values_it_was_given() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
+        let (fd, _) = drv.open(1, "/dev/nvhost-ctrl-gpu").unwrap();
 
         // ZbcSetTable { color_ds[4], color_l2[4], depth, format, type }.
         let mut set = [0u8; 0x2C];
@@ -1283,7 +1341,7 @@ mod tests {
     fn a_full_zbc_table_is_refused_rather_than_silently_dropping_entries() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
+        let (fd, _) = drv.open(1, "/dev/nvhost-ctrl-gpu").unwrap();
         let mut set = [0u8; 0x2C];
         write_u32(&mut set, 0x28, ZBC_TYPE_DEPTH);
         for i in 0..ZBC_TABLE_SIZE as u32 {
@@ -1306,7 +1364,7 @@ mod tests {
     fn get_config_refuses_every_key() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (fd, _) = drv.open("/dev/nvhost-ctrl").unwrap();
+        let (fd, _) = drv.open(1, "/dev/nvhost-ctrl").unwrap();
 
         // domain[0x41], key[0x41], value[0x101].
         let mut arg = [0u8; 0x183];
@@ -1326,7 +1384,7 @@ mod tests {
     fn an_event_is_signalled_by_the_ioctls_that_say_so() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (fd, _) = drv.open("/dev/nvhost-ctrl").unwrap();
+        let (fd, _) = drv.open(1, "/dev/nvhost-ctrl").unwrap();
 
         let mut arg = [0u8; 0x10];
         write_u32(&mut arg, 0, 3); // EventRegister slot 3
@@ -1368,8 +1426,8 @@ mod tests {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x2_0000).unwrap();
-        let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
-        let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
+        let (map_fd, _) = drv.open(1, "/dev/nvmap").unwrap();
+        let (as_fd, _) = drv.open(1, "/dev/nvhost-as-gpu").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x2_0000);
@@ -1420,8 +1478,8 @@ mod tests {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x4000).unwrap();
-        let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
-        let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
+        let (map_fd, _) = drv.open(1, "/dev/nvmap").unwrap();
+        let (as_fd, _) = drv.open(1, "/dev/nvhost-as-gpu").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x4000);
@@ -1489,7 +1547,7 @@ mod tests {
     fn get_characteristics_reports_the_gm20b() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
+        let (fd, _) = drv.open(1, "/dev/nvhost-ctrl-gpu").unwrap();
         let mut data = [0u8; 0x10 + 0xA0];
         assert_eq!(
             ioctl(&mut drv, &mem, fd, TYPE_CTRL_GPU, 0x05, &mut data),
@@ -1505,8 +1563,8 @@ mod tests {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x1000).unwrap();
-        let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
-        let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
+        let (map_fd, _) = drv.open(1, "/dev/nvmap").unwrap();
+        let (as_fd, _) = drv.open(1, "/dev/nvhost-as-gpu").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x1000);
@@ -1540,8 +1598,8 @@ mod tests {
     fn bind_channel_links_the_address_space() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
-        let (chan_fd, _) = drv.open("/dev/nvhost-gpu").unwrap();
+        let (as_fd, _) = drv.open(1, "/dev/nvhost-as-gpu").unwrap();
+        let (chan_fd, _) = drv.open(1, "/dev/nvhost-gpu").unwrap();
 
         let mut bind = [0u8; 4];
         write_u32(&mut bind, 0, chan_fd);
@@ -1562,9 +1620,9 @@ mod tests {
         let mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x1000).unwrap();
 
-        let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
-        let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
-        let (chan_fd, _) = drv.open("/dev/nvhost-gpu").unwrap();
+        let (map_fd, _) = drv.open(1, "/dev/nvmap").unwrap();
+        let (as_fd, _) = drv.open(1, "/dev/nvhost-as-gpu").unwrap();
+        let (chan_fd, _) = drv.open(1, "/dev/nvhost-gpu").unwrap();
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x1000);
@@ -1625,7 +1683,7 @@ mod tests {
     fn syncpt_read_reflects_submissions() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (ctrl_fd, _) = drv.open("/dev/nvhost-ctrl").unwrap();
+        let (ctrl_fd, _) = drv.open(1, "/dev/nvhost-ctrl").unwrap();
         drv.gpu.host1x.set(9, 3).unwrap();
         let mut data = [0u8; 8];
         write_u32(&mut data, 0, 9);
@@ -1640,7 +1698,7 @@ mod tests {
     fn unknown_ioctl_is_reported_not_implemented() {
         let mut drv = NvDrv::new();
         let mem = Memory::new();
-        let (fd, _) = drv.open("/dev/nvmap").unwrap();
+        let (fd, _) = drv.open(1, "/dev/nvmap").unwrap();
         let mut data = [0u8; 8];
         assert_eq!(
             ioctl(&mut drv, &mem, fd, TYPE_NVMAP, 0x7F, &mut data),

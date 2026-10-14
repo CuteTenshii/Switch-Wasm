@@ -887,3 +887,40 @@ fn coverage_per_pixel_covers_whole_pixels_on_the_device_too() {
         });
     }
 }
+
+#[test]
+fn two_address_spaces_with_a_surface_at_one_address_keep_their_own() {
+    let Some(mut gpu) = device() else { return };
+    let mut below = Harness::new();
+    below.as_id = 1;
+    below.triangle([1.0, 0.0, 0.0, 1.0]);
+    let mut above = Harness::new();
+    above.as_id = 2;
+    above.triangle([0.0, 0.0, 1.0, 1.0]);
+    let want = |h: &mut Harness| {
+        h.draw_with(&mut Software).expect("the draw");
+        h.target()
+    };
+    let (red, blue) = {
+        let mut r = Harness::new();
+        r.triangle([1.0, 0.0, 0.0, 1.0]);
+        let mut b = Harness::new();
+        b.triangle([0.0, 0.0, 1.0, 1.0]);
+        (want(&mut r), want(&mut b))
+    };
+
+    below.draw_with(&mut gpu).expect("the first draw");
+    above.draw_with(&mut gpu).expect("the second draw");
+    below.flush_with(&mut gpu);
+    above.flush_with(&mut gpu);
+    assert_eq!(
+        below.target(),
+        red,
+        "the first address space lost its surface"
+    );
+    assert_eq!(
+        above.target(),
+        blue,
+        "the second address space got the first's"
+    );
+}

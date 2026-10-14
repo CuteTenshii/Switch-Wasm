@@ -33,6 +33,7 @@ fn three_vertex_colours_interpolate_correctly_at_a_known_interior_point() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: true,
@@ -162,6 +163,7 @@ fn a_vertex_shader_stores_to_global_memory() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -232,6 +234,7 @@ fn a_vertex_shader_reads_its_vertex_and_instance_ids() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -293,6 +296,7 @@ fn an_instanced_vertex_array_advances_with_the_instance_not_the_vertex() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -438,6 +442,7 @@ fn a_depth_only_pass_draws_without_a_colour_target() {
         let mut ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -463,6 +468,7 @@ fn a_depth_only_pass_draws_without_a_colour_target() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -503,6 +509,7 @@ fn depth_test_keeps_the_nearer_of_two_overlapping_triangles() {
         let mut ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -524,6 +531,7 @@ fn depth_test_keeps_the_nearer_of_two_overlapping_triangles() {
         let mut ctx = ExecCtx {
             mem: &mut mem,
             vmm: &vmm,
+            as_id: 0,
             host1x: &mut host1x,
             stats: &mut stats,
             trace: false,
@@ -539,6 +547,7 @@ fn depth_test_keeps_the_nearer_of_two_overlapping_triangles() {
     let mut ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,

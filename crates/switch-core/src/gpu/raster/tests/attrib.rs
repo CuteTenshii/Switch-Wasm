@@ -33,6 +33,7 @@ fn fetch_attribute_reads_a_float32_vec4_by_stride() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -70,6 +71,7 @@ fn fetch_attribute_unpacks_10_10_10_2() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -123,6 +125,7 @@ fn fetch_attribute_past_the_limit_reads_zeros() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -170,6 +173,7 @@ fn fetch_attribute_unpacks_unorm8_and_honours_is_bgra() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -207,6 +211,7 @@ fn fetch_attribute_unpacks_the_eight_bit_integer_and_normalised_types() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -279,6 +284,7 @@ fn fetch_attribute_unpacks_the_sixteen_bit_types() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -357,6 +363,7 @@ fn fetch_attribute_unpacks_the_narrow_eight_bit_shapes() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -404,6 +411,7 @@ fn fetch_attribute_from_a_disabled_buffer_is_an_error() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,
@@ -435,6 +443,7 @@ fn a_fixed_attribute_reads_the_vec4_default_instead_of_failing_the_draw() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,

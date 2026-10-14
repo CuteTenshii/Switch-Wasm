@@ -180,7 +180,7 @@ impl Gpu {
                 .map(|&b| (ShaderStage::Fragment, u32::from(b))),
         );
         // Taken out of `self` because the closure holds it while `timed!` borrows `self`.
-        let cache = std::mem::take(&mut self.texture_cache);
+        let cache = std::mem::take(&mut self.space.texture_cache);
         let mut hits = 0u64;
         let uploads = timed!(self, upload, {
             Uploads::of_cached(
@@ -196,12 +196,12 @@ impl Gpu {
                 },
             )
         });
-        self.texture_cache = cache;
+        self.space.texture_cache = cache;
         self.texture_hits += hits;
         let uploads = uploads.map_err(|e| format!("{e:?}"))?;
         self.uploaded.add_but_textures(&uploads);
         for upload in &uploads.textures {
-            if !self.texture_cache.contains_key(&upload.key) {
+            if !self.space.texture_cache.contains_key(&upload.key) {
                 self.uploaded.add_texture(upload.bytes.len());
                 self.to_remember
                     .push((upload.key, upload.bytes.clone(), upload.source_len));
@@ -280,7 +280,8 @@ impl Gpu {
             );
             // A buffer over a held surface would read stale memory too.
             let held_at = |addr: u64| {
-                self.held
+                self.space
+                    .held
                     .values()
                     .find(|h| (h.target.addr..h.target.addr + h.target.len()).contains(&addr))
                     .map(|h| h.target.addr)
@@ -308,17 +309,27 @@ impl Gpu {
                     t.sampler,
                     t.key.addr,
                     // Sampling a held surface would read stale guest memory.
-                    match self.held.values().find(|h| {
+                    match self.space.held.values().find(|h| {
                         (h.target.addr..h.target.addr + h.target.len()).contains(&t.key.addr)
                     }) {
                         Some(h) if h.target.addr == t.key.addr => {
                             " (held on the device)".to_string()
                         }
                         Some(h) => format!(" (inside the held surface at {:#x})", h.target.addr),
-                        None if self.evicted.iter().any(|h| h.target.addr == t.key.addr) => {
+                        None if self
+                            .space
+                            .evicted
+                            .iter()
+                            .any(|h| h.target.addr == t.key.addr) =>
+                        {
                             " (evicted, not yet written back)".to_string()
                         }
-                        None if self.pending.iter().any(|p| p.target.addr == t.key.addr) => {
+                        None if self
+                            .space
+                            .pending
+                            .iter()
+                            .any(|p| p.target.addr == t.key.addr) =>
+                        {
                             " (being read back)".to_string()
                         }
                         None => String::new(),
@@ -358,7 +369,7 @@ impl Gpu {
             .ok_or_else(|| format!("no {stage:?} program"))?;
         let key = (binding.addr, stage);
         // Validate hits: a `brx` jump table read from a constant buffer may have changed.
-        if let Some(cached) = self.shader_cache.get(&key) {
+        if let Some(cached) = self.space.shader_cache.get(&key) {
             if cached.reads.constants_unchanged(ctx) {
                 self.shader_hits += 1;
                 return Ok(cached.translation.clone());
@@ -386,11 +397,11 @@ impl Gpu {
             }
         }
         // Whole-cache eviction, as for textures.
-        if self.shader_cache.len() >= SHADER_CACHE_ENTRIES {
-            self.shader_cache.clear();
-            self.shader_pages.clear();
+        if self.space.shader_cache.len() >= SHADER_CACHE_ENTRIES {
+            self.space.shader_cache.clear();
+            self.space.shader_pages.clear();
         }
-        self.shader_cache.insert(
+        self.space.shader_cache.insert(
             key,
             CachedShader {
                 translation: translation.clone(),
@@ -403,11 +414,11 @@ impl Gpu {
     /// Drop every translation a written page held program words for.
     pub(super) fn evict_shaders(&mut self, pages: &[u32]) {
         for page in pages {
-            let Some(keys) = self.shader_pages.remove(page) else {
+            let Some(keys) = self.space.shader_pages.remove(page) else {
                 continue;
             };
             for key in keys {
-                self.shader_cache.remove(&key);
+                self.space.shader_cache.remove(&key);
             }
         }
     }

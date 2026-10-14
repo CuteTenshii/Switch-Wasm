@@ -269,6 +269,7 @@ fn memory_constants_reads_a_real_bound_buffer_out_of_gpu_memory() {
     let ctx = ExecCtx {
         mem: &mut mem,
         vmm: &vmm,
+        as_id: 0,
         host1x: &mut host1x,
         stats: &mut stats,
         trace: false,

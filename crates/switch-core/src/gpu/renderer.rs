@@ -44,6 +44,11 @@ pub trait Renderer: std::fmt::Debug {
         "{}".to_string()
     }
 
+    /// Forget what is held for an address space that was closed.
+    fn address_space_closed(&mut self, as_id: u32) {
+        let _ = as_id;
+    }
+
     /// Whether the device was lost and the backend wants replacing.
     fn lost(&self) -> bool {
         false

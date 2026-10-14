@@ -295,6 +295,7 @@ impl Gpu {
         let scratch = match (p.color, p.color_scratch) {
             (Some(color), Some((width, height))) => {
                 let held = &self
+                    .space
                     .held
                     .get(&color.addr)
                     .ok_or("the surface was not held")?
@@ -472,7 +473,11 @@ impl Gpu {
             // Put back whatever a companion holds first.
             Render::Direct | Render::Expanded => self.resolve_companion(addr)?,
         }
-        let held = self.held.get_mut(&addr).ok_or("the surface was not held")?;
+        let held = self
+            .space
+            .held
+            .get_mut(&addr)
+            .ok_or("the surface was not held")?;
         held.dirty |= writes;
         let texture = match &held.companion {
             Some(companion) => &companion.texture,

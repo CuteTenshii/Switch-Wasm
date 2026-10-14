@@ -3,28 +3,61 @@
 use crate::builtin::LOAD_DEPTH_WGSL;
 use crate::convert::{depth_texture_format, device_attachment_format};
 use crate::readback::{Held, Pending, MAP_FAILED, MAP_READY, MAP_WAITING};
-use crate::{crop_rows, Gpu, COPY_ALIGNMENT};
+use crate::{crop_rows, Gpu, Space, COPY_ALIGNMENT};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Flush;
 use switch_core::gpu::upload::{DepthKind, Target};
 use switch_core::{Error, Result};
 
 impl Gpu {
+    /// Make `as_id`'s surfaces and caches current, parking the previous address space's.
+    pub(super) fn enter_space(&mut self, as_id: u32) {
+        if as_id == self.space_id {
+            return;
+        }
+        let space = self.parked.remove(&as_id).unwrap_or_default();
+        let previous = std::mem::replace(&mut self.space, space);
+        self.parked.insert(self.space_id, previous);
+        self.space_id = as_id;
+    }
+
+    /// Destroy an address space's device textures; nothing is owed to guest memory that is gone.
+    pub(super) fn drop_space(&mut self, space: Space) {
+        for held in space.held.into_values().chain(space.evicted) {
+            held.texture.destroy();
+            if let Some(companion) = &held.companion {
+                companion.texture.destroy();
+            }
+        }
+        for pending in space.pending {
+            pending.staging.destroy();
+        }
+        for (key, made) in space.gpu_textures {
+            let bytes = space.texture_cache.get(&key).map_or(0, |b| b.len() as u64);
+            for (_, texture) in made {
+                texture.destroy();
+                self.gpu_texture_bytes = self.gpu_texture_bytes.saturating_sub(bytes);
+            }
+        }
+        let cached: u64 = space.texture_cache.values().map(|b| b.len() as u64).sum();
+        self.cached_bytes = self.cached_bytes.saturating_sub(cached);
+    }
+
     /// The device texture for a surface, uploaded on first use.
     pub(super) fn hold(&mut self, target: &Target, ctx: &ExecCtx) -> Result<()> {
-        match self.held.get(&target.addr) {
+        match self.space.held.get(&target.addr) {
             // The same surface as last time.
             Some(held) if held.target == *target => return Ok(()),
             // A different surface at the same address: the guest rebound it; write the old one back later.
             Some(_) => {
-                if let Some(held) = self.held.remove(&target.addr) {
-                    self.evicted.push(held);
+                if let Some(held) = self.space.held.remove(&target.addr) {
+                    self.space.evicted.push(held);
                 }
             }
             None => {}
         }
         let texture = self.upload_target(target, ctx)?;
-        self.held.insert(
+        self.space.held.insert(
             target.addr,
             Held {
                 texture,
@@ -38,7 +71,7 @@ impl Gpu {
 
     /// Write one held surface back into guest memory and stop holding it.
     fn flush_one(&mut self, addr: u64) {
-        let Some(held) = self.held.remove(&addr) else {
+        let Some(held) = self.space.held.remove(&addr) else {
             return;
         };
         self.ask_for(held);
@@ -56,7 +89,7 @@ impl Gpu {
         // A surface nothing drew into is already what guest memory says.
         if held.dirty {
             let pending = self.start_read_back(&held.target, &held.texture);
-            self.pending.push(pending);
+            self.space.pending.push(pending);
         }
         // Destroyed rather than dropped, so a browser frees it without waiting for GC.
         held.texture.destroy();
@@ -410,16 +443,19 @@ impl Gpu {
             return Ok(Flush::Done);
         }
         // Nothing held, owed or in flight: nothing to do (and no poll).
-        if self.held.is_empty() && self.evicted.is_empty() && self.pending.is_empty() {
+        if self.space.held.is_empty()
+            && self.space.evicted.is_empty()
+            && self.space.pending.is_empty()
+        {
             return Ok(Flush::Done);
         }
         // Only once per frame.
-        if self.pending.is_empty() {
+        if self.space.pending.is_empty() {
             timed!(self, flush_ask, {
-                for held in std::mem::take(&mut self.evicted) {
+                for held in std::mem::take(&mut self.space.evicted) {
                     self.ask_for(held);
                 }
-                let addresses: Vec<u64> = self.held.keys().copied().collect();
+                let addresses: Vec<u64> = self.space.held.keys().copied().collect();
                 for addr in addresses {
                     self.flush_one(addr);
                 }
@@ -439,6 +475,7 @@ impl Gpu {
         });
         use std::sync::atomic::Ordering;
         if self
+            .space
             .pending
             .iter()
             .any(|p| p.state.load(Ordering::Acquire) == MAP_WAITING)
@@ -448,7 +485,7 @@ impl Gpu {
             return Ok(Flush::Pending);
         }
         timed!(self, flush_land, {
-            for pending in std::mem::take(&mut self.pending) {
+            for pending in std::mem::take(&mut self.space.pending) {
                 if pending.state.load(Ordering::Acquire) == MAP_FAILED {
                     // Include the device's reason if it left one.
                     return Err(Error::Gpu(match self.device_error() {
