@@ -57,7 +57,7 @@ export function tryGpu(): void {
       {},
     );
     const why = report.lostBecause ? ` (${report.lostBecause})` : '';
-    workerLog(`[gpu] the device was lost${why} - opening another (attempt ${gpuReopens})`, 'err');
+    workerLog(`[gpu] the device was lost${why} - opening another (attempt ${gpuReopens})`, 'error');
   }
   // `never` survives new sessions: this browser has no device to give.
   if (gpu === 'done' && state.handle !== gpuSession) gpu = 'no';

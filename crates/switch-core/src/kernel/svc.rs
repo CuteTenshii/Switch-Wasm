@@ -209,7 +209,7 @@ impl Cpu {
                         self.sp()
                     );
                     let line = format!("{line}\n{}", self.trail_text());
-                    self.diagnostic(crate::trace::Level::Error, &line);
+                    self.log(crate::trace::Level::Error, &line);
                 }
                 self.exit_process(crate::cpu::Ending::Exited);
                 Ok(())

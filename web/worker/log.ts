@@ -1,10 +1,10 @@
 // Worker logging, forwarded to the page's log instead of `console`.
 
-import type { LogClass, WorkerMessage } from '../shared/protocol';
+import type { LogLevel, WorkerMessage } from '../shared/protocol';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
-export function workerLog(text: string, cls?: LogClass): void {
-  const message: WorkerMessage = { type: 'log', text, cls };
+export function workerLog(text: string, level: LogLevel = 'log'): void {
+  const message: WorkerMessage = { type: 'log', text, level };
   ctx.postMessage(message);
 }

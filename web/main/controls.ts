@@ -18,7 +18,7 @@ export async function controlRemember(titleId: string, icon: Bytes | null): Prom
     const entry: StoredControl = { nacp, icon: icon ?? new Uint8Array(0) };
     await idbApply(await nandIdb(), NAND_CONTROLS, [[titleId, entry]]);
   } catch (err) {
-    log('Title details: could not be stored (' + (err as Error).message + ')', 'err');
+    log('Title details: could not be stored (' + (err as Error).message + ')', 'error');
   }
 }
 
@@ -27,7 +27,7 @@ export async function controlRestore(): Promise<void> {
   try {
     entries = await idbGetAll<StoredControl>(await nandIdb(), NAND_CONTROLS);
   } catch (err) {
-    log('Title details: could not be read (' + (err as Error).message + ')', 'err');
+    log('Title details: could not be read (' + (err as Error).message + ')', 'error');
     return;
   }
   for (const [id, control] of entries) {

@@ -23,7 +23,7 @@ export async function stageFont(): Promise<void> {
       fontBytes = new Uint8Array(await res.arrayBuffer());
     } catch (err) {
       log('No system font (' + fontUrl + '): ' + (err as Error).message
-        + ' - text will not render.', 'err');
+        + ' - text will not render.', 'error');
       return;
     }
   }

@@ -429,7 +429,7 @@ impl Cpu {
                 let data = self.ipc_request_data(tls);
                 let data_id = self.mem.read_u64(data.wrapping_add(8))?;
                 if !self.data_archives.contains_key(&data_id) {
-                    self.diagnostic(
+                    self.log(
                         Level::Warn,
                         &format!(
                             "[fs] no system data archive registered for data id {data_id:016x}"
@@ -543,7 +543,7 @@ impl Cpu {
             _ => "?",
         };
         let cmd = cmd_id.unwrap_or(0);
-        self.diagnostic(
+        self.log(
             Level::Warn,
             &format!(
                 "[fs] refused fsp-srv {cmd}: raw {first:#018x} {second:#018x} \

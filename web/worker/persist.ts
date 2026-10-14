@@ -28,9 +28,9 @@ export async function restoreStorage(): Promise<number> {
       if (value.kind === 'dir') void CMD.sd_create_dir(path);
       else void CMD.sd_write_file(path, value.data ?? new Uint8Array(0));
     }
-    if (sd.length) workerLog('SD card: restored ' + sd.length + ' entries', 'dim');
+    if (sd.length) workerLog('SD card: restored ' + sd.length + ' entries', 'debug');
   } catch (err) {
-    workerLog('SD card: could not be read (' + String(err) + ')', 'err');
+    workerLog('SD card: could not be read (' + String(err) + ')', 'error');
   }
   try {
     const saves = dirsFirst(await idbGetAll<StoredEntry>(await nandIdb(), NAND_SAVES));
@@ -41,9 +41,9 @@ export async function restoreStorage(): Promise<number> {
       if (value.kind === 'dir') void CMD.save_create_dir(id, path);
       else void CMD.save_write_file(id, path, value.data ?? new Uint8Array(0));
     }
-    if (saves.length) workerLog('Saves: restored ' + saves.length + ' entries', 'dim');
+    if (saves.length) workerLog('Saves: restored ' + saves.length + ' entries', 'debug');
   } catch (err) {
-    workerLog('Saves: could not be read (' + String(err) + ')', 'err');
+    workerLog('Saves: could not be read (' + String(err) + ')', 'error');
   }
   return 0;
 }
@@ -90,7 +90,7 @@ async function store(): Promise<void> {
     } catch (err) {
       // Put them back under anything newer that arrived meanwhile.
       for (const [key, value] of changes) if (!backlog.has(key)) backlog.set(key, value);
-      workerLog(`${what}: could not be written (${String(err)}) - retrying on the next flush.`, 'err');
+      workerLog(`${what}: could not be written (${String(err)}) - retrying on the next flush.`, 'error');
     }
   }
 }
@@ -107,5 +107,5 @@ function logStored(what: string, changes: [string, StoredEntry | null][]): void 
   }
   const more = changes.length > named.length ? `, and ${changes.length - named.length} more` : '';
   workerLog(`[io] ${what}: stored ${changes.length} changes (${fmtSize(bytes)}) in IndexedDB: `
-    + named.join(', ') + more);
+    + named.join(', ') + more, 'debug');
 }

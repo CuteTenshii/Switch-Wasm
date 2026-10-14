@@ -6,7 +6,7 @@ import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
-import { clearConsole, log } from './log';
+import { log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { noteBooted, recycleSession } from './session';
@@ -50,7 +50,7 @@ async function handleContainerFile(file: File): Promise<void> {
     // Without clearing: an open container should not vanish over a bad drop.
     $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
     $('nsp-result').appendChild(el('div', 'nca-info nca-inspect', verdict.why));
-    log(verdict.why, 'err');
+    log(verdict.why, 'error');
     return;
   }
   if (verdict.format === 'nca') {
@@ -146,7 +146,7 @@ async function handleDlcFile(file: File, packs: number): Promise<void> {
   log(describeDlc(packs) + ' for ' + titleId + ' - '
     + (titleId === openTitleId
       ? 'mounted when this title launches.'
-      : 'open that game to launch it with them.'), 'ok');
+      : 'open that game to launch it with them.'), 'info');
   showPairedNotes();
 }
 
@@ -161,7 +161,7 @@ async function handleUpdateFile(file: File, titleId: string): Promise<void> {
   log('Update ' + describeUpdate(heldUpdate) + ' for ' + titleId + ' - '
     + (titleId === openTitleId
       ? 'applied when this title launches.'
-      : 'open that game to launch it patched.'), 'ok');
+      : 'open that game to launch it patched.'), 'info');
   await syncPaired();
 }
 
@@ -252,7 +252,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
         + ' NCA - only a Program NCA holds an executable.';
       setState('fault');
       failLoad(why);
-      log(why, 'err');
+      log(why, 'error');
       return;
     }
     await launchStandaloneNca(file);
@@ -296,7 +296,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     const why = await readLastError();
     setState('fault');
     failLoad(why);
-    log('Nothing to boot in ' + file.name + ': ' + why, 'err');
+    log('Nothing to boot in ' + file.name + ': ' + why, 'error');
     return;
   }
   await launchNca(nspFiles[index], index);
@@ -312,7 +312,7 @@ export async function reopenContainer(): Promise<void> {
   const { file, kind } = openContainer;
   const ok = await call(kind === 'nca' ? 'open_nca' : 'open_nsp', file).catch(() => -1);
   if (ok !== 0) {
-    log('Could not re-open ' + file.name + ' - load it again to launch it.', 'err');
+    log('Could not re-open ' + file.name + ' - load it again to launch it.', 'error');
     openContainer = null;
     clearNsp();
     return;
@@ -333,7 +333,7 @@ async function handleNspFile(file: File): Promise<void> {
       const why = await readLastError();
       status.textContent = 'NSP error: ' + why;
       setNote('container-badge', 'none open', false);
-      log('NSP error: ' + why, 'err');
+      log('NSP error: ' + why, 'error');
       return;
     }
     openContainer = { file, kind: 'nsp' };
@@ -341,12 +341,12 @@ async function handleNspFile(file: File): Promise<void> {
   } catch (e) {
     status.textContent = 'Could not open ' + file.name + ': ' + (e as Error).message;
     setNote('container-badge', 'none open', false);
-    log('Could not open ' + file.name + ': ' + (e as Error).message, 'err');
+    log('Could not open ' + file.name + ': ' + (e as Error).message, 'error');
     return;
   }
   status.remove();
   nspFiles = JSON.parse(await call('nsp_files_json')) as NspFile[];
-  log('Parsed ' + nspFiles.length + ' file(s). Click an .nca to inspect it.', 'ok');
+  log('Parsed ' + nspFiles.length + ' file(s). Click an .nca to inspect it.', 'info');
 
   const ul = el('ul', 'nsp-list');
   nspFiles.forEach((f, index) => {
@@ -400,12 +400,12 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
   let info: ControlInfo;
   try {
     if (await loader() !== 0) {
-      log('No title details: ' + await readLastError(), 'dim');
+      log('No title details: ' + await readLastError(), 'debug');
       return null;
     }
     info = JSON.parse(await call('control_json')) as ControlInfo;
   } catch (err) {
-    log('No title details: ' + (err as Error).message, 'dim');
+    log('No title details: ' + (err as Error).message, 'debug');
     return null;
   }
   if (!info.name) return null;
@@ -413,7 +413,7 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
   if (!/^0*$/.test(info.title_id)) await controlRemember(info.title_id, icon);
   const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);
-  log('Title: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'ok');
+  log('Title: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'info');
   openTitleId = info.title_id;
   await syncPaired();
   return info;
@@ -615,10 +615,8 @@ export async function doLaunchNca(
   identity?: LaunchIdentity | null,
   note?: string,
 ): Promise<void> {
-  clearConsole();
-  // After the clear, so the log opens by naming the game.
-  log(describeLaunch(name, identity), 'ok');
-  if (note) log(note, 'ok');
+  log(describeLaunch(name, identity), 'info');
+  if (note) log(note, 'info');
   setState('loading');
   setRunning(null);
   beginLoad(identity?.name || name, 'decrypting the program and reading its ExeFS',
@@ -629,7 +627,7 @@ export async function doLaunchNca(
   } catch (err) {
     setState('fault');
     failLoad('The session could not be replaced: ' + (err as Error).message);
-    log('Reset before launch failed: ' + (err as Error).message, 'err');
+    log('Reset before launch failed: ' + (err as Error).message, 'error');
     return;
   }
   let entry: number;
@@ -638,17 +636,17 @@ export async function doLaunchNca(
   } catch (err) {
     setState('fault');
     failLoad('Launch failed: ' + (err as Error).message);
-    log('Launch failed: ' + (err as Error).message, 'err');
+    log('Launch failed: ' + (err as Error).message, 'error');
     return;
   }
   if (entry < 0) {
     const why = await readLastError();
     setState('fault');
     failLoad('Launch failed: ' + why);
-    log('Launch failed: ' + why, 'err');
+    log('Launch failed: ' + why, 'error');
     return;
   }
-  log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
+  log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'info');
   setRunning({
     name: identity?.name || name,
     publisher: identity?.publisher || '',

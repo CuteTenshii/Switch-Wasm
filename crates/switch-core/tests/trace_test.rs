@@ -18,10 +18,10 @@ fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 fn a_full_trace_loses_its_oldest_lines_and_keeps_the_fault() {
     let _sink = exclusive();
     let mut cpu = Cpu::new();
-    cpu.diagnostic(Level::Info, "[test] the very first thing that happened");
+    cpu.log(Level::Info, "[test] the very first thing that happened");
     // Well past the 512 KiB cap.
     for i in 0..40_000 {
-        cpu.diagnostic(
+        cpu.log(
             Level::Info,
             &format!("[test] filler line {i} ................."),
         );
@@ -56,13 +56,13 @@ fn a_full_trace_loses_its_oldest_lines_and_keeps_the_fault() {
     );
 }
 
-/// A diagnostic carries its level, and the lines under it inherit it.
+/// A log line carries its level, and the lines under it inherit it.
 #[test]
-fn a_diagnostic_carries_its_level_and_the_lines_under_it_inherit_it() {
+fn a_log_line_carries_its_level_and_the_lines_under_it_inherit_it() {
     let _sink = exclusive();
     let mut cpu = Cpu::new();
-    cpu.diagnostic(Level::Warn, "[test] answered with nothing behind it");
-    cpu.diagnostic(Level::Error, "[test] gave up");
+    cpu.log(Level::Warn, "[test] answered with nothing behind it");
+    cpu.log(Level::Error, "[test] gave up");
     let trace = String::from_utf8_lossy(&cpu.trace).to_string();
 
     let lines: Vec<&str> = trace.lines().collect();
@@ -98,7 +98,7 @@ fn a_trace_from_code_with_no_cpu_still_reaches_the_host() {
     let mut cpu = Cpu::new();
     // Emitted directly, independent of the channel mask.
     trace::emit("[test] something the rasterizer said");
-    cpu.diagnostic(Level::Info, "[test] and then the cpu said this");
+    cpu.log(Level::Info, "[test] and then the cpu said this");
 
     let trace = String::from_utf8_lossy(&cpu.trace).to_string();
     let said = trace.find("something the rasterizer said");

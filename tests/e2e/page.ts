@@ -9,7 +9,7 @@ export const test = base.extend<{ pageErrors: string[] }>({
       if (m.type() === 'error') errors.push(m.text());
     });
     await use(errors);
-    const logged = await page.locator('#console .err').allTextContents();
+    const logged = await page.locator('#console .error').allTextContents();
     expect([...errors, ...logged]).toEqual([]);
   }, { auto: true }],
 });

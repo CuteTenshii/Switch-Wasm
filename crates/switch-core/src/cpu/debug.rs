@@ -74,9 +74,8 @@ impl Cpu {
         out
     }
 
-    /// Record a user-facing diagnostic: to stderr on the host and to the trace buffer
-    /// the browser drains, with a level the page colours by.
-    pub fn diagnostic(&mut self, level: Level, line: &str) {
+    /// Log a line at `level`: to stderr on the host, and to the buffer the page drains.
+    pub fn log(&mut self, level: Level, line: &str) {
         // Not `traceln!`: that would feed the pending sink a second time.
         #[cfg(not(target_arch = "wasm32"))]
         eprintln!("{line}");
@@ -85,7 +84,7 @@ impl Cpu {
     }
 
     /// Fold in traces from parts without a `Cpu` (rasterizer, shader translator, texture
-    /// decoder); called before diagnostics, faults and drains to keep ordering.
+    /// decoder); called before logging, faults and drains to keep ordering.
     pub fn absorb_traces(&mut self) {
         let pending = crate::trace::take_pending();
         if pending.is_empty() {

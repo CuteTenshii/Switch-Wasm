@@ -77,8 +77,8 @@ impl Cpu {
     /// Take `program`'s identity and `main.npdm` settings for the running process.
     fn adopt_program(&mut self, program: &Program) -> Result<()> {
         let modules = program.modules();
-        self.diagnostic(
-            Level::Info,
+        self.log(
+            Level::Debug,
             &format!(
                 "[exefs] entries: {}, loading: {}",
                 program
@@ -100,8 +100,8 @@ impl Cpu {
         }
         self.set_program_id(program.program_id);
         let system_resource = program.system_resource_size();
-        self.diagnostic(
-            Level::Info,
+        self.log(
+            Level::Debug,
             &format!(
                 "[npdm] system resource {system_resource:#x}: {}",
                 if system_resource == 0 {
@@ -128,7 +128,7 @@ impl Cpu {
     pub fn boot_program(&mut self, program: &Program) -> Result<Vec<crate::nso::LoadedNso>> {
         self.adopt_program(program)?;
         if !program.is_64_bit() {
-            self.diagnostic(
+            self.log(
                 Level::Info,
                 "[npdm] AArch32 title: running the A32 interpreter",
             );

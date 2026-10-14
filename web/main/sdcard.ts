@@ -8,7 +8,7 @@ export async function sdRequestPersistence(): Promise<void> {
   try {
     if (await navigator.storage.persisted()) return;
     if (!(await navigator.storage.persist())) {
-      log('SD card: storage is not marked persistent - the browser may evict it.', 'dim');
+      log('SD card: storage is not marked persistent - the browser may evict it.', 'debug');
     }
   } catch { /* not fatal: the card still works for this session */ }
 }

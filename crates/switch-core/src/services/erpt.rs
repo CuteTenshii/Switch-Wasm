@@ -454,7 +454,7 @@ impl Cpu {
                 .collect::<Vec<_>>()
                 .join(", "),
         };
-        self.diagnostic(
+        self.log(
             Level::Warn,
             &format!(
                 "[erpt] {} report {} filed: {about} ({} categories journalled, {} bytes)",

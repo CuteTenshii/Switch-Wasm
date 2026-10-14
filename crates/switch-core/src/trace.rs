@@ -126,7 +126,7 @@ impl Trace {
     }
 }
 
-/// How much a diagnostic matters; the host colours and filters by it.
+/// A log line's severity; the page filters by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     /// The emulator or the guest has failed at something it was asked to do.
@@ -205,7 +205,7 @@ pub fn emit(line: &str) {
     emit_at(Level::Debug, line);
 }
 
-/// [`emit`] at `level`, for diagnostics from code with no [`crate::cpu::Cpu`] in reach.
+/// [`emit`] at `level`, for logging from code with no [`crate::cpu::Cpu`] in reach.
 pub fn emit_at(level: Level, line: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("{line}");

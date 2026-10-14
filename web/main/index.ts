@@ -56,7 +56,7 @@ async function init(): Promise<void> {
     await updateRam();
   } catch (err) {
     failLoad('The core could not be started: ' + (err as Error).message);
-    log('core failed to start: ' + (err as Error).message, 'err');
+    log('core failed to start: ' + (err as Error).message, 'error');
     return;
   }
   endLoad();
@@ -70,7 +70,7 @@ $('btn-reset').addEventListener('click', async () => {
     await recycleSession({ reopen: reopenContainer, force: true });
   } catch (err) {
     failLoad('The session could not be rebuilt: ' + (err as Error).message);
-    log('Reset failed: ' + (err as Error).message, 'err');
+    log('Reset failed: ' + (err as Error).message, 'error');
     return;
   }
   resetAudio();

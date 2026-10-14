@@ -36,7 +36,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
     try {
       switch_attach_screen(e.data.canvas);
     } catch (err) {
-      workerLog('[display] the screen could not be attached: ' + String(err), 'err');
+      workerLog('[display] the screen could not be attached: ' + String(err), 'error');
     }
     return;
   }
@@ -87,12 +87,12 @@ function startCores(module: WebAssembly.Module, memory: WebAssembly.Memory): voi
     const worker = new Worker(new URL('./core.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (e: MessageEvent<CoreStarted>) => {
       if (!e.data.started) {
-        workerLog(`[core] core worker ${i + 1} did not start: ${e.data.error}`, 'err');
+        workerLog(`[core] core worker ${i + 1} did not start: ${e.data.error}`, 'error');
       } else if (++started === CORE_WORKERS) {
         workerLog(`[core] ${CORE_WORKERS} core workers started on shared memory`);
       }
     };
-    worker.onerror = (e) => workerLog(`[core] core worker ${i + 1} failed: ${e.message}`, 'err');
+    worker.onerror = (e) => workerLog(`[core] core worker ${i + 1} failed: ${e.message}`, 'error');
     worker.postMessage({ module, memory } satisfies CoreStart);
   }
 }

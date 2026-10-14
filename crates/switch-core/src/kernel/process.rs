@@ -240,7 +240,7 @@ impl Cpu {
             ),
             Ending::Terminated => (Level::Info, "was terminated by its caller".to_owned()),
         };
-        self.diagnostic(
+        self.log(
             level,
             &format!("[kernel] process {pid} ({program:016x}) {why}"),
         );
@@ -254,7 +254,7 @@ impl Cpu {
         if self.pid == pid {
             self.reschedule();
             if self.pid == pid {
-                self.diagnostic(
+                self.log(
                     Level::Error,
                     &format!("[kernel] nothing can run after process {pid} ended"),
                 );

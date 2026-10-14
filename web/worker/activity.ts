@@ -254,7 +254,7 @@ function joined(parts: (string | false)[]): string {
 
 function logRegistered(): void {
   for (const [what, { count, bytes }] of registered) {
-    workerLog(`[io] registered ${count} ${what} (${fmtSize(bytes)})`);
+    workerLog(`[io] registered ${count} ${what} (${fmtSize(bytes)})`, 'debug');
   }
   registered.clear();
 }
@@ -277,10 +277,10 @@ function logGpu(before: Activity, now: Activity, seconds: number): void {
     copies > 0 && count(copies, 'copy', 'copies'),
     dispatches > 0 && count(dispatches, 'compute dispatch', 'compute dispatches'),
   ]);
-  if (line) workerLog('[gpu] ' + line, skipped > 0 ? 'warn' : undefined);
+  if (line) workerLog('[gpu] ' + line, skipped > 0 ? 'warn' : 'debug');
   for (const entry of now.gpu) logSurface(entry);
   if (now.gpuDropped > 0) {
-    workerLog(`[gpu] ...and ${now.gpuDropped} more surfaces than could be listed`);
+    workerLog(`[gpu] ...and ${now.gpuDropped} more surfaces than could be listed`, 'debug');
   }
 }
 
@@ -308,14 +308,14 @@ function logSurface(entry: GpuEntry): void {
       line = `presented ${label}: ${count(n, 'frame')}`;
       break;
   }
-  workerLog('[gpu] ' + line, failed ? 'warn' : undefined);
+  workerLog('[gpu] ' + line, failed ? 'warn' : 'debug');
 }
 
 // Thread lifecycle events, then each thread that ran or changed state.
 function logThreads(now: Activity): void {
-  for (const line of now.threadLog) workerLog('[thread] ' + line);
+  for (const line of now.threadLog) workerLog('[thread] ' + line, 'debug');
   if (now.threadLogDropped > 0) {
-    workerLog(`[thread] ...and ${now.threadLogDropped} more thread events than could be listed`);
+    workerLog(`[thread] ...and ${now.threadLogDropped} more thread events than could be listed`, 'debug');
   }
   const total = now.threads.reduce((sum, t) => sum + t.ran, 0);
   for (const thread of now.threads) {
@@ -331,6 +331,7 @@ function logThreads(now: Activity): void {
       `[thread] ${thread.index}${thread.running ? '*' : ''} (${who}, handle `
       + `${thread.handle.toString(16)}, priority ${thread.priority}): ${ran}; ${thread.state}; `
       + thread.at,
+      'debug',
     );
   }
 }
@@ -341,17 +342,17 @@ function logFs(before: Activity, now: Activity): void {
       file.reads > 0 && `${count(file.reads, 'read')} (${fmtSize(file.readBytes)})`,
       file.writes > 0 && `${count(file.writes, 'write')} (${fmtSize(file.writeBytes)})`,
     ]);
-    if (line) workerLog(`[fs] ${file.name}: ${line}`);
+    if (line) workerLog(`[fs] ${file.name}: ${line}`, 'debug');
   }
   if (now.filesDropped > 0) {
-    workerLog(`[fs] ...and ${now.filesDropped} more files than could be listed`);
+    workerLog(`[fs] ...and ${now.filesDropped} more files than could be listed`, 'debug');
   }
-  for (const entry of now.journal) workerLog('[fs] ' + entry);
+  for (const entry of now.journal) workerLog('[fs] ' + entry, 'debug');
   if (now.dropped > 0) {
-    workerLog(`[fs] ...and ${now.dropped} more path operations than could be listed`);
+    workerLog(`[fs] ...and ${now.dropped} more path operations than could be listed`, 'debug');
   }
   const failures = now.failures - before.failures;
-  if (failures > 0) workerLog(`[fs] ${failures} requests failed`);
+  if (failures > 0) workerLog(`[fs] ${failures} requests failed`, 'debug');
 }
 
 // A frame count as time at `rate`.
@@ -389,7 +390,7 @@ function logAudio(before: Audio, now: Audio): void {
     if (line || stateChanged) {
       const state = `${o.started ? 'started' : 'stopped'}`
         + (o.volume !== 1 ? `, volume ${Math.round(o.volume * 100)}%` : '');
-      workerLog(`[audio] ${name} ${state}` + (line ? `: ${line}` : ''));
+      workerLog(`[audio] ${name} ${state}` + (line ? `: ${line}` : ''), 'debug');
     }
     if (discarded > 0) {
       workerLog(
@@ -432,7 +433,7 @@ function logAudio(before: Audio, now: Audio): void {
       const silent = r.started && frames > 0 && !r.sinkChannels;
       workerLog(
         `[audio] ${name} ${r.started ? 'started' : 'stopped'}: ${line}`,
-        silent ? 'warn' : undefined,
+        silent ? 'warn' : 'debug',
       );
     }
   }
@@ -450,7 +451,7 @@ function logAudio(before: Audio, now: Audio): void {
       `${duration(taken / perFrame, now.sampleRate)} taken by the page`,
       now.backlog > 0 && `${duration(now.backlog / perFrame, now.sampleRate)} queued`,
     ]);
-    workerLog(`[audio] ${now.sampleRate} Hz ${layout(now.channels)}: ${line}`);
+    workerLog(`[audio] ${now.sampleRate} Hz ${layout(now.channels)}: ${line}`, 'debug');
   }
   if (dropped > 0) {
     const perFrame = Math.max(now.channels, 1);
@@ -491,7 +492,7 @@ function logProblems(now: Activity): void {
   const failing = asked(['refused', 'missing', 'ioctl']);
   if (failing.length) workerLog('[ipc] unanswered: ' + failing.join(', '), 'warn');
   const stubbed = asked(['stub']);
-  if (stubbed.length) workerLog('[ipc] answered by stubs: ' + stubbed.join(', '));
+  if (stubbed.length) workerLog('[ipc] answered by stubs: ' + stubbed.join(', '), 'debug');
   for (const refusal of now.refusals) {
     const what = refusal.kind === 'draw'
       ? count(refusal.count, 'draw')
@@ -529,7 +530,7 @@ function logIdleThreads(now: Activity): void {
     }
     idleWarned.set(thread.index, idle);
     const who = thread.name ? `${thread.index} (${thread.name})` : `${thread.index} (${thread.entry})`;
-    workerLog(`[thread] ${who} has done no work for ${idle} s of guest time; ${thread.state}`);
+    workerLog(`[thread] ${who} has done no work for ${idle} s of guest time; ${thread.state}`, 'debug');
   }
 }
 
@@ -581,7 +582,7 @@ function logMemory(): void {
   workerLog(
     `[memory] guest RAM ${fmtSize(guest)}, WebAssembly heap ${fmtSize(wasm)} of 4 GiB`
     + (near ? ': close to the limit, the next large allocation may fail' : ''),
-    near ? 'warn' : undefined,
+    near ? 'warn' : 'debug',
   );
 }
 
@@ -602,7 +603,7 @@ function logHostFiles(files: HostIo[]): void {
     `${count(sum('reads'), 'read')} (${fmtSize(sum('bytes'))})`,
     disk > 0 && `${fmtSize(disk)} read from disk (${count(sum('chunkMisses'), 'chunk miss', 'chunk misses')})`,
     disk === 0 && 'all from cache',
-  ]));
+  ]), 'debug');
 }
 
 function logHostIo(io: HostIo): void {
@@ -613,5 +614,5 @@ function logHostIo(io: HostIo): void {
     io.diskBytes === 0 && 'all from cache',
     io.failures > 0 && `${io.failures} failed`,
   ]);
-  workerLog(`[io] ${io.file}: ${line}`, io.failures > 0 ? 'warn' : undefined);
+  workerLog(`[io] ${io.file}: ${line}`, io.failures > 0 ? 'warn' : 'debug');
 }

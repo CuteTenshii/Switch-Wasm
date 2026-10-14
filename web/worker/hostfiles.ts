@@ -134,7 +134,7 @@ export function hostRead(
     }
   } catch (e) {
     stats.failures++;
-    workerLog(`[io] ${stats.file}: read at ${at} failed: ${String(e)}`, 'err');
+    workerLog(`[io] ${stats.file}: read at ${at} failed: ${String(e)}`, 'error');
   }
   stats.bytes += written;
   return written;

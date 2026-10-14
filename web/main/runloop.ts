@@ -14,7 +14,7 @@ import { icon } from './icons';
 import { dropErrors, offerErrors } from './errors';
 import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
-import { log, logBlock, type LogClass } from './log';
+import { log, type LogLevel } from './log';
 import { call, onLoopEvents, readLastError } from './rpc';
 import { pullProfileEdits, storeProfileEdits } from './users';
 import { loaded, panelOpen, setPanel, setState } from './shell';
@@ -104,7 +104,7 @@ async function onFailed(error: string): Promise<void> {
   } catch {
     // The module may be too far gone to answer.
   }
-  log('The run loop stopped: ' + why, 'err');
+  log('The run loop stopped: ' + why, 'error');
   // Linear memory survives a trap, so the context can still be read.
   await reportPanicContext();
   showEmulatorCrash(why);
@@ -122,7 +122,7 @@ async function reportPanicContext(): Promise<void> {
       const text = await ask();
       if (!text) continue;
       if (what === 'trace') logTrace(text);
-      else logBlock(text);
+      else log(text);
     } catch {
       log(`The module could not be asked for its ${what}.`);
     }
@@ -151,8 +151,7 @@ $('btn-step').addEventListener('click', async () => {
   const r = await call('run', 1);
   await finishRun(r, true);
   if (traceEnabled() && r >= 0) {
-    const t = await drainTrace();
-    if (t) log(t.replace(/\n$/, ''), 'dim');
+    logTrace(await drainTrace());
   }
 });
 
@@ -173,12 +172,12 @@ window.addEventListener('keydown', (e) => {
 });
 
 // Maps the `[lm/LEVEL]` tags `cpu/log.rs` writes to log levels.
-const GUEST_LEVELS: Record<string, LogClass> = {
-  FATAL: 'err',
-  ERROR: 'err',
+const GUEST_LEVELS: Record<string, LogLevel> = {
+  FATAL: 'error',
+  ERROR: 'error',
   WARN: 'warn',
-  INFO: 'ok',
-  TRACE: 'dim',
+  INFO: 'info',
+  TRACE: 'debug',
 };
 
 export async function drainOutput(): Promise<void> {
@@ -198,7 +197,7 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   const err = await readLastError();
   if (steps < 0) {
     setState('fault');
-    log('Fault: ' + err, 'err');
+    log('Fault: ' + err, 'error');
     showGuestCrash(err || 'The guest returned a fault without a message.');
     logTrace(await drainTrace());
   } else if (await call('halted')) {
@@ -208,12 +207,12 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
       showGuestCrash(fatal);
     } else {
       setState('halted');
-      log('Halted (ExitProcess)', 'ok');
+      log('Halted (ExitProcess)', 'info');
     }
     await drainDiagnostics();
   } else if (!stepped) {
     setState('fault');
-    log('Stopped unexpectedly.', 'err');
+    log('Stopped unexpectedly.', 'error');
     showGuestCrash('The guest stopped unexpectedly.');
   }
   await Promise.all([

@@ -149,18 +149,18 @@ export async function initNand(): Promise<void> {
   try {
     nandTitles = await idbGetAll<NandEntry>(await nandIdb(), NAND_TITLES);
   } catch (err) {
-    log('NAND: could not be read (' + (err as Error).message + ')', 'err');
+    log('NAND: could not be read (' + (err as Error).message + ')', 'error');
     nandTitles = [];
   }
   if (nandTitles.length) {
-    log('NAND: ' + nandTitles.length + ' title(s) installed.', 'dim');
+    log('NAND: ' + nandTitles.length + ' title(s) installed.', 'debug');
   }
   renderNandTitles();
   updateFirmwareState();
   void beginArchiveRestore().then((registered) => {
-    if (registered) log('NAND: ' + registered + ' system data archive(s) restored.', 'ok');
+    if (registered) log('NAND: ' + registered + ' system data archive(s) restored.', 'info');
   }, (err) => {
-    log('NAND: the archives could not be registered (' + (err as Error).message + ')', 'err');
+    log('NAND: the archives could not be registered (' + (err as Error).message + ')', 'error');
   });
 }
 
@@ -208,12 +208,12 @@ async function launchInstalled(id: string, entry: NandEntry): Promise<void> {
     content = await nandContent(entry.name);
   } catch (err) {
     failLoad('NAND: ' + (err as Error).message);
-    log('NAND: ' + (err as Error).message, 'err');
+    log('NAND: ' + (err as Error).message, 'error');
     return;
   }
   if (!content) {
     failLoad(entry.name + ' is indexed but its content is missing.');
-    log('NAND: ' + entry.name + ' is indexed but its content is missing.', 'err');
+    log('NAND: ' + entry.name + ' is indexed but its content is missing.', 'error');
     return;
   }
   // The loader maps the whole image, so programs are booted from bytes.
@@ -293,7 +293,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
     log('Ignoring ' + (picked.length - files.length) + ' file(s) that are not .nca.');
   }
   if (!files.length) {
-    log('Nothing in that selection is an .nca.', 'err');
+    log('Nothing in that selection is an .nca.', 'error');
     return;
   }
   log('Reading ' + files.length + ' firmware file(s) ...');
@@ -310,7 +310,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
       await nandInstall(f.name, f, what.id, what.kind);
       installed++;
     } catch (err) {
-      log('Could not read ' + f.name + ': ' + (err as Error).message, 'err');
+      log('Could not read ' + f.name + ': ' + (err as Error).message, 'error');
     }
   }
   try {
@@ -322,7 +322,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   updateFirmwareState();
   log('Installed ' + installed + ' title(s) of ' + files.length + ' file(s); '
     + (registered ?? archiveCount) + ' registered as system data archives.',
-  installed ? 'ok' : undefined);
+  installed ? 'info' : 'log');
   document.dispatchEvent(new Event('nand-changed'));
 });
 
@@ -331,12 +331,12 @@ $('btn-erase-nand').addEventListener('click', async () => {
   try {
     await nandErase();
   } catch (err) {
-    log('NAND: could not be erased (' + (err as Error).message + ')', 'err');
+    log('NAND: could not be erased (' + (err as Error).message + ')', 'error');
     return;
   }
   nandTitles = [];
   renderNandTitles();
   updateFirmwareState();
-  log('NAND erased.', 'ok');
+  log('NAND erased.', 'info');
   document.dispatchEvent(new Event('nand-changed'));
 });

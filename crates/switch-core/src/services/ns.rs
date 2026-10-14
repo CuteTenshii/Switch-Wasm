@@ -329,7 +329,7 @@ impl Cpu {
                     .mem
                     .read_u64(self.ipc_request_data(tls).wrapping_add(8))?;
                 let Some(data) = self.application_controls.get(&application_id).cloned() else {
-                    self.diagnostic(
+                    self.log(
                         crate::trace::Level::Warn,
                         &format!(
                             "[ns] no control data for {application_id:016x}; open that title once to record it"

@@ -57,12 +57,12 @@ async function acceptKeys(e: Event, which: 'prod' | 'title'): Promise<void> {
   await stageKeys();
   log(which === 'prod'
     ? 'prod.keys loaded - NCA header decryption enabled.'
-    : 'title.keys loaded.', 'ok');
+    : 'title.keys loaded.', 'info');
 }
 
 function refuseKeys(why: string): void {
   $('keys-state').textContent = why;
-  log(why, 'err');
+  log(why, 'error');
 }
 
 $('prod-keys').addEventListener('change', (e) => acceptKeys(e, 'prod'));

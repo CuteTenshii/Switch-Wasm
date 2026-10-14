@@ -151,7 +151,7 @@ impl Cpu {
         } else {
             "cancelled"
         };
-        self.diagnostic(Level::Info, &format!("[am] swkbd: the text was {outcome}"));
+        self.log(Level::Info, &format!("[am] swkbd: the text was {outcome}"));
         true
     }
 
@@ -166,7 +166,7 @@ impl Cpu {
         let Some((request, utf8)) = parsed else {
             return false;
         };
-        self.diagnostic(Level::Info, "[am] swkbd: waiting for the page to send text");
+        self.log(Level::Info, "[am] swkbd: waiting for the page to send text");
         self.process_mut().am_keyboard = Some(PendingKeyboard {
             accessor,
             request,

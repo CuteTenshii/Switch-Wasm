@@ -2,14 +2,14 @@
 // the emulator also uses for diagnostics.
 
 import type { GpuReport } from '../shared/protocol';
-import type { LogClass } from './log';
+import type { LogLevel } from './log';
 import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
 import { $, el } from './dom';
 import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
-import { log, logBlock } from './log';
+import { log } from './log';
 import { call, hasSession } from './rpc';
 import { openPanel, setNote } from './shell';
 
@@ -61,20 +61,20 @@ export async function drainTrace(): Promise<string> {
 }
 
 // Trace line levels from `switch_core::trace::Level`; an unmarked line continues the previous one.
-const MARKERS: Record<string, LogClass> = {
-  '\u0001': 'err',
+const MARKERS: Record<string, LogLevel> = {
+  '\u0001': 'error',
   '\u0002': 'warn',
-  '\u0003': 'ok',
-  '\u0004': 'dim',
+  '\u0003': 'info',
+  '\u0004': 'debug',
 };
 
 export function logTrace(text: string): void {
   if (!text) return;
-  let cls: LogClass = 'dim';
+  let level: LogLevel = 'debug';
   for (const line of text.replace(/\n$/, '').split('\n')) {
     const marked = MARKERS[line[0]];
-    if (marked) cls = marked;
-    log(marked ? line.slice(1) : line, cls);
+    if (marked) level = marked;
+    log(marked ? line.slice(1) : line, level);
   }
 }
 
@@ -231,7 +231,7 @@ $('btn-dumptrace').addEventListener('click', async () => {
 $('btn-dumpregs').addEventListener('click', async () => {
   const s = await call('dump_regs');
   openPanel('console');
-  if (s) logBlock(s);
+  if (s) log(s);
 });
 
 const regIdx = $<HTMLInputElement>('reg-idx');

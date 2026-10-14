@@ -64,7 +64,7 @@ async function open(options: RingOptions): Promise<void> {
     audioCtx = ctx;
   } catch (err) {
     unavailable = true;
-    log('[audio] sound is off: the output could not be opened (' + (err as Error).message + ')', 'err');
+    log('[audio] sound is off: the output could not be opened (' + (err as Error).message + ')', 'error');
   } finally {
     opening = false;
   }

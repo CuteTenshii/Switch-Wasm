@@ -1,27 +1,18 @@
 // The on-page console.
 
 import { $, el } from './dom';
-import type { LogClass } from '../shared/protocol';
+import type { LogLevel } from '../shared/protocol';
 import { LOG_KEY, LOG_STORE, idbApply, idbGet, logIdb } from '../shared/db';
 import { openPanel } from './shell';
 
-export type { LogClass } from '../shared/protocol';
+export type { LogLevel } from '../shared/protocol';
 
 const consoleEl = $('console');
 const autoscrollCb = $<HTMLInputElement>('autoscroll-cb');
 const levelSelect = $<HTMLSelectElement>('log-level');
 
-export type LogLevel = 'error' | 'warn' | 'log' | 'debug';
-
-const LEVELS: LogLevel[] = ['error', 'warn', 'log', 'debug'];
+const LEVELS: LogLevel[] = ['error', 'warn', 'info', 'log', 'debug'];
 const LEVEL_KEY = 'switch-wasm-log-level';
-
-function levelOf(cls?: LogClass): LogLevel {
-  if (cls === 'err') return 'error';
-  if (cls === 'warn') return 'warn';
-  if (cls === 'dim') return 'debug';
-  return 'log';
-}
 
 function storedLevel(): LogLevel {
   try {
@@ -32,15 +23,16 @@ function storedLevel(): LogLevel {
   }
 }
 
-let level = storedLevel();
-levelSelect.value = level;
+// The least severe level the console shows.
+let threshold = storedLevel();
+levelSelect.value = threshold;
 
-function shown(cls?: LogClass): boolean {
-  return LEVELS.indexOf(levelOf(cls)) <= LEVELS.indexOf(level);
+function shown(level: LogLevel): boolean {
+  return LEVELS.indexOf(level) <= LEVELS.indexOf(threshold);
 }
 
 export function logLevel(): LogLevel {
-  return level;
+  return threshold;
 }
 
 const levelListeners: ((level: LogLevel) => void)[] = [];
@@ -50,12 +42,12 @@ export function onLogLevel(listener: (level: LogLevel) => void): void {
 }
 
 levelSelect.addEventListener('change', () => {
-  level = levelSelect.value as LogLevel;
+  threshold = levelSelect.value as LogLevel;
   try {
-    localStorage.setItem(LEVEL_KEY, level);
+    localStorage.setItem(LEVEL_KEY, threshold);
   } catch { /* the choice still holds for this session */ }
   renderConsole();
-  for (const listener of levelListeners) listener(level);
+  for (const listener of levelListeners) listener(threshold);
 });
 
 // Entries kept on the page; `backlog` keeps more for copying and saving.
@@ -66,7 +58,7 @@ const KEPT_MAX = 50_000;
 // Consecutive repeats collapse into one entry with a count.
 interface Entry {
   text: string;
-  cls?: LogClass;
+  level: LogLevel;
   count: number;
 }
 
@@ -76,36 +68,41 @@ const backlog: Entry[] = [];
 // The newest entry's row, so a repeat can be counted in place.
 let lastRow: HTMLElement | null = null;
 
-export function log(msg: string, cls?: LogClass): void {
+// One entry per line.
+export function log(text: string, level: LogLevel = 'log'): void {
+  for (const line of text.replace(/\n$/, '').split('\n')) logLine(line, level);
+}
+
+function logLine(msg: string, level: LogLevel): void {
   mirrorDirty = true;
-  const visible = shown(cls);
+  const visible = shown(level);
 
   // A row the view evicted is detached, so counting into it would hide the repeat.
   const last = backlog[backlog.length - 1];
-  if (last && last.text === msg && last.cls === cls && !visible) {
+  if (last && last.text === msg && last.level === level && !visible) {
     last.count += 1;
     return;
   }
-  if (last && last.text === msg && last.cls === cls && lastRow?.isConnected) {
+  if (last && last.text === msg && last.level === level && lastRow?.isConnected) {
     last.count += 1;
     lastRow.dataset.repeat = String(last.count);
     if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
     return;
   }
 
-  backlog.push({ text: msg, cls, count: 1 });
+  backlog.push({ text: msg, level, count: 1 });
   if (backlog.length > KEPT_MAX) backlog.splice(0, backlog.length - KEPT_MAX);
   if (!visible) return;
 
-  lastRow = row({ text: msg, cls, count: 1 });
+  lastRow = row({ text: msg, level, count: 1 });
   consoleEl.appendChild(lastRow);
   while (consoleEl.childElementCount > SHOWN_MAX) consoleEl.firstElementChild!.remove();
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
-  if (cls === 'err') openPanel('console');
+  if (level === 'error') openPanel('console');
 }
 
 function row(entry: Entry): HTMLElement {
-  const line = el('div', entry.cls, entry.text);
+  const line = el('div', entry.level, entry.text);
   if (entry.count > 1) line.dataset.repeat = String(entry.count);
   return line;
 }
@@ -114,18 +111,13 @@ function renderConsole(): void {
   const rows: HTMLElement[] = [];
   lastRow = null;
   for (let i = backlog.length - 1; i >= 0 && rows.length < SHOWN_MAX; i--) {
-    if (!shown(backlog[i].cls)) continue;
+    if (!shown(backlog[i].level)) continue;
     const line = row(backlog[i]);
     if (i === backlog.length - 1) lastRow = line;
     rows.push(line);
   }
   consoleEl.replaceChildren(...rows.reverse());
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
-}
-
-// One entry per line, at one level.
-export function logBlock(text: string, cls?: LogClass): void {
-  for (const line of text.replace(/\n$/, '').split('\n')) log(line, cls);
 }
 
 export function clearConsole(): void {
@@ -145,56 +137,16 @@ function asLine(entry: Entry): string {
   return entry.count > 1 ? `${entry.text}  (x${entry.count})` : entry.text;
 }
 
-const copyBtn = $('btn-copy-console');
+const saveBtn = $('btn-save-console');
 
-let copyLabelTimer = 0;
-function flashCopyLabel(text: string): void {
-  clearTimeout(copyLabelTimer);
-  copyBtn.textContent = text;
-  copyLabelTimer = setTimeout(() => {
-    copyBtn.textContent = 'Copy all';
+let saveLabelTimer = 0;
+function flashSaveLabel(text: string): void {
+  clearTimeout(saveLabelTimer);
+  saveBtn.textContent = text;
+  saveLabelTimer = setTimeout(() => {
+    saveBtn.textContent = 'Save';
   }, 1400);
 }
-
-// Fallback for insecure contexts, where `navigator.clipboard` is unavailable.
-function copyViaSelection(text: string): boolean {
-  const area = el('textarea');
-  area.value = text;
-  area.setAttribute('readonly', '');
-  // Off-screen rather than hidden: a display:none textarea cannot be selected.
-  area.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
-  document.body.appendChild(area);
-  area.select();
-  let ok: boolean;
-  try {
-    ok = document.execCommand('copy');
-  } catch {
-    ok = false;
-  }
-  area.remove();
-  return ok;
-}
-
-export async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    // No clipboard API, or the permission was refused.
-    return copyViaSelection(text);
-  }
-}
-
-async function copyConsole(): Promise<void> {
-  const text = consoleText();
-  if (!text) {
-    flashCopyLabel('Log is empty');
-    return;
-  }
-  flashCopyLabel(await copyText(text) ? 'Copied' : 'Copy failed');
-}
-
-copyBtn.addEventListener('click', copyConsole);
 
 export function download(name: string, text: string, type = 'text/plain'): void {
   const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
@@ -329,10 +281,10 @@ function logHeader(): string {
 export function saveLog(): void {
   const text = consoleText();
   if (!text) {
-    flashCopyLabel('Log is empty');
+    flashSaveLabel('Log is empty');
     return;
   }
   download(`switch-wasm-log-${stamp()}.txt`, logHeader() + '\n\n' + text);
 }
 
-$('btn-save-console').addEventListener('click', saveLog);
+saveBtn.addEventListener('click', saveLog);

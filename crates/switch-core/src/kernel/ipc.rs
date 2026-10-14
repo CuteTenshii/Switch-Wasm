@@ -755,7 +755,7 @@ impl Cpu {
             let recv = (hdr1 >> 24) & 0xf;
             let recv_static = matches!((hdr2 >> 10) & 0xf, 2..) as u32;
             let words = hdr2 & 0x3ff;
-            self.diagnostic(
+            self.log(
                 Level::Warn,
                 &format!(
                     "[ipc] unimplemented: {iface} cmd={cmd_id:?} (pc={pc:#x}, {words} data words, \
@@ -812,7 +812,7 @@ impl Cpu {
     pub(crate) fn warn_no_implementation(&mut self, service: &str, cmd_id: Option<u32>) {
         self.count_gap(GapKind::Missing, service, cmd_id);
         if self.unimplemented_ipc.insert((service.to_string(), cmd_id)) {
-            self.diagnostic(
+            self.log(
                 Level::Warn,
                 &format!("[ipc] no implementation: {service} cmd={cmd_id:?}"),
             );
@@ -823,7 +823,7 @@ impl Cpu {
     pub(crate) fn warn_stub(&mut self, iface: &str, cmd_id: Option<u32>, what: &str) {
         self.count_gap(GapKind::Stub, iface, cmd_id);
         if self.stubbed_ipc.insert((iface.to_string(), cmd_id)) {
-            self.diagnostic(
+            self.log(
                 Level::Warn,
                 &format!("[ipc] stub: {iface} cmd={cmd_id:?} ({what})"),
             );

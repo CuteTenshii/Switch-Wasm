@@ -51,7 +51,7 @@ impl Cpu {
             Ok(crate::gpu::renderer::Flush::Done) => {
                 self.pending_present = None;
                 if let Err(e) = self.machine.nv.gpu.present(pid, &mem, &buffer) {
-                    self.diagnostic(
+                    self.log(
                         Level::Error,
                         &format!("[vi] the deferred present failed: {e}"),
                     );
@@ -60,7 +60,7 @@ impl Cpu {
             Err(e) => {
                 // Drop the frame rather than stall the display.
                 self.pending_present = None;
-                self.diagnostic(
+                self.log(
                     Level::Error,
                     &format!("[vi] the deferred readback failed: {e}"),
                 );

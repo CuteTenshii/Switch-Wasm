@@ -319,7 +319,7 @@ impl Cpu {
                 }
             }
             if certs.is_empty() {
-                self.diagnostic(
+                self.log(
                     crate::trace::Level::Warn,
                     "[ssl] no certificate store: a browser aborts without one; register a \
                      firmware directory",

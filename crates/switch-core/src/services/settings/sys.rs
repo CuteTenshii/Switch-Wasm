@@ -414,7 +414,7 @@ impl Cpu {
             .missing_settings_items
             .insert(format!("{category}!{name}"))
         {
-            self.diagnostic(
+            self.log(
                 Level::Warn,
                 &format!("[set:sys] no settings item {category}!{name}"),
             );

@@ -488,14 +488,14 @@ impl Cpu {
                 if let Some(applet) = self.process_mut().am_applets.get_mut(&accessor) {
                     applet.process = Some(pid);
                 }
-                self.diagnostic(
+                self.log(
                     Level::Info,
                     &format!("[am] started the {name} applet as process {pid}"),
                 );
                 true
             }
             Err(e) => {
-                self.diagnostic(
+                self.log(
                     Level::Error,
                     &format!("[am] the {name} applet could not start, so it ends cancelled: {e}"),
                 );
@@ -639,7 +639,7 @@ impl Cpu {
                     .unimplemented_ipc
                     .insert((queue.event_name().to_string(), None))
                 {
-                    self.diagnostic(Level::Warn, queue.empty_message());
+                    self.log(Level::Warn, queue.empty_message());
                 }
                 self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
             }

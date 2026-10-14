@@ -366,7 +366,7 @@ impl Cpu {
                     self.am_terminate_result = result;
                     if result != 0 {
                         let (module, description) = (result & 0x1ff, result >> 9);
-                        self.diagnostic(
+                        self.log(
                             Level::Warn,
                             &format!(
                                 "[am] the title set a terminate result of {result:#x} \
@@ -698,7 +698,7 @@ impl Cpu {
                         Some(data) => applet_result_summary(self.program_id(), data),
                         None => "a storage this session never handed out".to_owned(),
                     };
-                    self.diagnostic(
+                    self.log(
                         Level::Info,
                         &format!(
                             "[am] the {} applet finished: {summary}",
@@ -725,7 +725,7 @@ impl Cpu {
                         .unimplemented_ipc
                         .insert(("am:applet-interactive-output".to_string(), cmd_id))
                     {
-                        self.diagnostic(
+                        self.log(
                             Level::Warn,
                             &format!(
                                 "[am] the applet is talking to its caller ({} bytes); nothing \
@@ -774,7 +774,7 @@ impl Cpu {
                     let answer = (id == APPLET_PLAYER_SELECT && self.users.len() == 1)
                         .then(|| player_select_answer(self.current_user().uid));
                     if answer.is_some() {
-                        self.diagnostic(
+                        self.log(
                             Level::Info,
                             &format!(
                                 "[am] CreateLibraryApplet: playerSelect (mode {mode}); \
@@ -782,12 +782,12 @@ impl Cpu {
                             ),
                         );
                     } else if id == APPLET_SWKBD && mode == 0 {
-                        self.diagnostic(
+                        self.log(
                             Level::Info,
                             "[am] CreateLibraryApplet: swkbd (mode 0); the page asks for the text",
                         );
                     } else if id == APPLET_ERROR {
-                        self.diagnostic(
+                        self.log(
                             Level::Info,
                             &format!(
                                 "[am] CreateLibraryApplet: error (mode {mode}); the page shows it"
@@ -796,7 +796,7 @@ impl Cpu {
                     } else if library_applet_program_id(id)
                         .is_some_and(|program| self.is_installed(program))
                     {
-                        self.diagnostic(
+                        self.log(
                             Level::Info,
                             &format!(
                                 "[am] CreateLibraryApplet: {} (mode {mode}); it runs from the \
@@ -805,7 +805,7 @@ impl Cpu {
                             ),
                         );
                     } else {
-                        self.diagnostic(
+                        self.log(
                             Level::Warn,
                             &format!(
                                 "[am] CreateLibraryApplet: {} (mode {mode}); it is not on the \
@@ -897,7 +897,7 @@ impl Cpu {
                                 .get(&key)
                                 .and_then(LibraryApplet::error_shown);
                             if let Some((shown, dialog)) = shown {
-                                self.diagnostic(
+                                self.log(
                                     Level::Warn,
                                     &format!("[am] the error applet was asked to show {shown}"),
                                 );

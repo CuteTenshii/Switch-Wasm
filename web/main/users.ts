@@ -99,7 +99,7 @@ export async function loadProfiles(): Promise<void> {
     }
     if (!profiles.some((p) => p.uid === current)) current = profiles[0].uid;
   } catch (err) {
-    log('Profiles: could not be read (' + (err as Error).message + ') - playing as "Player".', 'err');
+    log('Profiles: could not be read (' + (err as Error).message + ') - playing as "Player".', 'error');
     profiles = [firstProfile()];
     current = profiles[0].uid;
   }
@@ -109,7 +109,7 @@ export async function loadProfiles(): Promise<void> {
 export async function stageUsers(): Promise<void> {
   if (!hasSession()) return;
   const refused = await call('users_set', profiles.map(toRecord), current);
-  if (refused) log(`Profiles: the core refused the list (code ${refused}).`, 'err');
+  if (refused) log(`Profiles: the core refused the list (code ${refused}).`, 'error');
 }
 
 // A running title keeps the user it started with; an idle session gets changes now.
@@ -361,7 +361,7 @@ async function update(profile: Profile): Promise<void> {
   try {
     await storeProfile(profile);
   } catch (err) {
-    log('Profiles: could not be saved (' + (err as Error).message + ')', 'err');
+    log('Profiles: could not be saved (' + (err as Error).message + ')', 'error');
   }
   renderProfiles();
   await stageIfIdle();
@@ -372,7 +372,7 @@ async function choose(profile: Profile): Promise<void> {
   try {
     await storeCurrent();
   } catch (err) {
-    log('Profiles: the choice could not be saved (' + (err as Error).message + ')', 'err');
+    log('Profiles: the choice could not be saved (' + (err as Error).message + ')', 'error');
   }
   log(titleBooted()
     ? `Profiles: ${profile.nickname} plays the next title; the running one keeps its player.`
@@ -393,7 +393,7 @@ async function setPicture(profile: Profile, file: File): Promise<void> {
   try {
     profile.picture = await toPicture(file);
   } catch (err) {
-    log(`Profiles: ${file.name} could not be used as a picture (${(err as Error).message})`, 'err');
+    log(`Profiles: ${file.name} could not be used as a picture (${(err as Error).message})`, 'error');
     return;
   }
   await update(profile);
@@ -417,7 +417,7 @@ async function removeProfile(profile: Profile): Promise<void> {
     const removed = await deleteSavesOf(profile.uid);
     log(`Profiles: deleted ${profile.nickname}` + (removed ? ` and ${removed} saved entries` : ''));
   } catch (err) {
-    log('Profiles: the deletion could not be finished (' + (err as Error).message + ')', 'err');
+    log('Profiles: the deletion could not be finished (' + (err as Error).message + ')', 'error');
   }
   renderProfiles();
   await stageIfIdle();
@@ -438,7 +438,7 @@ addForm.addEventListener('submit', (e) => {
   profiles.push(profile);
   addName.value = '';
   void storeProfile(profile)
-    .catch((err: Error) => log('Profiles: could not be saved (' + err.message + ')', 'err'))
+    .catch((err: Error) => log('Profiles: could not be saved (' + err.message + ')', 'error'))
     .then(() => {
       renderProfiles();
       return stageIfIdle();

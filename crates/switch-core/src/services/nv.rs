@@ -99,7 +99,7 @@ impl Cpu {
                     if self.unimplemented_ipc.insert((node.clone(), Some(nr))) {
                         let ioc_type = (request >> 8) & 0xFF;
                         let pc = self.pc;
-                        self.diagnostic(
+                        self.log(
                             Level::Warn,
                             &format!(
                                 "[nv] unimplemented: {node} ioctl type={ioc_type:#04x} \

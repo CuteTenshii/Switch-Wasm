@@ -15,7 +15,7 @@ impl Cpu {
             "[fatal] {result:#010x} = {module}-{description:04} (cmd {cmd_id:?}) bt={trace:x?}"
         );
         self.process_mut().guest_fatal = Some(report.clone());
-        self.diagnostic(Level::Error, &report);
+        self.log(Level::Error, &report);
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 

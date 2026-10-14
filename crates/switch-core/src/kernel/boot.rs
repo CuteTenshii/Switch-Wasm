@@ -178,7 +178,7 @@ impl Cpu {
         let mut base = crate::nso::NSO_BASE;
         let mut loaded = Vec::with_capacity(modules.len());
         // Name the title, so fault addresses are read against the right binary.
-        self.diagnostic(
+        self.log(
             Level::Info,
             &format!("[loader] program {:#018x}", self.process().program_id),
         );
@@ -192,7 +192,7 @@ impl Cpu {
                 .wrapping_add(module.data.file_size)
                 .wrapping_add(module.bss_size);
             // Where each module landed; `rtld` finds them itself via `svcQueryMemory`.
-            self.diagnostic(Level::Info, &format!(
+            self.log(Level::Debug, &format!(
                 "[loader] {} at {:#010x}: text {:#010x}..{:#010x}, rodata {:#010x}..{:#010x}, data {:#010x}..{:#010x}, bss {:#010x}..{:#010x}",
                 name,
                 module.base,

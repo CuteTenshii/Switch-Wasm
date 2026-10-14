@@ -7,7 +7,7 @@ import { $, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
-import { clearConsole, log } from './log';
+import { log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { noteBooted, recycleSession } from './session';
@@ -16,7 +16,6 @@ import { runningIconUrl, setRunning } from './title';
 import type { RunningTitle } from './title';
 
 export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
-  clearConsole();
   setState('loading');
   beginLoad(file.name, 'reading ' + fmtSize(file.size));
   const data = new Uint8Array(await file.arrayBuffer());
@@ -29,7 +28,6 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
 export async function launchFromSd(path: string, data: Bytes): Promise<void> {
   const name = path.slice(path.lastIndexOf('/') + 1);
   if (!(await replaceSession(name))) return;
-  clearConsole();
   setState('loading');
   loadPhase('loading the NRO', 'mapping the image and seeding the guest');
   if (await loadWith(name, () => call('load_nro', data, path))) await run();
@@ -43,17 +41,17 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
   } catch (err) {
     setState('fault');
     failLoad('Load failed: ' + (err as Error).message);
-    log('Load failed: ' + (err as Error).message, 'err');
+    log('Load failed: ' + (err as Error).message, 'error');
     return false;
   }
   if (entry < 0) {
     const why = await readLastError();
     setState('fault');
     failLoad('Load failed: ' + why);
-    log('Load failed: ' + why, 'err');
+    log('Load failed: ' + why, 'error');
     return false;
   }
-  log('Loaded ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
+  log('Loaded ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'info');
   const title = await homebrewTitle(name);
   setRunning(title);
   loadIdentity(title.name, runningIconUrl());
@@ -72,12 +70,12 @@ async function homebrewTitle(filename: string): Promise<RunningTitle> {
   try {
     info = JSON.parse(await call('control_json')) as ControlInfo;
   } catch (err) {
-    log('No homebrew details: ' + (err as Error).message, 'dim');
+    log('No homebrew details: ' + (err as Error).message, 'debug');
     return { name: filename, publisher: '', icon: null, version: '' };
   }
   const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
   if (info.name) {
-    log('Homebrew: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'ok');
+    log('Homebrew: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'info');
   }
   return {
     name: info.name || filename,
@@ -92,7 +90,7 @@ async function bootFile(file: File): Promise<void> {
   if (!verdict.ok) {
     // Not a fault: whatever is running keeps running.
     failLoad(verdict.why);
-    log(verdict.why, 'err');
+    log(verdict.why, 'error');
     return;
   }
   if (!(await replaceSession(file.name))) return;
@@ -113,7 +111,7 @@ async function replaceSession(name: string): Promise<boolean> {
   } catch (err) {
     setState('fault');
     failLoad('The session could not be replaced: ' + (err as Error).message);
-    log('Reset before boot failed: ' + (err as Error).message, 'err');
+    log('Reset before boot failed: ' + (err as Error).message, 'error');
     return false;
   }
 }

@@ -95,7 +95,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
         }
     };
     if update.is_some() {
-        cpu.diagnostic(
+        cpu.log(
             Level::Info,
             &format!(
                 "[update] booting the update's modules for {:016x}, over this container's RomFS",
@@ -105,7 +105,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
     }
     // Report whether the ExeFS hash coverage was checked.
     match program.pfs0_hash_coverage(exefs_index) {
-        Some((block, blocks)) => cpu.diagnostic(
+        Some((block, blocks)) => cpu.log(
             Level::Info,
             &format!(
                 "[exefs] {:#x} bytes, {} blocks of {:#x} verified against the section hash table",
@@ -114,7 +114,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
                 block
             ),
         ),
-        None => cpu.diagnostic(
+        None => cpu.log(
             Level::Warn,
             &format!(
                 "[exefs] {:#x} bytes; hash table geometry unrecognised, contents NOT verified",
@@ -140,7 +140,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
             });
             match patched {
                 Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
-                Err(e) => cpu.diagnostic(
+                Err(e) => cpu.log(
                     Level::Error,
                     &format!("the update's RomFS is unreadable: {}", e),
                 ),
@@ -150,7 +150,7 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
             if let Some(romfs_index) = nca.romfs_section_index() {
                 match nca.romfs_source(nca_src, keys, romfs_index) {
                     Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
-                    Err(e) => cpu.diagnostic(Level::Error, &format!("romfs unavailable: {}", e)),
+                    Err(e) => cpu.log(Level::Error, &format!("romfs unavailable: {}", e)),
                 }
             }
         }
@@ -184,14 +184,14 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
             Ok(romfs) => {
                 let size = romfs.len();
                 match cpu.add_add_on_content(entry.content_id, Box::new(romfs)) {
-                    Some(index) => cpu.diagnostic(
+                    Some(index) => cpu.log(
                         Level::Info,
                         &format!(
                             "[aoc] {:016x} mounted as add-on content {index}, {size:#x} bytes",
                             entry.content_id
                         ),
                     ),
-                    None => cpu.diagnostic(
+                    None => cpu.log(
                         Level::Warn,
                         &format!(
                             "[aoc] {:016x} is not this title's add-on content; not mounted",
@@ -200,7 +200,7 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
                     ),
                 }
             }
-            Err(e) => cpu.diagnostic(
+            Err(e) => cpu.log(
                 Level::Error,
                 &format!("[aoc] {:016x} could not be read: {e}", entry.content_id),
             ),

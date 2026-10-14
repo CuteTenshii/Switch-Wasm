@@ -290,8 +290,8 @@ export interface CallRequest {
   args: unknown[];
 }
 
-// Log level; DevTools mirrors `err`/`warn` as named, `ok` as info, `dim` as debug, none as log.
-export type LogClass = 'err' | 'warn' | 'ok' | 'dim';
+// A log line's severity; the console shows those at or above its chosen level.
+export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug';
 
 // What the worker gathers every few slices, so the page polls for nothing.
 export interface Housekeeping {
@@ -328,7 +328,7 @@ export interface SliceReport {
 // `loop_failed` come from the worker's run loop.
 export type WorkerMessage =
   | { type: 'ready'; error?: string }
-  | { type: 'log'; text: string; cls?: LogClass }
+  | { type: 'log'; text: string; level: LogLevel }
   | { type: 'slice'; report: SliceReport }
   | { type: 'loop_failed'; error: string }
   // Once at startup: the ring audio is written to, in the worker's shared memory.

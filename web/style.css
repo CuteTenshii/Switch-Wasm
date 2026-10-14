@@ -925,7 +925,7 @@ body.resizing {
   color: #4f586e;
 }
 
-/* Markers are positioned so wrapped lines align, and drawn in CSS so `Copy all` skips them. */
+/* Markers are positioned so wrapped lines align, and drawn in CSS so they stay out of the text. */
 .console div {
   position: relative;
   padding: 1px 6px 1px 22px;
@@ -956,12 +956,12 @@ body.resizing {
 
 .console div:hover { background: rgb(255 255 255 / 3.5%); }
 
-.console .err {
+.console .error {
   color: var(--red);
   border-left-color: var(--red);
   background: rgb(255 111 111 / 7%);
 }
-.console .err::before {
+.console .error::before {
   content: "\2715";
   color: var(--red);
 }
@@ -975,14 +975,14 @@ body.resizing {
   color: var(--amber);
 }
 
-.console .ok { color: var(--green); }
-.console .ok::before {
-  content: "\2713";
-  color: var(--green);
+.console .info { color: var(--accent); }
+.console .info::before {
+  content: "\24d8";
+  color: var(--accent);
 }
 
-.console .dim { color: var(--muted); }
-.console .dim::before {
+.console .debug { color: var(--muted); }
+.console .debug::before {
   content: "\b7";
   color: #3f4860;
 }

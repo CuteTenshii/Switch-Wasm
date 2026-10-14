@@ -106,7 +106,7 @@ impl Cpu {
         let header = match crate::nro::NroHeader::parse(&image) {
             Ok(header) => header,
             Err(e) => {
-                self.diagnostic(
+                self.log(
                     Level::Warn,
                     &format!("[ro] refusing the module at {nro_address:#010x}: {e}"),
                 );
@@ -115,7 +115,7 @@ impl Cpu {
         };
         // A short BSS would spill the module's data onto the next mapping.
         if bss_size < u64::from(header.bss_size) {
-            self.diagnostic(
+            self.log(
                 Level::Warn,
                 &format!(
                     "[ro] refusing the module at {nro_address:#010x}: it needs {:#x} bytes of bss \
@@ -128,7 +128,7 @@ impl Cpu {
 
         let size = (nro_size + bss_size) as u32;
         let Some(base) = self.ro_free_region(size) else {
-            self.diagnostic(
+            self.log(
                 Level::Warn,
                 &format!(
                     "[ro] no room for a {size:#x}-byte module: {} already mapped",
@@ -172,8 +172,8 @@ impl Cpu {
                 text,
             },
         );
-        self.diagnostic(
-            Level::Info,
+        self.log(
+            Level::Debug,
             &format!(
                 "[ro] mapped the module at {nro_address:#010x} to {base:#010x}: text \
              {:#010x}..{:#010x}, rodata {:#010x}..{:#010x}, data {:#010x}..{:#010x}, bss \
@@ -214,8 +214,8 @@ impl Cpu {
             .unmark_module(module.base, module.base.wrapping_add(module.size));
         self.mem.unmap(module.base, module.size as usize);
         self.forget_module_name(module.base);
-        self.diagnostic(
-            Level::Info,
+        self.log(
+            Level::Debug,
             &format!(
                 "[ro] unmapped the module at {:#010x} ({:#x} bytes)",
                 module.base, module.size
@@ -245,7 +245,7 @@ impl Cpu {
             return self.write_ipc_response(tls, INVALID_SIZE, &[], &[], &[]);
         }
         if self.mem.read_u32(nrr_address as u32).unwrap_or(0) != NRR0_MAGIC {
-            self.diagnostic(Level::Warn, &format!("[ro] no NRR at {nrr_address:#010x}"));
+            self.log(Level::Warn, &format!("[ro] no NRR at {nrr_address:#010x}"));
             return self.write_ipc_response(tls, INVALID_NRR, &[], &[], &[]);
         }
         self.process_mut()

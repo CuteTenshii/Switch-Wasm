@@ -68,7 +68,7 @@ export function initWorker(): void {
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
     const d = e.data;
     if ('type' in d && d.type === 'log') {
-      log(d.text, d.cls);
+      log(d.text, d.level);
       return;
     }
     if ('type' in d && d.type === 'slice') {
@@ -86,7 +86,7 @@ export function initWorker(): void {
     if ('type' in d) {
       ready = true;
       // A core that failed to load still reports ready, with the error.
-      if (d.error) log('core failed to load: ' + d.error, 'err');
+      if (d.error) log('core failed to load: ' + d.error, 'error');
       readyResolve();
       return;
     }
@@ -98,7 +98,7 @@ export function initWorker(): void {
   };
   worker.onerror = (e) => {
     readyResolve();
-    log('worker error: ' + e.message, 'err');
+    log('worker error: ' + e.message, 'error');
   };
 }
 
