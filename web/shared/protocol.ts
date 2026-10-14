@@ -176,7 +176,8 @@ export interface Commands {
   // Quoted, since unquoted `new()` is a construct signature.
   // eslint-disable-next-line @stylistic/quote-props
   'new'(): number;
-  free_session(): number;
+  // End the running title and its applets; the console stays.
+  end_title(): number;
 
   set_trace(on: number): number;
   set_jit(on: number): number;

@@ -11,7 +11,7 @@ export interface WasmExports {
 
   switch_init(): void;
   switch_new(): number;
-  switch_free_session(handle: number): void;
+  switch_end_title(handle: number): void;
   switch_last_error(handle: number, buf: number, maxlen: number): number;
 
   switch_open_nsp(handle: number, size: bigint): number;

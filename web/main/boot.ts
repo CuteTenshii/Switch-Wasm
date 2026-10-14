@@ -10,7 +10,7 @@ import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from '.
 import { log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updateReadouts } from './runloop';
-import { noteBooted, recycleSession } from './session';
+import { endTitle, noteBooted } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
 import { runningIconUrl, setRunning } from './title';
 import type { RunningTitle } from './title';
@@ -24,10 +24,10 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
   return loadWith(file.name, () => kind === 'nro' ? call('load_nro', data) : call('load_elf', data));
 }
 
-// Launch `data`, the NRO at `path` on the SD card, on a fresh console as hbmenu does.
+// Launch `data`, the NRO at `path` on the SD card, in place of the running title as hbmenu does.
 export async function launchFromSd(path: string, data: Bytes): Promise<void> {
   const name = path.slice(path.lastIndexOf('/') + 1);
-  if (!(await replaceSession(name))) return;
+  if (!(await replaceTitle(name))) return;
   setState('loading');
   loadPhase('loading the NRO', 'mapping the image and seeding the guest');
   if (await loadWith(name, () => call('load_nro', data, path))) await run();
@@ -93,7 +93,7 @@ async function bootFile(file: File): Promise<void> {
     log(verdict.why, 'error');
     return;
   }
-  if (!(await replaceSession(file.name))) return;
+  if (!(await replaceTitle(file.name))) return;
   if (verdict.format === 'pfs0' || verdict.format === 'xci' || verdict.format === 'nca') {
     await bootContainer(file, verdict.format);
     return;
@@ -101,17 +101,17 @@ async function bootFile(file: File): Promise<void> {
   if (await loadProgram(file, verdict.format)) await run();
 }
 
-// A title gets a fresh console. See `recycleSession`.
-async function replaceSession(name: string): Promise<boolean> {
+// End whatever runs before booting `name`.
+async function replaceTitle(name: string): Promise<boolean> {
   try {
-    beginLoad(name, 'replacing the running session');
+    beginLoad(name, 'ending the running title');
     setRunning(null);
-    await recycleSession();
+    await endTitle();
     return true;
   } catch (err) {
     setState('fault');
-    failLoad('The session could not be replaced: ' + (err as Error).message);
-    log('A new console could not be prepared for the boot: ' + (err as Error).message, 'error');
+    failLoad('The running title could not be ended: ' + (err as Error).message);
+    log('The running title could not be ended: ' + (err as Error).message, 'error');
     return false;
   }
 }

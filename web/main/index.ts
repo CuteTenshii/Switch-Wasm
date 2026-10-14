@@ -14,8 +14,7 @@ import { updateReadouts, updateRam } from './runloop';
 import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence } from './sdcard';
 import { screenEl, setState, showOverlay } from './shell';
-import { reopenContainer } from './container';
-import { recycleSession, stageFont } from './session';
+import { endTitle, stageFont } from './session';
 import { setRunning } from './title';
 import { endLoad, failLoad, loadPhase } from './loading';
 
@@ -71,8 +70,8 @@ async function init(): Promise<void> {
 }
 
 $('btn-stop').addEventListener('click', async () => {
-  // Stops the run and disowns the session before any slice report is handled.
-  const rebuilt = recycleSession({ reopen: reopenContainer, force: true });
+  // Stops the run before any slice report is handled.
+  const ended = endTitle();
   endLoad();
   resetAudio();
   clearConsole();
@@ -81,7 +80,7 @@ $('btn-stop').addEventListener('click', async () => {
   setState('idle');
   showOverlay(true);
   try {
-    await rebuilt;
+    await ended;
   } catch (err) {
     log('Stop failed: ' + (err as Error).message, 'error');
     return;

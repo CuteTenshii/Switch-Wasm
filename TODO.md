@@ -5,7 +5,7 @@
 Library applets must run as processes beside their caller, in one kernel with one set of console services.
 Each stage builds, passes `make test` and clippy, keeps every title in `docs/progress.md` booting to the same frames, and is committed on its own.
 
-1. Per-process handle tables, and shared memory for the shared framebuffer and transfer memory.
+1. Shared memory objects for the shared framebuffer and transfer memory.
 2. nvmap handles are console-wide and name a CPU address in the allocating process; a handle another process maps or presents is read from that process's memory at the same address.
 3. am focus: the caller is told it lost and regained focus, and `GetCurrentFocusState` answers per process.
 
@@ -19,6 +19,7 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Open gaps
 
+- The worker's host file table keeps every update and DLC added during a visit, each with up to 16 MiB of chunk cache; it should drop a file the session no longer reads.
 - `npns:s` cmd 3 (Receive) is refused; qlaunch polls it constantly. Needs the empty-queue result from switchbrew.
 - `ssl:s` cmd 5 is stubbed and the `ssl:s` name is not routed like `ssl`.
 - The `crates/switch-wasm/src/heap.rs` allocator can be entered concurrently by core workers at startup (unsynchronized dlmalloc under `+atomics`; `__wbindgen_start` allocates their stack and TLS).

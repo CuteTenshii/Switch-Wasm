@@ -58,7 +58,7 @@ The page, the worker, and the wasm bindings between them.
 - NAND content comes back from IndexedDB as Blobs, so firmware is registered for the cost of its headers rather than copied through the wasm heap.
 - The chunk cache is per file, not shared: a title with an update reads two containers at once and a shared LRU thrashes at every crossing.
 - Reads larger than a chunk (ExeFS pulled in one go) bypass the cache so they don't evict the working set.
-- The host file table only grows within a session (wasm sources address archives by index); `resetHostFiles` clears it when the session is freed so resets don't accumulate handles and caches.
+- The host file table only grows (wasm sources address archives by index). System archives and applets are added once per page; each update or DLC added appends a file with its chunk cache.
 - A failed read (file moved or replaced) reports a short read; the wasm side turns it into an error with the offset.
 
 ## `web/worker/latch.ts`
@@ -69,8 +69,9 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/main/session.ts`
 
-- A session is a whole console (RAM, threads, handles) and nothing is cleared per title, so every boot recycles the session first. Loading into the running session left the previous title's pages mapped (hundreds of MiB for retail), and after a few swaps guest RAM hit the cap and failed inside unrelated code.
-- `recycleSession` invalidates the main-thread session (`setSession(-1)`) before posting the free so timers stop immediately, then restages font, SD card, saves, controls, users, keys, then archives and library applets (both need keys). A never-booted session is not recycled unless forced (Stop). Rebuilds run one at a time, so a boot started while Stop rebuilds in the background waits for it. `reopen` is passed by the caller to avoid a `container.ts` import cycle.
+- The session is the console, created and staged once per page (font, SD card, saves, controls, users, keys, archives, library applets). A title is a process in it: every launch and Stop calls `endTitle`, which has the core end the title and its applets (`Cpu::end_title`) and leaves an empty process for the next one, so nothing is restaged.
+- Before titles were processes, every boot rebuilt the session: loading into the running one left the previous title's pages mapped (hundreds of MiB for retail) until guest RAM hit the cap.
+- `endTitle` restages the users afterwards: a running title keeps the player it started with, and profile edits made meanwhile reach the next one.
 
 ## `web/main/index.ts`, `boot.ts`, `dock.ts`, `wakelock.ts`
 

@@ -1,39 +1,30 @@
-// Session bring-up and replacement. A session is a whole console, so a new
-// title needs a new session rather than loading over the old one.
+// Session bring-up and ending a title. The session is the console, staged once; each title
+// is a process in it.
 
 import fontUrl from '../font.ttf?url';
 import type { Bytes } from '../shared/protocol';
-import { controlRestore } from './controls';
-import { hasKeys, stageKeys } from './keys';
-import { loadPhase } from './loading';
 import { log } from './log';
-import { call, setSession } from './rpc';
+import { call } from './rpc';
 import { abortRun } from './runloop';
-import { restoreArchives } from './nand';
 import { stageUsers } from './users';
 
-// Held across sessions; only the staging repeats.
-let fontBytes: Bytes | null = null;
-
 export async function stageFont(): Promise<void> {
-  if (!fontBytes) {
-    try {
-      const res = await fetch(fontUrl);
-      if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
-      fontBytes = new Uint8Array(await res.arrayBuffer());
-    } catch (err) {
-      log('No system font (' + fontUrl + '): ' + (err as Error).message
-        + ' - text will not render.', 'error');
-      return;
-    }
+  let font: Bytes;
+  try {
+    const res = await fetch(fontUrl);
+    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+    font = new Uint8Array(await res.arrayBuffer());
+  } catch (err) {
+    log('No system font (' + fontUrl + '): ' + (err as Error).message
+      + ' - text will not render.', 'error');
+    return;
   }
-  await call('load_font', fontBytes);
+  await call('load_font', font);
 }
 
-// A session nothing has booted into is already fresh.
 let booted = false;
 
-// Record that a title was loaded into the running session.
+// Record that a title was loaded.
 export function noteBooted(): void {
   booted = true;
 }
@@ -42,44 +33,11 @@ export function titleBooted(): boolean {
   return booted;
 }
 
-// What a rebuilt session needs before it can boot.
-export interface Recycle {
-  // Re-open the container the Files panel shows; supplied by the caller to avoid an import cycle.
-  reopen?: () => Promise<void>;
-  // Rebuild even if nothing has been booted, as Stop wants.
-  force?: boolean;
-}
-
-// The rebuild in flight; the next one waits for it, so a boot never lands mid-rebuild.
-let rebuilding: Promise<void> = Promise.resolve();
-
-// Replace the running session, restaging everything it was given. Throws on failure.
-export function recycleSession(options: Recycle = {}): Promise<void> {
-  const next = rebuilding.then(() => recycle(options));
-  rebuilding = next.catch(() => undefined);
-  return next;
-}
-
-async function recycle({ reopen, force = false }: Recycle): Promise<void> {
-  if (!booted && !force) return;
-  booted = false;
+// End the running title; the console, with its storage, keys and system data, stays.
+export async function endTitle(): Promise<void> {
   abortRun();
-  // Before the free, so timers stop pushing at the session now.
-  setSession(-1);
-  loadPhase('freeing the session');
-  await call('free_session');
-  setSession(await call('new'));
-  loadPhase('restoring the SD card, saves, keys and system data');
-  // Independent, except the archives, which need the keys.
-  await Promise.all([
-    stageFont(),
-    call('restore_storage'),
-    controlRestore(),
-    stageUsers(),
-    (hasKeys() ? stageKeys() : Promise.resolve()).then(restoreArchives),
-  ]);
-  if (reopen) {
-    loadPhase('re-opening the container');
-    await reopen();
-  }
+  await call('end_title');
+  booted = false;
+  // A running title keeps the player it started with; the next one gets the current list.
+  await stageUsers();
 }

@@ -5,8 +5,8 @@ import type {
   UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
-import { noteRegistered, resetActivity } from './activity';
-import { addHostFile, openHostFile, resetHostFiles } from './hostfiles';
+import { noteRegistered } from './activity';
+import { addHostFile, openHostFile } from './hostfiles';
 import { workerLog } from './log';
 import { switch_clear_screen } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
@@ -85,13 +85,10 @@ export const CMD: CommandHandlers = {
     pushBattery();
     return state.handle;
   },
-  free_session() {
+  end_title() {
     stopLoop();
-    core.switch_free_session(state.handle);
-    state.handle = -1;
-    resetInput();
-    resetActivity();
-    resetHostFiles();
+    core.switch_end_title(state.handle);
+    resetInput(); // the frame counter restarts at 0
     return 0;
   },
 

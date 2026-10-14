@@ -48,7 +48,7 @@ function reader(): FileReaderSync {
   return hostReader;
 }
 
-// Replaces slot 0 only: the table can only grow within a session.
+// Replaces slot 0 only: the wasm side addresses the other files by index.
 export function openHostFile(file: Blob): bigint {
   reader();
   if (hostFiles.length === 0) hostFiles = [null];
@@ -62,11 +62,6 @@ export function addHostFile(file: Blob): number {
   reader();
   if (hostFiles.length === 0) hostFiles = [null];
   return hostFiles.push(file) - 1;
-}
-
-export function resetHostFiles(): void {
-  hostFiles = [];
-  hostChunks.clear();
 }
 
 function readBlob(stats: HostIo, file: Blob, start: number, end: number): Uint8Array {

@@ -201,17 +201,6 @@ export function noteRegistered(what: string, bytes: number): void {
   registered.set(what, entry);
 }
 
-// Reset: the session the counts were about is gone.
-export function resetActivity(): void {
-  previous = ZERO;
-  reportedAt = 0;
-  lastThreadState.clear();
-  idleWarned.clear();
-  memoryLogged = { guest: 0, wasm: 0 };
-  registered.clear();
-  takeHostIo();
-}
-
 // Log what changed if a second has passed, or at once when `now` (the run just
 // stopped). Never throws.
 export function reportActivity(now = false): void {

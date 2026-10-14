@@ -9,7 +9,7 @@ import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updateReadouts } from './runloop';
-import { noteBooted, recycleSession } from './session';
+import { endTitle, noteBooted } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
 import { holdUrl, releaseUrl } from './objecturl';
 import { setRunning } from './title';
@@ -305,20 +305,6 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
 let openContainer: { file: File; kind: 'nsp' | 'nca' } | null = null;
 
 let nspFiles: NspFile[] = [];
-
-// Give a fresh session the container the page is still showing.
-export async function reopenContainer(): Promise<void> {
-  if (!openContainer) return;
-  const { file, kind } = openContainer;
-  const ok = await call(kind === 'nca' ? 'open_nca' : 'open_nsp', file).catch(() => -1);
-  if (ok !== 0) {
-    log('Could not re-open ' + file.name + ' - load it again to launch it.', 'error');
-    openContainer = null;
-    clearNsp();
-    return;
-  }
-  await syncPaired();
-}
 
 // The File goes to the worker, which reads ranges from it; only its header is read.
 async function handleNspFile(file: File): Promise<void> {
@@ -621,13 +607,12 @@ export async function doLaunchNca(
   setRunning(null);
   beginLoad(identity?.name || name, 'decrypting the program and reading its ExeFS',
     identity?.iconUrl);
-  // Rebuild the session with the container still open; a no-op if the boot already did.
   try {
-    await recycleSession({ reopen: reopenContainer });
+    await endTitle();
   } catch (err) {
     setState('fault');
-    failLoad('The session could not be replaced: ' + (err as Error).message);
-    log('A new console could not be prepared for the launch: ' + (err as Error).message, 'error');
+    failLoad('The running title could not be ended: ' + (err as Error).message);
+    log('The running title could not be ended: ' + (err as Error).message, 'error');
     return;
   }
   let entry: number;
