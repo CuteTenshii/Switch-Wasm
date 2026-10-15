@@ -7,7 +7,7 @@ How guest cores run on several workers over one shared memory. The console gives
 - One wasm module, instantiated by every worker over a shared `WebAssembly.Memory`, so guest RAM, the page table and the emulator's heap are the same bytes everywhere. That needs std built with atomics, hence the pinned nightly in the `Makefile` and the `+atomics`/`--shared-memory` flags in `.cargo/config.toml`.
 - `web/worker/core.ts` instantiates the module with `initSync` on the system worker's module and memory. Core workers run no guest code yet.
 - Function tables are per instance, so a region compiled by one worker cannot be called from another: each core keeps its own JIT caches, one per process (`Cpu.jit` for the running process, `parked_jits` for the rest), and installs its own regions; `switch-wasm`'s free-slot list is thread-local.
-- The global allocator in `crates/switch-wasm/src/heap.rs` has no lock, so it is only sound while one worker at a time allocates.
+- The global allocator in `crates/switch-wasm/src/heap.rs` is dlmalloc behind a spin lock, since every worker allocates.
 
 ## State
 

@@ -23,7 +23,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - The worker's host file table keeps every update and DLC added during a visit, each with up to 16 MiB of chunk cache; it should drop a file the session no longer reads.
 - `npns:s` cmd 3 (Receive) is refused; qlaunch polls it constantly. Needs the empty-queue result from switchbrew.
 - `ssl:s` cmd 5 is stubbed and the `ssl:s` name is not routed like `ssl`.
-- The `crates/switch-wasm/src/heap.rs` allocator can be entered concurrently by core workers at startup (unsynchronized dlmalloc under `+atomics`; `__wbindgen_start` allocates their stack and TLS).
 - Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
 - Minecraft frame 20 is clean on the WebGPU device but the software rasterizer differs from it, mostly in the right half.
