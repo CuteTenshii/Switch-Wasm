@@ -125,6 +125,8 @@ pub struct Cpu {
     pub(crate) switched_in_at: u64,
     /// The process this core runs.
     pub(crate) pid: u64,
+    /// Which of the [`crate::mem::CORES`] this is; 0 runs the kernel.
+    pub(crate) core: usize,
     /// How the running process ended, acted on once the `svc` that ended it replied.
     pub(crate) process_ending: Option<crate::kernel::process::Ending>,
     /// Kernel and service state: one per console, shared by its cores.
@@ -426,6 +428,7 @@ impl Cpu {
             pending_sleep: None,
             switched_in_at: 0,
             pid: ROOT_PID,
+            core: 0,
             process_ending: None,
             machine: Box::new(Machine {
                 next_object_id: 1,

@@ -189,7 +189,7 @@ fn main() {
                     cpu.mem.take_read_hit();
                     cpu.mem.take_watch_hit();
                     cpu.mem.mark_code_page(WATCHED_PAGE_AT);
-                    cpu.mem.dirty_code_pages();
+                    cpu.mem.dirty_code_pages(0);
                     let mut fault = false;
                     for _ in 0..ops {
                         if cpu.step().is_err() {
@@ -213,7 +213,10 @@ fn main() {
                     let must_hand_back = fault
                         || cpu.mem.take_read_hit().is_some()
                         || cpu.mem.take_watch_hit().is_some()
-                        || !cpu.mem.dirty_code_pages().is_empty();
+                        || cpu
+                            .mem
+                            .dirty_code_pages(0)
+                            .is_none_or(|pages| !pages.is_empty());
 
                     let name = format!("case{cases:05}");
                     std::fs::write(format!("{out_dir}/{name}.wasm"), &module)

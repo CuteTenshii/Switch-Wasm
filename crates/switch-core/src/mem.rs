@@ -136,10 +136,17 @@ impl Hit {
     }
 }
 
+/// Cores that run guest code, each with its own translations to drop.
+pub const CORES: usize = 3;
+
+/// Code pages one core has not been told of beyond this are reported as "all".
+const DIRTY_CODE_CAP: usize = 1 << 14;
+
 /// Watched pages written since each drain last ran.
 #[derive(Debug, Default)]
 struct Dirty {
-    code: Vec<u32>,
+    /// Per core; `None` once more were written than the list holds.
+    code: [Option<Vec<u32>>; CORES],
     gpu: Vec<u32>,
 }
 
@@ -165,7 +172,7 @@ pub struct Memory {
     watched_pages: AtomicPtr<WatchWords>,
     /// Watched pages written since each drain, and whether either list is non-empty.
     dirty: Mutex<Dirty>,
-    code_dirty: AtomicBool,
+    code_dirty: [AtomicBool; CORES],
     gpu_dirty: AtomicBool,
     /// Whether the GPU backend has watched a page, so reports are not queued for nobody.
     gpu_watching: AtomicBool,
@@ -341,8 +348,11 @@ impl Memory {
             watch_hit: Hit(AtomicU64::new(Hit::NONE)),
             read_hit: Hit(AtomicU64::new(Hit::NONE)),
             watched_pages: AtomicPtr::new(std::ptr::null_mut()),
-            dirty: Mutex::default(),
-            code_dirty: AtomicBool::new(false),
+            dirty: Mutex::new(Dirty {
+                code: std::array::from_fn(|_| Some(Vec::new())),
+                gpu: Vec::new(),
+            }),
+            code_dirty: Default::default(),
             gpu_dirty: AtomicBool::new(false),
             gpu_watching: AtomicBool::new(false),
             copy_watch: AtomicPtr::new(std::ptr::null_mut()),
@@ -433,8 +443,16 @@ impl Memory {
     fn report_written(&self, idx: usize) {
         {
             let mut dirty = self.dirty.lock().unwrap_or_else(|e| e.into_inner());
-            dirty.code.push(idx as u32);
-            self.code_dirty.store(true, Relaxed);
+            for (list, flag) in dirty.code.iter_mut().zip(&self.code_dirty) {
+                if let Some(pages) = list {
+                    if pages.len() < DIRTY_CODE_CAP {
+                        pages.push(idx as u32);
+                    } else {
+                        *list = None;
+                    }
+                }
+                flag.store(true, Relaxed);
+            }
             if self.gpu_watching.load(Relaxed) {
                 dirty.gpu.push(idx as u32);
                 self.gpu_dirty.store(true, Relaxed);
@@ -465,17 +483,18 @@ impl Memory {
         }
     }
 
-    /// Whether any translated page was written since the last drain.
+    /// Whether any translated page was written since `core` last drained.
     #[inline(always)]
-    pub fn has_dirty_code(&self) -> bool {
-        self.code_dirty.load(Relaxed)
+    pub fn has_dirty_code(&self, core: usize) -> bool {
+        self.code_dirty[core].load(Relaxed)
     }
 
-    /// Take the stale code pages, clearing the list.
-    pub fn dirty_code_pages(&self) -> Vec<u32> {
+    /// Take the code pages written since `core` last drained, or `None` if
+    /// there were too many to list and every translation is stale.
+    pub fn dirty_code_pages(&self, core: usize) -> Option<Vec<u32>> {
         let mut dirty = self.dirty.lock().unwrap_or_else(|e| e.into_inner());
-        self.code_dirty.store(false, Relaxed);
-        std::mem::take(&mut dirty.code)
+        self.code_dirty[core].store(false, Relaxed);
+        dirty.code[core].replace(Vec::new())
     }
 
     /// Watch `addr`'s page for the GPU backend.
@@ -1949,10 +1968,10 @@ mod tests {
         mem.mark_gpu_page(0x1000);
         mem.write_u32(0x1000, 1).unwrap();
         assert!(mem.has_dirty_gpu());
-        assert!(mem.has_dirty_code());
+        assert!(mem.has_dirty_code(0));
         assert_eq!(mem.dirty_gpu_pages().len(), 1);
         assert!(!mem.has_dirty_gpu());
-        assert_eq!(mem.dirty_code_pages().len(), 1);
+        assert_eq!(mem.dirty_code_pages(0), Some(vec![1]));
 
         // A page is reported once until cached again.
         mem.write_u32(0x1000, 2).unwrap();
@@ -1960,6 +1979,27 @@ mod tests {
         mem.mark_gpu_page(0x1000);
         mem.write_u32(0x1000, 3).unwrap();
         assert_eq!(mem.dirty_gpu_pages().len(), 1);
+    }
+
+    /// Each core drops its own translations, so one drain must not hide a
+    /// store from another, nor a flood of them overflow its list.
+    #[test]
+    fn every_core_hears_of_a_code_store() {
+        let mem = Memory::new();
+        mem.map_zero(0x1000, 0x1000).unwrap();
+        mem.mark_code_page(0x1000);
+        mem.write_u32(0x1000, 1).unwrap();
+        assert_eq!(mem.dirty_code_pages(0), Some(vec![1]));
+        assert!(!mem.has_dirty_code(0));
+        assert!(mem.has_dirty_code(CORES - 1));
+        assert_eq!(mem.dirty_code_pages(CORES - 1), Some(vec![1]));
+
+        for _ in 0..=DIRTY_CODE_CAP {
+            mem.mark_code_page(0x1000);
+            mem.write_u32(0x1000, 2).unwrap();
+        }
+        assert_eq!(mem.dirty_code_pages(0), None);
+        assert_eq!(mem.dirty_code_pages(0), Some(vec![]));
     }
 
     // The mask in `Memory::page_index` is a no-op for every `u32` address.

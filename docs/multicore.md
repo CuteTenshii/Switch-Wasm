@@ -18,7 +18,7 @@ How guest cores run on several workers over one shared memory. The console gives
 - `Memory` is safe to use from several cores at once:
   - page table entries are atomic pointers; a first touch allocates with a compare-and-swap, and pages are freed only while every other core is paused;
   - what stores update (mapped-page counts, the cached-pages bitmap, the copy and fill watches) is atomic;
-  - the dirty-page lists are behind a mutex, reached only by the first store to a watched page;
+  - the dirty-page lists are behind a mutex, reached only by the first store to a watched page; each core has its own code list (`dirty_code_pages(core)`), since each drops its own translations, and one that overflows reports every translation stale;
   - rare metadata (module and read-only ranges, the soft region, watchpoints) changes only while every other core is paused, so stores read it with plain loads.
 
 ## Stages

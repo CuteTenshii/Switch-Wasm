@@ -145,7 +145,7 @@ impl Cpu {
             let pc = self.pc;
             // A store to translated code disables the fast paths until
             // `jit_block_at` drains the dirty list.
-            let stale = self.mem.has_dirty_code();
+            let stale = self.mem.has_dirty_code(self.core);
             let block = match held.take() {
                 Some(block) if block.start == pc && !stale => block,
                 // Where this block went last time.
@@ -180,7 +180,7 @@ impl Cpu {
                     || steps >= max_steps
                     || self.halted
                     || self.slice_used >= TIME_SLICE
-                    || self.mem.has_dirty_code()
+                    || self.mem.has_dirty_code(self.core)
                     || self.pid != held_pid
                 {
                     None
@@ -208,9 +208,11 @@ impl Cpu {
     /// The block entered at `pc`, translating it on first visit. Drains dirty
     /// code pages first so a stale block is never handed out.
     fn jit_block_at(&mut self, pc: u32) -> Rc<Block> {
-        if self.mem.has_dirty_code() {
-            let dirty = self.mem.dirty_code_pages();
-            self.jit.invalidate(&dirty);
+        if self.mem.has_dirty_code(self.core) {
+            match self.mem.dirty_code_pages(self.core) {
+                Some(dirty) => self.jit.invalidate(&dirty),
+                None => self.jit.clear(),
+            }
         }
         if let Some(block) = self.jit.get(pc) {
             return block;
@@ -295,7 +297,7 @@ impl Cpu {
                 Taken::Follow(target) => {
                     // Leave as a terminator would, so `run_jit` notices a store
                     // to the translated code past here.
-                    if self.mem.has_dirty_code() {
+                    if self.mem.has_dirty_code(self.core) {
                         self.pc = target;
                         self.retire_runs(run_pc, run_i, i);
                         return Ok(i as u64);
@@ -586,7 +588,7 @@ impl Cpu {
     fn region_members(&self, head: &Block) -> Vec<Rc<Block>> {
         let mut members: Vec<Rc<Block>> = Vec::new();
         // Pending stores could have left a cached block stale.
-        if self.mem.has_dirty_code() {
+        if self.mem.has_dirty_code(self.core) {
             return members;
         }
         let mut seen = vec![head.start];
