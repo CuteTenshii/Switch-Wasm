@@ -3,6 +3,7 @@
 use super::shift::{decode_imm_shift, shift_c};
 use crate::cpu::Cpu;
 use crate::{Error, Result};
+use std::sync::atomic::{fence, Ordering::SeqCst};
 
 impl Cpu {
     /// Returns the address to access and the base register's new value; post-indexed forms always write back.
@@ -209,45 +210,46 @@ impl Cpu {
             }
             // STREX{,D,B,H}: `rd` takes 0 on success, 1 when the monitor was lost.
             0b1000 | 0b1010 | 0b1100 | 0b1110 => {
-                if self.exclusive.take() == Some(addr) {
-                    let value = self.r32(rt);
-                    match (insn >> 21) & 0b11 {
-                        0b00 => self.mem.write_u32(addr, value)?,
-                        0b01 => {
-                            self.mem.write_u32(addr, value)?;
-                            self.mem.write_u32(addr.wrapping_add(4), self.r32(rt + 1))?;
-                        }
-                        0b10 => self.mem.write_u8(addr, value as u8)?,
-                        _ => self.mem.write_u16(addr, value as u16)?,
-                    }
-                    self.set_r32(rd, 0);
-                } else {
-                    self.set_r32(rd, 1);
-                }
+                let value = u64::from(self.r32(rt));
+                let (size, value) = match (insn >> 21) & 0b11 {
+                    0b00 => (4, value),
+                    0b01 => (8, value | u64::from(self.r32(rt + 1)) << 32),
+                    0b10 => (1, value),
+                    _ => (2, value),
+                };
+                let stored = self.store_exclusive_at(addr, size, [value, 0])?;
+                self.set_r32(rd, u32::from(!stored));
             }
             // LDREX{,D,B,H}. `rd` is the destination here, not a status word.
             0b1001 | 0b1011 | 0b1101 | 0b1111 => {
-                match (insn >> 21) & 0b11 {
+                let value = match (insn >> 21) & 0b11 {
                     0b00 => {
                         let value = self.mem.read_u32(addr)?;
                         self.set_r32(rd, value);
+                        u64::from(value)
                     }
                     0b01 => {
                         let lo = self.mem.read_u32(addr)?;
                         let hi = self.mem.read_u32(addr.wrapping_add(4))?;
                         self.set_r32(rd, lo);
                         self.set_r32(rd + 1, hi);
+                        u64::from(lo) | u64::from(hi) << 32
                     }
                     0b10 => {
                         let value = u32::from(self.mem.read_u8(addr)?);
                         self.set_r32(rd, value);
+                        u64::from(value)
                     }
                     _ => {
                         let value = u32::from(self.mem.read_u16(addr)?);
                         self.set_r32(rd, value);
+                        u64::from(value)
                     }
-                }
-                self.exclusive = Some(addr);
+                };
+                self.exclusive = Some(crate::cpu::Monitor {
+                    addr,
+                    value: [value, 0],
+                });
             }
             _ => {
                 return Err(Error::Cpu(format!(
@@ -263,6 +265,8 @@ impl Cpu {
     /// `LDA{,B,H}`/`STL{,B,H}`: plain accesses that leave the monitor alone; loads write `Rd`, stores read `Rt`.
     fn a32_acquire_release(&mut self, insn: u32, addr: u32, rd: u8, rt: u8) -> Result<()> {
         let load = (insn >> 20) & 1 != 0;
+        // A fence on both sides is stronger than either half needs.
+        fence(SeqCst);
         match ((insn >> 21) & 0b11, load) {
             (0b00, false) => self.mem.write_u32(addr, self.r32(rt))?,
             (0b10, false) => self.mem.write_u8(addr, self.r32(rt) as u8)?,
@@ -287,6 +291,7 @@ impl Cpu {
                 )))
             }
         }
+        fence(SeqCst);
         self.pc = self.pc.wrapping_add(4);
         Ok(())
     }

@@ -19,6 +19,7 @@ use super::ir::{Block, Exit, Op, Term};
 use super::wasm::{Func, Module, F32, F64, I32, I64, V128};
 use crate::cpu::bits::mask_of_width;
 use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
+use crate::cpu::system::SysOp;
 use crate::cpu::{Cpu, CONDITION_MASKS, REG_SLOTS, SELF_RETURN_TRAMPOLINE};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
@@ -2020,6 +2021,17 @@ impl Emitter<'_> {
                 self.f.i32_const(addr as i32);
                 self.f.local_set(L_ADDR);
                 self.access(rt, acc, retired);
+                true
+            }
+            Op::Ordered { rt, rn, acc } => {
+                self.address(rn, 0, Wb::None);
+                self.f.atomic_fence();
+                self.access(rt, acc, retired);
+                self.f.atomic_fence();
+                true
+            }
+            Op::Sys { op: SysOp::Barrier } => {
+                self.f.atomic_fence();
                 true
             }
 

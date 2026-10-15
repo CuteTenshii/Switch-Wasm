@@ -59,6 +59,20 @@ const PROGRAMS = [
     expect: { 0: 0x1234n, 2: 0x1234n },
   },
   {
+    name: 'a barrier, and a store-release the load-acquire reads back',
+    data: true,
+    code: [
+      0x1000001e, // adr  x30, #0        -> x30 = BASE
+      0xd2824680, // movz x0,  #0x1234
+      0x10008001, // adr  x1,  #0x1000   -> x1 = DATA + 8
+      0xd5033bbf, // dmb  ish
+      0xc89ffc20, // stlr x0,  [x1]
+      0xc8dffc22, // ldar x2,  [x1]
+      0xd65f03c0, // ret  x30
+    ],
+    expect: { 0: 0x1234n, 2: 0x1234n },
+  },
+  {
     name: 'a loop whose back edge is a conditional branch',
     data: false,
     code: [

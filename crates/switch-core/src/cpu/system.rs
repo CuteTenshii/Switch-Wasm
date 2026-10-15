@@ -67,16 +67,22 @@ pub(super) enum SysOp {
     DcZva { rt: u8 },
     /// `CLREX`: clear the local exclusive monitor.
     ClearExclusive,
+    /// `DMB`/`DSB`: order memory against the other cores.
+    Barrier,
     /// An encoding this does not place. The caller reports it.
     Unhandled,
 }
 
 impl SysOp {
     pub(super) fn of(insn: u32) -> SysOp {
-        // HINT and barriers. CLREX is CRn == 0011, op2 == 010.
+        // HINT and barriers: CRn == 0011 is CLREX (op2 010), DSB (100), DMB (101), ISB (110).
         if (insn >> 16) & 0xFFFF == 0xD503 {
-            if (insn >> 12) & 0xF == 0b0011 && (insn >> 5) & 0b111 == 0b010 {
-                return SysOp::ClearExclusive;
+            if (insn >> 12) & 0xF == 0b0011 {
+                match (insn >> 5) & 0b111 {
+                    0b010 => return SysOp::ClearExclusive,
+                    0b100 | 0b101 => return SysOp::Barrier,
+                    _ => {}
+                }
             }
             return SysOp::Nop;
         }
@@ -165,6 +171,7 @@ impl Cpu {
             },
             SysOp::MsrNzcvImm { imm } => self.nzcv = u32::from(imm),
             SysOp::ClearExclusive => self.exclusive = None,
+            SysOp::Barrier => std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst),
             SysOp::DcZva { rt } => {
                 // Eight doubleword stores rather than sixty-four byte ones.
                 let addr = self.reg_at(rt) as u32 & !0x3F;

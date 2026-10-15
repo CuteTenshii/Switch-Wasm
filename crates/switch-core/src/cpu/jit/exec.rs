@@ -13,6 +13,7 @@ use crate::cpu::bits::*;
 use crate::cpu::loadstore::{Acc, PairKind, Wb};
 use crate::cpu::{Cpu, Layout, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use std::rc::Rc;
+use std::sync::atomic::{fence, Ordering::SeqCst};
 
 /// Entries before a block is emitted as wasm.
 pub const HOT: u32 = 512;
@@ -1071,6 +1072,11 @@ impl Cpu {
             }
             Op::LoadExclusive { rt, rn, sz } => self.load_exclusive(rt, rn, sz)?,
             Op::StoreExclusive { rs, rt, rn, sz } => self.store_exclusive(rs, rt, rn, sz)?,
+            Op::Ordered { rt, rn, acc } => {
+                fence(SeqCst);
+                self.access(self.reg_at(rn) as u32, rt, acc)?;
+                fence(SeqCst);
+            }
         }
         Ok(())
     }

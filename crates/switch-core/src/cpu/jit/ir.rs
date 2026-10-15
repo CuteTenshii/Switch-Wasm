@@ -332,6 +332,12 @@ pub(in crate::cpu) enum Op {
         rn: u8,
         sz: u8,
     },
+    /// `LDAR`/`STLR`: the access at `rn`, fenced against the other cores.
+    Ordered {
+        rt: u8,
+        rn: u8,
+        acc: Acc,
+    },
 }
 
 impl Op {

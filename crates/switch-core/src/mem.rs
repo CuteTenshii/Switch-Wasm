@@ -4,7 +4,8 @@
 use crate::{Error, Result};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed,
+    AtomicBool, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize,
+    Ordering::{Relaxed, SeqCst},
 };
 use std::sync::Mutex;
 
@@ -1006,6 +1007,93 @@ impl Memory {
             self.read_hit.set(addr);
         }
         Some(page[off..off + N].try_into().unwrap())
+    }
+
+    /// Store `new` over the `size` bytes at `addr` (1, 2, 4 or 8) if they still
+    /// hold `old`, in one step other cores cannot split: an exclusive store.
+    /// `Ok(false)` when they did not. An unaligned one is not atomic.
+    pub fn compare_exchange(&self, addr: u32, size: u32, old: u64, new: u64) -> Result<bool> {
+        if !addr.is_multiple_of(size) {
+            if self.read_sized(addr, size)? != old {
+                return Ok(false);
+            }
+            self.write_sized(addr, size, new)?;
+            return Ok(true);
+        }
+        self.check_writable(addr)?;
+        let page = self.page_mut(Self::page_index(addr))?;
+        let at = page[Self::in_page_offset(addr)..].as_mut_ptr();
+        // SAFETY: `at` is `size`-aligned in guest space and pages are at least
+        // 8-aligned, so it is aligned for the atomic of that width, and in bounds.
+        let swapped = unsafe {
+            match size {
+                1 => AtomicU8::from_ptr(at)
+                    .compare_exchange(old as u8, new as u8, SeqCst, SeqCst)
+                    .is_ok(),
+                2 => AtomicU16::from_ptr(at.cast())
+                    .compare_exchange(old as u16, new as u16, SeqCst, SeqCst)
+                    .is_ok(),
+                4 => AtomicU32::from_ptr(at.cast())
+                    .compare_exchange(old as u32, new as u32, SeqCst, SeqCst)
+                    .is_ok(),
+                _ => AtomicU64::from_ptr(at.cast())
+                    .compare_exchange(old, new, SeqCst, SeqCst)
+                    .is_ok(),
+            }
+        };
+        if swapped {
+            self.note_written(addr, size);
+        }
+        Ok(swapped)
+    }
+
+    /// [`Memory::compare_exchange`] for a 16-byte pair, which wasm has no atomic
+    /// for: serialised against other pairs, not against plain stores.
+    pub fn compare_exchange_pair(&self, addr: u32, old: [u64; 2], new: [u64; 2]) -> Result<bool> {
+        static PAIRS: AtomicBool = AtomicBool::new(false);
+        while PAIRS
+            .compare_exchange_weak(false, true, SeqCst, Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        let second = addr.wrapping_add(8);
+        let swapped = (|| {
+            if [self.read_u64(addr)?, self.read_u64(second)?] != old {
+                return Ok(false);
+            }
+            self.write_u64(addr, new[0])?;
+            self.write_u64(second, new[1])?;
+            Ok(true)
+        })();
+        PAIRS.store(false, SeqCst);
+        swapped
+    }
+
+    fn read_sized(&self, addr: u32, size: u32) -> Result<u64> {
+        Ok(match size {
+            1 => u64::from(self.read_u8(addr)?),
+            2 => u64::from(self.read_u16(addr)?),
+            4 => u64::from(self.read_u32(addr)?),
+            _ => self.read_u64(addr)?,
+        })
+    }
+
+    fn write_sized(&self, addr: u32, size: u32, value: u64) -> Result<()> {
+        match size {
+            1 => self.write_u8(addr, value as u8),
+            2 => self.write_u16(addr, value as u16),
+            4 => self.write_u32(addr, value as u32),
+            _ => self.write_u64(addr, value),
+        }
+    }
+
+    /// What a store to `[addr, addr + size)` owes the watchpoint and the caches.
+    fn note_written(&self, addr: u32, size: u32) {
+        if addr < self.meta().watch.1 && addr.wrapping_add(size) > self.meta().watch.0 {
+            self.watch_hit.set(addr);
+        }
+        self.note_code_write(addr);
     }
 
     /// Same, for writing. `None` if the access straddles a page.

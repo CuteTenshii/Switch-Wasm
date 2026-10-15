@@ -178,6 +178,11 @@ impl Func {
         self.op(0x05);
     }
 
+    /// Order memory against other threads on the shared memory.
+    pub(super) fn atomic_fence(&mut self) {
+        self.code.extend_from_slice(&[0xFE, 0x03, 0x00]);
+    }
+
     /// Tail-call the table entry on the stack, with arguments under it, as type `ty`.
     pub(super) fn return_call_indirect(&mut self, ty: u32) {
         self.op_idx(0x13, ty);

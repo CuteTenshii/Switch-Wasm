@@ -3,8 +3,9 @@
 //! with the JIT.
 
 use super::bits::*;
-use super::Cpu;
+use super::{Cpu, Monitor};
 use crate::{Error, Result};
+use std::sync::atomic::{fence, Ordering::SeqCst};
 
 /// What a load/store does to its base register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -592,9 +593,32 @@ impl Cpu {
     pub(super) fn load_exclusive(&mut self, rt: u8, rn: u8, sz: u8) -> Result<()> {
         let addr = self.reg_at(rn) as u32;
         let val = self.load_by_size(addr, u32::from(sz), false)?;
-        self.exclusive = Some(addr);
+        self.exclusive = Some(Monitor {
+            addr,
+            value: [val, 0],
+        });
         self.set_reg_at(rt, val);
         Ok(())
+    }
+
+    /// The store half of an exclusive pair: `new` goes to the `size` bytes at
+    /// `addr` only if this thread's monitor is armed there and memory still
+    /// holds what it read, which another core's store would have changed.
+    pub(crate) fn store_exclusive_at(
+        &mut self,
+        addr: u32,
+        size: u32,
+        new: [u64; 2],
+    ) -> Result<bool> {
+        let Some(monitor) = self.exclusive.take().filter(|m| m.addr == addr) else {
+            return Ok(false);
+        };
+        if size == 16 {
+            self.mem.compare_exchange_pair(addr, monitor.value, new)
+        } else {
+            self.mem
+                .compare_exchange(addr, size, monitor.value[0], new[0])
+        }
     }
 
     /// `STXR`/`STLXR`: stores only against this thread's monitor at the same
@@ -602,13 +626,8 @@ impl Cpu {
     #[inline(always)]
     pub(super) fn store_exclusive(&mut self, rs: u8, rt: u8, rn: u8, sz: u8) -> Result<()> {
         let addr = self.reg_at(rn) as u32;
-        if self.exclusive.take() == Some(addr) {
-            let val = self.reg_at(rt);
-            self.store_by_size(addr, u32::from(sz), val)?;
-            self.set_reg_at(rs, 0);
-        } else {
-            self.set_reg_at(rs, 1);
-        }
+        let stored = self.store_exclusive_at(addr, 1 << sz, [self.reg_at(rt), 0])?;
+        self.set_reg_at(rs, u64::from(!stored));
         Ok(())
     }
 
@@ -636,20 +655,14 @@ impl Cpu {
                 }
                 0b001000001 => {
                     // STXP: `sz` 10 is two words, 11 two doublewords.
-                    if self.exclusive.take() == Some(base as u32) {
-                        let v0 = self.read_zr(rt);
-                        let v1 = self.read_zr(rt2);
-                        if sz == 0b10 {
-                            self.mem.write_u32(base as u32, v0 as u32)?;
-                            self.mem.write_u32(base.wrapping_add(4) as u32, v1 as u32)?;
-                        } else {
-                            self.mem.write_u64(base as u32, v0)?;
-                            self.mem.write_u64(base.wrapping_add(8) as u32, v1)?;
-                        }
-                        self.write_zr(((insn >> 16) & 0x1F) as u8, 0);
+                    let (v0, v1) = (self.read_zr(rt), self.read_zr(rt2));
+                    let stored = if sz == 0b10 {
+                        let both = (v0 & 0xFFFF_FFFF) | (v1 << 32);
+                        self.store_exclusive_at(base as u32, 8, [both, 0])?
                     } else {
-                        self.write_zr(((insn >> 16) & 0x1F) as u8, 1);
-                    }
+                        self.store_exclusive_at(base as u32, 16, [v0, v1])?
+                    };
+                    self.write_zr(((insn >> 16) & 0x1F) as u8, u64::from(!stored));
                 }
                 0b001000011 => {
                     // LDXP: the 32-bit form zero-extends each half.
@@ -664,17 +677,27 @@ impl Cpu {
                             self.mem.read_u64(base.wrapping_add(8) as u32)?,
                         )
                     };
-                    self.exclusive = Some(base as u32);
+                    let value = if sz == 0b10 {
+                        [v0 | (v1 << 32), 0]
+                    } else {
+                        [v0, v1]
+                    };
+                    self.exclusive = Some(Monitor {
+                        addr: base as u32,
+                        value,
+                    });
                     self.write_zr(rt, v0);
                     self.write_zr(rt2, v1);
                 }
                 0b001000100 => {
                     // STLR: store-release
+                    fence(SeqCst);
                     self.store_by_size(base as u32, sz, self.read_zr(rt))?;
                 }
                 0b001000110 => {
                     // LDAR: load-acquire
                     let val = self.load_by_size(base as u32, sz, false)?;
+                    fence(SeqCst);
                     self.write_zr(rt, val);
                 }
                 _ => unreachable!(),

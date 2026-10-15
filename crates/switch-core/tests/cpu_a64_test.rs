@@ -1298,3 +1298,65 @@ fn a_32_bit_exclusive_pair_moves_words() {
         "a word pair wrote over its neighbour"
     );
 }
+
+/// A store between the load and the store-exclusive makes the store fail,
+/// as another core's would: the monitor compares what the load read.
+#[test]
+fn a_store_in_between_breaks_the_exclusive_pair() {
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.set_reg(0, 0x2000);
+    cpu.set_reg(2, 0xAAAA);
+    cpu.mem
+        .map(0x1000, &0xc85f7c01u32.to_le_bytes()) // ldxr x1, [x0]
+        .unwrap();
+    cpu.mem
+        .map(0x1004, &0xc8037c02u32.to_le_bytes()) // stxr w3, x2, [x0]
+        .unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(1).unwrap();
+    cpu.mem.write_u64(0x2000, 7).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(3), 1, "the store-exclusive reported success");
+    assert_eq!(cpu.mem.read_u64(0x2000).unwrap(), 7, "it stored anyway");
+}
+
+/// Two cores incrementing one counter with `LDXR`/`STXR` lose no update.
+#[test]
+fn exclusive_increments_from_two_cores_all_land() {
+    const ROUNDS: u64 = 50_000;
+    let code: [u32; 9] = [
+        0xc85f7c01, // ldxr x1, [x0]
+        0x91000421, // add x1, x1, #1
+        0xc8037c01, // stxr w3, x1, [x0]
+        0x35ffffa3, // cbnz w3, ldxr
+        0xf1000442, // subs x2, x2, #1
+        0x54ffff61, // b.ne ldxr
+        0xd5033bbf, // dmb ish
+        0xc8dffc04, // ldar x4, [x0]
+        0xd4000001, // svc #0
+    ];
+    let cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    let bytes: Vec<u8> = code.iter().flat_map(|i| i.to_le_bytes()).collect();
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    let mem = cpu.mem.clone();
+    let cores: Vec<_> = (0..2)
+        .map(|_| {
+            let mem = mem.clone();
+            std::thread::spawn(move || {
+                let mut cpu = Cpu::new();
+                cpu.mem = mem;
+                cpu.set_pc(0x1000);
+                cpu.set_reg(0, 0x2000);
+                cpu.set_reg(2, ROUNDS);
+                cpu.run(u64::MAX).unwrap();
+                assert!(cpu.halted, "the loop did not finish");
+            })
+        })
+        .collect();
+    for core in cores {
+        core.join().unwrap();
+    }
+    assert_eq!(mem.read_u64(0x2000).unwrap(), 2 * ROUNDS);
+}

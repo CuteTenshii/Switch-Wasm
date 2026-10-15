@@ -792,10 +792,13 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
                 sz,
             }
         }
-        // `STLR`/`LDAR`: a single core has nothing to order against.
         0b001000100 | 0b001000110 => {
             let acc = Acc::of(sz, u8::from(grp_excl == 0b001000110));
-            return Op::load_store_imm(rt_slot(insn, acc), rn, acc, Wb::None, 0);
+            return Op::Ordered {
+                rt: rt_slot(insn, acc),
+                rn,
+                acc,
+            };
         }
         0b001000001 | 0b001000011 => return Op::Interpret { insn },
         _ => {}

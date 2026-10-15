@@ -17,13 +17,16 @@ impl Cpu {
 
     /// The `cond == 0xF` space: barriers, preload hints, and BLX to Thumb.
     pub(super) fn a32_unconditional(&mut self, insn: u32) -> Result<()> {
-        // DSB/DMB/ISB, CLREX and PLD/PLI are no-ops with one core and no cache.
+        // DSB/DMB/ISB fence against the other cores; CLREX and PLD/PLI need no cache.
         let barrier = (insn & 0xFFFF_FFF0) == 0xF57F_F040
             || (insn & 0xFFFF_FFF0) == 0xF57F_F050
             || (insn & 0xFFFF_FFF0) == 0xF57F_F060;
         let clrex = insn == 0xF57F_F01F;
         let preload = (insn & 0xFD30_F000) == 0xF510_F000;
         if barrier || preload {
+            if barrier {
+                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+            }
             self.pc = self.pc.wrapping_add(4);
             return Ok(());
         }
@@ -76,8 +79,11 @@ impl Cpu {
         let crm = insn & 0xF;
         let opc2 = (insn >> 5) & 0x7;
         let rt = ((insn >> 12) & 0xF) as u8;
-        // CP15 c7 is cache maintenance and pre-ARMv7 barriers; all retire as no-ops.
+        // CP15 c7 is cache maintenance and pre-ARMv7 barriers (c10, 4 and 5).
         if coproc == 15 && crn == 7 && !is_mrc {
+            if crm == 10 && (opc2 == 4 || opc2 == 5) {
+                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+            }
             self.pc = self.pc.wrapping_add(4);
             return Ok(());
         }

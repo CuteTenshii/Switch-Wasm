@@ -21,6 +21,11 @@ How guest cores run on several workers over one shared memory. The console gives
   - the dirty-page lists are behind a mutex, reached only by the first store to a watched page; each core has its own code list (`dirty_code_pages(core)`), since each drops its own translations, and one that overflows reports every translation stale;
   - rare metadata (module and read-only ranges, the soft region, watchpoints) changes only while every other core is paused, so stores read it with plain loads.
 
+## Ordering
+
+- Exclusive stores are a compare-and-swap against what the exclusive load read (`Memory::compare_exchange`), so another core's store in between makes them fail as on the console; a store that writes back the same value is not noticed. 16-byte pairs have no wasm atomic and are serialised against each other only.
+- `DMB`/`DSB` (and A32's CP15 barriers) are host fences, `LDAR`/`STLR` and A32's `LDA`/`STL` are fenced on both sides, in the interpreter and emitted as `atomic.fence`: the host may reorder plain wasm accesses as an ARM host does.
+
 ## Stages
 
 1. Shared-memory build, core workers that start. Done.

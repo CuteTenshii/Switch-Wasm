@@ -105,8 +105,8 @@ pub struct Cpu {
     /// TPIDR_EL0: guest-writable, separate from `tpidr` (the SDK writes it).
     pub(crate) tpidr_rw: u64,
     pub(crate) current_thread: usize,
-    /// Address of the outstanding exclusive load, or `None`. Cleared on context switch.
-    pub(crate) exclusive: Option<u32>,
+    /// The outstanding exclusive load, or `None`. Cleared on context switch.
+    pub(crate) exclusive: Option<Monitor>,
     /// Instructions since the running thread was scheduled, against [`TIME_SLICE`].
     pub(crate) slice_used: u64,
     /// Next cycle at which [`Cpu::sweep_timed_waits`] checks deadlines.
@@ -131,6 +131,14 @@ pub struct Cpu {
     pub(crate) process_ending: Option<crate::kernel::process::Ending>,
     /// Kernel and service state: one per console, shared by its cores.
     pub(crate) machine: Box<Machine>,
+}
+
+/// What an exclusive load armed: where, and what it read there (a pair's
+/// second doubleword in `value[1]`), which the store compares against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Monitor {
+    pub(crate) addr: u32,
+    pub(crate) value: [u64; 2],
 }
 
 /// What the console holds beyond a core: kernel objects, services and devices.
