@@ -6,6 +6,7 @@ import type {
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
+import { serveCores } from './coreworkers';
 import { addHostFile, openHostFile } from './hostfiles';
 import { workerLog } from './log';
 import { switch_clear_screen } from '@core/switch_wasm.js';
@@ -80,6 +81,7 @@ function logLoad(what: string, result: number | bigint): void {
 export const CMD: CommandHandlers = {
   new() {
     state.handle = core.switch_new();
+    serveCores(state.handle);
     resetInput(); // the new session's frame counter restarts at 0
     pushOperationMode();
     pushBattery();

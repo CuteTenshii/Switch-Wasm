@@ -1,6 +1,7 @@
 //! AArch64 (A64) interpreter core: decode and execute, with instruction groups,
 //! A32 in `a32`, and the block JIT in `jit`.
 
+use crate::kernel::cores::Handback;
 use crate::mem::AddressSpace;
 use crate::trace::Level;
 use crate::IdMap;
@@ -25,6 +26,7 @@ pub(crate) use crate::kernel::process::{Ending, Process, ROOT_PID};
 pub use crate::kernel::program::{Installed, Program};
 use crate::services::*;
 
+pub use crate::kernel::cores::{serve, CoreSlot};
 pub(crate) use crate::kernel::events::*;
 pub use crate::kernel::layout::*;
 pub use crate::kernel::sched::*;
@@ -127,6 +129,12 @@ pub struct Cpu {
     pub(crate) pid: u64,
     /// Which of the [`crate::mem::CORES`] this is; 0 runs the kernel.
     pub(crate) core: usize,
+    /// On another core, why the lent thread stops; see [`Cpu::run_lent`].
+    pub(crate) handback: Option<Handback>,
+    /// Set by core 0 to have this core hand its thread back.
+    pub(crate) recall: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Core 0's clock as it last published it, which the other cores read.
+    pub(crate) clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// How the running process ended, acted on once the `svc` that ended it replied.
     pub(crate) process_ending: Option<crate::kernel::process::Ending>,
     /// Kernel and service state: one per console, shared by its cores.
@@ -323,6 +331,10 @@ pub struct Machine {
     pub(crate) processes: BTreeMap<u64, Process>,
     /// The running title's pid; its ending halts the console.
     pub(crate) root: u64,
+    /// The other cores core 0 lends threads to; see [`Cpu::add_core`].
+    pub(crate) cores: Vec<std::sync::Arc<crate::kernel::cores::CoreSlot>>,
+    /// Instructions those cores retired; see [`Cpu::other_core_steps`].
+    pub(crate) lent_steps: u64,
 }
 
 pub const RECENT_LEN: usize = 64;
@@ -342,11 +354,16 @@ impl Cpu {
         if pid == self.pid {
             return;
         }
+        self.switch_translations(pid);
+        self.mem = self.machine.processes[&pid].mem.clone();
+        self.pid = pid;
+    }
+
+    /// Park the running process's translations and take out `pid`'s.
+    pub(crate) fn switch_translations(&mut self, pid: u64) {
         let jit = self.parked_jits.remove(&pid).unwrap_or_default();
         let left = std::mem::replace(&mut self.jit, jit);
         self.parked_jits.insert(self.pid, left);
-        self.mem = self.machine.processes[&pid].mem.clone();
-        self.pid = pid;
     }
 
     /// Drop the code this core translated for a process that ended.
@@ -437,6 +454,9 @@ impl Cpu {
             switched_in_at: 0,
             pid: ROOT_PID,
             core: 0,
+            handback: None,
+            recall: Default::default(),
+            clock: Default::default(),
             process_ending: None,
             machine: Box::new(Machine {
                 next_object_id: 1,
@@ -535,6 +555,8 @@ impl Cpu {
 
                 processes: BTreeMap::from([(ROOT_PID, Process::new(mem))]),
                 root: ROOT_PID,
+                cores: Vec::new(),
+                lent_steps: 0,
             }),
         };
         // Pre-map the fixed framebuffer and input regions.

@@ -8,6 +8,8 @@
 //     --title-keys=<file> title.keys, for content whose key is not bundled
 //     --firmware=<dir>    register every .nca in it as a system data archive
 //     --kind=<k>          override the header sniff: nsp, nca, nro or elf
+//     --build=<dir>       the wasm-bindgen output to load (default the release build)
+//     --cores=N           serve N more guest cores on worker threads, as the page does
 //
 // Reports steady-state frame time of the release wasm build (run
 // `make wasm-release` first). Host timings do not transfer to wasm; use this
@@ -16,10 +18,11 @@
 import { openSync, readSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Worker } from 'node:worker_threads';
 
 const USAGE =
   'usage: node tools/wasm_bench.mjs <container> [switch_wasm.wasm]'
-  + ' [--frames=N] [--warmup=N] [--shot=frame.ppm] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf]';
+  + ' [--frames=N] [--warmup=N] [--shot=frame.ppm] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf] [--build=dir] [--cores=N]';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -30,7 +33,7 @@ if (!containerPath) {
   console.error(USAGE);
   process.exit(1);
 }
-const release = join(root, 'target/wasm32-unknown-unknown/release');
+const release = flag('build') ?? join(root, 'target/wasm32-unknown-unknown/release');
 const wasmPath = positional[1] || join(release, 'switch_wasm_bg.wasm');
 
 // Untimed frames cover loading and let V8 tier up from Liftoff to TurboFan.
@@ -51,8 +54,21 @@ writeFileSync(
   benchGlue,
   readFileSync(gluePath, 'utf8').replace('\'@host/files\'', JSON.stringify(shim)),
 );
-const init = (await import(pathToFileURL(benchGlue).href)).default;
-const api = await init({ module_or_path: readFileSync(wasmPath) });
+const glueModule = await import(pathToFileURL(benchGlue).href);
+const compiled = new WebAssembly.Module(readFileSync(wasmPath));
+const api = await glueModule.default({ module_or_path: compiled });
+
+// Each serves one core of the session, blocking until the session stops it.
+const CORE_SOURCE = `
+const { parentPort, workerData } = require('node:worker_threads');
+import(workerData.glue).then(({ initSync }) => {
+  const exports = initSync({ module: workerData.module, memory: workerData.memory });
+  parentPort.on('message', (slot) => exports.switch_serve_core(slot));
+});`;
+const cores = Array.from({ length: Number(flag('cores')) || 0 }, () => new Worker(CORE_SOURCE, {
+  eval: true,
+  workerData: { glue: pathToFileURL(benchGlue).href, module: compiled, memory: api.memory },
+}));
 
 // File 0 is the container; the rest are system data archives, as in the worker.
 const hostFiles = [];
@@ -132,6 +148,7 @@ function text(call) {
 }
 
 const handle = api.switch_new();
+for (const core of cores) core.postMessage(api.switch_add_core(handle));
 const lastError = () => text((ptr, cap) => api.switch_last_error(handle, ptr, cap));
 
 function die(what) {
@@ -326,3 +343,7 @@ if (shot) {
     api.switch_free(ptr, len);
   }
 }
+
+// Stopping the session's cores returns the workers from `switch_serve_core`.
+api.switch_free_session(handle);
+for (const core of cores) void core.terminate();

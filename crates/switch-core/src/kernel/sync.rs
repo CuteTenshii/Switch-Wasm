@@ -29,8 +29,10 @@ impl Cpu {
     pub(crate) fn arbitrate_lock(&mut self, owner: u32, addr: u32, _self_handle: u32) {
         self.ensure_main_thread();
         let word = self.mem.read_u32(addr).unwrap_or(0);
-        if word & !MUTEX_HAS_LISTENERS != owner || owner == 0 {
-            return; // stale request; the guest re-reads the word and retries
+        // Without the listeners bit the owner's unlock would never come here,
+        // so the request is stale: the guest re-reads the word and retries.
+        if word != owner | MUTEX_HAS_LISTENERS || owner == 0 {
+            return;
         }
         self.machine.process_mut(self.pid).threads[self.current_thread].state =
             ThreadState::WaitMutex(addr);
@@ -87,6 +89,12 @@ impl Cpu {
             return;
         }
         self.next_expiry = self.cycles.wrapping_add(TIME_SLICE);
+        // On the clock rather than the slice, which every switch restarts.
+        if !self.machine.cores.is_empty() {
+            self.clock
+                .store(self.cycles, std::sync::atomic::Ordering::Relaxed);
+            self.service_cores();
+        }
         self.expire_timed_waits();
     }
 
@@ -122,14 +130,35 @@ impl Cpu {
     /// Dequeue a condvar waiter holding (or queued for) its mutex, as the kernel does on every wake.
     pub(crate) fn wake_condvar_waiter(&mut self, index: usize, mutex: u32) {
         let handle = self.process().threads[index].handle as u32;
-        let owner = self.mem.read_u32(mutex).unwrap_or(0);
-        if owner == 0 {
-            let _ = self.mem.write_u32(mutex, handle);
-            self.process_mut().threads[index].state = ThreadState::Runnable;
-        } else {
-            // Contended: queue up and mark the word so the owner arbitrates its unlock.
-            let _ = self.mem.write_u32(mutex, owner | MUTEX_HAS_LISTENERS);
-            self.process_mut().threads[index].state = ThreadState::WaitMutex(mutex);
+        // Contended: queue up and mark the word so the owner arbitrates its unlock.
+        let owner = self.update_word(mutex, |owner| {
+            Some(match owner {
+                0 => handle,
+                _ => owner | MUTEX_HAS_LISTENERS,
+            })
+        });
+        self.process_mut().threads[index].state = match owner {
+            Some(0) | None => ThreadState::Runnable,
+            Some(_) => ThreadState::WaitMutex(mutex),
+        };
+    }
+
+    /// Replace the word at `addr` with what `f` makes of it, atomically
+    /// against guest code on the other cores; `None` from `f` leaves it.
+    /// Returns the word it acted on, or `None` if `f` declined or the word
+    /// cannot be read.
+    fn update_word(&self, addr: u32, f: impl Fn(u32) -> Option<u32>) -> Option<u32> {
+        loop {
+            let current = self.mem.read_u32(addr).ok()?;
+            let updated = f(current)?;
+            match self
+                .mem
+                .compare_exchange(addr, 4, u64::from(current), u64::from(updated))
+            {
+                Ok(true) => return Some(current),
+                Ok(false) => continue,
+                Err(_) => return None,
+            }
         }
     }
 
@@ -186,21 +215,23 @@ impl Cpu {
         timeout: i64,
     ) -> ArbiterWait {
         self.ensure_main_thread();
-        let Ok(current) = self.mem.read_u32(addr).map(|w| w as i32) else {
-            return ArbiterWait::Mismatch;
-        };
-        let holds = match arb_type {
+        let holds = |current: u32| match arb_type {
             // WaitIfLessThan, and its atomic-decrement variant.
-            0 | 1 => current < value,
+            0 | 1 => (current as i32) < value,
             // WaitIfEqual.
-            2 => current == value,
-            _ => return ArbiterWait::Mismatch,
+            2 => current as i32 == value,
+            _ => false,
         };
-        if !holds {
+        let held = if arb_type == 1 {
+            self.update_word(addr, |current| {
+                holds(current).then(|| current.wrapping_sub(1))
+            })
+            .is_some()
+        } else {
+            self.mem.read_u32(addr).is_ok_and(holds)
+        };
+        if !held {
             return ArbiterWait::Mismatch;
-        }
-        if arb_type == 1 {
-            let _ = self.mem.write_u32(addr, current.wrapping_sub(1) as u32);
         }
         // A zero timeout is a poll.
         if timeout == 0 {
@@ -234,12 +265,6 @@ impl Cpu {
             .filter(|t| matches!(t.state, ThreadState::WaitAddress { addr: a, .. } if a == addr))
             .count() as i32;
         if signal_type != 0 {
-            let Ok(current) = self.mem.read_u32(addr).map(|w| w as i32) else {
-                return false;
-            };
-            if current != value {
-                return false;
-            }
             let updated = match signal_type {
                 // SignalAndIncrementIfEqual.
                 1 => value.wrapping_add(1),
@@ -252,7 +277,12 @@ impl Cpu {
                     None => value.wrapping_add(1),
                 },
             };
-            let _ = self.mem.write_u32(addr, updated as u32);
+            let swapped = self.update_word(addr, |current| {
+                (current as i32 == value).then_some(updated as u32)
+            });
+            if swapped.is_none() {
+                return false;
+            }
         }
         let mut woken = 0;
         for i in 0..self.process().threads.len() {
@@ -283,5 +313,38 @@ impl Cpu {
                 _ => None,
             })
             .min()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lock word without the listeners bit means the owner let go (and
+    /// perhaps took it again) after the waiter marked it: blocking then would
+    /// wait for an unlock that never comes to the kernel.
+    #[test]
+    fn arbitrating_a_word_without_the_listeners_bit_does_not_block() {
+        const MUTEX: u32 = 0x6100;
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+        cpu.ensure_main_thread();
+        // Somewhere to switch to once the main thread blocks.
+        let other = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY, 0);
+        assert!(cpu.start_thread(other));
+        let owner = 0x1234;
+        cpu.mem.write_u32(MUTEX, owner).unwrap();
+        cpu.arbitrate_lock(owner, MUTEX, 1);
+        assert_eq!(cpu.process().threads[0].state, ThreadState::Runnable);
+
+        cpu.mem
+            .write_u32(MUTEX, owner | MUTEX_HAS_LISTENERS)
+            .unwrap();
+        cpu.arbitrate_lock(owner, MUTEX, 1);
+        assert_eq!(
+            cpu.process().threads[0].state,
+            ThreadState::WaitMutex(MUTEX)
+        );
     }
 }

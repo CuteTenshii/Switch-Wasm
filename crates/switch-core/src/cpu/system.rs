@@ -141,7 +141,12 @@ impl Cpu {
 
     /// The 19.2 MHz generic-timer count, read by `CNTPCT_EL0` and `svcGetSystemTick`.
     pub(crate) fn system_tick(&self) -> u64 {
-        (u128::from(self.cycles) * u128::from(TICK_HZ) / u128::from(CLOCK_RATES_HZ[0])) as u64
+        let cycles = if self.core == 0 {
+            self.cycles
+        } else {
+            self.clock.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        (u128::from(cycles) * u128::from(TICK_HZ) / u128::from(CLOCK_RATES_HZ[0])) as u64
     }
 
     /// Execute a classified system instruction. `Unhandled` is the caller's to report.

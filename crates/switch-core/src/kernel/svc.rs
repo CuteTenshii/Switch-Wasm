@@ -4,15 +4,25 @@ use crate::cpu::{
     ArbiterWait, Cpu, GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_SPACE_END,
     GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
+use crate::kernel::cores::Handback;
 use crate::{Error, Result};
 use std::fmt::Write;
 
 impl Cpu {
     /// Every SVC a guest issues. `svc #0` (unused by Horizon) is the host halt trap.
     pub(crate) fn syscall(&mut self, imm: u16) -> Result<()> {
+        if self.core != 0 {
+            // Only core 0 runs the kernel: it reissues the `svc`.
+            self.pc = self.pc.wrapping_sub(4);
+            self.handback = Some(Handback::Svc);
+            return Ok(());
+        }
         if imm == 0 {
             self.halted = true;
             return Ok(());
+        }
+        if !self.machine.cores.is_empty() {
+            self.lend_again(imm);
         }
         self.horizon_syscall(imm)?;
         if let Some(ending) = self.process_ending.take() {

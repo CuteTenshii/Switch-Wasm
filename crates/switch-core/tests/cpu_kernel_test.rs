@@ -921,7 +921,7 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
     // child: arbitrate the mutex main owns, then record the word.
     let child = [
         0xd28c_2009u32, // mov x9, #0x6100
-        0xb940_0120,    // ldr w0, [x9]     (current owner)
+        0xb940_0120,    // ldr w0, [x9]     (current owner, with the listeners bit)
         0xaa09_03e1,    // mov x1, x9       (the mutex address)
         0xd280_0022,    // mov x2, #1       (our handle, unused by the stub)
         0xd400_0341,    // svc #0x1a        (ArbitrateLock → blocks)
@@ -935,8 +935,9 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
     cpu.mem.map(0x1000, &bytes(&main)).unwrap();
     cpu.mem.map_zero(0x2000, 0x100).unwrap();
     cpu.mem.map(0x2000, &bytes(&child)).unwrap();
-    // main "owns" the mutex to begin with (handle 1 = the main thread).
-    cpu.mem.write_u32(MUTEX, 1).unwrap();
+    // main "owns" the mutex to begin with (handle 1 = the main thread), contended:
+    // a waiter sets the listeners bit before it arbitrates.
+    cpu.mem.write_u32(MUTEX, 1 | 0x4000_0000).unwrap();
     cpu.set_pc(0x1000);
     cpu.run(10_000).unwrap();
 

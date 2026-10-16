@@ -133,12 +133,11 @@ impl Cpu {
             self.jit.watches = watches;
         }
         while steps < max_steps && !self.halted {
-            // Preemption point, between blocks.
-            if self.slice_used >= TIME_SLICE {
-                self.slice_used = 0;
-                self.yield_thread();
+            // Between blocks.
+            self.preemption_point();
+            if self.handback.is_some() {
+                break;
             }
-            self.sweep_timed_waits();
             if self.pid != held_pid {
                 held = None;
                 held_pid = self.pid;
@@ -180,6 +179,7 @@ impl Cpu {
                 let next = if ran == 0
                     || steps >= max_steps
                     || self.halted
+                    || self.handback.is_some()
                     || self.slice_used >= TIME_SLICE
                     || self.mem.has_dirty_code(self.core)
                     || self.pid != held_pid

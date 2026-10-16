@@ -16,13 +16,8 @@ impl Cpu {
         if self.halted {
             return Err(Error::Cpu("attempted to step a halted CPU".into()));
         }
-        // Preemption point; `yield_thread` is a no-op when nothing else can run.
         self.slice_used += 1;
-        if self.slice_used >= TIME_SLICE {
-            self.slice_used = 0;
-            self.yield_thread();
-        }
-        self.sweep_timed_waits();
+        self.preemption_point();
         let pc = self.pc;
         let insn = match self.mem.fetch(pc) {
             Ok(i) => i,
@@ -127,13 +122,13 @@ impl Cpu {
         }
     }
 
-    fn run_engine(&mut self, max_steps: u64) -> Result<RunReport> {
+    pub(crate) fn run_engine(&mut self, max_steps: u64) -> Result<RunReport> {
         self.complete_pending_present();
         if self.jit_enabled && !self.trace_enabled && self.mode == ExecMode::A64 {
             return self.run_jit(max_steps);
         }
         let mut steps = 0u64;
-        while steps < max_steps && !self.halted {
+        while steps < max_steps && !self.halted && self.handback.is_none() {
             self.step_inner()?;
             steps += 1;
         }

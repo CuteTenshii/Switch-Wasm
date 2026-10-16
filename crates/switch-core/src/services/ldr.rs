@@ -148,6 +148,7 @@ impl Cpu {
                 .wrapping_add(header.text_size),
         );
         // `.text` is read-execute; `UnloadModule` must undo this.
+        self.quiesce_cores();
         self.mem.mark_readonly(text.0, text.1);
         // Run-time modules carry the `Alias*` memory states; see `Memory::mark_module`.
         self.mem.mark_module(
@@ -209,6 +210,7 @@ impl Cpu {
         let Some(module) = base.and_then(|base| self.process_mut().ro_modules.remove(&base)) else {
             return self.write_ipc_response(tls, NOT_LOADED, &[], &[], &[]);
         };
+        self.quiesce_cores();
         self.mem.unmark_readonly(module.text.0, module.text.1);
         self.mem
             .unmark_module(module.base, module.base.wrapping_add(module.size));

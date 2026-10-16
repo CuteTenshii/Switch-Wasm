@@ -93,13 +93,27 @@ impl Cpu {
         if self.switch_to_next_runnable() {
             return;
         }
+        // Take back what came home, which may be ready here, and lend what core 0 may not run.
+        if !self.machine.cores.is_empty() {
+            self.service_cores();
+            if self.settled() {
+                return;
+            }
+        }
         // Idle the clock to the earliest deadline of any kind, as the console idles.
         if let Some(deadline) = self.earliest_deadline() {
             if deadline > self.cycles {
                 self.cycles = deadline;
             }
             self.expire_timed_waits();
-            if self.switch_to_next_runnable() {
+            if self.settled() {
+                return;
+            }
+        }
+        // A thread out on another core may yet wake one here.
+        while self.cores_busy() {
+            self.wait_for_cores();
+            if self.settled() {
                 return;
             }
         }
@@ -122,6 +136,16 @@ impl Cpu {
                 _ => {}
             }
         }
+    }
+
+    /// Switched to another thread, or the running one may go on after all.
+    fn settled(&mut self) -> bool {
+        self.switch_to_next_runnable()
+            || self
+                .process()
+                .threads
+                .get(self.current_thread)
+                .is_some_and(|t| t.ready())
     }
 
     /// Account one retired instruction: a cycle and a step. Both engines call this.
@@ -172,7 +196,19 @@ impl Cpu {
     }
 
     fn save_context(&mut self, index: usize) {
-        let thread = &mut self.machine.process_mut(self.pid).threads[index];
+        let mut thread = self.process().threads[index].clone();
+        self.registers_into(&mut thread);
+        self.machine.process_mut(self.pid).threads[index] = thread;
+    }
+
+    fn load_context(&mut self, index: usize) {
+        let thread = self.process().threads[index].clone();
+        self.load_registers(&thread);
+        self.current_thread = index;
+    }
+
+    /// The running thread's registers, PC and modes into `thread`.
+    pub(crate) fn registers_into(&self, thread: &mut ThreadContext) {
         thread.regs = self.regs;
         thread.pc = self.pc;
         thread.nzcv = self.nzcv;
@@ -187,11 +223,11 @@ impl Cpu {
         thread.tpidr_rw = self.tpidr_rw;
     }
 
-    fn load_context(&mut self, index: usize) {
+    /// Start running `thread`'s registers on a fresh slice.
+    pub(crate) fn load_registers(&mut self, thread: &ThreadContext) {
         self.slice_used = 0;
         // A switch clears the local monitor.
         self.exclusive = None;
-        let thread = self.process().threads[index].clone();
         self.regs = thread.regs;
         self.pc = thread.pc;
         self.nzcv = thread.nzcv;
@@ -204,7 +240,6 @@ impl Cpu {
         self.fpsr = thread.fpsr;
         self.tpidr = thread.tpidr;
         self.tpidr_rw = thread.tpidr_rw;
-        self.current_thread = index;
     }
 
     pub fn current_thread_handle(&self) -> u64 {

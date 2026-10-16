@@ -10,7 +10,7 @@ import { workerLog } from './log';
 import init, { switch_attach_screen } from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { core, setCore, state, type WasmExports } from './wasm';
-import type { CoreStart, CoreStarted } from './core';
+import { startCores } from './coreworkers';
 
 // `self` is typed as the shared WorkerGlobalScope, which lacks postMessage.
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -76,26 +76,6 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
     reply({ id, ok: false, error: String(err) });
   }
 };
-
-// Guest cores beyond the one this worker runs: the console gives a title three.
-const CORE_WORKERS = 2;
-
-// Start the core workers on this worker's module and shared memory.
-function startCores(module: WebAssembly.Module, memory: WebAssembly.Memory): void {
-  let started = 0;
-  for (let i = 0; i < CORE_WORKERS; i++) {
-    const worker = new Worker(new URL('./core.ts', import.meta.url), { type: 'module' });
-    worker.onmessage = (e: MessageEvent<CoreStarted>) => {
-      if (!e.data.started) {
-        workerLog(`[core] core worker ${i + 1} did not start: ${e.data.error}`, 'error');
-      } else if (++started === CORE_WORKERS) {
-        workerLog(`[core] ${CORE_WORKERS} core workers started on shared memory`);
-      }
-    };
-    worker.onerror = (e) => workerLog(`[core] core worker ${i + 1} failed: ${e.message}`, 'error');
-    worker.postMessage({ module, memory } satisfies CoreStart);
-  }
-}
 
 void (async () => {
   try {

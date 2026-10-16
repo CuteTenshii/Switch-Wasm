@@ -62,13 +62,18 @@ impl Cpu {
         for (index, thread) in self.process().threads.iter().enumerate() {
             let running = index == self.current_thread;
             out.push_str(&format!(
-                "  [{index}]{} handle={:#x} priority={} state={:?} paused={} pc={:#x}\n",
+                "  [{index}]{} handle={:#x} priority={} state={:?} paused={} pc={:#x} core={} ideal={} affinity={:#x}{}{}\n",
                 if running { "*" } else { " " },
                 thread.handle,
                 thread.priority,
                 thread.state,
                 thread.paused,
                 if running { self.pc } else { thread.pc },
+                thread.core,
+                thread.ideal_core,
+                thread.affinity,
+                if thread.lent { " lent" } else { "" },
+                if thread.kernel_pending { " kernel-pending" } else { "" },
             ));
         }
         out

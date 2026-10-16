@@ -8,6 +8,9 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 - The bench mirrors `web/worker/hostfiles.ts`'s per-file LRU (same 1 MiB chunks, depth, and large-read bypass) so the wasm side sees the shipped access pattern, even though node's `readSync` is cheaper than `FileReaderSync`.
 - Frames are timed by sampling the frame counter between slices of a single run, because boot time varies by seconds between runs. One extra frame is timed and dropped because it absorbs the warmup's tail.
 - Running without `web/font.ttf` understates frame cost (no text is drawn).
+- It loads `target/wasm32-unknown-unknown/release` unless `--build=<dir>` names another wasm-bindgen output: comparing two builds means copying each out and naming it, or both runs measure the same one.
+- `--cores=N` serves N more guest cores on `worker_threads` over the shared memory, as `web/worker/coreworkers.ts` does in the page.
+- Native examples take `CORES=<n>` for the same, and `NO_DRAW=1` to swap in a renderer that draws nothing, so a run times the CPU as it is with a GPU doing the drawing.
 
 ## `Cargo.toml`
 

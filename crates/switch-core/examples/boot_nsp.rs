@@ -2,7 +2,9 @@
 //!
 //! Usage: cargo run -p switch-core --example boot_nsp -- <container> <prod.keys> [title.keys] [max_steps]
 //!
-//! `PROFILE=<interval>` samples the pc by thread, page and caller.
+//! `PROFILE=<interval>` samples the pc by thread, page and caller. `CORES=<n>` runs
+//! n more guest cores on host threads; `STOP_FRAME=<n>` stops at frame n; `NO_DRAW=1`
+//! draws nothing.
 //! `SHOT=<out.ppm>` writes the last presented frame.
 //! `PRESS=<buttons>@<interval>` taps buttons periodically, e.g. `PRESS=A+DOWN@300000000`.
 //! `DUMP=`, `TRAP_WRITE=`, `TRAP_READ=` and `WATCH_PC=` are described in [`common::Debug`].
@@ -161,8 +163,25 @@ fn main() {
     } else {
         Pace::Blocks
     };
+    common::apply_no_draw(&mut cpu);
+    let cores = common::start_cores(&mut cpu);
+    let stop_frame = common::env_u64("STOP_FRAME", u64::MAX);
+    let started = std::time::Instant::now();
+    let mut frames_seen = 0;
     let run = common::drive(&mut cpu, pace, max_steps, |cpu, done| {
         debug.tick(cpu, done);
+        if cpu.nv.gpu.frames != frames_seen {
+            frames_seen = cpu.nv.gpu.frames;
+            println!(
+                "frame {frames_seen} at {:.2}s, {} steps, {} on core 0",
+                started.elapsed().as_secs_f64(),
+                cpu.steps,
+                cpu.steps - cpu.other_core_steps()
+            );
+            if frames_seen >= stop_frame {
+                return Flow::Stop;
+            }
+        }
         if let Some((buttons, interval)) = press {
             // The first tap waits a whole interval so it does not land during boot.
             let down = done >= interval && done % interval < PRESS_HOLD;
@@ -180,7 +199,10 @@ fn main() {
         Flow::Continue
     });
 
+    let wall = started.elapsed();
+    common::stop_cores(&mut cpu, cores);
     common::report(&cpu, &run);
+    println!("ran for {:.1}s", wall.as_secs_f64());
     debug.report();
     debug.stop_state(&cpu);
     print!("{}", cpu.thread_dump());

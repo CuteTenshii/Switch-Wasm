@@ -73,6 +73,33 @@ pub struct ThreadContext {
     pub(crate) switches: u64,
     /// Clock when it last did real work; see [`ThreadReport::idle_ms`].
     pub(crate) busy_at: u64,
+    /// Running on another core, which holds its live registers.
+    pub(crate) lent: bool,
+    /// Handed back on an instruction only core 0 may run, so not lent again first.
+    pub(crate) kernel_pending: bool,
+}
+
+impl ThreadContext {
+    /// Whether core 0 can switch to it.
+    pub(crate) fn ready(&self) -> bool {
+        self.state == ThreadState::Runnable && !self.paused && !self.lent
+    }
+
+    /// The registers, PC and modes another core left it with.
+    pub(crate) fn take_registers(&mut self, from: &ThreadContext) {
+        self.regs = from.regs;
+        self.pc = from.pc;
+        self.nzcv = from.nzcv;
+        self.mode = from.mode;
+        self.cpsr_q = from.cpsr_q;
+        self.cpsr_ge = from.cpsr_ge;
+        self.fpscr_nzcv = from.fpscr_nzcv;
+        self.vregs = from.vregs;
+        self.fpcr = from.fpcr;
+        self.fpsr = from.fpsr;
+        self.tpidr = from.tpidr;
+        self.tpidr_rw = from.tpidr_rw;
+    }
 }
 
 impl Cpu {
@@ -113,6 +140,8 @@ impl Cpu {
                     ran: 0,
                     switches: 0,
                     busy_at: self.cycles,
+                    lent: false,
+                    kernel_pending: false,
                 });
             self.current_thread = 0;
         }
@@ -185,6 +214,8 @@ impl Cpu {
                 ran: 0,
                 switches: 0,
                 busy_at: self.cycles,
+                lent: false,
+                kernel_pending: false,
             });
         let line = format!(
             "{} created by {}: arg {arg:#x}, stack top {stack_top:#x}, priority {priority}, \
@@ -281,9 +312,7 @@ impl Cpu {
     pub(crate) fn has_other_runnable(&self) -> bool {
         self.processes.iter().any(|(&pid, process)| {
             process.threads.iter().enumerate().any(|(i, t)| {
-                (pid, i) != (self.pid, self.current_thread)
-                    && t.state == ThreadState::Runnable
-                    && !t.paused
+                (pid, i) != (self.pid, self.current_thread) && t.ready() && self.runs_here(t)
             })
         })
     }
@@ -305,7 +334,9 @@ impl Cpu {
             ThreadState::Finished;
         // Joiners are parked on this thread's handle, now signalled.
         self.wake_event_waiters();
-        if !self.switch_to_next_runnable() {
+        // As any blocking call: what is out on the other cores may wake a thread here.
+        self.reschedule();
+        if self.process().threads[self.current_thread].state == ThreadState::Finished {
             // Nothing else can run: fall back to the main thread.
             self.process_mut().threads[0].state = ThreadState::Runnable;
             self.switch_to_next_runnable();
@@ -357,8 +388,12 @@ impl Cpu {
         for step in steps {
             let candidate = order[(start + step) % count];
             let t = thread(candidate);
-            if t.state != ThreadState::Runnable || t.paused {
+            if !t.ready() || !self.runs_here(t) {
                 continue;
+            }
+            // Its own core would take the `svc` at once.
+            if t.kernel_pending {
+                return Some(candidate);
             }
             if t.passed_over >= STARVE_DECISIONS {
                 return Some(candidate);
@@ -376,7 +411,7 @@ impl Cpu {
             for (index, thread) in process.threads.iter_mut().enumerate() {
                 if (pid, index) == chosen {
                     thread.passed_over = 0;
-                } else if thread.state == ThreadState::Runnable && !thread.paused {
+                } else if thread.ready() {
                     thread.passed_over = thread.passed_over.saturating_add(1);
                 }
             }

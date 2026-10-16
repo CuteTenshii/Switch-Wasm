@@ -257,6 +257,66 @@ pub fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+/// A renderer that draws nothing, for `NO_DRAW=1`: frames still present, so
+/// the run times the CPU alone, as with a GPU doing the drawing.
+#[derive(Debug)]
+struct NoDraw;
+
+impl switch_core::gpu::renderer::Renderer for NoDraw {
+    fn draw(
+        &mut self,
+        _: &switch_core::gpu::engine::threed::Engine3D,
+        _: &mut switch_core::gpu::exec::ExecCtx,
+    ) -> switch_core::Result<()> {
+        Ok(())
+    }
+
+    fn clear_color(
+        &mut self,
+        _: &switch_core::gpu::engine::threed::Engine3D,
+        _: &mut switch_core::gpu::exec::ExecCtx,
+        _: u32,
+        _: u32,
+        _: [bool; 4],
+    ) -> switch_core::Result<()> {
+        Ok(())
+    }
+
+    fn clear_depth_stencil(
+        &mut self,
+        _: &switch_core::gpu::engine::threed::Engine3D,
+        _: &mut switch_core::gpu::exec::ExecCtx,
+        _: bool,
+        _: bool,
+    ) -> switch_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// Swap in [`NoDraw`] when `NO_DRAW=1`.
+pub fn apply_no_draw(cpu: &mut Cpu) {
+    if env_u64("NO_DRAW", 0) != 0 {
+        cpu.nv.gpu.set_renderer(Box::new(NoDraw));
+    }
+}
+
+/// `CORES=<n>` more guest cores, each served on a host thread, for [`stop_cores`].
+pub fn start_cores(cpu: &mut Cpu) -> Vec<std::thread::JoinHandle<()>> {
+    (0..env_u64("CORES", 0))
+        .map(|_| {
+            let slot = cpu.add_core();
+            std::thread::spawn(move || switch_core::cpu::serve(slot))
+        })
+        .collect()
+}
+
+pub fn stop_cores(cpu: &mut Cpu, cores: Vec<std::thread::JoinHandle<()>>) {
+    cpu.stop_cores();
+    for core in cores {
+        core.join().expect("a core thread panicked");
+    }
+}
+
 /// A hexadecimal `u32` from the environment (`0x` optional).
 pub fn env_hex(name: &str) -> Option<u32> {
     let raw = env::var(name).ok()?;
@@ -442,7 +502,10 @@ pub fn drive(
             }
             Pace::Blocks => match cpu.run(SLICE.min(budget - run.steps)) {
                 // No progress and not halted: nothing more will happen.
-                Ok(report) if report.steps == 0 => break,
+                Ok(report) if report.steps == 0 => {
+                    println!("[drive] a slice ran nothing at step {}", run.steps);
+                    break;
+                }
                 Ok(report) => run.steps += report.steps,
                 Err(e) => {
                     run.fault = Some(format!("{e:?}"));
@@ -511,6 +574,13 @@ pub fn report(cpu: &Cpu, run: &Run) {
         "steps={} frames={} stats={:?}",
         run.steps, cpu.nv.gpu.frames, cpu.nv.gpu.stats
     );
+    if cpu.other_core_steps() > 0 {
+        println!(
+            "other cores retired {} of {} steps",
+            cpu.other_core_steps(),
+            cpu.steps
+        );
+    }
     // Peak RAM use against the cap.
     let used = cpu.mem.mapped_bytes();
     let cap = cpu.mem.max_mapped_bytes();

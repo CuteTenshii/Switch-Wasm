@@ -34,6 +34,7 @@ mod applets;
 mod audio;
 mod boot;
 mod container;
+mod cores;
 mod debug;
 mod display;
 mod input;
@@ -309,6 +310,9 @@ pub extern "C" fn switch_free_session(handle: u32) {
     // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     let slots = unsafe { &mut *SESSIONS.get() };
     if let Some(slot) = slots.get_mut(handle as usize) {
+        if let Some(session) = slot.as_mut() {
+            session.cpu.stop_cores();
+        }
         *slot = None;
     }
 }

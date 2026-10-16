@@ -1,6 +1,7 @@
 //! The Horizon kernel: supervisor calls, IPC, threads, scheduling and synchronization.
 
 pub(crate) mod boot;
+pub(crate) mod cores;
 pub(crate) mod events;
 pub(crate) mod handles;
 pub(crate) mod ipc;

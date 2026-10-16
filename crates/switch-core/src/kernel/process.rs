@@ -395,6 +395,8 @@ impl Cpu {
             ran: 0,
             switches: 0,
             busy_at: cycles,
+            lent: false,
+            kernel_pending: false,
         });
     }
 }
