@@ -324,11 +324,11 @@ impl Fragments {
                     let z = sample_z[sample as usize];
                     // Merge into a packed depth-stencil pixel's stencil byte.
                     let value = if dt.format.packs_stencil() {
-                        dt.format.with_depth(ctx.read_pixel(dva, bytes)?, z)
+                        dt.format.with_depth(ctx.read_pixel(dva, bytes)? as u64, z)
                     } else {
                         dt.format.encode_depth(z)
                     };
-                    ctx.write_pixel(dva, bytes, value)?;
+                    ctx.write_pixel(dva, bytes, u128::from(value))?;
                 }
             }
 

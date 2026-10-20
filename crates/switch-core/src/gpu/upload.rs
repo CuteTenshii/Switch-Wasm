@@ -281,6 +281,15 @@ pub struct Target {
     pub depth: Option<DepthLayout>,
 }
 
+/// The low 8 bytes of a depth pixel, where depth and stencil sit, as a little-endian value.
+#[inline(always)]
+fn le_depth_pixel(bytes: &[u8]) -> u64 {
+    let mut padded = [0u8; 8];
+    let take = bytes.len().min(8);
+    padded[..take].copy_from_slice(&bytes[..take]);
+    u64::from_le_bytes(padded)
+}
+
 /// A pixel of up to 16 bytes as a little-endian value; per-byte shifts cost a call each on wasm.
 #[inline(always)]
 fn le_pixel(bytes: &[u8]) -> u128 {
@@ -404,10 +413,7 @@ impl Target {
                 continue;
             }
             for texel in row.chunks_exact(unit) {
-                let mut low = [0u8; 8];
-                let take = unit.min(8);
-                low[..take].copy_from_slice(&texel[..take]);
-                let depth = layout.decode_depth(u64::from_le_bytes(low));
+                let depth = layout.decode_depth(le_depth_pixel(texel));
                 out.extend_from_slice(&kind.encode(depth)[..kind.unit() as usize]);
             }
         }
@@ -430,12 +436,13 @@ impl Target {
         if let Some((cpu, mut raw)) = self.mapped(ctx)? {
             let texel = self.unit as usize;
             for y in 0..self.rows {
+                let row = self.layout.row_offset(y, self.row_bytes);
                 for x in 0..per_row {
-                    let at = self.layout.offset(x * self.unit, y, self.row_bytes) as usize;
+                    let at = (row + self.layout.column_offset(x * self.unit)) as usize;
                     let from = (y * per_row + x) as usize * unit;
                     let depth = kind.decode(&values[from..from + unit]);
                     let value = if layout.packs_stencil() {
-                        layout.with_depth(le_pixel(&raw[at..at + texel]), depth)
+                        layout.with_depth(le_depth_pixel(&raw[at..at + texel]), depth)
                     } else {
                         layout.encode_depth(depth)
                     };
@@ -451,11 +458,11 @@ impl Target {
                 let from = (y * per_row + x) as usize * unit;
                 let depth = kind.decode(&values[from..from + unit]);
                 let value = if layout.packs_stencil() {
-                    layout.with_depth(ctx.read_pixel(at, self.unit)?, depth)
+                    layout.with_depth(ctx.read_pixel(at, self.unit)? as u64, depth)
                 } else {
                     layout.encode_depth(depth)
                 };
-                ctx.write_pixel(at, self.unit, value)?;
+                ctx.write_pixel(at, self.unit, u128::from(value))?;
             }
         }
         Ok(())

@@ -358,12 +358,12 @@ fn writing_depth_leaves_a_packed_stencil_byte_alone() {
     let z24s8 = depth_format_layout(0x14).unwrap();
     assert!(z24s8.packs_stencil());
     assert_eq!(z24s8.with_depth(0x0000_00AB, 1.0), 0xFFFF_FFAB);
-    assert!((z24s8.decode_depth(z24s8.with_depth(0x0000_00AB, 0.5) as u64) - 0.5).abs() < 1e-6);
+    assert!((z24s8.decode_depth(z24s8.with_depth(0x0000_00AB, 0.5)) - 0.5).abs() < 1e-6);
 
     // Z32Float owns its whole pixel, so a depth write need not read first.
     let zf32 = depth_format_layout(0x0A).unwrap();
     assert!(!zf32.packs_stencil());
-    assert_eq!(zf32.decode_depth(zf32.encode_depth(0.25) as u64), 0.25);
+    assert_eq!(zf32.decode_depth(zf32.encode_depth(0.25)), 0.25);
 }
 
 /// The run-based depth clear must match a per-texel one and keep `Z24S8`'s stencil byte.
@@ -410,7 +410,7 @@ fn a_depth_clear_writes_runs_where_a_per_texel_clear_would() {
                 let old = seeded(tx, ty);
                 let inside = (rx..rx + rw).contains(&tx) && (ry..ry + rh).contains(&ty);
                 let want = if inside {
-                    format.with_depth(u128::from(old), 0.5) as u32
+                    format.with_depth(u64::from(old), 0.5) as u32
                 } else {
                     old
                 };

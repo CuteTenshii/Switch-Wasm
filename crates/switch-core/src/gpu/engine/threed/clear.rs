@@ -311,8 +311,8 @@ impl Engine3D {
         let mut value = 0u128;
         if clear_depth {
             let mask = format.depth_mask();
-            written |= mask;
-            value |= format.encode_depth(depth) & mask;
+            written |= u128::from(mask);
+            value |= u128::from(format.encode_depth(depth) & mask);
         }
         if clear_stencil {
             if let Some(shift) = format.stencil_shift {
