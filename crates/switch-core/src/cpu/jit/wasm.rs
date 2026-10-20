@@ -233,6 +233,20 @@ impl Func {
         self.mem(0x36, align, offset);
     }
 
+    /// Compare-and-swap on the `1 << size_log2` bytes at the address under the expected and
+    /// replacement values, answering what was there; sizes under 64 bits work on `i32`s and
+    /// widen unsigned. The address must be naturally aligned or the engine traps.
+    pub(super) fn atomic_cmpxchg(&mut self, size_log2: u8) {
+        let op = match size_log2 {
+            0 => 0x4A,
+            1 => 0x4B,
+            2 => 0x48,
+            _ => 0x49,
+        };
+        self.code
+            .extend_from_slice(&[0xFE, op, size_log2.min(3), 0]);
+    }
+
     pub(super) fn i64_store(&mut self, align: u8, offset: u32) {
         self.mem(0x37, align, offset);
     }
@@ -283,6 +297,14 @@ impl Func {
 
     pub(super) fn i32_lt_s(&mut self) {
         self.op(0x48);
+    }
+
+    pub(super) fn i64_clz(&mut self) {
+        self.op(0x79);
+    }
+
+    pub(super) fn i32_ne(&mut self) {
+        self.op(0x47);
     }
 
     pub(super) fn i32_eqz(&mut self) {

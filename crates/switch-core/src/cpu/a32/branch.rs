@@ -31,7 +31,7 @@ impl Cpu {
             return Ok(());
         }
         if clrex {
-            self.exclusive = None;
+            self.exclusive.clear();
             self.pc = self.pc.wrapping_add(4);
             return Ok(());
         }

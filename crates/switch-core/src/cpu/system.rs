@@ -175,7 +175,7 @@ impl Cpu {
                 SysReg::TpidrRo | SysReg::SystemTick | SysReg::Fixed(_) => {}
             },
             SysOp::MsrNzcvImm { imm } => self.nzcv = u32::from(imm),
-            SysOp::ClearExclusive => self.exclusive = None,
+            SysOp::ClearExclusive => self.exclusive.clear(),
             SysOp::Barrier => std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst),
             SysOp::DcZva { rt } => {
                 // Eight doubleword stores rather than sixty-four byte ones.

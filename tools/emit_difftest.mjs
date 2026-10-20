@@ -24,7 +24,7 @@ const HEADER_KEYS = new Set([
   'watch_hi_at', 'watched_at', 'pages_at', 'table_at', 'bitmap_at', 'slots',
   'code_at', 'read_watch', 'watch', 'watched_page', 'wasm_pages', 'pc_at',
   'discard_slot', 'vregs_at',
-  'fpsr_at',
+  'fpsr_at', 'exclusive_at', 'tpidr_at', 'tpidr_rw_at', 'tpidr_values',
 ]);
 const header = {};
 // `(guest address, wasm offset)` per mapped page, in `guest.bin` order.
@@ -66,6 +66,8 @@ const vregSeed = (i) => {
   const hi = (0xC2B2AE3D27D4EB4Fn * BigInt(2 * i + 2)) & M64;
   return (hi << 64n) | lo;
 };
+// The exclusive monitor and the thread registers, in manifests that seed them.
+const EXCL_AT = header.exclusive_at ? header.exclusive_at[0] : -1;
 // Only manifests with conditional-branch cases name it.
 const PC_AT = header.pc_at ? header.pc_at[0] : -1;
 // Set in `run`'s result when the block left at a taken branch.
@@ -81,6 +83,11 @@ const view = new DataView(memory.buffer);
 const bytes = new Uint8Array(memory.buffer);
 
 view.setUint32(PAGES_AT, TABLE_AT, true);
+if (header.tpidr_values) {
+  const [tpidr, tpidrRw] = header.tpidr_values;
+  view.setBigUint64(header.tpidr_at[0], BigInt(tpidr), true);
+  view.setBigUint64(header.tpidr_rw_at[0], BigInt(tpidrRw), true);
+}
 // `(1, 0)` disarms a watchpoint.
 const [readLo, readHi] = header.read_watch ?? [1, 0];
 view.setUint32(RW_LO_AT, readLo, true);
@@ -157,11 +164,14 @@ for (const line of manifest.slice(first)) {
   // `fpsr:before:after`, when the harness tracks it.
   const fpsrToken = f.slice(bang + 1).find((t) => t.startsWith('fpsr:'));
   const [fpsrBefore, fpsrAfter] = fpsrToken ? fpsrToken.slice(5).split(':').map((h) => parseInt(h, 16)) : [];
+  // `excl:addr:armed:value:addr:armed:value`, the monitor before and after.
+  const exclToken = f.slice(bang + 1).find((t) => t.startsWith('excl:'));
+  const excl = exclToken ? exclToken.slice(5).split(':').map((h) => BigInt('0x' + h)) : null;
   const vdelta = new Map(f.slice(bang + 1).filter((t) => t.startsWith('v')).map((t) => {
     const [reg, hex] = t.slice(1).split(':');
     return [Number(reg), BigInt('0x' + hex)];
   }));
-  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:')).map((run) => {
+  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('excl:')).map((run) => {
     const [at, hex] = run.split(':');
     return [Number(at), Uint8Array.from(hex.match(/../g), (b) => parseInt(b, 16))];
   });
@@ -178,6 +188,12 @@ for (const line of manifest.slice(first)) {
   }
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
   if (fpsrToken) view.setUint32(need('fpsr_at'), fpsrBefore, true);
+  if (excl && EXCL_AT >= 0) {
+    view.setUint32(EXCL_AT, Number(excl[0]), true);
+    view.setUint32(EXCL_AT + 4, Number(excl[1]), true);
+    view.setBigUint64(EXCL_AT + 8, excl[2], true);
+    view.setBigUint64(EXCL_AT + 16, 0n, true);
+  }
   if (PC_AT >= 0) view.setUint32(PC_AT, NO_PC, true);
 
   let exports;
@@ -246,6 +262,17 @@ for (const line of manifest.slice(first)) {
       const gotFpsr = view.getUint32(need('fpsr_at'), true) >>> 0;
       const wantFpsr = (want === after ? fpsrAfter : fpsrBefore) >>> 0;
       if (gotFpsr !== wantFpsr) bad.push(`fpsr: emitted ${gotFpsr.toString(16)}, interpreted ${wantFpsr.toString(16)}`);
+    }
+    if (excl && EXCL_AT >= 0) {
+      const wantExcl = want === after ? excl.slice(3) : excl.slice(0, 3);
+      const gotExcl = [
+        BigInt(view.getUint32(EXCL_AT, true)),
+        BigInt(view.getUint32(EXCL_AT + 4, true)),
+        view.getBigUint64(EXCL_AT + 8, true),
+      ];
+      if (gotExcl.some((v, i) => v !== wantExcl[i])) {
+        bad.push(`monitor: emitted ${gotExcl.map((v) => v.toString(16)).join(':')}, interpreted ${wantExcl.map((v) => v.toString(16)).join(':')}`);
+      }
     }
     const gotNzcv = view.getUint32(NZCV, true) >>> 0;
     if (gotNzcv !== (Number(BigInt(wantNzcv)) >>> 0)) {

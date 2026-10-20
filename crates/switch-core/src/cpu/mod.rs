@@ -108,7 +108,7 @@ pub struct Cpu {
     pub(crate) tpidr_rw: u64,
     pub(crate) current_thread: usize,
     /// The outstanding exclusive load, or `None`. Cleared on context switch.
-    pub(crate) exclusive: Option<Monitor>,
+    pub(crate) exclusive: Monitor,
     /// Instructions since the running thread was scheduled, against [`TIME_SLICE`].
     pub(crate) slice_used: u64,
     /// Next cycle at which [`Cpu::sweep_timed_waits`] checks deadlines.
@@ -142,11 +142,36 @@ pub struct Cpu {
 }
 
 /// What an exclusive load armed: where, and what it read there (a pair's
-/// second doubleword in `value[1]`), which the store compares against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// second doubleword in `value[1]`), which the store compares against. Emitted code
+/// reads and writes the fields in place, so the layout is fixed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C)]
 pub(crate) struct Monitor {
     pub(crate) addr: u32,
+    /// Nonzero while the monitor is armed.
+    pub(crate) armed: u32,
     pub(crate) value: [u64; 2],
+}
+
+impl Monitor {
+    pub(crate) fn arm(&mut self, addr: u32, value: [u64; 2]) {
+        *self = Monitor {
+            addr,
+            armed: 1,
+            value,
+        };
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.armed = 0;
+    }
+
+    /// Disarm, answering what it read if it was armed at `addr`.
+    pub(crate) fn take_at(&mut self, addr: u32) -> Option<[u64; 2]> {
+        let held = self.armed != 0 && self.addr == addr;
+        self.armed = 0;
+        held.then_some(self.value)
+    }
 }
 
 /// What the console holds beyond a core: kernel objects, services and devices.
@@ -443,7 +468,7 @@ impl Cpu {
             tpidr: 0,
             tpidr_rw: 0,
             current_thread: 0,
-            exclusive: None,
+            exclusive: Monitor::default(),
             slice_used: 0,
             next_expiry: 0,
             jit: jit::Jit::default(),

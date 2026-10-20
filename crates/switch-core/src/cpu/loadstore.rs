@@ -3,7 +3,7 @@
 //! with the JIT.
 
 use super::bits::*;
-use super::{Cpu, Monitor};
+use super::Cpu;
 use crate::{Error, Result};
 use std::sync::atomic::{fence, Ordering::SeqCst};
 
@@ -593,10 +593,7 @@ impl Cpu {
     pub(super) fn load_exclusive(&mut self, rt: u8, rn: u8, sz: u8) -> Result<()> {
         let addr = self.reg_at(rn) as u32;
         let val = self.load_by_size(addr, u32::from(sz), false)?;
-        self.exclusive = Some(Monitor {
-            addr,
-            value: [val, 0],
-        });
+        self.exclusive.arm(addr, [val, 0]);
         self.set_reg_at(rt, val);
         Ok(())
     }
@@ -610,14 +607,13 @@ impl Cpu {
         size: u32,
         new: [u64; 2],
     ) -> Result<bool> {
-        let Some(monitor) = self.exclusive.take().filter(|m| m.addr == addr) else {
+        let Some(value) = self.exclusive.take_at(addr) else {
             return Ok(false);
         };
         if size == 16 {
-            self.mem.compare_exchange_pair(addr, monitor.value, new)
+            self.mem.compare_exchange_pair(addr, value, new)
         } else {
-            self.mem
-                .compare_exchange(addr, size, monitor.value[0], new[0])
+            self.mem.compare_exchange(addr, size, value[0], new[0])
         }
     }
 
@@ -682,10 +678,7 @@ impl Cpu {
                     } else {
                         [v0, v1]
                     };
-                    self.exclusive = Some(Monitor {
-                        addr: base as u32,
-                        value,
-                    });
+                    self.exclusive.arm(base as u32, value);
                     self.write_zr(rt, v0);
                     self.write_zr(rt2, v1);
                 }

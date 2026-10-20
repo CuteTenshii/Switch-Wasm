@@ -227,7 +227,7 @@ impl Cpu {
     pub(crate) fn load_registers(&mut self, thread: &ThreadContext) {
         self.slice_used = 0;
         // A switch clears the local monitor.
-        self.exclusive = None;
+        self.exclusive.clear();
         self.regs = thread.regs;
         self.pc = thread.pc;
         self.nzcv = thread.nzcv;

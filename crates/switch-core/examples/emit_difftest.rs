@@ -35,6 +35,11 @@ const FPSR_AT: u32 = 4140;
 const MEMORY_AT: u32 = 4144;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 8192;
+/// `TPIDRRO_EL0` and `TPIDR_EL0`.
+const TPIDR_AT: u32 = 4192;
+const TPIDR_RW_AT: u32 = 4200;
+/// The exclusive monitor: address, armed flag, then two doublewords.
+const EXCLUSIVE_AT: u32 = 4160;
 
 /// Page table offset: one four-byte entry per 4 KiB page.
 const TABLE_AT: u32 = 0x0010_0000;
@@ -54,6 +59,9 @@ const LAYOUT: Layout = Layout {
     pc: PC_AT,
     fuel: FUEL_AT,
     vregs: VREGS_AT,
+    exclusive: EXCLUSIVE_AT,
+    tpidr: TPIDR_AT,
+    tpidr_rw: TPIDR_RW_AT,
 };
 
 /// Vector registers start each case at these, so a wrong register or half shows.

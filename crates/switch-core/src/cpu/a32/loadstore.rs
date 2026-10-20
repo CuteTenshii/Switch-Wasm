@@ -246,10 +246,7 @@ impl Cpu {
                         u64::from(value)
                     }
                 };
-                self.exclusive = Some(crate::cpu::Monitor {
-                    addr,
-                    value: [value, 0],
-                });
+                self.exclusive.arm(addr, [value, 0]);
             }
             _ => {
                 return Err(Error::Cpu(format!(

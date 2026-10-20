@@ -19,7 +19,7 @@ use super::ir::{Block, Exit, Op, Term};
 use super::wasm::{Func, Module, F32, F64, I32, I64, V128};
 use crate::cpu::bits::mask_of_width;
 use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
-use crate::cpu::system::SysOp;
+use crate::cpu::system::{SysOp, SysReg};
 use crate::cpu::{Cpu, CONDITION_MASKS, REG_SLOTS, SELF_RETURN_TRAMPOLINE};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
@@ -81,6 +81,9 @@ const SCRATCH: Layout = Layout {
     watch_hi: 0,
     watched: 0,
     vregs: 0,
+    exclusive: 0,
+    tpidr: 0,
+    tpidr_rw: 0,
 };
 
 /// Byte offsets of the guest state an emitted block touches, from the pointer
@@ -114,6 +117,11 @@ pub struct Layout {
     /// Where the pointer to the cached-pages bitmap is kept; null until
     /// something watches a page. Write-protected pages are set in it too.
     pub watched: u32,
+    /// The exclusive monitor, `Monitor`'s `addr`, `armed` and `value` at fixed offsets from here.
+    pub exclusive: u32,
+    /// `TPIDRRO_EL0` and `TPIDR_EL0`, the thread's TLS base and its software register.
+    pub tpidr: u32,
+    pub tpidr_rw: u32,
 }
 
 impl Layout {
@@ -136,6 +144,9 @@ impl Layout {
             watch_lo: m.watch_lo,
             watch_hi: m.watch_hi,
             watched: m.watched,
+            exclusive: std::mem::offset_of!(Cpu, exclusive) as u32,
+            tpidr: std::mem::offset_of!(Cpu, tpidr) as u32,
+            tpidr_rw: std::mem::offset_of!(Cpu, tpidr_rw) as u32,
         }
     }
 }
@@ -176,6 +187,16 @@ pub(super) const MEMBER_SHIFT: u32 = 16;
 
 /// The parameter every block function takes.
 const STATE: u32 = 0;
+
+/// Offsets inside `Monitor`, which is `#[repr(C)]`.
+const MONITOR_ADDR: u32 = 0;
+const MONITOR_ARMED: u32 = 4;
+const MONITOR_VALUE: u32 = 8;
+const _: () = {
+    assert!(std::mem::offset_of!(crate::cpu::Monitor, addr) as u32 == MONITOR_ADDR);
+    assert!(std::mem::offset_of!(crate::cpu::Monitor, armed) as u32 == MONITOR_ARMED);
+    assert!(std::mem::offset_of!(crate::cpu::Monitor, value) as u32 == MONITOR_VALUE);
+};
 
 /// Scratch locals.
 const L_A: u32 = 1;
@@ -1406,6 +1427,218 @@ impl Emitter<'_> {
         }
     }
 
+    /// `LDXR`/`LDAXR`: the load, then the monitor armed at the address with what was read.
+    fn load_exclusive(&mut self, rt: u8, rn: u8, sz: u8, retired: usize) {
+        self.address(rn, 0, Wb::None);
+        self.page_for_read(1 << sz, retired);
+        self.in_page();
+        match sz {
+            0 => self.f.i64_load8_u(0),
+            1 => self.f.i64_load16_u(UNALIGNED, 0),
+            2 => self.f.i64_load32_u(UNALIGNED, 0),
+            _ => self.f.i64_load(UNALIGNED, 0),
+        }
+        self.f.local_set(L_T);
+        let at = self.layout.exclusive;
+        self.f.local_get(STATE);
+        self.f.local_get(L_ADDR);
+        self.f.i32_store(ALIGN_4, at + MONITOR_ADDR);
+        self.f.local_get(STATE);
+        self.f.i32_const(1);
+        self.f.i32_store(ALIGN_4, at + MONITOR_ARMED);
+        self.f.local_get(STATE);
+        self.f.local_get(L_T);
+        self.f.i64_store(ALIGN_8, at + MONITOR_VALUE);
+        self.f.local_get(STATE);
+        self.f.i64_const(0);
+        self.f.i64_store(ALIGN_8, at + MONITOR_VALUE + 8);
+        self.f.local_get(L_T);
+        self.store_reg(rt);
+    }
+
+    /// `STXR`/`STLXR`: swap in `rt` only if the monitor is armed at the address and memory
+    /// still holds what it read, and say which in `rs` (0 stored, 1 not). A misaligned
+    /// address is the interpreter's, since a wasm atomic would trap on it.
+    fn store_exclusive(&mut self, rs: u8, rt: u8, rn: u8, sz: u8, retired: usize) {
+        self.address(rn, 0, Wb::None);
+        self.page_for_write(1 << sz, retired);
+        if sz > 0 {
+            self.f.local_get(L_ADDR);
+            self.f.i32_const((1 << sz) - 1);
+            self.f.i32_and();
+            self.deopt_if(retired);
+        }
+        let at = self.layout.exclusive;
+        // Armed at this address; either way the monitor is spent.
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, at + MONITOR_ARMED);
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, at + MONITOR_ADDR);
+        self.f.local_get(L_ADDR);
+        self.f.i32_eq();
+        self.f.i32_and();
+        self.f.local_set(L_C);
+        self.f.local_get(STATE);
+        self.f.i32_const(0);
+        self.f.i32_store(ALIGN_4, at + MONITOR_ARMED);
+        self.f.i64_const(1);
+        self.f.local_set(L_R);
+        self.f.local_get(L_C);
+        self.f.if_void();
+        let wide = sz == 3;
+        self.f.local_get(STATE);
+        self.f.i64_load(ALIGN_8, at + MONITOR_VALUE);
+        self.f.local_set(L_T);
+        self.in_page();
+        self.f.local_get(L_T);
+        if !wide {
+            self.f.i32_wrap_i64();
+        }
+        self.read_reg_raw(rt);
+        if !wide {
+            self.f.i32_wrap_i64();
+        }
+        self.f.atomic_cmpxchg(sz);
+        self.f.local_get(L_T);
+        if wide {
+            self.f.i64_ne();
+        } else {
+            self.f.i32_wrap_i64();
+            self.f.i32_ne();
+        }
+        self.f.i64_extend_i32_u();
+        self.f.local_set(L_R);
+        self.f.end();
+        self.f.local_get(L_R);
+        self.store_reg(rs);
+    }
+
+    /// `SMULH`/`UMULH`: the high half of the 128-bit product, from 32-bit partial products.
+    fn mulh(&mut self, rd: u8, rn: u8, rm: u8, signed: bool) {
+        const LOW: i64 = 0xFFFF_FFFF;
+        self.read_reg_raw(rn);
+        self.f.local_tee(L_A);
+        self.f.i64_const(LOW);
+        self.f.i64_and();
+        self.f.local_set(L_T);
+        self.f.local_get(L_A);
+        self.f.i64_const(32);
+        self.f.i64_shr_u();
+        self.f.local_set(L_S);
+        self.read_reg_raw(rm);
+        self.f.local_tee(L_B);
+        self.f.i64_const(LOW);
+        self.f.i64_and();
+        self.f.local_set(L_R);
+        self.f.local_get(L_B);
+        self.f.i64_const(32);
+        self.f.i64_shr_u();
+        self.f.local_set(L_W);
+        // hi = a1*b1 + (a0*b1 >> 32) + (a1*b0 >> 32) + (mid >> 32)
+        self.product(L_S, L_W);
+        self.product(L_T, L_W);
+        self.f.i64_const(32);
+        self.f.i64_shr_u();
+        self.f.i64_add();
+        self.product(L_S, L_R);
+        self.f.i64_const(32);
+        self.f.i64_shr_u();
+        self.f.i64_add();
+        // mid = (a0*b0 >> 32) + (a0*b1 & low) + (a1*b0 & low)
+        self.product(L_T, L_R);
+        self.f.i64_const(32);
+        self.f.i64_shr_u();
+        self.product(L_T, L_W);
+        self.f.i64_const(LOW);
+        self.f.i64_and();
+        self.f.i64_add();
+        self.product(L_S, L_R);
+        self.f.i64_const(LOW);
+        self.f.i64_and();
+        self.f.i64_add();
+        self.f.i64_const(32);
+        self.f.i64_shr_u();
+        self.f.i64_add();
+        if signed {
+            // Subtract each operand where the other is negative.
+            for (sign, other) in [(L_A, L_B), (L_B, L_A)] {
+                self.f.local_get(sign);
+                self.f.i64_const(63);
+                self.f.i64_shr_s();
+                self.f.local_get(other);
+                self.f.i64_and();
+                self.f.i64_sub();
+            }
+        }
+        self.store_reg(rd);
+    }
+
+    /// Push the product of two locals.
+    fn product(&mut self, a: u32, b: u32) {
+        self.f.local_get(a);
+        self.f.local_get(b);
+        self.f.i64_mul();
+    }
+
+    /// `RBIT`, `REV16`, `REV32`, `REV` and `CLZ`; false for the rest.
+    fn one_source(&mut self, rd: u8, rn: u8, opcode: u8, sf: bool) -> bool {
+        // A 32-bit `REV` of a doubleword is not an encoding.
+        if opcode > 4 || (opcode == 3 && !sf) {
+            return false;
+        }
+        self.read_reg(rn, sf);
+        if opcode == 4 {
+            self.f.i64_clz();
+            if !sf {
+                self.f.i64_const(32);
+                self.f.i64_sub();
+            }
+            self.store_reg(rd);
+            return true;
+        }
+        self.f.local_set(L_T);
+        // Swap `shift`-bit groups with their neighbours; the bit reversal is these down to
+        // single bits, then the byte reversal.
+        let swaps: &[(i64, i64)] = match opcode {
+            0 => &[
+                (0x5555_5555_5555_5555, 1),
+                (0x3333_3333_3333_3333, 2),
+                (0x0F0F_0F0F_0F0F_0F0F, 4),
+                (0x00FF_00FF_00FF_00FF, 8),
+                (0x0000_FFFF_0000_FFFF, 16),
+            ],
+            1 => &[(0x00FF_00FF_00FF_00FF, 8)],
+            _ => &[(0x00FF_00FF_00FF_00FF, 8), (0x0000_FFFF_0000_FFFF, 16)],
+        };
+        for &(mask, shift) in swaps {
+            self.f.local_get(L_T);
+            self.f.i64_const(shift);
+            self.f.i64_shr_u();
+            self.f.i64_const(mask);
+            self.f.i64_and();
+            self.f.local_get(L_T);
+            self.f.i64_const(mask);
+            self.f.i64_and();
+            self.f.i64_const(shift);
+            self.f.i64_shl();
+            self.f.i64_or();
+            self.f.local_set(L_T);
+        }
+        self.f.local_get(L_T);
+        // The last step swaps the halves of the doubleword: a bit reversal and `REV` need it.
+        if opcode == 0 || opcode == 3 {
+            self.f.i64_const(32);
+            self.f.i64_rotr();
+        }
+        // A 32-bit bit reversal ends up in the upper half.
+        if !sf && opcode == 0 {
+            self.f.i64_const(32);
+            self.f.i64_shr_u();
+        }
+        self.store_reg(rd);
+        true
+    }
+
     /// A load of two `n`-byte registers from `L_ADDR`, checked as one access.
     fn load_pair(&mut self, rt: u8, rt2: u8, n: u32, signed: bool, retired: usize) {
         self.page_for_read(2 * n, retired);
@@ -1904,6 +2137,15 @@ impl Emitter<'_> {
                 true
             }
 
+            Op::LoadExclusive { rt, rn, sz } => {
+                self.load_exclusive(rt, rn, sz, retired);
+                true
+            }
+            Op::StoreExclusive { rs, rt, rn, sz } => {
+                self.store_exclusive(rs, rt, rn, sz, retired);
+                true
+            }
+
             Op::Load64 { rt, rn, wb, offset } => {
                 self.address(rn, offset, wb);
                 self.load(rt, Acc::Load64, retired);
@@ -2034,6 +2276,41 @@ impl Emitter<'_> {
                 self.f.atomic_fence();
                 true
             }
+            Op::Sys {
+                op: SysOp::ClearExclusive,
+            } => {
+                self.f.local_get(STATE);
+                self.f.i32_const(0);
+                self.f
+                    .i32_store(ALIGN_4, self.layout.exclusive + MONITOR_ARMED);
+                true
+            }
+            Op::Sys {
+                op: SysOp::Mrs { rd, reg },
+            } => match reg {
+                SysReg::Tpidr | SysReg::TpidrRo => {
+                    let at = if reg == SysReg::Tpidr {
+                        self.layout.tpidr_rw
+                    } else {
+                        self.layout.tpidr
+                    };
+                    self.f.local_get(STATE);
+                    self.f.i64_load(ALIGN_8, at);
+                    self.store_reg(rd);
+                    true
+                }
+                SysReg::Fixed(value) => {
+                    self.f.i64_const(i64::from(value));
+                    self.store_reg(rd);
+                    true
+                }
+                _ => false,
+            },
+            Op::Mulh { rd, rn, rm, signed } => {
+                self.mulh(rd, rn, rm, signed);
+                true
+            }
+            Op::OneSource { rd, rn, opcode, sf } => self.one_source(rd, rn, opcode, sf),
 
             _ => false,
         }
@@ -2216,6 +2493,30 @@ impl Cpu {
         Ok((bytes, path))
     }
 
+    /// The thread registers `MRS` reads, for the difftests to seed.
+    pub fn set_thread_pointers(&mut self, tpidr: u64, tpidr_rw: u64) {
+        self.tpidr = tpidr;
+        self.tpidr_rw = tpidr_rw;
+    }
+
+    /// Arm the exclusive monitor at `addr` as having read `value`, or disarm it.
+    pub fn set_exclusive(&mut self, armed: bool, addr: u32, value: u64) {
+        if armed {
+            self.exclusive.arm(addr, [value, 0]);
+        } else {
+            self.exclusive = Default::default();
+        }
+    }
+
+    /// The monitor as `(address, armed, first doubleword)`, which the difftests compare.
+    pub fn exclusive_state(&self) -> (u32, bool, u64) {
+        (
+            self.exclusive.addr,
+            self.exclusive.armed != 0,
+            self.exclusive.value[0],
+        )
+    }
+
     /// The register file by slot, including the three register 31 resolves to.
     pub fn reg_slots(&self) -> [u64; crate::cpu::REG_SLOTS] {
         let mut out = [0u64; crate::cpu::REG_SLOTS];
@@ -2248,6 +2549,9 @@ mod tests {
         watch_hi: 2068,
         watched: 2080,
         vregs: 4096,
+        exclusive: 2112,
+        tpidr: 2144,
+        tpidr_rw: 2152,
     };
 
     #[test]
@@ -2279,6 +2583,7 @@ mod tests {
         let mut cpu = Cpu::new();
         cpu.set_reg_at(SLOT, VALUE);
         cpu.nzcv = 0xC000_0000;
+        cpu.exclusive.arm(ADDR, [VALUE, 0]);
         cpu.mem.write_u8(ADDR, BYTE).expect("the page is writable");
         cpu.mem.watch_reads(0x1000, 0x40);
         cpu.mem.watch_writes(0x2000, 0x80);
@@ -2302,6 +2607,17 @@ mod tests {
                 *((base + layout.nzcv as usize) as *const u32),
                 0xC000_0000,
                 "NZCV moved"
+            );
+
+            let monitor = (base + layout.exclusive as usize) as *const u8;
+            assert_eq!(
+                (
+                    *(monitor.add(MONITOR_ADDR as usize) as *const u32),
+                    *(monitor.add(MONITOR_ARMED as usize) as *const u32),
+                    *(monitor.add(MONITOR_VALUE as usize) as *const u64),
+                ),
+                (ADDR, 1, VALUE),
+                "the exclusive monitor moved"
             );
 
             assert_eq!(

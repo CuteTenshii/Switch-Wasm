@@ -307,7 +307,7 @@ impl Cpu {
         self.tpidr = u64::from(MAIN_THREAD_TLS_BASE);
         self.tpidr_rw = 0;
         self.current_thread = 0;
-        self.exclusive = None;
+        self.exclusive.clear();
         self.process_ending = None;
         self.pending_yield = false;
         self.pending_sleep = None;

@@ -34,6 +34,11 @@ const FPSR_AT: u32 = 0x102C;
 const MEMORY_AT: u32 = 0x1030;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 0x2000;
+/// `TPIDRRO_EL0` and `TPIDR_EL0`.
+const TPIDR_AT: u32 = 0x1050;
+const TPIDR_RW_AT: u32 = 0x1058;
+/// The exclusive monitor: address, armed flag, then two doublewords.
+const EXCLUSIVE_AT: u32 = 0x1040;
 
 /// The page table: one four-byte entry per 4 KiB of guest space, zero if unmapped.
 const TABLE_AT: u32 = 0x0010_0000;
@@ -77,6 +82,10 @@ const WATCHED_PAGE_AT: u32 = 3 * PAGE_BYTES;
 /// through the cached-pages bitmap.
 const READONLY_ONE: (u32, u32) = (5 * PAGE_BYTES, 6 * PAGE_BYTES);
 const READONLY_TWO: (u32, u32) = (8 * PAGE_BYTES, 9 * PAGE_BYTES);
+
+/// What `MRS` of the thread registers reads; small enough for the manifest's numbers.
+const TPIDR_SEED: u64 = 0x1234_5678_9ABC;
+const TPIDR_RW_SEED: u64 = 0x0FED_CBA9_8765;
 
 /// `MSR NZCV, X0`: the preamble that seeds the flags.
 const MSR_NZCV_X0: u32 = 0xD51B_4200;
@@ -173,6 +182,7 @@ fn main() {
                     }
 
                     cpu.set_fpsr(0);
+                    cpu.set_thread_pointers(TPIDR_SEED, TPIDR_RW_SEED);
                     let before = cpu.reg_slots();
                     let nzcv_before = cpu.nzcv();
                     let Ok((module, path)) = cpu.emit_block_at(block_at, LAYOUT) else {
@@ -190,6 +200,8 @@ fn main() {
                     cpu.mem.take_watch_hit();
                     cpu.mem.mark_code_page(WATCHED_PAGE_AT);
                     cpu.mem.dirty_code_pages(0);
+                    arm_monitor(&mut cpu, body[0], set);
+                    let monitor_before = cpu.exclusive_state();
                     let mut fault = false;
                     for _ in 0..ops {
                         if cpu.step().is_err() {
@@ -248,6 +260,17 @@ fn main() {
                     manifest.push_str(&memory_delta(&cpu, &start));
                     manifest.push_str(&vreg_delta(&cpu));
                     let _ = write!(manifest, " fpsr:0:{:x}", cpu.fpsr());
+                    let monitor_after = cpu.exclusive_state();
+                    let _ = write!(
+                        manifest,
+                        " excl:{:x}:{}:{:x}:{:x}:{}:{:x}",
+                        monitor_before.0,
+                        u8::from(monitor_before.1),
+                        monitor_before.2,
+                        monitor_after.0,
+                        u8::from(monitor_after.1),
+                        monitor_after.2,
+                    );
                     manifest.push('\n');
                     cases += 1;
                 }
@@ -276,6 +299,10 @@ fn main() {
          discard_slot {DISCARD_SLOT}\n\
          pc_at {PC_AT}\n\
          vregs_at {VREGS_AT}\n\
+         exclusive_at {EXCLUSIVE_AT}\n\
+         tpidr_at {TPIDR_AT}\n\
+         tpidr_rw_at {TPIDR_RW_AT}\n\
+         tpidr_values {TPIDR_SEED} {TPIDR_RW_SEED}\n\
          table_at {TABLE_AT}\n\
          bitmap_at {BITMAP_AT}\n\
          slots {}\n\
@@ -321,6 +348,9 @@ const LAYOUT: Layout = Layout {
     pc: PC_AT,
     fuel: FUEL_AT,
     vregs: VREGS_AT,
+    exclusive: EXCLUSIVE_AT,
+    tpidr: TPIDR_AT,
+    tpidr_rw: TPIDR_RW_AT,
 };
 
 /// Vector registers start each case at these, so a wrong register or half shows.
@@ -459,6 +489,28 @@ fn survey() -> BTreeMap<String, Vec<u32>> {
 const SEEDS: usize = 11;
 
 /// Seed flags first (the preamble clobbers `X0`), then the register file.
+/// Arm the monitor for an exclusive load or store at the address its base register holds:
+/// not at all, with what memory holds, or with something else, by seed set.
+fn arm_monitor(cpu: &mut Cpu, insn: u32, set: usize) {
+    let exclusive = matches!((insn >> 21) & 0x1FF, 0b001000000 | 0b001000010);
+    let rn = ((insn >> 5) & 0x1F) as usize;
+    if !exclusive || rn == 31 || set.is_multiple_of(3) {
+        cpu.set_exclusive(false, 0, 0);
+        return;
+    }
+    let addr = cpu.reg_slots()[rn] as u32;
+    let held = match (insn >> 30) & 0b11 {
+        0 => cpu.mem.read_u8(addr).map(u64::from),
+        1 => cpu.mem.read_u16(addr).map(u64::from),
+        2 => cpu.mem.read_u32(addr).map(u64::from),
+        _ => cpu.mem.read_u64(addr),
+    };
+    match held {
+        Ok(value) => cpu.set_exclusive(true, addr, if set % 3 == 1 { value } else { value ^ 1 }),
+        Err(_) => cpu.set_exclusive(false, 0, 0),
+    }
+}
+
 fn seed(cpu: &mut Cpu, set: usize, nzcv: u8) {
     cpu.set_reg(0, u64::from(nzcv) << 28);
     cpu.set_pc(CODE_AT);
