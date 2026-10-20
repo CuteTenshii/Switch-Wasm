@@ -420,11 +420,12 @@ impl Target {
         Ok(out)
     }
 
-    /// Write device depth rows back in the guest packing, keeping stencil bytes.
-    pub fn write_depth(&self, ctx: &mut ExecCtx, values: &[u8]) -> Result<()> {
+    /// Write device depth rows back in the guest packing, keeping stencil bytes. `values` holds
+    /// the leftmost `columns` texels of each row; the rest of a row is left alone.
+    pub fn write_depth(&self, ctx: &mut ExecCtx, values: &[u8], columns: u32) -> Result<()> {
         let (layout, kind) = self.depth_parts()?;
         let unit = kind.unit() as usize;
-        let per_row = self.row_bytes / self.unit.max(1);
+        let per_row = columns.min(self.row_bytes / self.unit.max(1));
         let want = per_row as usize * self.rows as usize * unit;
         if values.len() < want {
             return Err(Error::Gpu(format!(
@@ -1395,7 +1396,9 @@ mod tests {
         target.write(&mut h.ctx(), &original).unwrap();
         let device = target.read_depth(&h.ctx(), target.width).unwrap();
         assert_eq!(device.len(), 16 * 4);
-        target.write_depth(&mut h.ctx(), &device).unwrap();
+        target
+            .write_depth(&mut h.ctx(), &device, target.width)
+            .unwrap();
         assert_eq!(target.read(&h.ctx()).unwrap(), original);
     }
 
@@ -1470,12 +1473,38 @@ mod tests {
             .flat_map(|i: u32| (0x00AB_CD00 | (i + 1)).to_le_bytes())
             .collect();
         target.write(&mut h.ctx(), &original).unwrap();
-        target.write_depth(&mut h.ctx(), &[0u8; 16 * 4]).unwrap();
+        target
+            .write_depth(&mut h.ctx(), &[0u8; 16 * 4], target.width)
+            .unwrap();
         let after = target.read(&h.ctx()).unwrap();
         for (i, pixel) in after.as_chunks::<4>().0.iter().enumerate() {
             let value = u32::from_le_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
             assert_eq!(value >> 8, 0, "texel {i} kept a depth it was told to clear");
             assert_eq!(value & 0xFF, i as u32 + 1, "texel {i} lost its stencil");
+        }
+    }
+
+    #[test]
+    fn writing_a_window_of_depth_leaves_the_rest_of_each_row_alone() {
+        let mut h = Harness::new(0x1000);
+        let target = packed_depth_target(h.base);
+        let original: Vec<u8> = (0..16)
+            .flat_map(|i: u32| (0x00AB_CD00 | (i + 1)).to_le_bytes())
+            .collect();
+        target.write(&mut h.ctx(), &original).unwrap();
+        // Two columns of four rows, all depth zero.
+        target
+            .write_depth(&mut h.ctx(), &[0u8; 2 * 4 * 4], 2)
+            .unwrap();
+        let after = target.read(&h.ctx()).unwrap();
+        for (i, pixel) in after.as_chunks::<4>().0.iter().enumerate() {
+            let value = u32::from_le_bytes(*pixel);
+            let want = if i % 4 < 2 {
+                i as u32 + 1
+            } else {
+                0x00AB_CD00 | (i as u32 + 1)
+            };
+            assert_eq!(value, want, "texel {i}");
         }
     }
 
@@ -1509,7 +1538,9 @@ mod tests {
             device, original,
             "a Z16 texel is already what the device holds"
         );
-        target.write_depth(&mut h.ctx(), &device).unwrap();
+        target
+            .write_depth(&mut h.ctx(), &device, target.width)
+            .unwrap();
         assert_eq!(target.read(&h.ctx()).unwrap(), original);
     }
 

@@ -560,6 +560,59 @@ fn a_depth_surface_smaller_than_the_colour_target_confines_the_draw() {
     assert_eq!(h.texel(9, 1), outside, "untouched past the depth surface");
 }
 
+/// A clear and a draw on a depth surface larger than the colour target share one cropped
+/// hold on the device, and what lies outside the colour target's extent stays as it was.
+#[test]
+fn a_depth_clear_and_draw_beside_a_smaller_colour_target_agree() {
+    let Some(mut gpu) = device() else { return };
+    let (width, height) = (testing::TARGET_WIDTH, testing::TARGET_HEIGHT);
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::new();
+        h.depth_target_sized(0x0201, width * 2, height * 2);
+        h.engine.regs.set(0x364, 0.75f32.to_bits());
+        // The clear covers the colour target's extent, not the whole depth surface.
+        h.engine.regs.set(0x3FD, width << 16);
+        h.engine.regs.set(0x3FE, height << 16);
+        h.triangle([1.0, 0.0, 1.0, 1.0]);
+        let layout = h.engine.depth_target().unwrap().expect("bound").layout;
+        let addr = h.base + 0x1000;
+        let mut ctx = h.ctx();
+        for y in 0..height * 2 {
+            for x in 0..width * 2 {
+                let at = addr + u64::from(layout.offset(x * 4, y, width * 2 * 4));
+                let seed = y
+                    .wrapping_mul(0x101)
+                    .wrapping_add(x.wrapping_mul(0x1357_9bdf));
+                ctx.write_u32(at, seed | 0x11).unwrap();
+            }
+        }
+        match gpu {
+            Some(gpu) => {
+                h.clear_depth_with(gpu).expect("the clear");
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => {
+                h.clear_depth_with(&mut Software).expect("the clear");
+                h.draw_with(&mut Software).expect("the draw");
+            }
+        }
+        (h.target(), h.depth())
+    };
+    let want = build(None);
+    let before = gpu.fallbacks;
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, before,
+        "a clear or the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected a pass");
+    assert_eq!(got.0, want.0, "the colour surface differs");
+    assert_eq!(got.1, want.1, "the depth surface differs");
+}
+
 #[test]
 fn a_depth_only_pass_still_writes_depth() {
     // No colour target at all; the fragment shader still runs.

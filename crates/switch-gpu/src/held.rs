@@ -393,13 +393,13 @@ impl Gpu {
         // Colour writes straight from the padded mapping; depth repacks.
         let outcome = match target.depth_kind() {
             None => target.write_strided(ctx, &mapped, pending.padded),
-            Some(kind) => {
+            Some(_) => {
                 let mut rows = Vec::with_capacity((pending.row_bytes * target.rows) as usize);
                 for y in 0..target.rows {
                     let at = (y * pending.padded) as usize;
                     rows.extend_from_slice(&mapped[at..at + pending.row_bytes as usize]);
                 }
-                Self::land_depth(target, kind, &rows, ctx)
+                Self::land_depth(target, &rows, ctx)
             }
         };
         drop(mapped);
@@ -409,25 +409,9 @@ impl Gpu {
         outcome
     }
 
-    /// Put a depth readback back, repacked.
-    fn land_depth(target: &Target, kind: DepthKind, rows: &[u8], ctx: &mut ExecCtx) -> Result<()> {
-        // A cropped depth target holds the left of each row; the rest is preserved.
-        let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
-        let window = target.width as usize;
-        if window >= surface_texels {
-            return target.write_depth(ctx, rows);
-        }
-        let unit = kind.unit() as usize;
-        let mut full = target.read_depth(ctx, surface_texels as u32)?;
-        for y in 0..target.rows as usize {
-            let from = y * window * unit;
-            let to = y * surface_texels * unit;
-            let len = window * unit;
-            if to + len <= full.len() && from + len <= rows.len() {
-                full[to..to + len].copy_from_slice(&rows[from..from + len]);
-            }
-        }
-        target.write_depth(ctx, &full)
+    /// Put a depth readback back, repacked. A cropped target holds the left of each row.
+    fn land_depth(target: &Target, rows: &[u8], ctx: &mut ExecCtx) -> Result<()> {
+        target.write_depth(ctx, rows, target.width)
     }
 
     pub(super) fn flush_inner(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {

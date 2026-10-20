@@ -203,6 +203,15 @@ impl Gpu {
             return Ok(());
         };
         let rect = self.clear_texels(engine, &surface)?;
+        // The cropped surface the draws use, when the clear stays inside it, so the two share a hold.
+        let color =
+            Target::color(engine, engine.render_target_slot(0)).map_err(|e| format!("{e:?}"))?;
+        let cropped = crate::crop_depth(surface, color);
+        let surface = if rect.x1 <= cropped.width && rect.y1 <= cropped.height {
+            cropped
+        } else {
+            surface
+        };
         self.clear_on_device(None, Some((surface, engine.clear_depth_value())), rect, ctx)
     }
 

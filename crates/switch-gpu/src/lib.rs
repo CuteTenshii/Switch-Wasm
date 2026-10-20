@@ -82,6 +82,20 @@ struct GlobalUpload {
 /// Upper bound on one `ldg` buffer, since the program does not say how far it reads.
 const MAX_GLOBAL: u64 = 8 << 20;
 
+/// A depth surface at least as large as the colour target beside it is cropped to it, as every
+/// draw does, since a pass's attachments must match in size.
+fn crop_depth(depth: Target, color: Option<Target>) -> Target {
+    match color {
+        Some(c) if depth.width >= c.width && depth.height >= c.height => Target {
+            width: c.width,
+            height: c.height,
+            rows: c.height,
+            ..depth
+        },
+        _ => depth,
+    }
+}
+
 /// How wide the red channel of a shadow map's texel is, and how it is read.
 #[derive(Clone, Copy)]
 enum Red {

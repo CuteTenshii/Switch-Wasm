@@ -7,7 +7,7 @@ use switch_core::gpu::pipeline::{self as state, AttributeBase, Pipeline};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation};
 use switch_core::gpu::texture::TextureSlot;
-use switch_core::gpu::upload::{Banks, Target, Targets, Uploads};
+use switch_core::gpu::upload::{Banks, Targets, Uploads};
 
 impl Gpu {
     /// Decide whether a draw can run here, without uploading anything.
@@ -32,12 +32,7 @@ impl Gpu {
             let (cw, ch) = (full_color.width, full_color.height);
             let (dw, dh) = (full_depth.width, full_depth.height);
             if dw >= cw && dh >= ch {
-                depth = Some(Target {
-                    width: cw,
-                    height: ch,
-                    rows: ch,
-                    ..full_depth
-                });
+                depth = Some(crate::crop_depth(full_depth, Some(full_color)));
             } else if dw <= cw && dh <= ch {
                 color_scratch = Some((dw, dh));
                 // The scissor is confined to the depth surface only for draws that reach it.
