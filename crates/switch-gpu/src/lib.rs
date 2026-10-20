@@ -82,18 +82,6 @@ struct GlobalUpload {
 /// Upper bound on one `ldg` buffer, since the program does not say how far it reads.
 const MAX_GLOBAL: u64 = 8 << 20;
 
-/// Keep the leftmost `window` texels of each `stride`-texel row.
-fn crop_rows(rows: Vec<u8>, stride: usize, window: usize, unit: usize) -> Vec<u8> {
-    if window >= stride {
-        return rows;
-    }
-    let mut out = Vec::with_capacity(rows.len() / stride * window);
-    for row in rows.chunks_exact(stride * unit) {
-        out.extend_from_slice(&row[..window * unit]);
-    }
-    out
-}
-
 /// How wide the red channel of a shadow map's texel is, and how it is read.
 #[derive(Clone, Copy)]
 enum Red {

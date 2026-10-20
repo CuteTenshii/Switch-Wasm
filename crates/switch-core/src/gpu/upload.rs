@@ -384,21 +384,32 @@ impl Target {
     }
 
     /// Read a depth surface as device rows, one [`DepthKind::unit`] per texel, stencil dropped.
-    pub fn read_depth(&self, ctx: &ExecCtx) -> Result<Vec<u8>> {
+    /// Only the leftmost `columns` texels of each row are converted and kept.
+    pub fn read_depth(&self, ctx: &ExecCtx, columns: u32) -> Result<Vec<u8>> {
         let (layout, kind) = self.depth_parts()?;
         let rows = self.read(ctx)?;
         let unit = self.unit as usize;
+        let stride = (self.row_bytes as usize).max(1);
+        let keep = (columns as usize * unit).min(stride);
         // `Z16` and `ZF32` are already what the device holds, bit for bit.
-        if kind == DepthKind::Unorm16 || (layout.depth_bits == 0 && unit == 4) {
+        let direct = kind == DepthKind::Unorm16 || (layout.depth_bits == 0 && unit == 4);
+        if direct && keep == stride {
             return Ok(rows);
         }
-        let mut out = Vec::with_capacity(rows.len() / unit * kind.unit() as usize);
-        for texel in rows.chunks_exact(unit) {
-            let mut low = [0u8; 8];
-            let take = unit.min(8);
-            low[..take].copy_from_slice(&texel[..take]);
-            let depth = layout.decode_depth(u64::from_le_bytes(low));
-            out.extend_from_slice(&kind.encode(depth)[..kind.unit() as usize]);
+        let mut out = Vec::with_capacity(rows.len() / stride * keep / unit * kind.unit() as usize);
+        for row in rows.chunks_exact(stride) {
+            let row = &row[..keep];
+            if direct {
+                out.extend_from_slice(row);
+                continue;
+            }
+            for texel in row.chunks_exact(unit) {
+                let mut low = [0u8; 8];
+                let take = unit.min(8);
+                low[..take].copy_from_slice(&texel[..take]);
+                let depth = layout.decode_depth(u64::from_le_bytes(low));
+                out.extend_from_slice(&kind.encode(depth)[..kind.unit() as usize]);
+            }
         }
         Ok(out)
     }
@@ -1375,7 +1386,7 @@ mod tests {
             original.extend_from_slice(&((depth << 8) | (u32::from(i as u8) + 1)).to_le_bytes());
         }
         target.write(&mut h.ctx(), &original).unwrap();
-        let device = target.read_depth(&h.ctx()).unwrap();
+        let device = target.read_depth(&h.ctx(), target.width).unwrap();
         assert_eq!(device.len(), 16 * 4);
         target.write_depth(&mut h.ctx(), &device).unwrap();
         assert_eq!(target.read(&h.ctx()).unwrap(), original);
@@ -1426,9 +1437,19 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                target.read_depth(&h.ctx()).unwrap(),
+                target.read_depth(&h.ctx(), target.width).unwrap(),
                 want,
                 "format {raw:#x}"
+            );
+            let out_unit = kind.unit() as usize;
+            let window: Vec<u8> = want
+                .chunks_exact(8 * out_unit)
+                .flat_map(|row| row[..3 * out_unit].to_vec())
+                .collect();
+            assert_eq!(
+                target.read_depth(&h.ctx(), 3).unwrap(),
+                window,
+                "format {raw:#x}, three columns"
             );
         }
     }
@@ -1476,7 +1497,7 @@ mod tests {
         };
         let original: Vec<u8> = (0..8u16).flat_map(|i| (i * 0x1234).to_le_bytes()).collect();
         target.write(&mut h.ctx(), &original).unwrap();
-        let device = target.read_depth(&h.ctx()).unwrap();
+        let device = target.read_depth(&h.ctx(), target.width).unwrap();
         assert_eq!(
             device, original,
             "a Z16 texel is already what the device holds"
@@ -1500,7 +1521,7 @@ mod tests {
             depth: None,
         };
         assert!(target.depth_kind().is_none());
-        assert!(target.read_depth(&h.ctx()).is_err());
+        assert!(target.read_depth(&h.ctx(), target.width).is_err());
     }
 
     #[test]

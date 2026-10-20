@@ -3,7 +3,7 @@
 use crate::builtin::LOAD_DEPTH_WGSL;
 use crate::convert::{depth_texture_format, device_attachment_format};
 use crate::readback::{Held, Pending, MAP_FAILED, MAP_READY, MAP_WAITING};
-use crate::{crop_rows, Gpu, Space, COPY_ALIGNMENT};
+use crate::{Gpu, Space, COPY_ALIGNMENT};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Flush;
 use switch_core::gpu::upload::{DepthKind, Target};
@@ -169,14 +169,7 @@ impl Gpu {
             view_formats: &[],
         });
         // A cropped target takes the left of each row.
-        let values = target.read_depth(ctx)?;
-        let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
-        let values = crop_rows(
-            values,
-            surface_texels,
-            target.width as usize,
-            kind.unit() as usize,
-        );
+        let values = target.read_depth(ctx, target.width)?;
         // The staging image is always `r32float`.
         let staging = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth upload"),
@@ -425,7 +418,7 @@ impl Gpu {
             return target.write_depth(ctx, rows);
         }
         let unit = kind.unit() as usize;
-        let mut full = target.read_depth(ctx)?;
+        let mut full = target.read_depth(ctx, surface_texels as u32)?;
         for y in 0..target.rows as usize {
             let from = y * window * unit;
             let to = y * surface_texels * unit;
