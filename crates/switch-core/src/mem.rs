@@ -171,6 +171,9 @@ pub struct Memory {
     /// One bit per page something has cached (JIT code, GPU textures); stores there
     /// are reported to both drains. Null until the first mark; fixed-size for emitted code.
     watched_pages: AtomicPtr<WatchWords>,
+    /// Which of the watched pages hold translated code, and which the GPU backend caches.
+    code_pages: AtomicPtr<WatchWords>,
+    gpu_pages: AtomicPtr<WatchWords>,
     /// Watched pages written since each drain, and whether either list is non-empty.
     dirty: Mutex<Dirty>,
     code_dirty: [AtomicBool; CORES],
@@ -306,7 +309,13 @@ impl Drop for Memory {
                 drop(unsafe { Box::from_raw(page) });
             }
         }
-        for words in [&self.watched_pages, &self.copy_watch, &self.fill_watch] {
+        for words in [
+            &self.watched_pages,
+            &self.code_pages,
+            &self.gpu_pages,
+            &self.copy_watch,
+            &self.fill_watch,
+        ] {
             let words = words.swap(std::ptr::null_mut(), Relaxed);
             if !words.is_null() {
                 // SAFETY: as above.
@@ -349,6 +358,8 @@ impl Memory {
             watch_hit: Hit(AtomicU64::new(Hit::NONE)),
             read_hit: Hit(AtomicU64::new(Hit::NONE)),
             watched_pages: AtomicPtr::new(std::ptr::null_mut()),
+            code_pages: AtomicPtr::new(std::ptr::null_mut()),
+            gpu_pages: AtomicPtr::new(std::ptr::null_mut()),
             dirty: Mutex::new(Dirty {
                 code: std::array::from_fn(|_| Some(Vec::new())),
                 gpu: Vec::new(),
@@ -407,8 +418,14 @@ impl Memory {
 
     /// Mark `addr`'s page as translated, so stores there are reported.
     pub fn mark_code_page(&self, addr: u32) {
+        self.watch_page(addr, &self.code_pages);
+    }
+
+    fn watch_page(&self, addr: u32, kind: &AtomicPtr<WatchWords>) {
         let idx = Self::page_index(addr);
-        Self::words(&self.watched_pages)[idx >> 6].fetch_or(1u64 << (idx & 63), Relaxed);
+        let bit = 1u64 << (idx & 63);
+        Self::words(kind)[idx >> 6].fetch_or(bit, Relaxed);
+        Self::words(&self.watched_pages)[idx >> 6].fetch_or(bit, Relaxed);
     }
 
     /// Note a guest store; the miss path must stay a few instructions.
@@ -442,24 +459,30 @@ impl Memory {
 
     /// Report page `idx` as written; its `watched_pages` bit is already clear.
     fn report_written(&self, idx: usize) {
+        let bit = 1u64 << (idx & 63);
+        let was_set = |kind: &AtomicPtr<WatchWords>| {
+            Self::words_if(kind).is_some_and(|w| w[idx >> 6].fetch_and(!bit, Relaxed) & bit != 0)
+        };
+        let (code, gpu) = (was_set(&self.code_pages), was_set(&self.gpu_pages));
         {
             let mut dirty = self.dirty.lock().unwrap_or_else(|e| e.into_inner());
-            for (list, flag) in dirty.code.iter_mut().zip(&self.code_dirty) {
-                if let Some(pages) = list {
-                    if pages.len() < DIRTY_CODE_CAP {
-                        pages.push(idx as u32);
-                    } else {
-                        *list = None;
+            if code {
+                for (list, flag) in dirty.code.iter_mut().zip(&self.code_dirty) {
+                    if let Some(pages) = list {
+                        if pages.len() < DIRTY_CODE_CAP {
+                            pages.push(idx as u32);
+                        } else {
+                            *list = None;
+                        }
                     }
+                    flag.store(true, Relaxed);
                 }
-                flag.store(true, Relaxed);
             }
-            if self.gpu_watching.load(Relaxed) {
+            if gpu && self.gpu_watching.load(Relaxed) {
                 dirty.gpu.push(idx as u32);
                 self.gpu_dirty.store(true, Relaxed);
             }
         }
-        let bit = 1u64 << (idx & 63);
         for (watch, written) in [
             (&self.copy_watch, &self.copy_written),
             (&self.fill_watch, &self.fill_written),
@@ -501,7 +524,7 @@ impl Memory {
     /// Watch `addr`'s page for the GPU backend.
     pub fn mark_gpu_page(&self, addr: u32) {
         self.gpu_watching.store(true, Relaxed);
-        self.mark_code_page(addr);
+        self.watch_page(addr, &self.gpu_pages);
     }
 
     /// Whether any GPU-watched page was written since the last drain.
@@ -2054,6 +2077,7 @@ mod tests {
         let mem = Memory::new();
         mem.map_zero(0x1000, 0x2000).unwrap();
         mem.mark_gpu_page(0x1000);
+        mem.mark_code_page(0x1000);
         mem.write_u32(0x1000, 1).unwrap();
         assert!(mem.has_dirty_gpu());
         assert!(mem.has_dirty_code(0));
@@ -2067,6 +2091,17 @@ mod tests {
         mem.mark_gpu_page(0x1000);
         mem.write_u32(0x1000, 3).unwrap();
         assert_eq!(mem.dirty_gpu_pages().len(), 1);
+    }
+
+    /// Pages only the GPU backend watches are none of the translator's business.
+    #[test]
+    fn a_gpu_only_page_is_not_reported_as_code() {
+        let mem = Memory::new();
+        mem.map_zero(0x1000, 0x1000).unwrap();
+        mem.mark_gpu_page(0x1000);
+        mem.write_u32(0x1000, 1).unwrap();
+        assert!(mem.has_dirty_gpu());
+        assert!(!mem.has_dirty_code(0));
     }
 
     /// Each core drops its own translations, so one drain must not hide a
