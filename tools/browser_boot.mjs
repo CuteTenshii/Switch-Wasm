@@ -3,6 +3,7 @@
 //   node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]
 //                               [--seconds=N] [--out=log.txt] [--jit-stats]
 // Serves `dist` (run `make assets` first) with WebGPU enabled and a fresh profile.
+// `HEADED=1` opens a window, whose browser gets the machine's GPU instead of a software adapter.
 // `--jit-stats` records the cumulative block stats with every sample.
 import { existsSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -53,6 +54,7 @@ const say = (text) => {
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM || undefined,
+  headless: !process.env.HEADED,
   args: ['--enable-unsafe-webgpu'],
 });
 try {
