@@ -13,6 +13,12 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 - Stretch audio when emulation runs below full speed, so it plays slowed down rather than in bursts with gaps.
 
+## Performance
+
+- A Short Hike presents no frame in the browser: its 8x multisampled draws program jittered sample locations, which the device cannot express, so the rasterizer takes every frame after the first fallback (`Gpu::route`). Needs the device route to place samples exactly, or a cheaper fallback.
+- Held surfaces are written back and dropped at every flush, so a depth target drawn into without a clear is converted and uploaded again each frame (Just Dance 2019: about 20 uploads a second). Keep a clean held surface until the guest writes to its pages.
+- About half the block entries of Asphalt 9 run the op walk, not compiled code, and neither `HOT` nor a larger block cache moved the rate over its first 3B instructions.
+
 ## Mobile
 
 - Performance on phones and tablets.
