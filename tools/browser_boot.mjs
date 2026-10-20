@@ -39,10 +39,10 @@ const titleKeys = flag('title-keys') && resolve(flag('title-keys'));
 const server = await preview({
   configFile: join(root, 'vite.config.ts'),
   logLevel: 'error',
-  preview: { port: 0, strictPort: false, open: false },
+  preview: { host: '127.0.0.1', port: 0, strictPort: false, open: false },
 });
 const address = server.httpServer.address();
-const url = `http://localhost:${address.port}/`;
+const url = `http://127.0.0.1:${address.port}/`;
 
 const lines = [];
 const note = (text) => lines.push(text);
@@ -93,6 +93,8 @@ try {
     try {
       sample = await page.evaluate(() => ({
         state: document.body.dataset.state,
+        instructions: document.getElementById('instructions')?.textContent ?? '',
+        fps: document.getElementById('fps')?.textContent ?? '',
         rows: document.getElementById('console')?.childElementCount ?? 0,
         last: document.getElementById('console')?.lastElementChild?.textContent ?? '',
       }));
@@ -106,7 +108,7 @@ try {
     // The console is capped, so quiet means the last line is unchanged.
     const unchanged = sample.rows === lastRows && sample.last === lastLine;
     const quiet = unchanged ? ', console quiet since the last sample' : '';
-    say(`${at}s: ${sample.state}, ${sample.rows} console lines${quiet}; last: ${sample.last.slice(0, 160)}`);
+    say(`${at}s: ${sample.state}, ${sample.instructions}, ${sample.fps}, ${sample.rows} console lines${quiet}; last: ${sample.last.slice(0, 160)}`);
     lastRows = sample.rows;
     lastLine = sample.last;
     if (jitStats) {
