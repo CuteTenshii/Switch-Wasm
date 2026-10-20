@@ -15,7 +15,7 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Performance
 
-- Held surfaces are written back and dropped at every flush, so a depth target drawn into without a clear is converted and uploaded again each frame (Just Dance 2019: about 20 uploads a second). Keep a clean held surface until the guest writes to its pages.
+- A present whose surface is still on the device waits in one slot (`Cpu::pending_present`), and the next present replaces it unshown: about half of Just Dance 2019's presents never reach the screen. A two-slot queue would show the older frame while the newer one is still waiting.
 - About half the block entries of Asphalt 9 run the op walk, not compiled code, and neither `HOT` nor a larger block cache moved the rate over its first 3B instructions.
 
 ## Mobile
