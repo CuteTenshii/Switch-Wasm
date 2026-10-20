@@ -179,6 +179,7 @@ pub fn bindless_texel(x: u32, y: u32) -> u32 {
 }
 
 pub const MULTISAMPLE_ENABLE: u32 = 0x54D;
+pub const MULTISAMPLE_SAMPLE_LOCATIONS: u32 = 0x478;
 pub const MULTISAMPLE_CONTROL: u32 = 0x54F;
 pub const MULTISAMPLE_MODE: u32 = 0x574;
 pub const MULTISAMPLE_SAMPLE_MASK: u32 = 0x3EF;

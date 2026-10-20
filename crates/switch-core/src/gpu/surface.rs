@@ -214,6 +214,13 @@ impl SampleGrid {
         self
     }
 
+    /// Whether every sample sits at the pixel centre, so all of a pixel's samples cover alike.
+    pub fn all_at_pixel_centre(&self) -> bool {
+        self.positions[..self.count() as usize]
+            .iter()
+            .all(|&position| position == [0.5, 0.5])
+    }
+
     pub fn count(&self) -> u32 {
         self.samples_x * self.samples_y
     }
@@ -1157,6 +1164,18 @@ mod tests {
         assert!(!SampleGrid::new(2, &moved)
             .unwrap()
             .samples_at_texel_centres());
+    }
+
+    #[test]
+    fn samples_programmed_to_the_pixel_centre_are_told_apart() {
+        let mut centre = [0u8; MAX_SAMPLES];
+        centre[..2].fill(0x88);
+        let grid = SampleGrid::new(5, &centre).unwrap();
+        assert!(grid.all_at_pixel_centre());
+        assert!(!grid.samples_at_texel_centres());
+        assert!(!SampleGrid::new(5, &[0; MAX_SAMPLES])
+            .unwrap()
+            .all_at_pixel_centre());
     }
 
     #[test]

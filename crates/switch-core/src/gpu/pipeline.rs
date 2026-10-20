@@ -396,8 +396,8 @@ pub struct Pipeline {
     pub fixed_attributes: Vec<u32>,
     /// Sample layout and coverage positions; [`Pipeline::samples`] is its count.
     pub grid: SampleGrid,
-    /// Coverage tested per pixel over a multisampled surface (`AntiAliasEnable` off),
-    /// which device multisampling can't do.
+    /// Coverage tested per pixel over a multisampled surface (`AntiAliasEnable` off, or every
+    /// sample programmed to the pixel centre), which device multisampling can't do.
     pub per_pixel_coverage: bool,
     pub samples: u32,
     pub sample_mask: u32,
@@ -483,7 +483,8 @@ impl Pipeline {
             vertex_buffers,
             fixed_attributes,
             grid,
-            per_pixel_coverage: !grid.is_single() && !engine.multisample_enabled(),
+            per_pixel_coverage: !grid.is_single()
+                && (!engine.multisample_enabled() || grid.all_at_pixel_centre()),
             samples: grid.count(),
             sample_mask: engine.sample_mask(),
             alpha_to_coverage: engine.alpha_to_coverage(),

@@ -888,6 +888,20 @@ fn coverage_per_pixel_covers_whole_pixels_on_the_device_too() {
     }
 }
 
+/// Every sample programmed to the pixel centre covers alike, which is whole-pixel coverage.
+#[test]
+fn samples_programmed_to_the_pixel_centre_run_on_the_device() {
+    for (mode, x, y) in [(1, 2, 1), (2, 2, 2)] {
+        compare(mode, x, y, |h| {
+            for word in 0..4 {
+                h.engine
+                    .regs
+                    .set(testing::MULTISAMPLE_SAMPLE_LOCATIONS + word, 0x8888_8888);
+            }
+        });
+    }
+}
+
 #[test]
 fn two_address_spaces_with_a_surface_at_one_address_keep_their_own() {
     let Some(mut gpu) = device() else { return };
