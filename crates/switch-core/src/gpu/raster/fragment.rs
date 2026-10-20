@@ -279,7 +279,7 @@ impl Fragments {
                 let (tx, ty) = self.grid.texel(x, y, sample);
                 let bytes = dt.format.bytes;
                 let dva = dt.addr + dt.layout.offset(tx * bytes, ty, dt.width * bytes) as u64;
-                let old = dt.format.decode_depth(ctx.read_pixel(dva, bytes)?);
+                let old = dt.format.decode_depth(ctx.read_pixel(dva, bytes)? as u64);
                 if !depth_test_passes(self.depth_state.func, z, old) {
                     continue;
                 }

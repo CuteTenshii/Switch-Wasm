@@ -413,9 +413,9 @@ impl DepthLayout {
         u128::from(stored << self.depth_shift)
     }
 
-    /// Inverse of [`DepthLayout::encode_depth`], from a whole stored pixel.
-    pub fn decode_depth(&self, pixel: u128) -> f32 {
-        let stored = (pixel as u64 & self.depth_mask64()) >> self.depth_shift;
+    /// Inverse of [`DepthLayout::encode_depth`], from the low 64 bits of a stored pixel, where depth sits.
+    pub fn decode_depth(&self, pixel: u64) -> f32 {
+        let stored = (pixel & self.depth_mask64()) >> self.depth_shift;
         match self.depth_bits {
             0 => f32::from_bits(stored as u32),
             bits => {

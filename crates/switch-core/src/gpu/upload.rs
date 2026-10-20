@@ -281,6 +281,14 @@ pub struct Target {
     pub depth: Option<DepthLayout>,
 }
 
+/// A pixel of up to 16 bytes as a little-endian value; per-byte shifts cost a call each on wasm.
+#[inline(always)]
+fn le_pixel(bytes: &[u8]) -> u128 {
+    let mut padded = [0u8; 16];
+    padded[..bytes.len()].copy_from_slice(bytes);
+    u128::from_le_bytes(padded)
+}
+
 impl Target {
     pub fn len(&self) -> u64 {
         u64::from(self.row_bytes) * u64::from(self.rows)
@@ -353,10 +361,7 @@ impl Target {
                 let offset = self.layout.offset(x * self.unit, y, self.row_bytes);
                 let at = self.addr + u64::from(offset);
                 let from = ((y * stride) + x * self.unit) as usize;
-                let mut value = 0u128;
-                for (i, &byte) in rows[from..from + self.unit as usize].iter().enumerate() {
-                    value |= u128::from(byte) << (8 * i);
-                }
+                let value = le_pixel(&rows[from..from + self.unit as usize]);
                 ctx.write_pixel(at, self.unit, value)?;
             }
         }
@@ -383,13 +388,17 @@ impl Target {
         let (layout, kind) = self.depth_parts()?;
         let rows = self.read(ctx)?;
         let unit = self.unit as usize;
+        // `Z16` and `ZF32` are already what the device holds, bit for bit.
+        if kind == DepthKind::Unorm16 || (layout.depth_bits == 0 && unit == 4) {
+            return Ok(rows);
+        }
         let mut out = Vec::with_capacity(rows.len() / unit * kind.unit() as usize);
         for texel in rows.chunks_exact(unit) {
-            let mut pixel = 0u128;
-            for (i, &byte) in texel.iter().enumerate() {
-                pixel |= u128::from(byte) << (8 * i);
-            }
-            out.extend_from_slice(&kind.encode(layout.decode_depth(pixel))[..kind.unit() as usize]);
+            let mut low = [0u8; 8];
+            let take = unit.min(8);
+            low[..take].copy_from_slice(&texel[..take]);
+            let depth = layout.decode_depth(u64::from_le_bytes(low));
+            out.extend_from_slice(&kind.encode(depth)[..kind.unit() as usize]);
         }
         Ok(out)
     }
@@ -415,11 +424,7 @@ impl Target {
                     let from = (y * per_row + x) as usize * unit;
                     let depth = kind.decode(&values[from..from + unit]);
                     let value = if layout.packs_stencil() {
-                        let mut old = 0u128;
-                        for (i, &byte) in raw[at..at + texel].iter().enumerate() {
-                            old |= u128::from(byte) << (8 * i);
-                        }
-                        layout.with_depth(old, depth)
+                        layout.with_depth(le_pixel(&raw[at..at + texel]), depth)
                     } else {
                         layout.encode_depth(depth)
                     };
@@ -1374,6 +1379,58 @@ mod tests {
         assert_eq!(device.len(), 16 * 4);
         target.write_depth(&mut h.ctx(), &device).unwrap();
         assert_eq!(target.read(&h.ctx()).unwrap(), original);
+    }
+
+    /// The per-texel formula each fast path in `read_depth` stands in for.
+    #[test]
+    fn reading_depth_matches_decoding_each_texel() {
+        use crate::gpu::engine::threed::depth_format_layout;
+        for raw in [0x0A, 0x13, 0x14, 0x15, 0x16, 0x19] {
+            let layout = depth_format_layout(raw).unwrap();
+            let unit = layout.bytes as u32;
+            let mut h = Harness::new(0x1000);
+            let target = Target {
+                format: if unit == 2 {
+                    Format::Depth16Unorm
+                } else {
+                    Format::Depth24PlusStencil8
+                },
+                addr: h.base,
+                width: 8,
+                height: 8,
+                layout: Layout::Pitch { pitch: 8 * unit },
+                row_bytes: 8 * unit,
+                rows: 8,
+                unit,
+                depth: Some(layout),
+            };
+            let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+            let bytes: Vec<u8> = (0..64 * unit)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    seed as u8
+                })
+                .collect();
+            target.write(&mut h.ctx(), &bytes).unwrap();
+            let kind = DepthKind::of(layout);
+            let want: Vec<u8> = bytes
+                .chunks_exact(unit as usize)
+                .flat_map(|texel| {
+                    let pixel = texel
+                        .iter()
+                        .rev()
+                        .fold(0u64, |value, &byte| (value << 8) | u64::from(byte));
+                    kind.encode(layout.decode_depth(pixel))[..kind.unit() as usize].to_vec()
+                })
+                .collect();
+            assert_eq!(
+                target.read_depth(&h.ctx()).unwrap(),
+                want,
+                "format {raw:#x}"
+            );
+        }
     }
 
     #[test]
