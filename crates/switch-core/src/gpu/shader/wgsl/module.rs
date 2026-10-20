@@ -445,8 +445,11 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         format!("vec4<f32>({})", components.join(", "))
     };
 
-    let mut out =
-        String::from("struct FragmentInput {\n  @builtin(position) position: vec4<f32>,\n");
+    let mut out = String::new();
+    if layout.coverage.as_ref().is_some_and(|c| c.per_sample_pass) {
+        out.push_str("override pass_sample: u32 = 0u;\n\n");
+    }
+    out.push_str("struct FragmentInput {\n  @builtin(position) position: vec4<f32>,\n");
     for slot in &layout.varyings {
         out.push_str(&format!(
             "  @location({slot}) @interpolate(linear{}) vary{slot}: vec4<f32>,\n",
@@ -475,6 +478,9 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
     // Coverage first: the sample mask applies before shading.
     if let Some(coverage) = &layout.coverage {
         out.push_str(&sample_index(coverage));
+        if coverage.per_sample_pass {
+            out.push_str("  if (sample != pass_sample) { discard; }\n");
+        }
         if coverage.sample_mask != u32::MAX {
             out.push_str(&format!(
                 "  if (({}u >> sample) & 1u) == 0u {{ discard; }}\n",

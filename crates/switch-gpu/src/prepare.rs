@@ -125,6 +125,7 @@ impl Gpu {
                 sample_of_slot: state.grid.sample_of_slot()[..state.samples as usize].to_vec(),
                 sample_mask: state.sample_mask,
                 alpha_to_coverage: state.alpha_to_coverage,
+                per_sample_pass: !state.grid.samples_at_texel_centres(),
             });
         }
         // Integer attributes come from the draw's registers.

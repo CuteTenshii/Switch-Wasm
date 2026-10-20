@@ -902,6 +902,24 @@ fn samples_programmed_to_the_pixel_centre_run_on_the_device() {
     }
 }
 
+/// Samples away from their texel centres: one draw per sample, the geometry moved onto it.
+#[test]
+fn programmed_sample_locations_reach_the_same_texels_the_rasterizer_reaches() {
+    // `x | (y << 4)` in sixteenths of a pixel, four samples to a register.
+    let rotated: &[u32] = &[0xEAA2_6E26];
+    // The 4x2 pattern A Short Hike programs.
+    let jittered: &[u32] = &[0xB735_9D59, 0x1FFB_71D3];
+    for (mode, x, y, words) in [(2, 2, 2, rotated), (3, 4, 2, jittered)] {
+        compare(mode, x, y, |h| {
+            for (i, &word) in words.iter().enumerate() {
+                h.engine
+                    .regs
+                    .set(testing::MULTISAMPLE_SAMPLE_LOCATIONS + i as u32, word);
+            }
+        });
+    }
+}
+
 #[test]
 fn two_address_spaces_with_a_surface_at_one_address_keep_their_own() {
     let Some(mut gpu) = device() else { return };

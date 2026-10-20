@@ -214,6 +214,16 @@ impl SampleGrid {
         self
     }
 
+    /// How far to move the geometry, in texels, for the centre of `sample`'s texel to land on the sample.
+    pub fn texel_shift(&self, sample: u32) -> (f32, f32) {
+        let (dx, dy) = self.slot(sample);
+        let [x, y] = self.position(sample);
+        (
+            dx as f32 + 0.5 - x * self.samples_x as f32,
+            dy as f32 + 0.5 - y * self.samples_y as f32,
+        )
+    }
+
     /// Whether every sample sits at the pixel centre, so all of a pixel's samples cover alike.
     pub fn all_at_pixel_centre(&self) -> bool {
         self.positions[..self.count() as usize]

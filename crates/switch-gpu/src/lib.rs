@@ -168,6 +168,8 @@ struct PipelineKey {
     samples: u32,
     sample_mask: u64,
     alpha_to_coverage: bool,
+    /// The sample a repeated draw keeps; see `Coverage::per_sample_pass`.
+    sample_pass: Option<u32>,
     blend: Option<state::Blend>,
     write_mask: [bool; 4],
     topology: state::Topology,

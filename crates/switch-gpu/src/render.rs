@@ -173,6 +173,7 @@ impl Gpu {
             samples: multisample.count,
             sample_mask: multisample.mask,
             alpha_to_coverage: multisample.alpha_to_coverage_enabled,
+            sample_pass: None,
             blend: p.state.target.and_then(|t| t.blend),
             write_mask: p.state.target.map_or([true; 4], |t| t.write_mask),
             topology: p.state.topology,
@@ -195,89 +196,114 @@ impl Gpu {
                 })
                 .collect(),
         };
-        if let Some(pipeline) = self.pipelines.get(&key) {
-            return self.encode(p, &pipeline.clone(), &vs_group, &fs_group, &bound, ctx);
-        }
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("draw"),
-                bind_group_layouts: &[Some(&vs_group_layout), Some(&fs_group_layout)],
-                immediate_size: 0,
+        // A draw whose samples sit off their texel centres is drawn once per sample.
+        let passes: Vec<Option<u32>> =
+            if p.render == Render::Expanded && !p.state.grid.samples_at_texel_centres() {
+                (0..p.state.samples).map(Some).collect()
+            } else {
+                vec![None]
+            };
+        let mut pipelines = Vec::with_capacity(passes.len());
+        let mut layout = None;
+        for sample_pass in passes {
+            let key = PipelineKey {
+                sample_pass,
+                ..key.clone()
+            };
+            if let Some(pipeline) = self.pipelines.get(&key) {
+                pipelines.push(pipeline.clone());
+                continue;
+            }
+            let pipeline_layout = layout.get_or_insert_with(|| {
+                self.device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("draw"),
+                        bind_group_layouts: &[Some(&vs_group_layout), Some(&fs_group_layout)],
+                        immediate_size: 0,
+                    })
             });
-        // Empty for a depth-only pass.
-        let colour_targets: Vec<Option<wgpu::ColorTargetState>> = target_format
-            .map(|format| {
-                Some(wgpu::ColorTargetState {
-                    format,
-                    blend: p.state.target.and_then(|t| t.blend).map(blend),
-                    write_mask: p
-                        .state
-                        .target
-                        .map_or(wgpu::ColorWrites::ALL, |t| write_mask(t.write_mask)),
+            // Empty for a depth-only pass.
+            let colour_targets: Vec<Option<wgpu::ColorTargetState>> = target_format
+                .map(|format| {
+                    Some(wgpu::ColorTargetState {
+                        format,
+                        blend: p.state.target.and_then(|t| t.blend).map(blend),
+                        write_mask: p
+                            .state
+                            .target
+                            .map_or(wgpu::ColorWrites::ALL, |t| write_mask(t.write_mask)),
+                    })
                 })
-            })
-            .into_iter()
-            .collect();
-        let descriptor = wgpu::RenderPipelineDescriptor {
-            label: Some("draw"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vs_module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &layouts,
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: topology(p.state.topology),
-                strip_index_format,
-                front_face: match p.state.front_face {
-                    state::FrontFace::Ccw => wgpu::FrontFace::Ccw,
-                    state::FrontFace::Cw => wgpu::FrontFace::Cw,
+                .into_iter()
+                .collect();
+            let constants: Vec<(&str, f64)> = sample_pass
+                .map(|k| ("pass_sample", f64::from(k)))
+                .into_iter()
+                .collect();
+            let descriptor = wgpu::RenderPipelineDescriptor {
+                label: Some("draw"),
+                layout: Some(pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vs_module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &layouts,
                 },
-                cull_mode: match p.state.cull {
-                    state::Cull::None => None,
-                    state::Cull::Front => Some(wgpu::Face::Front),
-                    state::Cull::Back => Some(wgpu::Face::Back),
+                primitive: wgpu::PrimitiveState {
+                    topology: topology(p.state.topology),
+                    strip_index_format,
+                    front_face: match p.state.front_face {
+                        state::FrontFace::Ccw => wgpu::FrontFace::Ccw,
+                        state::FrontFace::Cw => wgpu::FrontFace::Cw,
+                    },
+                    cull_mode: match p.state.cull {
+                        state::Cull::None => None,
+                        state::Cull::Front => Some(wgpu::Face::Front),
+                        state::Cull::Back => Some(wgpu::Face::Back),
+                    },
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
                 },
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: key.depth.map(|(format, write_enabled, test)| {
-                wgpu::DepthStencilState {
-                    format,
-                    depth_write_enabled: Some(write_enabled),
-                    depth_compare: Some(compare(test)),
-                    // Neither renderer tests stencil.
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }
-            }),
-            multisample,
-            fragment: Some(wgpu::FragmentState {
-                module: &fs_module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &colour_targets,
-            }),
-            multiview_mask: None,
-            cache: None,
-        };
-        let pipeline = timed!(
-            self,
-            pipeline,
-            self.device.create_render_pipeline(&descriptor)
-        );
-        self.pipelines.insert(key, pipeline.clone());
-        self.encode(p, &pipeline, &vs_group, &fs_group, &bound, ctx)
+                depth_stencil: key.depth.map(|(format, write_enabled, test)| {
+                    wgpu::DepthStencilState {
+                        format,
+                        depth_write_enabled: Some(write_enabled),
+                        depth_compare: Some(compare(test)),
+                        // Neither renderer tests stencil.
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }
+                }),
+                multisample,
+                fragment: Some(wgpu::FragmentState {
+                    module: &fs_module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    targets: &colour_targets,
+                }),
+                multiview_mask: None,
+                cache: None,
+            };
+            let pipeline = timed!(
+                self,
+                pipeline,
+                self.device.create_render_pipeline(&descriptor)
+            );
+            self.pipelines.insert(key, pipeline.clone());
+            pipelines.push(pipeline);
+        }
+        self.encode(p, &pipelines, &vs_group, &fs_group, &bound, ctx)
     }
 
     /// Record and submit one draw against a built pipeline.
     fn encode(
         &mut self,
         p: &Prepared,
-        pipeline: &wgpu::RenderPipeline,
+        pipelines: &[wgpu::RenderPipeline],
         vs_group: &wgpu::BindGroup,
         fs_group: &wgpu::BindGroup,
         bound: &[Bound],
@@ -405,7 +431,6 @@ impl Gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, vs_group, &[]);
             pass.set_bind_group(1, fs_group, &[]);
             for (slot, b) in bound.iter().enumerate() {
@@ -417,14 +442,6 @@ impl Gpu {
                 _ => (1, 1),
             };
             let viewport = &p.state.viewport;
-            pass.set_viewport(
-                viewport.x * sx as f32,
-                viewport.y * sy as f32,
-                viewport.width * sx as f32,
-                viewport.height * sy as f32,
-                viewport.min_depth.clamp(0.0, 1.0),
-                viewport.max_depth.clamp(0.0, 1.0),
-            );
             let scissor = p.state.scissor;
             pass.set_scissor_rect(
                 scissor.x0 * sx,
@@ -444,13 +461,29 @@ impl Gpu {
             }
             // One instance, numbered so `instance_index` matches `gl_InstanceID`.
             let instances = p.instance..p.instance + 1;
-            match &index {
-                Some((buffer, format, base)) => {
-                    pass.set_index_buffer(buffer.slice(..), *format);
+            if let Some((buffer, format, _)) = &index {
+                pass.set_index_buffer(buffer.slice(..), *format);
+            }
+            // One pipeline, or one per sample with the geometry moved onto it.
+            for (sample, pipeline) in pipelines.iter().enumerate() {
+                let (shift_x, shift_y) = match pipelines.len() {
+                    1 => (0.0, 0.0),
+                    _ => p.state.grid.texel_shift(sample as u32),
+                };
+                pass.set_pipeline(pipeline);
+                pass.set_viewport(
+                    viewport.x * sx as f32 + shift_x,
+                    viewport.y * sy as f32 + shift_y,
+                    viewport.width * sx as f32,
+                    viewport.height * sy as f32,
+                    viewport.min_depth.clamp(0.0, 1.0),
+                    viewport.max_depth.clamp(0.0, 1.0),
+                );
+                match &index {
                     // The vertex buffer starts at the draw's lowest index.
-                    pass.draw_indexed(0..p.count, *base, instances);
+                    Some((_, _, base)) => pass.draw_indexed(0..p.count, *base, instances.clone()),
+                    None => pass.draw(0..p.count, instances.clone()),
                 }
-                None => pass.draw(0..p.count, instances),
             }
         }
         if let Some((held, texture, size)) = &scratch {

@@ -47,10 +47,6 @@ impl Gpu {
         if offered {
             return Ok(Render::Companion(Shape::Multisampled(state.samples)));
         }
-        // Samples moved off texel centres cannot be expressed by either route.
-        if !state.grid.samples_at_texel_centres() {
-            return Err("a draw with programmed sample locations".into());
-        }
         Ok(Render::Expanded)
     }
 

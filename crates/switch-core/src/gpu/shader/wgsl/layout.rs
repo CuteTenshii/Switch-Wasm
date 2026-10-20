@@ -61,6 +61,9 @@ pub struct Coverage {
     pub sample_of_slot: Vec<u32>,
     pub sample_mask: u32,
     pub alpha_to_coverage: bool,
+    /// The draw is repeated once per sample, each keeping only the texels of the sample named
+    /// by the `pass_sample` pipeline constant, with the geometry moved onto that sample.
+    pub per_sample_pass: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

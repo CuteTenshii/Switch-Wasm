@@ -324,6 +324,7 @@ fn quad_coverage(sample_mask: u32, alpha_to_coverage: bool) -> Coverage {
         sample_of_slot: vec![0, 1, 2, 3],
         sample_mask,
         alpha_to_coverage,
+        per_sample_pass: false,
     }
 }
 
@@ -350,6 +351,31 @@ fn a_sample_mask_discards_the_texels_it_excludes() {
     layout.coverage = Some(quad_coverage(u32::MAX, false));
     let open = module(&translated, Stage::Fragment, &layout).unwrap();
     assert!(!open.contains("& 1u) == 0u"), "{open}");
+}
+
+#[test]
+fn a_per_sample_pass_keeps_only_the_texels_of_its_sample() {
+    let p = program(&[(Op::Exit, ALWAYS)]);
+    let translated = translate(&p).unwrap();
+    let mut layout = Layout::of(&translated, Stage::Fragment);
+    layout.coverage = Some(Coverage {
+        per_sample_pass: true,
+        ..quad_coverage(u32::MAX, false)
+    });
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(
+        source.contains("override pass_sample: u32 = 0u;"),
+        "{source}"
+    );
+    assert!(
+        source.contains("if (sample != pass_sample) { discard; }"),
+        "{source}"
+    );
+    assert!(braces_balance(&source), "{source}");
+
+    layout.coverage = Some(quad_coverage(u32::MAX, false));
+    let plain = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(!plain.contains("pass_sample"), "{plain}");
 }
 
 #[test]
