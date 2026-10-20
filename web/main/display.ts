@@ -30,7 +30,7 @@ function countFrames(delta: number): void {
   const elapsed = now - fpsSince;
   if (elapsed >= 500) {
     $('fps').textContent = (fpsFrames * 1000 / elapsed).toFixed(1) + ' fps';
-    $('frame-ms').textContent = (emulatedMs / fpsFrames).toFixed(1) + ' ms';
+    $('frame-ms').textContent = fpsFrames > 0 ? (emulatedMs / fpsFrames).toFixed(1) + ' ms' : '- ms';
     fpsFrames = 0;
     emulatedMs = 0;
     fpsSince = now;
@@ -40,9 +40,9 @@ function countFrames(delta: number): void {
 // What a slice did to the screen.
 export function noteFrame(report: SliceReport): void {
   if (report.paintMs !== null) recordCanvasWrite(report.paintMs);
-  if (report.frame === lastFrame) return;
   const delta = report.frame - lastFrame;
   countFrames(delta);
+  if (delta === 0) return;
   recordGuestFrames(delta);
   // The first real frame uncovers the screen.
   if (lastFrame === 0) {

@@ -12,7 +12,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 ## Browser bindings
 
 - Stretch audio when emulation runs below full speed, so it plays slowed down rather than in bursts with gaps.
-- The FPS counter freezes on its last value (e.g. 26) while no frame is presented; it should fall to the actual rate.
 
 ## Mobile
 
