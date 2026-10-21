@@ -82,6 +82,12 @@ impl Cpu {
         self.reschedule();
     }
 
+    /// Let the other cores read the clock as it now stands.
+    pub(crate) fn publish_clock(&self) {
+        self.clock
+            .store(self.cycles, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Wake expired timed waits, at most once per [`TIME_SLICE`] cycles of the clock.
     #[inline(always)]
     pub(crate) fn sweep_timed_waits(&mut self) {
@@ -91,8 +97,7 @@ impl Cpu {
         self.next_expiry = self.cycles.wrapping_add(TIME_SLICE);
         // On the clock rather than the slice, which every switch restarts.
         if !self.machine.cores.is_empty() {
-            self.clock
-                .store(self.cycles, std::sync::atomic::Ordering::Relaxed);
+            self.publish_clock();
             self.service_cores();
         }
         self.expire_timed_waits();

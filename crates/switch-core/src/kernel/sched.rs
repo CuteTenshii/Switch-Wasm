@@ -9,6 +9,9 @@ pub const VSYNC_PERIOD_CYCLES: u64 = 1_020_000_000 / 60;
 /// Instructions per 200 Hz `hid` sample; LIFOs advance even with no input.
 pub const HID_SAMPLE_PERIOD_CYCLES: u64 = 1_020_000_000 / 200;
 
+/// Cycles of the clock one [`Cpu::wait_for_cores`] wait stands for.
+const IDLE_WAIT_CYCLES: u64 = 1_020_000_000 / 5_000;
+
 /// Instructions a thread runs before preemption.
 pub(crate) const TIME_SLICE: u64 = 20_000;
 
@@ -127,6 +130,7 @@ impl Cpu {
         if let Some(deadline) = self.earliest_deadline() {
             if deadline > self.cycles {
                 self.cycles = deadline;
+                self.publish_clock();
             }
             self.expire_timed_waits();
             if self.settled() {
@@ -136,6 +140,10 @@ impl Cpu {
         // A thread out on another core may yet wake one here.
         while self.cores_busy() {
             self.wait_for_cores();
+            // Time passes while core 0 waits, which a thread polling the tick may need.
+            self.cycles += IDLE_WAIT_CYCLES;
+            self.publish_clock();
+            self.expire_timed_waits();
             if self.settled() {
                 return;
             }
