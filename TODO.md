@@ -28,4 +28,5 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - `ssl:s` cmd 5 is stubbed and the `ssl:s` name is not routed like `ssl`.
 - Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
+- Just Dance 2019 stops presenting on "Hold on... and warm up..." after one to two minutes and stays there (0 fps, over 100B instructions). The main thread only sleeps and polls, while two priority-29 threads run flat out on the other cores (a float-to-16-bit conversion loop, and `nn::hid::VibrationMixer`). Whether it waits on something the emulator never delivers is not known.
 - Minecraft frame 20 is clean on the WebGPU device but the software rasterizer differs from it, mostly in the right half.
