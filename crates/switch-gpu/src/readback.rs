@@ -12,6 +12,8 @@ use crate::Shape;
 pub(crate) struct Pending {
     pub(crate) staging: wgpu::Buffer,
     pub(crate) target: Target,
+    /// The ask it was made in; see `Space::asked`.
+    pub(crate) generation: u64,
     /// Bytes per row on the device; for depth this is the device format's, not the guest's.
     pub(crate) row_bytes: u32,
     /// `row_bytes` rounded up to the 256 bytes `copyTextureToBuffer` wants.

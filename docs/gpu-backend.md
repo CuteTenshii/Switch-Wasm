@@ -52,7 +52,7 @@
 
 ### `crates/switch-gpu/src/readback.rs`
 
-- Readback is copy to staging, map, read: three steps that cannot happen in one call on the web. The map callback runs from the event loop, so state is an atomic polled by the next slice.
+- Readback is copy to staging, map, read: three steps that cannot happen in one call on the web. The map callback runs from the event loop, so state is an atomic polled by the next slice. Each ask for a frame's surfaces is a generation, at most two in flight, landed in order; a present waits on its generation.
 - Depth row bytes are the device format's: `Z24S8` is 4 bytes in memory and 4 bytes of `f32` on the device; `ZF32_X24S8` is 8 and 4.
 - A companion surface is resolved back into the held surface before the readback, so guest memory only sees the expanded form; its grid is stored because the register file has moved on by flush time.
 

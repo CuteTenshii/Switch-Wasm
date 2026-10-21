@@ -277,9 +277,7 @@ impl Cpu {
         self.forget_translations(pid);
         self.machine.nv.close_process(pid);
         self.machine.nv.gpu.remove_layer(pid);
-        if self.pending_present.is_some_and(|(owner, _)| owner == pid) {
-            self.pending_present = None;
-        }
+        self.pending_present.retain(|&(owner, ..)| owner != pid);
     }
 
     /// End the title and every process it started, leaving an empty process for the next

@@ -324,19 +324,7 @@ impl Cpu {
                     crop,
                 };
                 // GPU backends keep render targets on the device; the display reads guest memory.
-                if self.machine.nv.gpu.flush_renderers(self.pid, &self.mem)?
-                    == crate::gpu::renderer::Flush::Done
-                {
-                    self.machine.nv.gpu.present(self.pid, &self.mem, &buffer)?;
-                    if crate::trace::enabled(crate::trace::Trace::Nv) {
-                        crate::traceln!(
-                            "[vi] presented shared frame {} from slot {slot}",
-                            self.nv.gpu.frames
-                        );
-                    }
-                } else {
-                    self.pending_present = Some((self.pid, buffer));
-                }
+                self.present_when_landed(buffer)?;
                 let _ = SHARED_BUFFER_ADDR;
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
@@ -415,23 +403,8 @@ impl Cpu {
             );
         }
         if let crate::display::Action::Present(buffer) = action {
-            // A device-backed surface may not be ready yet;
-            // `Cpu::complete_pending_present` presents it later.
-            if self.machine.nv.gpu.flush_renderers(self.pid, &self.mem)?
-                == crate::gpu::renderer::Flush::Done
-            {
-                self.machine.nv.gpu.present(self.pid, &self.mem, &buffer)?;
-                if crate::trace::enabled(crate::trace::Trace::Nv) {
-                    crate::traceln!(
-                        "[vi] presented frame {} ({}x{})",
-                        self.nv.gpu.frames,
-                        buffer.width,
-                        buffer.height
-                    );
-                }
-            } else {
-                self.pending_present = Some((self.pid, buffer));
-            }
+            // A device-backed surface may not be ready yet.
+            self.present_when_landed(buffer)?;
             // Paced to the refresh rate either way.
             self.pace_present();
         }

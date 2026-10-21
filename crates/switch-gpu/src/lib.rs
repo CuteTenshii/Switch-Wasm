@@ -56,7 +56,7 @@ pub use wgpu;
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state, Pipeline};
-use switch_core::gpu::renderer::{Flush, Renderer, Software};
+use switch_core::gpu::renderer::{Flush, Renderer, Software, Submit};
 #[cfg(test)]
 use switch_core::gpu::shader::compiled::Compiled;
 #[cfg(test)]
@@ -107,6 +107,9 @@ enum Red {
 
 /// `copyTextureToBuffer` wants each row of the destination aligned.
 const COPY_ALIGNMENT: u32 = 256;
+
+/// Presented frames whose readbacks may be on their way at once.
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 /// Where a module's textures start binding; see `switch_core::gpu::shader::wgsl`.
 const TEXTURE_BINDING: u32 = 32;
@@ -228,8 +231,10 @@ struct Space {
     held: std::collections::HashMap<u64, Held>,
     /// Surfaces the guest rebound, still owing a write-back.
     evicted: Vec<Held>,
-    /// Readbacks asked for and not yet collected.
+    /// Readbacks asked for and not yet collected, oldest first.
     pending: Vec<Pending>,
+    /// Asks made for a whole frame's surfaces; each readback carries its ask's number.
+    asked: u64,
     /// Deswizzled texture bytes, evicted when the guest writes their pages.
     texture_cache: std::collections::HashMap<TextureKey, std::sync::Arc<[u8]>>,
     /// Translated shaders by address and stage.
@@ -673,6 +678,16 @@ impl Renderer for Gpu {
             t.flush += at.elapsed().as_micros();
         }
         result
+    }
+
+    fn submit_frame(&mut self, ctx: &mut ExecCtx) -> Result<Submit> {
+        self.enter_space(ctx.as_id);
+        self.submit_frame_inner(ctx)
+    }
+
+    fn frames_landed(&mut self, ctx: &mut ExecCtx) -> Result<u64> {
+        self.enter_space(ctx.as_id);
+        self.frames_landed_inner(ctx)
     }
 
     fn address_space_closed(&mut self, as_id: u32) {

@@ -15,7 +15,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Performance
 
-- A present whose surface is still on the device waits in one slot (`Cpu::pending_present`), and the next present replaces it unshown: about half of Just Dance 2019's presents never reach the screen. A two-slot queue would show the older frame while the newer one is still waiting.
 - Blocks with an instruction the emitter lacks stay in the op walk and break their region: on Asphalt 9 the hot ones are `MRS` of `CNTVCT_EL0` (the clock, which needs the host), scalar `FMIN`/`FMAX` and `FCCMP`, and `LD3` multiple-structure loads. `LDXP`/`STXP` are also interpreted.
 
 ## Mobile

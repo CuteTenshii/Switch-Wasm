@@ -241,6 +241,16 @@ impl Engine3D {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.flush(ctx))
     }
 
+    /// See [`Renderer::submit_frame`].
+    pub fn submit_frame(&mut self, ctx: &mut ExecCtx) -> Result<crate::gpu::renderer::Submit> {
+        self.with_renderer(ctx, |renderer, _, ctx| renderer.submit_frame(ctx))
+    }
+
+    /// See [`Renderer::frames_landed`].
+    pub fn frames_landed(&mut self, ctx: &mut ExecCtx) -> Result<u64> {
+        self.with_renderer(ctx, |renderer, _, ctx| renderer.frames_landed(ctx))
+    }
+
     /// `gl_InstanceID` for [`Engine3D::last_draw`].
     pub fn instance_id(&self) -> u32 {
         self.instance_id

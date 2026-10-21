@@ -2,7 +2,7 @@
 
 use crate::tests::device;
 
-use switch_core::gpu::renderer::Software;
+use switch_core::gpu::renderer::{Renderer, Software, Submit};
 use switch_core::gpu::testing::{self, Harness};
 
 /// A solid white triangle over a multisample mode, by both renderers; only coverage can differ.
@@ -1008,4 +1008,44 @@ fn two_address_spaces_with_a_surface_at_one_address_keep_their_own() {
         blue,
         "the second address space got the first's"
     );
+}
+
+/// Two presented frames drawn into one surface land in order, the second's pixels last.
+#[test]
+fn presented_frames_land_in_the_order_they_were_submitted() {
+    let Some(mut gpu) = device() else { return };
+    gpu.deferred_readbacks = true;
+    gpu.defer_readbacks = true;
+    let mut h = Harness::new();
+    let submit = |h: &mut Harness, gpu: &mut super::Gpu, colour: [f32; 4]| {
+        h.triangle(colour);
+        h.clear_with(gpu, [true; 4]).expect("the clear");
+        h.draw_with(gpu).expect("the draw");
+        gpu.submit_frame(&mut h.ctx()).expect("the submit")
+    };
+    let first = submit(&mut h, &mut gpu, [1.0, 0.0, 0.0, 1.0]);
+    let second = submit(&mut h, &mut gpu, [0.0, 0.0, 1.0, 1.0]);
+    let generation = |s| match s {
+        Submit::Queued(g) => g,
+        _ => 0,
+    };
+    assert!(generation(second) >= generation(first));
+
+    let mut landed = 0;
+    for _ in 0..10_000 {
+        let now = gpu.frames_landed(&mut h.ctx()).expect("the landing");
+        assert!(now >= landed, "a landed generation went back");
+        landed = now;
+        if landed >= generation(second) && landed > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(landed >= generation(second), "the readbacks never landed");
+    let mut want = Harness::new();
+    want.triangle([0.0, 0.0, 1.0, 1.0]);
+    want.clear_with(&mut Software, [true; 4])
+        .expect("the clear");
+    want.draw_with(&mut Software).expect("the draw");
+    assert_eq!(h.target(), want.target());
 }

@@ -39,6 +39,19 @@ pub trait Renderer: std::fmt::Debug {
         Ok(Flush::Done)
     }
 
+    /// Start getting a presented frame's surfaces back without waiting for the ones
+    /// already on their way; see [`Submit`].
+    fn submit_frame(&mut self, ctx: &mut ExecCtx) -> Result<Submit> {
+        let _ = ctx;
+        Ok(Submit::Done)
+    }
+
+    /// The newest [`Submit::Queued`] generation whose surfaces are all in guest memory.
+    fn frames_landed(&mut self, ctx: &mut ExecCtx) -> Result<u64> {
+        let _ = ctx;
+        Ok(u64::MAX)
+    }
+
     /// What this backend has been doing, as a JSON object.
     fn report_json(&self) -> String {
         "{}".to_string()
@@ -53,6 +66,17 @@ pub trait Renderer: std::fmt::Debug {
     fn lost(&self) -> bool {
         false
     }
+}
+
+/// Where a presented frame stands after [`Renderer::submit_frame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Submit {
+    /// Guest memory has the frame.
+    Done,
+    /// The frame lands with this generation; see [`Renderer::frames_landed`].
+    Queued(u64),
+    /// Readbacks already fill the queue, and this frame was not asked for.
+    Full,
 }
 
 /// Whether a [`Renderer::flush`] finished, or wants asking again after the

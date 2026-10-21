@@ -3,9 +3,9 @@
 use crate::builtin::LOAD_DEPTH_WGSL;
 use crate::convert::{depth_texture_format, device_attachment_format};
 use crate::readback::{Held, Pending, MAP_FAILED, MAP_READY, MAP_WAITING};
-use crate::{Gpu, Space, COPY_ALIGNMENT};
+use crate::{Gpu, Space, COPY_ALIGNMENT, MAX_FRAMES_IN_FLIGHT};
 use switch_core::gpu::exec::ExecCtx;
-use switch_core::gpu::renderer::Flush;
+use switch_core::gpu::renderer::{Flush, Submit};
 use switch_core::gpu::upload::{DepthKind, Target};
 use switch_core::{Error, Result};
 
@@ -377,6 +377,7 @@ impl Gpu {
         Pending {
             staging,
             target: *target,
+            generation: self.space.asked,
             row_bytes,
             padded,
             state,
@@ -414,6 +415,89 @@ impl Gpu {
         target.write_depth(ctx, rows, target.width)
     }
 
+    /// Ask for every held and evicted surface as one generation.
+    fn ask_for_all(&mut self) {
+        timed!(self, flush_ask, {
+            self.space.asked += 1;
+            for held in std::mem::take(&mut self.space.evicted) {
+                self.ask_for(held);
+            }
+            let addresses: Vec<u64> = self.space.held.keys().copied().collect();
+            for addr in addresses {
+                self.flush_one(addr);
+            }
+        });
+    }
+
+    /// Check on the readbacks, then land the oldest ones that have arrived.
+    fn land_ready(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let polled = if self.defer_readbacks {
+            self.device.poll(wgpu::PollType::Poll)
+        } else {
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(5)),
+            })
+        };
+        let _ = polled;
+        while let Some(first) = self.space.pending.first() {
+            match first.state.load(Ordering::Acquire) {
+                MAP_WAITING => break,
+                MAP_FAILED => {
+                    self.space.pending.remove(0);
+                    return Err(Error::Gpu(match self.device_error() {
+                        Some(e) => format!("the readback was not mapped: {e}"),
+                        None => "the readback was not mapped".into(),
+                    }));
+                }
+                _ => {
+                    let pending = self.space.pending.remove(0);
+                    self.land(&pending, ctx)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The newest ask whose readbacks have all landed.
+    fn landed(&self) -> u64 {
+        self.space
+            .pending
+            .first()
+            .map_or(self.space.asked, |p| p.generation - 1)
+    }
+
+    /// Start a presented frame's readbacks while earlier frames' are still on their way.
+    pub(super) fn submit_frame_inner(&mut self, ctx: &mut ExecCtx) -> Result<Submit> {
+        if self.give_up() {
+            return Ok(Submit::Done);
+        }
+        if !self.space.held.is_empty() || !self.space.evicted.is_empty() {
+            let mut asks: Vec<u64> = self.space.pending.iter().map(|p| p.generation).collect();
+            asks.dedup();
+            if asks.len() >= MAX_FRAMES_IN_FLIGHT {
+                return Ok(Submit::Full);
+            }
+            self.ask_for_all();
+        }
+        timed!(self, flush_wait, self.land_ready(ctx))?;
+        if self.space.pending.is_empty() {
+            return Ok(Submit::Done);
+        }
+        // A readback outlived the call that asked for it. See [`Gpu::deferred_readbacks`].
+        self.deferred_readbacks = true;
+        Ok(Submit::Queued(self.space.asked))
+    }
+
+    pub(super) fn frames_landed_inner(&mut self, ctx: &mut ExecCtx) -> Result<u64> {
+        if self.give_up() {
+            return Ok(u64::MAX);
+        }
+        timed!(self, flush_wait, self.land_ready(ctx))?;
+        Ok(self.landed())
+    }
+
     pub(super) fn flush_inner(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
         // After a loss, report rather than error: a flush also runs inside GPU submissions.
         if self.give_up() {
@@ -428,15 +512,7 @@ impl Gpu {
         }
         // Only once per frame.
         if self.space.pending.is_empty() {
-            timed!(self, flush_ask, {
-                for held in std::mem::take(&mut self.space.evicted) {
-                    self.ask_for(held);
-                }
-                let addresses: Vec<u64> = self.space.held.keys().copied().collect();
-                for addr in addresses {
-                    self.flush_one(addr);
-                }
-            });
+            self.ask_for_all();
         }
         // `Wait` blocks natively and does nothing on the web, where the present waits for a later slice.
         // `GPU_DEFER_READBACKS=1` skips it to reproduce the browser natively.

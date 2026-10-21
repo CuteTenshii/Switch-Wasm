@@ -346,9 +346,9 @@ pub struct Machine {
     pub display: crate::display::BufferQueue,
     /// See [`Cpu::pace_present`].
     pub(crate) last_present_cycles: u64,
-    /// A presented frame awaiting the GPU backend, and the process presenting it; see
-    /// [`Cpu::complete_pending_present`].
-    pub(crate) pending_present: Option<(u64, crate::gpu::DisplayBuffer)>,
+    /// Presented frames awaiting the GPU backend, with the process presenting each and the
+    /// readback generation it waits on; see [`Cpu::complete_pending_present`].
+    pub(crate) pending_present: std::collections::VecDeque<(u64, crate::gpu::DisplayBuffer, u64)>,
     /// Thread lifecycle events since the host last asked; see [`ThreadReport`].
     pub(crate) thread_log: Vec<String>,
     pub(crate) thread_log_dropped: u64,
@@ -574,7 +574,7 @@ impl Cpu {
                 nv: crate::gpu::nvdrv::NvDrv::new(),
                 display: crate::display::BufferQueue::new(),
                 last_present_cycles: 0,
-                pending_present: None,
+                pending_present: std::collections::VecDeque::new(),
                 thread_log: Vec::new(),
                 thread_log_dropped: 0,
 

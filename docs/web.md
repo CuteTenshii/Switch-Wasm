@@ -30,7 +30,7 @@ The page, the worker, and the wasm bindings between them.
 ## `web/worker/index.ts`
 
 - `gpuSession`: the backend belongs to the `Gpu` inside the session it was opened on, so freeing the session drops it. Every boot recycles the session, so without tracking this every session after the first silently ran on the rasterizer.
-- `GPU_BACKEND_READY`: `Renderer::flush` answers `Pending` instead of blocking, and `Cpu::complete_pending_present` presents from a later slice, after the event loop let the map complete. The constant is the switch if the browser disagrees with the CLI.
+- `GPU_BACKEND_READY`: `Renderer::flush` answers `Pending` instead of blocking, and `Cpu::complete_pending_present` presents the queued frames from a later slice, oldest first, after the event loop let the map complete. The constant is the switch if the browser disagrees with the CLI.
 - `GPU_DEVICE_MSAA` off: Maxwell samples sit at texel centres, WebGPU's on the spec's rotated grid, so device MSAA anti-aliases differently from the software reference. On would save fragment work. WebGPU guarantees only 4 samples, so 2x1, 4x2 and 4x4 always render expanded.
 - `GPU_INTERLEAVE` off: fallback draws inside a device frame race the readback and lose pixels. A frame that is slow without interleaving is slow because a shader `gpu::shader::wgsl` cannot translate; the fix is the translator, not the switch.
 - Adapter naming: wgpu names from `GPUAdapterInfo.description`, which Chrome leaves empty on macOS (it fills `vendor`/`architecture`), so the worker asks once with a second `requestAdapter`. Firefox (`dom/webgpu/Adapter.h`) blanks all four fields against fingerprinting, so "an unnamed adapter" is final there.

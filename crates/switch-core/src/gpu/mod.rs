@@ -300,8 +300,35 @@ impl Gpu {
     /// Writes back what the backend holds for process `owner`, whose memory is `mem`, so
     /// the next reader of a render target sees it.
     pub fn flush_renderers(&mut self, owner: u64, mem: &Memory) -> Result<renderer::Flush> {
+        self.on_flush_channel(owner, mem, renderer::Flush::Done, |three_d, ctx| {
+            three_d.flush_renderer(ctx)
+        })
+    }
+
+    /// Starts getting the frame process `owner` presented back from the backend.
+    pub fn submit_frame(&mut self, owner: u64, mem: &Memory) -> Result<renderer::Submit> {
+        self.on_flush_channel(owner, mem, renderer::Submit::Done, |three_d, ctx| {
+            three_d.submit_frame(ctx)
+        })
+    }
+
+    /// The newest generation of [`Gpu::submit_frame`] whose surfaces are in `mem`.
+    pub fn frames_landed(&mut self, owner: u64, mem: &Memory) -> Result<u64> {
+        self.on_flush_channel(owner, mem, u64::MAX, |three_d, ctx| {
+            three_d.frames_landed(ctx)
+        })
+    }
+
+    /// Runs `f` on the 3D engine of `owner`'s flush channel, or answers `none` without one.
+    fn on_flush_channel<T>(
+        &mut self,
+        owner: u64,
+        mem: &Memory,
+        none: T,
+        f: impl FnOnce(&mut engine::threed::Engine3D, &mut ExecCtx) -> Result<T>,
+    ) -> Result<T> {
         let Some(channel_id) = self.flush_channel(owner) else {
-            return Ok(renderer::Flush::Done);
+            return Ok(none);
         };
         let channel = self
             .channels
@@ -323,9 +350,9 @@ impl Gpu {
             stats: &mut self.stats,
             trace: crate::trace::enabled(crate::trace::Trace::Gpu),
         };
-        let flushed = channel.three_d.flush_renderer(&mut ctx);
+        let out = f(&mut channel.three_d, &mut ctx);
         channel.three_d.swap_renderer(&mut self.renderer);
-        flushed
+        out
     }
 
     /// Scan-out: convert a display surface on `layer` to RGBA8888 and composite the screen.

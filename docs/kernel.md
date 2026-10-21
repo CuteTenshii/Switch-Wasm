@@ -52,7 +52,7 @@ Guest memory layout, threads, scheduling, synchronization, boot and diagnostics.
 - `WaitEvent` parks until `signal_event` or its deadline rather than re-polling each slice: two threads waiting on `am:gpu-error` (never signalled on a console) took 70% of Just Dance 2023's retired instructions.
 - Vsync fires on a timer (60 Hz) as well as on present: titles wait for vsync before rendering the frame that would fire it. hid samples every LIFO at 200 Hz even without input: Tomodachi Life waits for a sample newer than the last one.
 - Present pacing: `pace_present` parks the presenting thread until the next 60 Hz refresh. Without it Just Dance 2019 presented many frames per displayed one and starved its loading threads; pacing tripled guest progress.
-- Deferred present: a device backend's readback completes only after the host event loop runs, so `vi` keeps the buffer and presents the same surface a slice later. Presenting whatever guest memory held instead came out black for double-buffered titles.
+- Deferred present: a device backend's readback completes only after the host event loop runs, so `vi` queues the buffer with the readback generation it waits on and presents the same surface a slice later. Up to two frames' readbacks are in flight (`Renderer::submit_frame`, `frames_landed`); a present that finds both slots full is dropped, never an older queued one. Presenting whatever guest memory held instead came out black for double-buffered titles.
 - When nothing can run, the clock idles to the earliest deadline of any kind (sleep, timed wait, display tick), not just the display tick: loading threads sleep in single milliseconds, and idling to the 16.7 ms tick throttled loading.
 
 ## `crates/switch-core/src/kernel/sync.rs`

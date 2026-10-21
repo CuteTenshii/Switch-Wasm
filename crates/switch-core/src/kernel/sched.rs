@@ -37,33 +37,56 @@ impl Cpu {
         self.last_present_cycles = self.cycles.max(tick);
     }
 
-    /// Present a frame whose surface was still on the device, once it has come back.
-    pub(crate) fn complete_pending_present(&mut self) {
-        let Some((pid, buffer)) = self.pending_present else {
-            return;
-        };
-        let Some(mem) = self.machine.processes.get(&pid).map(|p| p.mem.clone()) else {
-            self.pending_present = None;
-            return;
-        };
-        match self.machine.nv.gpu.flush_renderers(pid, &mem) {
-            Ok(crate::gpu::renderer::Flush::Pending) => {}
-            Ok(crate::gpu::renderer::Flush::Done) => {
-                self.pending_present = None;
-                if let Err(e) = self.machine.nv.gpu.present(pid, &mem, &buffer) {
-                    self.log(
-                        Level::Error,
-                        &format!("[vi] the deferred present failed: {e}"),
-                    );
+    /// Present `buffer` now, or once the surfaces its frame drew into have come back from
+    /// the device. Frames present in the order they were submitted.
+    pub(crate) fn present_when_landed(
+        &mut self,
+        buffer: crate::gpu::DisplayBuffer,
+    ) -> crate::Result<()> {
+        use crate::gpu::renderer::Submit;
+        self.complete_pending_present();
+        match self.machine.nv.gpu.submit_frame(self.pid, &self.mem)? {
+            Submit::Done => {
+                self.machine.nv.gpu.present(self.pid, &self.mem, &buffer)?;
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
+                    crate::traceln!("[vi] presented frame {}", self.nv.gpu.frames);
                 }
             }
-            Err(e) => {
-                // Drop the frame rather than stall the display.
-                self.pending_present = None;
-                self.log(
-                    Level::Error,
-                    &format!("[vi] the deferred readback failed: {e}"),
-                );
+            Submit::Queued(generation) => {
+                let pid = self.pid;
+                self.pending_present.push_back((pid, buffer, generation));
+            }
+            Submit::Full => {}
+        }
+        Ok(())
+    }
+
+    /// Present the queued frames whose surfaces have come back, oldest first.
+    pub(crate) fn complete_pending_present(&mut self) {
+        while let Some(&(pid, buffer, generation)) = self.pending_present.front() {
+            let Some(mem) = self.machine.processes.get(&pid).map(|p| p.mem.clone()) else {
+                self.pending_present.pop_front();
+                continue;
+            };
+            match self.machine.nv.gpu.frames_landed(pid, &mem) {
+                Ok(landed) if landed >= generation => {
+                    self.pending_present.pop_front();
+                    if let Err(e) = self.machine.nv.gpu.present(pid, &mem, &buffer) {
+                        self.log(
+                            Level::Error,
+                            &format!("[vi] the deferred present failed: {e}"),
+                        );
+                    }
+                }
+                Ok(_) => return,
+                Err(e) => {
+                    // Drop the frame rather than stall the display.
+                    self.pending_present.pop_front();
+                    self.log(
+                        Level::Error,
+                        &format!("[vi] the deferred readback failed: {e}"),
+                    );
+                }
             }
         }
     }
