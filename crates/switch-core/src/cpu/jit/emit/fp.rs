@@ -15,6 +15,8 @@ const F64X2_REPLACE: u32 = 0x22;
 const MUL: [u8; 2] = [0x94, 0xA2];
 const ADD: [u8; 2] = [0x92, 0xA0];
 const SUB: [u8; 2] = [0x93, 0xA1];
+const MIN: [u8; 2] = [0x96, 0xA4];
+const MAX: [u8; 2] = [0x97, 0xA5];
 const NEG: [u8; 2] = [0x8C, 0x9A];
 const ABS: [u8; 2] = [0x8B, 0x99];
 const EQ: [u8; 2] = [0x5B, 0x61];
@@ -55,6 +57,81 @@ impl Emitter<'_> {
         self.vset(r);
     }
 
+    /// Push the NZCV word of comparing `Sn`/`Dn` with `Rm`, or with zero when `against_rm` is false.
+    fn fcmp_flags(&mut self, rn: u32, against_rm: bool, rm: u32, double: bool) {
+        let d = usize::from(double);
+        let (a, b) = if double {
+            (L_F64, L_F64B)
+        } else {
+            (L_F32, L_F32B)
+        };
+        self.fget(rn, double);
+        self.f.local_set(a);
+        if against_rm {
+            self.fget(rm, double);
+        } else if double {
+            self.f.f64_const(0.0);
+        } else {
+            self.f.f32_const(0.0);
+        }
+        self.f.local_set(b);
+        // NZCV: 0011 unordered, 1000 less, 0110 equal, 0010 greater.
+        // `select` keeps its first operand when the condition holds.
+        self.f.i32_const(0x6000_0000);
+        self.f.i32_const(0x2000_0000);
+        self.f.local_get(a);
+        self.f.local_get(b);
+        self.f.op_raw(EQ[d]);
+        self.f.select();
+        self.f.local_set(L_C);
+        self.f.i32_const(0x8000_0000u32 as i32);
+        self.f.local_get(L_C);
+        self.f.local_get(a);
+        self.f.local_get(b);
+        self.f.op_raw(LT[d]);
+        self.f.select();
+        self.f.local_set(L_C);
+        // Unordered: either side unequal to itself.
+        self.f.i32_const(0x3000_0000);
+        self.f.local_get(L_C);
+        self.f.local_get(a);
+        self.f.local_get(a);
+        self.f.op_raw(NE[d]);
+        self.f.local_get(b);
+        self.f.local_get(b);
+        self.f.op_raw(NE[d]);
+        self.f.i32_or();
+        self.f.select();
+    }
+
+    /// FMAX, FMIN, FMAXNM, FMINNM: a NaN operand is the result, the first one first.
+    fn fminmax(&mut self, rd: u32, rn: u32, rm: u32, max: bool, double: bool) {
+        let d = usize::from(double);
+        let (a, b) = if double {
+            (L_F64, L_F64B)
+        } else {
+            (L_F32, L_F32B)
+        };
+        self.fget(rn, double);
+        self.f.local_set(a);
+        self.fget(rm, double);
+        self.f.local_set(b);
+        self.f.local_get(a);
+        self.f.local_get(b);
+        self.f.local_get(a);
+        self.f.local_get(b);
+        self.f.op_raw(if max { MAX[d] } else { MIN[d] });
+        self.f.local_get(b);
+        self.f.local_get(b);
+        self.f.op_raw(NE[d]);
+        self.f.select();
+        self.f.local_get(a);
+        self.f.local_get(a);
+        self.f.op_raw(NE[d]);
+        self.f.select();
+        self.fset(rd, double);
+    }
+
     /// One scalar floating-point instruction of `form`, or `false`.
     pub(super) fn fp(&mut self, insn: u32, form: FpForm) -> bool {
         if !self.simd {
@@ -81,60 +158,24 @@ impl Emitter<'_> {
                 }
                 // FCMP and FCMPE, against Rm or zero.
                 0b00 if (insn >> 10) & 0x3F == 0b001000 => {
-                    let zero = (insn >> 3) & 1 == 1;
-                    let operand = |e: &mut Self, r: u32| {
-                        if r == u32::MAX {
-                            if double {
-                                e.f.f64_const(0.0);
-                            } else {
-                                e.f.f32_const(0.0);
-                            }
-                        } else {
-                            e.fget(r, double);
-                        }
-                    };
-                    let b = if zero { u32::MAX } else { rm };
-                    // NZCV: 0011 unordered, 1000 less, 0110 equal, 0010 greater.
-                    operand(self, rn);
-                    self.f.local_set(if double { L_F64 } else { L_F32 });
-                    operand(self, b);
-                    self.f.local_set(if double { L_F64B } else { L_F32B });
-                    let (a, b) = if double {
-                        (L_F64, L_F64B)
-                    } else {
-                        (L_F32, L_F32B)
-                    };
-                    // `select` keeps its first operand when the condition holds.
-                    self.f.i32_const(0x6000_0000);
-                    self.f.i32_const(0x2000_0000);
-                    self.f.local_get(a);
-                    self.f.local_get(b);
-                    self.f.op_raw(EQ[d]);
-                    self.f.select();
-                    self.f.local_set(L_C);
-                    self.f.i32_const(0x8000_0000u32 as i32);
-                    self.f.local_get(L_C);
-                    self.f.local_get(a);
-                    self.f.local_get(b);
-                    self.f.op_raw(LT[d]);
-                    self.f.select();
-                    self.f.local_set(L_C);
-                    // Unordered: either side unequal to itself.
-                    self.f.i32_const(0x3000_0000);
-                    self.f.local_get(L_C);
-                    self.f.local_get(a);
-                    self.f.local_get(a);
-                    self.f.op_raw(NE[d]);
-                    self.f.local_get(b);
-                    self.f.local_get(b);
-                    self.f.op_raw(NE[d]);
-                    self.f.i32_or();
+                    self.fcmp_flags(rn, (insn >> 3) & 1 == 0, rm, double);
+                    self.store_nzcv();
+                }
+                // FCCMP and FCCMPE: the comparison when the condition holds, else the immediate.
+                0b01 => {
+                    self.fcmp_flags(rn, true, rm, double);
+                    self.f.i32_const(((insn & 0xF) << 28) as i32);
+                    self.cond_holds(((insn >> 12) & 0xF) as u8);
                     self.f.select();
                     self.store_nzcv();
                 }
                 0b10 if (insn >> 11) & 0x1F == 3 => self.fdiv(insn, double),
                 0b10 => {
                     let opcode = match (insn >> 11) & 0x1F {
+                        op @ (9 | 11 | 13 | 15) => {
+                            self.fminmax(rd, rn, rm, op & 2 == 0, double);
+                            return true;
+                        }
                         1 => MUL[d],
                         5 => ADD[d],
                         7 => SUB[d],

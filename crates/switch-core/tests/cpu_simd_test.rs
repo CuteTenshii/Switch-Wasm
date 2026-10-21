@@ -821,3 +821,19 @@ fn simd_scalar_compares_and_add_sub_on_a_doubleword() {
     assert_eq!(cpu.read_vreg(15), 1, "add wraps");
     assert_eq!(cpu.read_vreg(18), u128::from(ONES), "sub: 5 - 6 wraps");
 }
+
+#[test]
+fn smov_to_a_w_register_leaves_the_upper_half_zero() {
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(19, 0x80u128 << 48);
+    cpu.set_reg(28, u64::MAX);
+    cpu.set_reg(27, u64::MAX);
+    let code = [
+        0x0E0D_2E7C, // smov w28, v19.b[6]
+        0x4E0D_2E7B, // smov x27, v19.b[6]
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(28), 0xFFFF_FF80);
+    assert_eq!(cpu.read_x(27), 0xFFFF_FFFF_FFFF_FF80);
+}

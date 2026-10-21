@@ -602,7 +602,8 @@ impl Cpu {
                 let shift = index * esize;
                 let val = (self.vregs[rn as usize] >> shift) & ((1u128 << esize) - 1);
                 let val = sext_u64(val as u64, esize);
-                self.write_zr(rd, val);
+                // A W destination takes only the low 32 bits.
+                self.write_zr(rd, if q == 0 { val & 0xFFFF_FFFF } else { val });
                 Ok(true)
             }
             _ => Ok(false),

@@ -61,7 +61,15 @@ const PAGES_AT = need('pages_at');
 const VREGS = need('vregs_at');
 // The harnesses' `vreg_seed`.
 const M64 = (1n << 64n) - 1n;
-const vregSeed = (i) => {
+const SINGLES = [0, 0x80000000, 0x00800000, 0x00000001, 0x7F800000, 0xFF800000, 0x3F800000, 0xBF800000].map(BigInt);
+const DOUBLES = [0n, 1n << 63n, 0x7FF8000000000000n, 0x1n, 0x7FF0000000000000n, 0xFFF0000000000000n, 0x3FF0000000000000n, 0xBFF0000000000000n];
+const specialSeed = (i) => {
+  const half = (at) => (i % 2 === 0 ? DOUBLES[at % 8] : (SINGLES[(at + 3) % 8] << 32n) | SINGLES[at % 8]);
+  const pick = Math.floor(i / 2);
+  return (half(pick + 5) << 64n) | half(pick);
+};
+const vregSeed = (i, specials) => {
+  if (specials) return specialSeed(i);
   const lo = (0x9E3779B97F4A7C15n * BigInt(2 * i + 1)) & M64;
   const hi = (0xC2B2AE3D27D4EB4Fn * BigInt(2 * i + 2)) & M64;
   return (hi << 64n) | lo;
@@ -167,11 +175,12 @@ for (const line of manifest.slice(first)) {
   // `excl:addr:armed:value:addr:armed:value`, the monitor before and after.
   const exclToken = f.slice(bang + 1).find((t) => t.startsWith('excl:'));
   const excl = exclToken ? exclToken.slice(5).split(':').map((h) => BigInt('0x' + h)) : null;
+  const specials = f.slice(bang + 1).includes('specials');
   const vdelta = new Map(f.slice(bang + 1).filter((t) => t.startsWith('v')).map((t) => {
     const [reg, hex] = t.slice(1).split(':');
     return [Number(reg), BigInt('0x' + hex)];
   }));
-  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('excl:')).map((run) => {
+  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('excl:') && t !== 'specials').map((run) => {
     const [at, hex] = run.split(':');
     return [Number(at), Uint8Array.from(hex.match(/../g), (b) => parseInt(b, 16))];
   });
@@ -183,8 +192,8 @@ for (const line of manifest.slice(first)) {
   resetGuest();
   for (let i = 0; i < SLOTS; i++) view.setBigUint64(REGS + i * 8, before[i], true);
   for (let i = 0; i < 32; i++) {
-    view.setBigUint64(VREGS + i * 16, vregSeed(i) & M64, true);
-    view.setBigUint64(VREGS + i * 16 + 8, vregSeed(i) >> 64n, true);
+    view.setBigUint64(VREGS + i * 16, vregSeed(i, specials) & M64, true);
+    view.setBigUint64(VREGS + i * 16 + 8, vregSeed(i, specials) >> 64n, true);
   }
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
   if (fpsrToken) view.setUint32(need('fpsr_at'), fpsrBefore, true);
@@ -252,7 +261,7 @@ for (const line of manifest.slice(first)) {
       }
     }
     for (let i = 0; i < 32; i++) {
-      const wantV = (want === after && vdelta.has(i)) ? vdelta.get(i) : vregSeed(i);
+      const wantV = (want === after && vdelta.has(i)) ? vdelta.get(i) : vregSeed(i, specials);
       const gotV = view.getBigUint64(VREGS + i * 16, true) | (view.getBigUint64(VREGS + i * 16 + 8, true) << 64n);
       if (gotV !== wantV) {
         bad.push(`v${i}: emitted ${gotV.toString(16).padStart(32, '0')}, interpreted ${wantV.toString(16).padStart(32, '0')}`);

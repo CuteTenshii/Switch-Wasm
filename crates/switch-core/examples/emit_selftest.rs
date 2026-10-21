@@ -176,9 +176,13 @@ fn main() {
 
             for set in 0..SEEDS {
                 for &nzcv in flags {
+                    // A case before this one may have stored over the preamble.
+                    cpu.mem
+                        .map(WINDOW_AT, &start)
+                        .expect("the window is mapped");
                     seed(&mut cpu, set, nzcv);
                     for i in 0..32 {
-                        cpu.set_vreg(i, vreg_seed(i));
+                        cpu.set_vreg(i, vreg_seed(i, set == SPECIALS_SET));
                     }
 
                     cpu.set_fpsr(0);
@@ -258,7 +262,10 @@ fn main() {
                     }
                     manifest.push_str(" !");
                     manifest.push_str(&memory_delta(&cpu, &start));
-                    manifest.push_str(&vreg_delta(&cpu));
+                    manifest.push_str(&vreg_delta(&cpu, set == SPECIALS_SET));
+                    if set == SPECIALS_SET {
+                        manifest.push_str(" specials");
+                    }
                     let _ = write!(manifest, " fpsr:0:{:x}", cpu.fpsr());
                     let monitor_after = cpu.exclusive_state();
                     let _ = write!(
@@ -354,18 +361,56 @@ const LAYOUT: Layout = Layout {
 };
 
 /// Vector registers start each case at these, so a wrong register or half shows.
-fn vreg_seed(i: u8) -> u128 {
+fn vreg_seed(i: u8, specials: bool) -> u128 {
+    if specials {
+        return special_floats(i);
+    }
     let lo = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(2 * u64::from(i) + 1);
     let hi = 0xC2B2_AE3D_27D4_EB4Fu64.wrapping_mul(2 * u64::from(i) + 2);
     u128::from(hi) << 64 | u128::from(lo)
 }
 
+/// Signed zeros, infinities, denormals and unit values: as doubles in the even registers, as
+/// pairs of singles in the odd ones. Only the doubles hold a NaN; the emitted fused multiply-add
+/// of singles does not keep a NaN's sign.
+fn special_floats(i: u8) -> u128 {
+    const SINGLES: [u32; 8] = [
+        0,
+        0x8000_0000,
+        0x0080_0000,
+        0x0000_0001,
+        0x7F80_0000,
+        0xFF80_0000,
+        0x3F80_0000,
+        0xBF80_0000,
+    ];
+    const DOUBLES: [u64; 8] = [
+        0,
+        1 << 63,
+        0x7FF8_0000_0000_0000,
+        0x0000_0000_0000_0001,
+        0x7FF0_0000_0000_0000,
+        0xFFF0_0000_0000_0000,
+        0x3FF0_0000_0000_0000,
+        0xBFF0_0000_0000_0000,
+    ];
+    let pick = usize::from(i / 2);
+    let half = |at: usize| {
+        if i.is_multiple_of(2) {
+            DOUBLES[at % 8]
+        } else {
+            u64::from(SINGLES[(at + 3) % 8]) << 32 | u64::from(SINGLES[at % 8])
+        }
+    };
+    u128::from(half(pick + 5)) << 64 | u128::from(half(pick))
+}
+
 /// ` vN:hex` for each vector register the case changed from its seed.
-fn vreg_delta(cpu: &Cpu) -> String {
+fn vreg_delta(cpu: &Cpu, specials: bool) -> String {
     let mut out = String::new();
     for i in 0..32 {
         let v = cpu.read_vreg(i);
-        if v != vreg_seed(i) {
+        if v != vreg_seed(i, specials) {
             let _ = write!(out, " v{i}:{v:032x}");
         }
     }
@@ -486,7 +531,10 @@ fn survey() -> BTreeMap<String, Vec<u32>> {
 }
 
 /// How many register-content sets each block is run under.
-const SEEDS: usize = 11;
+const SEEDS: usize = 12;
+
+/// The set whose vector registers hold zeros, infinities and NaNs instead of noise.
+const SPECIALS_SET: usize = SEEDS - 1;
 
 /// Seed flags first (the preamble clobbers `X0`), then the register file.
 /// Arm the monitor for an exclusive load or store at the address its base register holds:
@@ -551,7 +599,7 @@ fn seed_value(set: usize, i: u64) -> u64 {
         4 => i,
         5 => 32 + i,
         6 => 63 + i,
-        7 => splitmix(0x9E37_79B9_7F4A_7C15 ^ i),
+        7 | 11 => splitmix(0x9E37_79B9_7F4A_7C15 ^ i),
         8 => splitmix(0xD1B5_4A32_D192_ED03 ^ i),
         9 => {
             if even {
