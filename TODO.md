@@ -15,7 +15,7 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Performance
 
-- Blocks with an instruction the emitter lacks stay in the op walk and break their region: on Asphalt 9 the hot ones are `MRS` of `CNTVCT_EL0` (the clock, which needs the host), scalar `FMIN`/`FMAX` and `FCCMP`, and `LD3` multiple-structure loads. `LDXP`/`STXP` are also interpreted.
+- Blocks with an instruction the emitter lacks stay in the op walk and break their region: on Asphalt 9 the hot one left is `MRS` of `CNTVCT_EL0` (the clock, which needs the host). `LDXP`/`STXP` are also interpreted; the 64-bit pair store compares 16 bytes, which wasm has no atomic for.
 
 ## Mobile
 

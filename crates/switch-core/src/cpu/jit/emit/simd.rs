@@ -785,6 +785,9 @@ impl Emitter<'_> {
         if !self.simd {
             return false;
         }
+        if insn & 0xBF20_0000 == 0x0C00_0000 {
+            return self.multiple_structures(insn, retired);
+        }
         // LD1/ST1 (single structure) and LD1R, one register.
         if insn & 0xBF00_0000 == 0x0D00_0000 && (insn >> 21) & 1 == 0 {
             return self.single_structure(insn, retired);
@@ -923,6 +926,108 @@ impl Emitter<'_> {
             }
         }
         self.write_back(rn, wb);
+        true
+    }
+
+    /// LD1 to LD4 and ST1 to ST4 of whole registers, checked as one access.
+    fn multiple_structures(&mut self, insn: u32, retired: usize) -> bool {
+        let q = (insn >> 30) & 1;
+        let post = (insn >> 23) & 1 == 1;
+        let load = (insn >> 22) & 1 == 1;
+        let rm = (insn >> 16) & 0x1F;
+        let size = (insn >> 10) & 3;
+        let rn = base_slot((insn >> 5) & 0x1F);
+        let rt = insn & 0x1F;
+        if !post && rm != 0 {
+            return false;
+        }
+        let (regs, members) = match (insn >> 12) & 0xF {
+            0b0000 => (1, 4),
+            0b0010 => (4, 1),
+            0b0100 => (1, 3),
+            0b0110 => (3, 1),
+            0b0111 => (1, 1),
+            0b1000 => (1, 2),
+            0b1010 => (2, 1),
+            _ => return false,
+        };
+        if size == 3 && q == 0 && members != 1 {
+            return false;
+        }
+        let vector = 8u32 << q;
+        let total = regs * members * vector;
+        self.read_reg_raw(rn);
+        self.f.local_tee(L_A);
+        self.f.i32_wrap_i64();
+        self.f.local_set(L_ADDR);
+        if post {
+            self.f.local_get(L_A);
+            if rm == 31 {
+                self.f.i64_const(i64::from(total));
+            } else {
+                self.read_reg_raw(rm as u8);
+            }
+            self.f.i64_add();
+            self.f.local_set(L_W);
+        }
+        if load {
+            self.page_for_read(total, retired);
+        } else {
+            self.page_for_write(total, retired);
+        }
+        if members == 1 {
+            for i in 0..regs {
+                let reg = (rt + i) % 32;
+                let at = i * vector;
+                if load {
+                    if q == 1 {
+                        self.in_page();
+                        self.f.simd_mem(op::V128_LOAD, UNALIGNED, at);
+                    } else {
+                        self.f.v128_const([0; 16]);
+                        self.in_page();
+                        self.f.i64_load(UNALIGNED, at);
+                        self.f.simd_lane(op::I64X2_REPLACE, 0);
+                    }
+                    self.vset(reg);
+                } else {
+                    self.in_page();
+                    self.vget(reg);
+                    if q == 1 {
+                        self.f.simd_mem(op::V128_STORE, UNALIGNED, at);
+                    } else {
+                        self.f.simd_lane(op::I64X2_EXTRACT, 0);
+                        self.f.i64_store(UNALIGNED, at);
+                    }
+                }
+            }
+        } else {
+            let bytes = 1u32 << size;
+            for member in 0..members {
+                let reg = (rt + member) % 32;
+                for lane in 0..vector / bytes {
+                    let at = (lane * members + member) * bytes;
+                    self.in_page();
+                    if load {
+                        if lane == 0 {
+                            self.f.v128_const([0; 16]);
+                        } else {
+                            self.vget(reg);
+                        }
+                        self.f
+                            .simd_mem_lane(op::LOAD8_LANE + size, UNALIGNED, at, lane as u8);
+                        self.vset(reg);
+                    } else {
+                        self.vget(reg);
+                        self.f
+                            .simd_mem_lane(op::STORE8_LANE + size, UNALIGNED, at, lane as u8);
+                    }
+                }
+            }
+        }
+        if post {
+            self.write_back(rn, Wb::Post);
+        }
         true
     }
 
