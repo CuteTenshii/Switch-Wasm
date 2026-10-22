@@ -488,6 +488,7 @@ impl Cpu {
                 if let Some(applet) = self.process_mut().am_applets.get_mut(&accessor) {
                     applet.process = Some(pid);
                 }
+                self.set_application_focus(false);
                 self.log(
                     Level::Info,
                     &format!("[am] started the {name} applet as process {pid}"),
@@ -513,6 +514,7 @@ impl Cpu {
         applet.process = None;
         applet.finish();
         self.signal_library_applet_event(accessor, STATE_CHANGED_EVENT);
+        self.set_application_focus(true);
     }
 
     /// Hand a storage the running applet pushed to its caller's accessor; false if no

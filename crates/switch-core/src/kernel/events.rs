@@ -99,6 +99,17 @@ impl Cpu {
         }
     }
 
+    /// Tell the running application it lost or regained focus to a library applet. An
+    /// applet is not told.
+    pub(crate) fn set_application_focus(&mut self, in_focus: bool) {
+        let process = self.process_mut();
+        if !process.applet_is_application || process.in_focus == in_focus {
+            return;
+        }
+        process.in_focus = in_focus;
+        self.queue_applet_message(AppletMessage::FocusStateChanged);
+    }
+
     /// Record the proxy kind, which selects the focus message.
     pub(crate) fn set_applet_is_application(&mut self, is_application: bool) {
         self.process_mut().applet_is_application = is_application;

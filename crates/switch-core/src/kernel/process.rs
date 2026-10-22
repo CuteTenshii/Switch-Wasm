@@ -33,6 +33,8 @@ pub(crate) struct Process {
     pub(crate) applet_messages: VecDeque<u32>,
     /// Shared `GetEventHandle` event, signalled when a message is queued.
     pub(crate) applet_event: Option<u64>,
+    /// Whether the process has focus; an application loses it while its library applet runs.
+    pub(crate) in_focus: bool,
     /// Whether the startup focus message has been handed out.
     pub(crate) applet_focus_announced: bool,
     /// The applet's sleep-lock event and whether the lock is held.
@@ -167,6 +169,7 @@ impl Process {
             save_data_quota: fs::SaveDataQuota::default(),
             memory_layout: MemoryLayout::PLAIN,
             system_resource_size: 0,
+            in_focus: true,
             applet_focus_announced: false,
             applet_is_application: true,
             idle_time_detection_extension: 0,

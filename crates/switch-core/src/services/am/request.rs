@@ -193,7 +193,11 @@ impl Cpu {
                     let mode = self.operation_mode().performance_mode();
                     self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
                 }
-                Some(9) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetCurrentFocusState: InFocus
+                // GetCurrentFocusState: 1 is InFocus, 2 OutOfFocus.
+                Some(9) => {
+                    let state = if self.process().in_focus { 1u32 } else { 2 };
+                    self.write_ipc_response(tls, 0, &[], &state.to_le_bytes(), &[])
+                }
                 // GetBootMode: Normal.
                 Some(8) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // GetAcquiredSleepLockEvent: never signalled.

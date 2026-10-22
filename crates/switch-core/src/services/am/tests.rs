@@ -1016,3 +1016,45 @@ fn an_error_dialog_shows_the_code_as_the_console_prints_it() {
         Some("1234")
     );
 }
+
+#[test]
+fn an_application_is_told_it_lost_focus_to_its_library_applet_and_that_it_has_it_back() {
+    const GETTER: u64 = 10;
+    const FOCUS_STATE_CHANGED: u32 = 15;
+    let (mut cpu, accessor) = library_applet(APPLET_WEB);
+    cpu.register_service_handle(GETTER, "am:common-state-getter");
+    let ask = |cpu: &mut Cpu, cmd: u32| -> (u32, u32) {
+        marshal(cpu, false, cmd, &[]);
+        cpu.applet_request(TLS, GETTER, Some(cmd)).unwrap();
+        (
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+        )
+    };
+    const RECEIVE_MESSAGE: u32 = 1;
+    const GET_CURRENT_FOCUS_STATE: u32 = 9;
+    assert_eq!(ask(&mut cpu, RECEIVE_MESSAGE), (0, FOCUS_STATE_CHANGED));
+    assert_eq!(ask(&mut cpu, GET_CURRENT_FOCUS_STATE).1, 1, "InFocus");
+
+    cpu.set_application_focus(false);
+    assert_eq!(ask(&mut cpu, GET_CURRENT_FOCUS_STATE).1, 2, "OutOfFocus");
+    assert_eq!(ask(&mut cpu, RECEIVE_MESSAGE), (0, FOCUS_STATE_CHANGED));
+
+    cpu.finish_library_applet(Cpu::object_key(accessor, 0), true);
+    assert_eq!(ask(&mut cpu, GET_CURRENT_FOCUS_STATE).1, 1, "InFocus");
+    assert_eq!(ask(&mut cpu, RECEIVE_MESSAGE), (0, FOCUS_STATE_CHANGED));
+    assert_ne!(
+        ask(&mut cpu, RECEIVE_MESSAGE).0,
+        0,
+        "a message was left over"
+    );
+}
+
+#[test]
+fn an_applet_is_not_told_about_focus() {
+    let (mut cpu, _) = library_applet(APPLET_WEB);
+    cpu.set_applet_is_application(false);
+    cpu.set_application_focus(false);
+    assert!(cpu.process().in_focus);
+    assert!(cpu.process().applet_messages.is_empty());
+}
