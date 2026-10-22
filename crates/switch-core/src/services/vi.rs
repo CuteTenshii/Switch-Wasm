@@ -237,11 +237,12 @@ impl Cpu {
     /// `ISystemDisplayService`'s shared-buffer commands: applets acquire a slot
     /// of one shared buffer, render into it and present it.
     fn vi_shared_buffer(&mut self, tls: u32, cmd_id: u32) -> Result<()> {
-        use crate::cpu::{SHARED_BUFFER_ADDR, SHARED_BUFFER_SLOTS, SHARED_BUFFER_USABLE_SLOTS};
+        use crate::cpu::{SHARED_BUFFER_SLOTS, SHARED_BUFFER_USABLE_SLOTS};
         // See [`crate::cpu::SHARED_BUFFER_GEOMETRY`]; does not follow the dock.
         let mode = crate::cpu::SHARED_BUFFER_GEOMETRY;
         let (shared_width, shared_height) = mode.display_size();
         let slot_size = mode.shared_buffer_slot_size();
+        self.map_shared_buffer()?;
         /// `NvMultiFence`: a count and four `{ id, value }` pairs.
         const FENCE_SIZE: usize = 4 + 4 * 8;
         match cmd_id {
@@ -325,7 +326,6 @@ impl Cpu {
                 };
                 // GPU backends keep render targets on the device; the display reads guest memory.
                 self.present_when_landed(buffer)?;
-                let _ = SHARED_BUFFER_ADDR;
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // GetSharedFrameBufferAcquirableEvent: a slot is always free, so it stays signalled.
@@ -337,6 +337,20 @@ impl Cpu {
             // Open/Close/Connect/DisconnectSharedLayer, CancelSharedFrameBuffer.
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
+    }
+
+    /// Map the usable slots into the running process, once, so every process draws on the same pages.
+    pub(crate) fn map_shared_buffer(&mut self) -> Result<()> {
+        if self.process().shared_buffer_mapped {
+            return Ok(());
+        }
+        self.shared_buffer_object();
+        if let Some(pages) = self.shared_buffer_pages.clone() {
+            self.mem
+                .map_shared(crate::cpu::SHARED_BUFFER_ADDR, &pages)?;
+        }
+        self.process_mut().shared_buffer_mapped = true;
+        Ok(())
     }
 
     /// The system shared buffer's nvmap `(handle, id)`, created on first use.
@@ -352,6 +366,9 @@ impl Cpu {
         let _ = self.nv.gpu.nvmap.alloc(handle, 0, 0, 0x1000, 0, addr);
         let id = self.nv.gpu.nvmap.get(handle).map(|h| h.id).unwrap_or(0);
         self.shared_buffer = Some((handle, id));
+        let used = crate::cpu::SHARED_BUFFER_USABLE_SLOTS
+            * crate::cpu::SHARED_BUFFER_GEOMETRY.shared_buffer_slot_size();
+        self.shared_buffer_pages = Some(crate::mem::SharedPages::new(used as usize));
         (handle, id)
     }
 

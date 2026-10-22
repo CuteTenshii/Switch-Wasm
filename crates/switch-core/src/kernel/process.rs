@@ -105,6 +105,8 @@ pub(crate) struct Process {
     /// The process's own RomFS (`OpenDataStorageByCurrentProcess`), read by range.
     /// `None` for homebrew, which reads RomFS from the SD card.
     pub(crate) romfs: Option<Box<dyn crate::source::ByteSource>>,
+    /// Whether the shared buffer's pages are mapped at `SHARED_BUFFER_ADDR`.
+    pub(crate) shared_buffer_mapped: bool,
     /// Guest address of hid shared memory; 0 until mapped.
     pub(crate) hid_shmem_addr: u32,
     /// Handle used to recognise hid's shared memory in `svcMapSharedMemory`.
@@ -192,6 +194,7 @@ impl Process {
             am_applets: IdMap::default(),
             am_keyboard: None,
             romfs: None,
+            shared_buffer_mapped: false,
             hid_shmem_addr: 0,
             hid_shmem_handle: None,
             time_shmem_handle: None,
@@ -320,6 +323,7 @@ impl Cpu {
         self.display.set_default_size(width, height);
         self.shared_buffer = None;
         self.shared_buffer_slot = 0;
+        self.shared_buffer_pages = None;
         // Frames count the title's presents; the host waits for its first.
         self.nv.gpu.frames = 0;
         self.last_vsync_frame = 0;
@@ -405,6 +409,21 @@ mod tests {
 
     const CODE: u32 = 0x0800_0000;
     const WORD: u32 = 0x0900_0000;
+
+    #[test]
+    fn every_process_draws_on_the_same_shared_buffer() {
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        let other = cpu.create_process();
+        cpu.map_shared_buffer().unwrap();
+        cpu.in_process(other, |cpu| cpu.map_shared_buffer().unwrap());
+        cpu.mem.write_u32(SHARED_BUFFER_ADDR + 0x1_0000, 5).unwrap();
+        let seen = cpu.processes[&other]
+            .mem
+            .read_u32(SHARED_BUFFER_ADDR + 0x1_0000)
+            .unwrap();
+        assert_eq!(seen, 5, "the other process has its own copy");
+    }
 
     /// `movz w1, #value; str w1, [x0]; b .-8`
     fn store_forever(cpu: &mut Cpu, value: u32) {

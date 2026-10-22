@@ -5,9 +5,8 @@
 Library applets must run as processes beside their caller, in one kernel with one set of console services.
 Each stage builds, passes `make test` and clippy, keeps every title in `docs/progress.md` booting to the same frames, and is committed on its own.
 
-1. Shared memory objects for the shared framebuffer and transfer memory.
-2. nvmap handles are console-wide and name a CPU address in the allocating process; a handle another process maps or presents is read from that process's memory at the same address.
-3. am focus: the caller is told it lost and regained focus, and `GetCurrentFocusState` answers per process.
+1. nvmap handles are console-wide and name a CPU address in the allocating process; a handle another process maps or presents is read from that process's memory at the same address.
+2. am focus: the caller is told it lost and regained focus, and `GetCurrentFocusState` answers per process.
 
 ## Browser bindings
 

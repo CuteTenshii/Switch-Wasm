@@ -205,6 +205,10 @@ pub struct Machine {
     /// The system shared buffer's nvmap `(handle, id)` and the next slot to acquire.
     pub(crate) shared_buffer: Option<(u32, u32)>,
     pub(crate) shared_buffer_slot: u32,
+    /// The pages behind the usable slots, mapped at `SHARED_BUFFER_ADDR` in each process that asks.
+    pub(crate) shared_buffer_pages: Option<std::sync::Arc<crate::mem::SharedPages>>,
+    /// Transfer memory objects by handle: the creator's pages, shared.
+    pub(crate) transfer_memories: IdMap<u64, std::sync::Arc<crate::mem::SharedPages>>,
     /// See [`Cpu::set_operation_mode`].
     pub(crate) operation_mode: OperationMode,
     /// Last `SetTerminateResult`, read back by `GetLastApplicationExitReason`.
@@ -498,6 +502,8 @@ impl Cpu {
                 binder_event: None,
                 shared_buffer: None,
                 shared_buffer_slot: 0,
+                shared_buffer_pages: None,
+                transfer_memories: IdMap::default(),
                 am_terminate_result: 0,
                 mii_random_sequence: 0,
                 operation_mode: OperationMode::default(),

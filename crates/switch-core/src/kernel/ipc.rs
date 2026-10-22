@@ -121,6 +121,19 @@ impl Cpu {
         off
     }
 
+    /// The copy handles a request carries.
+    pub(crate) fn ipc_request_copy_handles(&self, tls: u32) -> Vec<u64> {
+        let word = |at: u32| self.mem.read_u32(tls.wrapping_add(at)).unwrap_or(0);
+        if (word(4) >> 31) & 1 == 0 {
+            return Vec::new();
+        }
+        let special = word(8);
+        let first = 12 + if special & 1 != 0 { 8 } else { 0 };
+        (0..(special >> 1) & 0xf)
+            .map(|i| u64::from(word(first + 4 * i)))
+            .collect()
+    }
+
     /// The data area past the descriptors, where TIPC arguments begin.
     pub(crate) fn ipc_data_area(&self, tls: u32) -> u32 {
         let header = self.ipc_header(tls);

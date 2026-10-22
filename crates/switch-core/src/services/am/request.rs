@@ -825,7 +825,7 @@ impl Cpu {
                 Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 Some(2) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // CreateStorage(s64 size) / CreateTransferMemoryStorage(u8 writable, s64 size,
-                // handle) -> IStorage. Transfer memory is not tracked, so its storage is zeros.
+                // handle) -> IStorage. A transfer memory's storage holds its contents.
                 Some(10) | Some(11) => {
                     const MAX_STORAGE: u64 = 64 * 1024 * 1024;
                     /// `KERNELRESULT(OutOfMemory)`.
@@ -837,13 +837,19 @@ impl Cpu {
                     if size > MAX_STORAGE {
                         return self.write_ipc_response(tls, OUT_OF_MEMORY, &[], &[], &[]);
                     }
+                    let mut contents = vec![0u8; size as usize];
                     if cmd_id == Some(11) {
-                        self.warn_stub(&iface, cmd_id, "zeros, not the transfer memory's contents");
+                        let memory = self
+                            .ipc_request_copy_handles(tls)
+                            .first()
+                            .and_then(|h| self.transfer_memories.get(h));
+                        if let Some(memory) = memory {
+                            let n = contents.len().min(memory.size());
+                            memory.read_into(0, &mut contents[..n])?;
+                        }
                     }
                     let key = self.reply_with_interface(tls, handle, "am:storage")?;
-                    self.process_mut()
-                        .am_storages
-                        .insert(key, vec![0u8; size as usize]);
+                    self.process_mut().am_storages.insert(key, contents);
                     Ok(())
                 }
                 // CreateHandleStorage: no backing memory to read.

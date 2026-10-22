@@ -23,6 +23,9 @@ impl Cpu {
             return;
         }
         handles.remove(&handle);
+        if self.transfer_memories.contains_key(&handle) && !self.held_handles().contains(&handle) {
+            self.transfer_memories.remove(&handle);
+        }
         if self.service_handles.contains_key(&handle) && !self.held_handles().contains(&handle) {
             self.close_session(handle);
         }
@@ -45,6 +48,9 @@ impl Cpu {
                 self.close_session(handle);
             }
         }
+        self.machine
+            .transfer_memories
+            .retain(|handle, _| held.contains(handle));
         let processes = &self.machine.processes;
         self.machine.events.retain(|handle, event| {
             event

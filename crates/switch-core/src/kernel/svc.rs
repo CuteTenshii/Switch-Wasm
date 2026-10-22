@@ -538,9 +538,21 @@ impl Cpu {
                 Ok(())
             }
             0x15 => {
-                // CreateTransferMemory: a handle of its own, as nothing models the object.
+                // CreateTransferMemory(addr, size, perm): the creator's pages become a shared
+                // block, so a process the memory is passed to sees what the creator writes.
+                let addr = self.read_zr(1) as u32;
+                let size = self.read_zr(2) as usize;
                 let handle = self.alloc_handle();
                 self.grant_handle(handle);
+                let page = crate::mem::PAGE_SIZE;
+                if size != 0 && (addr as usize).is_multiple_of(page) && size.is_multiple_of(page) {
+                    let block = crate::mem::SharedPages::new(size);
+                    let mut contents = vec![0u8; size];
+                    self.mem.read_into(addr, &mut contents)?;
+                    block.write(0, &contents)?;
+                    self.mem.map_shared(addr, &block)?;
+                    self.transfer_memories.insert(handle, block);
+                }
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, handle);
                 Ok(())
@@ -1292,6 +1304,31 @@ mod tests {
         cpu.write_zr(2, mask);
         cpu.horizon_syscall(0x0F).unwrap();
         cpu.read_zr(0)
+    }
+
+    #[test]
+    fn a_transfer_memory_is_the_creators_pages_and_goes_with_its_last_handle() {
+        const ADDR: u32 = 0x0900_0000;
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(ADDR, 0x2000).unwrap();
+        cpu.mem.write_u32(ADDR + 4, 7).unwrap();
+        cpu.write_zr(1, u64::from(ADDR));
+        cpu.write_zr(2, 0x2000);
+        cpu.horizon_syscall(0x15).unwrap();
+        assert_eq!(cpu.read_zr(0), 0);
+        let handle = cpu.read_zr(1);
+
+        let memory = cpu.transfer_memories[&handle].clone();
+        assert_eq!(memory.read_u32(4).unwrap(), 7, "the contents were not kept");
+        cpu.mem.write_u32(ADDR + 0x1000, 9).unwrap();
+        assert_eq!(
+            memory.read_u32(0x1000).unwrap(),
+            9,
+            "a store by the creator did not show in the object"
+        );
+
+        cpu.close_handle(handle);
+        assert!(cpu.transfer_memories.is_empty());
     }
 
     /// Each thread reports the core it was put on.

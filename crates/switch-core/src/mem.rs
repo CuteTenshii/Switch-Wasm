@@ -280,6 +280,26 @@ impl SharedPages {
         self.write(offset, &value.to_le_bytes())
     }
 
+    /// Bytes in the block.
+    pub fn size(&self) -> usize {
+        self.pages.len() * PAGE_SIZE
+    }
+
+    /// Fill `buf` from `offset` into the block.
+    pub fn read_into(&self, offset: u32, buf: &mut [u8]) -> Result<()> {
+        let at = offset as usize;
+        if at + buf.len() > self.pages.len() * PAGE_SIZE {
+            return Err(Error::Cpu(format!(
+                "shared memory read at {offset:#x} is past its end"
+            )));
+        }
+        for (i, byte) in buf.iter_mut().enumerate() {
+            // SAFETY: in bounds, checked above.
+            *byte = unsafe { (*self.pages[(at + i) / PAGE_SIZE].get())[(at + i) % PAGE_SIZE] };
+        }
+        Ok(())
+    }
+
     pub fn read_u32(&self, offset: u32) -> Result<u32> {
         let at = offset as usize;
         if at + 4 > self.pages.len() * PAGE_SIZE {
