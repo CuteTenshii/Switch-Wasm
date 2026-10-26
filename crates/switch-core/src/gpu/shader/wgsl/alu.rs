@@ -229,18 +229,24 @@ impl Emitter<'_> {
                 offset,
                 size,
             } => {
-                let Some((bank, at, index)) = self.global_base(at, addr) else {
+                let Some((bank, descriptor)) = self.global_base(at, addr) else {
                     return Err(Unsupported::Op { at, op });
                 };
-                let slot = match self.globals.iter().position(|g| *g == (bank, at)) {
+                let slot = match self.globals.iter().position(|g| *g == (bank, descriptor)) {
                     Some(slot) => slot,
                     None => {
-                        self.globals.push((bank, at));
+                        self.globals.push((bank, descriptor));
                         self.globals.len() - 1
                     }
                 };
-                let index = self.r(index);
-                let base = self.bind(&format!("({index} + {offset}u)"));
+                // The address register still holds descriptor plus offset, whatever
+                // happened to the register the offset was added from.
+                let address = self.r(addr);
+                let start = self.operand(Operand::Const {
+                    bank,
+                    offset: descriptor,
+                });
+                let base = self.bind(&format!("({address} - {start} + {offset}u)"));
                 for word in 0..size.regs() {
                     let byte = u32::from(word) * 4;
                     self.set_r(

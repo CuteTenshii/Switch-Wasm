@@ -63,14 +63,17 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// A `ldg` base descriptor from a constant bank plus a register offset:
+    /// The constant-bank descriptor a `ldg` address was built from, plus a register offset:
     ///
     /// ```text
     /// iadd.cout r10, r7, c0[0x110]      // low half, carrying out
     /// iadd.cin  r11, RZ, c0[0x114]      // high half, carrying in
     /// ldg       r10, [r10]
     /// ```
-    pub(super) fn global_base(&self, at: usize, addr: u8) -> Option<(u8, u16, u8)> {
+    ///
+    /// The offset register may be rewritten before the `ldg`, so callers take the
+    /// offset from the address register instead.
+    pub(super) fn global_base(&self, at: usize, addr: u8) -> Option<(u8, u16)> {
         self.indexed_global_base(at, addr)
             .or_else(|| self.direct_global_base(at, addr))
     }
@@ -81,7 +84,7 @@ impl<'a> Emitter<'a> {
     /// ldc.64 r0, c1[0x40]
     /// ldg.64 r2, [r0]
     /// ```
-    fn direct_global_base(&self, at: usize, addr: u8) -> Option<(u8, u16, u8)> {
+    fn direct_global_base(&self, at: usize, addr: u8) -> Option<(u8, u16)> {
         let lo = self.sole_writer(at, addr)?;
         let hi = self.sole_writer(at, addr.wrapping_add(1))?;
         match (self.program.op(lo), self.program.op(hi)) {
@@ -94,7 +97,7 @@ impl<'a> Emitter<'a> {
                     size: MemSize::B64,
                 },
                 _,
-            ) if lo == hi && dst == addr => Some((bank, (offset as u32 & 0xffff) as u16, RZ)),
+            ) if lo == hi && dst == addr => Some((bank, (offset as u32 & 0xffff) as u16)),
             (
                 Op::Mov {
                     src: Operand::Const { bank, offset },
@@ -108,25 +111,24 @@ impl<'a> Emitter<'a> {
                         },
                     ..
                 },
-            ) if hi_bank == bank && hi_offset == offset.wrapping_add(4) => Some((bank, offset, RZ)),
+            ) if hi_bank == bank && hi_offset == offset.wrapping_add(4) => Some((bank, offset)),
             _ => None,
         }
     }
 
     /// The indexed form of [`Emitter::global_base`].
-    fn indexed_global_base(&self, at: usize, addr: u8) -> Option<(u8, u16, u8)> {
+    fn indexed_global_base(&self, at: usize, addr: u8) -> Option<(u8, u16)> {
         let (mut lo, mut hi) = (None, None);
         for i in (0..at).rev() {
             match self.program.op(i) {
                 Op::Iadd {
                     dst,
-                    a,
                     b: Operand::Const { bank, offset },
                     aneg: false,
                     bneg: false,
                     cout: true,
                     ..
-                } if dst == addr && lo.is_none() => lo = Some((bank, offset, a)),
+                } if dst == addr && lo.is_none() => lo = Some((bank, offset)),
                 // The high half adds only the carry.
                 Op::Iadd {
                     dst,
@@ -152,11 +154,11 @@ impl<'a> Emitter<'a> {
                 break;
             }
         }
-        let ((bank, offset, index), (hi_bank, hi_offset)) = (lo?, hi?);
+        let ((bank, offset), (hi_bank, hi_offset)) = (lo?, hi?);
         if hi_bank != bank || hi_offset != offset.wrapping_add(4) {
             return None;
         }
-        Some((bank, offset, index))
+        Some((bank, offset))
     }
 
     /// The constant word a bindless `tex.b` reads its handle from:

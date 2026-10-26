@@ -260,6 +260,115 @@ fn lea_computes_the_same_words_on_both_renderers() {
     assert_eq!(h.texel(1, 1), 0xffff_ffff, "every lea matched");
 }
 
+/// A `ldg` through a constant-bank descriptor reads the address the add made, even
+/// when the shader rewrites the register the offset came from before loading.
+/// Echoes of Wisdom's controller applet builds its glyph quads this way, and the
+/// device read the wrong record words, so none of its text showed.
+#[test]
+fn a_global_load_reads_where_the_address_points_after_its_offset_register_changes() {
+    use switch_core::gpu::shader::isa::{self, MemSize};
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    const RZ: u64 = 0xff;
+    const ONE: u32 = 0x3f80_0000;
+    const HALF: u32 = 0x3f00_0000;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    // iadd dst, a, c0[word * 4], carrying out of the low half or into the high one.
+    let iadd_c0 = |dst: u64, a: u64, word: u64, cin: u64, cout: u64| {
+        0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | a << 8 | dst
+    };
+    let ldg = |dst: u64, addr: u64| 0xeed0u64 << 48 | 4 << 48 | PT | addr << 8 | dst;
+    let words = [
+        mov32i(7, 16),
+        iadd_c0(10, 7, 0x110 / 4, 0, 1),
+        iadd_c0(11, RZ, 0x114 / 4, 1, 0),
+        // The offset register changes; the address pair does not.
+        mov32i(7, 0),
+        ldg(0, 10),
+        mov32i(12, 20),
+        // The offset register is the address register itself.
+        iadd_c0(12, 12, 0x110 / 4, 0, 1),
+        iadd_c0(13, RZ, 0x114 / 4, 1, 0),
+        ldg(1, 12),
+        mov32i(2, 0),
+        mov32i(3, ONE),
+        0xe300_0000_0007_000f, // exit
+    ];
+    assert_eq!(
+        isa::decode(ldg(0, 10)).op,
+        Op::Ldg {
+            dst: 0,
+            addr: 10,
+            offset: 0,
+            size: MemSize::B32
+        }
+    );
+    assert!(matches!(
+        isa::decode(iadd_c0(10, 7, 0x110 / 4, 0, 1)).op,
+        Op::Iadd {
+            dst: 10,
+            a: 7,
+            cout: true,
+            cin: false,
+            ..
+        }
+    ));
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| {
+        h.triangle([0.0; 4]);
+        let constants = h.base + 0x1500;
+        let buffer = h.base + 0x1a00;
+        // Every word but the two the offsets name reads as one half.
+        for word in 0..16u64 {
+            let value = if word == 4 || word == 5 { ONE } else { HALF };
+            h.vmm.write_u32(&h.mem, buffer + word * 4, value).unwrap();
+        }
+        h.vmm
+            .write_u32(&h.mem, constants + 0x110, buffer as u32)
+            .unwrap();
+        h.vmm
+            .write_u32(&h.mem, constants + 0x114, (buffer >> 32) as u32)
+            .unwrap();
+        // The fragment stage's bank 0.
+        let mut ctx = switch_core::gpu::exec::ExecCtx {
+            mem: &h.mem,
+            vmm: &h.vmm,
+            as_id: h.as_id,
+            host1x: &mut h.host1x,
+            stats: &mut h.stats,
+            trace: false,
+        };
+        for (method, arg) in [
+            (0x8E0, 0x200),
+            (0x8E1, (constants >> 32) as u32),
+            (0x8E2, constants as u32),
+            (0x900 + 4 * 8 + 4, 1),
+        ] {
+            h.engine.write(method, arg, true, &mut ctx).unwrap();
+        }
+    };
+    agrees_shading(
+        move || Harness::with_fragment_shader(shader()),
+        |_| {},
+        set_up,
+    );
+    let mut h = Harness::with_fragment_shader(shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    assert_eq!(h.texel(1, 1), 0xff00_ffff, "both loads read one");
+}
+
 /// A shader reading its quad neighbour's register reads the same on both renderers,
 /// with native quad operations and with the browser's `QUAD_SWAP`.
 #[test]
