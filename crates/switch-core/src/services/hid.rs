@@ -239,9 +239,10 @@ impl Cpu {
                 Some(309) => self.write_ipc_response(tls, 0, &[], &[0u8; 8], &[]),
                 // GetUniquePadIds: none.
                 Some(703) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
-                // GetRegisteredDevices (543 before 13.0.0, 548 after): no Bluetooth pairings; connected pads come from shared memory.
-                // The controller applet aborts with 10-0221 when 548 is refused.
-                Some(543) | Some(548) => {
+                // GetRegisteredDevices (543 before 13.0.0, 548 after) and, from 20.0.0, its
+                // ForControllerSupport form (551): no Bluetooth pairings; connected pads come from
+                // shared memory. The controller applet aborts with 10-0221 when either is refused.
+                Some(543) | Some(548) | Some(551) => {
                     self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[])
                 }
                 // SetNotificationLedPattern and its timeout form.
@@ -437,7 +438,7 @@ mod tests {
 
     #[test]
     fn the_controller_applet_finds_no_registered_devices_rather_than_a_refusal() {
-        for command in [543u32, 548] {
+        for command in [543u32, 548, 551] {
             let mut cpu = request(false, command, &[]);
             cpu.register_service_handle(9, "hid:sys");
             cpu.hid_request(TLS, 9, Some(command)).unwrap();
