@@ -363,7 +363,9 @@ pub fn load_fallback_font(cpu: &mut Cpu) {
     }
 }
 
-/// Register every system data archive in `SWITCH_FIRMWARE`, if it is set.
+/// Register every system data archive in `SWITCH_FIRMWARE`, if it is set, and install
+/// its programs as the browser's NAND does, so library applets run. Returns the
+/// number of data archives.
 pub fn register_firmware(cpu: &mut Cpu, keys: &KeySet) -> usize {
     let Ok(dir) = env::var("SWITCH_FIRMWARE") else {
         return 0;
@@ -385,6 +387,10 @@ pub fn register_firmware(cpu: &mut Cpu, keys: &KeySet) -> usize {
             continue;
         };
         use switch_core::nca::ContentType;
+        if archive.content_type == ContentType::Program {
+            install_firmware_program(cpu, keys, &path, archive);
+            continue;
+        }
         if !matches!(
             archive.content_type,
             ContentType::Data | ContentType::PublicData
@@ -400,6 +406,32 @@ pub fn register_firmware(cpu: &mut Cpu, keys: &KeySet) -> usize {
         }
     }
     registered
+}
+
+/// `switch_add_applet`'s install, over a file; a program that does not open is skipped.
+fn install_firmware_program(cpu: &mut Cpu, keys: &KeySet, path: &Path, nca: switch_core::nca::Nca) {
+    use std::rc::Rc;
+    use switch_core::source::FileSource;
+    let Some(exefs_index) = nca.exefs_section_index() else {
+        return;
+    };
+    let Ok(exefs) = FileSource::open(path)
+        .map_err(|e| switch_core::Error::Io(e.to_string()))
+        .and_then(|file| nca.section_source(file, keys, exefs_index))
+    else {
+        return;
+    };
+    let romfs = nca.romfs_section_index().and_then(|index| {
+        let file = FileSource::open(path).ok()?;
+        let romfs = nca.romfs_source(file, keys, index).ok()?;
+        Some(Rc::new(romfs) as Rc<dyn ByteSource>)
+    });
+    cpu.install_program(switch_core::cpu::Installed {
+        nca,
+        exefs: Rc::new(exefs),
+        exefs_index,
+        romfs,
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
