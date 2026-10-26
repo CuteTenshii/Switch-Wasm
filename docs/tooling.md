@@ -39,6 +39,10 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 - Samples the run state (`body[data-state]`) and the page's console every 5 s so stalls are observed, then saves the Debug panel's Rendering section and the full console, periodic activity and thread reports included. `--jit-stats` adds the Translation section's block stats to every sample, which only the browser build can measure.
 - WebGPU is force-enabled (headless Chromium leaves it off); headless adapters are usually SwiftShader, valid for draw-path coverage but not speed. Each run uses a fresh profile so stored keys, SD card, saves and NAND do not leak between runs.
+- A fresh profile has an empty NAND, so library applets report themselves cancelled; `--firmware=<dir>` installs a firmware directory's NCAs first.
+- The run fails at once, with the console's last lines and exit code 1, when the title is not running within 2 minutes or the page logs an error; before this check a boot that never started sampled an idle page for the whole run.
+- The console comes from the page's Save download: the view keeps only the newest 2000 lines. Debug from the start floods the log and can leave the page too busy for the Rendering section, so `--debug-from=<text>` switches to debug once a line contains the text.
+- `--no-webgpu` gives the software rasterizer every frame, the reference a device frame is compared against. No Chromium switch removes WebGPU (`--disable-features=WebGPU` leaves it on), so the tool deletes `gpu` from the page's and the worker's navigator. `--screenshot=<file>` saves the screen canvas at the end.
 
 ## `crates/switch-core/examples/difftest.rs`
 

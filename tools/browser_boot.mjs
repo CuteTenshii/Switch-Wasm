@@ -1,11 +1,18 @@
 // Boot a container in the built site in a real browser and save what the
 // page and its worker said:
 //   node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]
-//                               [--seconds=N] [--out=log.txt] [--jit-stats]
+//                               [--firmware=dir] [--log-level=debug] [--debug-from=text]
+//                               [--no-webgpu] [--seconds=N] [--out=log.txt]
+//                               [--screenshot=frame.png] [--jit-stats]
 // Serves `dist` (run `make assets` first) with WebGPU enabled and a fresh profile.
+// `--firmware` installs a directory's NCAs to the NAND first, so library applets run.
+// `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
+// a device frame is compared against.
+// `--debug-from` switches the console to debug once a line contains the text: debug from
+// the start floods the log long before the moment worth reading.
 // `HEADED=1` opens a window, whose browser gets the machine's GPU instead of a software adapter.
 // `--jit-stats` records the cumulative block stats with every sample.
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -13,7 +20,7 @@ import { preview } from 'vite';
 
 const USAGE =
   'usage: node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]'
-  + ' [--seconds=N] [--out=log.txt] [--jit-stats]';
+  + ' [--firmware=dir] [--log-level=debug] [--debug-from=text] [--no-webgpu] [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--jit-stats]';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -32,10 +39,16 @@ const seconds = Number(flag('seconds') ?? 60);
 const out = flag('out');
 const jitStats = process.argv.includes('--jit-stats');
 const SAMPLE_MS = 5000;
+const START_MS = 120_000;
 
 // Relative to the caller's working directory.
 const keys = flag('keys') && resolve(flag('keys'));
 const titleKeys = flag('title-keys') && resolve(flag('title-keys'));
+const firmware = flag('firmware') && resolve(flag('firmware'));
+const screenshot = flag('screenshot') && resolve(flag('screenshot'));
+const logLevel = flag('log-level');
+const debugFrom = flag('debug-from');
+const noWebGpu = process.argv.includes('--no-webgpu');
 
 const server = await preview({
   configFile: join(root, 'vite.config.ts'),
@@ -55,10 +68,21 @@ const say = (text) => {
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM || undefined,
   headless: !process.env.HEADED,
-  args: ['--enable-unsafe-webgpu'],
+  args: noWebGpu ? [] : ['--enable-unsafe-webgpu'],
 });
 try {
   const page = await browser.newPage();
+  // Chromium has no switch that takes WebGPU away, so the property goes before any
+  // script runs: init scripts reach the page, and the worker's scripts are rewritten.
+  if (noWebGpu) {
+    await page.addInitScript(() => delete Navigator.prototype.gpu);
+    await page.route(/\.js$/, async (route) => {
+      const response = await route.fetch();
+      const body = 'if (typeof WorkerNavigator !== \'undefined\') delete WorkerNavigator.prototype.gpu;\n'
+        + await response.text();
+      await route.fulfill({ response, body });
+    });
+  }
   page.on('console', (m) => note(`page ${m.type()}: ${m.text()}`));
   page.on('pageerror', (e) => say(`page error: ${e.stack || e.message}`));
   let crashed = false;
@@ -76,9 +100,69 @@ try {
   // "idle" also shows before the core loads; the loading screen closes once it has.
   await page.waitForFunction(() =>
     document.getElementById('loading')?.classList.contains('hidden'));
+  // The select sits in the closed console panel, so set it the way a change would.
+  if (logLevel) {
+    await page.evaluate((level) => {
+      const select = document.getElementById('log-level');
+      select.value = level;
+      select.dispatchEvent(new Event('change'));
+    }, logLevel);
+  }
+  // Watched in the page, so the switch lands with the line rather than at the next sample.
+  if (debugFrom) {
+    await page.evaluate((text) => {
+      const consoleEl = document.getElementById('console');
+      const observer = new MutationObserver(() => {
+        if (!consoleEl.textContent.includes(text)) return;
+        observer.disconnect();
+        const select = document.getElementById('log-level');
+        select.value = 'debug';
+        select.dispatchEvent(new Event('change'));
+      });
+      observer.observe(consoleEl, { childList: true });
+    }, debugFrom);
+  }
   if (keys) await page.setInputFiles('#prod-keys', keys);
   if (titleKeys) await page.setInputFiles('#title-keys', titleKeys);
+  if (firmware) {
+    const ncas = readdirSync(firmware).filter((name) => /\.nca$/i.test(name));
+    await page.setInputFiles('#firmware-ncas', ncas.map((name) => join(firmware, name)));
+    // The page logs `Installed N title(s)` once every archive is registered.
+    let progress = '';
+    while (!(await page.locator('#console', { hasText: /Installed \d+ title/ }).count())) {
+      await page.waitForTimeout(2000);
+      const now = await page.locator('#firmware-state').innerText();
+      if (now !== progress) say(`firmware: ${now}`);
+      progress = now;
+    }
+    say(`installed the firmware in ${firmware} (${ncas.length} NCAs)`);
+  }
+  const before = await page.evaluate(() => document.getElementById('console').childElementCount);
   await page.setInputFiles('#nro-file', resolve(container));
+  // Fail now, not after the whole run, when the title never starts.
+  const booting = Date.now();
+  let running = false;
+  while (!crashed) {
+    const { state, error } = await page.evaluate((from) => ({
+      state: document.body.dataset.state,
+      error: [...document.getElementById('console').children].slice(from)
+        .some((row) => row.textContent.startsWith('e> ')),
+    }), before);
+    if (state === 'running') {
+      running = true;
+      say(`the title is running after ${Math.round((Date.now() - booting) / 1000)}s`);
+      break;
+    }
+    if (error || state === 'fault' || state === 'halted' || Date.now() - booting > START_MS) {
+      const tail = await page.evaluate(() =>
+        [...document.getElementById('console').children].slice(-15)
+          .map((row) => row.textContent).join('\n'));
+      say(`the title did not start (state: ${state}); the console ends with:\n${tail}`);
+      process.exitCode = 1;
+      break;
+    }
+    await page.waitForTimeout(1000);
+  }
   // The Translation section counts only while it is on screen.
   if (jitStats) {
     await page.locator('#btn-panel').click();
@@ -88,7 +172,7 @@ try {
   const started = Date.now();
   let lastRows = -1;
   let lastLine = '';
-  while (!crashed && Date.now() - started < seconds * 1000) {
+  while (running && !crashed && Date.now() - started < seconds * 1000) {
     await page.waitForTimeout(SAMPLE_MS);
     if (crashed) break;
     let sample;
@@ -119,19 +203,29 @@ try {
     }
   }
 
+  if (screenshot && !crashed) {
+    await page.locator('#screen').screenshot({ path: screenshot });
+    say(`saved the screen to ${screenshot}`);
+  }
+
   let pageConsole = '(the page crashed, and its console went with it)';
   let rendering = '(not read)';
   if (!crashed) {
-    // The Rendering section refreshes only while it is on screen.
-    if (!(await page.locator('body.panel-open').count())) await page.locator('#btn-panel').click();
-    await page.getByRole('tab', { name: 'Debug' }).click();
-    await page.getByRole('button', { name: 'Graphics' }).click();
-    await page.waitForTimeout(3000);
-    rendering = await page.locator('#render-debug-section').innerText();
-    pageConsole = await page.evaluate(() =>
-      [...document.getElementById('console').children]
-        .map((row) => row.textContent + (row.dataset.repeat ? `  (x${row.dataset.repeat})` : ''))
-        .join('\n'));
+    // Save's download holds every line; the view keeps only the newest.
+    const saved = page.waitForEvent('download', { timeout: 60_000 });
+    await page.evaluate(() => document.getElementById('btn-save-console').click());
+    pageConsole = readFileSync(await (await saved).path(), 'utf8');
+    // The Rendering section refreshes only while it is on screen; a page busy logging
+    // can be too slow to open it, which costs the section and not the report.
+    try {
+      if (!(await page.locator('body.panel-open').count())) await page.locator('#btn-panel').click();
+      await page.getByRole('tab', { name: 'Debug' }).click();
+      await page.getByRole('button', { name: 'Graphics' }).click();
+      await page.waitForTimeout(3000);
+      rendering = await page.locator('#render-debug-section').innerText();
+    } catch (error) {
+      rendering = `(not read: ${String(error.message).split('\n')[0]})`;
+    }
   }
   const report = `${lines.join('\n')}\n=== rendering ===\n${rendering}\n`
     + `=== the page's console ===\n${pageConsole}\n`;
