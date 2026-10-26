@@ -486,6 +486,21 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             bneg,
             shift,
         },
+        Op::Lea {
+            dst,
+            a,
+            hi,
+            b,
+            neg,
+            shift,
+        } => Op::Lea {
+            dst,
+            a,
+            hi,
+            b: f(b),
+            neg,
+            shift,
+        },
         Op::Isetp {
             p0,
             p1,

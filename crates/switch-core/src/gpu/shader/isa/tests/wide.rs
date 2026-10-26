@@ -715,3 +715,106 @@ fn an_immediate_half_pair_reassembles_both_signs() {
     );
     assert_eq!(half_imm(insn), 0x4000_bc00);
 }
+
+#[test]
+fn decodes_every_lea_form() {
+    // lea.hi r4, r4, r3, rz, 0x1f: Echoes of Wisdom's.
+    assert_eq!(
+        op(0x5bdf7f81f0370404),
+        Op::Lea {
+            dst: 4,
+            a: 4,
+            hi: Some(255),
+            b: Operand::Reg(3),
+            neg: false,
+            shift: 31
+        }
+    );
+    // lea r0, -r1, r2, 0x4
+    assert_eq!(
+        op(asm(
+            0x5bd7,
+            &[(0, 8, 0), (8, 8, 1), (20, 8, 2), (39, 5, 4), (45, 1, 1)]
+        )),
+        Op::Lea {
+            dst: 0,
+            a: 1,
+            hi: None,
+            b: Operand::Reg(2),
+            neg: true,
+            shift: 4
+        }
+    );
+    // lea r0, r1, c[0x3][0x10], 0x2
+    assert_eq!(
+        op(asm(
+            0x4bd7,
+            &[(0, 8, 0), (8, 8, 1), (20, 14, 4), (34, 5, 3), (39, 5, 2)]
+        )),
+        Op::Lea {
+            dst: 0,
+            a: 1,
+            hi: None,
+            b: Operand::Const {
+                bank: 3,
+                offset: 0x10
+            },
+            neg: false,
+            shift: 2
+        }
+    );
+    // lea r0, r1, -0x8, 0x3: the immediate's sign is the opcode's low bit.
+    assert_eq!(
+        op(asm(
+            0x37d7,
+            &[(0, 8, 0), (8, 8, 1), (20, 19, 0x7fff8), (39, 5, 3)]
+        )),
+        Op::Lea {
+            dst: 0,
+            a: 1,
+            hi: None,
+            b: Operand::Imm(-8i32 as u32),
+            neg: false,
+            shift: 3
+        }
+    );
+    // lea.hi r0, -r1, c[0x3][0x10], r5, 0x1e
+    assert_eq!(
+        op(asm(
+            0x1807,
+            &[
+                (0, 8, 0),
+                (8, 8, 1),
+                (20, 14, 4),
+                (34, 5, 3),
+                (39, 8, 5),
+                (51, 5, 30),
+                (56, 1, 1)
+            ]
+        )),
+        Op::Lea {
+            dst: 0,
+            a: 1,
+            hi: Some(5),
+            b: Operand::Const {
+                bank: 3,
+                offset: 0x10
+            },
+            neg: true,
+            shift: 30
+        }
+    );
+}
+
+#[test]
+fn a_lea_that_writes_a_carry_or_predicate_is_refused() {
+    const WORD: u64 = 0x5bdf7f81f0370404;
+    for word in [
+        WORD | 1 << 38,            // .x
+        WORD | 1 << 47,            // .cc
+        WORD & !(7 << 48),         // writes p0
+        asm(0x36df, &[(0, 8, 0)]), // no immediate .hi
+    ] {
+        assert!(matches!(op(word), Op::Unimplemented { .. }), "{word:#x}");
+    }
+}

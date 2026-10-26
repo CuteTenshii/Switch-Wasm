@@ -592,3 +592,33 @@ fn ftz_flushes_a_subnormal_half_but_not_a_small_float() {
     let inv = run_half(&[(1, subnormal.to_bits()), (2, 0.0f32.to_bits())], &[add]);
     assert_eq!(f32::from_bits(inv.reg(0)), subnormal);
 }
+
+/// `lea.hi` adds the low word of a 64-bit shift right; Echoes of Wisdom's halves r4 into r3.
+#[test]
+fn lea_hi_adds_the_low_word_of_a_wide_shift() {
+    let run = |word: u64, regs: &[(u8, u32)]| run_half(regs, &[isa::decode(word).op]).reg(4);
+    const WORD: u64 = 0x5bdf7f81f0370404;
+    assert_eq!(run(WORD, &[(4, 0x8000_0001), (3, 0x10)]), 0x4000_0010);
+
+    let with_hi = WORD & !(0xff << 39) | 5 << 39;
+    assert_eq!(
+        run(with_hi, &[(4, 0x8000_0001), (5, 3), (3, 0x10)]),
+        0xc000_0010
+    );
+    // Negation is of the whole 64 bits, so a zero low word borrows nothing.
+    let negated = with_hi | 1 << 37;
+    assert_eq!(run(negated, &[(4, 2), (5, 0), (3, 0x10)]), 0xf);
+    assert_eq!(run(negated, &[(4, 0), (5, 1), (3, 0x10)]), 0x8000_0010);
+    // A shift of zero takes the high word whole.
+    let unshifted = with_hi & !(0x1f << 28);
+    assert_eq!(run(unshifted, &[(4, 0x1234), (5, 7), (3, 1)]), 8);
+}
+
+#[test]
+fn lea_adds_a_shifted_and_optionally_negated_register() {
+    // lea r4, r1, r2, 0x4
+    let word = 0x5bd7u64 << 48 | 7 << 16 | 4 | 1 << 8 | 2 << 20 | 4 << 39;
+    let run = |word: u64| run_half(&[(1, 3), (2, 0x100)], &[isa::decode(word).op]).reg(4);
+    assert_eq!(run(word), 0x130);
+    assert_eq!(run(word | 1 << 45), 0xd0);
+}

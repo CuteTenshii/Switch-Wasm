@@ -635,6 +635,7 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::Imul { dst, .. }
         | Op::Xmad { dst, .. }
         | Op::Iscadd { dst, .. }
+        | Op::Lea { dst, .. }
         | Op::Iset { dst, .. }
         | Op::Icmp { dst, .. }
         | Op::Lop { dst, .. }

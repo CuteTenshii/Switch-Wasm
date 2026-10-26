@@ -63,7 +63,7 @@ impl Emitter<'_> {
 
             Op::Rro { .. } | Op::Fadd { .. } | Op::Fmul { .. } | Op::Ffma { .. } | Op::Fmnmx { .. } | Op::Mufu { .. } | Op::Hadd2 { .. } | Op::Hmul2 { .. } | Op::Hfma2 { .. } | Op::Hset2 { .. } | Op::Hsetp2 { .. } | Op::Fsetp { .. } | Op::Fset { .. } => self.emit_float(op)?,
 
-            Op::Iadd { .. } | Op::Iadd3 { .. } | Op::Iscadd { .. } | Op::Vmnmx { .. } | Op::Imnmx { .. } | Op::Imul { .. } | Op::Xmad { .. } | Op::Isetp { .. } | Op::Iset { .. } | Op::Icmp { .. } | Op::Bfi { .. } | Op::R2p { .. } | Op::Lop { .. } | Op::Lop3 { .. } | Op::Shl { .. } | Op::Shr { .. } | Op::Shf { .. } | Op::Bfe { .. } | Op::Popc { .. } | Op::Flo { .. } | Op::Sel { .. } => self.emit_integer(op)?,
+            Op::Iadd { .. } | Op::Iadd3 { .. } | Op::Iscadd { .. } | Op::Lea { .. } | Op::Vmnmx { .. } | Op::Imnmx { .. } | Op::Imul { .. } | Op::Xmad { .. } | Op::Isetp { .. } | Op::Iset { .. } | Op::Icmp { .. } | Op::Bfi { .. } | Op::R2p { .. } | Op::Lop { .. } | Op::Lop3 { .. } | Op::Shl { .. } | Op::Shr { .. } | Op::Shf { .. } | Op::Bfe { .. } | Op::Popc { .. } | Op::Flo { .. } | Op::Sel { .. } => self.emit_integer(op)?,
 
             Op::I2f { .. } | Op::F2i { .. } | Op::F2f { .. } | Op::I2i { .. } | Op::Mov { .. } | Op::Mov32i { .. } | Op::S2r { .. } | Op::Psetp { .. } | Op::Csetp { .. } => self.emit_conversion(at, op)?,
 

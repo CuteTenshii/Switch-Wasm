@@ -96,6 +96,7 @@ The Maxwell engines, shader translation, the software rasterizer and texture han
 - Perspective correction: the fragment shader reads interpolated `1/w` at `a[0x7c]` via `ipa pass`, computes `w = mufu rcp`, and multiplies other varyings by it in perspective `ipa`. Barycentrics are therefore screen-space linear in both renderers.
 - Guard predicate is bits [16,19) plus negate at 19; register 7 is `PT`.
 - Maxwell has no 32-bit integer multiply; multiplies are `xmad` chains (16x16 + accumulate).
+- `lea.hi` adds the low word of the 64-bit `hi:a` shifted right by `32 - shift`, and `neg` negates all 64 bits. WGSL has no `u64`, so the translation borrows across the two words by hand; `lea_computes_the_same_words_on_both_renderers` checks it against the interpreter. Echoes of Wisdom's first was `lea.hi r4, r4, r3, rz, 0x1f`. The `.x`, `.cc` and predicate-writing forms are refused, as Eden refuses them.
 
 ## `crates/switch-core/src/gpu/activity.rs`
 

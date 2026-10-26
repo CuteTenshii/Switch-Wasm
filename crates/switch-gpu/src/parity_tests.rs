@@ -175,6 +175,91 @@ fn a_colour_through_local_memory_reaches_the_same_pixels_on_both_renderers() {
     assert_eq!(h.texel(1, 1), 0xffff_00ff, "red survived the round trip");
 }
 
+/// `lea.hi`'s 64-bit negate and shift, done on two words in WGSL, gives what the interpreter
+/// gives: each channel is 1.0 only when its `lea` produced the expected word.
+#[test]
+fn lea_computes_the_same_words_on_both_renderers() {
+    use switch_core::gpu::shader::isa::{self, ICmp};
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    let lea_hi = |dst: u64, a: u64, b: u64, hi: u64, shift: u64, neg: u64| {
+        0x5bdfu64 << 48 | hi << 39 | neg << 37 | shift << 28 | b << 20 | PT | a << 8 | dst
+    };
+    let lea_neg = |dst: u64, a: u64, b: u64, shift: u64| {
+        0x5bd7u64 << 48 | 1 << 45 | shift << 39 | b << 20 | PT | a << 8 | dst
+    };
+    // iset.eq.u32.and.bf dst, a, b, pt
+    let iset = |dst: u64, a: u64, b: u64| {
+        0x5b54u64 << 48 | 1 << 44 | 7 << 39 | b << 20 | PT | a << 8 | dst
+    };
+    let leas = [
+        // A borrow out of the low word: (0:2) negated, shifted right by one.
+        lea_hi(6, 8, 3, 9, 31, 1),
+        // No borrow: (1:0) negated.
+        lea_hi(7, 10, 3, 11, 31, 1),
+        // A shift of zero takes the high word whole.
+        lea_hi(12, 4, 3, 5, 0, 0),
+        lea_neg(13, 14, 3, 4),
+    ];
+    for word in leas {
+        assert!(matches!(isa::decode(word).op, Op::Lea { .. }), "{word:#x}");
+    }
+    assert!(matches!(
+        isa::decode(iset(0, 6, 16)).op,
+        Op::Iset {
+            cmp: ICmp::Eq,
+            bf: true,
+            ..
+        }
+    ));
+    let words = [
+        mov32i(3, 0x10),
+        mov32i(8, 2),
+        mov32i(9, 0),
+        mov32i(10, 0),
+        mov32i(11, 1),
+        mov32i(4, 0x1234),
+        mov32i(5, 7),
+        mov32i(14, 3),
+        leas[0],
+        leas[1],
+        leas[2],
+        leas[3],
+        mov32i(16, 0xf),
+        mov32i(17, 0x8000_0010),
+        mov32i(18, 0x17),
+        mov32i(19, 0xffff_ffe0),
+        iset(0, 6, 16),
+        iset(1, 7, 17),
+        iset(2, 12, 18),
+        iset(3, 13, 19),
+        0xe300_0000_0007_000f, // exit
+    ];
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| h.triangle([0.0; 4]);
+    agrees_shading(
+        move || Harness::with_fragment_shader(shader()),
+        |_| {},
+        set_up,
+    );
+    let mut h = Harness::with_fragment_shader(shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    assert_eq!(h.texel(1, 1), 0xffff_ffff, "every lea matched");
+}
+
 /// A shader reading its quad neighbour's register reads the same on both renderers,
 /// with native quad operations and with the browser's `QUAD_SWAP`.
 #[test]

@@ -69,6 +69,43 @@ impl Emitter<'_> {
                 let shift = u32::from(shift) & 31;
                 self.set_r(dst, &format!("(({x}) << {shift}u) + ({y})"));
             }
+            Op::Lea {
+                dst,
+                a,
+                hi: None,
+                b,
+                neg,
+                shift,
+            } => {
+                let x = self.r(a);
+                let x = self.ineg(neg, x);
+                let y = self.operand(b);
+                let shift = u32::from(shift) & 31;
+                self.set_r(dst, &format!("(({x}) << {shift}u) + ({y})"));
+            }
+            // WGSL has no u64, so the 64-bit negate and shift are done on the two words.
+            Op::Lea {
+                dst,
+                a,
+                hi: Some(hi),
+                b,
+                neg,
+                shift,
+            } => {
+                let mut lo = self.r(a);
+                let mut hi = self.r(hi);
+                if neg {
+                    let old_lo = self.bind(&lo);
+                    lo = self.bind(&format!("0u - {old_lo}"));
+                    hi = self.bind(&format!("~({hi}) + select(0u, 1u, {old_lo} == 0u)"));
+                }
+                let offset = match u32::from(shift) & 31 {
+                    0 => hi,
+                    shift => format!("(({lo} >> {}u) | (({hi}) << {shift}u))", 32 - shift),
+                };
+                let y = self.operand(b);
+                self.set_r(dst, &format!("({offset}) + ({y})"));
+            }
             Op::Vmnmx {
                 dst,
                 a,

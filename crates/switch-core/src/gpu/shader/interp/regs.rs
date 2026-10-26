@@ -112,6 +112,12 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v.extend(operand_reg(b));
             v
         }
+        Op::Lea { a, hi, b, .. } => {
+            let mut v = vec![a];
+            v.extend(hi);
+            v.extend(operand_reg(b));
+            v
+        }
         Op::Iadd3 { a, b, c, .. } | Op::Xmad { a, b, c, .. } => {
             let mut v = vec![a];
             v.extend(operand_reg(b));

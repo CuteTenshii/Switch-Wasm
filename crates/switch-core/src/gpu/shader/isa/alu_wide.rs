@@ -145,8 +145,48 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 cneg: field(insn, 49, 1) != 0,
             };
         }
+        // lea, 0x5bd0/0xfff0 (bit 51 picks `.hi`), 0x4bd0 and the `.lo`-only immediate.
+        0x5bd | 0x4bd | 0x36d | 0x37d => {
+            let hi = form >> 8 != 0x4b && field(insn, 51, 1) != 0;
+            return match form >> 12 {
+                0x5 if hi => decode_lea(
+                    insn,
+                    Operand::Reg(reg(insn, 20, 8)),
+                    Some(reg(insn, 39, 8)),
+                    field(insn, 28, 5),
+                    37,
+                ),
+                0x5 => decode_lea(
+                    insn,
+                    Operand::Reg(reg(insn, 20, 8)),
+                    None,
+                    field(insn, 39, 5),
+                    45,
+                ),
+                0x4 => decode_lea(insn, const_operand(insn), None, field(insn, 39, 5), 45),
+                _ if hi => un,
+                _ => decode_lea(
+                    insn,
+                    Operand::Imm(imm20(insn)),
+                    None,
+                    field(insn, 39, 5),
+                    45,
+                ),
+            };
+        }
         // psetp, a pure predicate op.
         _ => {}
+    }
+
+    // lea.hi with a bank base, 0x1800/0xfc00.
+    if insn >> 58 == 0b000110 {
+        return decode_lea(
+            insn,
+            const_operand(insn),
+            Some(reg(insn, 39, 8)),
+            field(insn, 51, 5),
+            56,
+        );
     }
 
     if insn & 0xfff8_0000_0000_0000 == 0x5090_0000_0000_0000 {
@@ -536,6 +576,21 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
     }
 
     un
+}
+
+/// Every `lea` form keeps `.x` just above `neg`, and the carry and predicate outputs at 47 and 48.
+fn decode_lea(insn: u64, b: Operand, hi: Option<u8>, shift: u64, neg: u32) -> Op {
+    if field(insn, neg + 1, 1) != 0 || field(insn, 47, 1) != 0 || field(insn, 48, 3) != 7 {
+        return Op::Unimplemented { raw: insn }; // `.x`, `.cc` or a predicate written
+    }
+    Op::Lea {
+        dst: reg(insn, 0, 8),
+        a: reg(insn, 8, 8),
+        hi,
+        b,
+        neg: field(insn, neg, 1) != 0,
+        shift: shift as u8,
+    }
 }
 
 fn decode_ffma(insn: u64, b: Operand, c: Operand) -> Op {

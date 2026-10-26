@@ -239,6 +239,16 @@ pub enum Op {
         bneg: bool,
         shift: u8,
     },
+    /// `lea`: `b + (a << shift)`. With `hi`, `b` plus the low word of the 64-bit
+    /// `hi:a` shifted right by `32 - shift`; `neg` negates the shifted value's source.
+    Lea {
+        dst: u8,
+        a: u8,
+        hi: Option<u8>,
+        b: Operand,
+        neg: bool,
+        shift: u8,
+    },
     Isetp {
         p0: u8,
         p1: u8,

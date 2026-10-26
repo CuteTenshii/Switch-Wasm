@@ -373,6 +373,25 @@ impl Invocation {
                 let y = ineg_if(self.operand(b, env)?, bneg);
                 self.set_reg(dst, x.wrapping_add(y));
             }
+            Op::Lea {
+                dst,
+                a,
+                hi,
+                b,
+                neg,
+                shift,
+            } => {
+                let offset = match hi {
+                    None => ineg_if(self.reg(a), neg).wrapping_shl(u32::from(shift)),
+                    Some(hi) => {
+                        let wide = (u64::from(self.reg(hi)) << 32) | u64::from(self.reg(a));
+                        let wide = if neg { wide.wrapping_neg() } else { wide };
+                        (wide >> (32 - u32::from(shift))) as u32
+                    }
+                };
+                let base = self.operand(b, env)?;
+                self.set_reg(dst, base.wrapping_add(offset));
+            }
             Op::Vmnmx {
                 dst,
                 a,
