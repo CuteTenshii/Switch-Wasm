@@ -6,7 +6,7 @@ The page, the worker, and the wasm bindings between them.
 
 - Exports are `extern "C"` taking pointers JS owns for the call; marking them `unsafe fn` would not help a JS caller, hence `#![allow(clippy::not_unsafe_ptr_arg_deref)]`.
 - The session table uses `SyncCell` (an `UnsafeCell`), not `Mutex`: a reentrant `lock()` deadlocks and a panic while held leaves it locked. It is sound only because one worker calls exports; the core workers on the shared memory only instantiate. Host tests serialize on a `HOST` mutex because `cargo test` is multi-threaded, and a panic crossing `extern "C"` aborts the harness.
-- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing (so do `switch_new` and `switch_alloc`), so panics before the first session are captured instead of trapping as bare `unreachable`. Panic and trace state is cleared on each new session, otherwise the first error after Stop described the dead session.
+- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing (so do `switch_new` and `switch_alloc`), so panics before the first session are captured instead of trapping as bare `unreachable`. The panic message is cleared on each new session, otherwise the first error after Stop described the dead session. Log lines are not: what the dead session said still reaches the page.
 - With the `gpu` feature the host read is a wasm-bindgen import (`@host/files`, resolved by Vite) because wasm-bindgen owns the whole import object.
 - `switch_alloc` returns null rather than trapping for sizes above `isize::MAX` (2 GiB on wasm32).
 - `nul_reserved`: the terminating NUL takes a byte of the buffer, not of the message.
@@ -15,11 +15,18 @@ The page, the worker, and the wasm bindings between them.
 - DLC: one Data NCA with a RomFS, title id = base + 0x1000 + 11-bit index, mounted by id like system data; `aoc:u` only lists indices. Mounted after the program id and NACP override are known; content for another title is reported and skipped.
 - NRO control data is cached for display only, not via `cache_control`: homebrew runs in another title's process, so its NACP never governs saves.
 - Boot reports ExeFS hash coverage and the module list next to what loaded (a missing `sdk`/`subsdk0` looks like a missing service otherwise). The NPDM system resource size picks the address space layout and must precede the boot (`nn::init` reads it immediately); the 32/64-bit flag changes the entry ABI.
-- `switch_gpu_report_json` and `switch_activity_json` exist because `eprintln!` and env vars are unavailable on wasm32. Activity lists are fitted to `maxlen` in whole entries so the JSON always parses.
+- `switch_gpu_report_json` exists because `eprintln!` and env vars are unavailable on wasm32. The activity report is not data for the page: `activity.rs` writes its lines into the log.
 - `switch_present` (and `switch_fb_snapshot`) force opaque alpha: titles leave arbitrary alpha (Just Dance 2019 uses 0) and Chromium/macOS `putImageData` multiplies by it even with `alpha: false`.
 - The page hands its canvas to the worker once (`transferControlToOffscreen`); `screen.rs` paints each new frame on it through `web_sys` after the slice that presented it, into one reused `ImageData`. The page never reads pixels, and maps touches with the size the slice report carries.
 - SD and save host writes are not reported as changes (restores would otherwise be written straight back). Drains happen even if the JSON does not fit.
 - The device opens as the run loop starts, between slices since it is a promise. The backend installs on the session's single `Gpu`, not a channel (Asphalt 9 opens four).
+
+## `crates/switch-wasm/src/log.rs`
+
+- The page gets finished lines and a level number per line, so it reads nothing out of their text: guest `[lm/LEVEL]` tags and the trace's marker bytes are decoded here.
+- The queue is global, not per session, so lines outlive the session that wrote them and code with no session still logs.
+- Boot empties the core's output and trace buffers, so lines are collected first; clearing them lost the ExeFS verification line every retail boot logs.
+- The worker flushes after every command (before replying, so the caller finds the command's lines on the page) and every slice (before the slice report, so a halt's last lines precede it).
 
 ## `crates/switch-wasm/src/gpu.rs`
 
@@ -44,7 +51,7 @@ The page, the worker, and the wasm bindings between them.
 ## `web/worker/wasm.ts`
 
 - `switch_alloc` returns an i32 that reads negative past 2 GiB; `>>> 0` is required. A refused allocation returns 0, and writing at 0 would corrupt module data.
-- `readWholeString` retries with a doubled buffer (capped at 1 MiB) and is only for idempotent reads; the activity report is consumed on read.
+- `readWholeString` retries with a doubled buffer (capped at 1 MiB) and is only for idempotent reads.
 
 ## `web/worker/commands.ts`
 
@@ -150,8 +157,8 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/main/log.ts`
 
-- The page view keeps 2000 entries (layout cost with tracing on); the backlog keeps 50,000 for copy and save.
-- The log tail is mirrored to IndexedDB on a timer (not per line) so it survives the browser killing the tab; capped so it can't trigger origin eviction (which would take the SD card and NAND).
+- The page view keeps 2000 entries (layout cost with tracing on); the backlog keeps every entry until Clear, for copy and save.
+- The log is mirrored to IndexedDB on a timer (not per line) so it survives the browser killing the tab. The mirror is whole, so a very long session's log counts against the origin's quota, which the SD card and NAND share.
 - Unclean-exit detection: a `pagehide` handler writes a mark synchronously to `localStorage` (no time to await IndexedDB). The mark is per origin, so other tabs are pinged over `BroadcastChannel` before treating it as a dead session; pings carry a tab id because a page receives its own channel messages.
 - Clipboard falls back to a selection copy because `navigator.clipboard` needs a secure context (e.g. testing on a phone over plain http).
 

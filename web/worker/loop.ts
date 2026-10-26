@@ -4,6 +4,7 @@ import type { ErrorDialog, Housekeeping, SliceReport, WorkerMessage } from '../s
 import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
+import { flushLog } from './log';
 import { flushStorage } from './persist';
 import { switch_present } from '@core/switch_wasm.js';
 import { core, state } from './wasm';
@@ -72,6 +73,8 @@ function slice(): void {
   const stopped = done || pauseRequested;
   tryGpu();
   reportActivity(done);
+  // Before the report, so a halt's last lines are on the page when it handles the halt.
+  flushLog();
   const paintMs = paint();
 
   core.switch_audio_feed(state.handle);
@@ -106,13 +109,8 @@ export function paint(): number | null {
   return switch_present(state.handle) ? performance.now() - at : null;
 }
 
-const text = new TextDecoder();
-
 function housekeeping(): Housekeeping {
   void flushStorage();
-  const decode = (bytes: unknown) => (bytes instanceof Uint8Array && bytes.length
-    ? text.decode(bytes)
-    : '');
   const errors: ErrorDialog[] = [];
   for (let error = CMD.error_dialog(); error; error = CMD.error_dialog()) {
     errors.push(error as ErrorDialog);
@@ -120,8 +118,6 @@ function housekeeping(): Housekeeping {
   return {
     steps: CMD.get_steps() as number,
     ram: CMD.ram() as Housekeeping['ram'],
-    output: decode(CMD.drain_output()),
-    trace: decode(CMD.drain_trace()),
     profilesEdited: CMD.users_take_edits() as boolean,
     keyboard: CMD.keyboard_request() as Housekeeping['keyboard'],
     errors,

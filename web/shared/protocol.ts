@@ -231,10 +231,10 @@ export interface Commands {
   clear_screen(): number;
   halted(): number;
   guest_fatal(): string;
-  drain_output(): Bytes;
-  drain_trace(): Bytes;
-  dump_regs(): string;
-  thread_dump(): string;
+  // Passes the core's queued lines on now; how many there were.
+  flush_log(): number;
+  log_regs(): number;
+  log_threads(): number;
   get_steps(): number;
   get_reg(i: number): string;
   ram(): RamUsage;
@@ -298,9 +298,6 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug';
 export interface Housekeeping {
   steps: number;
   ram: { guest: number; wasm: number };
-  // Guest console output and core diagnostics since the last report.
-  output: string;
-  trace: string;
   // Changed since the last report; the page reads the profiles itself.
   profilesEdited: boolean;
   keyboard: KeyboardRequest | null;

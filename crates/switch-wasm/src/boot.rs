@@ -29,6 +29,8 @@ pub extern "C" fn switch_load_nro(
 ) -> i64 {
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     let s = session(handle);
+    // Booting empties the output and trace buffers.
+    crate::log::collect(&mut s.cpu);
     let booted = if path_len == 0 {
         s.cpu.boot_homebrew(data)
     } else {
@@ -40,8 +42,6 @@ pub extern "C" fn switch_load_nro(
         Ok(loaded) => {
             // Cached for display only: homebrew runs in another title's process.
             s.control = switch_core::control::Control::from_nro(data);
-            s.cpu.out.clear();
-            s.cpu.trace.clear();
             s.cpu.halted = false;
             s.last_error.clear();
             loaded.entry as i64
@@ -165,9 +165,11 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
         }
     }
 
+    // Booting empties the output and trace buffers.
+    crate::log::collect(cpu);
     match cpu.boot_program(&program) {
         Ok(loaded) => {
-            // After the modules: booting clears the diagnostic buffer.
+            // After the modules, so its lines follow the boot's.
             mount_add_on_content(cpu, keys, added.dlc);
             last_error.clear();
             i64::from(loaded[0].entry)
@@ -300,8 +302,7 @@ pub extern "C" fn switch_load_elf(handle: u32, ptr: *const u8, len: u32) -> i64 
         Ok(elf) => {
             s.cpu.set_pc(elf.entry as u32);
             boot_entry_regs(&mut s.cpu, 0);
-            s.cpu.out.clear();
-            s.cpu.trace.clear();
+            crate::log::collect(&mut s.cpu);
             s.cpu.halted = false;
             s.last_error.clear();
             elf.entry as i64

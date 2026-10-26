@@ -6,7 +6,7 @@ import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { paint } from './loop';
 import { tryGpu } from './gpu';
-import { workerLog } from './log';
+import { flushLog, workerLog } from './log';
 import init, { switch_attach_screen } from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { core, setCore, state, type WasmExports } from './wasm';
@@ -54,11 +54,19 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
     // IndexedDB work answers when it is done.
     if (result instanceof Promise) {
       result.then(
-        (value: unknown) => reply({ id, ok: true, result: value }),
-        (err: unknown) => reply({ id, ok: false, error: String(err) }),
+        (value: unknown) => {
+          flushLog();
+          reply({ id, ok: true, result: value });
+        },
+        (err: unknown) => {
+          flushLog();
+          reply({ id, ok: false, error: String(err) });
+        },
       );
       return;
     }
+    // Before the reply, so what the command logged is on the page when the caller resumes.
+    flushLog();
     const stopped = cmd === 'run' && typeof result === 'number' && result < Number(args[0]);
     if (result instanceof Uint8Array) {
       reply({ id, ok: true, result }, [result.buffer as ArrayBuffer]);

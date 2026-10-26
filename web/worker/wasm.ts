@@ -59,7 +59,9 @@ export interface WasmExports {
   switch_jit_stats_json(handle: number, buf: number, maxlen: number): number;
   switch_gpu_report_json(handle: number, buf: number, maxlen: number): number;
   switch_gpu_lost(handle: number): number;
-  switch_activity_json(handle: number, buf: number, maxlen: number): number;
+  switch_log_activity(handle: number, seconds: number): void;
+  switch_log_next(handle: number): number;
+  switch_log_line(buf: number, maxlen: number): number;
   switch_set_input(
     handle: number, buttons: bigint,
     stickLx: number, stickLy: number, stickRx: number, stickRy: number): void;
@@ -71,10 +73,8 @@ export interface WasmExports {
   switch_run(handle: number, maxSteps: bigint): bigint;
   switch_halted(handle: number): number;
   switch_guest_fatal(handle: number, buf: number, maxlen: number): number;
-  switch_drain_output(handle: number, buf: number, maxlen: number): number;
-  switch_drain_trace(handle: number, buf: number, maxlen: number): number;
-  switch_dump_regs(handle: number, buf: number, maxlen: number): number;
-  switch_thread_dump(handle: number, buf: number, maxlen: number): number;
+  switch_log_regs(handle: number): void;
+  switch_log_threads(handle: number): void;
   switch_get_reg(handle: number, idx: number): bigint;
   switch_get_steps(handle: number): bigint;
   switch_guest_ram(handle: number): bigint;
@@ -140,12 +140,16 @@ export interface WasmExports {
 
 export const state = { handle: -1 };
 
-// The core's exports, set once at load; every command runs after that. A live binding:
-// importers see the assignment.
+// The core's exports, set once at load. A live binding: importers see the assignment.
 export let core = null as unknown as WasmExports;
 
 export function setCore(exports: WasmExports): void {
   core = exports;
+}
+
+// IndexedDB commands can arrive while the module is still loading.
+export function coreLoaded(): boolean {
+  return (core as WasmExports | null) !== null;
 }
 
 // A refused allocation returns 0. `>>> 0` because the i32 reads signed past 2 GiB.
@@ -249,29 +253,4 @@ export function lastError(): string {
   // The buffer is NUL-padded past the message.
   const end = s.indexOf('\0');
   return end < 0 ? s : s.slice(0, end);
-}
-
-// Drain a ring buffer (output/trace) to completion, concatenating the chunks.
-export function drain(
-  fn: (handle: number, buf: number, cap: number) => number,
-  cap: number,
-): Bytes {
-  const chunks: Bytes[] = [];
-  for (;;) {
-    const n = withBuffer(cap, (buf) => {
-      const got = fn(state.handle, buf, cap);
-      if (got > 0) chunks.push(fromWasm(buf, got));
-      return got;
-    });
-    if (n < cap) break;
-  }
-  let total = 0;
-  for (const c of chunks) total += c.length;
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const c of chunks) {
-    out.set(c, o);
-    o += c.length;
-  }
-  return out;
 }

@@ -8,14 +8,13 @@ import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
 import { serveCores } from './coreworkers';
 import { addHostFile, openHostFile } from './hostfiles';
-import { workerLog } from './log';
+import { flushLog, workerLog } from './log';
 import { switch_clear_screen } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { flushStorage, restoreStorage } from './persist';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
   core,
-  drain,
   fromWasm,
   lastError,
   readJson,
@@ -323,17 +322,16 @@ export const CMD: CommandHandlers = {
   guest_fatal() {
     return readString(2048, (buf, cap) => core.switch_guest_fatal(state.handle, buf, cap));
   },
-  drain_output() {
-    return drain((h, b, l) => core.switch_drain_output(h, b, l), 4096);
+  flush_log() {
+    return flushLog();
   },
-  drain_trace() {
-    return drain((h, b, l) => core.switch_drain_trace(h, b, l), 8192);
+  log_regs() {
+    core.switch_log_regs(state.handle);
+    return 0;
   },
-  dump_regs() {
-    return readString(2048, (buf, cap) => core.switch_dump_regs(state.handle, buf, cap));
-  },
-  thread_dump() {
-    return readString(8192, (buf, cap) => core.switch_thread_dump(state.handle, buf, cap));
+  log_threads() {
+    core.switch_log_threads(state.handle);
+    return 0;
   },
   get_steps() {
     return Number(core.switch_get_steps(state.handle));

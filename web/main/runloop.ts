@@ -4,7 +4,7 @@ import { Pause, Play } from 'lucide';
 import type { Housekeeping, SliceReport } from '../shared/protocol';
 import { noteAudio } from './audio';
 import { showEmulatorCrash, showGuestCrash } from './crash';
-import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
+import { traceEnabled } from './debug';
 import { countEmulation, noteFrame } from './display';
 import { recordRunSlice } from './display-metrics';
 import { $ } from './dom';
@@ -14,7 +14,7 @@ import { icon } from './icons';
 import { dropErrors, offerErrors } from './errors';
 import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
-import { log, type LogLevel } from './log';
+import { log } from './log';
 import { call, onLoopEvents, readLastError } from './rpc';
 import { pullProfileEdits, storeProfileEdits } from './users';
 import { loaded, setState } from './shell';
@@ -84,8 +84,6 @@ async function onSlice(report: SliceReport): Promise<void> {
 
 function applyHousekeeping(h: Housekeeping): void {
   showReadouts(h.steps, h.ram);
-  logOutput(h.output);
-  logTrace(h.trace);
   if (h.profilesEdited) void storeProfileEdits();
   offerKeyboard(h.keyboard);
   offerErrors(h.errors);
@@ -112,23 +110,18 @@ async function onFailed(error: string): Promise<void> {
 
 // Each piece is asked for separately so one failure costs only that piece.
 async function reportPanicContext(): Promise<void> {
-  const parts: [string, () => Promise<string>][] = [
-    ['registers', () => call('dump_regs')],
-    ['threads', () => call('thread_dump')],
-    ['trace', () => drainTrace()],
-  ];
+  const parts = [
+    ['registers', () => call('log_regs')],
+    ['threads', () => call('log_threads')],
+    ['trace', () => call('flush_log')],
+  ] as const;
   for (const [what, ask] of parts) {
     try {
-      const text = await ask();
-      if (!text) continue;
-      if (what === 'trace') logTrace(text);
-      else log(text);
+      await ask();
     } catch {
       log(`The module could not be asked for its ${what}.`);
     }
   }
-  log('Take a crash report from the debug panel before stopping - Stop is what loses this.',
-    'warn');
 }
 
 // Stops the loop for Stop without waiting for the slice; freeing the session ends it.
@@ -148,33 +141,8 @@ $('btn-step').addEventListener('click', async () => {
     return;
   }
   if (nothingLoaded()) return;
-  const r = await call('run', 1);
-  await finishRun(r, true);
-  if (traceEnabled() && r >= 0) {
-    logTrace(await drainTrace());
-  }
+  await finishRun(await call('run', 1), true);
 });
-
-// Maps the `[lm/LEVEL]` tags `cpu/log.rs` writes to log levels.
-const GUEST_LEVELS: Record<string, LogLevel> = {
-  FATAL: 'error',
-  ERROR: 'error',
-  WARN: 'warn',
-  INFO: 'info',
-  TRACE: 'debug',
-};
-
-export async function drainOutput(): Promise<void> {
-  const bytes = await call('drain_output');
-  if (bytes && bytes.length) logOutput(new TextDecoder().decode(bytes));
-}
-
-function logOutput(text: string): void {
-  if (!text) return;
-  for (const line of text.replace(/\n$/, '').split('\n')) {
-    log(line, GUEST_LEVELS[/^\[lm\/([A-Z]+)/.exec(line)?.[1] ?? '']);
-  }
-}
 
 async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   endLoad();
@@ -183,7 +151,6 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     setState('fault');
     log('Fault: ' + err, 'error');
     showGuestCrash(err || 'The guest returned a fault without a message.');
-    logTrace(await drainTrace());
   } else if (await call('halted')) {
     const fatal = await call('guest_fatal');
     if (fatal) {
@@ -193,15 +160,12 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
       setState('halted');
       log('Halted (ExitProcess)', 'info');
     }
-    await drainDiagnostics();
   } else if (!stepped) {
     setState('fault');
     log('Stopped unexpectedly.', 'error');
     showGuestCrash('The guest stopped unexpectedly.');
   }
-  await Promise.all([
-    drainOutput(), call('flush_storage'), pullProfileEdits(), updateReadouts(),
-  ]);
+  await Promise.all([call('flush_storage'), pullProfileEdits(), updateReadouts()]);
 }
 
 let countedInstructions = 0;

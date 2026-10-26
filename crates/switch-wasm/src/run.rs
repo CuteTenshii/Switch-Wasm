@@ -37,20 +37,6 @@ pub extern "C" fn switch_guest_fatal(handle: u32, buf: *mut u8, maxlen: u32) -> 
     write_into(buf, maxlen, fatal.as_bytes())
 }
 
-/// Copy accumulated console output into `buf` and clear it. Returns bytes copied.
-#[no_mangle]
-pub extern "C" fn switch_drain_output(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session(handle);
-    let n = s.cpu.out.len().min(maxlen as usize);
-    if n > 0 && !buf.is_null() {
-        unsafe {
-            std::ptr::copy_nonoverlapping(s.cpu.out.as_ptr(), buf, n);
-        }
-        s.cpu.out.drain(..n);
-    }
-    n as u32
-}
-
 /// Read register `idx` (0..=31; 31 = SP).
 #[no_mangle]
 pub extern "C" fn switch_get_reg(handle: u32, idx: u32) -> u64 {

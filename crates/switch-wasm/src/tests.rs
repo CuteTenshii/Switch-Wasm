@@ -1,10 +1,11 @@
 use super::*;
 use switch_core::cpu::SaveKey;
 
+use crate::activity::switch_log_activity;
 use crate::boot::switch_load_nca_from_nsp;
 use crate::container::{switch_nsp_files_json, switch_open_nsp, switch_read_file};
-use crate::debug::{switch_drain_trace, switch_set_trace_channels};
-use crate::stats::switch_activity_json;
+use crate::debug::switch_set_trace_channels;
+use crate::log::{switch_log_line, switch_log_next};
 use crate::storage::{
     switch_save_create_dir, switch_save_file_size, switch_save_ids_json,
     switch_save_pending_changes, switch_save_read_file, switch_save_take_changes_json,
@@ -25,52 +26,6 @@ fn new_session() -> (std::sync::MutexGuard<'static, ()>, u32) {
     let handle = switch_new();
     let _ = std::panic::take_hook();
     (guard, handle)
-}
-
-fn json_from(fill: impl Fn(*mut u8, u32) -> u32) -> String {
-    let cap = 1024 * 1024;
-    let mut buf = vec![0u8; cap];
-    let n = fill(buf.as_mut_ptr(), cap as u32);
-    String::from_utf8(buf[..n as usize].to_vec()).unwrap()
-}
-
-/// The raw JSON text of a `"key":` field.
-fn field<'a>(json: &'a str, key: &str) -> &'a str {
-    let at = json
-        .find(&format!("\"{key}\":"))
-        .unwrap_or_else(|| panic!("no {key} in {json:.400}"));
-    let rest = &json[at + key.len() + 3..];
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, c) in rest.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-                if depth == 0 {
-                    return &rest[..i + 1];
-                }
-            }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '{' | '[' => depth += 1,
-            '}' | ']' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    return &rest[..i + 1];
-                }
-            }
-            ',' | '}' | ']' if depth == 0 => return &rest[..i],
-            _ => {}
-        }
-    }
-    rest
 }
 
 #[test]
@@ -100,58 +55,95 @@ fn the_page_turns_every_trace_channel_on_and_off() {
     assert_eq!(switch_core::trace::mask(), 0);
 }
 
+/// Every queued log line, collecting from `handle` first, as `(level, text)`.
+fn take_log(handle: i32) -> Vec<(u32, String)> {
+    let mut lines = Vec::new();
+    loop {
+        let level = switch_log_next(handle);
+        if level == 0 {
+            return lines;
+        }
+        let mut buf = vec![0u8; switch_log_line(std::ptr::null_mut(), 0) as usize];
+        let n = switch_log_line(buf.as_mut_ptr(), buf.len() as u32);
+        buf.truncate(n as usize);
+        lines.push((level, String::from_utf8(buf).unwrap()));
+    }
+}
+
 #[test]
 fn the_activity_report_names_each_file_and_hands_it_over_once() {
     let (_host, handle) = new_session();
-    let json = json_from(|buf, cap| switch_activity_json(handle, buf, cap));
-    assert_eq!(field(&json, "draws"), "0");
-    assert_eq!(field(&json, "files"), "[]");
-    assert_eq!(field(&json, "gpu"), "[]");
-    assert_eq!(field(&json, "threadLog"), "[]");
-    assert!(field(&json, "threads").contains("\"index\":0"), "{json}");
-    assert!(field(&json, "threads").contains("\"idleMs\":"), "{json}");
-    assert_eq!(field(&json, "journal"), "[]");
-    for list in ["refusals", "gaps", "nvErrors"] {
-        assert_eq!(field(&json, list), "[]", "{list}");
-    }
-    assert_eq!(field(&json, "input"), r#"{"supported":0,"presented":1}"#);
-    assert_eq!(field(&json, "problemsDropped"), "0");
+    take_log(handle as i32);
+    switch_log_activity(handle, 0.0);
+    let first = take_log(handle as i32);
+    assert!(
+        first
+            .iter()
+            .any(|(_, line)| line.starts_with("[thread] 0* (the process entry, ")),
+        "{first:?}"
+    );
+    assert!(
+        !first.iter().any(|(_, line)| line.starts_with("[fs]")),
+        "{first:?}"
+    );
 
     let activity = &mut session(handle).cpu.fs_activity;
     activity.read("romfs", 0x100);
     activity.read("romfs", 0x20);
     activity.wrote("sdmc:/cfg.json", 7);
     activity.record("fs OpenFile \"/b\" on sdmc -> 2002-0001 (0x202)".to_owned());
-    let json = json_from(|buf, cap| switch_activity_json(handle, buf, cap));
+    switch_log_activity(handle, 1.0);
+    let fs: Vec<(u32, String)> = take_log(handle as i32)
+        .into_iter()
+        .filter(|(_, line)| line.starts_with("[fs]"))
+        .collect();
+    let debug = log::PageLevel::Debug as u32;
     assert_eq!(
-        field(&json, "files"),
-        r#"[{"name":"romfs","reads":2,"readBytes":288,"writes":0,"writeBytes":0},{"name":"sdmc:/cfg.json","reads":0,"readBytes":0,"writes":1,"writeBytes":7}]"#
+        fs,
+        [
+            (debug, "[fs] romfs: 2 reads (288 B)".to_owned()),
+            (debug, "[fs] sdmc:/cfg.json: 1 write (7 B)".to_owned()),
+            (
+                debug,
+                "[fs] fs OpenFile \"/b\" on sdmc -> 2002-0001 (0x202)".to_owned()
+            ),
+        ]
     );
-    assert_eq!(
-        field(&json, "journal"),
-        r#"["fs OpenFile \"/b\" on sdmc -> 2002-0001 (0x202)"]"#
+    switch_log_activity(handle, 1.0);
+    let again = take_log(handle as i32);
+    assert!(
+        !again.iter().any(|(_, line)| line.starts_with("[fs]")),
+        "taken, not read: {again:?}"
     );
-    let again = json_from(|buf, cap| switch_activity_json(handle, buf, cap));
-    assert_eq!(field(&again, "files"), "[]", "taken, not read");
-    assert_eq!(field(&again, "journal"), "[]", "taken, not read");
-
-    // An answer too small stays parseable and counts what it dropped.
-    let activity = &mut session(handle).cpu.fs_activity;
-    activity.read(&"x".repeat(1000), 1);
-    activity.record("y".repeat(1000));
-    let mut buf = vec![0u8; 700];
-    let n = switch_activity_json(handle, buf.as_mut_ptr(), buf.len() as u32);
-    let small = String::from_utf8(buf[..n as usize].to_vec()).unwrap();
-    assert!(small.ends_with('}'), "{small}");
-    assert_eq!(field(&small, "files"), "[]");
-    assert_eq!(field(&small, "filesDropped"), "1");
-    assert_eq!(field(&small, "dropped"), "1");
 }
 
-/// Reset clears module-level panic and trace state.
 #[test]
-fn a_new_session_inherits_nothing_from_the_one_before_it() {
+fn each_line_carries_its_level_so_the_page_reads_none_of_its_text() {
+    let (_host, handle) = new_session();
+    take_log(handle as i32);
+    let cpu = &mut session(handle).cpu;
+    cpu.out
+        .extend_from_slice(b"[lm/WARN/nn::fs] low on space\n[lm/TRACE] tick\nplain stdout\n");
+    cpu.trace.push(switch_core::trace::Level::Error.marker());
+    cpu.trace.extend_from_slice(b"fault at 0x80\n  x0=0x1\n");
+    use log::PageLevel::*;
+    assert_eq!(
+        take_log(handle as i32),
+        [
+            (Warn as u32, "[lm/WARN/nn::fs] low on space".to_owned()),
+            (Debug as u32, "[lm/TRACE] tick".to_owned()),
+            (Log as u32, "plain stdout".to_owned()),
+            (Error as u32, "fault at 0x80".to_owned()),
+            (Error as u32, "  x0=0x1".to_owned()),
+        ]
+    );
+}
+
+/// A new session starts without the old one's panic, but keeps every line it logged.
+#[test]
+fn a_new_session_inherits_the_log_but_not_the_panic_of_the_one_before_it() {
     let (_host, first) = new_session();
+    take_log(first as i32);
 
     // SAFETY: single-threaded under the `HOST` lock.
     let planted = b"PANIC: the old session died here";
@@ -159,15 +151,27 @@ fn a_new_session_inherits_nothing_from_the_one_before_it() {
     guard[..planted.len()].copy_from_slice(planted);
     guard[planted.len()] = 0;
     switch_core::trace::emit("[test] the old session traced this");
+    session(first)
+        .cpu
+        .out
+        .extend_from_slice(b"the old session printed this\n");
 
     switch_free_session(first);
     let second = switch_new();
 
-    let trace = json_from(|buf, cap| switch_drain_trace(second, buf, cap));
-    assert!(
-        !trace.contains("the old session traced this"),
-        "the new session opened with the old one's trace: {trace:.400}"
-    );
+    let lines: Vec<String> = take_log(second as i32)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    for kept in [
+        "the old session printed this",
+        "[test] the old session traced this",
+    ] {
+        assert!(
+            lines.iter().any(|line| line == kept),
+            "{kept:?} was dropped: {lines:?}"
+        );
+    }
 
     let mut buf = [0u8; 256];
     let n = switch_last_error(second, buf.as_mut_ptr(), buf.len() as u32);

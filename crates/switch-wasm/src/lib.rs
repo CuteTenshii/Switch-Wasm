@@ -30,6 +30,7 @@ mod jit;
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 mod screen;
 
+mod activity;
 mod applets;
 mod audio;
 mod boot;
@@ -39,6 +40,7 @@ mod debug;
 mod display;
 mod input;
 mod keyboard;
+mod log;
 mod nand;
 mod run;
 mod stats;
@@ -70,6 +72,7 @@ struct Session {
     staged_users: Vec<switch_core::cpu::UserAccount>,
     cpu: Cpu,
     last_error: String,
+    activity: activity::Reporter,
 }
 
 // Only the system worker calls exports, each to completion; a `Mutex` would deadlock on reentry.
@@ -102,6 +105,13 @@ fn session(handle: u32) -> &'static mut Session {
         .and_then(|s| s.as_mut())
         .unwrap_or_else(|| panic!("invalid session handle {handle} (slots len {len})"));
     unsafe { std::mem::transmute::<&mut Session, &'static mut Session>(slot) }
+}
+
+/// The session `handle` names, or `None` once it has been freed.
+fn session_if_live(handle: u32) -> Option<&'static mut Session> {
+    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
+    let slots = unsafe { &mut *SESSIONS.get() };
+    slots.get_mut(handle as usize)?.as_mut()
 }
 
 fn new_handle(session: Session) -> u32 {
@@ -274,12 +284,10 @@ fn install_panic_hook() {
     });
 }
 
-/// Clear module-level state (panic message, pending traces) left by the previous session.
+/// Clear the panic message the previous session left; its log lines stay queued.
 fn forget_the_last_session() {
     // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     unsafe { &mut *PANIC_MSG.get() }.fill(0);
-    // Drop traces the previous session left.
-    let _ = switch_core::trace::take_pending();
 }
 
 /// Create a fresh machine, return its handle.
@@ -301,6 +309,7 @@ pub extern "C" fn switch_new() -> u32 {
         staged_users: Vec::new(),
         cpu,
         last_error: String::new(),
+        activity: activity::Reporter::default(),
     })
 }
 
@@ -312,6 +321,7 @@ pub extern "C" fn switch_free_session(handle: u32) {
     if let Some(slot) = slots.get_mut(handle as usize) {
         if let Some(session) = slot.as_mut() {
             session.cpu.stop_cores();
+            log::collect(&mut session.cpu);
         }
         *slot = None;
     }

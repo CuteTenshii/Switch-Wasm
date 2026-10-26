@@ -1,8 +1,7 @@
-// The debug panel: instruction tracing, register dumps, and the trace buffer
-// the emulator also uses for diagnostics.
+// The debug panel: instruction tracing, register dumps, and the translator and
+// renderer readouts.
 
 import type { GpuReport } from '../shared/protocol';
-import type { LogLevel } from './log';
 import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
@@ -47,36 +46,6 @@ traceCb.addEventListener('change', () => {
   setNote('trace-badge', traceCb.checked ? 'on' : 'off', traceCb.checked);
   if (traceCb.checked) log('Tracing enabled - run slices are capped for readability. The trace shows at the Debug log level.');
 });
-
-// The trace buffer also carries diagnostics (unimplemented services, faults),
-// so it is drained as the run goes.
-export async function drainDiagnostics(): Promise<void> {
-  logTrace(await drainTrace());
-}
-
-export async function drainTrace(): Promise<string> {
-  const bytes = await call('drain_trace');
-  if (bytes && bytes.length) return new TextDecoder().decode(bytes);
-  return '';
-}
-
-// Trace line levels from `switch_core::trace::Level`; an unmarked line continues the previous one.
-const MARKERS: Record<string, LogLevel> = {
-  '\u0001': 'error',
-  '\u0002': 'warn',
-  '\u0003': 'info',
-  '\u0004': 'debug',
-};
-
-export function logTrace(text: string): void {
-  if (!text) return;
-  let level: LogLevel = 'debug';
-  for (const line of text.replace(/\n$/, '').split('\n')) {
-    const marked = MARKERS[line[0]];
-    if (marked) level = marked;
-    log(marked ? line.slice(1) : line, level);
-  }
-}
 
 const jitCb = $<HTMLInputElement>('jit-cb');
 
@@ -222,16 +191,13 @@ setInterval(() => {
 updateDisplayDebug();
 
 $('btn-dumptrace').addEventListener('click', async () => {
-  const t = await drainTrace();
   openPanel('console');
-  if (t) logTrace(t);
-  else log('(no trace)');
+  if (!await call('flush_log')) log('(no trace)');
 });
 
 $('btn-dumpregs').addEventListener('click', async () => {
-  const s = await call('dump_regs');
   openPanel('console');
-  if (s) log(s);
+  await call('log_regs');
 });
 
 const regIdx = $<HTMLInputElement>('reg-idx');
