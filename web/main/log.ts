@@ -98,8 +98,13 @@ function logLine(msg: string, level: LogLevel): void {
   if (level === 'error') openPanel('console');
 }
 
+// `e>`, `w>`, `i>`, `l>` or `d>`, so the level survives copying and saving.
+function prompted(entry: Entry): string {
+  return `${entry.level[0]}> ${entry.text}`;
+}
+
 function row(entry: Entry): HTMLElement {
-  const line = el('div', entry.level, entry.text);
+  const line = el('div', entry.level, prompted(entry));
   if (entry.count > 1) line.dataset.repeat = String(entry.count);
   return line;
 }
@@ -131,7 +136,8 @@ export function consoleText(): string {
 }
 
 function asLine(entry: Entry): string {
-  return entry.count > 1 ? `${entry.text}  (x${entry.count})` : entry.text;
+  const line = prompted(entry);
+  return entry.count > 1 ? `${line}  (x${entry.count})` : line;
 }
 
 const saveBtn = $('btn-save-console');

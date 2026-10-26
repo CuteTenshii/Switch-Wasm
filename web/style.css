@@ -1068,26 +1068,16 @@ body.resizing {
 /* Empty-log note. */
 .console:empty::before {
   content: "Nothing logged yet.";
-  /* Aligned with an entry's text column, not its marker. */
-  padding-left: 16px;
+  /* Aligned with an entry's text. */
+  padding-left: 8px;
   color: #4f586e;
 }
 
-/* Markers are positioned so wrapped lines align, and drawn in CSS so they stay out of the text. */
 .console div {
-  position: relative;
-  padding: 1px 6px 1px 22px;
+  padding: 1px 6px;
   border-left: 2px solid transparent;
   border-radius: 4px;
   animation: log-in .14s ease-out;
-}
-.console div::before {
-  content: "\203a";           /* stdout from the guest */
-  position: absolute;
-  left: 8px;
-  top: 1px;
-  color: #3f4860;
-  font-weight: 600;
 }
 /* Repeat count via `attr()`, so copied text carries it as a trailing `(xN)`. */
 .console div[data-repeat]::after {
@@ -1109,31 +1099,15 @@ body.resizing {
   border-left-color: var(--red);
   background: rgb(255 111 111 / 7%);
 }
-.console .error::before {
-  content: "\2715";
-  color: var(--red);
-}
 
 .console .warn {
   color: var(--amber);
   border-left-color: #5c4718;
 }
-.console .warn::before {
-  content: "\26a0";
-  color: var(--amber);
-}
 
 .console .info { color: var(--accent); }
-.console .info::before {
-  content: "\24d8";
-  color: var(--accent);
-}
 
 .console .debug { color: var(--muted); }
-.console .debug::before {
-  content: "\b7";
-  color: #3f4860;
-}
 
 @keyframes log-in {
   from { opacity: 0;
