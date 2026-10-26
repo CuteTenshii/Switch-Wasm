@@ -237,6 +237,11 @@ impl Cpu {
                 Some(309) => self.write_ipc_response(tls, 0, &[], &[0u8; 8], &[]),
                 // GetUniquePadIds: none.
                 Some(703) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
+                // GetRegisteredDevices (543 before 13.0.0, 548 after): no Bluetooth pairings; connected pads come from shared memory.
+                // The controller applet aborts with 10-0221 when 548 is refused.
+                Some(543) | Some(548) => {
+                    self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[])
+                }
                 // SetNotificationLedPattern and its timeout form.
                 Some(830) | Some(831) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -426,6 +431,25 @@ mod tests {
             cpu.mem.read_u32(TLS + 0x20).unwrap(),
             crate::cpu::supported_npad_style_set()
         );
+    }
+
+    #[test]
+    fn the_controller_applet_finds_no_registered_devices_rather_than_a_refusal() {
+        for command in [543u32, 548] {
+            let mut cpu = request(false, command, &[]);
+            cpu.register_service_handle(9, "hid:sys");
+            cpu.hid_request(TLS, 9, Some(command)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "command {command}"
+            );
+            assert_eq!(
+                cpu.mem.read_u64(TLS + 0x20).unwrap(),
+                0,
+                "command {command}"
+            );
+        }
     }
 
     #[test]
