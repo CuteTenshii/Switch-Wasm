@@ -233,15 +233,18 @@ pub struct MemoryTextures<'a, 'b> {
     pub ctx: &'a ExecCtx<'b>,
     pub tex_header_pool: u64,
     pub tex_sampler_pool: u64,
-    /// Descriptors parsed this draw, keyed by handle. Owned by the caller so this
-    /// struct can be rebuilt per fragment.
-    pub descriptors: &'a std::cell::RefCell<crate::IdMap<u32, crate::gpu::texture::Descriptors>>,
+    /// Owned by the caller so this struct can be rebuilt per fragment.
+    pub descriptors: &'a std::cell::RefCell<crate::gpu::texture::DescriptorCache>,
     /// Decoded compressed blocks, shared across the draw.
     pub blocks: &'a std::cell::RefCell<crate::gpu::texture::BlockCache>,
 }
 
 impl MemoryTextures<'_, '_> {
-    fn descriptors_for(&self, handle: u32) -> ShaderResult<crate::gpu::texture::Descriptors> {
+    /// `None` for a null image, which every read here answers with zeros.
+    fn descriptors_for(
+        &self,
+        handle: u32,
+    ) -> ShaderResult<Option<crate::gpu::texture::Descriptors>> {
         if let Some(d) = self.descriptors.borrow().get(&handle).copied() {
             return Ok(d);
         }
@@ -258,7 +261,9 @@ impl MemoryTextures<'_, '_> {
 
 impl TextureSource for MemoryTextures<'_, '_> {
     fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]> {
-        let descriptors = self.descriptors_for(handle)?;
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
         Ok(crate::gpu::texture::sample_with(
             self.ctx,
             &descriptors,
@@ -270,17 +275,22 @@ impl TextureSource for MemoryTextures<'_, '_> {
     }
 
     fn texel_step(&self, handle: u32) -> ShaderResult<(f32, f32)> {
-        let texture = self.descriptors_for(handle)?.texture;
-        Ok((
-            1.0 / texture.width.max(1) as f32,
-            1.0 / texture.height.max(1) as f32,
-        ))
+        let (width, height) = self
+            .descriptors_for(handle)?
+            .map_or((0, 0), |d| (d.texture.width, d.texture.height));
+        Ok((1.0 / width.max(1) as f32, 1.0 / height.max(1) as f32))
     }
 
-    // One level, all either renderer gives a texture.
+    // One level, all either renderer gives a texture; a null image has none.
     fn dimensions(&self, handle: u32) -> ShaderResult<[u32; 4]> {
-        let texture = self.descriptors_for(handle)?.texture;
-        Ok([texture.width, texture.height, texture.layers.max(1), 1])
+        Ok(self.descriptors_for(handle)?.map_or([0; 4], |d| {
+            [
+                d.texture.width,
+                d.texture.height,
+                d.texture.layers.max(1),
+                1,
+            ]
+        }))
     }
 
     fn gather(
@@ -291,7 +301,9 @@ impl TextureSource for MemoryTextures<'_, '_> {
         layer: u32,
         component: usize,
     ) -> ShaderResult<[f32; 4]> {
-        let descriptors = self.descriptors_for(handle)?;
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
         Ok(crate::gpu::texture::gather_with(
             self.ctx,
             &descriptors,
@@ -304,7 +316,9 @@ impl TextureSource for MemoryTextures<'_, '_> {
     }
 
     fn sample_3d(&self, handle: u32, u: f32, v: f32, w: f32) -> ShaderResult<[f32; 4]> {
-        let descriptors = self.descriptors_for(handle)?;
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
         Ok(crate::gpu::texture::sample_3d_with(
             self.ctx,
             &descriptors,
@@ -316,7 +330,9 @@ impl TextureSource for MemoryTextures<'_, '_> {
     }
 
     fn sample_cube(&self, handle: u32, s: f32, t: f32, r: f32) -> ShaderResult<[f32; 4]> {
-        let descriptors = self.descriptors_for(handle)?;
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
         Ok(crate::gpu::texture::sample_cube_with(
             self.ctx,
             &descriptors,
@@ -336,7 +352,9 @@ impl TextureSource for MemoryTextures<'_, '_> {
         r: f32,
         cube: u32,
     ) -> ShaderResult<[f32; 4]> {
-        let descriptors = self.descriptors_for(handle)?;
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
         Ok(crate::gpu::texture::sample_cube_with(
             self.ctx,
             &descriptors,
@@ -356,7 +374,9 @@ impl TextureSource for MemoryTextures<'_, '_> {
         layer: u32,
         reference: f32,
     ) -> ShaderResult<[f32; 4]> {
-        let descriptors = self.descriptors_for(handle)?;
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
         Ok(crate::gpu::texture::sample_compare_with(
             self.ctx,
             &descriptors,

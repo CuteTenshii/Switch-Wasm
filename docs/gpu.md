@@ -216,4 +216,5 @@ The Maxwell engines, shader translation, the software rasterizer and texture han
 - Layer stride for mipmapped arrays/cubes includes the mip chain: Tomodachi Life's 64x64 cubes with seven levels are 0x6000 apart; 0x4000 sampled every face from the first face's mips.
 - Cubemaps: `DEPTH_MINUS_ONE` holds 1 but there are six faces. Software cube sampling clamps at face edges where the GPU filters across seams; nothing seen samples there.
 - Shadow sampling is PCF (compare per tap, then filter), returning `[c, c, c, 1]` without swizzle. Integer textures are always nearest-sampled.
+- A TIC entry whose address is 0 is a null image, as Eden's `IsValidEntry` treats it: samples, gathers and surface loads read zero, size queries answer 0 and stores are dropped. Echoes of Wisdom's cubemap filter samples four unbound slots (handle 0, an all-zero entry), which read as `COMPONENTS_SIZES 0`/`R_DATA_TYPE 0` and refused 7 of 8 dispatches. Only the rasterizer reads a null image; a device draw that samples one falls back to it.
 - `TRACE_TEX` is separate from `TRACE_GPU` because a frame has a million method traces but only dozens of textures.

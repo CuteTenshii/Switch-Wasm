@@ -12,7 +12,7 @@ use crate::gpu::shader::interp::{
 };
 use crate::gpu::shader::isa::SurfaceData;
 use crate::gpu::shader::{decode_program_from_memory, Op};
-use crate::gpu::texture::{self, BlockCache, Descriptors, Texture};
+use crate::gpu::texture::{self, BlockCache, DescriptorCache, Texture};
 use crate::{Error, Result};
 use std::cell::RefCell;
 
@@ -197,10 +197,10 @@ struct DispatchMemory<'a, 'b> {
     consts: RefCell<ConstCache>,
     tex_header_pool: u64,
     tex_sampler_pool: u64,
-    descriptors: RefCell<crate::IdMap<u32, Descriptors>>,
+    descriptors: RefCell<DescriptorCache>,
     blocks: RefCell<BlockCache>,
     /// Images for surface instructions, keyed by handle (TIC only, no sampler).
-    surfaces: RefCell<crate::IdMap<u32, Texture>>,
+    surfaces: RefCell<crate::IdMap<u32, Option<Texture>>>,
 }
 
 impl DispatchMemory<'_, '_> {
@@ -255,12 +255,13 @@ impl GlobalMemory for DispatchMemory<'_, '_> {
 }
 
 impl DispatchMemory<'_, '_> {
-    fn surface(&self, handle: u32) -> ShaderResult<Texture> {
+    /// `None` for a null image: loads read zero and stores are dropped.
+    fn surface(&self, handle: u32) -> ShaderResult<Option<Texture>> {
         if let Some(image) = self.surfaces.borrow().get(&handle).copied() {
             return Ok(image);
         }
         let at = self.tex_header_pool + u64::from(texture::image_id(handle)) * 32;
-        let image = texture::read_image(&self.ctx.borrow(), at)?;
+        let image = texture::read_bound_image(&self.ctx.borrow(), at)?;
         self.surfaces.borrow_mut().insert(handle, image);
         Ok(image)
     }
@@ -333,7 +334,9 @@ impl TextureSource for DispatchMemory<'_, '_> {
     }
 
     fn surface_load(&self, handle: u32, at: [u32; 3], data: SurfaceData) -> ShaderResult<[u32; 4]> {
-        let image = self.surface(handle)?;
+        let Some(image) = self.surface(handle)? else {
+            return Ok([0; 4]);
+        };
         Ok(texture::surface_load(&self.ctx.borrow(), &image, at, data)?)
     }
 
@@ -344,7 +347,9 @@ impl TextureSource for DispatchMemory<'_, '_> {
         data: SurfaceData,
         regs: [u32; 4],
     ) -> ShaderResult<()> {
-        let image = self.surface(handle)?;
+        let Some(image) = self.surface(handle)? else {
+            return Ok(());
+        };
         Ok(texture::surface_store(
             &mut self.ctx.borrow_mut(),
             &image,
@@ -868,6 +873,43 @@ mod tests {
             vec![100, 101, 102, 103, 0],
             "the fifth store is dropped"
         );
+    }
+
+    /// A surface whose TIC entry has no address is a null image: the store is dropped
+    /// and the load reads zero, rather than the dispatch being refused.
+    #[test]
+    fn a_null_surface_drops_stores_and_loads_zero() {
+        const TIC_POOL_AT: u64 = 0x3000;
+        let mut h = Harness::new();
+        let out = h.base + OUTPUT_AT;
+        let program = [
+            mov32i(0, 0),
+            mov32i(1, 0),
+            mov32i(39, 0),
+            mov32i(24, 0x1234),
+            sust_p_2d(0, 24, 39),
+            mov32i(8, 0x5678),
+            suld_d_2d_b32(8, 0, 39),
+            mov32i(10, out as u32),
+            mov32i(11, (out >> 32) as u32),
+            stg(10, 0, 8),
+            exit(),
+        ];
+        let launch = Launch {
+            grid: [1, 1, 1],
+            block: [1, 1, 1],
+            ..Launch::default()
+        };
+        h.write_words(QMD_AT, &launch.words());
+        h.write_program(&program);
+        let mut engine = h.engine();
+        let pool = h.base + TIC_POOL_AT;
+        engine.regs.set(0x55D, (pool >> 32) as u32);
+        engine.regs.set(0x55E, pool as u32);
+        h.write_words(OUTPUT_AT, &[0xffff_ffff]);
+        dispatch(&engine, &mut h.ctx()).unwrap();
+
+        assert_eq!(h.read_output(1), vec![0]);
     }
 
     #[test]

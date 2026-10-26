@@ -782,21 +782,41 @@ pub struct Descriptors {
     pub sampler: Sampler,
 }
 
-/// Resolve a bindless `handle` against the bound TIC/TSC pools.
+/// Descriptors parsed during one draw or dispatch, keyed by handle; `None` is a null image.
+pub type DescriptorCache = crate::IdMap<u32, Option<Descriptors>>;
+
+/// What every sample, gather and load of a null image reads.
+pub const NULL_TEXEL: [f32; 4] = [0.0; 4];
+
+/// [`read_image`], or `None` when the TIC entry's address is 0. Eden binds a null
+/// view for such an entry (`IsValidEntry`): samples read zero and stores are dropped.
+pub fn read_bound_image(ctx: &ExecCtx, addr: u64) -> Result<Option<Texture>> {
+    let address_low = ctx.read_u32(addr + 4)?;
+    let address_high = ctx.read_u32(addr + 8)? & 0xffff;
+    if address_low == 0 && address_high == 0 {
+        return Ok(None);
+    }
+    read_image(ctx, addr).map(Some)
+}
+
+/// Resolve a bindless `handle` against the bound TIC/TSC pools; `None` is a null image.
 pub fn read_descriptors(
     ctx: &ExecCtx,
     tex_header_pool: u64,
     tex_sampler_pool: u64,
     handle: u32,
-) -> Result<Descriptors> {
-    let texture = read_image(ctx, tex_header_pool + image_id(handle) as u64 * 32)?;
+) -> Result<Option<Descriptors>> {
+    let Some(texture) = read_bound_image(ctx, tex_header_pool + image_id(handle) as u64 * 32)?
+    else {
+        return Ok(None);
+    };
     let mut sampler = read_sampler(ctx, tex_sampler_pool + sampler_id(handle) as u64 * 32)?;
     // Integer textures are always read at the nearest texel.
     if matches!(texture.kind, TexelKind::Depth(depth) if depth.is_integer()) {
         sampler.mag_linear = false;
         sampler.min_linear = false;
     }
-    Ok(Descriptors { texture, sampler })
+    Ok(Some(Descriptors { texture, sampler }))
 }
 
 /// Resolve a bindless `handle` and sample at normalized `(u, v)`.
@@ -809,7 +829,10 @@ pub fn sample(
     v: f64,
     layer: u32,
 ) -> Result<[f32; 4]> {
-    let descriptors = read_descriptors(ctx, tex_header_pool, tex_sampler_pool, handle)?;
+    let Some(descriptors) = read_descriptors(ctx, tex_header_pool, tex_sampler_pool, handle)?
+    else {
+        return Ok(NULL_TEXEL);
+    };
     sample_with(
         ctx,
         &descriptors,
@@ -1086,6 +1109,48 @@ mod tests {
         );
     }
 
+    /// Echoes of Wisdom's cubemap filter samples TIC entry 0, all zeros, as Eden's null
+    /// view; an entry with an address and no known format is still refused.
+    #[test]
+    fn a_tic_entry_with_no_address_is_a_null_image() {
+        use crate::gpu::shader::interp::{MemoryTextures, TextureSource};
+        let (mut mem, vmm, base) = harness();
+        let tic_pool = base;
+        let tsc_pool = base + 0x100;
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            as_id: 0,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        assert!(read_bound_image(&ctx, tic_pool).unwrap().is_none());
+        assert!(read_descriptors(&ctx, tic_pool, tsc_pool, 0)
+            .unwrap()
+            .is_none());
+
+        let descriptors = RefCell::new(DescriptorCache::default());
+        let blocks = RefCell::new(BlockCache::default());
+        let textures = MemoryTextures {
+            ctx: &ctx,
+            tex_header_pool: tic_pool,
+            tex_sampler_pool: tsc_pool,
+            descriptors: &descriptors,
+            blocks: &blocks,
+        };
+        assert_eq!(textures.sample(0, 0.5, 0.5, 0).unwrap(), NULL_TEXEL);
+        assert_eq!(textures.sample_cube(0, 1.0, 0.0, 0.0).unwrap(), NULL_TEXEL);
+        assert_eq!(textures.gather(0, 0.5, 0.5, 0, 0).unwrap(), NULL_TEXEL);
+        assert_eq!(textures.dimensions(0).unwrap(), [0; 4]);
+
+        ctx.vmm.write_u32(ctx.mem, tic_pool + 4, 0x1000).unwrap();
+        let refused = read_bound_image(&ctx, tic_pool).unwrap_err().to_string();
+        assert!(refused.contains("R_DATA_TYPE 0"), "{refused}");
+    }
+
     /// `S8D24` as an unsigned integer: stencil bits and unorm depth, never blended.
     #[test]
     fn an_integer_stencil_texture_reads_the_nearest_texel_bits() {
@@ -1122,7 +1187,9 @@ mod tests {
             stats: &mut stats,
             trace: false,
         };
-        let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0).unwrap();
+        let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0)
+            .unwrap()
+            .unwrap();
         let blocks = RefCell::new(BlockCache::default());
         let left = sample_with(&ctx, &d, 0.45, 0.5, 0, &blocks).unwrap();
         assert_eq!(left[0].to_bits(), 3);
@@ -1709,7 +1776,9 @@ mod tests {
                 stats: &mut stats,
                 trace: false,
             };
-            let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0).unwrap();
+            let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0)
+                .unwrap()
+                .unwrap();
             sample_compare_with(
                 &ctx,
                 &d,

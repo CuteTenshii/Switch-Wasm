@@ -368,7 +368,7 @@ pub(super) fn with_fragment_env<T>(
     engine: &Engine3D,
     ctx: &ExecCtx,
     consts: &std::cell::RefCell<crate::gpu::shader::interp::ConstCache>,
-    descriptors: &std::cell::RefCell<crate::IdMap<u32, crate::gpu::texture::Descriptors>>,
+    descriptors: &std::cell::RefCell<crate::gpu::texture::DescriptorCache>,
     blocks: &std::cell::RefCell<crate::gpu::texture::BlockCache>,
     stores: &std::cell::RefCell<Vec<(u64, u32)>>,
     f: impl FnOnce(&mut Env) -> Result<T>,

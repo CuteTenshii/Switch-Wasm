@@ -613,12 +613,19 @@ fn read_texture(
         )));
     }
     let handle = ctx.read_u32(addr + u64::from(offset))?;
-    let descriptors = texture::read_descriptors(
+    let Some(descriptors) = texture::read_descriptors(
         ctx,
         engine.tex_header_pool(),
         engine.tex_sampler_pool(),
         handle,
-    )?;
+    )?
+    else {
+        return Err(Error::Gpu(
+            "upload: the draw samples a null image (TIC address 0), which only the \
+             rasterizer reads as zeros"
+                .into(),
+        ));
+    };
     let image = descriptors.texture;
 
     let copy = image_copy(&image)?;
