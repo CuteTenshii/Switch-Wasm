@@ -70,7 +70,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 - `hid` and `hid:dbg` are both `IHidServer`; `hid:sys` is `IHidSystemServer` with its own dispatch (libnx opens it in `hidsysInitialize`).
 - A refused command is fatal under `nnSdk`, so many void setters are accepted (e.g. `SetGestureOutputRanges`, which Tomodachi Life sends with 1280x720; `ActivateGesture` pairs with it; `GetLastActiveNpad` blocked the Mii editor).
 - `SetSupportedNpadStyleSet` determines how pads are published (`NPAD_PRESENTATIONS`): publishing FullKey and Handheld regardless made titles that only accept Joy-Con pairs abort with 2202-0710. Style set 0 (libnx defaults) means a Pro Controller in slot 0 and handheld in slot 8. Resolution is best-first.
-- `GetRegisteredDevices` (`hid:sys` 548, 543 before 13.0.0) reports no paired devices; refusing it made the controller applet abort with 10-0221, which Echoes of Wisdom then relaunched forever.
+- `GetRegisteredDevices` (`hid:sys` 548, 543 before 13.0.0) reports no paired devices; refusing it made the controller applet abort with 10-0221, which Echoes of Wisdom then relaunched forever. The applet then asks `IsHandheldButtonPressedOnConsoleMode` (870), answered false, and aborts the same way when it is refused.
 - System applets (18.0.1 qlaunch) never send `SetSupportedNpadStyleSet`; they use `ApplyNpadSystemCommonPolicy` (303/308), which grants every publishable style, and 310 must report the same set.
 - SystemExt is a second copy every pad carries (qlaunch reads only SystemExt), published regardless of style.
 - `GetNpadJoyHoldType` reads `NpadCondition` from shared memory and aborts (2202-0710, seen in 21.2.0 Home Menu) unless `is_valid` is set, so hold type changes must be written there too.

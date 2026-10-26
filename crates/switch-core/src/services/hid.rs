@@ -225,6 +225,8 @@ impl Cpu {
                 Some(523) | Some(525) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
                 // IsUsbFullKeyControllerEnabled: no.
                 Some(850) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // IsHandheldButtonPressedOnConsoleMode: no. The controller applet aborts with 10-0221 when it is refused.
+                Some(870) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 // SetTouchScreenMagnification / SetTouchScreenDefaultConfiguration / SetForceHandheldStyleVibration.
                 Some(1150) | Some(1152) | Some(1155) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -450,6 +452,16 @@ mod tests {
                 "command {command}"
             );
         }
+    }
+
+    #[test]
+    fn the_controller_applet_sees_no_handheld_button_pressed_while_docked() {
+        let mut cpu = request(false, 870, &[]);
+        cpu.register_service_handle(9, "hid:sys");
+        cpu.mem.write_u8(TLS + 0x20, 0xff).unwrap();
+        cpu.hid_request(TLS, 9, Some(870)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0);
     }
 
     #[test]
