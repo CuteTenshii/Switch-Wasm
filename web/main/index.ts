@@ -7,7 +7,7 @@ import { controlRestore } from './controls';
 import { resetDisplay } from './display';
 import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
-import { clearConsole, log, logLevel, offerPreviousLog, onLogLevel } from './log';
+import { log, logLevel, offerPreviousLog, onLogLevel } from './log';
 import { initNand } from './nand';
 import { attachScreen, call, initWorker, setSession, whenReady } from './rpc';
 import { updateReadouts, updateRam } from './runloop';
@@ -74,7 +74,6 @@ $('btn-stop').addEventListener('click', async () => {
   const ended = endTitle();
   endLoad();
   resetAudio();
-  clearConsole();
   resetDisplay();
   setRunning(null);
   setState('idle');

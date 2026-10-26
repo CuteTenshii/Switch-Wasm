@@ -50,10 +50,8 @@ levelSelect.addEventListener('change', () => {
   for (const listener of levelListeners) listener(threshold);
 });
 
-// Entries kept on the page; `backlog` keeps more for copying and saving.
+// Entries kept on the page; `backlog` keeps every one for copying and saving.
 const SHOWN_MAX = 2000;
-
-const KEPT_MAX = 50_000;
 
 // Consecutive repeats collapse into one entry with a count.
 interface Entry {
@@ -62,7 +60,7 @@ interface Entry {
   count: number;
 }
 
-// Every entry, whether or not it is still on the page.
+// Every entry, whether or not it is still on the page. Only the Clear button empties it.
 const backlog: Entry[] = [];
 
 // The newest entry's row, so a repeat can be counted in place.
@@ -91,7 +89,6 @@ function logLine(msg: string, level: LogLevel): void {
   }
 
   backlog.push({ text: msg, level, count: 1 });
-  if (backlog.length > KEPT_MAX) backlog.splice(0, backlog.length - KEPT_MAX);
   if (!visible) return;
 
   lastRow = row({ text: msg, level, count: 1 });
@@ -120,7 +117,7 @@ function renderConsole(): void {
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
-export function clearConsole(): void {
+function clearConsole(): void {
   consoleEl.textContent = '';
   backlog.length = 0;
   lastRow = null;
@@ -162,9 +159,8 @@ export function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
 }
 
-// The log's tail is mirrored to IndexedDB on a timer, so it survives the browser killing the tab.
+// The log is mirrored to IndexedDB on a timer, so it survives the browser killing the tab.
 const MIRROR_EVERY_MS = 5000;
-const MIRRORED_MAX = 4000;
 
 let mirrorDirty = false;
 
@@ -176,8 +172,7 @@ setInterval(() => {
 
 async function mirrorLog(): Promise<void> {
   try {
-    const tail = backlog.slice(-MIRRORED_MAX).map(asLine).join('\n');
-    await idbApply(await logIdb(), LOG_STORE, [[LOG_KEY, tail]]);
+    await idbApply(await logIdb(), LOG_STORE, [[LOG_KEY, consoleText()]]);
   } catch {
     // Private browsing, refused quota, or evicted origin: the mirror is lost silently.
   }

@@ -638,13 +638,6 @@ body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-stat
   overflow-wrap: anywhere;
 }
 
-.crash-help {
-  max-width: 58ch;
-  margin: 12px 0 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
 .crash-actions {
   grid-column: 2;
   display: flex;
