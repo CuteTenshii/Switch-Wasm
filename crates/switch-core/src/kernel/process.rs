@@ -332,6 +332,7 @@ impl Cpu {
         self.last_vsync_frame = 0;
         self.npad_style_set = 0;
         self.npad_joy_hold_type = 0;
+        self.six_axis_passthrough = false;
         self.vibration = (0.0, 0.0);
         self.error_dialogs.clear();
         self.am_terminate_result = 0;

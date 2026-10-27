@@ -48,6 +48,16 @@ impl Cpu {
                 | Some(1000..=1004) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // SetGestureOutputRanges(u32 width, u32 height, u64 aruid): no gestures are synthesised.
                 Some(92) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // Enable/IsSixAxisSensorUnalteredPassthroughEnabled(flag, handle, aruid):
+                // stored and read back; no six-axis samples are published to alter.
+                Some(84) => {
+                    self.six_axis_passthrough = self.mem.read_u8(data)? != 0;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(85) => {
+                    let enabled = u8::from(self.six_axis_passthrough);
+                    self.write_ipc_response(tls, 0, &[], &[enabled], &[])
+                }
                 // SetSupportedNpadStyleSet and its readback; the set also picks how the pad is published.
                 Some(100) => {
                     let styles = self.mem.read_u32(data)?;
@@ -291,6 +301,31 @@ mod tests {
                 0,
                 "command {command}"
             );
+        }
+    }
+
+    #[test]
+    fn six_axis_unaltered_passthrough_reads_back_what_was_set() {
+        // Nintendo Switch Sports sets it, reads it back, and panics on a refusal of either.
+        let ask = |cpu: &mut Cpu| -> u8 {
+            let mut probe = request(false, 85, &[0; 16]);
+            probe.six_axis_passthrough = cpu.six_axis_passthrough;
+            probe.register_service_handle(9, "hid");
+            probe.hid_request(TLS, 9, Some(85)).unwrap();
+            assert_eq!(probe.mem.read_u32(TLS + 0x18).unwrap(), 0, "a refusal");
+            probe.mem.read_u8(TLS + 0x20).unwrap()
+        };
+
+        for enable in [1u8, 0] {
+            // { enable, padding, handle, aruid }
+            let mut payload = vec![enable, 0, 0, 0];
+            payload.extend_from_slice(&0x2000_0000u32.to_le_bytes());
+            payload.extend_from_slice(&0u64.to_le_bytes());
+            let mut cpu = request(false, 84, &payload);
+            cpu.register_service_handle(9, "hid");
+            cpu.hid_request(TLS, 9, Some(84)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "a refusal");
+            assert_eq!(ask(&mut cpu), enable, "after setting {enable}");
         }
     }
 

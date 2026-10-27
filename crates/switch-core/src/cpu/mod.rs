@@ -256,6 +256,8 @@ pub struct Machine {
     /// `AcquireNpadStyleSetUpdateEventHandle`'s auto-clearing event.
     pub(crate) npad_style_update_event: Option<u64>,
     pub(crate) npad_joy_hold_type: u64,
+    /// `EnableSixAxisSensorUnalteredPassthrough`, read back by its getter.
+    pub(crate) six_axis_passthrough: bool,
     /// Rumble amplitudes (low band, high band).
     pub(crate) vibration: (f32, f32),
     /// Built-in CA certificates, loaded on first use; empty if the store is missing.
@@ -531,6 +533,7 @@ impl Cpu {
                 npad_style_set: 0,
                 npad_style_update_event: None,
                 npad_joy_hold_type: 0,
+                six_axis_passthrough: false,
                 vibration: (0.0, 0.0),
                 ssl_certificates: None,
                 ssl_next_pki_id: 1,
