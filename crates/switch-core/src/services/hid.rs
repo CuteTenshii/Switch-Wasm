@@ -58,6 +58,17 @@ impl Cpu {
                     let enabled = u8::from(self.six_axis_passthrough);
                     self.write_ipc_response(tls, 0, &[], &[enabled], &[])
                 }
+                // GetSixAxisSensorIcInformation(handle, aruid) -> the sensor's ranges, in a
+                // buffer: there is no sensor, so the defaults Eden answers with.
+                Some(88) => {
+                    if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
+                        let info = six_axis_ic_information();
+                        for (i, &byte) in info.iter().take(len as usize).enumerate() {
+                            self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                        }
+                    }
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 // SetSupportedNpadStyleSet and its readback; the set also picks how the pad is published.
                 Some(100) => {
                     let styles = self.mem.read_u32(data)?;
@@ -278,6 +289,33 @@ impl Cpu {
     }
 }
 
+/// `SixAxisSensorIcInformation` (0xC8 bytes): the gyroscope's range in degrees per
+/// second and the accelerometer's in G, each with its bounds and calibration matrices.
+fn six_axis_ic_information() -> Vec<u8> {
+    const RANGE_GYRO: [f32; 1] = [2000.0];
+    const BOUNDS_GYRO: [f32; 6] = [-10.0, -10.0, -10.0, 10.0, 10.0, 10.0];
+    const RANGE_ACCEL: [f32; 1] = [8.0];
+    const BOUNDS_ACCEL: [f32; 6] = [-0.0612, -0.0612, -0.0612, 0.0612, 0.0612, 0.0612];
+    const LOW: [f32; 9] = [
+        0.95, -0.003, -0.003, -0.003, 0.95, -0.003, -0.003, -0.003, 0.95,
+    ];
+    const HIGH: [f32; 9] = [1.05, 0.003, 0.003, 0.003, 1.05, 0.003, 0.003, 0.003, 1.05];
+    [
+        &RANGE_GYRO[..],
+        &BOUNDS_GYRO,
+        &LOW,
+        &HIGH,
+        &RANGE_ACCEL,
+        &BOUNDS_ACCEL,
+        &LOW,
+        &HIGH,
+    ]
+    .concat()
+    .iter()
+    .flat_map(|value| value.to_le_bytes())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::cpu::Cpu;
@@ -302,6 +340,25 @@ mod tests {
                 "command {command}"
             );
         }
+    }
+
+    #[test]
+    fn six_axis_ic_information_fills_the_buffer_with_the_sensor_ranges() {
+        // Nintendo Switch Sports asks after its first scene change; a refusal reads as no sensor.
+        const BUFFER: u32 = 0x3_0000;
+        // { handle, padding, aruid }
+        let mut payload = 0x2000_0000u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&[0; 12]);
+        let mut cpu = request_with_recv_static(88, &payload, BUFFER, 0xC8);
+        cpu.mem.map_zero(BUFFER, 0x1000).unwrap();
+        cpu.register_service_handle(9, "hid");
+        cpu.hid_request(TLS, 9, Some(88)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "a refusal");
+        let float = |at: u32| f32::from_bits(cpu.mem.read_u32(BUFFER + at).unwrap());
+        assert_eq!(super::six_axis_ic_information().len(), 0xC8);
+        assert_eq!(float(0), 2000.0, "the gyroscope's range");
+        assert_eq!(float(0x64), 8.0, "the accelerometer's range");
+        assert_eq!(float(0xC4), 1.05, "the last calibration entry");
     }
 
     #[test]
