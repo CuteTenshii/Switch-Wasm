@@ -612,6 +612,7 @@ pub const AUDREN_IN_HEADER: usize = 0x40;
 pub const AUDREN_IN_BEHAVIOR: usize = 0x10;
 pub const AUDREN_IN_CHANNEL: usize = 0x70;
 pub const AUDREN_IN_VOICE: usize = 0x170;
+pub const AUDREN_IN_EFFECT: usize = 0xC0;
 pub const AUDREN_IN_MIX: usize = 0x930;
 pub const AUDREN_IN_SINK: usize = 0x140;
 pub const AUDREN_IN_PERF: usize = 0x10;
@@ -628,25 +629,33 @@ pub struct AudrenUpdate {
     pub data: Vec<u8>,
     pub channels_at: usize,
     pub voices_at: usize,
+    pub effects_at: usize,
     pub mixes_at: usize,
     pub sinks_at: usize,
 }
 
 impl AudrenUpdate {
     pub fn new(voices: usize, mixes: usize, sinks: usize) -> Self {
+        Self::with_effects(voices, 0, mixes, sinks)
+    }
+
+    pub fn with_effects(voices: usize, effects: usize, mixes: usize, sinks: usize) -> Self {
         let channels_sz = voices * AUDREN_IN_CHANNEL;
         let voices_sz = voices * AUDREN_IN_VOICE;
+        let effects_sz = effects * AUDREN_IN_EFFECT;
         let mixes_sz = mixes * AUDREN_IN_MIX;
         let sinks_sz = sinks * AUDREN_IN_SINK;
         let channels_at = AUDREN_IN_HEADER + AUDREN_IN_BEHAVIOR;
         let voices_at = channels_at + channels_sz;
-        let mixes_at = voices_at + voices_sz;
+        let effects_at = voices_at + voices_sz;
+        let mixes_at = effects_at + effects_sz;
         let sinks_at = mixes_at + mixes_sz;
         let total = sinks_at + sinks_sz + AUDREN_IN_PERF;
         let mut update = AudrenUpdate {
             data: vec![0u8; total],
             channels_at,
             voices_at,
+            effects_at,
             mixes_at,
             sinks_at,
         };
@@ -656,6 +665,7 @@ impl AudrenUpdate {
         update.put(0x08, 0);
         update.put(0x0c, voices_sz as u32);
         update.put(0x10, channels_sz as u32);
+        update.put(0x14, effects_sz as u32);
         update.put(0x18, mixes_sz as u32);
         update.put(0x1c, sinks_sz as u32);
         update.put(0x20, AUDREN_IN_PERF as u32);
@@ -718,6 +728,15 @@ impl AudrenUpdate {
         self.data[at + 0x64] = 1; // is_used
     }
 
+    /// Effect slot `index` as `EffectInfo::InParameter`: its type, whether it is
+    /// enabled, and the mix it is attached to.
+    pub fn effect(&mut self, index: usize, kind: u8, enabled: bool, mix_id: u32) {
+        let at = self.effects_at + index * AUDREN_IN_EFFECT;
+        self.data[at] = kind;
+        self.data[at + 0x02] = u8::from(enabled);
+        self.put(at + 0x04, mix_id);
+    }
+
     /// The final mix, with `buffers` mix buffers and going nowhere but the sink.
     pub fn mix(&mut self, buffers: u32) {
         let at = self.mixes_at;
@@ -752,17 +771,27 @@ impl AudrenUpdate {
     }
 }
 
-/// `OpenAudioRenderer` at 48 kHz, 240 samples a frame, revision 9.
-pub fn audren_open(cpu: &mut Cpu, manager: u64, voices: u32, sinks: u32, mix_buffers: u32) -> u64 {
+/// The object counts `OpenAudioRenderer` fixes for a renderer's lifetime.
+#[derive(Debug, Clone, Copy)]
+pub struct AudrenCounts {
+    pub voices: u32,
+    pub effects: u32,
+    pub sinks: u32,
+    pub mix_buffers: u32,
+}
+
+/// `OpenAudioRenderer` at 48 kHz, 240 samples a frame.
+pub fn audren_open(cpu: &mut Cpu, manager: u64, revision: &[u8; 4], counts: AudrenCounts) -> u64 {
     // `AudioRendererParameter`: rate, sample_count, mix_buffer_count,
     // submix_count, voice_count, sink_count, effect_count, … revision.
     let mut params = vec![0u8; 52];
     params[0..4].copy_from_slice(&48_000u32.to_le_bytes());
     params[4..8].copy_from_slice(&240u32.to_le_bytes());
-    params[8..12].copy_from_slice(&mix_buffers.to_le_bytes());
-    params[16..20].copy_from_slice(&voices.to_le_bytes());
-    params[20..24].copy_from_slice(&sinks.to_le_bytes());
-    params[48..52].copy_from_slice(b"REV9");
+    params[8..12].copy_from_slice(&counts.mix_buffers.to_le_bytes());
+    params[16..20].copy_from_slice(&counts.voices.to_le_bytes());
+    params[20..24].copy_from_slice(&counts.sinks.to_le_bytes());
+    params[24..28].copy_from_slice(&counts.effects.to_le_bytes());
+    params[48..52].copy_from_slice(revision);
     ipc_request_plain(cpu, manager, 0, &params);
     u64::from(cpu.mem.read_u32(cpu.tls_base() + 0x0c).unwrap())
 }
@@ -772,7 +801,13 @@ pub fn audren_open(cpu: &mut Cpu, manager: u64, voices: u32, sinks: u32, mix_buf
 pub fn audren_stereo(cpu: &mut Cpu) -> u64 {
     const AUDREN: u64 = 0xB100;
     cpu.register_service_handle(AUDREN, "audren:u");
-    let renderer = audren_open(cpu, AUDREN, 1, 1, 2);
+    let counts = AudrenCounts {
+        voices: 1,
+        effects: 0,
+        sinks: 1,
+        mix_buffers: 2,
+    };
+    let renderer = audren_open(cpu, AUDREN, b"REV9", counts);
     assert_ne!(renderer, 0, "no IAudioRenderer came back");
     renderer
 }

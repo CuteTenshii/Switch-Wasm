@@ -34,7 +34,8 @@
 - **`end_sample_offset` is a claim; `size` is the allocation, and it wins** (`playable_samples`, the same lesson as the audout Mii editor bug). The buffer is still consumed: one that never comes back stalls its voice.
 - At end of stream, interpolate toward zero (avoids a DC step) and keep `primed` so the last sample still plays.
 - ADPCM is decoded from the start of the 14-sample frame when seeking; loops restart from the context's history. Output is scaled by 32768 so unity 16-bit passes bit-exact.
-- Not modelled: effects (parsed for sizing), splitters (stepped over), the circular-buffer sink (reported once, never written). Each is a truthful zero.
+- **An effect's `OutStatus` state is load-bearing**: `nn::audio::Is*Removable` wants `Disabled` (4) before a title removes an effect, so the old zero hung Nintendo Switch Sports at its first scene change. The rule is the SDK's own server (`EffectInfoBase::StoreStatus` and `UpdateForCommandGeneration`): a rendered frame sets each effect of a used mix to enabled or disabled, and the reply reports `Disabled` for that or a stopped renderer, `Enabled` (3) otherwise, unused slots included. A new type in a slot starts over. Effects are never processed.
+- Not modelled: effect processing (the signal passes dry), splitters (stepped over), the circular-buffer sink (reported once, never written; a title waiting on its write offset would stall).
 
 ## `crates/switch-core/src/services/hwopus.rs`
 

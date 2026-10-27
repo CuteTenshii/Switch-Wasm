@@ -33,6 +33,15 @@ const MEMPOOL_IN_SZ: u32 = 0x20;
 const CHANNEL_IN_SZ: u32 = 0x70;
 const VOICE_IN_SZ: u32 = 0x170;
 const WAVE_BUF_IN_SZ: u32 = 0x38;
+/// `EffectInfo::InParameter`, the same size in both revisions.
+const EFFECT_IN_SZ: u32 = 0xC0;
+
+/// `EffectType_Invalid`: an unused slot, which command generation leaves alone.
+const EFFECT_TYPE_INVALID: u8 = 0;
+
+/// `EffectInfo::OutStatus` states; `nn::audio::Is*Removable` wants `Disabled`.
+const EFFECT_STATE_ENABLED: u8 = 3;
+const EFFECT_STATE_DISABLED: u8 = 4;
 
 /// `PcmFormat`, from libnx's `audio.h`.
 const PCM_INT8: u8 = 1;
@@ -100,6 +109,8 @@ pub(crate) struct AudioRenderer {
     /// `mix[i]` is the gain from this channel into buffer `i` of the destination mix.
     pub channels: Vec<ChannelResource>,
     pub mixes: Vec<Mix>,
+    /// Indexed by effect slot.
+    pub effects: Vec<Effect>,
     /// The sink that plays: output channel count and the mix buffer feeding each.
     pub sink: Option<DeviceSink>,
     pub warned_unplayable_sink: bool,
@@ -134,6 +145,38 @@ pub(crate) struct Mix {
     pub dest_mix_id: u32,
     /// `mix[src][dest]`: gain from buffer `src` into buffer `dest` of `dest_mix_id`.
     pub matrix: Vec<f32>,
+}
+
+/// `server::EffectInfoBase::UsageState`. Its `New` state only changes what a
+/// stopped renderer reports, so it is not kept.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum EffectUsage {
+    #[default]
+    Invalid,
+    Enabled,
+    Disabled,
+}
+
+/// One effect slot. Effects are not processed; only whether one is still in
+/// use is reported, and a title waits on that before removing it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Effect {
+    pub kind: u8,
+    pub enabled: bool,
+    pub mix_id: u32,
+    /// Set by command generation, so a change shows from the next rendered frame.
+    pub usage: EffectUsage,
+}
+
+impl Effect {
+    /// `server::EffectInfoBase::StoreStatus`.
+    fn out_state(&self, renderer_started: bool) -> u8 {
+        if renderer_started && self.usage != EffectUsage::Disabled {
+            EFFECT_STATE_ENABLED
+        } else {
+            EFFECT_STATE_DISABLED
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -289,6 +332,27 @@ impl AudioRenderer {
         }
         Some(mix.buffer_offset as usize + dest)
     }
+
+    /// Command generation's `UpdateForCommandGeneration`, run for each effect
+    /// of a mix in use.
+    fn update_effect_usage(&mut self) {
+        for effect in self.effects.iter_mut() {
+            if effect.kind == EFFECT_TYPE_INVALID {
+                continue;
+            }
+            let mix_used = self
+                .mixes
+                .iter()
+                .any(|mix| mix.is_used && mix.mix_id == effect.mix_id);
+            if mix_used {
+                effect.usage = if effect.enabled {
+                    EffectUsage::Enabled
+                } else {
+                    EffectUsage::Disabled
+                };
+            }
+        }
+    }
 }
 
 impl Cpu {
@@ -353,6 +417,7 @@ impl Cpu {
                         mempool_states: Vec::new(),
                         channels: Vec::new(),
                         mixes: Vec::new(),
+                        effects: vec![Effect::default(); effect_count as usize],
                         sink: None,
                         warned_unplayable_sink: false,
                         updates: 0,
@@ -581,10 +646,9 @@ impl Cpu {
         self.audren_parse_channels(&mut renderer, at, channels_sz);
         at = at.wrapping_add(channels_sz);
         self.audren_parse_voices(&mut renderer, at, voices_sz);
-        at = at
-            .wrapping_add(voices_sz)
-            .wrapping_add(effects_sz)
-            .wrapping_add(splitters_sz);
+        at = at.wrapping_add(voices_sz);
+        self.audren_parse_effects(&mut renderer, at, effects_sz);
+        at = at.wrapping_add(effects_sz).wrapping_add(splitters_sz);
         self.audren_parse_mixes(&mut renderer, at, mixes_sz);
         at = at.wrapping_add(mixes_sz);
         self.audren_parse_sinks(&mut renderer, at, sinks_sz);
@@ -722,6 +786,25 @@ impl Cpu {
         }
     }
 
+    /// `EffectInfo::InParameter[]`: type, is_new, is_enabled, then the mix id at 4.
+    fn audren_parse_effects(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
+        let count = ((size / EFFECT_IN_SZ) as usize).min(renderer.effects.len());
+        for i in 0..count {
+            let at = addr.wrapping_add(i as u32 * EFFECT_IN_SZ);
+            let kind = self.mem.read_u8(at).unwrap_or(0);
+            let effect = &mut renderer.effects[i];
+            // A new type is a new effect in the slot, with no usage yet.
+            if kind != effect.kind {
+                *effect = Effect {
+                    kind,
+                    ..Effect::default()
+                };
+            }
+            effect.enabled = self.mem.read_u8(at.wrapping_add(0x02)).unwrap_or(0) != 0;
+            effect.mix_id = self.mem.read_u32(at.wrapping_add(0x04)).unwrap_or(0);
+        }
+    }
+
     /// `AudioRendererMixInfoIn[]`. Buffers are assigned in mix-id order.
     fn audren_parse_mixes(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
         let count = (renderer.submix_count + 1) as usize;
@@ -849,6 +932,7 @@ impl Cpu {
             render_frame(&self.mem, &mut renderer, &mut pcm);
             renderer.elapsed_frames = renderer.elapsed_frames.wrapping_add(1);
         }
+        renderer.update_effect_usage();
 
         if crate::trace::enabled(crate::trace::Trace::Audio) {
             let playing = renderer
@@ -897,12 +981,12 @@ impl Cpu {
 
         let mempools_sz = mempool_count * MEMPOOL_OUT_SZ;
         let voices_sz = voice_count * VOICE_OUT_SZ;
-        let effects_sz = effect_count
-            * if revision >= 9 {
-                EFFECT_OUT_V2_SZ
-            } else {
-                EFFECT_OUT_SZ
-            };
+        let effect_out_sz = if revision >= 9 {
+            EFFECT_OUT_V2_SZ
+        } else {
+            EFFECT_OUT_SZ
+        };
+        let effects_sz = effect_count * effect_out_sz;
         let sinks_sz = sink_count * SINK_OUT_SZ;
         let render_info_sz = if revision >= 5 { RENDER_INFO_OUT_SZ } else { 0 };
         let total_sz = HEADER_OUT_SZ
@@ -944,8 +1028,19 @@ impl Cpu {
             at += VOICE_OUT_SZ as usize;
         }
 
-        // Effects and sinks report nothing.
-        at += effects_sz as usize;
+        // `EffectInfo::OutStatus`: the state byte; the revision-9 result state stays zero.
+        for i in 0..effect_count as usize {
+            let state = renderer
+                .effects
+                .get(i)
+                .copied()
+                .unwrap_or_default()
+                .out_state(renderer.started);
+            reply[at] = state;
+            at += effect_out_sz as usize;
+        }
+
+        // Sinks report nothing.
         at += sinks_sz as usize;
         at += PERFMGR_OUT_SZ as usize;
         at += BEHAVIOR_OUT_SZ as usize;

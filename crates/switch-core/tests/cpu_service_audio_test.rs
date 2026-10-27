@@ -486,6 +486,120 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
     );
 }
 
+/// `EffectType_Aux`, `_Delay` and `_Reverb`.
+const EFFECT_AUX: u8 = 2;
+const EFFECT_DELAY: u8 = 3;
+const EFFECT_REVERB: u8 = 4;
+
+/// `EffectInfo::OutStatus` states.
+const EFFECT_ENABLED: u8 = 3;
+const EFFECT_DISABLED: u8 = 4;
+
+/// The reply's effect section: past the header, the mempools (one per effect and
+/// four per voice) and the voices.
+fn effect_out(voices: u32, effects: u32) -> u32 {
+    64 + (effects + 4 * voices) * 16 + voices * 16
+}
+
+#[test]
+fn audren_reports_a_disabled_effect_once_a_frame_has_been_generated() {
+    // `nn::audio::Is*Removable` waits for `Disabled` before a title removes an
+    // effect; Nintendo Switch Sports hangs changing scenes without it.
+    const AUDREN: u64 = 0xB200;
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const COUNTS: AudrenCounts = AudrenCounts {
+        voices: 1,
+        effects: 3,
+        sinks: 1,
+        mix_buffers: 2,
+    };
+    /// The revision-9 `OutStatus` stride.
+    const STRIDE: u32 = 0x90;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDREN, "audren:u");
+    let renderer = audren_open(&mut cpu, AUDREN, b"REV9", COUNTS);
+    let base = effect_out(COUNTS.voices, COUNTS.effects);
+    let states = |cpu: &Cpu| -> Vec<u8> {
+        (0..COUNTS.effects)
+            .map(|i| cpu.mem.read_u8(OUT + base + i * STRIDE).unwrap())
+            .collect()
+    };
+
+    let mut update = AudrenUpdate::with_effects(1, 3, 1, 1);
+    update.mix(2);
+    update.sink(&[0, 1]);
+    update.effect(0, EFFECT_DELAY, true, 0);
+    update.effect(1, EFFECT_DELAY, false, 0);
+    // A mix nothing uses: no command is generated for it.
+    update.effect(2, EFFECT_REVERB, false, 5);
+
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    assert_eq!(
+        states(&cpu),
+        [EFFECT_ENABLED; 3],
+        "before any frame, no effect has been through command generation"
+    );
+
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    assert_eq!(
+        states(&cpu),
+        [EFFECT_ENABLED, EFFECT_DISABLED, EFFECT_ENABLED],
+        "after a frame"
+    );
+
+    update.effect(0, EFFECT_DELAY, false, 0);
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    assert_eq!(states(&cpu)[0], EFFECT_DISABLED, "the effect turned off");
+
+    // A different type in the slot is a new effect with no usage yet.
+    update.effect(1, EFFECT_AUX, false, 0);
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    assert_eq!(states(&cpu)[1], EFFECT_ENABLED, "the replaced effect");
+
+    // StopAudioRenderer: a stopped renderer reports every effect disabled.
+    ipc_request_plain(&mut cpu, renderer, 6, &[]);
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    assert_eq!(states(&cpu), [EFFECT_DISABLED; 3], "stopped");
+}
+
+#[test]
+fn audren_reports_effects_in_the_narrow_status_before_revision_9() {
+    const AUDREN: u64 = 0xB300;
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const COUNTS: AudrenCounts = AudrenCounts {
+        voices: 1,
+        effects: 2,
+        sinks: 1,
+        mix_buffers: 2,
+    };
+    const STRIDE: u32 = 16;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDREN, "audren:u");
+    let renderer = audren_open(&mut cpu, AUDREN, b"REV4", COUNTS);
+
+    let mut update = AudrenUpdate::with_effects(1, 2, 1, 1);
+    update.mix(2);
+    update.sink(&[0, 1]);
+    update.effect(0, EFFECT_DELAY, true, 0);
+    update.effect(1, EFFECT_DELAY, false, 0);
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+
+    let base = OUT + effect_out(COUNTS.voices, COUNTS.effects);
+    assert_eq!(cpu.mem.read_u8(base).unwrap(), EFFECT_ENABLED);
+    assert_eq!(cpu.mem.read_u8(base + STRIDE).unwrap(), EFFECT_DISABLED);
+}
+
 #[test]
 fn audren_frame_event_fires_on_the_clock() {
     // The renderer event paces `audrenWaitFrame` and must be a real event.
