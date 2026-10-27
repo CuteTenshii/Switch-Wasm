@@ -193,6 +193,39 @@ impl Gpu {
         )
     }
 
+    /// Whether nothing held or being read back overlaps the colour target a layer-0 clear
+    /// names. Then guest memory is current and stays so, and the rasterizer can clear it
+    /// without a flush and without taking the frames.
+    pub(super) fn clear_touches_nothing_held(
+        &self,
+        engine: &Engine3D,
+        target: u32,
+        layer: u32,
+    ) -> bool {
+        let Ok(Some(surface)) = Target::color(engine, engine.render_target_slot(target)) else {
+            return false;
+        };
+        if layer != 0 {
+            return false;
+        }
+        // Block-linear rows pad out to whole blocks, past `len`.
+        let span = |t: &Target| {
+            let len = u64::from(t.layout.layer_stride(t.row_bytes, t.rows)).max(t.len());
+            t.addr..t.addr + len
+        };
+        let cleared = span(&surface);
+        let overlaps = |t: &Target| {
+            let other = span(t);
+            other.start < cleared.end && cleared.start < other.end
+        };
+        !self.space.held.values().any(|held| overlaps(&held.target))
+            && !self
+                .space
+                .pending
+                .iter()
+                .any(|pending| overlaps(&pending.target))
+    }
+
     /// Clear the depth surface, on the device.
     pub(super) fn clear_depth_here(
         &mut self,

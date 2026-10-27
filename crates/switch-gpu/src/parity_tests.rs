@@ -1020,6 +1020,41 @@ fn a_store_only_points_draw_lands_without_latching_the_frame() {
     );
 }
 
+/// A clear of a target the device cannot hold, overlapping nothing it holds, runs on
+/// the rasterizer without counting as a fallback or handing the frames over.
+#[test]
+fn a_clear_the_device_cannot_hold_does_not_latch_the_frames() {
+    let Some(mut gpu) = device() else { return };
+    gpu.deferred_readbacks = true;
+    // No browser renders into `R16_UNORM`.
+    gpu.set_web_limits(true);
+    let r16_unorm = |h: &mut Harness| {
+        h.engine.regs.set(0x204, 0xEE);
+        for (i, value) in [0.6f32, 0.0, 0.0, 0.0].into_iter().enumerate() {
+            h.engine.regs.set(0x360 + i as u32, value.to_bits());
+        }
+    };
+    let mut h = Harness::new();
+    r16_unorm(&mut h);
+    let fallbacks = gpu.fallbacks;
+    h.clear_with(&mut gpu, [true; 4]).expect("the clear");
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "counted as a fallback: {:?}",
+        gpu.last_fallback
+    );
+
+    let mut want = Harness::new();
+    r16_unorm(&mut want);
+    want.clear_with(&mut Software, [true; 4])
+        .expect("the clear");
+    assert_eq!(h.target(), want.target());
+
+    h.clear_with(&mut gpu, [true; 4])
+        .expect("the next frame's clear");
+    assert!(!gpu.software_frame, "the clear latched the frames");
+}
+
 #[test]
 fn a_clear_writes_what_the_rasterizer_would_have_written() {
     let Some(mut gpu) = device() else { return };

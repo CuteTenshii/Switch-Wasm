@@ -638,6 +638,9 @@ impl Renderer for Gpu {
         self.release_scratch();
         match attempt {
             Ok(()) => Ok(()),
+            Err(_) if self.clear_touches_nothing_held(engine, target, layer) => self
+                .software
+                .clear_color(engine, ctx, target, layer, channels),
             Err(why) => {
                 self.fall_back(why);
                 // Write held surfaces back before the rasterizer clears.
