@@ -119,15 +119,67 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         .program(ShaderStage::Fragment)
         .ok_or_else(|| Error::Gpu("raster: draw with no bound fragment program".into()))?;
 
-    let vs_program = decode_program_from_memory(&*ctx, vs_binding.addr, &|bank: u8| {
+    let vs_decoded = decode_program_from_memory(&*ctx, vs_binding.addr, &|bank: u8| {
         engine.bound_constbuf(ShaderStage::VertexB, bank as u32)
     })?;
-    let fs_program = decode_program_from_memory(&*ctx, fs_binding.addr, &|bank: u8| {
+    let fs_decoded = decode_program_from_memory(&*ctx, fs_binding.addr, &|bank: u8| {
         engine.bound_constbuf(ShaderStage::Fragment, bank as u32)
     })?;
     // Only when a diagnostic asked; see `examples/shader_coverage.rs`.
-    crate::gpu::shader::uses::note(wgsl::Stage::Vertex, vs_binding.addr, &vs_program);
-    crate::gpu::shader::uses::note(wgsl::Stage::Fragment, fs_binding.addr, &fs_program);
+    crate::gpu::shader::uses::note(wgsl::Stage::Vertex, vs_binding.addr, &vs_decoded);
+    crate::gpu::shader::uses::note(wgsl::Stage::Fragment, fs_binding.addr, &fs_decoded);
+    // `TRACE_WGSL=1`: whether each shader translates. `TRACE_WGSL=dir`
+    // writes each module to `dir/<stage>_<addr>.wgsl` for `naga --validate`.
+    if crate::trace::enabled(crate::trace::Trace::Wgsl) {
+        // No directory in a browser, so only the summary there.
+        let where_to = match std::env::var("TRACE_WGSL").unwrap_or_default() {
+            dir if dir.is_empty() || dir == "1" => None,
+            dir => Some(dir),
+        };
+        use crate::gpu::shader::wgsl::{self, Layout, Stage};
+        // Unfolded, as the device translates it: folding turns the constant
+        // operands a `ldg` descriptor is traced through into immediates.
+        for (name, stage, addr, program) in [
+            ("vs", Stage::Vertex, vs_binding.addr, &vs_decoded),
+            ("fs", Stage::Fragment, fs_binding.addr, &fs_decoded),
+        ] {
+            let translated = match wgsl::translate(&Compiled::new(program)) {
+                Ok(translated) => translated,
+                Err(e) => {
+                    crate::traceln!("[wgsl] {name}@{addr:#x} untranslated: {e}");
+                    continue;
+                }
+            };
+            let mut layout = Layout::of(&translated, stage);
+            // Both corrections come from the viewport transform.
+            if let Ok(pipeline) = crate::gpu::pipeline::Pipeline::of(engine) {
+                layout.flip_y = pipeline.viewport.flip_y;
+                layout.depth_minus_one_to_one = pipeline.viewport.depth_minus_one_to_one();
+            }
+            match wgsl::module(&translated, stage, &layout) {
+                Ok(_) if where_to.is_none() => crate::traceln!(
+                    "[wgsl] {name}@{addr:#x} {} regs, {} attribs, {} varyings, \
+                     {} banks, {} textures",
+                    translated.registers.len(),
+                    layout.attributes.len(),
+                    layout.varyings.len(),
+                    layout.const_banks.len(),
+                    layout.textures.len()
+                ),
+                Ok(module) => {
+                    let dir = where_to.as_deref().unwrap_or_default();
+                    let path = format!("{dir}/{name}_{addr:x}.wgsl");
+                    match std::fs::write(&path, module) {
+                        Ok(()) => crate::traceln!("[wgsl] {name}@{addr:#x} -> {path}"),
+                        Err(e) => {
+                            crate::traceln!("[wgsl] {name}@{addr:#x} cannot write {path}: {e}")
+                        }
+                    }
+                }
+                Err(e) => crate::traceln!("[wgsl] {name}@{addr:#x} no module: {e}"),
+            }
+        }
+    }
 
     let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS)
         .map(|i| engine.vertex_attrib(i))
@@ -190,7 +242,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         )));
     }
     let triangles = assemble(primitive, call.count);
-    let mut tally = DrawTally::new(&fs_program);
+    let mut tally = DrawTally::new(&fs_decoded);
     // Vertex shading is cached per index.
     let mut cache: crate::IdMap<u32, ShadedVertex> = crate::IdMap::default();
     // One fragment invocation for the whole draw, reset per pixel.
@@ -220,7 +272,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
             cache: &vs_const_cache,
         };
-        Compiled::with_constants(&vs_program, &consts)
+        Compiled::with_constants(&vs_decoded, &consts)
     };
     let fs_program = {
         let consts = MemoryConstants {
@@ -228,7 +280,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
             cache: &fs_const_cache,
         };
-        Compiled::with_constants(&fs_program, &consts)
+        Compiled::with_constants(&fs_decoded, &consts)
     };
     // Shaders with warp shuffles run in 2x2 quads.
     let mut quad: Option<Box<[Invocation; QUAD]>> = fs_program
@@ -330,57 +382,6 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             );
         }
     }
-    // `TRACE_WGSL=1`: whether each shader translates. `TRACE_WGSL=dir`
-    // writes each module to `dir/<stage>_<addr>.wgsl` for `naga --validate`.
-    if crate::trace::enabled(crate::trace::Trace::Wgsl) {
-        // No directory in a browser, so only the summary there.
-        let where_to = match std::env::var("TRACE_WGSL").unwrap_or_default() {
-            dir if dir.is_empty() || dir == "1" => None,
-            dir => Some(dir),
-        };
-        use crate::gpu::shader::wgsl::{self, Layout, Stage};
-        for (name, stage, addr, program) in [
-            ("vs", Stage::Vertex, vs_binding.addr, &vs_program),
-            ("fs", Stage::Fragment, fs_binding.addr, &fs_program),
-        ] {
-            let translated = match wgsl::translate(program) {
-                Ok(translated) => translated,
-                Err(e) => {
-                    crate::traceln!("[wgsl] {name}@{addr:#x} untranslated: {e}");
-                    continue;
-                }
-            };
-            let mut layout = Layout::of(&translated, stage);
-            // Both corrections come from the viewport transform.
-            if let Ok(pipeline) = crate::gpu::pipeline::Pipeline::of(engine) {
-                layout.flip_y = pipeline.viewport.flip_y;
-                layout.depth_minus_one_to_one = pipeline.viewport.depth_minus_one_to_one();
-            }
-            match wgsl::module(&translated, stage, &layout) {
-                Ok(_) if where_to.is_none() => crate::traceln!(
-                    "[wgsl] {name}@{addr:#x} {} regs, {} attribs, {} varyings, \
-                     {} banks, {} textures",
-                    translated.registers.len(),
-                    layout.attributes.len(),
-                    layout.varyings.len(),
-                    layout.const_banks.len(),
-                    layout.textures.len()
-                ),
-                Ok(module) => {
-                    let dir = where_to.as_deref().unwrap_or_default();
-                    let path = format!("{dir}/{name}_{addr:x}.wgsl");
-                    match std::fs::write(&path, module) {
-                        Ok(()) => crate::traceln!("[wgsl] {name}@{addr:#x} -> {path}"),
-                        Err(e) => {
-                            crate::traceln!("[wgsl] {name}@{addr:#x} cannot write {path}: {e}")
-                        }
-                    }
-                }
-                Err(e) => crate::traceln!("[wgsl] {name}@{addr:#x} no module: {e}"),
-            }
-        }
-    }
-
     // What the draw's shaders store to global memory, landed after each
     // shading step: see `MemoryGlobal`.
     let global_stores = std::cell::RefCell::new(Vec::new());
