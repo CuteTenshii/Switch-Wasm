@@ -3,7 +3,7 @@
 //!
 //! Knobs beyond [`common::Debug`]: `SWITCH_FIRMWARE`, `STEPS`, `PROFILE`, `STACKS`,
 //! `COVER`, `WATCH_MEM`, `SCAN_MEM`, `DUMP_VERTS`, `DUMP_SURFACE`, `POKE_U32`,
-//! `POKE_AT`, `GATE_SNIFF`, `FIND_MAGIC`.
+//! `POKE_AT`, `GATE_SNIFF`, `FIND_MAGIC`, and `PRESS` as `boot_nsp` takes it.
 mod common;
 
 use common::{Flow, Pace};
@@ -89,6 +89,7 @@ fn main() {
 
     let mut debug = common::Debug::from_env();
     debug.arm(&mut cpu);
+    let mut press = common::Press::from_env();
 
     let stacks = env::var("STACKS").is_ok();
     let interval = match (common::env_u64("PROFILE", 0), stacks) {
@@ -123,6 +124,9 @@ fn main() {
                 return Flow::Stop;
             }
             debug.tick(cpu, done);
+            if let Some(press) = press.as_mut() {
+                press.tick(cpu, done);
+            }
             if interval > 0 && done % interval == 0 {
                 profile.sample(cpu, stacks);
             }

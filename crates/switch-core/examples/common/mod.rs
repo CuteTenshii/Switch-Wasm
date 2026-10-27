@@ -293,6 +293,78 @@ impl switch_core::gpu::renderer::Renderer for NoDraw {
     }
 }
 
+/// Three frames at 1.02 GHz and 60 Hz, so a once-per-frame pad poll sees the press.
+const PRESS_HOLD: u64 = 3 * 17_000_000;
+
+/// In Horizon's `HidNpadButton` order.
+const BUTTONS: [(&str, u64); 16] = [
+    ("A", 1 << 0),
+    ("B", 1 << 1),
+    ("X", 1 << 2),
+    ("Y", 1 << 3),
+    ("LSTICK", 1 << 4),
+    ("RSTICK", 1 << 5),
+    ("L", 1 << 6),
+    ("R", 1 << 7),
+    ("ZL", 1 << 8),
+    ("ZR", 1 << 9),
+    ("PLUS", 1 << 10),
+    ("MINUS", 1 << 11),
+    ("LEFT", 1 << 12),
+    ("UP", 1 << 13),
+    ("RIGHT", 1 << 14),
+    ("DOWN", 1 << 15),
+];
+
+/// `PRESS=<buttons>@<interval>`: tap buttons every `interval` steps, e.g.
+/// `PRESS=A+DOWN@300000000`. The first tap waits a whole interval so it does
+/// not land during boot.
+pub struct Press {
+    buttons: u64,
+    interval: u64,
+    held: bool,
+}
+
+impl Press {
+    /// Exits on an unreadable spelling rather than running without the input.
+    pub fn from_env() -> Option<Press> {
+        let raw = env::var("PRESS").ok()?;
+        let fail = |why: &str| -> ! {
+            eprintln!("PRESS={raw}: {why}; expected <buttons>@<interval>, e.g. A@500000000");
+            std::process::exit(2)
+        };
+        let (names, interval) = raw.split_once('@').unwrap_or_else(|| fail("no interval"));
+        let interval: u64 = interval
+            .parse()
+            .unwrap_or_else(|_| fail("the interval is not a number"));
+        if interval <= PRESS_HOLD {
+            fail("the interval must be longer than a press");
+        }
+        let mut buttons = 0;
+        for name in names.split('+') {
+            let upper = name.trim().to_ascii_uppercase();
+            match BUTTONS.iter().find(|(button, _)| *button == upper) {
+                Some((_, bit)) => buttons |= bit,
+                None => fail(&format!("no button named {name:?}")),
+            }
+        }
+        Some(Press {
+            buttons,
+            interval,
+            held: false,
+        })
+    }
+
+    /// Press or release for the step count `done`; call once per tick.
+    pub fn tick(&mut self, cpu: &mut Cpu, done: u64) {
+        let down = done >= self.interval && done % self.interval < PRESS_HOLD;
+        if down != self.held {
+            self.held = down;
+            cpu.set_gamepad_state(if down { self.buttons } else { 0 }, 0, 0, 0, 0);
+        }
+    }
+}
+
 /// Swap in [`NoDraw`] when `NO_DRAW=1`.
 pub fn apply_no_draw(cpu: &mut Cpu) {
     if env_u64("NO_DRAW", 0) != 0 {

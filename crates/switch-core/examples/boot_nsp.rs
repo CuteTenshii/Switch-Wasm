@@ -16,54 +16,6 @@ use switch_core::cpu::Cpu;
 
 const USAGE: &str = "boot_nsp <container> <prod.keys> [title.keys] [max_steps]";
 
-/// Three frames at 1.02 GHz and 60 Hz, so a once-per-frame pad poll sees the press.
-const PRESS_HOLD: u64 = 3 * 17_000_000;
-
-/// In Horizon's `HidNpadButton` order.
-const BUTTONS: [(&str, u64); 16] = [
-    ("A", 1 << 0),
-    ("B", 1 << 1),
-    ("X", 1 << 2),
-    ("Y", 1 << 3),
-    ("LSTICK", 1 << 4),
-    ("RSTICK", 1 << 5),
-    ("L", 1 << 6),
-    ("R", 1 << 7),
-    ("ZL", 1 << 8),
-    ("ZR", 1 << 9),
-    ("PLUS", 1 << 10),
-    ("MINUS", 1 << 11),
-    ("LEFT", 1 << 12),
-    ("UP", 1 << 13),
-    ("RIGHT", 1 << 14),
-    ("DOWN", 1 << 15),
-];
-
-/// Exits on an unreadable spelling rather than running without the input.
-fn press_from_env() -> Option<(u64, u64)> {
-    let raw = std::env::var("PRESS").ok()?;
-    let fail = |why: &str| -> ! {
-        eprintln!("PRESS={raw}: {why}; expected <buttons>@<interval>, e.g. A@500000000");
-        std::process::exit(2)
-    };
-    let (names, interval) = raw.split_once('@').unwrap_or_else(|| fail("no interval"));
-    let interval: u64 = interval
-        .parse()
-        .unwrap_or_else(|_| fail("the interval is not a number"));
-    if interval <= PRESS_HOLD {
-        fail("the interval must be longer than a press");
-    }
-    let mut mask = 0;
-    for name in names.split('+') {
-        let upper = name.trim().to_ascii_uppercase();
-        match BUTTONS.iter().find(|(button, _)| *button == upper) {
-            Some((_, bit)) => mask |= bit,
-            None => fail(&format!("no button named {name:?}")),
-        }
-    }
-    Some((mask, interval))
-}
-
 fn report_profile(
     pages: &BTreeMap<(u64, u32), u64>,
     callers: &BTreeMap<(u64, u32), u64>,
@@ -155,8 +107,7 @@ fn main() {
     // Keyed by return address, which names the caller of a hot leaf like `memcpy`.
     let mut callers: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     let mut sampled = 0u64;
-    let press = press_from_env();
-    let mut held = false;
+    let mut press = common::Press::from_env();
     // Without sampling or watchpoints the run uses the block translator, like the frontend.
     let pace = if debug.stepwise() || profile > 0 {
         Pace::Instructions
@@ -182,13 +133,8 @@ fn main() {
                 return Flow::Stop;
             }
         }
-        if let Some((buttons, interval)) = press {
-            // The first tap waits a whole interval so it does not land during boot.
-            let down = done >= interval && done % interval < PRESS_HOLD;
-            if down != held {
-                held = down;
-                cpu.set_gamepad_state(if down { buttons } else { 0 }, 0, 0, 0, 0);
-            }
+        if let Some(press) = press.as_mut() {
+            press.tick(cpu, done);
         }
         if profile > 0 && done % profile == 0 {
             let thread = cpu.current_thread_handle();

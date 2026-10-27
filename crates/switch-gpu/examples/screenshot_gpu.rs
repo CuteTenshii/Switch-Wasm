@@ -1,6 +1,7 @@
 //! `screenshot_title` with the GPU backend installed; `cmp` the two PPMs to
 //! check the backend against the software reference:
 //! `screenshot_gpu <container> <prod.keys> [title.keys] <out.ppm> [frame]`.
+//! `PRESS=<buttons>@<interval>` taps buttons on the way, as in `boot_nsp`.
 #[path = "../../switch-core/examples/common/mod.rs"]
 mod common;
 
@@ -42,6 +43,7 @@ fn main() {
     }
     let mut debug = common::Debug::from_env();
     debug.arm(&mut cpu);
+    let mut press = common::Press::from_env();
     let pace = if debug.stepwise() {
         Pace::Instructions
     } else {
@@ -53,6 +55,9 @@ fn main() {
         common::env_u64("STEPS", u64::MAX),
         |cpu, done| {
             debug.tick(cpu, done);
+            if let Some(press) = press.as_mut() {
+                press.tick(cpu, done);
+            }
             if cpu.nv.gpu.frames >= dock_at {
                 cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
             }
