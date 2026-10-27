@@ -405,3 +405,42 @@ fn a_reason_with_json_punctuation_in_it_stays_one_string() {
     // A control character has no literal form at all.
     assert_eq!(super::json_string("\u{1}"), r#""\u0001""#);
 }
+
+/// A deep-block volume's slices start inside one block, a block's height of GOBs apart,
+/// and only a slice that fits one GOB is laid out as a plain surface.
+#[test]
+fn a_volume_slice_is_looked_for_where_the_volume_puts_it() {
+    use crate::bind::{slice_fits_one_gob, volume_slice_addr};
+    use switch_core::gpu::pipeline::Format;
+    use switch_core::gpu::surface::{Layout, GOB_SIZE};
+    use switch_core::gpu::upload::TextureKey;
+
+    // Nintendo Switch Sports' colour volume: 16x8 RGBA8 slices, 8 GOBs deep.
+    let key = |row_bytes: u32, rows: u32, block_height_gobs: u32| TextureKey {
+        addr: 0x3_1b30_a000,
+        width: row_bytes / 4,
+        height: rows,
+        layers: 8,
+        layer_stride: 0x400,
+        row_bytes,
+        rows,
+        block_depth_gobs: 8,
+        layout: Layout::BlockLinear { block_height_gobs },
+        format: Format::Rgba8Unorm,
+        srgb: false,
+    };
+    let small = key(64, 8, 1);
+    assert_eq!(volume_slice_addr(&small, 0), small.addr);
+    assert_eq!(
+        volume_slice_addr(&small, 1),
+        small.addr + u64::from(GOB_SIZE)
+    );
+    let tall_blocks = key(64, 8, 2);
+    assert_eq!(
+        volume_slice_addr(&tall_blocks, 3),
+        tall_blocks.addr + 3 * 2 * u64::from(GOB_SIZE)
+    );
+    assert!(slice_fits_one_gob(&small));
+    assert!(!slice_fits_one_gob(&key(128, 8, 1)), "two GOBs wide");
+    assert!(!slice_fits_one_gob(&key(64, 16, 2)), "two GOBs tall");
+}

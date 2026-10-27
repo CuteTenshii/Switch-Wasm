@@ -9,6 +9,10 @@ use crate::{
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::shader::wgsl::{self, Layout};
+use switch_core::gpu::surface::{
+    block_linear_volume_offset, Layout as SurfaceLayout, GOB_HEIGHT, GOB_WIDTH,
+};
+use switch_core::gpu::upload::TextureKey;
 use switch_core::gpu::upload::Uploads;
 
 impl Gpu {
@@ -196,8 +200,14 @@ impl Gpu {
         view: wgpu::TextureViewDimension,
     ) -> std::result::Result<Vec<(u32, HeldLayer)>, String> {
         let mut layers = Vec::new();
+        // A deep-block volume's slices interleave inside each block.
+        let deep_volume = view == wgpu::TextureViewDimension::D3 && upload.key.block_depth_gobs > 1;
         for layer in 0..upload.layers.max(1) {
-            let addr = upload.key.addr + u64::from(layer) * u64::from(upload.key.layer_stride);
+            let addr = if deep_volume {
+                volume_slice_addr(&upload.key, layer)
+            } else {
+                upload.key.addr + u64::from(layer) * u64::from(upload.key.layer_stride)
+            };
             let Some(held) = self.space.held.get(&addr) else {
                 continue;
             };
@@ -272,8 +282,8 @@ impl Gpu {
             if held.companion.is_some() {
                 return Err("samples a multisampled surface held on the device".into());
             }
-            // Deep-block volume slices interleave, so none is a surface of its own.
-            if view == wgpu::TextureViewDimension::D3 && upload.key.block_depth_gobs > 1 {
+            // Within one GOB a slice is addressed as a plain surface is; past it, slices interleave.
+            if deep_volume && !slice_fits_one_gob(&upload.key) {
                 return Err(
                     "samples a surface held on the device as a slice of an interleaved volume"
                         .into(),
@@ -790,4 +800,28 @@ impl Gpu {
             })
             .clone()
     }
+}
+
+/// Where slice `z` of a deep-block volume starts: slices interleave inside each block.
+pub(crate) fn volume_slice_addr(key: &TextureKey, z: u32) -> u64 {
+    let block_height_gobs = match key.layout {
+        SurfaceLayout::BlockLinear { block_height_gobs } => block_height_gobs,
+        SurfaceLayout::Pitch { .. } => 1,
+    };
+    key.addr
+        + u64::from(block_linear_volume_offset(
+            0,
+            0,
+            z,
+            key.row_bytes,
+            key.rows,
+            block_height_gobs,
+            key.block_depth_gobs,
+        ))
+}
+
+/// Whether a volume's slice lies within one GOB, where its texels are addressed as a
+/// plain surface's are, so a held surface can stand in for it.
+pub(crate) fn slice_fits_one_gob(key: &TextureKey) -> bool {
+    key.row_bytes <= GOB_WIDTH && key.rows <= GOB_HEIGHT
 }
