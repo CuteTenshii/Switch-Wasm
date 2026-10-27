@@ -247,8 +247,11 @@ impl Gpu {
                         "held as {:?} and sampled as {format:?}",
                         held.texture.format()
                     ))
-                } else if (held.texture.width(), held.texture.height())
-                    != (upload.width, upload.height)
+                } else if upload.width > held.texture.width()
+                    || upload.height > held.texture.height()
+                    || ((held.texture.width(), held.texture.height())
+                        != (upload.width, upload.height)
+                        && !same_rows(&held.target, &upload.key))
                 {
                     Some(format!(
                         "held {}x{} and sampled {}x{}",
@@ -357,19 +360,21 @@ impl Gpu {
                 // Drawn above, before these copies were encoded.
                 HeldLayer::ShadowCorner(_) => {}
                 HeldLayer::Depth(surface) => {
+                    // A depth copy takes the whole surface; the sampled corner is taken from the buffer.
+                    let (width, height) = (surface.width(), surface.height());
                     // Four bytes a texel, rows padded for a texture-buffer copy.
-                    let row = (upload.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                    let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
                         * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
                     let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("held depth"),
-                        size: u64::from(row) * u64::from(upload.height),
+                        size: u64::from(row) * u64::from(height),
                         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
                         mapped_at_creation: false,
                     });
                     let layout = wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(row),
-                        rows_per_image: Some(upload.height),
+                        rows_per_image: Some(height),
                     };
                     encoder.copy_texture_to_buffer(
                         wgpu::TexelCopyTextureInfo {
@@ -382,7 +387,11 @@ impl Gpu {
                             buffer: &staging,
                             layout,
                         },
-                        extent,
+                        wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
                     );
                     encoder.copy_buffer_to_texture(
                         wgpu::TexelCopyBufferInfo {
