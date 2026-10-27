@@ -311,8 +311,12 @@ fn elf_hash(name: &str) -> u32 {
 
 /// `st_value` of `name` via the legacy DT_HASH tables, relative to the load base.
 pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
+    let word = |at: usize| -> Option<u32> {
+        let bytes = data.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+    };
     let mod0 = find_mod0(data)?;
-    let dyn_off = mod0.wrapping_add(read_u32(data, mod0 + 4) as usize);
+    let dyn_off = mod0.wrapping_add(word(mod0 + 4)? as usize);
     let mut symtab = 0u64;
     let mut strtab = 0u64;
     let mut hash_off = 0u64;
@@ -337,37 +341,40 @@ pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
     let symtab = symtab as usize;
     let strtab = strtab as usize;
     let hash_off = hash_off as usize;
-    if hash_off + 8 > data.len() {
+    let nbucket = word(hash_off)? as usize;
+    let nchain = word(hash_off.checked_add(4)?)? as usize;
+    // lld writes a table with no buckets for a module that exports nothing (Taisei).
+    if nbucket == 0 {
         return None;
     }
-    let nbucket = read_u32(data, hash_off) as usize;
-    let nchain = read_u32(data, hash_off + 4) as usize;
     let buckets_off = hash_off + 8;
-    let chains_off = buckets_off.checked_add(4 * nbucket)?;
-    if buckets_off.checked_add(4 * nbucket)? > data.len()
-        || chains_off.checked_add(4 * nchain)? > data.len()
-    {
+    let chains_off = buckets_off.checked_add(nbucket.checked_mul(4)?)?;
+    if chains_off.checked_add(nchain.checked_mul(4)?)? > data.len() {
         return None;
     }
 
     let h = elf_hash(name) as usize;
-    let mut idx = read_u32(data, buckets_off + 4 * (h % nbucket)) as usize;
-    while idx != 0 {
-        let sym_off = symtab.checked_add(idx * 24)?;
-        if sym_off + 24 > data.len() {
+    let mut idx = word(buckets_off + 4 * (h % nbucket))? as usize;
+    // A chain visits each symbol at most once; more steps than symbols means a cycle.
+    for _ in 0..nchain {
+        if idx == 0 || idx >= nchain {
             break;
         }
-        let name_off = read_u32(data, sym_off) as usize;
-        if read_cstr(data, strtab + name_off) == name {
+        let sym_off = symtab.checked_add(idx * 24)?;
+        if sym_off.checked_add(24)? > data.len() {
+            break;
+        }
+        let name_off = word(sym_off)? as usize;
+        if read_cstr(data, strtab.saturating_add(name_off)) == name {
             return Some(read_u64(data, sym_off + 8));
         }
-        idx = read_u32(data, chains_off + 4 * idx) as usize;
+        idx = word(chains_off + 4 * idx)? as usize;
     }
     if idx == 0 {
         let sym_off = symtab;
-        if sym_off + 24 <= data.len() {
-            let name_off = read_u32(data, sym_off) as usize;
-            if read_cstr(data, strtab + name_off) == name {
+        if sym_off.checked_add(24)? <= data.len() {
+            let name_off = word(sym_off)? as usize;
+            if read_cstr(data, strtab.saturating_add(name_off)) == name {
                 return Some(read_u64(data, sym_off + 8));
             }
         }
@@ -913,5 +920,48 @@ mod tests {
         let mut nro = build_nro(&[0u8; 4], &[]);
         nro[0x14..0x18].copy_from_slice(&0xFFFFu32.to_le_bytes());
         assert!(matches!(NroHeader::parse(&nro), Err(Error::Nro(_))));
+    }
+
+    /// MOD0 at 0, its dynamic section at 0x10, `DT_HASH` at 0x60, symbols at 0x80, names at 0xC0.
+    fn module_with_hash(nbucket: u32, nchain: u32, buckets: &[u32], chains: &[u32]) -> Vec<u8> {
+        let mut out = vec![0u8; 0x100];
+        out[0..4].copy_from_slice(b"MOD0");
+        out[4..8].copy_from_slice(&0x10u32.to_le_bytes());
+        for (i, (tag, value)) in [(4u64, 0x60u64), (5, 0xC0), (6, 0x80), (0, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            out[0x10 + i * 16..0x18 + i * 16].copy_from_slice(&tag.to_le_bytes());
+            out[0x18 + i * 16..0x20 + i * 16].copy_from_slice(&value.to_le_bytes());
+        }
+        out[0x60..0x64].copy_from_slice(&nbucket.to_le_bytes());
+        out[0x64..0x68].copy_from_slice(&nchain.to_le_bytes());
+        for (i, word) in buckets.iter().chain(chains).enumerate() {
+            out[0x68 + i * 4..0x6C + i * 4].copy_from_slice(&word.to_le_bytes());
+        }
+        // Symbol 1 is named "other" and has the value 0x1234.
+        out[0x98..0x9C].copy_from_slice(&1u32.to_le_bytes());
+        out[0xA0..0xA8].copy_from_slice(&0x1234u64.to_le_bytes());
+        out[0xC1..0xC6].copy_from_slice(b"other");
+        out
+    }
+
+    #[test]
+    fn a_symbol_is_found_through_its_hash_chain() {
+        let module = module_with_hash(1, 2, &[1], &[0, 0]);
+        assert_eq!(symbol_value(&module, "other"), Some(0x1234));
+        assert_eq!(symbol_value(&module, "missing"), None);
+    }
+
+    #[test]
+    fn a_hash_table_with_no_buckets_has_no_symbols() {
+        let module = module_with_hash(0, 1, &[], &[0]);
+        assert_eq!(symbol_value(&module, "_trn_runconf_heap_mode"), None);
+    }
+
+    #[test]
+    fn a_hash_chain_that_loops_ends_the_lookup() {
+        let module = module_with_hash(1, 2, &[1], &[0, 1]);
+        assert_eq!(symbol_value(&module, "missing"), None);
     }
 }
