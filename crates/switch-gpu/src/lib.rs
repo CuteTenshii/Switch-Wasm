@@ -520,6 +520,11 @@ struct Prepared {
     instance: u32,
 }
 
+/// Whether the rasterizer would only run the draw's vertex shader for what it stores.
+fn only_shades_vertices(engine: &Engine3D, ctx: &ExecCtx) -> bool {
+    switch_core::gpu::raster::only_shades_vertices(engine, ctx).unwrap_or(false)
+}
+
 impl Renderer for Gpu {
     fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         self.enter_space(ctx.as_id);
@@ -539,6 +544,9 @@ impl Renderer for Gpu {
         }
         // See [`Gpu::software_frame`].
         if self.software_frame {
+            if only_shades_vertices(engine, ctx) {
+                return self.software.draw(engine, ctx);
+            }
             self.check_for_release(engine, ctx);
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
@@ -579,6 +587,10 @@ impl Renderer for Gpu {
                     None => {}
                 }
                 return Ok(());
+            }
+            // It reads no render target, so it neither waits for one nor latches the frame.
+            Err(_) if only_shades_vertices(engine, ctx) => {
+                return self.software.draw(engine, ctx);
             }
             Err(why) => self.fall_back(why),
         }

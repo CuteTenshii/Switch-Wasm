@@ -562,3 +562,57 @@ fn the_other_triangle_topologies_assemble() {
     assert!(assemble(Primitive::Lines, 6).is_empty());
     assert!(assemble(Primitive::Points, 6).is_empty());
 }
+
+/// A points draw is not rasterized, but what its vertex shader stores lands:
+/// Nintendo Switch Sports resets records in memory with one.
+#[test]
+fn a_points_draw_lands_what_its_vertex_shader_stores() {
+    let mut h = Harness::new();
+    let dest = h.base + 0x1000;
+    h.set_vertex_shader(&crate::gpu::testing::vertex_id_store_shader(dest));
+    h.engine.last_draw = DrawCall {
+        primitive: 0,
+        first: 5,
+        count: 3,
+        indexed: false,
+        index_format: 0,
+    };
+    {
+        let ctx = ExecCtx {
+            mem: &h.mem,
+            vmm: &h.vmm,
+            as_id: 0,
+            host1x: &mut h.host1x,
+            stats: &mut h.stats,
+            trace: false,
+        };
+        assert!(
+            super::super::only_shades_vertices(&h.engine, &ctx).unwrap(),
+            "a store-only points draw"
+        );
+    }
+    let refused = h
+        .draw_with(&mut crate::gpu::renderer::Software)
+        .unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("Points is not rasterized"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        h.vmm.read_u32(&h.mem, dest).unwrap(),
+        7,
+        "the last vertex's store"
+    );
+
+    // A triangle draw is the rasterizer's whole job.
+    h.engine.last_draw.primitive = 4;
+    let ctx = ExecCtx {
+        mem: &h.mem,
+        vmm: &h.vmm,
+        as_id: 0,
+        host1x: &mut h.host1x,
+        stats: &mut h.stats,
+        trace: false,
+    };
+    assert!(!super::super::only_shades_vertices(&h.engine, &ctx).unwrap());
+}

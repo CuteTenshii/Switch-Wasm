@@ -14,7 +14,7 @@ mod tests;
 mod vertex;
 
 pub use attrib::fetch_attribute;
-pub use draw::draw;
+pub use draw::{draw, only_shades_vertices};
 pub use fragment::QUAD;
 pub use setup::{rasterize_triangle, rasterize_triangle_weighted, TriangleSetup};
 
@@ -49,6 +49,14 @@ impl Primitive {
             9 => Ok(Primitive::Polygon),
             other => Err(Error::Gpu(format!("raster: unknown DkPrimitive {other}"))),
         }
+    }
+
+    /// Whether this renderer assembles it into triangles: points and lines it does not.
+    pub fn is_rasterized(self) -> bool {
+        !matches!(
+            self,
+            Primitive::Points | Primitive::Lines | Primitive::LineLoop | Primitive::LineStrip
+        )
     }
 }
 

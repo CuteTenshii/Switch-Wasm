@@ -107,6 +107,36 @@ pub(super) fn clip_near(tri: [ClipVertex; 3]) -> Vec<[ClipVertex; 3]> {
 }
 
 /// Run `engine.last_draw` into the bound render targets.
+/// Whether a program can write global memory.
+fn stores_globally(program: &Program) -> bool {
+    program
+        .insns
+        .iter()
+        .any(|insn| matches!(insn.op, Op::Stg { .. } | Op::Atom { .. }))
+}
+
+/// Whether [`draw`] would only run the vertex shader for what it stores, sampling
+/// no texture: a point or line draw, which nothing here rasterizes. Such a draw
+/// reads no render target, so it can run here while a device holds them.
+pub fn only_shades_vertices(engine: &Engine3D, ctx: &ExecCtx) -> Result<bool> {
+    if Primitive::from_raw(engine.last_draw.primitive)?.is_rasterized() {
+        return Ok(false);
+    }
+    let Some(binding) = engine.program(ShaderStage::VertexB) else {
+        return Ok(false);
+    };
+    let program = decode_program_from_memory(ctx, binding.addr, &|bank: u8| {
+        engine.bound_constbuf(ShaderStage::VertexB, bank as u32)
+    })?;
+    let samples = program.insns.iter().any(|insn| {
+        matches!(
+            insn.op,
+            Op::Texs { .. } | Op::Tex { .. } | Op::Txq { .. } | Op::Tld4 { .. } | Op::Suld { .. }
+        )
+    });
+    Ok(stores_globally(&program) && !samples)
+}
+
 pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let call = engine.last_draw;
     // Logical target 0, mapped through RenderTargetControl as a clear is.
@@ -187,6 +217,61 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS)
         .map(|i| engine.vertex_array(i))
         .collect();
+    let index_base = if call.indexed {
+        engine.index_array_start()
+    } else {
+        0
+    };
+    let instance_id = engine.instance_id();
+    let primitive = Primitive::from_raw(call.primitive)?;
+    // Report point and line topologies rather than silently drawing nothing.
+    if !primitive.is_rasterized() {
+        // What the vertex shader stores still lands: Nintendo Switch Sports resets
+        // records in memory with a points draw that only writes through pointers.
+        if stores_globally(&vs_decoded) {
+            let vs_const_cache =
+                std::cell::RefCell::new(crate::gpu::shader::interp::ConstCache::default());
+            let vs_program = Compiled::with_constants(
+                &vs_decoded,
+                &MemoryConstants {
+                    ctx: &*ctx,
+                    bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
+                    cache: &vs_const_cache,
+                },
+            );
+            let global_stores = std::cell::RefCell::new(Vec::new());
+            let mut shaded = std::collections::BTreeSet::new();
+            for ordinal in 0..call.count {
+                let index = if call.indexed {
+                    read_index(&*ctx, index_base, call.index_format, call.first + ordinal)?
+                } else {
+                    call.first + ordinal
+                };
+                if !shaded.insert(index) {
+                    continue;
+                }
+                let vs_consts = MemoryConstants {
+                    ctx: &*ctx,
+                    bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
+                    cache: &vs_const_cache,
+                };
+                shade_vertex(
+                    &vs_program,
+                    &attribs,
+                    &arrays,
+                    (index, instance_id),
+                    &*ctx,
+                    &vs_consts,
+                    engine.window_origin().lower_left,
+                    &global_stores,
+                )?;
+                MemoryGlobal::land(ctx, &global_stores)?;
+            }
+        }
+        return Err(Error::Gpu(format!(
+            "raster: {primitive:?} is not rasterized"
+        )));
+    }
     let viewport = engine.viewport_transform();
     let grid = engine.sample_grid()?;
     let sample_mask = engine.sample_mask();
@@ -225,22 +310,6 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let writes_any_channel = color_mask.iter().any(|&channel| channel);
     let cull = engine.cull_state();
 
-    let index_base = if call.indexed {
-        engine.index_array_start()
-    } else {
-        0
-    };
-    let instance_id = engine.instance_id();
-    let primitive = Primitive::from_raw(call.primitive)?;
-    // Report point and line topologies rather than silently drawing nothing.
-    if matches!(
-        primitive,
-        Primitive::Points | Primitive::Lines | Primitive::LineLoop | Primitive::LineStrip
-    ) {
-        return Err(Error::Gpu(format!(
-            "raster: {primitive:?} is not rasterized"
-        )));
-    }
     let triangles = assemble(primitive, call.count);
     let mut tally = DrawTally::new(&fs_decoded);
     // Vertex shading is cached per index.

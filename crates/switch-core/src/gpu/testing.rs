@@ -63,6 +63,27 @@ pub fn solid_fragment_shader() -> Vec<u8> {
     bytes
 }
 
+/// `*(u32 *)dest = gl_VertexID;` and nothing else: no position, only a store.
+pub fn vertex_id_store_shader(dest: u64) -> Vec<u8> {
+    let mov32i = |dst: u64, imm: u32| {
+        let raw = 0x0100_0000_0007_f000 | u64::from(imm) << 20 | dst;
+        (raw as u32, (raw >> 32) as u32)
+    };
+    let mut bytes = block(
+        (0xfc20070f, 0x081f8441),
+        (0x2fc7ff02, 0xefd87f80), // ld b32 $r2 a[0x2fc]  (gl_VertexID)
+        mov32i(0, dest as u32),   // mov32i $r0 dest.lo
+        mov32i(1, (dest >> 32) as u32),
+    );
+    bytes.extend(block(
+        (0xfc2207e1, 0x001f8c40),
+        (0x00070002, 0xeedc2000), // stg e b32 [$r0] $r2
+        (0x0007000f, 0xe3000000), // exit
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
 /// `oColor = (dFdx(vColor.r), neighbour, 0, 1)` via `shfl.bfly`.
 pub fn derivative_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
@@ -313,6 +334,23 @@ impl Harness {
             stats: GpuStats::default(),
             base,
             as_id: 0,
+        }
+    }
+
+    /// Replace the captured vertex shader.
+    pub fn set_vertex_shader(&mut self, words: &[u8]) {
+        let mut ctx = ExecCtx {
+            mem: &self.mem,
+            vmm: &self.vmm,
+            as_id: self.as_id,
+            host1x: &mut self.host1x,
+            stats: &mut self.stats,
+            trace: false,
+        };
+        for (i, chunk) in words.as_chunks::<4>().0.iter().enumerate() {
+            let word = u32::from_le_bytes(*chunk);
+            ctx.write_u32(self.base + 0x200 + i as u64 * 4, word)
+                .expect("the shader fits its mapping");
         }
     }
 

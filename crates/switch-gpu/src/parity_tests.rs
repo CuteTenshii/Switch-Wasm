@@ -988,6 +988,38 @@ fn the_latch_lets_go_after_clean_frames_and_waits_longer_each_time() {
     assert_eq!(gpu.unlatched, 2);
 }
 
+/// A points draw that only stores runs its vertex shader on the rasterizer, which reads
+/// no render target, so it neither counts as a fallback nor hands the frames over.
+#[test]
+fn a_store_only_points_draw_lands_without_latching_the_frame() {
+    let Some(mut gpu) = device() else { return };
+    gpu.deferred_readbacks = true;
+    let mut h = Harness::new();
+    let dest = h.base + 0x1000;
+    h.set_vertex_shader(&testing::vertex_id_store_shader(dest));
+    h.engine.last_draw.primitive = 0;
+
+    h.clear_with(&mut gpu, [true; 4]).expect("the clear");
+    let fallbacks = gpu.fallbacks;
+    // The points themselves are still refused.
+    let _ = h.draw_with(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "counted as a fallback: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(
+        h.vmm.read_u32(&h.mem, dest).unwrap(),
+        2,
+        "the last vertex's store"
+    );
+    h.clear_with(&mut gpu, [true; 4]).expect("the clear");
+    assert!(
+        !gpu.software_frame,
+        "the store-only draw latched the frames"
+    );
+}
+
 #[test]
 fn a_clear_writes_what_the_rasterizer_would_have_written() {
     let Some(mut gpu) = device() else { return };
