@@ -35,6 +35,9 @@ const VOICE_IN_SZ: u32 = 0x170;
 const WAVE_BUF_IN_SZ: u32 = 0x38;
 /// `EffectInfo::InParameter`, the same size in both revisions.
 const EFFECT_IN_SZ: u32 = 0xC0;
+const MIX_IN_SZ: u32 = 0x930;
+/// The header of a dirty-only mix section: a magic, then the entry count at 4.
+const MIX_DIRTY_HEADER_SZ: u32 = 0x20;
 
 /// `EffectType_Invalid`: an unused slot, which command generation leaves alone.
 const EFFECT_TYPE_INVALID: u8 = 0;
@@ -805,54 +808,44 @@ impl Cpu {
         }
     }
 
-    /// `AudioRendererMixInfoIn[]`. Buffers are assigned in mix-id order.
+    /// `AudioRendererMixInfoIn[]`, either every mix or only the changed ones
+    /// (`MixInParameterDirtyOnlyUpdate`). Buffers are assigned in mix-id order.
     fn audren_parse_mixes(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
-        let count = (renderer.submix_count + 1) as usize;
-        let stride = if count > 0 { size / count as u32 } else { 0 };
-        renderer.mixes.clear();
-        if stride == 0 {
-            // Every voice names a final mix, so one exists even if the update sent none.
-            renderer.mixes.push(Mix {
-                is_used: true,
-                mix_id: 0,
-                volume: 1.0,
-                buffer_count: renderer.mix_buffer_count.min(MAX_MIX_BUFFERS as u32),
-                buffer_offset: 0,
-                dest_mix_id: UNUSED_MIX_ID,
-                matrix: Vec::new(),
-            });
-            return;
-        }
-        for i in 0..count {
-            let at = addr.wrapping_add(i as u32 * stride);
-            let volume = f32::from_bits(self.mem.read_u32(at).unwrap_or(0));
-            let buffer_count = self.mem.read_u32(at.wrapping_add(0x08)).unwrap_or(0);
-            let is_used = self.mem.read_u8(at.wrapping_add(0x0c)).unwrap_or(0) != 0;
-            let mix_id = self.mem.read_u32(at.wrapping_add(0x10)).unwrap_or(0);
-            let dest_mix_id = self.mem.read_u32(at.wrapping_add(0x924)).unwrap_or(0);
-            let buffer_count = buffer_count.min(MAX_MIX_BUFFERS as u32);
-            let mut matrix = Vec::new();
-            if dest_mix_id != UNUSED_MIX_ID && buffer_count > 0 {
-                matrix = vec![0.0; MAX_MIX_BUFFERS * MAX_MIX_BUFFERS];
-                for src in 0..buffer_count as usize {
-                    for dest in 0..MAX_MIX_BUFFERS {
-                        let offset = 0x24 + ((src * MAX_MIX_BUFFERS + dest) * 4) as u32;
-                        let raw = self.mem.read_u32(at.wrapping_add(offset)).unwrap_or(0);
-                        let gain = f32::from_bits(raw);
-                        matrix[src * MAX_MIX_BUFFERS + dest] =
-                            if gain.is_finite() { gain } else { 0.0 };
-                    }
+        // The server checks the section size exactly, so its remainder tells the forms apart.
+        if size % MIX_IN_SZ == MIX_DIRTY_HEADER_SZ {
+            let sent = self.mem.read_u32(addr.wrapping_add(4)).unwrap_or(0);
+            let count = sent.min(size / MIX_IN_SZ);
+            for i in 0..count {
+                let at = addr
+                    .wrapping_add(MIX_DIRTY_HEADER_SZ)
+                    .wrapping_add(i * MIX_IN_SZ);
+                let mix = self.audren_read_mix(at);
+                match renderer.mixes.iter_mut().find(|m| m.mix_id == mix.mix_id) {
+                    Some(kept) => *kept = mix,
+                    None => renderer.mixes.push(mix),
                 }
             }
-            renderer.mixes.push(Mix {
-                is_used,
-                mix_id,
-                volume: if volume.is_finite() { volume } else { 1.0 },
-                buffer_count,
-                buffer_offset: 0,
-                dest_mix_id,
-                matrix,
-            });
+        } else {
+            let count = (renderer.submix_count + 1) as usize;
+            let stride = if count > 0 { size / count as u32 } else { 0 };
+            renderer.mixes.clear();
+            if stride == 0 {
+                // Every voice names a final mix, so one exists even if the update sent none.
+                renderer.mixes.push(Mix {
+                    is_used: true,
+                    mix_id: 0,
+                    volume: 1.0,
+                    buffer_count: renderer.mix_buffer_count.min(MAX_MIX_BUFFERS as u32),
+                    buffer_offset: 0,
+                    dest_mix_id: UNUSED_MIX_ID,
+                    matrix: Vec::new(),
+                });
+                return;
+            }
+            for i in 0..count {
+                let mix = self.audren_read_mix(addr.wrapping_add(i as u32 * stride));
+                renderer.mixes.push(mix);
+            }
         }
         // Assign buffer ranges in mix-id order, as `audrvMixAdd` does.
         renderer.mixes.sort_by_key(|mix| mix.mix_id);
@@ -860,6 +853,38 @@ impl Cpu {
         for mix in renderer.mixes.iter_mut() {
             mix.buffer_offset = offset;
             offset += mix.buffer_count;
+        }
+    }
+
+    /// One `AudioRendererMixInfoIn`.
+    fn audren_read_mix(&self, at: u32) -> Mix {
+        let volume = f32::from_bits(self.mem.read_u32(at).unwrap_or(0));
+        let buffer_count = self.mem.read_u32(at.wrapping_add(0x08)).unwrap_or(0);
+        let is_used = self.mem.read_u8(at.wrapping_add(0x0c)).unwrap_or(0) != 0;
+        let mix_id = self.mem.read_u32(at.wrapping_add(0x10)).unwrap_or(0);
+        let dest_mix_id = self.mem.read_u32(at.wrapping_add(0x924)).unwrap_or(0);
+        let buffer_count = buffer_count.min(MAX_MIX_BUFFERS as u32);
+        let mut matrix = Vec::new();
+        if dest_mix_id != UNUSED_MIX_ID && buffer_count > 0 {
+            matrix = vec![0.0; MAX_MIX_BUFFERS * MAX_MIX_BUFFERS];
+            for src in 0..buffer_count as usize {
+                for dest in 0..MAX_MIX_BUFFERS {
+                    let offset = 0x24 + ((src * MAX_MIX_BUFFERS + dest) * 4) as u32;
+                    let raw = self.mem.read_u32(at.wrapping_add(offset)).unwrap_or(0);
+                    let gain = f32::from_bits(raw);
+                    matrix[src * MAX_MIX_BUFFERS + dest] =
+                        if gain.is_finite() { gain } else { 0.0 };
+                }
+            }
+        }
+        Mix {
+            is_used,
+            mix_id,
+            volume: if volume.is_finite() { volume } else { 1.0 },
+            buffer_count,
+            buffer_offset: 0,
+            dest_mix_id,
+            matrix,
         }
     }
 

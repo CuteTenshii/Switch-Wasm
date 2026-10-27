@@ -601,6 +601,66 @@ fn audren_reports_effects_in_the_narrow_status_before_revision_9() {
 }
 
 #[test]
+fn audren_keeps_the_mixes_a_dirty_only_update_leaves_out() {
+    // From revision 7 the mix section is a header and only the mixes that
+    // changed, each naming itself by id. Reading it as one entry per mix lost
+    // every submix, so effects on them never reported `Disabled` and Nintendo
+    // Switch Sports hung removing one.
+    const AUDREN: u64 = 0xB400;
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const COUNTS: AudrenCounts = AudrenCounts {
+        voices: 1,
+        effects: 1,
+        sinks: 1,
+        mix_buffers: 4,
+    };
+    const SUBMIX: u32 = 1;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDREN, "audren:u");
+    let renderer = audren_open(&mut cpu, AUDREN, b"REV:", COUNTS);
+    let state = |cpu: &Cpu| -> u8 {
+        let base = OUT + effect_out(COUNTS.voices, COUNTS.effects);
+        cpu.mem.read_u8(base).unwrap()
+    };
+
+    // Every mix is dirty on the first update: the final mix and a submix feeding it.
+    let mut first = AudrenUpdate::with_dirty_mixes(1, 1, 2, 1);
+    first.mix_entry(0, 0, 2, 0x7FFF_FFFF);
+    first.mix_entry(1, SUBMIX, 2, 0);
+    first.sink(&[0, 1]);
+    first.effect(0, EFFECT_DELAY, false, SUBMIX);
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    first.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    assert_eq!(state(&cpu), EFFECT_DISABLED, "an effect on a submix");
+
+    // Nothing changed: no mixes are sent, and the submix is still there.
+    let mut quiet = AudrenUpdate::with_dirty_mixes(1, 1, 0, 1);
+    quiet.sink(&[0, 1]);
+    quiet.effect(0, EFFECT_DELAY, true, SUBMIX);
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    quiet.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    assert_eq!(state(&cpu), EFFECT_ENABLED, "the submix was forgotten");
+
+    // A submix marked unused stops generating commands for its effects.
+    let mut released = AudrenUpdate::with_dirty_mixes(1, 1, 1, 1);
+    released.mix_entry(0, SUBMIX, 2, 0);
+    released.data[released.mix_entries_at + 0x0c] = 0; // is_used
+    released.sink(&[0, 1]);
+    released.effect(0, EFFECT_DELAY, false, SUBMIX);
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    released.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    assert_eq!(
+        state(&cpu),
+        EFFECT_ENABLED,
+        "the effect of an unused mix kept its last state"
+    );
+}
+
+#[test]
 fn audren_frame_event_fires_on_the_clock() {
     // The renderer event paces `audrenWaitFrame` and must be a real event.
     let mut cpu = cpu_at(0x1000);

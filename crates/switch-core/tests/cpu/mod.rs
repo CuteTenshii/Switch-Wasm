@@ -614,6 +614,8 @@ pub const AUDREN_IN_CHANNEL: usize = 0x70;
 pub const AUDREN_IN_VOICE: usize = 0x170;
 pub const AUDREN_IN_EFFECT: usize = 0xC0;
 pub const AUDREN_IN_MIX: usize = 0x930;
+/// A dirty-only mix section's header: a magic, then the entry count.
+pub const AUDREN_IN_MIX_DIRTY_HEADER: usize = 0x20;
 pub const AUDREN_IN_SINK: usize = 0x140;
 pub const AUDREN_IN_PERF: usize = 0x10;
 
@@ -631,6 +633,8 @@ pub struct AudrenUpdate {
     pub voices_at: usize,
     pub effects_at: usize,
     pub mixes_at: usize,
+    /// Where the mix entries start: past the header in a dirty-only section.
+    pub mix_entries_at: usize,
     pub sinks_at: usize,
 }
 
@@ -640,10 +644,23 @@ impl AudrenUpdate {
     }
 
     pub fn with_effects(voices: usize, effects: usize, mixes: usize, sinks: usize) -> Self {
+        Self::build(voices, effects, 0, mixes, sinks)
+    }
+
+    /// A revision-7+ update whose mix section carries only `sent` changed mixes.
+    pub fn with_dirty_mixes(voices: usize, effects: usize, sent: usize, sinks: usize) -> Self {
+        let mut update = Self::build(voices, effects, AUDREN_IN_MIX_DIRTY_HEADER, sent, sinks);
+        let at = update.mixes_at;
+        update.put(at, 0xCAFE_BABE);
+        update.put(at + 4, sent as u32);
+        update
+    }
+
+    fn build(voices: usize, effects: usize, mix_header: usize, mixes: usize, sinks: usize) -> Self {
         let channels_sz = voices * AUDREN_IN_CHANNEL;
         let voices_sz = voices * AUDREN_IN_VOICE;
         let effects_sz = effects * AUDREN_IN_EFFECT;
-        let mixes_sz = mixes * AUDREN_IN_MIX;
+        let mixes_sz = mix_header + mixes * AUDREN_IN_MIX;
         let sinks_sz = sinks * AUDREN_IN_SINK;
         let channels_at = AUDREN_IN_HEADER + AUDREN_IN_BEHAVIOR;
         let voices_at = channels_at + channels_sz;
@@ -657,6 +674,7 @@ impl AudrenUpdate {
             voices_at,
             effects_at,
             mixes_at,
+            mix_entries_at: mixes_at + mix_header,
             sinks_at,
         };
         update.put(0x00, u32::from_le_bytes(*b"REV9"));
@@ -739,12 +757,17 @@ impl AudrenUpdate {
 
     /// The final mix, with `buffers` mix buffers and going nowhere but the sink.
     pub fn mix(&mut self, buffers: u32) {
-        let at = self.mixes_at;
+        self.mix_entry(0, 0, buffers, 0x7FFF_FFFF); // AUDREN_FINAL_MIX_ID, AUDREN_UNUSED_MIX_ID
+    }
+
+    /// Mix entry `index`: mix `mix_id`, in use, with `buffers` mix buffers, sending to `dest_mix_id`.
+    pub fn mix_entry(&mut self, index: usize, mix_id: u32, buffers: u32, dest_mix_id: u32) {
+        let at = self.mix_entries_at + index * AUDREN_IN_MIX;
         self.put_f32(at, 1.0); // volume
         self.put(at + 0x08, buffers);
         self.data[at + 0x0c] = 1; // is_used
-        self.put(at + 0x10, 0); // AUDREN_FINAL_MIX_ID
-        self.put(at + 0x924, 0x7FFF_FFFF); // AUDREN_UNUSED_MIX_ID
+        self.put(at + 0x10, mix_id);
+        self.put(at + 0x924, dest_mix_id);
     }
 
     /// A device sink reading one mix buffer into each output channel.

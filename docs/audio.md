@@ -30,6 +30,7 @@
 - `IAudioDevice` volume is stored and read back exactly: the web applet aborts if the volume it reads differs from what it set.
 - **`num_wavebufs_consumed` is load-bearing**: the guest advances its ring head by the delta, so a reply of zero is a title that queues four buffers and stops. Unrouted voices still advance.
 - Voice state is re-sent whole every update; only playback position (slot, offset, resampler, ADPCM history) and filter state survive, and `is_new` clears them. Re-seeding the slot from `wavebuf_head` keeps the guest's ring and ours in step.
+- **From revision 7 the mix section can be dirty-only** (`MixInParameterDirtyOnlyUpdate`): a 0x20-byte header (magic `0xcafebabe`, entry count at +4), then only the mixes that changed, each naming itself by id at +0x10; the rest keep their state. The server checks the size exactly, so `size % 0x930 == 0x20` tells it from a full section. Reading it as one entry per mix lost every submix (Nintendo Switch Sports, revision 10), which also starved the effect status below.
 - Mix buffers are assigned in mix-id order (final mix first), matching `audrvMixAdd`. Submixes render highest id first since a submix is created after the mix it sends to.
 - **`end_sample_offset` is a claim; `size` is the allocation, and it wins** (`playable_samples`, the same lesson as the audout Mii editor bug). The buffer is still consumed: one that never comes back stalls its voice.
 - At end of stream, interpolate toward zero (avoids a DC step) and keep `primed` so the last sample still plays.
