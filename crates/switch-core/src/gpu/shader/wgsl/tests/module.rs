@@ -107,7 +107,8 @@ fn a_layout_names_every_binding_the_text_calls_through() {
             slot: TextureSlot::Bound(0x1a4),
             dim: TexDim::T2d,
             compare: false,
-            swizzle: IDENTITY_SWIZZLE
+            swizzle: IDENTITY_SWIZZLE,
+            fold: None,
         }]
     );
     let source = module(&translated, Stage::Fragment, &layout).unwrap();
@@ -715,4 +716,39 @@ fn a_module_is_complete_enough_to_stand_on_its_own() {
         }
         assert!(braces_balance(&source), "{stage:?}:\n{source}");
     }
+}
+
+/// Tiles overlap by a row, so rows `r` and `r + 1` are always in tile `r / (tile_rows - 1)`;
+/// a repeating image's wrap tile holds the last row and then the first.
+#[test]
+fn an_image_folds_into_as_few_overlapping_tiles_as_hold_it() {
+    use crate::gpu::shader::wgsl::Fold;
+    // Nintendo Switch Sports' glyph atlas under a browser's limits.
+    let atlas = Fold::of(32768, 8192, 256, false).expect("folds");
+    assert_eq!((atlas.tile_rows, atlas.layers), (8192, 5));
+    for row in [0, 8190, 8191, 16381, 16382, 32766] {
+        let tile = (row / (atlas.tile_rows - 1)).min(atlas.tiles() - 1);
+        let at = row - atlas.image_row(tile, 0);
+        assert!(
+            at + 1 < atlas.tile_rows,
+            "row {row} is the last of tile {tile}"
+        );
+        assert_eq!(atlas.image_row(tile, at), row);
+        assert_eq!(atlas.image_row(tile, at + 1), row + 1);
+    }
+    // The last tile runs past the image, repeating its last row.
+    assert_eq!(atlas.image_row(4, atlas.tile_rows - 1), 32767);
+
+    let repeating = Fold::of(32768, 8192, 256, true).expect("folds");
+    assert_eq!((repeating.tiles(), repeating.layers), (5, 6));
+    assert_eq!(repeating.image_row(5, 0), 32767);
+    assert_eq!(repeating.image_row(5, 1), 0);
+
+    assert_eq!(Fold::of(8192, 8192, 256, false), None, "fits as it is");
+    assert_eq!(Fold::of(8193, 8192, 256, false).map(|f| f.layers), Some(2));
+    assert_eq!(
+        Fold::of(32768, 8192, 5, true),
+        None,
+        "more tiles than layers"
+    );
 }

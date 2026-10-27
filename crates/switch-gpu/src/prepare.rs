@@ -216,6 +216,7 @@ impl Gpu {
                     .find(|t| t.stage == stage && t.slot == binding.slot)
                 {
                     binding.swizzle = upload.swizzle;
+                    binding.fold = self.fold(upload, binding)?;
                 }
             }
         }
@@ -352,6 +353,43 @@ impl Gpu {
             assembled,
             instance: engine.instance_id(),
         })
+    }
+
+    /// How a 2D image taller than the device allows is folded into layers, if it is one.
+    /// Folding keeps two rows filtered together in one tile, repeating or not, but not a mirror.
+    fn fold(
+        &self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        binding: &wgsl::TextureBinding,
+    ) -> std::result::Result<Option<wgsl::Fold>, String> {
+        use switch_core::gpu::shader::isa::TexDim;
+        use switch_core::gpu::texture::Wrap;
+        let limits = self.device.limits();
+        let plain_2d = matches!(binding.dim, TexDim::T2d | TexDim::T2dArray)
+            && !binding.compare
+            && upload.layers <= 1
+            // Compressed rows are blocks, which a texel-row tile would cut through.
+            && upload.rows == upload.height
+            && upload.width <= limits.max_texture_dimension_2d;
+        if !plain_2d {
+            return Ok(None);
+        }
+        let Some(fold) = wgsl::Fold::of(
+            upload.height,
+            limits.max_texture_dimension_2d,
+            limits.max_texture_array_layers,
+            upload.sampler.wrap_v == Wrap::Repeat,
+        ) else {
+            return Ok(None);
+        };
+        if upload.sampler.wrap_v == Wrap::Mirror {
+            return Err(format!(
+                "a {}x{} image, taller than the device allows, sampled with a mirrored v wrap \
+                 that folding it into layers cannot keep",
+                upload.width, upload.height
+            ));
+        }
+        Ok(Some(fold))
     }
 
     fn translate(

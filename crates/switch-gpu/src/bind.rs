@@ -64,7 +64,10 @@ impl Gpu {
                 .ok_or("a texture the module never declared")?;
             let compare = declared_texture.compare;
             let dim = declared_texture.dim;
+            let fold = declared_texture.fold;
             let view_dimension = match dim {
+                // Folded tiles are layers, whatever the program samples the image as.
+                _ if fold.is_some() => wgpu::TextureViewDimension::D2Array,
                 TexDim::T2dArray => wgpu::TextureViewDimension::D2Array,
                 TexDim::T3d => wgpu::TextureViewDimension::D3,
                 // Six faces of a 2D texture, viewed as one cube.
@@ -105,18 +108,22 @@ impl Gpu {
                     upload.layers
                 ));
             }
-            let held = self.held_layers(upload, compare, view_dimension)?;
+            // Nothing the device holds is as tall as an image that needs folding.
+            let held = match fold {
+                Some(_) => Vec::new(),
+                None => self.held_layers(upload, compare, view_dimension)?,
+            };
             let texture = if !held.is_empty() {
                 self.texture_over_held(upload, view_dimension, &held, compare)?
             } else if compare {
                 self.shadow_texture(upload)?
             } else {
-                self.texture(upload, view_dimension)?
+                self.texture(upload, view_dimension, fold)?
             };
             resources.push(Resource::Texture(binding, texture, view_dimension));
             resources.push(Resource::Sampler(
                 binding + 1,
-                self.sampler(upload, compare),
+                self.sampler(upload, compare, fold.is_some()),
             ));
         }
 
@@ -333,7 +340,7 @@ impl Gpu {
         let texture = if compare {
             self.shadow_texture(upload)?
         } else {
-            let (texture, _) = self.upload_texture(upload, view)?;
+            let (texture, _) = self.upload_texture(upload, view, None)?;
             self.scratch.push(Scratch::Texture(texture.clone()));
             texture
         };
@@ -495,13 +502,14 @@ impl Gpu {
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
+        fold: Option<wgsl::Fold>,
     ) -> std::result::Result<wgpu::Texture, String> {
         if let Some(made) = self.space.gpu_textures.get(&upload.key) {
             if let Some((_, texture)) = made.iter().find(|(v, _)| *v == view) {
                 return Ok(texture.clone());
             }
         }
-        let (texture, len) = self.upload_texture(upload, view)?;
+        let (texture, len) = self.upload_texture(upload, view, fold)?;
         // Kept only alongside its cached bytes, which a guest write evicts.
         if self.space.texture_cache.contains_key(&upload.key) {
             self.gpu_texture_bytes += len as u64;
@@ -521,6 +529,7 @@ impl Gpu {
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
+        fold: Option<wgsl::Fold>,
     ) -> std::result::Result<(wgpu::Texture, usize), String> {
         let (format, widening) =
             sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
@@ -530,10 +539,36 @@ impl Gpu {
             Some(bytes) => (bytes.as_slice(), upload.row_bytes * 2),
             None => (&*upload.bytes, upload.row_bytes),
         };
-        let size = wgpu::Extent3d {
-            width: upload.width.max(1),
-            height: upload.height.max(1),
-            depth_or_array_layers: upload.layers.max(1),
+        // Each tile's rows, the image's last repeated past its end. See [`wgsl::Fold`].
+        let folded = fold.map(|fold| {
+            let row = |at: u32| {
+                let at = at.min(upload.rows.saturating_sub(1)) as usize * row_bytes as usize;
+                bytes.get(at..at + row_bytes as usize).unwrap_or(&[])
+            };
+            let mut tiles =
+                Vec::with_capacity(row_bytes as usize * (fold.tile_rows * fold.layers) as usize);
+            for layer in 0..fold.layers {
+                for at in 0..fold.tile_rows {
+                    tiles.extend_from_slice(row(fold.image_row(layer, at)));
+                }
+            }
+            tiles
+        });
+        let (bytes, rows) = match &folded {
+            Some(tiles) => (tiles.as_slice(), fold.map_or(upload.rows, |f| f.tile_rows)),
+            None => (bytes, upload.rows),
+        };
+        let size = match fold {
+            Some(fold) => wgpu::Extent3d {
+                width: upload.width.max(1),
+                height: fold.tile_rows,
+                depth_or_array_layers: fold.layers,
+            },
+            None => wgpu::Extent3d {
+                width: upload.width.max(1),
+                height: upload.height.max(1),
+                depth_or_array_layers: upload.layers.max(1),
+            },
         };
         // A 3D image must be created as one so sampling filters between slices.
         let dimension = match view {
@@ -585,7 +620,7 @@ impl Gpu {
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(row_bytes),
-                rows_per_image: Some(upload.rows),
+                rows_per_image: Some(rows),
             },
             size,
         );
@@ -743,10 +778,12 @@ impl Gpu {
     }
 
     /// `compare` is the binding's question, not the descriptor's.
+    /// A folded image wraps in the shader, so its tiles are clamped here.
     fn sampler(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         compare: bool,
+        folded: bool,
     ) -> wgpu::Sampler {
         use switch_core::gpu::texture::Wrap;
         let wrap = |w: Wrap| match w {
@@ -779,7 +816,11 @@ impl Gpu {
         let key = SamplerKey {
             compare,
             wrap_u: wrap(upload.sampler.wrap_u),
-            wrap_v: wrap(upload.sampler.wrap_v),
+            wrap_v: if folded {
+                wgpu::AddressMode::ClampToEdge
+            } else {
+                wrap(upload.sampler.wrap_v)
+            },
             mag: filter(upload.sampler.mag_linear),
             min: filter(upload.sampler.min_linear),
         };

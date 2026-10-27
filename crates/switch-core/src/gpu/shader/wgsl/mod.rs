@@ -25,7 +25,7 @@ mod tests;
 mod texture;
 
 use emitter::Emitter;
-pub use layout::{Coverage, Layout, Stage, TextureBinding, GLOBAL_BINDING, IDENTITY_SWIZZLE};
+pub use layout::{Coverage, Fold, Layout, Stage, TextureBinding, GLOBAL_BINDING, IDENTITY_SWIZZLE};
 pub use module::module;
 
 /// Why a program could not be translated; the caller falls back to the rasterizer.

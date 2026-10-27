@@ -75,6 +75,53 @@ pub struct TextureBinding {
     pub swizzle: [SwizzleSource; 4],
     /// A shadow map, bound as `texture_depth_*` with a `sampler_comparison`.
     pub compare: bool,
+    /// Set by the backend for an image taller than the device allows.
+    pub fold: Option<Fold>,
+}
+
+/// A 2D image taller than the device allows, bound as array layers of overlapping
+/// tiles. Tile `k` holds rows `k * (tile_rows - 1)` to `k * (tile_rows - 1) + tile_rows - 1`,
+/// so the two rows a bilinear sample or a gather reads are always in one tile; rows past
+/// the image repeat its last, as clamping to the edge would. A repeating image adds a
+/// last tile that starts at its last row and carries on from its first, for the one pair
+/// of rows no other tile holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fold {
+    pub height: u32,
+    pub tile_rows: u32,
+    /// Every layer, the wrap tile included.
+    pub layers: u32,
+    pub wrap: bool,
+}
+
+impl Fold {
+    /// How to fold an image `height` rows tall into tiles of at most `max_rows`, if it
+    /// needs folding and `max_layers` layers hold it.
+    pub fn of(height: u32, max_rows: u32, max_layers: u32, wrap: bool) -> Option<Fold> {
+        if height <= max_rows || max_rows < 2 {
+            return None;
+        }
+        let layers = (height - 1) / (max_rows - 1) + 1 + u32::from(wrap);
+        (layers <= max_layers).then_some(Fold {
+            height,
+            tile_rows: max_rows,
+            layers,
+            wrap,
+        })
+    }
+
+    /// The tiles that are not the wrap tile.
+    pub fn tiles(&self) -> u32 {
+        self.layers - u32::from(self.wrap)
+    }
+
+    /// The image row at row `row` of tile `layer`.
+    pub fn image_row(&self, layer: u32, row: u32) -> u32 {
+        if self.wrap && layer == self.tiles() {
+            return (self.height - 1 + row) % self.height;
+        }
+        (layer * (self.tile_rows - 1) + row).min(self.height - 1)
+    }
 }
 
 pub const IDENTITY_SWIZZLE: [SwizzleSource; 4] = [
@@ -126,6 +173,7 @@ impl Layout {
                     dim,
                     compare,
                     swizzle: IDENTITY_SWIZZLE,
+                    fold: None,
                 })
                 .collect(),
             texture_offsets: translated.texture_offsets.clone(),

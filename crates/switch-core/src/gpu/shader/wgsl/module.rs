@@ -1,7 +1,7 @@
 //! Wrapping a translation into a complete module with its entry points.
 
 use super::layout::{
-    attribute_scalar, unpack_1010102, Coverage, Layout, Stage, ATTRIBUTE_WORDS, GENERIC_BASE,
+    attribute_scalar, unpack_1010102, Coverage, Fold, Layout, Stage, ATTRIBUTE_WORDS, GENERIC_BASE,
     GENERIC_STRIDE, GLOBAL_BINDING, IDENTITY_SWIZZLE, INSTANCE_ID, POSITION, TEXTURE_BINDING,
     VERTEX_ID,
 };
@@ -89,7 +89,10 @@ pub fn module(
         out.push_str(&format!(
             "@group({}) @binding({binding}) var tex{index}: {};\n",
             layout.group,
-            texture_type(texture.dim, texture.compare)?
+            match texture.fold {
+                Some(_) => folded_texture_type(texture.dim, texture.compare)?,
+                None => texture_type(texture.dim, texture.compare)?,
+            }
         ));
         out.push_str(&format!(
             "@group({}) @binding({}) var smp{index}: {};\n",
@@ -164,11 +167,23 @@ pub fn module(
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
         let key = texture.slot.key();
-        let sample = format!("textureSampleLevel(tex{index}, smp{index}, {coords})");
-        out.push_str(&format!(
-            "    case {key}u: {{ {} }}\n",
-            return_swizzled(&sample, texture.swizzle)
-        ));
+        let body = match texture.fold {
+            Some(fold) => format!(
+                "{} {}",
+                folded_coords(fold, 0),
+                return_swizzled(
+                    &format!(
+                        "textureSampleLevel(tex{index}, smp{index}, vec2<f32>(u, fv), fk, 0.0)"
+                    ),
+                    texture.swizzle
+                )
+            ),
+            None => return_swizzled(
+                &format!("textureSampleLevel(tex{index}, smp{index}, {coords})"),
+                texture.swizzle,
+            ),
+        };
+        out.push_str(&format!("    case {key}u: {{ {body} }}\n"));
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }\n  }\n}\n\n");
 
@@ -209,13 +224,27 @@ pub fn module(
         let key = texture.slot.key();
         out.push_str(&format!("    case {key}u: {{\n      switch (offset) {{\n"));
         for (n, (x, y)) in layout.texture_offsets.iter().enumerate() {
-            let sample = format!(
-                "textureSampleLevel(tex{index}, smp{index}, {coords}, vec2<i32>({x}, {y}))"
-            );
-            out.push_str(&format!(
-                "        case {n}u: {{ {} }}\n",
-                return_swizzled(&sample, texture.swizzle)
-            ));
+            // A folded image takes the row offset before choosing its tile.
+            let body = match texture.fold {
+                Some(fold) => format!(
+                    "{} {}",
+                    folded_coords(fold, *y),
+                    return_swizzled(
+                        &format!(
+                            "textureSampleLevel(tex{index}, smp{index}, vec2<f32>(u, fv), fk, \
+                             0.0, vec2<i32>({x}, 0))"
+                        ),
+                        texture.swizzle
+                    )
+                ),
+                None => return_swizzled(
+                    &format!(
+                        "textureSampleLevel(tex{index}, smp{index}, {coords}, vec2<i32>({x}, {y}))"
+                    ),
+                    texture.swizzle,
+                ),
+            };
+            out.push_str(&format!("        case {n}u: {{ {body} }}\n"));
         }
         out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
     }
@@ -232,10 +261,15 @@ pub fn module(
             _ => "1u".to_string(),
         };
         let key = texture.slot.key();
+        // A folded image answers with the size it has, one layer and one level.
+        let (height, depth) = match texture.fold {
+            Some(fold) => (format!("{}u", fold.height), "1u".to_string()),
+            None => ("s.y".to_string(), depth),
+        };
         out.push_str(&format!(
             "    case {key}u: {{\n      let s = textureDimensions(tex{index});\n      \
              return vec4<u32>(select(max(s.x >> lod, 1u), 1u, lod >= 32u), \
-             select(max(s.y >> lod, 1u), 1u, lod >= 32u), {depth}, \
+             select(max({height} >> lod, 1u), 1u, lod >= 32u), {depth}, \
              textureNumLevels(tex{index}));\n    }}\n"
         ));
     }
@@ -256,6 +290,10 @@ pub fn module(
         out.push_str(&format!(
             "    case {key}u: {{\n      switch (component) {{\n"
         ));
+        let (prelude, coords) = match texture.fold {
+            Some(fold) => (folded_coords(fold, 0), "vec2<f32>(u, fv), fk"),
+            None => (String::new(), coords),
+        };
         for (channel, source) in texture.swizzle.iter().enumerate() {
             let texels = match source {
                 SwizzleSource::R => format!("textureGather(0, tex{index}, smp{index}, {coords})"),
@@ -266,7 +304,7 @@ pub fn module(
                 SwizzleSource::One => "vec4<f32>(1.0)".to_string(),
             };
             out.push_str(&format!(
-                "        case {channel}u: {{ return {texels}; }}\n"
+                "        case {channel}u: {{ {prelude} return {texels}; }}\n"
             ));
         }
         out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
@@ -302,6 +340,41 @@ fn return_swizzled(sample: &str, swizzle: [SwizzleSource; 4]) -> String {
         "let sampled = {sample}; return vec4<f32>({});",
         channels.join(", ")
     )
+}
+
+/// Statements binding `fk`, the layer a folded image is sampled in, and `fv`, the
+/// normalized `v` within it, for `v` moved `dy` texels. See [`Fold`].
+fn folded_coords(fold: Fold, dy: i32) -> String {
+    let (height, stride, rows) = (fold.height, fold.tile_rows - 1, fold.tile_rows);
+    let last = fold.tiles() - 1;
+    if !fold.wrap {
+        return format!(
+            "let fy = v * {height}.0 - 0.5 + f32({dy}); \
+             let fk = min(u32(max(floor(fy), 0.0)) / {stride}u, {last}u); \
+             let fv = (fy - f32(fk * {stride}u) + 0.5) / {rows}.0;"
+        );
+    }
+    // The row wraps into the image first; only the last row pairs with the first.
+    format!(
+        "let fw = v * {height}.0 - 0.5 + f32({dy}); \
+         let fy = fw - {height}.0 * floor(fw / {height}.0); \
+         let fr = min(u32(floor(fy)), {}u); \
+         let fwrap = fr == {}u; \
+         let fk = select(min(fr / {stride}u, {last}u), {}u, fwrap); \
+         let fv = (fy - f32(select(fk * {stride}u, {}u, fwrap)) + 0.5) / {rows}.0;",
+        height - 1,
+        height - 1,
+        fold.tiles(),
+        height - 1
+    )
+}
+
+/// The WGSL type of a folded image's binding: only plain 2D images fold.
+fn folded_texture_type(dim: TexDim, compare: bool) -> Result<&'static str, Unsupported> {
+    match (dim, compare) {
+        (TexDim::T2d | TexDim::T2dArray, false) => Ok("texture_2d_array<f32>"),
+        (dim, _) => Err(Unsupported::TextureDimension { dim }),
+    }
 }
 
 /// The WGSL type a `texs` of this dimensionality samples.

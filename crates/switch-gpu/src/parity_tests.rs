@@ -1020,6 +1020,100 @@ fn a_store_only_points_draw_lands_without_latching_the_frame() {
     );
 }
 
+/// A tall image sampled over eight rows starting at `first` (past the end where it
+/// repeats), by both renderers: they must agree and the device must draw it.
+fn folded_image_agrees(repeat: bool, first: impl Fn(u32) -> u32, wanted: impl Fn(u32) -> [u32; 2]) {
+    let Some(mut gpu) = device() else { return };
+    let max = gpu.device.limits().max_texture_dimension_2d;
+    let (width, height) = (8u32, max + 8);
+    let first = first(max);
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+        h.bindless_texture();
+        let bytes = width * height * 4;
+        h.mem
+            .map_zero(0x7100_0000, bytes as usize)
+            .expect("room for the image");
+        let image = h
+            .vmm
+            .map(0x7100_0000, u64::from(bytes), 2, 0, 0x1000, 0, 0)
+            .expect("a GPU mapping");
+        let tic = h.base + 0x1400 + 32;
+        let tsc = h.base + 0x1480 + 32;
+        let mut ctx = h.ctx();
+        for y in 0..height {
+            for x in 0..width {
+                // The row in the low half, so a pixel says which row it sampled.
+                let texel = (y & 0xffff) | (x * 30) << 16 | 0xff << 24;
+                ctx.write_u32(image + u64::from((y * width + x) * 4), texel)
+                    .unwrap();
+            }
+        }
+        // The fixture's descriptor, pointed at the tall image.
+        ctx.write_u32(tic + 4, image as u32).unwrap();
+        ctx.write_u32(tic + 8, (image >> 32) as u32 | (2 << 21))
+            .unwrap();
+        ctx.write_u32(tic + 12, width * 4 / 32).unwrap();
+        ctx.write_u32(tic + 16, (width - 1) | (1 << 23)).unwrap();
+        ctx.write_u32(tic + 20, height - 1).unwrap();
+        // Clamped to the edge on u and p; v repeats or clamps.
+        let wrap_v = if repeat { 0 } else { 2 };
+        ctx.write_u32(tsc, 2 | (wrap_v << 3) | (2 << 6)).unwrap();
+        // Pixel row p samples image row first + p.
+        let (top, bottom) = (
+            first as f32 / height as f32,
+            (first + 8) as f32 / height as f32,
+        );
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, top, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, top, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, bottom, 0.0, 1.0]);
+        match gpu {
+            Some(gpu) => {
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => h.draw_with(&mut Software).expect("the draw"),
+        }
+        h.target()
+    };
+    let want = build(None);
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    let rows: std::collections::BTreeSet<u32> = want
+        .iter()
+        .filter(|&&c| c != 0)
+        .map(|c| c & 0xffff)
+        .collect();
+    for row in wanted(max) {
+        assert!(rows.contains(&row), "row {row} unsampled: {rows:?}");
+    }
+    assert_eq!(got, want, "the folded image sampled differently");
+}
+
+/// An image taller than the device allows is folded into layers and samples what the
+/// rasterizer samples, across the seam between two tiles too (Nintendo Switch Sports'
+/// 1024x32768 glyph atlas).
+#[test]
+fn an_image_taller_than_the_device_allows_samples_what_the_rasterizer_samples() {
+    // The seam is row `max - 1`, the first tile's last and the second's first.
+    folded_image_agrees(false, |max| max - 4, |max| [max - 2, max]);
+}
+
+/// A repeating tall image wraps from its last row to its first, as the glyph atlas does.
+#[test]
+fn a_repeating_tall_image_wraps_from_its_last_row_to_its_first() {
+    // The image is `max + 8` rows tall; eight rows from four before its end.
+    folded_image_agrees(true, |max| max + 4, |max| [max + 7, 0]);
+}
+
 /// A clear of a target the device cannot hold, overlapping nothing it holds, runs on
 /// the rasterizer without counting as a fallback or handing the frames over.
 #[test]
