@@ -521,6 +521,30 @@ impl Gpu {
             wgpu::TextureViewDimension::D3 => wgpu::TextureDimension::D3,
             _ => wgpu::TextureDimension::D2,
         };
+        // Past a limit the device makes an invalid texture that poisons every bind group using it.
+        let limits = self.device.limits();
+        let (largest, deepest) = match dimension {
+            wgpu::TextureDimension::D3 => (
+                limits.max_texture_dimension_3d,
+                limits.max_texture_dimension_3d,
+            ),
+            _ => (
+                limits.max_texture_dimension_2d,
+                limits.max_texture_array_layers,
+            ),
+        };
+        if size.width > largest || size.height > largest || size.depth_or_array_layers > deepest {
+            return Err(format!(
+                "a {}x{}x{} {dimension:?} texture at {:#x} ({:?}, {:?}), past the device's \
+                 {largest} texels or {deepest} layers",
+                size.width,
+                size.height,
+                size.depth_or_array_layers,
+                upload.key.addr,
+                upload.format,
+                upload.key.layout
+            ));
+        }
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("texture"),
             size,
