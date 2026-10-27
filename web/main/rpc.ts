@@ -110,3 +110,15 @@ export function attachScreen(canvas: OffscreenCanvas): void {
 export async function readLastError(): Promise<string> {
   return await call('last_error');
 }
+
+// A panic traps as `unreachable`; `switch_last_error` recovers the message the hook kept.
+export async function explainFailure(err: unknown): Promise<string> {
+  let why = err instanceof Error ? err.message : String(err);
+  try {
+    const captured = await readLastError();
+    if (captured) why += ' - ' + captured;
+  } catch {
+    // The module may be too far gone to answer.
+  }
+  return why;
+}

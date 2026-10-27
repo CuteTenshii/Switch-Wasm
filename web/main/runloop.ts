@@ -15,7 +15,7 @@ import { dropErrors, offerErrors } from './errors';
 import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log } from './log';
-import { call, onLoopEvents, readLastError } from './rpc';
+import { call, explainFailure, onLoopEvents, readLastError } from './rpc';
 import { pullProfileEdits, storeProfileEdits } from './users';
 import { loaded, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
@@ -94,14 +94,7 @@ async function onFailed(error: string): Promise<void> {
   // A failure after Stop is expected; anything else is reported.
   if (aborted) return;
   setState('fault');
-  // A panic traps as `unreachable`; `switch_last_error` recovers its message.
-  let why = error;
-  try {
-    const captured = await readLastError();
-    if (captured) why += ' - ' + captured;
-  } catch {
-    // The module may be too far gone to answer.
-  }
+  const why = await explainFailure(new Error(error));
   log('The run loop stopped: ' + why, 'error');
   // Linear memory survives a trap, so the context can still be read.
   await reportPanicContext();

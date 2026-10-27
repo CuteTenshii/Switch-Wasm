@@ -7,7 +7,7 @@ import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { log } from './log';
-import { call, readLastError } from './rpc';
+import { call, explainFailure, readLastError } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { endTitle, noteBooted } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
@@ -325,9 +325,10 @@ async function handleNspFile(file: File): Promise<void> {
     openContainer = { file, kind: 'nsp' };
     setNote('container-badge', file.name, true);
   } catch (e) {
-    status.textContent = 'Could not open ' + file.name + ': ' + (e as Error).message;
+    const why = await explainFailure(e);
+    status.textContent = 'Could not open ' + file.name + ': ' + why;
     setNote('container-badge', 'none open', false);
-    log('Could not open ' + file.name + ': ' + (e as Error).message, 'error');
+    log('Could not open ' + file.name + ': ' + why, 'error');
     return;
   }
   status.remove();
@@ -503,7 +504,7 @@ async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   try {
     await call('open_nca', file);
   } catch (e) {
-    out.textContent = 'Could not open ' + file.name + ': ' + (e as Error).message;
+    out.textContent = 'Could not open ' + file.name + ': ' + await explainFailure(e);
     setNote('container-badge', 'none open', false);
     return null;
   }
@@ -529,7 +530,7 @@ async function parseAndRenderNca(
   try {
     info = JSON.parse(await call('parse_nca', header)) as NcaInfo;
   } catch (err) {
-    out.textContent = 'parse failed: ' + (err as Error).message;
+    out.textContent = 'parse failed: ' + await explainFailure(err);
     return null;
   }
   if (info.error) {
@@ -610,18 +611,20 @@ export async function doLaunchNca(
   try {
     await endTitle();
   } catch (err) {
+    const why = await explainFailure(err);
     setState('fault');
-    failLoad('The running title could not be ended: ' + (err as Error).message);
-    log('The running title could not be ended: ' + (err as Error).message, 'error');
+    failLoad('The running title could not be ended: ' + why);
+    log('The running title could not be ended: ' + why, 'error');
     return;
   }
   let entry: number;
   try {
     entry = await loadFn();
   } catch (err) {
+    const why = await explainFailure(err);
     setState('fault');
-    failLoad('Launch failed: ' + (err as Error).message);
-    log('Launch failed: ' + (err as Error).message, 'error');
+    failLoad('Launch failed: ' + why);
+    log('Launch failed: ' + why, 'error');
     return;
   }
   if (entry < 0) {
