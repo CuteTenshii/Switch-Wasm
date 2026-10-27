@@ -7,7 +7,9 @@ use crate::gpu::engine::threed::{DepthLayout, Engine3D, ShaderStage};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::pipeline::{Format, Pipeline, StepMode, VertexBuffer};
 use crate::gpu::surface::{ColorFormat, Layout};
-use crate::gpu::texture::{self, Sampler, SwizzleSource, TexelKind, Texture, TextureSlot};
+use crate::gpu::texture::{
+    self, DepthTexel, Sampler, SwizzleSource, TexelKind, Texture, TextureSlot,
+};
 use crate::{Error, Result};
 
 /// Which constant banks to resolve.
@@ -630,6 +632,7 @@ fn read_texture(
 
     let copy = image_copy(&image)?;
     let (format, row_bytes, rows) = copy.shape(&image);
+    let source_row_bytes = copy.source_row_bytes(row_bytes);
     let layers = image.layers.max(1);
     let total = u64::from(row_bytes) * u64::from(rows) * u64::from(layers);
     if total > MAX_UPLOAD {
@@ -644,7 +647,7 @@ fn read_texture(
         height: image.height,
         layers,
         layer_stride: image.layer_stride,
-        row_bytes,
+        row_bytes: source_row_bytes,
         rows,
         block_depth_gobs: image.block_depth_gobs,
         layout: image.layout,
@@ -653,11 +656,11 @@ fn read_texture(
     };
     // How far the read reaches: the last row's last byte plus a GOB, or the
     // dense size, whichever is larger.
-    let dense = u64::from(row_bytes) * u64::from(rows) * u64::from(layers);
+    let dense = u64::from(source_row_bytes) * u64::from(rows) * u64::from(layers);
     let last = u64::from(image.layout.offset(
-        row_bytes.saturating_sub(1),
+        source_row_bytes.saturating_sub(1),
         rows.saturating_sub(1),
-        row_bytes,
+        source_row_bytes,
     ));
     let strided =
         last + GOB_BYTES + u64::from(image.layer_stride) * u64::from(layers.saturating_sub(1));
@@ -686,8 +689,9 @@ fn read_texture(
     for layer in 0..layers {
         // A volume's slices interleave inside a block, so read through `Texture::texel`.
         if image.block_depth_gobs > 1 {
-            let unit = match copy {
-                Copy::Raw { unit } => unit,
+            let (unit, keep) = match copy {
+                Copy::Raw { unit } => (unit, unit),
+                Copy::FloatDepth => (8, 4),
                 Copy::Decode { .. } => {
                     return Err(Error::Gpu(
                         "upload: a compressed 3D image is not decoded".into(),
@@ -695,12 +699,12 @@ fn read_texture(
                 }
             };
             for y in 0..rows {
-                for x in 0..row_bytes / unit {
+                for x in 0..source_row_bytes / unit {
                     let at = crate::gpu::surface::block_linear_volume_offset(
                         x * unit,
                         y,
                         layer,
-                        row_bytes,
+                        source_row_bytes,
                         rows,
                         match image.layout {
                             Layout::BlockLinear { block_height_gobs } => block_height_gobs,
@@ -709,7 +713,7 @@ fn read_texture(
                         image.block_depth_gobs,
                     );
                     let word = ctx.read_pixel(image.addr + u64::from(at), unit)?;
-                    bytes.extend_from_slice(&word.to_le_bytes()[..unit as usize]);
+                    bytes.extend_from_slice(&word.to_le_bytes()[..keep as usize]);
                 }
             }
             continue;
@@ -718,6 +722,21 @@ fn read_texture(
         match copy {
             Copy::Raw { unit } => {
                 deswizzle(ctx, base, image.layout, row_bytes, rows, unit, &mut bytes)?
+            }
+            Copy::FloatDepth => {
+                let mut texels = Vec::with_capacity(source_row_bytes as usize * rows as usize);
+                deswizzle(
+                    ctx,
+                    base,
+                    image.layout,
+                    source_row_bytes,
+                    rows,
+                    8,
+                    &mut texels,
+                )?;
+                for texel in texels.as_chunks::<8>().0 {
+                    bytes.extend_from_slice(&texel[..4]);
+                }
             }
             Copy::Decode { codec } => decode_blocks(ctx, &image, base, codec, &mut bytes)?,
         }
@@ -746,9 +765,19 @@ enum Copy {
     Raw { unit: u32 },
     /// Decoded to `Rgba8Unorm`, for codecs WebGPU cannot name.
     Decode { codec: Codec },
+    /// `ZF32_X24S8`'s depth, the low half of each 8-byte texel, as `R32Float`.
+    FloatDepth,
 }
 
 impl Copy {
+    /// Bytes per row in guest memory, which differs from the copy's own rows where it narrows texels.
+    fn source_row_bytes(self, row_bytes: u32) -> u32 {
+        match self {
+            Copy::FloatDepth => row_bytes * 2,
+            Copy::Raw { .. } | Copy::Decode { .. } => row_bytes,
+        }
+    }
+
     fn shape(self, image: &Texture) -> (Format, u32, u32) {
         match self {
             Copy::Raw { unit } => match image.kind {
@@ -775,6 +804,7 @@ impl Copy {
                 };
                 (format, image.width * 4, image.height)
             }
+            Copy::FloatDepth => (Format::R32Float, image.width * 4, image.height),
         }
     }
 }
@@ -788,7 +818,8 @@ fn image_copy(image: &Texture) -> Result<Copy> {
                 unit: plain.bytes_per_pixel,
             }
         }
-        // WebGPU fills `depth32float` only from a texture copy, so the rasterizer handles these.
+        TexelKind::Depth(DepthTexel::F32X24S8) => Copy::FloatDepth,
+        // Stencil and unorm depth in one integer texel have no texture format here.
         TexelKind::Depth(depth) => {
             return Err(Error::Gpu(format!(
                 "upload: {depth:?} is a depth surface, which cannot be uploaded as a texture"
@@ -1261,6 +1292,17 @@ mod tests {
             false,
         );
         assert!(image_copy(&unknown).is_err(), "B5G6R5 has no WebGPU format");
+    }
+
+    #[test]
+    fn a_float_depth_texture_with_stencil_is_its_depth_in_rows_half_as_wide() {
+        let depth = image(TexelKind::Depth(DepthTexel::F32X24S8), 16, 8, false);
+        let copy = image_copy(&depth).unwrap();
+        assert!(matches!(copy, Copy::FloatDepth), "{copy:?}");
+        assert_eq!(copy.shape(&depth), (Format::R32Float, 64, 8));
+        assert_eq!(copy.source_row_bytes(64), 128);
+        let packed = image(TexelKind::Depth(DepthTexel::S8D24Uint), 16, 8, false);
+        assert!(image_copy(&packed).is_err(), "S8D24 has no route");
     }
 
     #[test]

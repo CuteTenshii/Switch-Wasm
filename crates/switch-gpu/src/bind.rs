@@ -218,10 +218,10 @@ impl Gpu {
             let Some(held) = self.space.held.get(&addr) else {
                 continue;
             };
-            // A held `ZF32` is copied through a buffer into an `R32` view; a depth texture cannot copy to colour.
+            // A held `ZF32` or `ZF32_X24S8` is copied through a buffer into an `R32` view; a depth
+            // texture cannot copy to colour. `S8` is the other zero-bit depth, and has no depth.
             if let Some(depth) = held.target.depth {
-                let float =
-                    depth.bytes == 4 && depth.depth_bits == 0 && depth.stencil_shift.is_none();
+                let float = depth.depth_bits == 0 && depth.bytes >= 4;
                 let (format, _) = sampled_texture_format(self.features(), upload.format)
                     .map_err(|e| format!("{e:?}"))?;
                 // A shadow map is copied depth to depth.

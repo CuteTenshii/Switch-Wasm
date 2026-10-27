@@ -456,30 +456,105 @@ fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
     agrees_shading(new, |_| {}, set_up);
 }
 
-/// A held `ZF32` surface sampled as a float texture reads the device's depth, not stale memory.
+/// A held float depth surface sampled as a float texture reads the device's depth, not stale
+/// memory, whether or not a stencil byte shares its texels.
 #[test]
 fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
+    let Some(mut gpu) = device() else { return };
+    for (zt_format, tic_format, name) in [(0x0A, 0x2f, "ZF32"), (0x19, 0x30, "ZF32_X24S8")] {
+        let build = |gpu: Option<&mut super::Gpu>| {
+            let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+            h.bindless_texture();
+            h.depth_target(0x0207);
+            // Neither tested nor written, so the draw samples it without attaching it.
+            h.engine.regs.set(0x3FA, zt_format);
+            h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
+            h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
+            h.engine.regs.set(0x364, 0.25f32.to_bits());
+            // The image descriptor, pointed at the depth surface.
+            let (tic, depth) = (h.base + 0x1400 + 32, h.base + 0x1000);
+            let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+            let mut ctx = h.ctx();
+            for (word, value) in [
+                (0, tic_format | (7 << 7) | identity),
+                (1, depth as u32),
+                (2, (depth >> 32) as u32 | (3 << 21)),
+                (3, 0),
+                (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
+                (5, testing::TARGET_HEIGHT - 1),
+            ] {
+                ctx.write_u32(tic + word * 4, value).unwrap();
+            }
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+            match gpu {
+                Some(gpu) => {
+                    h.clear_depth_with(gpu).expect("the clear");
+                    h.draw_with(gpu).expect("the draw");
+                    h.flush_with(gpu);
+                }
+                None => {
+                    h.clear_depth_with(&mut Software).expect("the clear");
+                    h.draw_with(&mut Software).expect("the draw");
+                }
+            }
+            h.target()
+        };
+        let want = build(None);
+        assert!(
+            want.contains(&0xff00_0040),
+            "{name}: the reference did not draw the cleared depth: {want:x?}"
+        );
+        let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+        let got = build(Some(&mut gpu));
+        assert_eq!(
+            gpu.fallbacks, fallbacks,
+            "{name}: the draw fell back: {:?}",
+            gpu.last_fallback
+        );
+        assert_eq!(
+            gpu.drawn,
+            drawn + 1,
+            "{name}: the draw did not run on the device"
+        );
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        assert_eq!(
+            gpu.device_error(),
+            None,
+            "{name}: the device rejected the pass"
+        );
+        assert_eq!(got, want, "{name}: the colour surface differs");
+    }
+}
+
+/// A `ZF32_X24S8` image in guest memory samples as its depth, the stencil half of each texel left out.
+#[test]
+fn a_float_depth_image_with_stencil_samples_as_its_depth() {
     let Some(mut gpu) = device() else { return };
     let build = |gpu: Option<&mut super::Gpu>| {
         let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
         h.bindless_texture();
-        h.depth_target(0x0207);
-        // ZF32, neither tested nor written, so the draw samples it without attaching it.
-        h.engine.regs.set(0x3FA, 0x0A);
-        h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
-        h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
-        h.engine.regs.set(0x364, 0.25f32.to_bits());
-        // The image descriptor, pointed at the depth surface.
-        let (tic, depth) = (h.base + 0x1400 + 32, h.base + 0x1000);
+        let size = testing::BINDLESS_TEXTURE_SIZE;
+        let (tic, image) = (h.base + 0x1400 + 32, h.base + 0x1000);
         let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
         let mut ctx = h.ctx();
+        for y in 0..size {
+            for x in 0..size {
+                let at = image + u64::from((y * size + x) * 8);
+                let depth = ((y * size + x) * 4) as f32 / 255.0;
+                ctx.write_u32(at, depth.to_bits()).unwrap();
+                ctx.write_u32(at + 4, 0xA5A5_A5A5).unwrap();
+            }
+        }
+        // Pitch-linear, rows of eight 8-byte texels.
         for (word, value) in [
-            (0, 0x2f | (7 << 7) | identity),
-            (1, depth as u32),
-            (2, (depth >> 32) as u32 | (3 << 21)),
-            (3, 0),
-            (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
-            (5, testing::TARGET_HEIGHT - 1),
+            (0, 0x30 | (7 << 7) | identity),
+            (1, image as u32),
+            (2, (image >> 32) as u32 | (2 << 21)),
+            (3, size * 8 / 32),
+            (4, (size - 1) | (1 << 23)),
+            (5, size - 1),
         ] {
             ctx.write_u32(tic + word * 4, value).unwrap();
         }
@@ -488,30 +563,34 @@ fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
         h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
         match gpu {
             Some(gpu) => {
-                h.clear_depth_with(gpu).expect("the clear");
                 h.draw_with(gpu).expect("the draw");
                 h.flush_with(gpu);
             }
-            None => {
-                h.clear_depth_with(&mut Software).expect("the clear");
-                h.draw_with(&mut Software).expect("the draw");
-            }
+            None => h.draw_with(&mut Software).expect("the draw"),
         }
         h.target()
     };
     let want = build(None);
+    let reds: std::collections::BTreeSet<u32> = want
+        .iter()
+        .filter(|&&c| c != 0)
+        .map(|&c| c & 0xff)
+        .collect();
     assert!(
-        want.contains(&0xff00_0040),
-        "the reference did not draw the cleared depth: {want:x?}"
+        reds.len() >= 8,
+        "the reference drew too few depths: {reds:x?}"
     );
-    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    assert!(
+        want.iter().all(|&c| c == 0 || c & 0x00ff_ff00 == 0),
+        "{want:x?}"
+    );
+    let fallbacks = gpu.fallbacks;
     let got = build(Some(&mut gpu));
     assert_eq!(
         gpu.fallbacks, fallbacks,
         "the draw fell back: {:?}",
         gpu.last_fallback
     );
-    assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
     let _ = gpu.device.poll(wgpu::PollType::Poll);
     assert_eq!(gpu.device_error(), None, "the device rejected the pass");
     assert_eq!(got, want, "the colour surface differs");
