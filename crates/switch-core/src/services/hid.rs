@@ -58,6 +58,15 @@ impl Cpu {
                     let enabled = u8::from(self.six_axis_passthrough);
                     self.write_ipc_response(tls, 0, &[], &[enabled], &[])
                 }
+                // LoadSixAxisSensorCalibrationParameter(handle, aruid) -> 0x744 bytes: nothing
+                // was ever stored by 86, so the zeroed block Eden answers with.
+                Some(87) => {
+                    if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
+                        self.mem
+                            .fill_le(addr, 1, 0, len.min(SIX_AXIS_CALIBRATION_SIZE))?;
+                    }
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 // GetSixAxisSensorIcInformation(handle, aruid) -> the sensor's ranges, in a
                 // buffer: there is no sensor, so the defaults Eden answers with.
                 Some(88) => {
@@ -289,6 +298,9 @@ impl Cpu {
     }
 }
 
+/// `SixAxisSensorCalibrationParameter`'s size; its layout is unknown.
+const SIX_AXIS_CALIBRATION_SIZE: u32 = 0x744;
+
 /// `SixAxisSensorIcInformation` (0xC8 bytes): the gyroscope's range in degrees per
 /// second and the accelerometer's in G, each with its bounds and calibration matrices.
 fn six_axis_ic_information() -> Vec<u8> {
@@ -359,6 +371,33 @@ mod tests {
         assert_eq!(float(0), 2000.0, "the gyroscope's range");
         assert_eq!(float(0x64), 8.0, "the accelerometer's range");
         assert_eq!(float(0xC4), 1.05, "the last calibration entry");
+    }
+
+    #[test]
+    fn six_axis_calibration_is_loaded_as_a_zeroed_block() {
+        // Nintendo Switch Sports asks for it with a map-alias buffer and retries on a refusal.
+        const BUFFER: u32 = 0x3_0000;
+        let size = super::SIX_AXIS_CALIBRATION_SIZE;
+        // { handle, padding, aruid }
+        let mut payload = 0x2000_0000u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&[0; 12]);
+        let mut cpu = request_with_recv_buffer(87, &payload, BUFFER, size);
+        cpu.mem.map_zero(BUFFER, 0x1000).unwrap();
+        cpu.mem.fill_le(BUFFER, 1, 0xAA, 0x1000).unwrap();
+        cpu.register_service_handle(9, "hid");
+        cpu.hid_request(TLS, 9, Some(87)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "a refusal");
+        assert_eq!(cpu.mem.read_u8(BUFFER).unwrap(), 0, "the first byte");
+        assert_eq!(
+            cpu.mem.read_u8(BUFFER + size - 1).unwrap(),
+            0,
+            "the last byte"
+        );
+        assert_eq!(
+            cpu.mem.read_u8(BUFFER + size).unwrap(),
+            0xAA,
+            "past the block"
+        );
     }
 
     #[test]
