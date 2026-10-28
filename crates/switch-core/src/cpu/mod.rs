@@ -29,6 +29,7 @@ use crate::services::*;
 pub use crate::kernel::cores::{serve, CoreSlot};
 pub(crate) use crate::kernel::events::*;
 pub use crate::kernel::layout::*;
+pub use crate::kernel::memory_use::{Region, TitleMemory};
 pub use crate::kernel::sched::*;
 pub use crate::kernel::sync::ArbiterWait;
 pub(crate) use crate::kernel::sync::*;

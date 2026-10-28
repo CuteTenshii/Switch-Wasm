@@ -16,6 +16,10 @@ Guest memory layout, threads, scheduling, synchronization, boot and diagnostics.
 - The system shared buffer pool is laid out at the handheld (720p) layer size regardless of dock state: qlaunch draws at 1280x720 whatever `vi` reports, a display-sized pool gave a docked frame that was the 720p frame plus black, and a pool that moved with the dock relocated slots under an applet still drawing. Address space is reserved at the docked size as headroom. Only slots 0 and 1 are handed out, as on a console.
 - Operation mode drives resolution, performance mode, GPU clock and touchscreen presence; they must agree (NX-Fetch printed "Docked" beside a handheld resolution when they did not).
 
+## `crates/switch-core/src/kernel/memory_use.rs`
+
+- Regions are counted with `Memory::mapped_bytes_in`, which reads the per-2 MiB block counts wherever a whole block fits, so a report costs about two thousand loads, not a walk of a million pages. The regions of every layout are disjoint (tested); what falls outside them is reported as `elsewhere`, not dropped.
+
 ## `crates/switch-core/src/kernel/process.rs` and `kernel/program.rs`
 
 - A `Process` holds what one guest process owns: its `AddressSpace`, threads, modules, memory layout, program id and the service objects it opened. `Machine.processes` keeps them by pid; `Cpu.pid` names the one the core runs, `enter_process` switches the core to another, and `in_process` runs kernel bookkeeping in another's address space and comes back.

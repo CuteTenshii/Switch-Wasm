@@ -786,6 +786,24 @@ impl Memory {
         self.mapped_pages() as u64 * PAGE_SIZE as u64
     }
 
+    /// Guest memory backed in `start..end`, from the per-block counts wherever a whole block fits.
+    pub fn mapped_bytes_in(&self, start: u64, end: u64) -> u64 {
+        let first = (start >> PAGE_BITS) as usize;
+        let last = end.min(ADDRESS_SPACE_SIZE).div_ceil(PAGE_SIZE as u64) as usize;
+        let mut pages = 0u64;
+        let mut idx = first;
+        while idx < last {
+            if idx.is_multiple_of(BLOCK_PAGES) && idx + BLOCK_PAGES <= last {
+                pages += u64::from(self.block_mapped[idx / BLOCK_PAGES].load(Relaxed));
+                idx += BLOCK_PAGES;
+            } else {
+                pages += u64::from(!self.pages[idx].load(Relaxed).is_null());
+                idx += 1;
+            }
+        }
+        pages * PAGE_SIZE as u64
+    }
+
     pub fn max_mapped_bytes(&self) -> u64 {
         self.meta().max_mapped_pages as u64 * PAGE_SIZE as u64
     }
@@ -1767,6 +1785,28 @@ mod tests {
             7,
             "unmapping freed the shared pages"
         );
+    }
+
+    #[test]
+    fn mapped_bytes_in_a_range_counts_whole_blocks_and_the_pages_at_its_ends() {
+        const BLOCK: u32 = (BLOCK_PAGES * PAGE_SIZE) as u32;
+        let m = Memory::new();
+        // A whole block, two pages either side of it, and a page well outside.
+        m.map_zero(BLOCK - 2 * PAGE_SIZE as u32, BLOCK as usize + 4 * PAGE_SIZE)
+            .unwrap();
+        m.map_zero(0x4000_0000, PAGE_SIZE).unwrap();
+        let page = PAGE_SIZE as u64;
+        let block = u64::from(BLOCK);
+        assert_eq!(m.mapped_bytes_in(0, ADDRESS_SPACE_SIZE), m.mapped_bytes());
+        assert_eq!(m.mapped_bytes_in(block, 2 * block), block);
+        assert_eq!(
+            m.mapped_bytes_in(block - page, 2 * block + page),
+            block + 2 * page
+        );
+        assert_eq!(m.mapped_bytes_in(0, block), 2 * page);
+        // A range ending inside a page counts that page.
+        assert_eq!(m.mapped_bytes_in(0x4000_0000, 0x4000_0001), page);
+        assert_eq!(m.mapped_bytes_in(2 * block + 2 * page, 0x4000_0000), 0);
     }
 
     #[test]
