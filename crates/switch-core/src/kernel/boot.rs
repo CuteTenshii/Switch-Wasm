@@ -35,8 +35,8 @@ impl Cpu {
             .ok(); // b .
     }
 
-    /// Boot a homebrew NRO as HBL does: run the crt0 up to `main`, then the `.init_array`
-    /// and main `ThreadVars` setup the skipped `__libnx_init` would provide.
+    /// Boot a homebrew NRO as HBL does: enter its crt0 with the environment block, which
+    /// leaves the heap, `ThreadVars` and the `.init_array` to `__libnx_init`.
     pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
         // Expose the NRO at argv[0] on the SD card for `romfsMountSelf`.
         self.fs
@@ -76,61 +76,6 @@ impl Cpu {
         self.set_reg(1, if loaded.env_addr != 0 { u64::MAX } else { 1 });
         self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
 
-        let init = crate::nro::init_array_entries(data);
-        if !init.is_empty() && loaded.env_addr != 0 {
-            // The crt0 calls main at entry+0xc0; BSS is zeroed and relocations applied by then.
-            let main_call = loaded.entry.wrapping_add(0xc0);
-            let main_insn = self.mem.fetch(main_call).ok();
-            let is_bl = matches!(main_insn, Some(i) if (i & 0xFC00_0000) == 0x9400_0000);
-            if is_bl {
-                self.set_pc(loaded.entry);
-                for _ in 0..5_000_000u64 {
-                    if self.halted || self.get_pc() == main_call {
-                        break;
-                    }
-                    self.step()?;
-                }
-                // ThreadVars at TLS+0x1E0: magic, handle, thread_ptr, _REENT (zeroed; lazily set up), tls_tp.
-                const TV_MAGIC: u32 = 0x2154_5624; // "!TV$"
-                const REENT_ADDR: u32 = 0x1FF1_0000;
-                let tls = self.tls_base();
-                let _ = self.mem.map_zero(REENT_ADDR, 0x400);
-                let _ = self.mem.write_u32(tls + 0x1E0, TV_MAGIC);
-                let _ = self.mem.write_u32(tls + 0x1E4, 0x100);
-                let _ = self.mem.write_u32(tls + 0x1E8, 0);
-                let _ = self.mem.write_u32(tls + 0x1F0, REENT_ADDR);
-                let _ = self.mem.write_u32(tls + 0x1F8, tls);
-                // Run the constructors; each returns via x30.
-                const SENTINEL: u32 = 0x1FF0_0000;
-                for &entry in &init {
-                    if self.halted {
-                        break;
-                    }
-                    for i in 0..=29u8 {
-                        self.set_reg(i, 0);
-                    }
-                    self.set_reg(30, SENTINEL as u64);
-                    self.set_pc(entry);
-                    for _ in 0..20_000_000u64 {
-                        if self.halted || self.get_pc() == SENTINEL {
-                            break;
-                        }
-                        self.step()?;
-                    }
-                }
-                // Restore the entry registers and resume at the crt0's call; x2 is the loader's
-                // return address, which `__nx_exit` jumps to.
-                for i in 0..=30u8 {
-                    self.set_reg(i, 0);
-                }
-                self.set_reg(0, loaded.env_addr as u64);
-                self.set_reg(1, if loaded.env_addr != 0 { u64::MAX } else { 1 });
-                self.set_reg(2, SELF_RETURN_TRAMPOLINE as u64);
-                self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
-                self.set_pc(main_call);
-                return Ok(loaded);
-            }
-        }
         self.set_pc(loaded.entry);
         Ok(loaded)
     }

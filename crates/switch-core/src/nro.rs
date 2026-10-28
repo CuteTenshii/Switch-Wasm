@@ -560,44 +560,6 @@ fn find_mod0(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|w| w == &magic[..])
 }
 
-/// `.init_array` entries as absolute addresses, for crt0s that skip
-/// `__libnx_init`. Empty without constructors.
-pub fn init_array_entries(data: &[u8]) -> Vec<u32> {
-    let mod0 = match find_mod0(data) {
-        Some(m) => m,
-        None => return Vec::new(),
-    };
-    // Relative to the MOD0 header.
-    let dyn_rel = crate::nsp::read_u32(data, mod0 + 4);
-    let mut dynp = mod0.wrapping_add(dyn_rel as usize);
-    let mut init_arr: Option<u32> = None;
-    let mut init_sz: u32 = 0;
-    for _ in 0..512 {
-        let tag = read_u64(data, dynp);
-        if tag == 0 {
-            break; // DT_NULL
-        }
-        let val = read_u64(data, dynp + 8);
-        if tag == 0x19 {
-            init_arr = Some(val as u32);
-        } else if tag == 0x1b {
-            init_sz = val as u32;
-        }
-        dynp += 16;
-    }
-    let (Some(arr_rel), n) = (init_arr, init_sz as usize) else {
-        return Vec::new();
-    };
-    if n == 0 || n % 8 != 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(n / 8);
-    for i in 0..n / 8 {
-        out.push(NRO_BASE.wrapping_add(read_u64(data, arr_rel as usize + i * 8) as u32));
-    }
-    out
-}
-
 /// Apply RELR relocations, stopping at the first backward or out-of-range
 /// address (some sections end in garbage).
 fn apply_relr(mem: &Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()> {

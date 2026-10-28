@@ -77,7 +77,7 @@ Guest memory layout, threads, scheduling, synchronization, boot and diagnostics.
 - Retail boot enters `rtld`, not `main`: `rtld` processes every module's relocations; entering `main` directly leaves its GOT full of placeholders.
 - Entry ABI: X1 must be the main thread handle. `nnSdk` stores it in the main `ThreadType` (+0x1B0) and `SdkMutex` compares lock words against it; X1 = 0 made unlocked mutexes look owned and `nn::oe::Initialize` aborted.
 - A library applet booted directly gets `LibAppletCommonArguments` then its own launch structs (an applet started by `am` gets what its caller pushed); the keyboard and controller applets pop two (stopping after one aborted with `2128-0003`).
-- Homebrew boot: when the crt0 skips `__libnx_init`, C++ globals stay empty (NX-Shell's SD path resolved to ""), so the emulator runs `.init_array` itself. `__libnx_init`'s x2 is the loader return address used by `__nx_exit`; leaving it 0 made clean exits jump to NULL.
+- Homebrew boot enters the crt0 at its entry, as HBL does; `__libnx_init` (the crt0's `bl` at entry+0xc0) sets up the heap and `ThreadVars` and then runs `.init_array`. The emulator once ran the constructors itself before that call, which ran them twice and the first time before the heap: newlib's `sbrk` then latched the end of BSS and grew through the soft-mapped stack region, so Taisei's `memset` zeroed a thread's stack. x30 at entry is the trampoline, which the crt0 hands `__libnx_init` as the loader return for `__nx_exit`.
 
 ## `crates/switch-core/src/kernel/svc.rs`
 
