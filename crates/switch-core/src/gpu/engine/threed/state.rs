@@ -226,9 +226,9 @@ impl Engine3D {
         std::mem::swap(&mut self.renderer, other);
     }
 
-    /// See [`Renderer::report_json`].
+    /// See [`Renderer::report`].
     pub fn renderer_report(&self) -> String {
-        self.renderer.report_json()
+        crate::json::object(|o| self.renderer.report(o))
     }
 
     /// See [`Renderer::lost`].

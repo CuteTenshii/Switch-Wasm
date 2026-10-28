@@ -272,8 +272,14 @@ impl Gpu {
         self.renderer = renderer;
     }
 
+    /// See [`renderer::Renderer::report`].
     pub fn renderer_report(&self) -> String {
-        self.renderer.report_json()
+        crate::json::object(|o| self.renderer.report(o))
+    }
+
+    /// The renderer's report fields, into an object the caller adds to.
+    pub fn write_renderer_report(&self, out: &mut crate::json::Object) {
+        self.renderer.report(out);
     }
 
     pub fn renderer_lost(&self) -> bool {
@@ -714,8 +720,8 @@ mod tests {
             Ok(renderer::Flush::Done)
         }
 
-        fn report_json(&self) -> String {
-            "{\"backend\":\"stub\"}".to_string()
+        fn report(&self, out: &mut crate::json::Object) {
+            out.field("backend", "stub");
         }
     }
 

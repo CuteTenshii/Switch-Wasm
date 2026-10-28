@@ -1,7 +1,8 @@
 //! The console's user accounts.
 
 use crate::storage::sd_path;
-use crate::{json_escape, session};
+use crate::{session, write_into};
+use switch_core::json;
 
 // The console's users: staged one at a time, committed whole before the title starts.
 // A uid travels as two little-endian halves.
@@ -66,31 +67,18 @@ pub extern "C" fn switch_take_profile_edits(handle: u32) -> u32 {
 /// "pictureLen":0}]`. Pictures come from `switch_user_picture`.
 #[no_mangle]
 pub extern "C" fn switch_users_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let mut out = Vec::from("[");
-    for (i, user) in session(handle).cpu.users().iter().enumerate() {
-        if i > 0 {
-            out.push(b',');
+    let json = json::array(|a| {
+        for user in session(handle).cpu.users() {
+            a.object(|o| {
+                let uid: String = user.uid.iter().map(|byte| format!("{byte:02x}")).collect();
+                o.field("uid", uid)
+                    .field("nickname", &user.nickname)
+                    .field("editedAt", user.edited_at)
+                    .field("pictureLen", user.picture.as_ref().map_or(0, Vec::len));
+            });
         }
-        out.extend_from_slice(b"{\"uid\":\"");
-        for byte in user.uid {
-            out.extend_from_slice(format!("{byte:02x}").as_bytes());
-        }
-        out.extend_from_slice(b"\",\"nickname\":\"");
-        json_escape(&user.nickname, &mut out);
-        out.extend_from_slice(
-            format!(
-                "\",\"editedAt\":{},\"pictureLen\":{}}}",
-                user.edited_at,
-                user.picture.as_ref().map_or(0, Vec::len)
-            )
-            .as_bytes(),
-        );
-    }
-    out.push(b']');
-    let n = out.len().min(maxlen as usize);
-    let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
-    dst.copy_from_slice(&out[..n]);
-    n as u32
+    });
+    write_into(buf, maxlen, json.as_bytes())
 }
 
 /// Copy a user's picture into `buf`. Returns bytes copied, or 0.

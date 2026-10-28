@@ -24,8 +24,8 @@ the TypeScript frontend plus the Rust core compiled to `wasm32-unknown-unknown`.
 - `crates/switch-gpu`: optional `wgpu` renderer behind the core renderer
   interface. The software renderer is its correctness reference.
 - `crates/switch-wasm`: browser bindings and session handles. Buffers cross the
-  boundary through WebAssembly linear memory. Keep the existing hand-written
-  JSON boundary; do not add serde merely for bindings.
+  boundary through WebAssembly linear memory. JSON for the page is written
+  with `switch_core::json`; do not add serde merely for bindings.
 - `web/main`: DOM, persistence, controls, display, audio, and worker RPC.
 - `web/worker`: module worker, WebAssembly loading, host file ranges, commands,
   and the run loop.

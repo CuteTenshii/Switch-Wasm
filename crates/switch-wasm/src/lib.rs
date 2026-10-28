@@ -441,24 +441,6 @@ fn nsp_file_source(s: &mut Session, index: u32) -> Option<Window<HostSource>> {
     }
 }
 
-// ---- small JSON helpers ----
-
-/// Escape a string into a JSON string body, per character. Non-ASCII is emitted as UTF-8.
-fn json_escape(s: &str, out: &mut Vec<u8>) {
-    for c in s.chars() {
-        match c {
-            '"' => out.extend_from_slice(b"\\\""),
-            '\\' => out.extend_from_slice(b"\\\\"),
-            '\n' => out.extend_from_slice(b"\\n"),
-            '\r' => out.extend_from_slice(b"\\r"),
-            c if (c as u32) < 0x20 => {
-                out.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes());
-            }
-            c => out.extend_from_slice(c.encode_utf8(&mut [0u8; 4]).as_bytes()),
-        }
-    }
-}
-
 fn write_into(buf: *mut u8, maxlen: u32, data: &[u8]) -> u32 {
     let n = data.len().min(maxlen as usize);
     if n > 0 && !buf.is_null() {

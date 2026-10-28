@@ -1,30 +1,28 @@
 //! Translator and GPU reports.
 
 use crate::{session, write_into};
+use switch_core::json;
 
 /// What the translator has been doing, as JSON.
 #[no_mangle]
 pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
     let stats = s.cpu.jit_stats();
-    let json = format!(
-        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"linked\":{},\"invalidated\":{},\"interpreted\":{},\"interpretedGroups\":[{}],\"emitted\":{},\"enteredEmitted\":{},\"chained\":{}}}",
-        s.cpu.jit_enabled(),
-        stats.blocks,
-        stats.translated,
-        stats.executed,
-        stats.linked,
-        stats.invalidated,
-        stats.interpreted,
-        stats.interpreted_groups
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(","),
-        stats.emitted,
-        stats.entered_emitted,
-        stats.chained
-    );
+    let json = json::object(|o| {
+        o.field("enabled", s.cpu.jit_enabled())
+            .field("blocks", stats.blocks)
+            .field("translated", stats.translated)
+            .field("executed", stats.executed)
+            .field("linked", stats.linked)
+            .field("invalidated", stats.invalidated)
+            .field("interpreted", stats.interpreted);
+        o.array("interpretedGroups", |a| {
+            a.extend(stats.interpreted_groups);
+        });
+        o.field("emitted", stats.emitted)
+            .field("enteredEmitted", stats.entered_emitted)
+            .field("chained", stats.chained);
+    });
     write_into(buf, maxlen, json.as_bytes())
 }
 
@@ -33,12 +31,11 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
 pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
     // The frame count comes from the core; the backend only sees clears and draws.
-    let frames = s.cpu.nv.gpu.frames;
-    let json = s.cpu.nv.gpu.renderer_report();
-    let json = match json.strip_suffix('}') {
-        Some(body) if body.len() > 1 => format!("{body},\"frames\":{frames}}}"),
-        _ => format!("{{\"frames\":{frames}}}"),
-    };
+    let gpu = &s.cpu.nv.gpu;
+    let json = json::object(|o| {
+        gpu.write_renderer_report(o);
+        o.field("frames", gpu.frames);
+    });
     write_into(buf, maxlen, json.as_bytes())
 }
 

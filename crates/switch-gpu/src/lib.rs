@@ -64,13 +64,14 @@ use switch_core::gpu::shader::wgsl::{self, Stage};
 use switch_core::gpu::shader::wgsl::{Layout, Translation};
 use switch_core::gpu::surface::{Layout as SurfaceLayout, GOB_WIDTH};
 use switch_core::gpu::upload::{Target, TextureKey, Uploads};
+use switch_core::json;
 use switch_core::Result;
 
 #[cfg(test)]
 use builtin::grid_bytes;
 use builtin::ResampleKey;
 use readback::{Held, Pending, Scratch};
-use stats::{json_string, DeviceErrors, Times, UploadBytes};
+use stats::{DeviceErrors, Times, UploadBytes};
 
 /// The memory a `ldg` reads, resolved from its descriptor.
 struct GlobalUpload {
@@ -800,65 +801,55 @@ impl Renderer for Gpu {
         self.gave_up
     }
 
-    fn report_json(&self) -> String {
+    fn report(&self, out: &mut json::Object) {
         // The `Drop` summary, for the browser.
-        let ms = |v: u128| v as f64 / 1000.0;
-        // Nested so the two "modules" keys do not collide.
-        let times = match self.times {
-            Some(t) => format!(
-                ",\"times\":{{\"translate\":{:.1},\"upload\":{:.1},\"modules\":{:.1},\
-                 \"pipeline\":{:.1},\"encode\":{:.1},\"flush\":{:.1},\
-                 \"flushAsk\":{:.1},\"flushWait\":{:.1},\"flushLand\":{:.1}}}",
-                ms(t.translate),
-                ms(t.upload),
-                ms(t.modules),
-                ms(t.pipeline),
-                ms(t.encode),
-                ms(t.flush),
-                ms(t.flush_ask),
-                ms(t.flush_wait),
-                ms(t.flush_land),
-            ),
-            None => String::new(),
-        };
-        let reasons: Vec<String> = self.reasons.iter().map(|why| json_string(why)).collect();
+        let ms = |v: u128| json::Decimals(v as f64 / 1000.0, 1);
         // Device rejections, which fallback counts do not show.
         let (error_count, errors) = self.device_errors();
-        let errors: Vec<String> = errors.iter().map(|e| json_string(e)).collect();
-        // `held` grows with flush cost.
-        format!(
-            "{{\"backend\":\"device\",\"drawn\":{},\"fallbacks\":{},\"pipelines\":{},\
-             \"modules\":{},\"held\":{},\"evicted\":{},\"pending\":{},\
-             \"read\":{{\"textures\":{},\"vertex\":{},\"constants\":{},\"index\":{}}},\
-             \"textureHits\":{},\"textureMisses\":{},\
-             \"shaderHits\":{},\"shaderMisses\":{},\
-             \"softwareFrame\":{},\"unlatched\":{},\"gaveUp\":{},\"lostBecause\":{},\"reasons\":[{}],\
-             \"deviceErrorCount\":{},\"deviceErrors\":[{}]{}}}",
-            self.drawn,
-            self.fallbacks,
-            self.pipelines.len(),
-            self.modules.len(),
-            self.space.held.len(),
-            self.space.evicted.len(),
-            self.space.pending.len(),
-            self.uploaded.textures,
-            self.uploaded.vertex,
-            self.uploaded.constants,
-            self.uploaded.index,
-            self.texture_hits,
-            self.texture_misses,
-            self.shader_hits,
-            self.shader_misses,
-            self.software_frame,
-            self.unlatched,
-            self.gave_up,
-            self.report
-                .as_deref()
-                .map_or("null".to_string(), json_string),
-            reasons.join(","),
-            error_count,
-            errors.join(","),
-            times,
-        )
+        out.field("backend", "device")
+            .field("drawn", self.drawn)
+            .field("fallbacks", self.fallbacks)
+            .field("pipelines", self.pipelines.len())
+            .field("modules", self.modules.len())
+            // `held` grows with flush cost.
+            .field("held", self.space.held.len())
+            .field("evicted", self.space.evicted.len())
+            .field("pending", self.space.pending.len());
+        out.object("read", |read| {
+            read.field("textures", self.uploaded.textures)
+                .field("vertex", self.uploaded.vertex)
+                .field("constants", self.uploaded.constants)
+                .field("index", self.uploaded.index);
+        });
+        out.field("textureHits", self.texture_hits)
+            .field("textureMisses", self.texture_misses)
+            .field("shaderHits", self.shader_hits)
+            .field("shaderMisses", self.shader_misses)
+            .field("softwareFrame", self.software_frame)
+            .field("unlatched", self.unlatched)
+            .field("gaveUp", self.gave_up)
+            .field("lostBecause", self.report.as_deref());
+        out.array("reasons", |a| {
+            a.extend(&self.reasons);
+        });
+        out.field("deviceErrorCount", error_count);
+        out.array("deviceErrors", |a| {
+            a.extend(&errors);
+        });
+        // Nested so the two "modules" keys do not collide.
+        if let Some(t) = self.times {
+            out.object("times", |times| {
+                times
+                    .field("translate", ms(t.translate))
+                    .field("upload", ms(t.upload))
+                    .field("modules", ms(t.modules))
+                    .field("pipeline", ms(t.pipeline))
+                    .field("encode", ms(t.encode))
+                    .field("flush", ms(t.flush))
+                    .field("flushAsk", ms(t.flush_ask))
+                    .field("flushWait", ms(t.flush_wait))
+                    .field("flushLand", ms(t.flush_land));
+            });
+        }
     }
 }

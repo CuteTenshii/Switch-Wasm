@@ -52,9 +52,9 @@ pub trait Renderer: std::fmt::Debug {
         Ok(u64::MAX)
     }
 
-    /// What this backend has been doing, as a JSON object.
-    fn report_json(&self) -> String {
-        "{}".to_string()
+    /// What this backend has been doing, as the fields of a JSON object.
+    fn report(&self, out: &mut crate::json::Object) {
+        let _ = out;
     }
 
     /// Forget what is held for an address space that was closed.

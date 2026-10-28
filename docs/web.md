@@ -10,7 +10,7 @@ The page, the worker, and the wasm bindings between them.
 - With the `gpu` feature the host read is a wasm-bindgen import (`@host/files`, resolved by Vite) because wasm-bindgen owns the whole import object.
 - `switch_alloc` returns null rather than trapping for sizes above `isize::MAX` (2 GiB on wasm32).
 - `nul_reserved`: the terminating NUL takes a byte of the buffer, not of the message.
-- `json_escape` escapes per character; per-byte `\u00XX` escapes turned "JUST DANCE® 2017" into "JUST DANCEÂ® 2017".
+- Everything the page parses is written with `switch_core::json`, which keeps keys in the order written and escapes per character: per-byte `\u00XX` escapes once turned "JUST DANCE® 2017" into "JUST DANCEÂ® 2017". The backend's report and `frames` go into one object (`Gpu::write_renderer_report`), so nothing splices JSON text.
 - Updates: the update's Program NCA carries the base title's program id (the `...800` id is only on its Meta NCA); its ExeFS replaces all modules and its RomFS is a patch over the base's. An update for a different title is refused at boot, which is where pairing is checked since the page may add the pieces in any order. Updates and DLC carry their own tickets.
 - DLC: one Data NCA with a RomFS, title id = base + 0x1000 + 11-bit index, mounted by id like system data; `aoc:u` only lists indices. Mounted after the program id and NACP override are known; content for another title is reported and skipped.
 - NRO control data is cached for display only, not via `cache_control`: homebrew runs in another title's process, so its NACP never governs saves.

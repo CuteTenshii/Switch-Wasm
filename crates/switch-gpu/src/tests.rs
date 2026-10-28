@@ -167,7 +167,7 @@ fn a_lost_device_is_reported_rather_than_failing_the_flush() {
     // `flush_with` panics on an error.
     h.flush_with(&mut gpu);
     h.flush_with(&mut gpu);
-    let json = gpu.report_json();
+    let json = switch_core::json::object(|o| gpu.report(o));
     assert!(json.contains("\"gaveUp\":true"), "{json}");
     assert!(json.contains("Out of memory"), "{json}");
 }
@@ -199,7 +199,7 @@ fn a_rejection_nothing_asked_about_is_still_counted_and_reported() {
     assert_eq!(gpu.device_errors(), (count, distinct.clone()));
 
     use switch_core::gpu::renderer::Renderer;
-    let json = gpu.report_json();
+    let json = switch_core::json::object(|o| gpu.report(o));
     assert!(
         json.contains(&format!("\"deviceErrorCount\":{count}")),
         "the count is missing from the report: {json}"
@@ -390,22 +390,6 @@ fn the_grid_a_resampling_pass_reads_is_the_one_the_rasterizer_uses() {
     }
 }
 
-/// Fallback reasons are escaped so `JSON.parse` accepts the report.
-#[test]
-fn a_reason_with_json_punctuation_in_it_stays_one_string() {
-    assert_eq!(super::json_string("plain"), "\"plain\"");
-    assert_eq!(
-        super::json_string(r#"no WGSL form for Ldg { at: 3 } "x" \ y"#),
-        r#""no WGSL form for Ldg { at: 3 } \"x\" \\ y""#
-    );
-    assert_eq!(
-        super::json_string("two\nlines\ttabbed"),
-        r#""two\nlines\ttabbed""#
-    );
-    // A control character has no literal form at all.
-    assert_eq!(super::json_string("\u{1}"), r#""\u0001""#);
-}
-
 /// A deep-block volume's slices start inside one block, a block's height of GOBs apart,
 /// and only a slice that fits one GOB is laid out as a plain surface.
 #[test]
@@ -517,4 +501,50 @@ fn vertex_arrays_past_the_limit_fold_into_one_interleaved_buffer_and_one_shared_
     );
     assert_eq!(within.len(), 1);
     assert_eq!(within[0].stride, 16);
+}
+
+/// Every field of the report, in the bytes the page parses.
+#[test]
+fn the_report_is_the_json_the_page_reads() {
+    use switch_core::gpu::renderer::Renderer;
+    let Some(mut gpu) = device() else { return };
+    gpu.drawn = 12;
+    gpu.fallbacks = 3;
+    gpu.uploaded = super::stats::UploadBytes {
+        vertex: 1,
+        index: 2,
+        constants: 3,
+        textures: 4,
+    };
+    gpu.texture_hits = 5;
+    gpu.texture_misses = 6;
+    gpu.shader_hits = 7;
+    gpu.shader_misses = 8;
+    gpu.unlatched = 2;
+    gpu.software_frame = true;
+    gpu.reasons = vec!["shader: \"op\"\nunknown".into(), "plain".into()];
+    gpu.report = Some("Out of memory".into());
+    gpu.times = Some(super::stats::Times {
+        translate: 1_250,
+        upload: 22_149,
+        modules: 0,
+        pipeline: 7_351,
+        encode: 450,
+        flush: 49,
+        flush_ask: 1,
+        flush_wait: 2,
+        flush_land: 3,
+    });
+    assert_eq!(
+        switch_core::json::object(|o| gpu.report(o)),
+        concat!(
+            r#"{"backend":"device","drawn":12,"fallbacks":3,"pipelines":0,"modules":0,"held":0,"#,
+            r#""evicted":0,"pending":0,"read":{"textures":4,"vertex":1,"constants":3,"index":2},"#,
+            r#""textureHits":5,"textureMisses":6,"shaderHits":7,"shaderMisses":8,"#,
+            r#""softwareFrame":true,"unlatched":2,"gaveUp":false,"lostBecause":"Out of memory","#,
+            r#""reasons":["shader: \"op\"\nunknown","plain"],"deviceErrorCount":0,"deviceErrors":[],"#,
+            r#""times":{"translate":1.2,"upload":22.1,"modules":0.0,"pipeline":7.4,"encode":0.5,"#,
+            r#""flush":0.0,"flushAsk":0.0,"flushWait":0.0,"flushLand":0.0}}"#
+        )
+    );
 }

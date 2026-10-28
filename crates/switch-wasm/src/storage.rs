@@ -2,7 +2,8 @@
 
 use switch_core::cpu::SaveKey;
 
-use crate::session;
+use crate::{session, write_into};
+use switch_core::json;
 
 // The emulated SD card. Paths are guest paths; `sdmc:` and extra slashes are
 // normalized away.
@@ -90,38 +91,21 @@ pub extern "C" fn switch_sd_take_changes_json(handle: u32, buf: *mut u8, maxlen:
 
 /// Serialize drained [`Change`](switch_core::vfs::Change)s into `buf`.
 fn write_changes_json(changes: &[switch_core::vfs::Change], buf: *mut u8, maxlen: u32) -> u32 {
-    let mut out = Vec::from("[");
-    for (i, change) in changes.iter().enumerate() {
-        if i > 0 {
-            out.push(b',');
+    let json = json::array(|a| {
+        for change in changes {
+            let kind = match change.kind {
+                Some(switch_core::vfs::ENTRY_TYPE_DIR) => "dir",
+                Some(_) => "file",
+                None => "deleted",
+            };
+            a.object(|o| {
+                o.field("path", &change.path)
+                    .field("kind", kind)
+                    .field("size", change.size);
+            });
         }
-        let kind = match change.kind {
-            Some(switch_core::vfs::ENTRY_TYPE_DIR) => "dir",
-            Some(_) => "file",
-            None => "deleted",
-        };
-        out.extend_from_slice(b"{\"path\":\"");
-        for &byte in change.path.as_bytes() {
-            match byte {
-                b'"' | b'\\' => {
-                    out.push(b'\\');
-                    out.push(byte);
-                }
-                0x00..=0x1F => out.extend_from_slice(format!("\\u{:04x}", byte).as_bytes()),
-                _ => out.push(byte),
-            }
-        }
-        out.extend_from_slice(b"\",\"kind\":\"");
-        out.extend_from_slice(kind.as_bytes());
-        out.extend_from_slice(b"\",\"size\":");
-        out.extend_from_slice(change.size.to_string().as_bytes());
-        out.push(b'}');
-    }
-    out.push(b']');
-    let n = out.len().min(maxlen as usize);
-    let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
-    dst.copy_from_slice(&out[..n]);
-    n as u32
+    });
+    write_into(buf, maxlen, json.as_bytes())
 }
 
 // save data
@@ -135,18 +119,10 @@ fn write_changes_json(changes: &[switch_core::vfs::Change], buf: *mut u8, maxlen
 pub extern "C" fn switch_save_ids_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let mut keys = session(handle).cpu.save_keys();
     keys.sort_unstable();
-    let mut out = Vec::from("[");
-    for (i, key) in keys.iter().enumerate() {
-        if i > 0 {
-            out.push(b',');
-        }
-        out.extend_from_slice(format!("\"{key}\"").as_bytes());
-    }
-    out.push(b']');
-    let n = out.len().min(maxlen as usize);
-    let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
-    dst.copy_from_slice(&out[..n]);
-    n as u32
+    let json = json::array(|a| {
+        a.extend(keys.iter().map(ToString::to_string));
+    });
+    write_into(buf, maxlen, json.as_bytes())
 }
 
 /// How many paths the guest has changed in this save and not yet had drained.

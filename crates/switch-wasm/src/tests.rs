@@ -550,18 +550,6 @@ fn a_path_json_cannot_carry_raw_is_escaped() {
 }
 
 #[test]
-fn a_non_ascii_title_name_survives_the_json() {
-    // A `\uXXXX` escape names a code point, so multi-byte characters go out raw.
-    let mut out = Vec::new();
-    json_escape("JUST DANCE® 2017 - 日本語", &mut out);
-    assert_eq!(String::from_utf8(out).unwrap(), "JUST DANCE® 2017 - 日本語");
-
-    let mut out = Vec::new();
-    json_escape("a\"b\\c\nd\u{7}e", &mut out);
-    assert_eq!(String::from_utf8(out).unwrap(), r#"a\"b\\c\nd\u0007e"#);
-}
-
-#[test]
 fn an_error_message_keeps_its_last_character() {
     // The NUL comes out of the buffer, not the message.
     let (_host, handle) = new_session();
@@ -582,5 +570,106 @@ fn an_error_message_keeps_its_last_character() {
     assert_eq!(&small[..n as usize], &MSG.as_bytes()[..small.len() - 1]);
     assert_eq!(small[small.len() - 1], 0);
 
+    switch_free_session(handle);
+}
+
+/// The translator's and the GPU's reports, in the bytes the page parses.
+#[test]
+fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
+    use crate::stats::{switch_gpu_report_json, switch_jit_stats_json};
+    let (_guard, handle) = new_session();
+    let mut buf = vec![0u8; 4096];
+    let n = switch_jit_stats_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    assert_eq!(
+        std::str::from_utf8(&buf[..n]).unwrap(),
+        concat!(
+            r#"{"enabled":true,"blocks":0,"translated":0,"executed":0,"linked":0,"#,
+            r#""invalidated":0,"interpreted":0,"interpretedGroups":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"#,
+            r#""emitted":0,"enteredEmitted":0,"chained":0}"#
+        )
+    );
+    // The software rasterizer reports nothing of its own.
+    let n = switch_gpu_report_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    assert_eq!(&buf[..n], br#"{"frames":0}"#);
+    switch_free_session(handle);
+}
+
+/// A title's control data and an unreadable NCA, in the bytes the page parses.
+#[test]
+fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
+    use crate::container::{switch_control_json, switch_parse_nca};
+    use switch_core::control::{CaptureSupport, Control, Nacp, Rating, StartupUserAccount, Title};
+    let (_guard, handle) = new_session();
+    let mut buf = vec![0u8; 4096];
+    let n = switch_control_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    assert_eq!(&buf[..n], b"{}", "nothing cached");
+
+    let mut nacp = Nacp::empty();
+    nacp.titles = vec![
+        Title {
+            language: "AmericanEnglish",
+            name: "JUST DANCE® 2017".into(),
+            publisher: "Ubisoft".into(),
+        },
+        Title {
+            language: "Japanese",
+            name: "日本語".into(),
+            publisher: "\"Q\"".into(),
+        },
+    ];
+    nacp.display_version = "1.0.2".into();
+    nacp.isbn = String::new();
+    nacp.is_demo = true;
+    nacp.startup_user_account = StartupUserAccount::Required;
+    nacp.screenshot = CaptureSupport::Screenshot(1);
+    nacp.video_capture = CaptureSupport::Video(2);
+    nacp.ratings = vec![Rating {
+        organisation: "PEGI",
+        age: 12,
+    }];
+    nacp.add_on_content_base_id = 0x0100_0000_0000_2000;
+    nacp.save_data_owner_id = 0;
+    nacp.user_account_save_data_size = 0x40_0000;
+    nacp.user_account_save_data_journal_size = 0x10_0000;
+    nacp.device_save_data_size = -1;
+    nacp.device_save_data_journal_size = 2;
+    nacp.bcat_delivery_cache_storage_size = 3;
+    nacp.application_error_code_category = "2181\n".into();
+    session(handle).control = Some(Control {
+        title_id: 0x0100_0000_0000_1000,
+        language: "AmericanEnglish",
+        name: "JUST DANCE® 2017".into(),
+        publisher: "Ubi \\ soft".into(),
+        icon: vec![0xFF, 0xD8, 0xFF, 0xE0],
+        nacp,
+        nacp_raw: Vec::new(),
+    });
+    let n = switch_control_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    assert_eq!(
+        std::str::from_utf8(&buf[..n]).unwrap(),
+        concat!(
+            r#"{"title_id":"0100000000001000","name":"JUST DANCE® 2017","publisher":"Ubi \\ soft","#,
+            r#""language":"AmericanEnglish","version":"1.0.2","isbn":"","error_code_category":"2181\n","#,
+            r#""startup_user_account":"required","screenshot":"blocked","video_capture":"enabled","#,
+            r#""demo":true,"languages":["AmericanEnglish","Japanese"],"#,
+            r#""ratings":[{"organisation":"PEGI","age":12}],"#,
+            r#""add_on_content_base_id":"0100000000002000","save_data_owner_id":"0000000000000000","#,
+            r#""user_save_size":4194304,"user_save_journal_size":1048576,"device_save_size":-1,"#,
+            r#""device_save_journal_size":2,"bcat_storage_size":3,"icon_mime":"image/jpeg","icon_size":4}"#
+        )
+    );
+
+    let garbage = [0u8; 16];
+    let n = switch_parse_nca(
+        handle,
+        garbage.as_ptr(),
+        garbage.len() as u32,
+        buf.as_mut_ptr(),
+        buf.len() as u32,
+    ) as usize;
+    assert_eq!(
+        std::str::from_utf8(&buf[..n]).unwrap(),
+        r#"{"error":"NCA header: expected at least 1024 bytes, got 16"}"#
+    );
     switch_free_session(handle);
 }

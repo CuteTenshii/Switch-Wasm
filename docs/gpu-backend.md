@@ -33,7 +33,6 @@
 - All device rejections are kept (distinct messages capped at 16, plus a total count), not just the first: the only production reader runs before pipeline creation, so later errors went unread.
 - Upload accounting is in bytes rather than time (same on host and V8); it showed textures dominate upload bytes, which is why textures are cached. Cached textures are not counted.
 - `flush` splits into ask/wait/land. In a browser `flush_wait` is ~0 because the wait moved to the slice boundary (`Flush::Pending`).
-- Fallback reasons and device errors are JSON-escaped because the page parses the report with `JSON.parse`.
 
 ### `crates/switch-gpu/src/lib.rs` and `device.rs`
 
@@ -51,7 +50,7 @@
 - Attachments must match in size: the pass covers the colour/depth intersection; a larger depth surface is cropped, a larger colour target draws into a scratch texture copied back (WebGPU copies part of a colour texture but only whole depth textures).
 - WebGPU details: no border address mode (wgpu web panics; the rasterizer also treats border as edge); strip pipelines must name the index format and non-strip pipelines must not, or the whole command buffer is rejected; Metal drops vertices whose stride overruns the buffer; no BGRA vertex format (swapped in the shader); no per-texture swizzle (passed into the layout); y is negated because WebGPU mirrors y itself; stencil is neither tested nor held on the device, so stencil clears go to guest memory.
 - Maxwell has 32 vertex arrays and WebGPU guarantees 8 buffers, which is all Chrome offers. Mesa gives each attribute its own array, so Taisei draws from 11; binding them all made the device reject the pipeline and handed the session to the rasterizer. Past the device's count, `fit_vertex_buffers` interleaves the per-vertex arrays into one buffer (they share the draw's first vertex and count) and puts every zero-stride element (instanced arrays, the defaults) into a second. Draws within the count bind as before.
-- `report_json` nests timings to avoid duplicate "modules" keys (`JSON.parse` keeps only the last).
+- `Renderer::report` nests timings to avoid duplicate "modules" keys (`JSON.parse` keeps only the last). Timings are written with one decimal place (`json::Decimals`) to keep the report short.
 
 ### `crates/switch-gpu/src/readback.rs`
 

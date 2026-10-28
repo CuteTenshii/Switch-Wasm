@@ -1,12 +1,11 @@
 //! Containers, updates, add-on content, control data and keys.
 
+use switch_core::json;
 use switch_core::nca::Nca;
 use switch_core::nsp::Pfs0;
 use switch_core::source::{ByteSource, Window};
 
-use crate::{
-    container, json_escape, nsp_file_source, session, write_into, Dlc, HostSource, Session, Update,
-};
+use crate::{container, nsp_file_source, session, write_into, Dlc, HostSource, Session, Update};
 
 /// Open the `size`-byte container (NSP or XCI) the host has ready, read through
 /// `host_read`. Returns 0 on success, -1 on error.
@@ -217,24 +216,21 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
 #[no_mangle]
 pub extern "C" fn switch_dlc_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
-    let mut out = Vec::new();
-    out.push(b'[');
-    for (i, dlc) in s.dlc.iter().enumerate() {
-        if i > 0 {
-            out.push(b',');
+    let json = dlc_json(s.dlc.iter().map(|dlc| dlc.content_id));
+    write_into(buf, maxlen, json.as_bytes())
+}
+
+/// Each add-on content id with its base title and index.
+fn dlc_json(content_ids: impl Iterator<Item = u64>) -> String {
+    json::array(|a| {
+        for id in content_ids {
+            a.object(|o| {
+                o.field("id", format!("{id:016x}"))
+                    .field("title_id", format!("{:016x}", id & !0x1FFF))
+                    .field("index", id & 0x7FF);
+            });
         }
-        out.extend_from_slice(
-            format!(
-                "{{\"id\":\"{:016x}\",\"title_id\":\"{:016x}\",\"index\":{}}}",
-                dlc.content_id,
-                dlc.content_id & !0x1FFF,
-                dlc.content_id & 0x7FF
-            )
-            .as_bytes(),
-        );
-    }
-    out.push(b']');
-    write_into(buf, maxlen, &out)
+    })
 }
 
 #[no_mangle]
@@ -257,22 +253,16 @@ fn is_add_on_content_id(title_id: u64) -> bool {
 #[no_mangle]
 pub extern "C" fn switch_nsp_files_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
-    let mut out = Vec::new();
-    out.extend_from_slice(b"[");
-    for (i, f) in s.nsp_files.iter().enumerate() {
-        if i > 0 {
-            out.extend_from_slice(b",");
+    let json = json::array(|a| {
+        for f in &s.nsp_files {
+            a.object(|o| {
+                o.field("name", &f.name)
+                    .field("offset", f.offset)
+                    .field("size", f.size);
+            });
         }
-        out.extend_from_slice(b"{\"name\":\"");
-        json_escape(&f.name, &mut out);
-        out.extend_from_slice(b"\",\"offset\":");
-        out.extend_from_slice(f.offset.to_string().as_bytes());
-        out.extend_from_slice(b",\"size\":");
-        out.extend_from_slice(f.size.to_string().as_bytes());
-        out.extend_from_slice(b"}");
-    }
-    out.extend_from_slice(b"]");
-    write_into(buf, maxlen, &out)
+    });
+    write_into(buf, maxlen, json.as_bytes())
 }
 
 /// Read a slice of NSP file `index` from `file_offset` into `buf`. Returns bytes
@@ -315,59 +305,41 @@ pub extern "C" fn switch_parse_nca(
 ) -> u32 {
     let s = session(handle);
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    let mut out = Vec::new();
-    match Nca::parse_with_keys(data, Some(&s.keys)) {
-        Ok(nca) => {
-            out.extend_from_slice(b"{\"title_id\":\"");
-            out.extend_from_slice(format!("{:016x}", nca.title_id).as_bytes());
-            out.extend_from_slice(b"\",\"content_type\":\"");
-            out.extend_from_slice(nca.content_type.name().as_bytes());
-            out.extend_from_slice(b"\",\"sdk_version\":\"");
-            out.extend_from_slice(format!("{:08x}", nca.sdk_version).as_bytes());
-            out.extend_from_slice(b"\",\"crypto_type\":");
-            out.extend_from_slice(nca.crypto_type.to_string().as_bytes());
-            out.extend_from_slice(b",\"encrypted\":");
-            out.extend_from_slice(if nca.is_encrypted() {
-                b"true"
-            } else {
-                b"false"
-            });
-            out.extend_from_slice(b",\"file_size\":");
-            out.extend_from_slice(nca.file_size.to_string().as_bytes());
-            out.extend_from_slice(b",\"sections\":[");
-            for (i, sec) in nca.sections.iter().enumerate() {
-                if i > 0 {
-                    out.extend_from_slice(b",");
-                }
-                out.extend_from_slice(b"{\"offset\":");
-                out.extend_from_slice(sec.media_offset.to_string().as_bytes());
-                out.extend_from_slice(b",\"size\":");
-                out.extend_from_slice(sec.media_size.to_string().as_bytes());
-                out.extend_from_slice(b",\"fs_type\":\"");
-                // The filesystem type lives in the FS header, which needs the full header to decrypt.
-                let fs_type = match nca.fs_headers.get(i).and_then(|o| o.as_ref()) {
-                    Some(fs) if sec.media_size > 0 => {
-                        if fs.fs_type == 1 {
-                            "PFS0"
-                        } else {
-                            "ROMFS"
+    let json = match Nca::parse_with_keys(data, Some(&s.keys)) {
+        Ok(nca) => json::object(|o| {
+            o.field("title_id", format!("{:016x}", nca.title_id))
+                .field("content_type", nca.content_type.name())
+                .field("sdk_version", format!("{:08x}", nca.sdk_version))
+                .field("crypto_type", nca.crypto_type)
+                .field("encrypted", nca.is_encrypted())
+                .field("file_size", nca.file_size);
+            o.array("sections", |a| {
+                for (i, sec) in nca.sections.iter().enumerate() {
+                    // The filesystem type lives in the FS header, which needs the full header to decrypt.
+                    let fs_type = match nca.fs_headers.get(i).and_then(|o| o.as_ref()) {
+                        Some(fs) if sec.media_size > 0 => {
+                            if fs.fs_type == 1 {
+                                "PFS0"
+                            } else {
+                                "ROMFS"
+                            }
                         }
-                    }
-                    _ => "?",
-                };
-                out.extend_from_slice(fs_type.as_bytes());
-                out.extend_from_slice(b"\"}");
-            }
-            out.extend_from_slice(b"]}");
-        }
-        Err(e) => {
-            // Return the raw error; the frontend adds friendly context.
-            out.extend_from_slice(b"{\"error\":\"");
-            json_escape(&e.to_string(), &mut out);
-            out.extend_from_slice(b"\"}");
-        }
-    }
-    write_into(buf, maxlen, &out)
+                        _ => "?",
+                    };
+                    a.object(|o| {
+                        o.field("offset", sec.media_offset)
+                            .field("size", sec.media_size)
+                            .field("fs_type", fs_type);
+                    });
+                }
+            });
+        }),
+        // Return the raw error; the frontend adds friendly context.
+        Err(e) => json::object(|o| {
+            o.field("error", e.to_string());
+        }),
+    };
+    write_into(buf, maxlen, json.as_bytes())
 }
 
 /// Cache control data and pass its NACP figures (save data, add-on base id) to the CPU.
@@ -476,78 +448,56 @@ pub extern "C" fn switch_control_nacp(handle: u32, buf: *mut u8, maxlen: u32) ->
 #[no_mangle]
 pub extern "C" fn switch_control_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
-    let mut out = Vec::new();
     let Some(control) = &s.control else {
-        out.extend_from_slice(b"{}");
-        return write_into(buf, maxlen, &out);
+        return write_into(buf, maxlen, b"{}");
     };
     let nacp = &control.nacp;
-    out.extend_from_slice(b"{\"title_id\":\"");
-    out.extend_from_slice(format!("{:016x}", control.title_id).as_bytes());
-    out.extend_from_slice(b"\",\"name\":\"");
-    json_escape(&control.name, &mut out);
-    out.extend_from_slice(b"\",\"publisher\":\"");
-    json_escape(&control.publisher, &mut out);
-    out.extend_from_slice(b"\",\"language\":\"");
-    json_escape(control.language, &mut out);
-    out.extend_from_slice(b"\",\"version\":\"");
-    json_escape(&nacp.display_version, &mut out);
-    out.extend_from_slice(b"\",\"isbn\":\"");
-    json_escape(&nacp.isbn, &mut out);
-    out.extend_from_slice(b"\",\"error_code_category\":\"");
-    json_escape(&nacp.application_error_code_category, &mut out);
-    out.extend_from_slice(b"\",\"startup_user_account\":\"");
-    out.extend_from_slice(nacp.startup_user_account.name().as_bytes());
-    out.extend_from_slice(b"\",\"screenshot\":\"");
-    out.extend_from_slice(nacp.screenshot.name().as_bytes());
-    out.extend_from_slice(b"\",\"video_capture\":\"");
-    out.extend_from_slice(nacp.video_capture.name().as_bytes());
-    out.extend_from_slice(b"\",\"demo\":");
-    out.extend_from_slice(if nacp.is_demo { b"true" } else { b"false" });
-    out.extend_from_slice(b",\"languages\":[");
-    for (i, title) in nacp.titles.iter().enumerate() {
-        if i > 0 {
-            out.extend_from_slice(b",");
-        }
-        out.extend_from_slice(b"\"");
-        json_escape(title.language, &mut out);
-        out.extend_from_slice(b"\"");
-    }
-    out.extend_from_slice(b"],\"ratings\":[");
-    for (i, rating) in nacp.ratings.iter().enumerate() {
-        if i > 0 {
-            out.extend_from_slice(b",");
-        }
-        out.extend_from_slice(b"{\"organisation\":\"");
-        json_escape(rating.organisation, &mut out);
-        out.extend_from_slice(b"\",\"age\":");
-        out.extend_from_slice(rating.age.to_string().as_bytes());
-        out.extend_from_slice(b"}");
-    }
-    out.extend_from_slice(b"],\"add_on_content_base_id\":\"");
-    out.extend_from_slice(format!("{:016x}", nacp.add_on_content_base_id).as_bytes());
-    out.extend_from_slice(b"\",\"save_data_owner_id\":\"");
-    out.extend_from_slice(format!("{:016x}", nacp.save_data_owner_id).as_bytes());
-    out.extend_from_slice(b"\",\"user_save_size\":");
-    out.extend_from_slice(nacp.user_account_save_data_size.to_string().as_bytes());
-    out.extend_from_slice(b",\"user_save_journal_size\":");
-    out.extend_from_slice(
-        nacp.user_account_save_data_journal_size
-            .to_string()
-            .as_bytes(),
-    );
-    out.extend_from_slice(b",\"device_save_size\":");
-    out.extend_from_slice(nacp.device_save_data_size.to_string().as_bytes());
-    out.extend_from_slice(b",\"device_save_journal_size\":");
-    out.extend_from_slice(nacp.device_save_data_journal_size.to_string().as_bytes());
-    out.extend_from_slice(b",\"bcat_storage_size\":");
-    out.extend_from_slice(nacp.bcat_delivery_cache_storage_size.to_string().as_bytes());
-    out.extend_from_slice(b",\"icon_mime\":\"");
-    out.extend_from_slice(control.icon_mime().as_bytes());
-    out.extend_from_slice(b"\",\"icon_size\":");
-    out.extend_from_slice(control.icon.len().to_string().as_bytes());
-    out.extend_from_slice(b"}");
-    write_into(buf, maxlen, &out)
+    let json = json::object(|o| {
+        o.field("title_id", format!("{:016x}", control.title_id))
+            .field("name", &control.name)
+            .field("publisher", &control.publisher)
+            .field("language", control.language)
+            .field("version", &nacp.display_version)
+            .field("isbn", &nacp.isbn)
+            .field("error_code_category", &nacp.application_error_code_category)
+            .field("startup_user_account", nacp.startup_user_account.name())
+            .field("screenshot", nacp.screenshot.name())
+            .field("video_capture", nacp.video_capture.name())
+            .field("demo", nacp.is_demo);
+        o.array("languages", |a| {
+            a.extend(nacp.titles.iter().map(|title| title.language));
+        });
+        o.array("ratings", |a| {
+            for rating in &nacp.ratings {
+                a.object(|r| {
+                    r.field("organisation", rating.organisation)
+                        .field("age", rating.age);
+                });
+            }
+        });
+        o.field(
+            "add_on_content_base_id",
+            format!("{:016x}", nacp.add_on_content_base_id),
+        )
+        .field(
+            "save_data_owner_id",
+            format!("{:016x}", nacp.save_data_owner_id),
+        )
+        .field("user_save_size", nacp.user_account_save_data_size)
+        .field(
+            "user_save_journal_size",
+            nacp.user_account_save_data_journal_size,
+        )
+        .field("device_save_size", nacp.device_save_data_size)
+        .field(
+            "device_save_journal_size",
+            nacp.device_save_data_journal_size,
+        )
+        .field("bcat_storage_size", nacp.bcat_delivery_cache_storage_size)
+        .field("icon_mime", control.icon_mime())
+        .field("icon_size", control.icon.len());
+    });
+    write_into(buf, maxlen, json.as_bytes())
 }
 
 /// Copy the cached icon into `buf`. Returns bytes copied, or -1.
@@ -596,4 +546,21 @@ pub extern "C" fn switch_load_keys(
     s.keys = ks;
     s.last_error.clear();
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_on_content_is_listed_with_its_base_title_and_index() {
+        assert_eq!(
+            dlc_json([0x0100_0000_0000_1001u64, 0x0100_0000_0000_17ff].into_iter()),
+            concat!(
+                r#"[{"id":"0100000000001001","title_id":"0100000000000000","index":1},"#,
+                r#"{"id":"01000000000017ff","title_id":"0100000000000000","index":2047}]"#
+            )
+        );
+        assert_eq!(dlc_json(std::iter::empty()), "[]");
+    }
 }
