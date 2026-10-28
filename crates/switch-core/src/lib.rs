@@ -78,6 +78,7 @@ pub mod display;
 pub mod elf;
 pub mod error;
 pub mod gpu;
+pub mod json;
 pub mod kernel;
 pub mod keys;
 pub mod lz4;
