@@ -12,6 +12,7 @@
   --green: #57d98b;
   --amber: #ffc861;
   --red: #ff6f6f;
+  --sans: "Inter", "Inter Display", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", consolas, monospace;
   --topbar-h: 48px;
   --statusbar-h: 26px;
@@ -27,7 +28,7 @@ html, body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.45 Inter, "Inter Display", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 14px/1.45 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
