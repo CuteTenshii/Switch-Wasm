@@ -516,6 +516,8 @@ fn the_report_is_the_json_the_page_reads() {
         constants: 3,
         textures: 4,
     };
+    gpu.cached_bytes = 9;
+    gpu.gpu_texture_bytes = 10;
     gpu.texture_hits = 5;
     gpu.texture_misses = 6;
     gpu.shader_hits = 7;
@@ -540,6 +542,7 @@ fn the_report_is_the_json_the_page_reads() {
         concat!(
             r#"{"backend":"device","drawn":12,"fallbacks":3,"pipelines":0,"modules":0,"held":0,"#,
             r#""evicted":0,"pending":0,"read":{"textures":4,"vertex":1,"constants":3,"index":2},"#,
+            r#""textureCacheBytes":9,"deviceTextureBytes":10,"#,
             r#""textureHits":5,"textureMisses":6,"shaderHits":7,"shaderMisses":8,"#,
             r#""softwareFrame":true,"unlatched":2,"gaveUp":false,"lostBecause":"Out of memory","#,
             r#""reasons":["shader: \"op\"\nunknown","plain"],"deviceErrorCount":0,"deviceErrors":[],"#,

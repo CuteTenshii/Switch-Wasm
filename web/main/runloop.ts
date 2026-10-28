@@ -15,6 +15,7 @@ import { dropErrors, offerErrors } from './errors';
 import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log } from './log';
+import { noteRam } from './memory';
 import { call, explainFailure, onLoopEvents, readLastError } from './rpc';
 import { pullProfileEdits, storeProfileEdits } from './users';
 import { loaded, setState } from './shell';
@@ -189,5 +190,6 @@ export async function updateRam(): Promise<void> {
 }
 
 function showRam(ram: Housekeeping['ram']): void {
+  noteRam(ram);
   $('ram').textContent = `${formatBytes(ram.guest)} (${formatBytes(ram.wasm)})`;
 }

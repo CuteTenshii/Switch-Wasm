@@ -78,6 +78,7 @@ export interface WasmExports {
   switch_get_reg(handle: number, idx: number): bigint;
   switch_get_steps(handle: number): bigint;
   switch_guest_ram(handle: number): bigint;
+  switch_memory_json(handle: number, buf: number, maxlen: number): number;
 
   switch_fb_width(handle: number): number;
   switch_fb_height(handle: number): number;

@@ -4,6 +4,7 @@
 import fontUrl from '../font.ttf?url';
 import type { Bytes } from '../shared/protocol';
 import { log } from './log';
+import { resetMemoryHistory } from './memory';
 import { call } from './rpc';
 import { abortRun } from './runloop';
 import { stageUsers } from './users';
@@ -38,6 +39,7 @@ export async function endTitle(): Promise<void> {
   abortRun();
   await call('end_title');
   booted = false;
+  resetMemoryHistory();
   // A running title keeps the player it started with; the next one gets the current list.
   await stageUsers();
 }

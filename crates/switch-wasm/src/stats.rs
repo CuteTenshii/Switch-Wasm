@@ -1,4 +1,4 @@
-//! Translator and GPU reports.
+//! Translator, GPU and memory reports.
 
 use crate::{session, write_into};
 use switch_core::json;
@@ -44,4 +44,26 @@ pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32)
 pub extern "C" fn switch_gpu_lost(handle: u32) -> u32 {
     let s = session(handle);
     u32::from(s.cpu.nv.gpu.renderer_lost())
+}
+
+/// The title's backed guest memory by region, as JSON. The page adds the heap size itself.
+#[no_mangle]
+pub extern "C" fn switch_memory_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let memory = session(handle).cpu.title_memory();
+    let json = json::object(|o| {
+        o.field("backed", memory.backed).field("cap", memory.cap);
+        o.array("regions", |a| {
+            for &(region, (start, end), bytes) in &memory.regions {
+                a.object(|r| {
+                    r.field("key", region.key())
+                        .field("start", start)
+                        .field("end", end)
+                        .field("bytes", bytes);
+                });
+            }
+        });
+        o.field("elsewhere", memory.elsewhere)
+            .field("allProcesses", memory.all_processes);
+    });
+    write_into(buf, maxlen, json.as_bytes())
 }

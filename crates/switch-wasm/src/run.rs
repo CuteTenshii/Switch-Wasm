@@ -62,8 +62,8 @@ pub extern "C" fn switch_get_steps(handle: u32) -> u64 {
     session(handle).cpu.steps
 }
 
-/// Guest RAM backed by host storage, in bytes.
+/// The title's guest RAM backed by host storage, in bytes, even while an applet runs.
 #[no_mangle]
 pub extern "C" fn switch_guest_ram(handle: u32) -> u64 {
-    session(handle).cpu.mem.mapped_bytes()
+    session(handle).cpu.title_backed()
 }

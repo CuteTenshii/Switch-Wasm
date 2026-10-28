@@ -1,7 +1,7 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, ErrorDialog, FsChange, GpuReport, JitStats, KeyboardRequest,
+  CommandHandlers, ErrorDialog, FsChange, GpuReport, JitStats, KeyboardRequest, MemoryReport,
   UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
@@ -344,6 +344,19 @@ export const CMD: CommandHandlers = {
       guest: state.handle < 0 ? 0 : Number(core.switch_guest_ram(state.handle)),
       wasm: core.memory.buffer.byteLength,
     };
+  },
+  memory() {
+    const wasmHeap = core.memory.buffer.byteLength;
+    const none: Omit<MemoryReport, 'wasmHeap'> = {
+      backed: 0, cap: 0, regions: [], elsewhere: 0, allProcesses: 0,
+    };
+    if (state.handle < 0) return { ...none, wasmHeap };
+    const report = readJson<Omit<MemoryReport, 'wasmHeap'>>(
+      4096,
+      (buf, cap) => core.switch_memory_json(state.handle, buf, cap),
+      none,
+    );
+    return { ...report, wasmHeap };
   },
   jit_stats() {
     if (state.handle < 0) {

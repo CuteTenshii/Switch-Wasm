@@ -821,6 +821,9 @@ impl Renderer for Gpu {
                 .field("constants", self.uploaded.constants)
                 .field("index", self.uploaded.index);
         });
+        // Deswizzled bytes kept in the WebAssembly heap, and textures held on the device.
+        out.field("textureCacheBytes", self.cached_bytes)
+            .field("deviceTextureBytes", self.gpu_texture_bytes);
         out.field("textureHits", self.texture_hits)
             .field("textureMisses", self.texture_misses)
             .field("shaderHits", self.shader_hits)

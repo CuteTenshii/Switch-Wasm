@@ -100,6 +100,13 @@ The page, the worker, and the wasm bindings between them.
 - The release profile aborts on panic, which on wasm is an empty `unreachable` trap; the panic hook stores the message and `switch_last_error` returns it without a live session. Linear memory survives the trap, so panic context is collected afterwards, each piece separately.
 - The status bar shows instructions retired, not the guest clock, which jumps forward when all threads are blocked.
 
+## `web/main/memory.ts`
+
+- The history comes from housekeeping, so it is there when the group is opened: one sample a second, five minutes kept, reset by `endTitle`. The region table and the heap are asked for once a second only while the group is on screen.
+- `switch_guest_ram` counts the title's process (`Cpu::title_backed`), not the running one: an applet on screen would otherwise dip the line and the status bar.
+- The heap section reports before a title boots, so `memory` is a sessionless command. The guest RAM section waits for `titleBooted`, not `hasSession`, which is true as soon as the console's session exists.
+- The chart's `viewBox` stretches to the panel: strokes use `vector-effect: non-scaling-stroke`, and the marker and the scale are HTML, since SVG circles and text would stretch with it. The scale sits on the caption row, where a line near the top cannot run through it.
+
 ## `web/main/loading.ts`
 
 - The loading screen only owns its markup. `awaitFirstFrame` is the one open-ended phase, ended by `display.noteFrame` on the first painted frame or by the run loop on a fault, halt or pause. Failures keep the screen up with the reason rather than revealing a black stage.

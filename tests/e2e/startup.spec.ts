@@ -102,6 +102,36 @@ test('trace channels record and show only at the debug level', async ({ page }) 
   await expect(svcLine).toHaveCount(0);
 });
 
+test('the memory section waits for a title, then shows where its RAM is', async ({ page }) => {
+  await openPage(page);
+  await page.locator('#btn-panel').click();
+  await page.getByRole('tab', { name: 'Debug' }).click();
+  await page.getByRole('button', { name: 'Memory' }).click();
+  await expect(page.getByText('Tracing', { exact: true })).toBeHidden();
+
+  const ram = page.locator('#memory-debug-section');
+  await expect(ram.locator('#memory-debug-empty')).toHaveText('Run a title to see its memory.');
+  await expect(ram.locator('#memory-debug-data')).toBeHidden();
+  // The heap is the core's, so it reports before any title runs.
+  await expect(page.locator('#heap-size')).toHaveText(/^\d+(\.\d+)? [KMG]iB of 4 GiB$/);
+
+  // b .
+  await bootElf(page, aarch64Elf([0x14000000]));
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'running');
+  await expect(ram.locator('#memory-debug-data')).toBeVisible();
+  await expect(ram.locator('#memory-backed')).not.toHaveText('0 B');
+  // The program sits at 0x08000000, the start of the code region.
+  const program = ram.locator('#memory-regions tr', { hasText: 'Program and its data' });
+  await expect(program).toContainText('0x08000000');
+  await expect(program.locator('td').first()).not.toHaveText('0 B');
+  await expect(ram.locator('#memory-regions tr')).toHaveCount(7);
+
+  await page.locator('#btn-stop').click();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'idle');
+  await expect(ram.locator('#memory-debug-empty')).toBeVisible();
+  await expect(page.locator('#heap-size')).not.toHaveText('-');
+});
+
 test('the translation section counts the blocks a program ran', async ({ page }) => {
   await openPage(page);
   await page.locator('#btn-panel').click();

@@ -15,6 +15,22 @@ export interface RamUsage {
   wasm: number;
 }
 
+// A part of the title's address space; `key` names it for the page's labels.
+export type MemoryRegionKey = 'code' | 'stacks' | 'runtime' | 'loaded' | 'heap' | 'alias';
+
+// The title's backed guest memory by region, and the WebAssembly heap it lives in.
+export interface MemoryReport {
+  backed: number;
+  // Past it, guest writes fault.
+  cap: number;
+  regions: { key: MemoryRegionKey; start: number; end: number; bytes: number }[];
+  // Backed outside every region: display buffers, the homebrew environment.
+  elsewhere: number;
+  // Every process's, library applets included.
+  allProcesses: number;
+  wasmHeap: number;
+}
+
 // GPU backend counters; `backend` is absent while the software rasterizer has the frame.
 // Timings are milliseconds over the whole run.
 export interface GpuReport {
@@ -31,6 +47,9 @@ export interface GpuReport {
   pending?: number;
   // Bytes lifted from guest memory by `Uploads::of`, by category.
   read?: { textures: number; vertex: number; constants: number; index: number };
+  // Deswizzled texture bytes kept in the WebAssembly heap, and texture bytes on the device.
+  textureCacheBytes?: number;
+  deviceTextureBytes?: number;
   // Texture reads served from cached deswizzled bytes vs re-read from guest memory.
   textureHits?: number;
   textureMisses?: number;
@@ -238,6 +257,7 @@ export interface Commands {
   get_steps(): number;
   get_reg(i: number): string;
   ram(): RamUsage;
+  memory(): MemoryReport;
   jit_stats(): JitStats;
   gpu_report(): GpuReport;
   last_error(): string;

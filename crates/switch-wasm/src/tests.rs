@@ -588,6 +588,17 @@ fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
             r#""emitted":0,"enteredEmitted":0,"chained":0}"#
         )
     );
+    let n = crate::stats::switch_memory_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    let memory = std::str::from_utf8(&buf[..n]).unwrap();
+    assert!(
+        memory.starts_with(r#"{"backed":"#)
+            && memory.contains(r#"{"key":"code","start":134217728,"end":402653184,"bytes":"#),
+        "{memory}"
+    );
+    assert!(
+        memory.contains(r#""elsewhere":"#) && memory.ends_with('}'),
+        "{memory}"
+    );
     // The software rasterizer reports nothing of its own.
     let n = switch_gpu_report_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
     assert_eq!(&buf[..n], br#"{"frames":0}"#);

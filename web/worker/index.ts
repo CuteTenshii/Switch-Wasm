@@ -28,7 +28,7 @@ interface ScreenHandoff {
 
 // Commands valid with no session open.
 const SESSIONLESS = new Set([
-  'new', 'set_battery', 'last_error', 'clear_screen',
+  'new', 'set_battery', 'last_error', 'clear_screen', 'memory',
 ]);
 
 ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {

@@ -283,6 +283,8 @@
         aria-pressed="true">CPU</button>
       <button class="btn small debug-group" data-debug-group="graphics"
         aria-pressed="false">Graphics</button>
+      <button class="btn small debug-group" data-debug-group="memory"
+        aria-pressed="false">Memory</button>
     </div>
 
     <details class="section" data-debug-section="cpu" open>
@@ -405,6 +407,66 @@
         <div class="panel-tools">
           <button id="btn-reset-display-debug" class="btn small ghost">Reset samples</button>
         </div>
+      </div>
+    </details>
+
+    <details class="section" id="memory-debug-section" data-debug-section="memory" open hidden>
+      <summary class="section-head">
+        <span class="section-title">Guest RAM</span>
+        <span class="section-note" id="memory-debug-badge">-</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">Pages of the title's address space that hold real memory. A page gets
+          memory the first time the title writes to it and keeps it until the title unmaps it.</p>
+        <p class="muted tiny" id="memory-debug-empty">Run a title to see its memory.</p>
+        <p class="tiny" id="memory-debug-error" hidden></p>
+        <div id="memory-debug-data" hidden>
+          <dl class="debug-totals">
+            <div><dt>Backed</dt><dd id="memory-backed">-</dd></div>
+            <div><dt>Limit</dt><dd id="memory-cap">-</dd></div>
+            <div><dt>Last 10 s</dt><dd id="memory-rate">-</dd></div>
+            <div><dt>Peak</dt><dd id="memory-peak">-</dd></div>
+          </dl>
+          <figure class="memory-history">
+            <figcaption class="muted tiny">
+              <span>Backed, last five minutes</span>
+              <span class="memory-scale" id="memory-scale"></span>
+            </figcaption>
+            <div class="memory-plot">
+              <svg id="memory-chart" viewBox="0 0 300 72" preserveAspectRatio="none" tabindex="0"
+                role="img" aria-label="Backed guest RAM over the last five minutes"
+                aria-describedby="memory-readout"></svg>
+              <span class="memory-marker" id="memory-marker" hidden></span>
+            </div>
+            <div class="memory-axis muted tiny"><span>5 min ago</span><span>now</span></div>
+            <p class="tiny memory-readout" id="memory-readout" aria-live="polite"></p>
+          </figure>
+          <table class="debug-timings memory-regions">
+            <caption>Where in the address space</caption>
+            <thead><tr><th scope="col">Region</th><th scope="col">Backed</th>
+              <th scope="col">Share</th></tr></thead>
+            <tbody id="memory-regions"></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" id="heap-debug-section" data-debug-section="memory" open hidden>
+      <summary class="section-head">
+        <span class="section-title">WebAssembly heap</span>
+        <span class="section-note" id="heap-debug-badge">-</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">The emulator's linear memory, which holds every process's guest RAM
+          and the emulator's own data. It only grows: memory freed inside it stays counted
+          here.</p>
+        <dl class="debug-totals">
+          <div><dt>Size</dt><dd id="heap-size">-</dd></div>
+          <div><dt>Guest RAM, all processes</dt><dd id="heap-guest">-</dd></div>
+          <div><dt>GPU texture cache</dt><dd id="heap-textures">-</dd></div>
+          <div><dt>Everything else</dt><dd id="heap-rest">-</dd></div>
+        </dl>
+        <p class="muted tiny" id="heap-device-textures"></p>
       </div>
     </details>
 

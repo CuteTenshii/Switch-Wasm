@@ -9,6 +9,7 @@ import { $, el } from './dom';
 import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
 import { log } from './log';
+import { updateMemoryDebug } from './memory';
 import { call, hasSession } from './rpc';
 import { openPanel, setNote } from './shell';
 
@@ -30,6 +31,7 @@ function selectDebugGroup(name: string): void {
     updateDisplayDebug();
     if (hasSession()) void updateRenderDebug();
   }
+  if (name === 'memory') void updateMemoryDebug();
 }
 
 for (const button of debugGroups) {
