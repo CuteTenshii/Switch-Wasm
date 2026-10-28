@@ -212,6 +212,82 @@ struct Bound {
     step: wgpu::VertexStepMode,
 }
 
+/// A vertex buffer's bytes and layout, before it is created as a [`Bound`].
+struct Feed<'a> {
+    bytes: std::borrow::Cow<'a, [u8]>,
+    attributes: Vec<wgpu::VertexAttribute>,
+    /// Zero when every vertex reads element 0.
+    stride: u64,
+    step: wgpu::VertexStepMode,
+}
+
+/// Fold `feeds` into two when there are more than `limit` (Maxwell has 32 arrays, WebGPU
+/// guarantees 8): the per-vertex arrays interleaved, since each starts at the draw's first
+/// vertex, and one element holding everything every vertex reads alike (instanced arrays
+/// upload only this instance's element; the defaults are constant).
+fn fit_vertex_buffers(feeds: Vec<Feed<'_>>, limit: u32) -> Vec<Feed<'_>> {
+    if feeds.len() <= limit as usize {
+        return feeds;
+    }
+    let (per_vertex, shared): (Vec<_>, Vec<_>) = feeds.into_iter().partition(|f| f.stride != 0);
+    let mut folded = Vec::with_capacity(2);
+    if !per_vertex.is_empty() {
+        let vertices = per_vertex
+            .iter()
+            .map(|f| f.bytes.len() / f.stride as usize)
+            .max()
+            .unwrap_or(0);
+        folded.push(interleave(&per_vertex, vertices));
+    }
+    if !shared.is_empty() {
+        folded.push(Feed {
+            stride: 0,
+            ..interleave(&shared, 1)
+        });
+    }
+    folded
+}
+
+/// Copy each feed's attributes, element by element, into one buffer of `elements` elements.
+fn interleave(feeds: &[Feed<'_>], elements: usize) -> Feed<'static> {
+    let mut placed = Vec::new();
+    let mut stride = 0;
+    for feed in feeds {
+        for attribute in &feed.attributes {
+            let size = attribute.format.size();
+            // WebGPU aligns an attribute to its size, or to four bytes when it is larger.
+            stride = u64::next_multiple_of(stride, size.min(4));
+            placed.push((feed, attribute, stride));
+            stride += size;
+        }
+    }
+    let stride = stride.next_multiple_of(4);
+    let mut bytes = vec![0u8; stride as usize * elements];
+    for element in 0..elements {
+        for &(feed, attribute, at) in &placed {
+            let size = attribute.format.size() as usize;
+            let from = element * feed.stride as usize + attribute.offset as usize;
+            let to = element * stride as usize + at as usize;
+            // Bytes past an upload's end read as zero, as they do on hardware.
+            if let Some(source) = feed.bytes.get(from..from + size) {
+                bytes[to..to + size].copy_from_slice(source);
+            }
+        }
+    }
+    Feed {
+        bytes: std::borrow::Cow::Owned(bytes),
+        attributes: placed
+            .iter()
+            .map(|&(_, attribute, at)| wgpu::VertexAttribute {
+                offset: at,
+                ..*attribute
+            })
+            .collect(),
+        stride,
+        step: wgpu::VertexStepMode::Vertex,
+    }
+}
+
 /// A ceiling for pathological titles; real ones use a few dozen.
 const SHADER_CACHE_ENTRIES: usize = 1024;
 
@@ -255,6 +331,8 @@ pub struct Gpu {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// The device's vertex buffer count; a draw with more is folded by [`fit_vertex_buffers`].
+    vertex_buffer_limit: u32,
     /// The address space draws now run in, and its surfaces and caches.
     space_id: u32,
     space: Space,

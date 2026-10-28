@@ -456,6 +456,56 @@ fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
     agrees_shading(new, |_| {}, set_up);
 }
 
+/// Vertex arrays past the device's buffer count are interleaved into one buffer and draw alike.
+#[test]
+fn vertex_arrays_past_the_device_limit_are_folded_and_draw_alike() {
+    let Some(mut gpu) = device() else { return };
+    // Off the eight-bit half-way points, so both renderers round alike.
+    let colour = [0.2f32, 0.4, 0.8, 1.0];
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::new();
+        // The colour comes from array 1, 16 bytes a vertex, apart from array 0's positions.
+        let colours = h.base + 0x600;
+        h.engine.regs.set(0x458 + 1, 1 | (0x01 << 21) | (7 << 27));
+        h.engine.regs.set(0x704, 16 | (1 << 12));
+        h.engine.regs.set(0x705, (colours >> 32) as u32);
+        h.engine.regs.set(0x706, colours as u32);
+        h.engine.regs.set(0x7C2, (colours >> 32) as u32);
+        h.engine.regs.set(0x7C3, colours as u32 + 3 * 16 - 1);
+        // Array 0 still carries a colour, which must not be the one drawn.
+        h.triangle([1.0, 1.0, 1.0, 1.0]);
+        let mut ctx = h.ctx();
+        for vertex in 0..3u64 {
+            for (i, c) in colour.iter().enumerate() {
+                ctx.write_u32(colours + vertex * 16 + i as u64 * 4, c.to_bits())
+                    .unwrap();
+            }
+        }
+        match gpu {
+            Some(gpu) => {
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => h.draw_with(&mut Software).expect("the draw"),
+        }
+        h.target()
+    };
+    let want = build(None);
+    assert!(want.contains(&0xffcc_6633), "the reference: {want:x?}");
+    // Two arrays against a limit of one forces the fold.
+    gpu.vertex_buffer_limit = 1;
+    let fallbacks = gpu.fallbacks;
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// A held float depth surface sampled as a float texture reads the device's depth, not stale
 /// memory, whether or not a stencil byte shares its texels.
 #[test]

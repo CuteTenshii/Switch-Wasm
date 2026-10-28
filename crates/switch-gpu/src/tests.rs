@@ -444,3 +444,77 @@ fn a_volume_slice_is_looked_for_where_the_volume_puts_it() {
     assert!(!slice_fits_one_gob(&key(128, 8, 1)), "two GOBs wide");
     assert!(!slice_fits_one_gob(&key(64, 16, 2)), "two GOBs tall");
 }
+
+#[test]
+fn vertex_arrays_past_the_limit_fold_into_one_interleaved_buffer_and_one_shared_element() {
+    use super::{fit_vertex_buffers, Feed};
+    use std::borrow::Cow;
+    let attribute = |format, offset, shader_location| wgpu::VertexAttribute {
+        format,
+        offset,
+        shader_location,
+    };
+    let feeds = vec![
+        // Two vertices of a 12-byte position in a 16-byte stride.
+        Feed {
+            bytes: Cow::Owned((0..32).collect()),
+            attributes: vec![attribute(wgpu::VertexFormat::Float32x3, 0, 0)],
+            stride: 16,
+            step: wgpu::VertexStepMode::Vertex,
+        },
+        // Two vertices of a byte pair at offset 2 of a 4-byte stride.
+        Feed {
+            bytes: Cow::Owned(vec![0, 0, 0xa0, 0xa1, 0, 0, 0xb0, 0xb1]),
+            attributes: vec![attribute(wgpu::VertexFormat::Unorm8x2, 2, 1)],
+            stride: 4,
+            step: wgpu::VertexStepMode::Vertex,
+        },
+        // One instance's element.
+        Feed {
+            bytes: Cow::Owned(vec![0xc0, 0xc1, 0xc2, 0xc3]),
+            attributes: vec![attribute(wgpu::VertexFormat::Uint32, 0, 2)],
+            stride: 0,
+            step: wgpu::VertexStepMode::Instance,
+        },
+    ];
+    let folded = fit_vertex_buffers(feeds, 1);
+    assert_eq!(folded.len(), 2);
+
+    let per_vertex = &folded[0];
+    // 12 bytes of position, the pair at 12, padded to 16.
+    assert_eq!(per_vertex.stride, 16);
+    assert_eq!(
+        per_vertex.attributes,
+        vec![
+            attribute(wgpu::VertexFormat::Float32x3, 0, 0),
+            attribute(wgpu::VertexFormat::Unorm8x2, 12, 1),
+        ]
+    );
+    let mut want: Vec<u8> = (0..12).collect();
+    want.extend([0xa0, 0xa1, 0, 0]);
+    want.extend(16..28);
+    want.extend([0xb0, 0xb1, 0, 0]);
+    assert_eq!(&per_vertex.bytes[..], &want[..]);
+
+    let shared = &folded[1];
+    assert_eq!(shared.stride, 0, "every vertex reads the one element");
+    assert_eq!(shared.step, wgpu::VertexStepMode::Vertex);
+    assert_eq!(
+        shared.attributes,
+        vec![attribute(wgpu::VertexFormat::Uint32, 0, 2)]
+    );
+    assert_eq!(&shared.bytes[..], &[0xc0, 0xc1, 0xc2, 0xc3]);
+
+    // Within the limit nothing changes.
+    let within = fit_vertex_buffers(
+        vec![Feed {
+            bytes: Cow::Owned(vec![0; 16]),
+            attributes: vec![attribute(wgpu::VertexFormat::Float32x4, 0, 0)],
+            stride: 16,
+            step: wgpu::VertexStepMode::Vertex,
+        }],
+        8,
+    );
+    assert_eq!(within.len(), 1);
+    assert_eq!(within[0].stride, 16);
+}

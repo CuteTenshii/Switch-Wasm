@@ -6,8 +6,8 @@ use crate::convert::{
 };
 use crate::readback::Scratch;
 use crate::{
-    can_blend, dump_wgsl, Bound, Gpu, PipelineKey, Prepared, Render, Shape, ABSENT_ATTRIBUTE,
-    ATTRIBUTE_DEFAULTS, DEFAULT_ATTRIBUTE,
+    can_blend, dump_wgsl, fit_vertex_buffers, Bound, Feed, Gpu, PipelineKey, Prepared, Render,
+    Shape, ABSENT_ATTRIBUTE, ATTRIBUTE_DEFAULTS, DEFAULT_ATTRIBUTE,
 };
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
@@ -68,7 +68,7 @@ impl Gpu {
         })?;
 
         // Vertex buffers the shader reads; the stride travels with each buffer.
-        let mut bound: Vec<Bound> = Vec::new();
+        let mut feeds: Vec<Feed> = Vec::new();
         for buffer in &p.state.vertex_buffers {
             let attributes: Vec<wgpu::VertexAttribute> = buffer
                 .attributes
@@ -100,8 +100,8 @@ impl Gpu {
             if whole != bytes.len() {
                 bytes.to_mut().resize(whole, 0);
             }
-            bound.push(Bound {
-                buffer: self.buffer("vertex", &bytes, wgpu::BufferUsages::VERTEX),
+            feeds.push(Feed {
+                bytes,
                 attributes,
                 stride,
                 step: match buffer.step {
@@ -111,9 +111,9 @@ impl Gpu {
             });
         }
         // Unbound locations read a constant buffer of the two default vectors.
-        let fed: Vec<usize> = bound
+        let fed: Vec<usize> = feeds
             .iter()
-            .flat_map(|b| b.attributes.iter().map(|a| a.shader_location as usize))
+            .flat_map(|f| f.attributes.iter().map(|a| a.shader_location as usize))
             .collect();
         let unfed: Vec<wgpu::VertexAttribute> = p
             .vs_layout
@@ -131,13 +131,22 @@ impl Gpu {
             })
             .collect();
         if !unfed.is_empty() {
-            bound.push(Bound {
-                buffer: self.buffer("defaults", &ATTRIBUTE_DEFAULTS, wgpu::BufferUsages::VERTEX),
+            feeds.push(Feed {
+                bytes: std::borrow::Cow::Borrowed(&ATTRIBUTE_DEFAULTS),
                 attributes: unfed,
                 stride: 0,
                 step: wgpu::VertexStepMode::Vertex,
             });
         }
+        let bound: Vec<Bound> = fit_vertex_buffers(feeds, self.vertex_buffer_limit)
+            .into_iter()
+            .map(|f| Bound {
+                buffer: self.buffer("vertex", &f.bytes, wgpu::BufferUsages::VERTEX),
+                attributes: f.attributes,
+                stride: f.stride,
+                step: f.step,
+            })
+            .collect();
         let layouts: Vec<Option<wgpu::VertexBufferLayout>> = bound
             .iter()
             .map(|b| {

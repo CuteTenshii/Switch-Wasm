@@ -31,11 +31,13 @@ impl Gpu {
                 slot.get_or_insert(format!("{reason:?}: {message}"));
             }
         });
+        let vertex_buffer_limit = device.limits().max_vertex_buffers;
         Gpu {
             _instance: instance,
             adapter,
             device,
             queue,
+            vertex_buffer_limit,
             space_id: 0,
             space: Space::default(),
             parked: std::collections::HashMap::new(),
