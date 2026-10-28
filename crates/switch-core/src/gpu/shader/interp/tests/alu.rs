@@ -36,6 +36,24 @@ fn a_hand_written_alu_program_produces_the_expected_registers() {
     assert_eq!(inv.reg_f32(3), 20.0);
 }
 
+#[test]
+fn ffma32i_accumulates_into_its_destination() {
+    // Taisei's "ffma32i ftz $r14 $r9 0x3e4ccccd $r14": r14 = r9 * 0.2 + r14.
+    let decoded = crate::gpu::shader::isa::decode(0x0c23e4ccccd7090e).op;
+    let program = prog(&[decoded, Op::Exit]);
+    let mut inv = Invocation::new();
+    inv.set_reg_f32(9, 10.0);
+    inv.set_reg_f32(14, 1.5);
+
+    inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+        .unwrap();
+
+    assert_eq!(
+        inv.reg_f32(14),
+        10.0f32.mul_add(f32::from_bits(0x3e4ccccd), 1.5)
+    );
+}
+
 /// A program at real byte offsets so branch targets resolve; slot 0 of each block is `sched`.
 fn prog_at(entries: &[(Op, Pred)]) -> Compiled {
     let mut p = crate::gpu::shader::Program::default();

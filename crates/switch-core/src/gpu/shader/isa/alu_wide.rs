@@ -531,6 +531,23 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             sat: false,
         };
     }
+    if insn & 0xfc00_0000_0000_0000 == 0x0c00_0000_0000_0000 {
+        // ffma32i: the destination is also the addend.
+        if field(insn, 52, 1) != 0 || field(insn, 53, 2) > 1 {
+            return Op::Unimplemented { raw: insn }; // `.cc`, or `.fmz`, which `Ffma` has no form for
+        }
+        let dst = reg(insn, 0, 8);
+        return Op::Ffma {
+            dst,
+            a: reg(insn, 8, 8),
+            b: Operand::Imm(field(insn, 20, 32) as u32),
+            bneg: field(insn, 56, 1) != 0,
+            c: Operand::Reg(dst),
+            cneg: field(insn, 57, 1) != 0,
+            ftz: field(insn, 53, 2) == 1,
+            sat: field(insn, 55, 1) != 0,
+        };
+    }
     if insn & 0xff00_0000_0000_0000 == 0x1e00_0000_0000_0000 {
         // fmul32i
         return Op::Fmul {

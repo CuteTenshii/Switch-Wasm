@@ -289,6 +289,41 @@ fn decodes_ffma_constant_bank_chain() {
 }
 
 #[test]
+fn decodes_ffma32i_into_its_own_destination() {
+    // Taisei's, which envydis reads as "ffma32i ftz $r34 $r30 0x3d707f87 $r34".
+    assert_eq!(
+        op(0x0c23d707f8771e22),
+        Op::Ffma {
+            dst: 34,
+            a: 30,
+            b: Operand::Imm(0x3d707f87),
+            bneg: false,
+            c: Operand::Reg(34),
+            cneg: false,
+            ftz: true,
+            sat: false,
+        }
+    );
+    // envydis: "ffma32i sat $r34 neg $r30 0x3d707f87 neg $r34".
+    assert_eq!(
+        op(0x0f83d707f8771e22),
+        Op::Ffma {
+            dst: 34,
+            a: 30,
+            b: Operand::Imm(0x3d707f87),
+            bneg: true,
+            c: Operand::Reg(34),
+            cneg: true,
+            ftz: false,
+            sat: true,
+        }
+    );
+    // `.fmz` and `.cc` have no `Ffma` form.
+    assert!(matches!(op(0x0c43d707f8771e22), Op::Unimplemented { .. }));
+    assert!(matches!(op(0x0c13d707f8771e22), Op::Unimplemented { .. }));
+}
+
+#[test]
 fn decodes_tex() {
     assert_eq!(
         op(0xc07a0080a0770401),
