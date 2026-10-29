@@ -19,6 +19,7 @@ const MIN: [u8; 2] = [0x96, 0xA4];
 const MAX: [u8; 2] = [0x97, 0xA5];
 const NEG: [u8; 2] = [0x8C, 0x9A];
 const ABS: [u8; 2] = [0x8B, 0x99];
+const SQRT: [u8; 2] = [0x91, 0x9F];
 const EQ: [u8; 2] = [0x5B, 0x61];
 const LT: [u8; 2] = [0x5D, 0x63];
 const NE: [u8; 2] = [0x5C, 0x62];
@@ -202,6 +203,23 @@ impl Emitter<'_> {
                         2 => self.f.op_raw(NEG[d]),
                         _ => {}
                     }
+                    self.fset(rd, double);
+                }
+                // FSQRT: Invalid for a negative operand, not -0 or a NaN.
+                3 => {
+                    self.f.i32_const(FPSR_IOC as i32);
+                    self.f.i32_const(0);
+                    self.fget(rn, double);
+                    if double {
+                        self.f.f64_const(0.0);
+                    } else {
+                        self.f.f32_const(0.0);
+                    }
+                    self.f.op_raw(LT[d]);
+                    self.f.select();
+                    self.or_fpsr();
+                    self.fget(rn, double);
+                    self.f.op_raw(SQRT[d]);
                     self.fset(rd, double);
                 }
                 // FCVT Sd, Dn and Dd, Sn.
