@@ -10,49 +10,11 @@
 //! `DUMP=`, `TRAP_WRITE=`, `TRAP_READ=` and `WATCH_PC=` are described in [`common::Debug`].
 mod common;
 
-use common::{Flow, Pace};
-use std::collections::BTreeMap;
+use common::profile::Profile;
+use common::Flow;
 use switch_core::cpu::Cpu;
 
 const USAGE: &str = "boot_nsp <container> <prod.keys> [title.keys] [max_steps]";
-
-fn report_profile(
-    pages: &BTreeMap<(u64, u32), u64>,
-    callers: &BTreeMap<(u64, u32), u64>,
-    sampled: u64,
-) {
-    let share = |count: u64| count as f64 * 100.0 / sampled as f64;
-    let mut ranked: Vec<_> = pages.iter().map(|(&key, &count)| (count, key)).collect();
-    ranked.sort_unstable_by(|a, b| b.cmp(a));
-
-    println!("--- profile: {sampled} samples ---");
-    let mut by_thread: BTreeMap<u64, u64> = BTreeMap::new();
-    for (count, (thread, _)) in &ranked {
-        *by_thread.entry(*thread).or_default() += count;
-    }
-    let mut threads: Vec<_> = by_thread.into_iter().map(|(t, c)| (c, t)).collect();
-    threads.sort_unstable_by(|a, b| b.cmp(a));
-    for (count, thread) in threads.iter().take(8) {
-        println!("  thread {thread:#x}: {:.1}%", share(*count));
-    }
-    for (count, (thread, page)) in ranked.iter().take(16) {
-        println!(
-            "  {:5.1}%  thread {thread:#x}  {page:#010x}..{:#010x}",
-            share(*count),
-            page + 0x1000,
-        );
-    }
-
-    let mut by_caller: Vec<_> = callers.iter().map(|(&key, &count)| (count, key)).collect();
-    by_caller.sort_unstable_by(|a, b| b.cmp(a));
-    println!("--- by return address ---");
-    for (count, (thread, at)) in by_caller.iter().take(16) {
-        println!(
-            "  {:5.1}%  thread {thread:#x}  lr {at:#010x}",
-            share(*count)
-        );
-    }
-}
 
 fn main() {
     let args = common::container_args(USAGE);
@@ -66,34 +28,23 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-
-    // The save-data quota comes from the Control NCA's NACP.
-    match title.control() {
-        Ok(control) => {
-            let quota = switch_core::cpu::SaveDataQuota::from(&control.nacp);
-            println!(
-                "save data: {} bytes (+{} journal), extendable to {} (+{}); \
-                 cache storage: {} x {} bytes, all from the NACP",
-                quota.size,
-                quota.journal_size,
-                quota.size_max,
-                quota.journal_size_max,
-                quota.cache_storage_index_max,
-                quota.cache_storage_size_max,
-            );
-            cpu.set_save_data_quota(quota);
-            cpu.set_add_on_content_base_id(control.nacp.add_on_content_base_id);
-        }
-        Err(e) => println!("no control data ({e}): using default save sizes"),
+    let booted = title.boot(&mut cpu);
+    if let Some(quota) = booted.quota {
+        println!(
+            "save data: {} bytes (+{} journal), extendable to {} (+{}); \
+             cache storage: {} x {} bytes, all from the NACP",
+            quota.size,
+            quota.journal_size,
+            quota.size_max,
+            quota.journal_size_max,
+            quota.cache_storage_index_max,
+            quota.cache_storage_size_max,
+        );
     }
-
-    title.mount_romfs(&mut cpu);
-    common::load_fallback_font(&mut cpu);
-    let registered = common::register_firmware(&mut cpu, &title.keys);
-    if registered > 0 {
-        println!("registered {registered} system data archive(s)");
+    if booted.archives > 0 {
+        println!("registered {} system data archive(s)", booted.archives);
     }
-    for module in title.boot(&mut cpu) {
+    for module in &booted.modules {
         println!(
             "module base={:#010x} entry={:#010x}",
             module.base, module.entry
@@ -102,18 +53,9 @@ fn main() {
 
     let mut debug = common::Debug::from_env();
     debug.arm(&mut cpu);
-    let profile = common::env_u64("PROFILE", 0);
-    let mut pages: BTreeMap<(u64, u32), u64> = BTreeMap::new();
-    // Keyed by return address, which names the caller of a hot leaf like `memcpy`.
-    let mut callers: BTreeMap<(u64, u32), u64> = BTreeMap::new();
-    let mut sampled = 0u64;
+    let mut profile = Profile::new(common::env_u64("PROFILE", 0), 0);
     let mut press = common::Press::from_env();
-    // Without sampling or watchpoints the run uses the block translator, like the frontend.
-    let pace = if debug.stepwise() || profile > 0 {
-        Pace::Instructions
-    } else {
-        Pace::Blocks
-    };
+    let pace = debug.pace(profile.is_on());
     common::apply_no_draw(&mut cpu);
     let cores = common::start_cores(&mut cpu);
     let stop_frame = common::env_u64("STOP_FRAME", u64::MAX);
@@ -136,12 +78,7 @@ fn main() {
         if let Some(press) = press.as_mut() {
             press.tick(cpu, done);
         }
-        if profile > 0 && done % profile == 0 {
-            let thread = cpu.current_thread_handle();
-            *pages.entry((thread, cpu.get_pc() & !0xFFF)).or_default() += 1;
-            *callers.entry((thread, cpu.read_x(30) as u32)).or_default() += 1;
-            sampled += 1;
-        }
+        profile.tick(cpu, done);
         Flow::Continue
     });
 
@@ -170,11 +107,6 @@ fn main() {
             common::write_ppm(&out, &cpu.nv.gpu.framebuffer);
         }
     }
-    if sampled > 0 {
-        report_profile(&pages, &callers, sampled);
-    }
-    println!("--- program console output ({} bytes) ---", cpu.out.len());
-    for line in String::from_utf8_lossy(&cpu.out).lines().take(80) {
-        println!("  {line}");
-    }
+    profile.report();
+    common::print_console(&cpu, 80);
 }

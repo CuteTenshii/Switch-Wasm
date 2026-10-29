@@ -34,7 +34,9 @@ fn main() {
     let booted = program.boot(&mut cpu);
 
     // Two frames of startup, so what follows is a steady-state frame.
-    common::run_to(&mut cpu, u64::MAX, |cpu| cpu.nv.gpu.frames >= 2);
+    if common::reach_frame(&mut cpu, 2, u64::MAX).is_none() {
+        return;
+    }
 
     let detail = std::env::args().any(|arg| arg == "--instructions");
     let mut by_pc: BTreeMap<u32, u64> = BTreeMap::new();

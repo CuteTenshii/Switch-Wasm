@@ -20,7 +20,9 @@ fn main() {
     program.boot(&mut cpu);
 
     // Two frames of startup, so what follows is a steady-state frame.
-    common::run_to(&mut cpu, u64::MAX, |cpu| cpu.nv.gpu.frames >= 2);
+    if common::reach_frame(&mut cpu, 2, u64::MAX).is_none() {
+        return;
+    }
 
     let mut seen: HashMap<u32, u64> = HashMap::new();
     let start = cpu.nv.gpu.frames;

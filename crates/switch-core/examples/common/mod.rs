@@ -1,9 +1,14 @@
 //! Scaffolding shared by the examples: argument handling, key loading,
 //! booting, driving the machine, and writing a frame out.
+// Every example compiles its own copy of this module and uses only part of it.
 #![allow(dead_code)]
 
-/// Image metadata tables, for tools that speak in file names.
-pub mod romfs;
+/// The guest-state layout emitted blocks are recorded against.
+pub mod emit;
+/// Sampling where a run spends its instructions.
+pub mod profile;
+/// A module's dynamic symbol table.
+pub mod symbols;
 
 use std::env;
 use std::fs;
@@ -39,11 +44,21 @@ pub fn opt_num(n: usize) -> Option<u64> {
     env::args().nth(n)?.parse().ok()
 }
 
+/// A hexadecimal number, `0x` optional.
+pub fn parse_hex(text: &str) -> Option<u64> {
+    u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
+}
+
+/// A hexadecimal number that fits a guest address.
+pub fn parse_hex32(text: &str) -> Option<u32> {
+    u32::try_from(parse_hex(text)?).ok()
+}
+
 /// Parse a hexadecimal address (`0x` optional), or exit.
 pub fn hex(text: &str) -> u32 {
-    match u32::from_str_radix(text.trim().trim_start_matches("0x"), 16) {
-        Ok(value) => value,
-        Err(_) => {
+    match parse_hex32(text) {
+        Some(value) => value,
+        None => {
             eprintln!("{text:?} is not a hexadecimal address");
             std::process::exit(1)
         }
@@ -171,44 +186,46 @@ pub struct Booted {
     pub modules: Vec<switch_core::nso::LoadedNso>,
     /// System data archives registered from `SWITCH_FIRMWARE`.
     pub archives: usize,
+    /// The save quota from the title's NACP; `None` for homebrew or without control data.
+    pub quota: Option<switch_core::cpu::SaveDataQuota>,
 }
 
 impl Program {
+    pub fn is_homebrew(&self) -> bool {
+        matches!(self.form, Form::Homebrew(_))
+    }
+
     /// Boot into an already bootstrapped `cpu`.
     pub fn boot(&self, cpu: &mut Cpu) -> Booted {
-        if let Form::Retail(title) = &self.form {
-            title.mount_romfs(cpu);
-        }
-        match &self.font {
-            Some(bytes) => cpu.set_shared_font(bytes.clone()),
-            None => load_fallback_font(cpu),
-        }
         match &self.form {
+            Form::Retail(title) => title.boot_with_font(cpu, self.font.as_deref()),
             Form::Homebrew(image) => {
+                apply_docked(cpu);
+                load_font(cpu, self.font.as_deref());
                 cpu.boot_homebrew(image)
                     .unwrap_or_else(|e| die(&format!("booting the NRO: {e:?}")));
                 Booted {
                     modules: Vec::new(),
                     archives: 0,
-                }
-            }
-            Form::Retail(title) => {
-                // After the font (firmware fonts override it), before the modules.
-                let archives = register_firmware(cpu, &title.keys);
-                Booted {
-                    modules: title.boot(cpu),
-                    archives,
+                    quota: None,
                 }
             }
         }
     }
+}
 
-    /// The retail title behind this program; `None` for homebrew.
-    pub fn title(&self) -> Option<&Title> {
-        match &self.form {
-            Form::Retail(title) => Some(title),
-            Form::Homebrew(_) => None,
-        }
+/// `DOCKED=1` boots docked (1080p), as the frontend's dock toggle does.
+fn apply_docked(cpu: &mut Cpu) {
+    if env::var("DOCKED").is_ok() {
+        cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
+    }
+}
+
+/// The font named on the command line, or the fallback one.
+fn load_font(cpu: &mut Cpu, font: Option<&[u8]>) {
+    match font {
+        Some(bytes) => cpu.set_shared_font(bytes.to_vec()),
+        None => load_fallback_font(cpu),
     }
 }
 
@@ -391,8 +408,7 @@ pub fn stop_cores(cpu: &mut Cpu, cores: Vec<std::thread::JoinHandle<()>>) {
 
 /// A hexadecimal `u32` from the environment (`0x` optional).
 pub fn env_hex(name: &str) -> Option<u32> {
-    let raw = env::var(name).ok()?;
-    u32::from_str_radix(raw.trim().trim_start_matches("0x"), 16).ok()
+    parse_hex32(&env::var(name).ok()?)
 }
 
 /// A `lo:len` pair of hexadecimal addresses, as `(lo, lo + len)`.
@@ -409,20 +425,14 @@ pub fn env_spans(name: &str) -> Vec<(u32, u32)> {
 
 fn parse_span(raw: &str) -> Option<(u32, u32)> {
     let (lo, len) = raw.split_once(':')?;
-    let lo = u32::from_str_radix(lo.trim().trim_start_matches("0x"), 16).ok()?;
-    let len = u32::from_str_radix(len.trim().trim_start_matches("0x"), 16).ok()?;
-    Some((lo, lo.saturating_add(len)))
+    let lo = parse_hex32(lo)?;
+    Some((lo, lo.saturating_add(parse_hex32(len)?)))
 }
 
 /// A comma-separated list of hexadecimal `u32`s from the environment.
 pub fn env_hex_list(name: &str) -> Vec<u32> {
     env::var(name)
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .filter_map(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok())
-                .collect()
-        })
+        .map(|raw| raw.split(',').filter_map(parse_hex32).collect())
         .unwrap_or_default()
 }
 
@@ -634,6 +644,28 @@ pub fn run_to(cpu: &mut Cpu, budget: u64, mut until: impl FnMut(&Cpu) -> bool) -
     })
 }
 
+/// Run until frame `frame` is presented; `None`, after saying why, if it never is.
+pub fn reach_frame(cpu: &mut Cpu, frame: u64, budget: u64) -> Option<Run> {
+    let run = run_to(cpu, budget, |cpu| cpu.nv.gpu.frames >= frame);
+    if cpu.nv.gpu.frames >= frame {
+        return Some(run);
+    }
+    println!(
+        "never reached frame {frame}: stopped at {} after {} steps",
+        cpu.nv.gpu.frames, run.steps
+    );
+    report(cpu, &run);
+    None
+}
+
+/// The guest's console output, up to `lines` lines.
+pub fn print_console(cpu: &Cpu, lines: usize) {
+    println!("--- program console output ({} bytes) ---", cpu.out.len());
+    for line in String::from_utf8_lossy(&cpu.out).lines().take(lines) {
+        println!("  {line}");
+    }
+}
+
 /// Write a framebuffer as a binary PPM and report its lit and opaque pixel
 /// counts.
 pub fn write_ppm(path: impl AsRef<Path>, fb: &Framebuffer) -> usize {
@@ -715,19 +747,18 @@ struct DumpSpec {
 
 fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
     const DEFAULT_LEN: u32 = 0x40;
-    let parse = |text: &str| u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok();
     spec.split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
         .filter_map(|entry| {
             let (addr, len) = match entry.split_once(':') {
-                Some((addr, len)) => (addr, parse(len)? as u32),
+                Some((addr, len)) => (addr, parse_hex(len)? as u32),
                 None => (entry, DEFAULT_LEN),
             };
             // Search from the right so `x23+0x10` splits on the sign.
             let (base, offset) = match addr.rfind(['+', '-']).filter(|&i| i > 0) {
                 Some(i) => {
-                    let value = parse(&addr[i + 1..])? as i64;
+                    let value = parse_hex(&addr[i + 1..])? as i64;
                     let signed = if addr.as_bytes()[i] == b'-' {
                         -value
                     } else {
@@ -745,7 +776,7 @@ fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
                 "sp" => DumpBase::StackPointer,
                 "pc" => DumpBase::ProgramCounter,
                 name if name.starts_with('x') => DumpBase::Register(name[1..].parse().ok()?),
-                absolute => DumpBase::Absolute(parse(absolute)? as u32),
+                absolute => DumpBase::Absolute(parse_hex(absolute)? as u32),
             };
             Some(DumpSpec {
                 label: entry.to_string(),
@@ -885,6 +916,16 @@ impl Debug {
     /// Whether any knob needs [`Pace::Instructions`].
     pub fn stepwise(&self) -> bool {
         self.write_trap.is_some() || self.read_trap.is_some() || !self.watch_pc.is_empty()
+    }
+
+    /// [`Pace::Instructions`] when a knob or the caller's own per-instruction
+    /// work needs it; otherwise the block translator, as in the frontend.
+    pub fn pace(&self, caller_stepwise: bool) -> Pace {
+        if caller_stepwise || self.stepwise() {
+            Pace::Instructions
+        } else {
+            Pace::Blocks
+        }
     }
 
     /// Install the watchpoints; call after boot.
@@ -1088,7 +1129,7 @@ impl Title {
 
     /// Open the Program NCA in an `.nsp` or `.xci`, with any bundled ticket's
     /// title key.
-    pub fn open_container(
+    fn open_container(
         container: impl AsRef<Path>,
         prod: impl AsRef<Path>,
         title: Option<impl AsRef<Path>>,
@@ -1107,7 +1148,7 @@ impl Title {
     }
 
     /// Open a bare Program NCA, such as a system applet.
-    pub fn open_nca(
+    fn open_nca(
         container: impl AsRef<Path>,
         prod: impl AsRef<Path>,
         title: Option<impl AsRef<Path>>,
@@ -1160,7 +1201,7 @@ impl Title {
     }
 
     /// Mount this title's RomFS, streamed off disk, if it has one.
-    pub fn mount_romfs(&self, cpu: &mut Cpu) {
+    fn mount_romfs(&self, cpu: &mut Cpu) {
         match self.romfs_source() {
             Some(Ok(romfs)) => cpu.set_romfs_source(Box::new(romfs)),
             Some(Err(e)) => eprintln!("this title's RomFS could not be opened: {e}"),
@@ -1195,24 +1236,52 @@ impl Title {
     }
 
     /// Open this title's RomFS and read its metadata tables, or exit.
-    pub fn romfs(&self, usage_line: &str) -> (Box<dyn ByteSource>, romfs::Image) {
+    pub fn romfs(&self) -> (Box<dyn ByteSource>, switch_core::romfs::RomFsIndex) {
         let source = match self.romfs_source() {
             Some(Ok(source)) => source,
-            Some(Err(e)) => usage(&format!("this title's RomFS could not be opened: {e}")),
-            None => usage("this NCA has no RomFS section"),
+            Some(Err(e)) => die(&format!("this title's RomFS could not be opened: {e}")),
+            None => die("this NCA has no RomFS section"),
         };
-        match romfs::read(&*source) {
-            Ok(image) => (source, image),
-            Err(why) => usage(&format!("{why} ({usage_line})")),
+        match switch_core::romfs::RomFsIndex::read(&*source) {
+            Ok(index) => (source, index),
+            Err(e) => die(&format!(
+                "this title's RomFS metadata could not be read: {e}"
+            )),
         }
     }
 
-    /// Boot the title and return where each module landed.
-    pub fn boot(&self, cpu: &mut Cpu) -> Vec<switch_core::nso::LoadedNso> {
-        // `DOCKED=1` boots docked (1080p), as the frontend's dock toggle does.
-        if env::var("DOCKED").is_ok() {
-            cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
+    /// Boot the title as the frontend does: save quota, RomFS, font, system
+    /// archives, modules, add-on content.
+    pub fn boot(&self, cpu: &mut Cpu) -> Booted {
+        self.boot_with_font(cpu, None)
+    }
+
+    fn boot_with_font(&self, cpu: &mut Cpu, font: Option<&[u8]>) -> Booted {
+        let quota = match self.control() {
+            Ok(control) => {
+                let quota = switch_core::cpu::SaveDataQuota::from(&control.nacp);
+                cpu.set_save_data_quota(quota);
+                cpu.set_add_on_content_base_id(control.nacp.add_on_content_base_id);
+                Some(quota)
+            }
+            Err(e) => {
+                eprintln!("no control data ({e}): using default save sizes");
+                None
+            }
+        };
+        self.mount_romfs(cpu);
+        load_font(cpu, font);
+        // After the font (firmware fonts override it), before the modules.
+        let archives = register_firmware(cpu, &self.keys);
+        Booted {
+            modules: self.boot_modules(cpu),
+            archives,
+            quota,
         }
+    }
+
+    fn boot_modules(&self, cpu: &mut Cpu) -> Vec<switch_core::nso::LoadedNso> {
+        apply_docked(cpu);
         let program = switch_core::cpu::Program::parse(self.nca.program_id, self.exefs.clone())
             .unwrap_or_else(|e| die(&format!("the ExeFS is not a PFS0: {e}")));
         let loaded = cpu
@@ -1238,8 +1307,8 @@ impl Title {
 
 /// An update container, named by `UPDATE=<path.nsp>`. Its RomFS reads over
 /// the base container's.
-pub struct Update {
-    pub nca: switch_core::nca::Nca,
+struct Update {
+    nca: switch_core::nca::Nca,
     path: std::path::PathBuf,
     program: (u64, u64),
 }
@@ -1247,7 +1316,7 @@ pub struct Update {
 impl Update {
     /// The update `UPDATE=<path.nsp>` names, if any. Its title key goes into
     /// `keys`.
-    pub fn from_env(keys: &mut KeySet) -> Option<Update> {
+    fn from_env(keys: &mut KeySet) -> Option<Update> {
         let path = std::path::PathBuf::from(env::var("UPDATE").ok()?);
         let (program, nca) = open_program(&path, keys);
         if !nca.is_update() {
@@ -1257,11 +1326,6 @@ impl Update {
             ));
         }
         Some(Update { nca, path, program })
-    }
-
-    /// A fresh window over this update's Program NCA.
-    pub fn program_window(&self) -> switch_core::source::Window<switch_core::source::FileSource> {
-        program_window(&self.path, self.program.0, self.program.1)
     }
 }
 

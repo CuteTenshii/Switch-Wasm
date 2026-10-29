@@ -8,7 +8,7 @@ mod common;
 
 use std::path::Path;
 
-use common::{Flow, Pace};
+use common::Flow;
 use switch_core::cpu::Cpu;
 
 fn main() {
@@ -30,11 +30,7 @@ fn main() {
 
     let mut debug = common::Debug::from_env();
     debug.arm(&mut cpu);
-    let pace = if debug.stepwise() {
-        Pace::Instructions
-    } else {
-        Pace::Blocks
-    };
+    let pace = debug.pace(false);
     let run = common::drive(
         &mut cpu,
         pace,
@@ -58,11 +54,7 @@ fn main() {
         );
     }
 
-    println!("--- program console output ({} bytes) ---", cpu.out.len());
-    let out = String::from_utf8_lossy(&cpu.out);
-    for line in out.lines().take(60) {
-        println!("  {line}");
-    }
+    common::print_console(&cpu, 60);
     if let Ok(show) = std::env::var("SHOW") {
         match cpu.fs.file(&show) {
             Some(bytes) => {

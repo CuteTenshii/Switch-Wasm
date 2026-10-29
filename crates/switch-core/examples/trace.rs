@@ -58,5 +58,5 @@ fn main() {
             println!("  {pc:#010x}  {n}");
         }
     }
-    println!("--- console ---\n{}", String::from_utf8_lossy(&cpu.out));
+    common::print_console(&cpu, usize::MAX);
 }

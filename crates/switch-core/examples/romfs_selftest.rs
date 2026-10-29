@@ -104,30 +104,36 @@ fn first_difference(reference: &[u8], other: &[u8], at: u64) -> Option<Mismatch>
 }
 
 /// Ranges at file edges and around compression block boundaries.
-fn samples(image: &common::romfs::Image, window: u64, wanted: usize, rng: &mut Rng) -> Vec<Sample> {
+/// `files` are `(start, end, path)` within an image of `image_len` bytes.
+fn samples(
+    files: &[(u64, u64, &str)],
+    image_len: u64,
+    window: u64,
+    wanted: usize,
+    rng: &mut Rng,
+) -> Vec<Sample> {
     let mut out = Vec::new();
-    if image.files.is_empty() {
+    if files.iter().all(|&(start, end, _)| end <= start) {
         return out;
     }
     let clamp = |at: u64, len: u64| -> Option<(u64, u64)> {
-        let at = at.min(image.len.saturating_sub(1));
-        let len = len.min(image.len - at);
+        let at = at.min(image_len.saturating_sub(1));
+        let len = len.min(image_len - at);
         (len > 0).then_some((at, len))
     };
     while out.len() < wanted {
-        let file = &image.files[rng.below(image.files.len() as u64) as usize];
-        if file.size == 0 {
+        let (start, end, path) = files[rng.below(files.len() as u64) as usize];
+        if end <= start {
             continue;
         }
-        let end = file.start + file.size;
         let picks = [
-            (file.start, "a file's first bytes"),
+            (start, "a file's first bytes"),
             (end.saturating_sub(window), "a file's last bytes"),
             (
-                (file.start + BLOCK_HINT) & !(BLOCK_HINT - 1),
+                (start + BLOCK_HINT) & !(BLOCK_HINT - 1),
                 "across a block boundary",
             ),
-            (file.start + rng.below(file.size), "somewhere inside a file"),
+            (start + rng.below(end - start), "somewhere inside a file"),
         ];
         for (at, why) in picks {
             if out.len() == wanted {
@@ -139,7 +145,7 @@ fn samples(image: &common::romfs::Image, window: u64, wanted: usize, rng: &mut R
                 out.push(Sample {
                     at,
                     len,
-                    why: format!("{why}: {}", file.path),
+                    why: format!("{why}: {path}"),
                 });
             }
         }
@@ -154,7 +160,9 @@ fn main() {
     let window = u64::from(common::env_hex("WINDOW").unwrap_or(0x9000));
 
     let title = args.open();
-    let (real, image) = title.romfs(USAGE);
+    let (real, index) = title.romfs();
+    let image_len = real.len();
+    let files: Vec<(u64, u64, &str)> = index.files().collect();
     let canary = common::env_u64("INJECT", 0) != 0;
     let source: Box<dyn ByteSource> = if canary {
         println!(
@@ -165,28 +173,22 @@ fn main() {
     } else {
         real
     };
-    println!(
-        "RomFS: {:#x} bytes, {} files, data at {:#x}",
-        image.len,
-        image.files.len(),
-        image.data_offset
-    );
+    println!("RomFS: {image_len:#x} bytes, {} files", files.len());
 
     // A file extending past the image is a metadata fault, not a reader one.
-    let overrunning: Vec<&common::romfs::Entry> = image
-        .files
+    let overrunning: Vec<&(u64, u64, &str)> = files
         .iter()
-        .filter(|f| f.start.saturating_add(f.size) > image.len)
+        .filter(|&&(_, end, _)| end > image_len)
         .collect();
-    for file in &overrunning {
+    for (start, end, path) in &overrunning {
         println!(
-            "  extent past the end of the image: {} at {:#x} +{:#x}",
-            file.path, file.start, file.size
+            "  extent past the end of the image: {path} at {start:#x} +{:#x}",
+            end - start
         );
     }
 
     let mut rng = Rng(seed);
-    let samples = samples(&image, window, wanted, &mut rng);
+    let samples = samples(&files, image_len, window, wanted, &mut rng);
     let mut compared = 0u64;
     let mut failures = 0usize;
     for sample in &samples {
@@ -201,7 +203,7 @@ fn main() {
                 continue;
             }
         };
-        let far = (sample.at + image.len / 2) % image.len;
+        let far = (sample.at + image_len / 2) % image_len;
         let readings: [(&str, u64, bool, Option<u64>); 8] = [
             ("1-byte pieces", 1, false, None),
             ("3-byte pieces", 3, false, None),

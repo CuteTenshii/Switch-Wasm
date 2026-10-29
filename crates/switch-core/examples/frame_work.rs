@@ -151,17 +151,9 @@ fn main() {
     cpu.bootstrap();
     program.boot(&mut cpu);
 
-    let boot = common::run_to(&mut cpu, FRAME_BUDGET, |cpu| {
-        cpu.nv.gpu.frames >= WARMUP_FRAMES
-    });
-    if cpu.nv.gpu.frames < WARMUP_FRAMES {
-        println!(
-            "never presented {WARMUP_FRAMES} frames: stopped at {} after {} steps",
-            cpu.nv.gpu.frames, boot.steps
-        );
-        common::report(&cpu, &boot);
+    let Some(boot) = common::reach_frame(&mut cpu, WARMUP_FRAMES, FRAME_BUDGET) else {
         return;
-    }
+    };
     println!(
         "startup: {} instructions to frame {WARMUP_FRAMES}",
         boot.steps

@@ -8,46 +8,13 @@
 //! node tools/emit_difftest.mjs target/emit-selftest
 //! ```
 
+mod common;
+
+use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use switch_core::cpu::{defers, emits, Cpu, Layout, DISCARD_SLOT};
+use switch_core::cpu::{defers, emits, Cpu};
 use switch_core::disasm::disassemble;
-
-/// Guest state offsets in module memory, shared with `emit_difftest`.
-const REGS_AT: u32 = 0;
-const NZCV_AT: u32 = 0x1000;
-const READ_WATCH_LO_AT: u32 = 0x1004;
-const READ_WATCH_HI_AT: u32 = 0x1008;
-/// Where the pointer to the page table is (a real `Memory` boxes its table).
-const PAGES_AT: u32 = 0x100C;
-const WATCH_LO_AT: u32 = 0x1010;
-const WATCH_HI_AT: u32 = 0x1014;
-/// Where the pointer to the watched-page bitmap is.
-const WATCHED_AT: u32 = 0x1020;
-/// Where the guest `pc` is; unused here but required by `Layout`.
-const PC_AT: u32 = 0x1024;
-/// Fuel, read only by branches between blocks, which a single block never takes.
-const FUEL_AT: u32 = 0x1028;
-/// FPSR, zeroed before each case.
-const FPSR_AT: u32 = 0x102C;
-/// A zero word: the `Memory` address, so the offsets above are absolute.
-const MEMORY_AT: u32 = 0x1030;
-/// The `[u128; 32]` vector register file.
-const VREGS_AT: u32 = 0x2000;
-/// The exclusive monitor: address, armed flag, then two doublewords.
-const EXCLUSIVE_AT: u32 = 0x1040;
-/// `TPIDRRO_EL0` and `TPIDR_EL0`, past the monitor.
-const TPIDR_AT: u32 = 0x1060;
-const TPIDR_RW_AT: u32 = 0x1068;
-/// The core number (zero, so the clock is the `Cpu`'s own), the published
-/// clock's pointer and the chain's clock origin.
-const CORE_AT: u32 = 0x1070;
-const CLOCK_AT_AT: u32 = 0x1074;
-const ORIGIN_AT: u32 = 0x1078;
-
-/// The page table: one four-byte entry per 4 KiB of guest space, zero if unmapped.
-const TABLE_AT: u32 = 0x0010_0000;
-const TABLE_BYTES: u32 = (1 << 20) * 4;
 
 /// Where the mapped guest pages live, one 4 KiB slot each.
 const POOL_AT: u32 = TABLE_AT + TABLE_BYTES;
@@ -281,7 +248,9 @@ fn main() {
                     }
                     manifest.push_str(" !");
                     manifest.push_str(&memory_delta(&cpu, &start));
-                    manifest.push_str(&vreg_delta(&cpu, set == SPECIALS_SET));
+                    manifest.push_str(&emit::vreg_delta(&cpu, |i| {
+                        vreg_seed(i, set == SPECIALS_SET)
+                    }));
                     if set == SPECIALS_SET {
                         manifest.push_str(" specials");
                     }
@@ -312,41 +281,23 @@ fn main() {
         );
     }
 
-    let header = format!(
-        "regs_at {REGS_AT}\n\
-         nzcv_at {NZCV_AT}\n\
-         fpsr_at {FPSR_AT}\n\
-         read_watch_lo_at {READ_WATCH_LO_AT}\n\
-         read_watch_hi_at {READ_WATCH_HI_AT}\n\
-         watch_lo_at {WATCH_LO_AT}\n\
-         watch_hi_at {WATCH_HI_AT}\n\
-         watched_at {WATCHED_AT}\n\
-         pages_at {PAGES_AT}\n\
-         discard_slot {DISCARD_SLOT}\n\
-         pc_at {PC_AT}\n\
-         vregs_at {VREGS_AT}\n\
-         exclusive_at {EXCLUSIVE_AT}\n\
-         tpidr_at {TPIDR_AT}\n\
-         tpidr_rw_at {TPIDR_RW_AT}\n\
-         tpidr_values {TPIDR_SEED} {TPIDR_RW_SEED}\n\
-         origin_at {ORIGIN_AT}\n\
-         table_at {TABLE_AT}\n\
+    let header = emit::header()
+        + &format!(
+            "tpidr_values {TPIDR_SEED} {TPIDR_RW_SEED}\n\
          bitmap_at {BITMAP_AT}\n\
-         slots {}\n\
          code_at {CODE_AT}\n\
          read_watch {READ_WATCH_AT} {}\n\
          watch {WATCH_AT} {}\n\
          watched_page {WATCHED_PAGE_AT} {} {}\n\
          wasm_pages {}\n\
          {}",
-        Cpu::new().reg_slots().len(),
-        READ_WATCH_AT + READ_WATCH_BYTES,
-        WATCH_AT + WATCH_BYTES,
-        READONLY_ONE.0,
-        READONLY_TWO.0,
-        (BITMAP_AT + BITMAP_BYTES).div_ceil(64 * 1024),
-        page_lines(),
-    );
+            READ_WATCH_AT + READ_WATCH_BYTES,
+            WATCH_AT + WATCH_BYTES,
+            READONLY_ONE.0,
+            READONLY_TWO.0,
+            (BITMAP_AT + BITMAP_BYTES).div_ceil(64 * 1024),
+            page_lines(),
+        );
     std::fs::write(format!("{out_dir}/manifest.txt"), header + &manifest)
         .expect("cannot write the manifest");
 
@@ -361,36 +312,13 @@ fn main() {
     println!("now run: node tools/emit_difftest.mjs {out_dir}");
 }
 
-const LAYOUT: Layout = Layout {
-    regs: REGS_AT,
-    nzcv: NZCV_AT,
-    fpsr: FPSR_AT,
-    memory: MEMORY_AT,
-    pages: PAGES_AT,
-    read_watch_lo: READ_WATCH_LO_AT,
-    read_watch_hi: READ_WATCH_HI_AT,
-    watch_lo: WATCH_LO_AT,
-    watch_hi: WATCH_HI_AT,
-    watched: WATCHED_AT,
-    pc: PC_AT,
-    fuel: FUEL_AT,
-    vregs: VREGS_AT,
-    exclusive: EXCLUSIVE_AT,
-    tpidr: TPIDR_AT,
-    tpidr_rw: TPIDR_RW_AT,
-    core: CORE_AT,
-    clock_at: CLOCK_AT_AT,
-    origin: ORIGIN_AT,
-};
-
-/// Vector registers start each case at these, so a wrong register or half shows.
+/// [`emit::vreg_seed`], or IEEE special values for the specials set.
 fn vreg_seed(i: u8, specials: bool) -> u128 {
     if specials {
-        return special_floats(i);
+        special_floats(i)
+    } else {
+        emit::vreg_seed(i)
     }
-    let lo = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(2 * u64::from(i) + 1);
-    let hi = 0xC2B2_AE3D_27D4_EB4Fu64.wrapping_mul(2 * u64::from(i) + 2);
-    u128::from(hi) << 64 | u128::from(lo)
 }
 
 /// Signed zeros, infinities, denormals and unit values: as doubles in the even registers, as
@@ -426,18 +354,6 @@ fn special_floats(i: u8) -> u128 {
         }
     };
     u128::from(half(pick + 5)) << 64 | u128::from(half(pick))
-}
-
-/// ` vN:hex` for each vector register the case changed from its seed.
-fn vreg_delta(cpu: &Cpu, specials: bool) -> String {
-    let mut out = String::new();
-    for i in 0..32 {
-        let v = cpu.read_vreg(i);
-        if v != vreg_seed(i, specials) {
-            let _ = write!(out, " v{i}:{v:032x}");
-        }
-    }
-    out
 }
 
 /// The byte at guest address `a`, distinct across load widths and signs.
@@ -575,7 +491,6 @@ const SEEDS: usize = 12;
 /// The set whose vector registers hold zeros, infinities and NaNs instead of noise.
 const SPECIALS_SET: usize = SEEDS - 1;
 
-/// Seed flags first (the preamble clobbers `X0`), then the register file.
 /// Arm the monitor for an exclusive load or store at the address its base register holds:
 /// not at all, with what memory holds, or with something else, by seed set.
 fn arm_monitor(cpu: &mut Cpu, insn: u32, set: usize) {
@@ -598,6 +513,7 @@ fn arm_monitor(cpu: &mut Cpu, insn: u32, set: usize) {
     }
 }
 
+/// Seed flags first (the preamble clobbers `X0`), then the register file.
 fn seed(cpu: &mut Cpu, set: usize, nzcv: u8) {
     cpu.set_reg(0, u64::from(nzcv) << 28);
     cpu.set_pc(CODE_AT);

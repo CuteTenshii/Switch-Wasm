@@ -1,18 +1,18 @@
 //! `screenshot_title` with the GPU backend installed; `cmp` the two PPMs to
 //! check the backend against the software reference:
-//! `screenshot_gpu <container> <prod.keys> [title.keys] <out.ppm> [frame]`.
+//! `screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]`.
 //! `PRESS=<buttons>@<interval>` taps buttons on the way, as in `boot_nsp`.
 #[path = "../../switch-core/examples/common/mod.rs"]
 mod common;
 
-use common::{Flow, Pace};
+use common::Flow;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "screenshot_gpu <container> <prod.keys> [title.keys] <out.ppm> [frame]";
+const USAGE: &str = "screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]";
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let title = args.open();
+    let args = common::program_args(USAGE);
+    let program = args.open_program();
     let out = args.need(0).to_string();
     let want = args.rest_num(1).unwrap_or(1);
 
@@ -26,15 +26,9 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    // `DOCKED=1` docks before boot; `DOCK_AT=<frame>` docks after that frame.
-    if std::env::var("DOCKED").is_ok() {
-        cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
-    }
+    // Booting docks at once for `DOCKED=1`; `DOCK_AT=<frame>` docks after that frame.
     let dock_at = common::env_u64("DOCK_AT", u64::MAX);
-    title.mount_romfs(&mut cpu);
-    common::load_fallback_font(&mut cpu);
-    common::register_firmware(&mut cpu, &title.keys);
-    title.boot(&mut cpu);
+    program.boot(&mut cpu);
 
     // Installed on the session so it precedes and covers every channel.
     if let Some(gpu) = gpu.take() {
@@ -44,11 +38,7 @@ fn main() {
     let mut debug = common::Debug::from_env();
     debug.arm(&mut cpu);
     let mut press = common::Press::from_env();
-    let pace = if debug.stepwise() {
-        Pace::Instructions
-    } else {
-        Pace::Blocks
-    };
+    let pace = debug.pace(false);
     let run = common::drive(
         &mut cpu,
         pace,

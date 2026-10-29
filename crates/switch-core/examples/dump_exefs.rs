@@ -4,17 +4,6 @@ mod common;
 
 use std::fs;
 
-fn read_u32(d: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
-}
-fn read_u64(d: &[u8], at: usize) -> u64 {
-    read_u32(d, at) as u64 | ((read_u32(d, at + 4) as u64) << 32)
-}
-fn read_cstr(d: &[u8], off: usize) -> String {
-    let end = d[off..].iter().position(|&b| b == 0).unwrap_or(0) + off;
-    String::from_utf8_lossy(&d[off..end]).into_owned()
-}
-
 const USAGE: &str = "dump_exefs <container> <prod.keys> [title.keys] <out_dir>";
 
 fn main() {
@@ -50,47 +39,17 @@ fn main() {
             m.bss_size, image_end
         );
 
-        let d = &flat[..];
-        let magic = 0x3044_4f4du32.to_le_bytes();
-        if let Some(mod0) = d.windows(4).position(|w| w == magic) {
-            let dyn_off = mod0 + read_u32(d, mod0 + 4) as usize;
-            let (mut symtab, mut strtab, mut hash) = (0u64, 0u64, 0u64);
-            let mut off = dyn_off;
-            while off + 16 <= d.len() {
-                let tag = read_u64(d, off);
-                let val = read_u64(d, off + 8);
-                off += 16;
-                if tag == 0 {
-                    break;
-                }
-                match tag {
-                    0x06 => symtab = val,
-                    0x05 => strtab = val,
-                    0x04 => hash = val,
-                    _ => {}
-                }
-            }
-            if symtab != 0 && strtab != 0 && hash != 0 {
-                let nchain = read_u32(d, hash as usize + 4) as usize;
-                for i in 0..nchain {
-                    let so = symtab as usize + i * 24;
-                    if so + 24 > d.len() {
-                        break;
-                    }
-                    let n = read_u32(d, so) as usize;
-                    if n == 0 {
-                        continue;
-                    }
-                    let sname = read_cstr(d, strtab as usize + n);
-                    let value = read_u64(d, so + 8) as u32;
-                    let size = read_u64(d, so + 16) as u32;
-                    if value == 0 {
-                        continue;
-                    }
-                    syms.push((base + value, size, sname, name.to_string()));
-                }
-                println!("  {} symbols ({} chain entries)", syms.len(), nchain);
-            }
+        let found = common::symbols::read(&flat);
+        if !found.is_empty() {
+            println!("  {} symbols", found.len());
+        }
+        for sym in found {
+            syms.push((
+                base + sym.value as u32,
+                sym.size as u32,
+                sym.name,
+                name.to_string(),
+            ));
         }
         base = (image_end + 0xfff) & !0xfff;
     }

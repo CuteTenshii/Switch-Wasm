@@ -1,31 +1,25 @@
-//! Run a retail title with the JIT on and off in lockstep and report the first
+//! Run a program with the JIT on and off in lockstep and report the first
 //! slice after which the two machines disagree. The interpreter is the
 //! reference.
 //!
-//! Usage: jit_bisect <container> <prod.keys> [title.keys] [max_steps] [window]
+//! Usage: jit_bisect <target> [prod.keys] [title.keys] [max_steps] [window] [font.ttf]
 //!
+//! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
 //! Exact only until the first thread switch: the two engines can interleave
 //! threads differently and both be correct.
 mod common;
 
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "jit_bisect <container> <prod.keys> [title.keys] [max_steps] [window]";
+const USAGE: &str = "jit_bisect <target> [prod.keys] [title.keys] [max_steps] [window] [font.ttf]";
 
 const SLICE: u64 = 4096;
 
-fn boot(title: &common::Title, jit: bool) -> Cpu {
+fn boot(program: &common::Program, jit: bool) -> Cpu {
     let mut cpu = Cpu::new();
     cpu.bootstrap();
     cpu.set_jit_enabled(jit);
-    if let Ok(control) = title.control() {
-        cpu.set_save_data_quota(switch_core::cpu::SaveDataQuota::from(&control.nacp));
-        cpu.set_add_on_content_base_id(control.nacp.add_on_content_base_id);
-    }
-    title.mount_romfs(&mut cpu);
-    common::load_fallback_font(&mut cpu);
-    common::register_firmware(&mut cpu, &title.keys);
-    title.boot(&mut cpu);
+    program.boot(&mut cpu);
     cpu
 }
 
@@ -45,8 +39,16 @@ fn advance(cpu: &mut Cpu, steps: u64) -> bool {
     !cpu.halted
 }
 
+/// FNV-1a, so bulk state fits on one comparable line.
+fn checksum(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(0xCBF2_9CE4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01B3)
+    })
+}
+
 /// One fact per line, so a disagreement prints as the differing lines.
 fn state(cpu: &Cpu) -> Vec<String> {
+    let fb = &cpu.nv.gpu.framebuffer;
     let mut lines = vec![
         format!(
             "steps={} cycles={} halted={}",
@@ -57,9 +59,25 @@ fn state(cpu: &Cpu) -> Vec<String> {
             cpu.locate(cpu.get_pc()),
             cpu.current_thread_handle()
         ),
+        format!("nzcv={:#x} sp={:#x}", cpu.nzcv(), cpu.sp()),
+        format!(
+            "console: {} bytes, checksum {:#x}",
+            cpu.out.len(),
+            checksum(cpu.out.iter().copied())
+        ),
+        format!(
+            "frames={} framebuffer {}x{} checksum {:#x}",
+            cpu.nv.gpu.frames,
+            fb.width,
+            fb.height,
+            checksum(fb.pixels.iter().flat_map(|p| p.to_le_bytes()))
+        ),
     ];
     for i in 0..=30u8 {
         lines.push(format!("x{i}={:#x}", cpu.read_x(i)));
+    }
+    for i in 0..32u8 {
+        lines.push(format!("v{i}={:#x}", cpu.read_vreg(i)));
     }
     lines.extend(cpu.thread_dump().lines().map(str::to_owned));
     lines
@@ -76,19 +94,37 @@ fn differences(reference: &[String], translated: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The translator's work counters over the run so far.
+fn print_jit_stats(cpu: &Cpu) {
+    let stats = cpu.jit_stats();
+    let per = |n: u64, of: u64| if of == 0 { 0.0 } else { n as f64 / of as f64 };
+    println!(
+        "translator: {} blocks, {} translated, {} entered ({:.0}x each), {} invalidated; \
+         {} instructions fell back to the interpreter ({:.2}% of the run)",
+        stats.blocks,
+        stats.translated,
+        stats.executed,
+        per(stats.executed, stats.translated),
+        stats.invalidated,
+        stats.interpreted,
+        per(stats.interpreted, cpu.steps) * 100.0,
+    );
+}
+
 fn main() {
-    let args = common::container_args(USAGE);
+    let args = common::program_args(USAGE);
     let max_steps = args.rest_num(0).unwrap_or(2_000_000_000);
     let window = args.rest_num(1).unwrap_or(1_000_000).max(SLICE);
-    let title = args.open();
+    let program = args.open_program();
 
     println!("pass 1: comparing every {window} instructions, up to {max_steps}");
-    let mut reference = boot(&title, false);
-    let mut translated = boot(&title, true);
+    let mut reference = boot(&program, false);
+    let mut translated = boot(&program, true);
     let mut at = 0u64;
     let diverged = loop {
         if at >= max_steps {
             println!("no disagreement in {at} instructions");
+            print_jit_stats(&translated);
             return;
         }
         let a = advance(&mut reference, window);
@@ -100,6 +136,7 @@ fn main() {
         at += window;
         if !a || !b {
             println!("both machines stopped at {at} instructions, in agreement");
+            print_jit_stats(&translated);
             return;
         }
     };
@@ -108,8 +145,8 @@ fn main() {
     );
 
     println!("pass 2: booting both again and comparing every {SLICE} instructions from {diverged}");
-    let mut reference = boot(&title, false);
-    let mut translated = boot(&title, true);
+    let mut reference = boot(&program, false);
+    let mut translated = boot(&program, true);
     advance(&mut reference, diverged);
     advance(&mut translated, diverged);
     let mut at = diverged;

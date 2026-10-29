@@ -1,19 +1,24 @@
-//! Boot a title (NSP, XCI or Program NCA) and write its Nth presented frame to a PPM:
-//! `screenshot_title <container> <prod.keys> [title.keys] <out.ppm> [frame]`.
+//! Boot a program and write its Nth presented frame to a PPM:
+//! `screenshot_title <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]`.
 //!
+//! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
 //! Knobs beyond [`common::Debug`]: `SWITCH_FIRMWARE`, `STEPS`, `PROFILE`, `STACKS`,
 //! `COVER`, `WATCH_MEM`, `SCAN_MEM`, `DUMP_VERTS`, `DUMP_SURFACE`, `POKE_U32`,
 //! `POKE_AT`, `GATE_SNIFF`, `FIND_MAGIC`, and `PRESS` as `boot_nsp` takes it.
 mod common;
 
-use common::{Flow, Pace};
-use std::collections::HashMap;
+use common::profile::Profile;
+use common::Flow;
 use std::env;
-use switch_core::cpu::Cpu;
 
-const USAGE: &str = "screenshot_title <container> <prod.keys> [title.keys] <out.ppm> [frame]";
+const USAGE: &str =
+    "screenshot_title <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]";
 
+/// Steps between the periodic memory checks and pokes, and the `STACKS` sample interval.
 const DEFAULT_INTERVAL: u64 = 4096;
+
+/// The default `STEPS` for an `.nro`.
+const HOMEBREW_STEPS: u64 = 200_000_000;
 
 /// A hex `<lo>:<hi>` pair.
 fn env_bounds(name: &str) -> Option<(u32, u32)> {
@@ -22,70 +27,15 @@ fn env_bounds(name: &str) -> Option<(u32, u32)> {
     Some((common::hex(lo), common::hex(hi)))
 }
 
-#[derive(Default)]
-struct Profile {
-    /// Samples per (thread index, pc).
-    hot: HashMap<(usize, u32), u64>,
-    /// Return address to (count, shallowest depth).
-    frames: HashMap<u32, (u64, usize)>,
-    /// Samples per thread index.
-    share: [u64; 32],
-}
-
-impl Profile {
-    fn sample(&mut self, cpu: &Cpu, stacks: bool) {
-        let thread = cpu.current_thread_index();
-        if thread < self.share.len() {
-            self.share[thread] += 1;
-        }
-        *self.hot.entry((thread, cpu.get_pc())).or_default() += 1;
-        if stacks {
-            for (depth, frame) in cpu.backtrace(14).into_iter().enumerate() {
-                let slot = self.frames.entry(frame).or_insert((0, depth));
-                slot.0 += 1;
-                slot.1 = slot.1.min(depth);
-            }
-        }
-    }
-
-    fn report(&self) {
-        println!("[threads] sampled share = {:?}", &self.share[..]);
-        let mut stacks: Vec<_> = self.frames.iter().collect();
-        stacks.sort_by_key(|&(_, &(count, _))| std::cmp::Reverse(count));
-        for (at, (count, shallowest)) in stacks.into_iter().take(34) {
-            println!("[stack] {at:#x} {count} (shallowest depth {shallowest})");
-        }
-
-        let mut by_page: HashMap<u32, u64> = HashMap::new();
-        for (&(_, pc), &count) in &self.hot {
-            *by_page.entry(pc & !0xFFF).or_default() += count;
-        }
-        let mut pages: Vec<_> = by_page.into_iter().collect();
-        pages.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
-        for (page, count) in pages.into_iter().take(20) {
-            println!("[hot-page] {page:#x} {count}");
-        }
-
-        let mut top: Vec<_> = self.hot.iter().collect();
-        top.sort_by_key(|&(_, &count)| std::cmp::Reverse(count));
-        for (&(thread, pc), count) in top.into_iter().take(10) {
-            println!("[hot] thread {thread} pc={pc:#x} {count}");
-        }
-    }
-}
-
 fn main() {
-    let args = common::container_args(USAGE);
-    let title = args.open();
+    let args = common::program_args(USAGE);
+    let program = args.open_program();
     let out = args.need(0).to_string();
     let want = args.rest_num(1).unwrap_or(1);
 
-    let mut cpu = Cpu::new();
+    let mut cpu = switch_core::cpu::Cpu::new();
     cpu.bootstrap();
-    title.mount_romfs(&mut cpu);
-    common::load_fallback_font(&mut cpu);
-    common::register_firmware(&mut cpu, &title.keys);
-    title.boot(&mut cpu);
+    program.boot(&mut cpu);
 
     let mut debug = common::Debug::from_env();
     debug.arm(&mut cpu);
@@ -96,7 +46,7 @@ fn main() {
         (0, true) => DEFAULT_INTERVAL,
         (given, _) => given,
     };
-    let mut profile = Profile::default();
+    let mut profile = Profile::new(interval, u64::from(stacks));
 
     let cover = env_bounds("COVER");
     let mut covered: Vec<bool> = cover
@@ -109,16 +59,17 @@ fn main() {
     let gate_sniff = env::var("GATE_SNIFF").is_ok();
     let mut gate: Option<u32> = None;
 
-    let pace =
-        if debug.stepwise() || interval > 0 || cover.is_some() || poke.is_some() || gate_sniff {
-            Pace::Instructions
-        } else {
-            Pace::Blocks
-        };
+    // Homebrew that never presents the frame stops; a retail title needs billions of steps.
+    let default_steps = if program.is_homebrew() {
+        HOMEBREW_STEPS
+    } else {
+        u64::MAX
+    };
+    let pace = debug.pace(profile.is_on() || cover.is_some() || poke.is_some() || gate_sniff);
     let run = common::drive(
         &mut cpu,
         pace,
-        common::env_u64("STEPS", u64::MAX),
+        common::env_u64("STEPS", default_steps),
         |cpu, done| {
             if cpu.nv.gpu.frames >= want {
                 return Flow::Stop;
@@ -127,9 +78,7 @@ fn main() {
             if let Some(press) = press.as_mut() {
                 press.tick(cpu, done);
             }
-            if interval > 0 && done % interval == 0 {
-                profile.sample(cpu, stacks);
-            }
+            profile.tick(cpu, done);
             if let Some(at) = watch_mem {
                 if !seen_nonzero
                     && done % DEFAULT_INTERVAL == 0
@@ -252,9 +201,7 @@ fn main() {
         }
     }
 
-    if interval > 0 {
-        profile.report();
-    }
+    profile.report();
     println!("[bt] {:#x} <- {:x?}", cpu.get_pc(), cpu.backtrace(12));
     print!("{}", cpu.thread_dump());
     common::report(&cpu, &run);

@@ -160,25 +160,13 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    title.mount_romfs(&mut cpu);
-    common::load_fallback_font(&mut cpu);
-    common::register_firmware(&mut cpu, &title.keys);
     title.boot(&mut cpu);
 
-    let boot = common::run_to(&mut cpu, BOOT_BUDGET, |cpu| cpu.nv.gpu.frames >= want_frame);
-    if cpu.nv.gpu.frames < want_frame {
-        println!(
-            "never reached frame {want_frame}: stopped at {} after {} steps",
-            cpu.nv.gpu.frames, boot.steps
-        );
-        common::report(&cpu, &boot);
+    let Some(boot) = common::reach_frame(&mut cpu, want_frame, BOOT_BUDGET) else {
         return;
-    }
+    };
 
-    let frames: u64 = std::env::var("FRAMES")
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(1);
+    let frames = common::env_u64("FRAMES", 1);
     uses::record();
     let target = cpu.nv.gpu.frames + frames;
     let frame = common::run_to(&mut cpu, FRAME_BUDGET * frames, |cpu| {

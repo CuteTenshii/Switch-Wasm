@@ -11,85 +11,12 @@ mod common;
 
 const USAGE: &str = "emit_difftest <target> [prod.keys] [title.keys] [font.ttf]";
 
+use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
 use common::{Flow, Pace};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
-use switch_core::cpu::{defers, Cpu, Layout, Refused, DISCARD_SLOT};
+use switch_core::cpu::{defers, Cpu, Refused};
 use switch_core::disasm::disassemble;
-
-/// Guest state offset in the module's memory.
-const REGS_AT: u32 = 0;
-const NZCV_AT: u32 = 4096;
-const READ_WATCH_LO_AT: u32 = 4100;
-const READ_WATCH_HI_AT: u32 = 4104;
-const WATCH_LO_AT: u32 = 4108;
-const WATCH_HI_AT: u32 = 4112;
-const WATCHED_AT: u32 = 4124;
-const PAGES_AT: u32 = 4128;
-/// Guest `pc` offset, written by a taken branch.
-const PC_AT: u32 = 4132;
-/// Fuel, read only by branches between blocks, which a single block never takes.
-const FUEL_AT: u32 = 4136;
-const FPSR_AT: u32 = 4140;
-/// A zero word: the `Memory` address, so the offsets above are absolute.
-const MEMORY_AT: u32 = 4144;
-/// The `[u128; 32]` vector register file.
-const VREGS_AT: u32 = 8192;
-/// `TPIDRRO_EL0` and `TPIDR_EL0`.
-const TPIDR_AT: u32 = 4192;
-const TPIDR_RW_AT: u32 = 4200;
-/// The core number (zero, so the clock is the `Cpu`'s own), the published
-/// clock's pointer and the chain's clock origin.
-const CORE_AT: u32 = 4208;
-const CLOCK_AT_AT: u32 = 4212;
-const ORIGIN_AT: u32 = 4216;
-/// The exclusive monitor: address, armed flag, then two doublewords.
-const EXCLUSIVE_AT: u32 = 4160;
-
-/// Page table offset: one four-byte entry per 4 KiB page.
-const TABLE_AT: u32 = 0x0010_0000;
-const TABLE_BYTES: u32 = (1 << 20) * 4;
-
-const LAYOUT: Layout = Layout {
-    regs: REGS_AT,
-    nzcv: NZCV_AT,
-    fpsr: FPSR_AT,
-    memory: MEMORY_AT,
-    pages: PAGES_AT,
-    read_watch_lo: READ_WATCH_LO_AT,
-    read_watch_hi: READ_WATCH_HI_AT,
-    watch_lo: WATCH_LO_AT,
-    watch_hi: WATCH_HI_AT,
-    watched: WATCHED_AT,
-    pc: PC_AT,
-    fuel: FUEL_AT,
-    vregs: VREGS_AT,
-    exclusive: EXCLUSIVE_AT,
-    tpidr: TPIDR_AT,
-    tpidr_rw: TPIDR_RW_AT,
-    core: CORE_AT,
-    clock_at: CLOCK_AT_AT,
-    origin: ORIGIN_AT,
-};
-
-/// Vector registers start each case at these, so a wrong register or half shows.
-fn vreg_seed(i: u8) -> u128 {
-    let lo = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(2 * u64::from(i) + 1);
-    let hi = 0xC2B2_AE3D_27D4_EB4Fu64.wrapping_mul(2 * u64::from(i) + 2);
-    u128::from(hi) << 64 | u128::from(lo)
-}
-
-/// ` vN:hex` for each vector register the case changed from its seed.
-fn vreg_delta(cpu: &Cpu) -> String {
-    let mut out = String::new();
-    for i in 0..32 {
-        let v = cpu.read_vreg(i);
-        if v != vreg_seed(i) {
-            let _ = write!(out, " v{i}:{v:032x}");
-        }
-    }
-    out
-}
 
 /// Encodings listed in the refusal report.
 const ROWS: usize = 20;
@@ -167,7 +94,7 @@ fn main() {
 
         // Step the interpreter until control leaves the straight-line path.
         for i in 0..32 {
-            cpu.set_vreg(i, vreg_seed(i));
+            cpu.set_vreg(i, emit::vreg_seed(i));
         }
         let before = cpu.reg_slots();
         let nzcv_before = cpu.nzcv();
@@ -232,35 +159,18 @@ fn main() {
         }
         // No memory delta, but the marker is still required.
         manifest.push_str(" !");
-        manifest.push_str(&vreg_delta(&cpu));
+        manifest.push_str(&emit::vreg_delta(&cpu, emit::vreg_seed));
         let _ = write!(manifest, " fpsr:{fpsr_before:x}:{:x}", cpu.fpsr());
         let _ = write!(manifest, " tpidr:{tpidr:x}:{tpidr_rw:x} clock:{origin:x}");
         manifest.push('\n');
         cases += 1;
     }
 
-    let header = format!(
-        "regs_at {REGS_AT}\n\
-         nzcv_at {NZCV_AT}\n\
-         fpsr_at {FPSR_AT}\n\
-         read_watch_lo_at {READ_WATCH_LO_AT}\n\
-         read_watch_hi_at {READ_WATCH_HI_AT}\n\
-         watch_lo_at {WATCH_LO_AT}\n\
-         watch_hi_at {WATCH_HI_AT}\n\
-         watched_at {WATCHED_AT}\n\
-         pages_at {PAGES_AT}\n\
-         discard_slot {DISCARD_SLOT}\n\
-         pc_at {PC_AT}\n\
-         tpidr_at {TPIDR_AT}\n\
-         tpidr_rw_at {TPIDR_RW_AT}\n\
-         origin_at {ORIGIN_AT}\n\
-         vregs_at {VREGS_AT}\n\
-         table_at {TABLE_AT}\n\
-         slots {}\n\
-         wasm_pages {}\n",
-        before_len(),
-        (TABLE_AT + TABLE_BYTES).div_ceil(64 * 1024),
-    );
+    let header = emit::header()
+        + &format!(
+            "wasm_pages {}\n",
+            (TABLE_AT + TABLE_BYTES).div_ceil(64 * 1024)
+        );
     std::fs::write(format!("{out_dir}/manifest.txt"), header + &manifest)
         .expect("cannot write the manifest");
 
@@ -283,8 +193,4 @@ fn main() {
     }
 
     println!("now run: node tools/emit_difftest.mjs {out_dir}");
-}
-
-fn before_len() -> usize {
-    Cpu::new().reg_slots().len()
 }

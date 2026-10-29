@@ -22,24 +22,17 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    title.mount_romfs(&mut cpu);
-    common::load_fallback_font(&mut cpu);
     title.boot(&mut cpu);
 
-    let ring_from = env::var("RING_FROM")
-        .ok()
-        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+    let ring_from = common::env_hex("RING_FROM");
     let mut recording = ring_from.is_none();
-    let ring_min = env::var("RING_MIN")
-        .ok()
-        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        .unwrap_or(0);
+    let ring_min = common::env_hex("RING_MIN").unwrap_or(0);
     let mut ring: std::collections::VecDeque<(u64, u32, [u64; 8])> =
         std::collections::VecDeque::with_capacity(tail + 1);
 
     let stop_after = env::var("RING_STOP_AFTER")
         .ok()
-        .and_then(|s| s.parse::<u64>().ok());
+        .and_then(|s| s.parse().ok());
     let mut recorded = 0u64;
     let marks: std::collections::HashMap<u32, String> = env::var("MARK")
         .ok()
@@ -48,7 +41,7 @@ fn main() {
                 .filter(|s| !s.is_empty())
                 .filter_map(|entry| {
                     let (pc, name) = entry.split_once('=').unwrap_or((entry, entry));
-                    let pc = u32::from_str_radix(pc.trim().trim_start_matches("0x"), 16).ok()?;
+                    let pc = common::parse_hex32(pc)?;
                     Some((pc, name.to_string()))
                 })
                 .collect()
@@ -145,5 +138,5 @@ fn main() {
             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]
         );
     }
-    println!("--- out ---\n{}", String::from_utf8_lossy(&cpu.out));
+    common::print_console(&cpu, usize::MAX);
 }
