@@ -139,6 +139,13 @@ impl RomFsIndex {
         Ok(RomFsIndex { extents })
     }
 
+    /// Every file as `(start, end, path)`, absolute within the image, in image order.
+    pub fn files(&self) -> impl Iterator<Item = (u64, u64, &str)> {
+        self.extents
+            .iter()
+            .map(|(start, end, path)| (*start, *end, path.as_str()))
+    }
+
     /// Every file the range `offset..offset + len` touches, with how many of
     /// its bytes fall inside that file, in image order.
     pub fn files_in(&self, offset: u64, len: u64) -> impl Iterator<Item = (&str, u64)> {
