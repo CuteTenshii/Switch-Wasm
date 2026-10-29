@@ -39,6 +39,11 @@ const EXCLUSIVE_AT: u32 = 0x1040;
 /// `TPIDRRO_EL0` and `TPIDR_EL0`, past the monitor.
 const TPIDR_AT: u32 = 0x1060;
 const TPIDR_RW_AT: u32 = 0x1068;
+/// The core number (zero, so the clock is the `Cpu`'s own), the published
+/// clock's pointer and the chain's clock origin.
+const CORE_AT: u32 = 0x1070;
+const CLOCK_AT_AT: u32 = 0x1074;
+const ORIGIN_AT: u32 = 0x1078;
 
 /// The page table: one four-byte entry per 4 KiB of guest space, zero if unmapped.
 const TABLE_AT: u32 = 0x0010_0000;
@@ -86,6 +91,17 @@ const READONLY_TWO: (u32, u32) = (8 * PAGE_BYTES, 9 * PAGE_BYTES);
 /// What `MRS` of the thread registers reads; small enough for the manifest's numbers.
 const TPIDR_SEED: u64 = 0x1234_5678_9ABC;
 const TPIDR_RW_SEED: u64 = 0x0FED_CBA9_8765;
+
+/// The clock at the block's start, by seed set: the edges of the tick
+/// conversion's quotient and remainder, and values whose 64-bit product overflows.
+const CLOCK_SEEDS: [u64; 6] = [
+    0,
+    1_019_999_999,
+    1_020_000_000,
+    0x2000_0000_0000_0123,
+    0xFFFF_FFFF_FFFF_F000,
+    0x7FFF_FFFF_FFFF_FFFF,
+];
 
 /// `MSR NZCV, X0`: the preamble that seeds the flags.
 const MSR_NZCV_X0: u32 = 0xD51B_4200;
@@ -187,6 +203,9 @@ fn main() {
 
                     cpu.set_fpsr(0);
                     cpu.set_thread_pointers(TPIDR_SEED, TPIDR_RW_SEED);
+                    cpu.cycles = CLOCK_SEEDS[set % CLOCK_SEEDS.len()];
+                    // The fuel is zero, so the origin is the clock itself.
+                    let origin = cpu.cycles;
                     let before = cpu.reg_slots();
                     let nzcv_before = cpu.nzcv();
                     let Ok((module, path)) = cpu.emit_block_at(block_at, LAYOUT) else {
@@ -266,7 +285,7 @@ fn main() {
                     if set == SPECIALS_SET {
                         manifest.push_str(" specials");
                     }
-                    let _ = write!(manifest, " fpsr:0:{:x}", cpu.fpsr());
+                    let _ = write!(manifest, " fpsr:0:{:x} clock:{origin:x}", cpu.fpsr());
                     let monitor_after = cpu.exclusive_state();
                     let _ = write!(
                         manifest,
@@ -310,6 +329,7 @@ fn main() {
          tpidr_at {TPIDR_AT}\n\
          tpidr_rw_at {TPIDR_RW_AT}\n\
          tpidr_values {TPIDR_SEED} {TPIDR_RW_SEED}\n\
+         origin_at {ORIGIN_AT}\n\
          table_at {TABLE_AT}\n\
          bitmap_at {BITMAP_AT}\n\
          slots {}\n\
@@ -358,6 +378,9 @@ const LAYOUT: Layout = Layout {
     exclusive: EXCLUSIVE_AT,
     tpidr: TPIDR_AT,
     tpidr_rw: TPIDR_RW_AT,
+    core: CORE_AT,
+    clock_at: CLOCK_AT_AT,
+    origin: ORIGIN_AT,
 };
 
 /// Vector registers start each case at these, so a wrong register or half shows.
@@ -522,6 +545,22 @@ fn survey() -> BTreeMap<String, Vec<u32>> {
                 form(&text)
             };
             let slot = buckets.entry(key).or_default();
+            if slot.len() < PER_FORM {
+                slot.push(insn);
+            }
+        }
+    }
+    // Random fills almost never land on one system register; sweep the generic
+    // timer's (`MRS Xt, S3_3_C14_C0_<op2>`), which read the clock, a form each.
+    for op2 in 0..8u32 {
+        for rt in 0..32u32 {
+            let insn = 0xD53B_E000 | op2 << 5 | rt;
+            if !emits(insn) {
+                continue;
+            }
+            let slot = buckets
+                .entry(format!("mrs x_, s3_3_c14_c0_{op2}"))
+                .or_default();
             if slot.len() < PER_FORM {
                 slot.push(insn);
             }

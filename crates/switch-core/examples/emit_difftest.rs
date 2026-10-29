@@ -38,6 +38,11 @@ const VREGS_AT: u32 = 8192;
 /// `TPIDRRO_EL0` and `TPIDR_EL0`.
 const TPIDR_AT: u32 = 4192;
 const TPIDR_RW_AT: u32 = 4200;
+/// The core number (zero, so the clock is the `Cpu`'s own), the published
+/// clock's pointer and the chain's clock origin.
+const CORE_AT: u32 = 4208;
+const CLOCK_AT_AT: u32 = 4212;
+const ORIGIN_AT: u32 = 4216;
 /// The exclusive monitor: address, armed flag, then two doublewords.
 const EXCLUSIVE_AT: u32 = 4160;
 
@@ -62,6 +67,9 @@ const LAYOUT: Layout = Layout {
     exclusive: EXCLUSIVE_AT,
     tpidr: TPIDR_AT,
     tpidr_rw: TPIDR_RW_AT,
+    core: CORE_AT,
+    clock_at: CLOCK_AT_AT,
+    origin: ORIGIN_AT,
 };
 
 /// Vector registers start each case at these, so a wrong register or half shows.
@@ -165,6 +173,8 @@ fn main() {
         let nzcv_before = cpu.nzcv();
         let fpsr_before = cpu.fpsr();
         let (tpidr, tpidr_rw) = cpu.thread_pointers();
+        // The fuel is zero, so the origin is the clock itself.
+        let origin = cpu.cycles;
         cpu.set_pc(pc);
         let mut faulted = false;
         let mut switched = false;
@@ -224,7 +234,7 @@ fn main() {
         manifest.push_str(" !");
         manifest.push_str(&vreg_delta(&cpu));
         let _ = write!(manifest, " fpsr:{fpsr_before:x}:{:x}", cpu.fpsr());
-        let _ = write!(manifest, " tpidr:{tpidr:x}:{tpidr_rw:x}");
+        let _ = write!(manifest, " tpidr:{tpidr:x}:{tpidr_rw:x} clock:{origin:x}");
         manifest.push('\n');
         cases += 1;
     }
@@ -243,6 +253,7 @@ fn main() {
          pc_at {PC_AT}\n\
          tpidr_at {TPIDR_AT}\n\
          tpidr_rw_at {TPIDR_RW_AT}\n\
+         origin_at {ORIGIN_AT}\n\
          vregs_at {VREGS_AT}\n\
          table_at {TABLE_AT}\n\
          slots {}\n\

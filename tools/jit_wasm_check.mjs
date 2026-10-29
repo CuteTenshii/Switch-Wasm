@@ -101,6 +101,25 @@ const PROGRAMS = [
     expect: { 0: 800n, 2: 400n, 3: 400n },
   },
   {
+    name: 'the clock, read in blocks that branch into each other',
+    data: false,
+    code: [
+      0x1000001e, // adr  x30, #0        -> x30 = BASE
+      0x91000400, // add  x0, x0, #1
+      0xd53be046, // mrs  x6, cntvct_el0
+      0x8b0600a5, // add  x5, x5, x6     -> a clock off by a few cycles changes the sum
+      0x36000060, // tbz  w0, #0, #0xc   -> BASE+0x1c when x0 is even
+      0xd53be027, // mrs  x7, cntpct_el0
+      0xd65f03c0, // ret  x30
+      0x91000463, // add  x3, x3, #1
+      0xd53be047, // mrs  x7, cntvct_el0
+      0xd65f03c0, // ret  x30
+    ],
+    // An odd and an even trip are fifteen instructions: 20001 steps is 1333 pairs and six more.
+    steps: 20001n,
+    expect: { 0: 2667n, 3: 1333n },
+  },
+  {
     name: 'calls and returns',
     data: false,
     code: [

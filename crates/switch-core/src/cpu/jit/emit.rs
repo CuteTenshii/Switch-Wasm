@@ -19,7 +19,8 @@ use super::ir::{Block, Exit, Op, Term};
 use super::wasm::{Func, Module, F32, F64, I32, I64, V128};
 use crate::cpu::bits::mask_of_width;
 use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
-use crate::cpu::system::{SysOp, SysReg};
+use crate::cpu::power::CLOCK_RATES_HZ;
+use crate::cpu::system::{SysOp, SysReg, TICK_HZ};
 use crate::cpu::{Cpu, CONDITION_MASKS, REG_SLOTS, SELF_RETURN_TRAMPOLINE};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
@@ -84,6 +85,9 @@ const SCRATCH: Layout = Layout {
     exclusive: 0,
     tpidr: 0,
     tpidr_rw: 0,
+    core: 0,
+    clock_at: 0,
+    origin: 0,
 };
 
 /// Byte offsets of the guest state an emitted block touches, from the pointer
@@ -122,6 +126,12 @@ pub struct Layout {
     /// `TPIDRRO_EL0` and `TPIDR_EL0`, the thread's TLS base and its software register.
     pub tpidr: u32,
     pub tpidr_rw: u32,
+    /// Which core this is, as a `u32`; core 0 keeps the clock the others read.
+    pub core: u32,
+    /// Where the pointer to core 0's published clock, a `u64`, is kept.
+    pub clock_at: u32,
+    /// The `u64` clock origin of the chain being run; see `Chain::origin`.
+    pub origin: u32,
 }
 
 impl Layout {
@@ -147,6 +157,11 @@ impl Layout {
             exclusive: std::mem::offset_of!(Cpu, exclusive) as u32,
             tpidr: std::mem::offset_of!(Cpu, tpidr) as u32,
             tpidr_rw: std::mem::offset_of!(Cpu, tpidr_rw) as u32,
+            core: std::mem::offset_of!(Cpu, core) as u32,
+            clock_at: std::mem::offset_of!(Cpu, clock_at) as u32,
+            origin: (std::mem::offset_of!(Cpu, jit)
+                + std::mem::offset_of!(Jit, chain)
+                + std::mem::offset_of!(Chain, origin)) as u32,
         }
     }
 }
@@ -333,6 +348,8 @@ struct Emitter<'a> {
     targets: Vec<u32>,
     /// The block being emitted, as an index into the region.
     member: usize,
+    /// The op being emitted, as an index into its block.
+    at: usize,
     epilogue: u32,
     /// The loop head that dispatches on `L_NEXT`, when a branch stays inside.
     top: Option<u32>,
@@ -371,6 +388,7 @@ impl<'a> Emitter<'a> {
             returns: Vec::new(),
             targets,
             member: 0,
+            at: 0,
             epilogue,
             top: None,
             starts: Vec::new(),
@@ -616,6 +634,7 @@ impl Emitter<'_> {
                     next_exit += 1;
                 }
                 _ => {
+                    self.at = i;
                     if !self.op(&block.ops[i], i) {
                         return Err(Refused::Op(block.words[i]));
                     }
@@ -1703,6 +1722,43 @@ impl Emitter<'_> {
         }
     }
 
+    /// Push the tick [`Cpu::system_tick`] answers at this instruction. Core 0
+    /// reads its own cycles, which `run_jit` settles only when the chain ends.
+    fn system_tick(&mut self) {
+        self.fuel_used = true;
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, self.layout.core);
+        self.f.i32_eqz();
+        self.f.if_result(I64);
+        self.f.local_get(STATE);
+        self.f.i64_load(ALIGN_8, self.layout.origin);
+        self.f.local_get(L_FUEL);
+        self.f.i64_extend_i32_s();
+        self.f.i64_sub();
+        self.f.i64_const(self.at as i64);
+        self.f.i64_add();
+        self.f.else_();
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, self.layout.clock_at);
+        self.f.i64_atomic_load();
+        self.f.end();
+        // `cycles * TICK_HZ / CLOCK_HZ` without its 128-bit product, as `q * N + r * N / D`.
+        let (n, d) = (i64::from(TICK_HZ), i64::from(CLOCK_RATES_HZ[0]));
+        self.f.local_tee(L_T);
+        self.f.i64_const(d);
+        self.f.i64_div_u();
+        self.f.i64_const(n);
+        self.f.i64_mul();
+        self.f.local_get(L_T);
+        self.f.i64_const(d);
+        self.f.i64_rem_u();
+        self.f.i64_const(n);
+        self.f.i64_mul();
+        self.f.i64_const(d);
+        self.f.i64_div_u();
+        self.f.i64_add();
+    }
+
     /// One op, or `false` if there is no way to write it yet.
     fn op(&mut self, op: &Op, retired: usize) -> bool {
         match *op {
@@ -2304,6 +2360,11 @@ impl Emitter<'_> {
                     self.store_reg(rd);
                     true
                 }
+                SysReg::SystemTick => {
+                    self.system_tick();
+                    self.store_reg(rd);
+                    true
+                }
                 _ => false,
             },
             Op::Mulh { rd, rn, rm, signed } => {
@@ -2557,6 +2618,9 @@ mod tests {
         exclusive: 2112,
         tpidr: 2144,
         tpidr_rw: 2152,
+        core: 2160,
+        clock_at: 2164,
+        origin: 2168,
     };
 
     #[test]

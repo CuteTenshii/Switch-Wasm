@@ -46,7 +46,7 @@ impl CoreSlot {
 pub fn serve(slot: Arc<CoreSlot>) {
     let mut cpu = Cpu::borrower(slot.core);
     cpu.recall = slot.recall.clone();
-    cpu.clock = slot.clock.clone();
+    cpu.share_clock(slot.clock.clone());
     loop {
         let lent = {
             let mut state = slot.lock();
@@ -300,6 +300,12 @@ impl Cpu {
             }
             slot.recall.store(false, Relaxed);
         }
+    }
+
+    /// Read core 0's published clock from `clock`.
+    fn share_clock(&mut self, clock: Arc<AtomicU64>) {
+        self.clock_at = Arc::as_ptr(&clock);
+        self.clock = clock;
     }
 
     /// A core that borrows threads; its `Machine` is never used.

@@ -18,6 +18,9 @@ pub(super) const CHAIN_SLOTS: usize = 256 * 1024;
 pub(super) struct Chain {
     /// Instructions jumped-from blocks may still retire; a jump that would take it below zero returns.
     pub(super) fuel: i32,
+    /// `cycles` plus `fuel` when `run_jit` entered a block: emitted code's clock
+    /// is this less the fuel left, plus the instruction's place in its block.
+    pub(super) origin: u64,
     /// Jumps since `run_jit` last entered a block.
     pub(super) hops: u32,
     /// Entry address of the last block jumped to.
@@ -48,6 +51,7 @@ impl Default for Chain {
     fn default() -> Chain {
         let mut chain = Chain {
             fuel: -1,
+            origin: 0,
             hops: 0,
             last: 0,
             slots: vec![[0; 2]; CHAIN_SLOTS]

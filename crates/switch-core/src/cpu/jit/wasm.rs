@@ -183,6 +183,11 @@ impl Func {
         self.code.extend_from_slice(&[0xFE, 0x03, 0x00]);
     }
 
+    /// Load the naturally aligned `i64` at the address on the stack in one access.
+    pub(super) fn i64_atomic_load(&mut self) {
+        self.code.extend_from_slice(&[0xFE, 0x11, 3, 0]);
+    }
+
     /// Tail-call the table entry on the stack, with arguments under it, as type `ty`.
     pub(super) fn return_call_indirect(&mut self, ty: u32) {
         self.op_idx(0x13, ty);
@@ -338,6 +343,10 @@ impl Func {
 
     pub(super) fn i64_div_u(&mut self) {
         self.op(0x80);
+    }
+
+    pub(super) fn i64_rem_u(&mut self) {
+        self.op(0x82);
     }
 
     pub(super) fn i64_and(&mut self) {

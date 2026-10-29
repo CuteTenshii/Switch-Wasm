@@ -136,6 +136,8 @@ pub struct Cpu {
     pub(crate) recall: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Core 0's clock as it last published it, which the other cores read.
     pub(crate) clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// `clock`'s counter, where emitted code reads it; set with it by [`Cpu::share_clock`].
+    pub(crate) clock_at: *const std::sync::atomic::AtomicU64,
     /// How the running process ended, acted on once the `svc` that ended it replied.
     pub(crate) process_ending: Option<crate::kernel::process::Ending>,
     /// Kernel and service state: one per console, shared by its cores.
@@ -450,6 +452,7 @@ impl Default for Cpu {
 impl Cpu {
     pub fn new() -> Cpu {
         let mem = AddressSpace::new();
+        let clock = std::sync::Arc::default();
         let cpu = Cpu {
             mode: ExecMode::A64,
             cpsr_q: false,
@@ -488,7 +491,8 @@ impl Cpu {
             core: 0,
             handback: None,
             recall: Default::default(),
-            clock: Default::default(),
+            clock_at: std::sync::Arc::as_ptr(&clock),
+            clock,
             process_ending: None,
             machine: Box::new(Machine {
                 next_object_id: 1,

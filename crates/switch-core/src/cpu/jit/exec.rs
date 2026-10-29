@@ -11,6 +11,7 @@ use super::host;
 use super::ir::{Block, Code, Exit, Op, PackedImm, Term};
 use crate::cpu::bits::*;
 use crate::cpu::loadstore::{Acc, PairKind, Wb};
+use crate::cpu::system::{SysOp, SysReg};
 use crate::cpu::{Cpu, Layout, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use std::rc::Rc;
 use std::sync::atomic::{fence, Ordering::SeqCst};
@@ -50,27 +51,32 @@ struct Emitted {
     member: usize,
 }
 
-/// Where the straight-line stretch being executed starts, in the block body
-/// and in guest memory, so any op's address can be derived.
+/// The block body and where the straight-line stretch at its op `at` starts
+/// in guest memory, so any op's place in the block and address can be derived.
 #[derive(Clone, Copy)]
 struct Here {
     first: usize,
+    /// The address op 0 would have if the stretch ran from it.
     pc: u32,
 }
 
 impl Here {
     #[inline(always)]
-    fn new(ops: &[Op], pc: u32) -> Here {
+    fn new(ops: &[Op], at: usize, pc: u32) -> Here {
         Here {
             first: ops.as_ptr() as usize,
-            pc,
+            pc: pc.wrapping_sub(4 * at as u32),
         }
     }
 
     #[inline(always)]
+    fn index(self, op: &Op) -> usize {
+        (op as *const Op as usize - self.first) / std::mem::size_of::<Op>()
+    }
+
+    #[inline(always)]
     fn pc_of(self, op: &Op) -> u32 {
-        let index = (op as *const Op as usize - self.first) / std::mem::size_of::<Op>();
-        self.pc.wrapping_add(4 * index as u32)
+        self.pc.wrapping_add(4 * self.index(op) as u32)
     }
 }
 
@@ -254,7 +260,7 @@ impl Cpu {
                 _ => body,
             };
             let segment = &block.ops[i..stop];
-            let here = Here::new(segment, pc);
+            let here = Here::new(&block.ops, i, pc);
             for op in segment {
                 if let Err(e) = self.exec_op(op, here) {
                     // Clock, steps, trail and `pc` are settled only on a fault;
@@ -436,6 +442,7 @@ impl Cpu {
         self.jit.entered_emitted += 1;
         let fuel = self.chain_fuel(budget);
         self.jit.chain.fuel = fuel;
+        self.jit.chain.origin = self.cycles.wrapping_add_signed(i64::from(fuel));
         self.jit.chain.hops = 0;
         let state = self as *mut Cpu;
         // SAFETY: `entry` came from `host::install` for this block and is only
@@ -779,6 +786,20 @@ impl Cpu {
                 let pc = here.pc_of(op);
                 self.pc = pc;
                 self.system(insn, pc.wrapping_add(4))?;
+            }
+            // The clock counts the instructions before it, which are retired at block end.
+            Op::Sys {
+                op:
+                    sys @ SysOp::Mrs {
+                        reg: SysReg::SystemTick,
+                        ..
+                    },
+            } => {
+                let ran = here.index(op) as u64;
+                self.cycles += ran;
+                let read = self.exec_sys(sys);
+                self.cycles -= ran;
+                read?;
             }
             Op::Sys { op } => self.exec_sys(op)?,
             Op::SimdLoadStore { insn } => {

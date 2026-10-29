@@ -24,7 +24,7 @@ const HEADER_KEYS = new Set([
   'watch_hi_at', 'watched_at', 'pages_at', 'table_at', 'bitmap_at', 'slots',
   'code_at', 'read_watch', 'watch', 'watched_page', 'wasm_pages', 'pc_at',
   'discard_slot', 'vregs_at',
-  'fpsr_at', 'exclusive_at', 'tpidr_at', 'tpidr_rw_at', 'tpidr_values',
+  'fpsr_at', 'exclusive_at', 'tpidr_at', 'tpidr_rw_at', 'tpidr_values', 'origin_at',
 ]);
 const header = {};
 // `(guest address, wasm offset)` per mapped page, in `guest.bin` order.
@@ -177,12 +177,14 @@ for (const line of manifest.slice(first)) {
   const excl = exclToken ? exclToken.slice(5).split(':').map((h) => BigInt('0x' + h)) : null;
   // `tpidr:ro:rw`, the thread registers when a case carries its own.
   const tpidrToken = f.slice(bang + 1).find((t) => t.startsWith('tpidr:'));
+  // `clock:origin`, what the chain's clock origin holds when the case starts.
+  const clockToken = f.slice(bang + 1).find((t) => t.startsWith('clock:'));
   const specials = f.slice(bang + 1).includes('specials');
   const vdelta = new Map(f.slice(bang + 1).filter((t) => t.startsWith('v')).map((t) => {
     const [reg, hex] = t.slice(1).split(':');
     return [Number(reg), BigInt('0x' + hex)];
   }));
-  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('excl:') && !t.startsWith('tpidr:') && t !== 'specials').map((run) => {
+  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('excl:') && !t.startsWith('tpidr:') && !t.startsWith('clock:') && t !== 'specials').map((run) => {
     const [at, hex] = run.split(':');
     return [Number(at), Uint8Array.from(hex.match(/../g), (b) => parseInt(b, 16))];
   });
@@ -199,6 +201,7 @@ for (const line of manifest.slice(first)) {
   }
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
   if (fpsrToken) view.setUint32(need('fpsr_at'), fpsrBefore, true);
+  if (clockToken) view.setBigUint64(need('origin_at'), BigInt('0x' + clockToken.slice(6)), true);
   if (tpidrToken) {
     const [tpidr, tpidrRw] = tpidrToken.slice(6).split(':').map((h) => BigInt('0x' + h));
     view.setBigUint64(need('tpidr_at'), tpidr, true);
