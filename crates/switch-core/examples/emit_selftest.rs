@@ -34,11 +34,11 @@ const FPSR_AT: u32 = 0x102C;
 const MEMORY_AT: u32 = 0x1030;
 /// The `[u128; 32]` vector register file.
 const VREGS_AT: u32 = 0x2000;
-/// `TPIDRRO_EL0` and `TPIDR_EL0`.
-const TPIDR_AT: u32 = 0x1050;
-const TPIDR_RW_AT: u32 = 0x1058;
 /// The exclusive monitor: address, armed flag, then two doublewords.
 const EXCLUSIVE_AT: u32 = 0x1040;
+/// `TPIDRRO_EL0` and `TPIDR_EL0`, past the monitor.
+const TPIDR_AT: u32 = 0x1060;
+const TPIDR_RW_AT: u32 = 0x1068;
 
 /// The page table: one four-byte entry per 4 KiB of guest space, zero if unmapped.
 const TABLE_AT: u32 = 0x0010_0000;

@@ -2499,6 +2499,11 @@ impl Cpu {
         self.tpidr_rw = tpidr_rw;
     }
 
+    /// `TPIDRRO_EL0` and `TPIDR_EL0`, for the difftests to carry into a case.
+    pub fn thread_pointers(&self) -> (u64, u64) {
+        (self.tpidr, self.tpidr_rw)
+    }
+
     /// Arm the exclusive monitor at `addr` as having read `value`, or disarm it.
     pub fn set_exclusive(&mut self, armed: bool, addr: u32, value: u64) {
         if armed {

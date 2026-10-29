@@ -175,12 +175,14 @@ for (const line of manifest.slice(first)) {
   // `excl:addr:armed:value:addr:armed:value`, the monitor before and after.
   const exclToken = f.slice(bang + 1).find((t) => t.startsWith('excl:'));
   const excl = exclToken ? exclToken.slice(5).split(':').map((h) => BigInt('0x' + h)) : null;
+  // `tpidr:ro:rw`, the thread registers when a case carries its own.
+  const tpidrToken = f.slice(bang + 1).find((t) => t.startsWith('tpidr:'));
   const specials = f.slice(bang + 1).includes('specials');
   const vdelta = new Map(f.slice(bang + 1).filter((t) => t.startsWith('v')).map((t) => {
     const [reg, hex] = t.slice(1).split(':');
     return [Number(reg), BigInt('0x' + hex)];
   }));
-  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('excl:') && t !== 'specials').map((run) => {
+  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('excl:') && !t.startsWith('tpidr:') && t !== 'specials').map((run) => {
     const [at, hex] = run.split(':');
     return [Number(at), Uint8Array.from(hex.match(/../g), (b) => parseInt(b, 16))];
   });
@@ -197,6 +199,11 @@ for (const line of manifest.slice(first)) {
   }
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
   if (fpsrToken) view.setUint32(need('fpsr_at'), fpsrBefore, true);
+  if (tpidrToken) {
+    const [tpidr, tpidrRw] = tpidrToken.slice(6).split(':').map((h) => BigInt('0x' + h));
+    view.setBigUint64(need('tpidr_at'), tpidr, true);
+    view.setBigUint64(need('tpidr_rw_at'), tpidrRw, true);
+  }
   if (excl && EXCL_AT >= 0) {
     view.setUint32(EXCL_AT, Number(excl[0]), true);
     view.setUint32(EXCL_AT + 4, Number(excl[1]), true);

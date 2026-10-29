@@ -164,6 +164,7 @@ fn main() {
         let before = cpu.reg_slots();
         let nzcv_before = cpu.nzcv();
         let fpsr_before = cpu.fpsr();
+        let (tpidr, tpidr_rw) = cpu.thread_pointers();
         cpu.set_pc(pc);
         let mut faulted = false;
         let mut switched = false;
@@ -223,6 +224,7 @@ fn main() {
         manifest.push_str(" !");
         manifest.push_str(&vreg_delta(&cpu));
         let _ = write!(manifest, " fpsr:{fpsr_before:x}:{:x}", cpu.fpsr());
+        let _ = write!(manifest, " tpidr:{tpidr:x}:{tpidr_rw:x}");
         manifest.push('\n');
         cases += 1;
     }
@@ -239,6 +241,8 @@ fn main() {
          pages_at {PAGES_AT}\n\
          discard_slot {DISCARD_SLOT}\n\
          pc_at {PC_AT}\n\
+         tpidr_at {TPIDR_AT}\n\
+         tpidr_rw_at {TPIDR_RW_AT}\n\
          vregs_at {VREGS_AT}\n\
          table_at {TABLE_AT}\n\
          slots {}\n\
