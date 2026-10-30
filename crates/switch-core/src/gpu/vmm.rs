@@ -34,6 +34,8 @@ pub struct Mapping {
     pub handle: u32,
     /// Memory kind (block-linear layout selector).
     pub kind: u8,
+    /// The VA the map returned; remap pieces keep it so an unmap finds them all.
+    pub origin: u64,
 }
 
 impl Mapping {
@@ -170,6 +172,7 @@ impl AddressSpace {
                 cpu_addr,
                 handle,
                 kind,
+                origin: gpu_va,
             },
         );
         self.forget_translations();
@@ -214,6 +217,7 @@ impl AddressSpace {
                 cpu_addr: m.cpu_addr.wrapping_add((at - m.gpu_va) as u32),
                 handle: m.handle,
                 kind,
+                origin: m.origin,
             };
             self.mappings.remove(&m.gpu_va);
             let (inner_start, inner_end) = (m.gpu_va.max(gpu_va), m_end.min(end));
@@ -232,8 +236,9 @@ impl AddressSpace {
         true
     }
 
+    /// Undo the map that returned `gpu_va`, including every piece a remap split off it.
     pub fn unmap(&mut self, gpu_va: u64) -> Result<()> {
-        self.mappings.remove(&gpu_va);
+        self.mappings.retain(|_, m| m.origin != gpu_va);
         self.forget_translations();
         Ok(())
     }
@@ -255,6 +260,7 @@ impl AddressSpace {
                 cpu_addr: mapping.cpu_addr.wrapping_add((at - mapping.gpu_va) as u32),
                 handle: mapping.handle,
                 kind: mapping.kind,
+                origin: mapping.origin,
             };
             self.mappings.remove(&mapping.gpu_va);
             if mapping.gpu_va < gpu_va {
@@ -545,6 +551,20 @@ mod tests {
         assert!(!vmm.remap(va + 0x3000, 0x2000, Some(0xdb)));
         assert_eq!(vmm.mapping_at(va).map(|m| m.kind), Some(0));
         assert!(vmm.remap(va + 0x2000, 0x2000, None));
+    }
+
+    #[test]
+    fn unmap_drops_every_piece_a_remap_split_off() {
+        let (mut vmm, va) = space_with_buffer(0x2000_0000, 0x4000);
+        let other = vmm
+            .map(0x2100_0000, 0x1000, 2, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        assert!(vmm.remap(va + 0x1000, 0x1000, Some(0xdb)));
+        vmm.unmap(va).unwrap();
+        for offset in [0, 0x1000, 0x2000, 0x3fff] {
+            assert_eq!(vmm.translate(va + offset), None, "{offset:#x}");
+        }
+        assert_eq!(vmm.translate(other), Some((0x2100_0000, 0x1000)));
     }
 
     #[test]
