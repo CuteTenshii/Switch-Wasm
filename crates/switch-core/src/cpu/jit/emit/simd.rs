@@ -212,6 +212,11 @@ impl Emitter<'_> {
             self.fset(rd, double);
             return true;
         }
+        // Scalar FCVTNS, FCVTPS, FCVTMS, FCVTZS and their unsigned forms.
+        if insn & 0xDF3F_EC00 == 0x5E21_A800 {
+            self.scalar_convert_to_int(insn, size & 1 == 1, u);
+            return true;
+        }
         // Three registers of the same type.
         if insn & 0x9F20_0400 == 0x0E20_0400 {
             return self.three_same(insn, q, u, size, rm, rn, rd);

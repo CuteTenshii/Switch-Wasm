@@ -545,6 +545,26 @@ impl Emitter<'_> {
         self.store_reg(gp_dst(rd));
     }
 
+    /// A float to an integer of its own width, in the low lane of a vector register.
+    /// Sets no FPSR flags, as the interpreter's two-register-misc path does not.
+    pub(super) fn scalar_convert_to_int(&mut self, insn: u32, double: bool, unsigned: bool) {
+        let rounding = ((insn >> 12) & 1) << 1 | (insn >> 23) & 1;
+        self.f.v128_const([0; 16]);
+        self.fget((insn >> 5) & 0x1F, double);
+        if !double {
+            self.f.op_raw(F64_PROMOTE_F32);
+        }
+        self.f.op_raw(ROUND[rounding as usize][1]);
+        self.f.trunc_sat(match (double, unsigned) {
+            (false, false) => 2,
+            (false, true) => 3,
+            (true, false) => 6,
+            (true, true) => 7,
+        });
+        self.f.simd_lane(if double { 0x1E } else { 0x1C }, 0);
+        self.vset(insn & 0x1F);
+    }
+
     /// FDIV, with the interpreter's Invalid and Divide-by-zero flags.
     fn fdiv(&mut self, insn: u32, double: bool) {
         let (rm, rn, rd) = ((insn >> 16) & 0x1F, (insn >> 5) & 0x1F, insn & 0x1F);
