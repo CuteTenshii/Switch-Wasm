@@ -144,6 +144,17 @@ The SIMD sweep found two interpreter bugs (ORR/BIC immediate, XZR register offse
 - **`wasm_bench.mjs` always loads `target/.../release`.** Every title comparison of two builds made in this round through it, or through a copy of it, ran one build against itself, so its title-level verdicts (Minecraft "10 to 20% faster", A Short Hike and Just Dance "unchanged") are void; the microbenchmark loaded each build from its own directory and stands.
 - Measuring: `wasm_bench --shot` frames differ between runs of one build (hbmenu's clock, all of a Minecraft loading frame), so byte-identical comparison needs a deterministic setup. Under shared load wall-clock A/B runs swung ±20%; the emulator thread's `process.threadCpuUsage` swings less.
 
+## Frames were spent outside the CPU (October 2026)
+
+The emulator thread was saturated while retiring tens of millions of instructions a second, and the device timers covered about a tenth of a run. `perf` on the renderer, with V8's symbol map applied by hand since `perf` will not use it for `[anon:v8]` memory, put CPU emulation at 11% of that thread in A Short Hike. The rest was pixel work on rendered surfaces.
+
+- **2D blits went through guest memory**: a readback, `decode`, `blit_filtered`, `encode_stored`, a re-upload. They run on the device now.
+- **Every present read back and destroyed every held surface**, and the next frame uploaded each again. Only the scan-out surface goes back now. Frames at Short Hike's frame 120, Minecraft's 25 and Just Dance 2019's 60 are byte-identical to a full sync on the native device backend.
+- **The "Pipelines" timer included `bind_group`**, which uploads textures: 20 s against 14 ms of real pipeline creation. `createRenderPipeline` costs 0.02 ms on the calling thread; the GPU process does the compiling. Bind groups have their own row now. They are one-time loading: 7.4 s at 60 s and 7.5 s at 200 s.
+- **One unemitted instruction refused 48% of hbmenu's frame**: scalar `FCVTZU Sd, Sn` in its pixel loop. Emitting it took `wasm_bench` from 174.9 to 100.5 ms a frame (one run on a busy machine). A Short Hike has no such gap (7,454 of 17M sampled instructions are in refused blocks), so check a title's refusals before assuming either way.
+
+Browser, 60 to 140 s on an NVIDIA Ampere adapter, none of it A/B-controlled against load: Short Hike about 1.1 to 5.8-9.3 fps, Minecraft's boot 0 to 6.6, hbmenu 6 to 11-16, Mario Kart 8 Deluxe's title 13.9 at the end of its run. `wasm_bench` draws in software and cannot see any of the GPU changes.
+
 ## Tuning the IR executor
 
 Emitted regions sit on top of the IR executor (`exec_block`/`exec_op`), which still runs every cold or refused block. About seventy experiments on it (September 2026, `wasm_bench` under V8, hbmenu around 290M instructions/s) came down to this.

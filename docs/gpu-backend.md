@@ -10,7 +10,13 @@
 
 **Dropping the backend destroys what it made.** wgpu's web backend frees nothing on drop and leaves it to the garbage collector, so `Gpu`'s `Drop` destroys every space's textures, the scratch resources and the device, which happens when a session is freed or a lost device is replaced.
 
-**A copy out of a held surface flushes first.** The 2D blitter, the copy engine and compute read guest memory, so `channel.rs` hands the surfaces back before `Engine2D::LAUNCHES_BLIT`, `copy::LAUNCH_DMA` and `compute::SEND_SIGNALING_PCAS_B`.
+**A copy out of a held surface flushes first.** The copy engine and compute read guest memory, so `channel.rs` hands the surfaces back before `copy::LAUNCH_DMA` and `compute::SEND_SIGNALING_PCAS_B`.
+
+**2D blits run where their surfaces are.** `Renderer::blit` answers before `Engine2D::LAUNCHES_BLIT` runs: `Done` when the source is held as the surface the registers name and the destination takes the same colour format (`blit.rs`, the engine's per-texel arithmetic in a shader, byte-identical with it in the parity tests); `GuestMemory` when neither surface overlaps anything held or on its way back, so no flush is needed; `Flush` otherwise. Routing a resolve through guest memory was most of a frame in A Short Hike.
+
+**A present brings back only what the display reads.** `submit_frame` reads back the scan-out surface and whatever the guest rebound; every other surface stays held and dirty across the present. Reading all of them back, destroying them and re-uploading them next frame was most of what remained. `Space::sync_all` asks for the old full sync at the next present when something else depends on guest memory: a guest write to a held surface's pages, a texture upload overlapping a dirty surface, or a new surface aliasing a held one. More than `MAX_HELD_BYTES` held does the same. **A guest reading a render target's memory directly, with no copy, is not seen.** `GPU_SYNC_EVERY_PRESENT=1` on `screenshot_gpu` restores the full sync, to compare frames byte for byte.
+
+**An attribute past its stride reads from a later buffer.** Maxwell takes any offset and WebGPU wants it inside the stride, so `within_stride` binds such an attribute's array whole strides later (appstore's offset 32 on stride 8).
 
 **Depth, clears and multisampling all run on the device.** A depth surface is held like a colour one, as `depth16unorm` or `depth32float` (see `upload.rs` in [gpu.md](gpu.md)); stencil stays in guest memory and is put back around the depth bytes, since neither renderer tests it. Clears are a pass's load operation where they cover the whole surface and a scissored fullscreen draw where they do not.
 
