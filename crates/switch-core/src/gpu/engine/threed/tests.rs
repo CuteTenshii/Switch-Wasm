@@ -919,6 +919,25 @@ fn flip_y_swaps_which_winding_is_front() {
 }
 
 #[test]
+fn flip_y_keeps_the_front_winding_through_a_y_mirroring_viewport() {
+    // A Short Hike's blits: front=CCW, FlipY, and a viewport that mirrors y.
+    let mut engine = Engine3D::new();
+    engine.regs.set(OGL_SET_FRONT_FACE, 0x901);
+    engine.regs.set(WINDOW_ORIGIN, 1 << 4);
+    engine.regs.set(VIEWPORT_TRANSFORM_BASE, 640.0f32.to_bits());
+    engine
+        .regs
+        .set(VIEWPORT_TRANSFORM_BASE + 1, (-360.0f32).to_bits());
+    assert!(engine.cull_state().front_ccw);
+
+    // Echoes of Wisdom's offscreen passes keep y, and FlipY swaps the winding.
+    engine
+        .regs
+        .set(VIEWPORT_TRANSFORM_BASE + 1, 360.0f32.to_bits());
+    assert!(!engine.cull_state().front_ccw);
+}
+
+#[test]
 fn blend_and_depth_state_resolve_from_registers() {
     let mut h = Harness::new(0x1000);
     let mut engine = Engine3D::new();

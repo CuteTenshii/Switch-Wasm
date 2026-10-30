@@ -309,8 +309,10 @@ impl Engine3D {
         let face = self.regs.get(OGL_SET_CULL_FACE);
         CullState {
             enabled: field(self.regs.get(OGL_SET_CULL), 0, 0) != 0,
-            // `flip_y` swaps the front winding independently of the viewport.
-            front_ccw: (self.regs.get(OGL_SET_FRONT_FACE) != 0x900) != self.window_origin().flip_y,
+            // `flip_y` swaps the front winding only through a viewport that keeps y:
+            // Unity's blits set it with a y-mirroring viewport and stay front-facing.
+            front_ccw: (self.regs.get(OGL_SET_FRONT_FACE) != 0x900)
+                != (self.window_origin().flip_y && self.viewport_transform().scale[1] >= 0.0),
             cull_front: face == 0x404 || face == 0x408,
             cull_back: face == 0x405 || face == 0x408,
         }
