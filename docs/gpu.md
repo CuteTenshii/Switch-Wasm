@@ -213,6 +213,7 @@ The Maxwell engines, shader translation, the software rasterizer and texture han
 
 ## `crates/switch-core/src/gpu/texture.rs`
 
+- Vertex shaders sample through the same `MemoryTextures` as fragments, so the rasterizer can run a draw the device refused.
 - `texs` immediates are dword indices into the `TexCbIndex` bank (nouveau 15, deko3d 0), which holds the bindless handle into the TIC/TSC pools; the two stages index different constant buffers with the same slot. Reading them as bytes lands in nouveau's fixed header (`0, 1, 2, ...` on GM107), which looks like a handle table, so every draw resolved to the same handle and text drew one glyph repeatedly.
 - Compressed surfaces are swizzled/addressed in blocks; using texel units makes the stride a block too large and shreds the image into diagonal ribbons.
 - `BlockCache`: decoding a whole block per fetch was a large share of an ASTC frame. Four ways cover a bilinear footprint across a block corner; round-robin fits scanline order. Blocks decode in place because ASTC blocks are 2.3 KiB.

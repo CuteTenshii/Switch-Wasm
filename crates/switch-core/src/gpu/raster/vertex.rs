@@ -5,7 +5,7 @@ use super::ScreenVertex;
 use crate::gpu::engine::threed::{VertexArray, VertexAttrib, ViewportTransform};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::interp::{ConstantSource, Env, Invocation, MemoryGlobal, NoTextures};
+use crate::gpu::shader::interp::{ConstantSource, Env, Invocation, MemoryGlobal, TextureSource};
 use crate::Result;
 
 /// The `a[]` offset of the clip position, and the fixed interpolated-`1/w` slot.
@@ -40,6 +40,7 @@ pub(super) fn shade_vertex(
     (vertex_index, instance_id): (u32, u32),
     ctx: &ExecCtx,
     consts: &dyn ConstantSource,
+    (textures, tex_cb_index): (&dyn TextureSource, u8),
     y_negate: bool,
     stores: &std::cell::RefCell<Vec<(u64, u32)>>,
 ) -> Result<ShadedVertex> {
@@ -68,7 +69,7 @@ pub(super) fn shade_vertex(
         }
     }
     let global = MemoryGlobal { ctx, stores };
-    let mut env = Env::new(consts, &NoTextures);
+    let mut env = Env::with_tex_cb_index(consts, textures, tex_cb_index);
     env.memory = Some(&global);
     env.special.y_negate = y_negate;
     inv.execute(program, &env)?;

@@ -9,7 +9,7 @@ use crate::gpu::engine::threed::{
 };
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::interp::{Invocation, MemoryConstants, MemoryGlobal};
+use crate::gpu::shader::interp::{Invocation, MemoryConstants, MemoryGlobal, MemoryTextures};
 use crate::gpu::shader::{decode_program_from_memory, wgsl, Op, Program};
 use crate::gpu::surface::MAX_SAMPLES;
 use crate::{Error, Result};
@@ -231,6 +231,8 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 },
             );
             let global_stores = std::cell::RefCell::new(Vec::new());
+            let descriptors = std::cell::RefCell::new(crate::IdMap::default());
+            let blocks = std::cell::RefCell::new(crate::gpu::texture::BlockCache::default());
             let mut shaded = std::collections::BTreeSet::new();
             for ordinal in 0..call.count {
                 let index = if call.indexed {
@@ -246,6 +248,13 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
                     cache: &vs_const_cache,
                 };
+                let vs_textures = MemoryTextures {
+                    ctx: &*ctx,
+                    tex_header_pool: engine.tex_header_pool(),
+                    tex_sampler_pool: engine.tex_sampler_pool(),
+                    descriptors: &descriptors,
+                    blocks: &blocks,
+                };
                 shade_vertex(
                     &vs_program,
                     &attribs,
@@ -253,6 +262,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     (index, instance_id),
                     &*ctx,
                     &vs_consts,
+                    (&vs_textures, engine.tex_cb_index()),
                     engine.window_origin().lower_left,
                     &global_stores,
                 )?;
@@ -462,6 +472,13 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
                 cache: &vs_const_cache,
             };
+            let vs_textures = MemoryTextures {
+                ctx: &*ctx,
+                tex_header_pool: engine.tex_header_pool(),
+                tex_sampler_pool: engine.tex_sampler_pool(),
+                descriptors: &descriptors,
+                blocks: &blocks,
+            };
             let v = shade_vertex(
                 &vs_program,
                 &attribs,
@@ -469,6 +486,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 (index, instance_id),
                 &*ctx,
                 &vs_consts,
+                (&vs_textures, engine.tex_cb_index()),
                 engine.window_origin().lower_left,
                 &global_stores,
             )?;

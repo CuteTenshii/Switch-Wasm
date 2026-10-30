@@ -170,7 +170,18 @@ fn a_vertex_shader_stores_to_global_memory() {
     };
     let consts: std::collections::HashMap<(u8, u16), f32> = Default::default();
     let stores = std::cell::RefCell::new(Vec::new());
-    shade_vertex(&program, &[], &[], (7, 0), &ctx, &consts, false, &stores).unwrap();
+    shade_vertex(
+        &program,
+        &[],
+        &[],
+        (7, 0),
+        &ctx,
+        &consts,
+        (&crate::gpu::shader::interp::NoTextures, 0),
+        false,
+        &stores,
+    )
+    .unwrap();
     MemoryGlobal::land(&mut ctx, &stores).unwrap();
     assert_eq!(ctx.read_u32(base).unwrap(), 7);
     assert_eq!(ctx.read_u32(base + 4).unwrap(), 7, "the load saw the store");
@@ -243,7 +254,18 @@ fn a_vertex_shader_reads_its_vertex_and_instance_ids() {
 
     let program = Compiled::new(&program);
     let stores = std::cell::RefCell::new(Vec::new());
-    let v = shade_vertex(&program, &[], &[], (7, 42), &ctx, &consts, false, &stores).unwrap();
+    let v = shade_vertex(
+        &program,
+        &[],
+        &[],
+        (7, 42),
+        &ctx,
+        &consts,
+        (&crate::gpu::shader::interp::NoTextures, 0),
+        false,
+        &stores,
+    )
+    .unwrap();
     assert_eq!(v.clip[0].to_bits(), 42, "gl_InstanceID");
     assert_eq!(v.clip[1].to_bits(), 7, "gl_VertexID");
 }
@@ -327,6 +349,7 @@ fn an_instanced_vertex_array_advances_with_the_instance_not_the_vertex() {
             (3, instance),
             &ctx,
             &consts,
+            (&crate::gpu::shader::interp::NoTextures, 0),
             false,
             &stores,
         )
