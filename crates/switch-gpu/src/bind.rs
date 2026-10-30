@@ -1,6 +1,6 @@
 //! Bind groups and the textures and samplers they bind.
 
-use crate::convert::{sampled_texture_format, widen, Widen};
+use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
 use crate::readback::Scratch;
 use crate::{
     same_rows, GlobalUpload, Gpu, HeldLayer, Prepared, Red, Resource, SamplerKey, MAX_GLOBAL,
@@ -63,6 +63,15 @@ impl Gpu {
                 .find(|b| b.slot == upload.slot)
                 .ok_or("a texture the module never declared")?;
             let compare = declared_texture.compare;
+            if !compare {
+                let (format, _) = sampled_texture_format(self.features(), upload.format)
+                    .map_err(|e| format!("{e:?}"))?;
+                if !can_filter(format, self.features()) {
+                    return Err(format!(
+                        "samples a {format:?} texture, which this device cannot filter"
+                    ));
+                }
+            }
             let dim = declared_texture.dim;
             let fold = declared_texture.fold;
             let view_dimension = match dim {

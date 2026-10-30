@@ -161,6 +161,18 @@ pub(crate) fn device_texture_format(
     Ok(wanted)
 }
 
+/// Whether a filtering sampler may read `format`: 32-bit floats need `float32-filterable`,
+/// and binding one as filterable without it is a validation error, not a fallback.
+pub(crate) fn can_filter(format: wgpu::TextureFormat, features: wgpu::Features) -> bool {
+    let float32 = matches!(
+        format,
+        wgpu::TextureFormat::R32Float
+            | wgpu::TextureFormat::Rg32Float
+            | wgpu::TextureFormat::Rgba32Float
+    );
+    !float32 || features.contains(wgpu::Features::FLOAT32_FILTERABLE)
+}
+
 /// How sampled texels are rewritten for the format [`sampled_texture_format`] chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Widen {
@@ -278,7 +290,7 @@ pub(crate) fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
 
 #[cfg(test)]
 mod tests {
-    use super::{sampled_texture_format, widen, Widen};
+    use super::{can_filter, sampled_texture_format, widen, Widen};
     use switch_core::gpu::pipeline::Format;
     use switch_core::gpu::surface::ColorFormat;
 
@@ -319,6 +331,21 @@ mod tests {
 
         assert!(sampled_texture_format(wgpu::Features::empty(), Format::R16Unorm).is_err());
         assert!(sampled_texture_format(web, Format::Bc1RgbaUnorm).is_err());
+    }
+
+    #[test]
+    fn only_a_device_with_float32_filterable_filters_a_float32_texture() {
+        let none = wgpu::Features::empty();
+        let filterable = wgpu::Features::FLOAT32_FILTERABLE;
+        for format in [
+            wgpu::TextureFormat::R32Float,
+            wgpu::TextureFormat::Rg32Float,
+            wgpu::TextureFormat::Rgba32Float,
+        ] {
+            assert!(!can_filter(format, none), "{format:?}");
+            assert!(can_filter(format, filterable), "{format:?}");
+        }
+        assert!(can_filter(wgpu::TextureFormat::Rgba16Float, none));
     }
 
     /// An `f32` holds `v / 65535` exactly.
