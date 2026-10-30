@@ -22,6 +22,7 @@ Interpreter details for A64, A32, SIMD and floating point that the code relies o
 - Narrowing shift destination size comes from all of `immh`, not bit 22.
 - FMLA by element is fused at source width (widening to f64 would round twice). FMAXNMV etc. reduce pairwise as (0 op 1) op (2 op 3). FCVTN rounds once via double.
 - Scalar and vector FP use Rust IEEE arithmetic; FPCR's rounding mode is honoured only by FRINTX/FRINTI (scalar and vector). Half-precision by-element is out of scope.
+- FMAXNM and FMINNM return the number when the other operand is NaN; FMAX and FMIN return the NaN. Treating them alike sent Just Dance 2023's Yoga layout, which marks undefined sizes with NaN and takes `fmaxf` through these, into endless re-layout until the main stack ran over the TLS blocks of other threads. Signaling NaNs count as quiet here.
 
 ## `crates/switch-core/src/cpu/system.rs`
 

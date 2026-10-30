@@ -795,6 +795,21 @@ pub(super) fn rsqrt_estimate_bits(bits: u64, esize: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{recip_estimate_bits, rsqrt_estimate_bits};
+    use crate::cpu::bits::{fp_max, fp_maxnum, fp_min, fp_minnum};
+
+    #[test]
+    fn only_the_number_forms_of_min_and_max_let_a_number_beat_a_nan() {
+        for (nan, number) in [(f64::NAN, 1.5), (1.5, f64::NAN)] {
+            assert_eq!(fp_maxnum(nan, number), 1.5);
+            assert_eq!(fp_minnum(nan, number), 1.5);
+            assert!(fp_max(nan, number).is_nan());
+            assert!(fp_min(nan, number).is_nan());
+        }
+        assert!(fp_maxnum(f64::NAN, f64::NAN).is_nan());
+        assert!(fp_minnum(f64::NAN, f64::NAN).is_nan());
+        assert_eq!(fp_maxnum(-2.25, 1.5), 1.5);
+        assert_eq!(fp_minnum(-2.25, 1.5), -2.25);
+    }
 
     /// `qemu-aarch64` results for `frecpe v3.4s` over (1.5, -2.25, 3.0, 0.5).
     #[test]

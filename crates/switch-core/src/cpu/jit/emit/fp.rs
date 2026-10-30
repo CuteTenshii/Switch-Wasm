@@ -105,8 +105,9 @@ impl Emitter<'_> {
         self.f.select();
     }
 
-    /// FMAX, FMIN, FMAXNM, FMINNM: a NaN operand is the result, the first one first.
-    fn fminmax(&mut self, rd: u32, rn: u32, rm: u32, max: bool, double: bool) {
+    /// FMAX and FMIN: a NaN operand is the result, the first one first.
+    /// FMAXNM and FMINNM (`number`): a NaN loses to a number; two NaNs give the first.
+    fn fminmax(&mut self, rd: u32, rn: u32, rm: u32, max: bool, number: bool, double: bool) {
         let d = usize::from(double);
         let (a, b) = if double {
             (L_F64, L_F64B)
@@ -122,12 +123,13 @@ impl Emitter<'_> {
         self.f.local_get(a);
         self.f.local_get(b);
         self.f.op_raw(if max { MAX[d] } else { MIN[d] });
-        self.f.local_get(b);
-        self.f.local_get(b);
+        let (first, second) = if number { (a, b) } else { (b, a) };
+        self.f.local_get(first);
+        self.f.local_get(first);
         self.f.op_raw(NE[d]);
         self.f.select();
-        self.f.local_get(a);
-        self.f.local_get(a);
+        self.f.local_get(second);
+        self.f.local_get(second);
         self.f.op_raw(NE[d]);
         self.f.select();
         self.fset(rd, double);
@@ -174,7 +176,7 @@ impl Emitter<'_> {
                 0b10 => {
                     let opcode = match (insn >> 11) & 0x1F {
                         op @ (9 | 11 | 13 | 15) => {
-                            self.fminmax(rd, rn, rm, op & 2 == 0, double);
+                            self.fminmax(rd, rn, rm, op & 2 == 0, op >= 13, double);
                             return true;
                         }
                         1 => MUL[d],

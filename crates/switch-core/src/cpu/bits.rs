@@ -267,13 +267,27 @@ pub(crate) fn fp_min(a: f64, b: f64) -> f64 {
     }
 }
 
-/// FMAXNM/FMINNM.
+/// FMAXNM: a NaN loses to a number. Signaling NaNs are treated as quiet ones, since
+/// widening an `f32` operand has already quieted them.
 pub(crate) fn fp_maxnum(a: f64, b: f64) -> f64 {
-    fp_max(a, b)
+    if a.is_nan() && !b.is_nan() {
+        b
+    } else if b.is_nan() && !a.is_nan() {
+        a
+    } else {
+        fp_max(a, b)
+    }
 }
 
+/// FMINNM: a NaN loses to a number, as in [`fp_maxnum`].
 pub(crate) fn fp_minnum(a: f64, b: f64) -> f64 {
-    fp_min(a, b)
+    if a.is_nan() && !b.is_nan() {
+        b
+    } else if b.is_nan() && !a.is_nan() {
+        a
+    } else {
+        fp_min(a, b)
+    }
 }
 
 #[inline(always)]
