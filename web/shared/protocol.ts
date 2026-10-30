@@ -70,6 +70,7 @@ export interface GpuReport {
     translate: number;
     upload: number;
     modules: number;
+    bind: number;
     pipeline: number;
     encode: number;
     flush: number;

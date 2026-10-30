@@ -470,11 +470,12 @@ impl Drop for Gpu {
             let ms = |v: u128| v as f64 / 1000.0;
             eprintln!(
                 "[gpu] translate {:.0}ms  upload {:.0}ms  modules {:.0}ms  \
-                 pipeline {:.0}ms  encode {:.0}ms  flush {:.0}ms \
+                 bind {:.0}ms  pipeline {:.0}ms  encode {:.0}ms  flush {:.0}ms \
                  (ask {:.0}ms, wait {:.0}ms, land {:.0}ms)",
                 ms(t.translate),
                 ms(t.upload),
                 ms(t.modules),
+                ms(t.bind),
                 ms(t.pipeline),
                 ms(t.encode),
                 ms(t.flush),
@@ -853,6 +854,7 @@ impl Renderer for Gpu {
                     .field("translate", ms(t.translate))
                     .field("upload", ms(t.upload))
                     .field("modules", ms(t.modules))
+                    .field("bind", ms(t.bind))
                     .field("pipeline", ms(t.pipeline))
                     .field("encode", ms(t.encode))
                     .field("flush", ms(t.flush))

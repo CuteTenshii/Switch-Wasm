@@ -75,7 +75,7 @@ async function updateJitDebug(): Promise<void> {
 
 const renderSection = $<HTMLDetailsElement>('render-debug-section');
 
-const RENDER_PHASES = ['translate', 'upload', 'modules', 'pipeline', 'encode', 'flush'] as const;
+const RENDER_PHASES = ['translate', 'upload', 'modules', 'bind', 'pipeline', 'encode', 'flush'] as const;
 
 // Who draws, in a word for the badge and a sentence for the section.
 function renderState(g: GpuReport): [string, string, boolean] {

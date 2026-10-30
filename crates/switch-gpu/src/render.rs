@@ -163,9 +163,9 @@ impl Gpu {
             .collect();
 
         let (vs_group_layout, vs_group) =
-            timed!(self, pipeline, self.bind_group(p, ShaderStage::VertexB, 0))?;
+            timed!(self, bind, self.bind_group(p, ShaderStage::VertexB, 0))?;
         let (fs_group_layout, fs_group) =
-            timed!(self, pipeline, self.bind_group(p, ShaderStage::Fragment, 1))?;
+            timed!(self, bind, self.bind_group(p, ShaderStage::Fragment, 1))?;
         // An assembled topology is always `u32` indices.
         let draw_index_format = match &p.assembled {
             Some(_) => Some(wgpu::IndexFormat::Uint32),

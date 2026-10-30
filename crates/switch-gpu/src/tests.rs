@@ -530,6 +530,7 @@ fn the_report_is_the_json_the_page_reads() {
         translate: 1_250,
         upload: 22_149,
         modules: 0,
+        bind: 0,
         pipeline: 7_351,
         encode: 450,
         flush: 49,
@@ -546,7 +547,7 @@ fn the_report_is_the_json_the_page_reads() {
             r#""textureHits":5,"textureMisses":6,"shaderHits":7,"shaderMisses":8,"#,
             r#""softwareFrame":true,"unlatched":2,"gaveUp":false,"lostBecause":"Out of memory","#,
             r#""reasons":["shader: \"op\"\nunknown","plain"],"deviceErrorCount":0,"deviceErrors":[],"#,
-            r#""times":{"translate":1.2,"upload":22.1,"modules":0.0,"pipeline":7.4,"encode":0.5,"#,
+            r#""times":{"translate":1.2,"upload":22.1,"modules":0.0,"bind":0.0,"pipeline":7.4,"encode":0.5,"#,
             r#""flush":0.0,"flushAsk":0.0,"flushWait":0.0,"flushLand":0.0}}"#
         )
     );

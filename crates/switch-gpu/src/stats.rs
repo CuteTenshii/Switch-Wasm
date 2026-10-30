@@ -65,6 +65,8 @@ pub(crate) struct Times {
     pub(crate) upload: u128,
     /// Generating the WGSL and creating the modules.
     pub(crate) modules: u128,
+    /// Building the bind groups: the constant buffers, views and samplers.
+    pub(crate) bind: u128,
     pub(crate) pipeline: u128,
     pub(crate) encode: u128,
     /// Writing surfaces back to guest memory.
