@@ -665,6 +665,74 @@ fn sampler_word(offset: u16) -> Operand {
 }
 
 #[test]
+fn a_split_handle_set_up_in_the_entry_block_reaches_a_later_block() {
+    // Just Dance 2023 loads the handle first and samples it across the shader.
+    let mut ops = split_handle(sampler_word(0x578));
+    let tex = ops.pop().unwrap();
+    ops.push((Op::Ssy { target: at(4) }, ALWAYS));
+    ops.push((Op::Sync, ALWAYS));
+    ops.push(tex);
+    ops.push((Op::Exit, ALWAYS));
+    assert_eq!(
+        translate(&program(&ops)).unwrap().textures,
+        vec![(
+            TextureSlot::BindlessPair {
+                bank: 2,
+                offset: 0x168,
+                other_bank: 2,
+                other_offset: 0x578,
+            },
+            TexDim::T2d,
+            false
+        )]
+    );
+}
+
+/// `split_handle`, then a branch over `skipped` to the sample and `after` it.
+fn split_handle_across_a_branch(skipped: Op, after: Op) -> Vec<(Op, Pred)> {
+    let mut ops = split_handle(sampler_word(0x578));
+    let tex = ops.pop().unwrap();
+    let guard = Pred {
+        reg: 0,
+        negate: false,
+    };
+    ops.push((Op::Bra { target: at(4) }, guard));
+    ops.push((skipped, ALWAYS));
+    ops.push(tex);
+    ops.push((after, ALWAYS));
+    ops.push((Op::Exit, ALWAYS));
+    ops
+}
+
+#[test]
+fn a_register_reused_after_the_sample_does_not_hide_the_handle() {
+    let reuse = Op::Mov {
+        dst: 2,
+        src: sampler_word(0x20),
+    };
+    let unrelated = Op::Mov {
+        dst: 9,
+        src: sampler_word(0x20),
+    };
+    let ops = split_handle_across_a_branch(unrelated, reuse);
+    assert!(translate(&program(&ops)).is_ok());
+}
+
+#[test]
+fn a_handle_that_differs_by_path_stays_refused() {
+    let other = Op::Mov {
+        dst: 2,
+        src: sampler_word(0x20),
+    };
+    let unrelated = Op::Mov {
+        dst: 9,
+        src: sampler_word(0x20),
+    };
+    let ops = split_handle_across_a_branch(other, unrelated);
+    assert!(translate(&program(&ops)).is_err());
+}
+
+#[test]
 fn a_handle_ored_from_two_constant_words_binds_both() {
     let mut ops = split_handle(sampler_word(0x568));
     ops.push((Op::Exit, ALWAYS));

@@ -31,7 +31,8 @@ pub(super) struct Emitter<'a> {
     pub(super) globals: Vec<(u8, u16)>,
     /// Counter naming `let` bindings.
     temps: usize,
-    pub(super) block: usize,
+    /// Each instruction's possible predecessors, for tracing a register's value.
+    pub(super) before: Vec<Vec<usize>>,
     /// Textures only `txq`'d, bound as 2D.
     pub(super) queried: Vec<TextureSlot>,
     pub(super) texture_offsets: Vec<(i32, i32)>,
@@ -58,7 +59,7 @@ impl<'a> Emitter<'a> {
             textures: Vec::new(),
             globals: Vec::new(),
             temps: 0,
-            block: 0,
+            before: Vec::new(),
             queried: Vec::new(),
             texture_offsets: Vec::new(),
         }
@@ -222,11 +223,11 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// The unguarded instruction whose value `reg` holds at `at`: the nearest
-    /// earlier write in the block, else the program's only write.
+    /// The unguarded instruction whose value `reg` holds at `at`: the one write
+    /// reaching it on every path, else the program's only write.
     fn sole_writer(&self, at: usize, reg: u8) -> Option<usize> {
         let writes_reg = |i: usize| super::interp::writes(&self.program.op(i)).contains(&reg);
-        let writer = match (self.block..at).rev().find(|&i| writes_reg(i)) {
+        let writer = match self.reaching_write(at, &writes_reg) {
             Some(writer) => writer,
             None => {
                 let mut writers = (0..self.program.len()).filter(|&i| i != at && writes_reg(i));
@@ -238,6 +239,33 @@ impl<'a> Emitter<'a> {
             }
         };
         (self.program.pred(writer) == Pred::ALWAYS).then_some(writer)
+    }
+
+    /// The single write every path to `at` ends on; `None` when paths disagree, a
+    /// write is guarded (it may not happen), or a path reaches the entry without one.
+    fn reaching_write(&self, at: usize, writes_reg: &dyn Fn(usize) -> bool) -> Option<usize> {
+        if at == 0 {
+            return None;
+        }
+        let mut found = None;
+        let mut seen = BTreeSet::new();
+        let mut pending = self.before.get(at)?.clone();
+        while let Some(i) = pending.pop() {
+            if !seen.insert(i) {
+                continue;
+            }
+            if writes_reg(i) {
+                if self.program.pred(i) != Pred::ALWAYS || found.is_some_and(|w| w != i) {
+                    return None;
+                }
+                found = Some(i);
+            } else if i == 0 {
+                return None;
+            } else {
+                pending.extend_from_slice(&self.before[i]);
+            }
+        }
+        found
     }
 
     /// The immediate `reg` holds at `at`. See [`Emitter::sole_writer`].

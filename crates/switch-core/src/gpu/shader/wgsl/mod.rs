@@ -5,7 +5,7 @@
 //! `TRACE_WGSL=<dir>` dumps every module a run uses, for checking with `naga`.
 
 use super::compiled::{Compiled, NO_TARGET};
-use super::isa::{Op, TexDim};
+use super::isa::{Op, Pred, TexDim};
 use super::{interp, isa};
 use crate::gpu::texture::TextureSlot;
 use std::collections::BTreeSet;
@@ -217,6 +217,62 @@ fn is_terminator(op: Op) -> bool {
         op,
         Op::Bra { .. } | Op::Brx { .. } | Op::Exit | Op::Kil | Op::Sync | Op::Brk | Op::Cont
     )
+}
+
+/// Each instruction's possible predecessors. A `sync` or `brk` may take any later
+/// target its `ssy` or `pbk` could have pushed, which can only add paths: an extra
+/// path refuses a trace, never confirms a wrong one.
+fn predecessors(program: &Compiled) -> Vec<Vec<usize>> {
+    let len = program.len();
+    let targets_of = |wanted: fn(Op) -> bool| -> Vec<usize> {
+        (0..len)
+            .filter(|&at| wanted(program.op(at)) && program.target(at) != NO_TARGET)
+            .map(|at| program.target(at) as usize)
+            .collect()
+    };
+    let ssy = targets_of(|op| matches!(op, Op::Ssy { .. }));
+    let pbk = targets_of(|op| matches!(op, Op::Pbk { .. }));
+    let pcnt = targets_of(|op| matches!(op, Op::Pcnt { .. }));
+    let mut before = vec![Vec::new(); len];
+    for at in 0..len {
+        let mut edge = |to: usize| {
+            if to < len {
+                before[to].push(at);
+            }
+        };
+        let falls_through = match program.op(at) {
+            Op::Exit => false,
+            Op::Bra { .. } => {
+                edge(program.target(at) as usize);
+                false
+            }
+            Op::Brx { .. } => {
+                program
+                    .indirect_targets(at)
+                    .into_iter()
+                    .flatten()
+                    .for_each(|&t| edge(t as usize));
+                false
+            }
+            Op::Sync => {
+                ssy.iter().filter(|&&t| t > at).for_each(|&t| edge(t));
+                false
+            }
+            Op::Brk => {
+                pbk.iter().filter(|&&t| t > at).for_each(|&t| edge(t));
+                false
+            }
+            Op::Cont => {
+                pcnt.iter().for_each(|&t| edge(t));
+                false
+            }
+            _ => true,
+        };
+        if falls_through || program.pred(at) != Pred::ALWAYS {
+            edge(at + 1);
+        }
+    }
+    before
 }
 
 /// Block starts: the entry, branch targets, and instructions after terminators.

@@ -2,16 +2,16 @@
 
 use super::emitter::Emitter;
 use super::helpers::HELPERS;
-use super::{is_terminator, Unsupported, RECONVERGENCE_DEPTH};
+use super::{is_terminator, predecessors, Unsupported, RECONVERGENCE_DEPTH};
 use crate::gpu::shader::compiled::NO_TARGET;
 use crate::gpu::shader::isa::{Op, Pred};
 
 impl Emitter<'_> {
     /// One `case` per basic block, in order.
     pub(super) fn emit_blocks(&mut self, leaders: &[usize]) -> Result<(), Unsupported> {
+        self.before = predecessors(self.program);
         for (n, &start) in leaders.iter().enumerate() {
             let end = leaders.get(n + 1).copied().unwrap_or(self.program.len());
-            self.block = start;
             self.indent = 3;
             self.line(&format!("case {start}u: {{"));
             self.indent = 4;
