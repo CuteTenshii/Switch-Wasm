@@ -209,6 +209,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 
 - `CloneCurrentObject` must return a new session move handle; `nnSdk` clones `fsp-srv` before `MountRom`.
 - `svcResetSignal` must fail when nothing was signalled; succeeding unconditionally made drain loops spin.
+- `svcSynchronizePreemptionState` does nothing: the kernel only unpins a pinned thread, and threads are never pinned here. Just Dance 2023 reaches it from `AK::EventManager`.
 
 ### `crates/switch-core/src/services/usb.rs`
 

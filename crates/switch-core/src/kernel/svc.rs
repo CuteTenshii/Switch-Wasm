@@ -401,6 +401,8 @@ impl Cpu {
                 self.write_zr(0, if ok { RESULT_OK } else { RESULT_INVALID_STATE });
                 Ok(())
             }
+            // SynchronizePreemptionState only unpins a pinned thread, and nothing here pins one.
+            0x36 => Ok(()),
             0x1D => {
                 // SignalProcessWideKey(key = X0, count = W1)
                 let key = self.read_zr(0) as u32;
@@ -1304,6 +1306,14 @@ mod tests {
         cpu.write_zr(2, mask);
         cpu.horizon_syscall(0x0F).unwrap();
         cpu.read_zr(0)
+    }
+
+    #[test]
+    fn synchronizing_preemption_state_leaves_an_unpinned_thread_alone() {
+        let mut cpu = Cpu::new();
+        cpu.write_zr(0, 0x1234);
+        cpu.horizon_syscall(0x36).unwrap();
+        assert_eq!(cpu.read_zr(0), 0x1234);
     }
 
     #[test]
