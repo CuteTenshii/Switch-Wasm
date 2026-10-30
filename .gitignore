@@ -17,3 +17,5 @@ out/
 # Playwright's output.
 /test-results
 /playwright-report
+
+.idea
