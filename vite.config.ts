@@ -35,7 +35,6 @@ const minifyHtml: Plugin = {
     order: 'post',
     handler: (html) => minify(html, {
       collapseWhitespace: true,
-      conservativeCollapse: true,
       removeComments: true,
       removeRedundantAttributes: true,
       minifyCSS: true,
