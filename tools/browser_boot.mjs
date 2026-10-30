@@ -3,7 +3,8 @@
 //   node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]
 //                               [--firmware=dir] [--log-level=debug] [--debug-from=text]
 //                               [--no-webgpu] [--seconds=N] [--out=log.txt]
-//                               [--screenshot=frame.png] [--jit-stats]
+//                               [--screenshot=frame.png] [--screenshot-every=N] [--jit-stats]
+//                               [--press=key@seconds[:every],...]
 // Serves `dist` (run `make assets` first) with WebGPU enabled and a fresh profile.
 // `--firmware` installs a directory's NCAs to the NAND first, so library applets run.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
@@ -12,6 +13,10 @@
 // the start floods the log long before the moment worth reading.
 // `HEADED=1` opens a window, whose browser gets the machine's GPU instead of a software adapter.
 // `--jit-stats` records the cumulative block stats with every sample.
+// `--press` taps keyboard keys, as `web/main/input.ts` maps them (z is A, x is B, the arrows
+// are the d-pad), that long after the title starts and again every `every` seconds. A tap
+// first closes any dialog, since keys belong to the page while one is open.
+// `--screenshot-every` also saves the screen every N seconds, beside `--screenshot`'s file.
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +25,7 @@ import { preview } from 'vite';
 
 const USAGE =
   'usage: node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]'
-  + ' [--firmware=dir] [--log-level=debug] [--debug-from=text] [--no-webgpu] [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--jit-stats]';
+  + ' [--firmware=dir] [--log-level=debug] [--debug-from=text] [--no-webgpu] [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N] [--jit-stats] [--press=key@seconds[:every],...]';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -49,6 +54,16 @@ const screenshot = flag('screenshot') && resolve(flag('screenshot'));
 const logLevel = flag('log-level');
 const debugFrom = flag('debug-from');
 const noWebGpu = process.argv.includes('--no-webgpu');
+const screenshotEvery = Number(flag('screenshot-every') ?? 0);
+const PRESS_HOLD_MS = 200;
+const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
+  const match = /^(.+)@(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?))?$/.exec(spec);
+  if (!match) {
+    console.error(`--press=${spec}: expected key@seconds[:every]`);
+    process.exit(1);
+  }
+  return { key: match[1], next: Number(match[2]), every: Number(match[3] ?? 0) };
+});
 
 const server = await preview({
   configFile: join(root, 'vite.config.ts'),
@@ -170,6 +185,32 @@ try {
   }
 
   const started = Date.now();
+  const tap = async (key) => {
+    await page.evaluate(() => document.querySelector('dialog[open] button')?.click());
+    await page.keyboard.down(key);
+    await page.waitForTimeout(PRESS_HOLD_MS);
+    await page.keyboard.up(key);
+    say(`${Math.round((Date.now() - started) / 1000)}s: tapped ${key}`);
+  };
+  const tapping = presses.map(async ({ key, next, every }) => {
+    let at = next;
+    while (running && !crashed && at < seconds) {
+      await page.waitForTimeout(started + at * 1000 - Date.now());
+      if (crashed || Date.now() - started >= seconds * 1000) return;
+      await tap(key);
+      if (!every) return;
+      at += every;
+    }
+  });
+  const shooting = (async () => {
+    if (!screenshot || !screenshotEvery) return;
+    for (let at = screenshotEvery; running && !crashed && at < seconds; at += screenshotEvery) {
+      await page.waitForTimeout(started + at * 1000 - Date.now());
+      if (crashed) return;
+      const path = screenshot.replace(/(\.\w+)?$/, `-${at}s$1`);
+      await page.locator('#screen').screenshot({ path });
+    }
+  })();
   let lastRows = -1;
   let lastLine = '';
   while (running && !crashed && Date.now() - started < seconds * 1000) {
@@ -203,6 +244,7 @@ try {
     }
   }
 
+  await Promise.allSettled([...tapping, shooting]);
   if (screenshot && !crashed) {
     await page.locator('#screen').screenshot({ path: screenshot });
     say(`saved the screen to ${screenshot}`);
