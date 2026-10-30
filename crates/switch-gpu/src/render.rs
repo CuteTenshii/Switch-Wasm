@@ -104,15 +104,18 @@ impl Gpu {
             if whole != bytes.len() {
                 bytes.to_mut().resize(whole, 0);
             }
-            feeds.push(Feed {
-                bytes,
-                attributes,
-                stride,
-                step: match buffer.step {
-                    state::StepMode::Instance => wgpu::VertexStepMode::Instance,
-                    state::StepMode::Vertex => wgpu::VertexStepMode::Vertex,
-                },
-            });
+            let step = match buffer.step {
+                state::StepMode::Instance => wgpu::VertexStepMode::Instance,
+                state::StepMode::Vertex => wgpu::VertexStepMode::Vertex,
+            };
+            for (bytes, attributes) in crate::within_stride(bytes, attributes, stride)? {
+                feeds.push(Feed {
+                    bytes,
+                    attributes,
+                    stride,
+                    step,
+                });
+            }
         }
         // Unbound locations read a constant buffer of the two default vectors.
         let fed: Vec<usize> = feeds

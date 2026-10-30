@@ -685,3 +685,37 @@ fn the_packed_depth_pass_converts_depths_bit_for_bit() {
         );
     }
 }
+
+#[test]
+fn an_attribute_past_its_stride_reads_from_a_later_buffer() {
+    let attribute = |offset, shader_location| wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset,
+        shader_location,
+    };
+    let bytes: Vec<u8> = (0..48).collect();
+    let split = super::within_stride(
+        std::borrow::Cow::Borrowed(&bytes[..]),
+        vec![attribute(0, 0), attribute(32, 1)],
+        8,
+    )
+    .expect("both fit a stride");
+    assert_eq!(split.len(), 2);
+    assert_eq!(split[0].0.as_ref(), &bytes[..]);
+    assert_eq!(split[0].1, [attribute(0, 0)]);
+    assert_eq!(split[1].0.len(), bytes.len(), "a draw must still fit it");
+    assert_eq!(split[1].0[0], 32, "the first element's bytes");
+    assert_eq!(split[1].0[47], 0, "past the array reads zero");
+    assert_eq!(split[1].1, [attribute(0, 1)]);
+}
+
+#[test]
+fn an_attribute_wider_than_its_stride_is_refused_before_the_device_sees_it() {
+    let wide = wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 4,
+        shader_location: 0,
+    };
+    let refused = super::within_stride(std::borrow::Cow::Borrowed(&[0u8; 16][..]), vec![wide], 8);
+    assert!(refused.is_err());
+}
