@@ -241,6 +241,15 @@ impl Engine3D {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.flush(ctx))
     }
 
+    /// See [`Renderer::blit`].
+    pub fn blit_on_renderer(
+        &mut self,
+        blit: &crate::gpu::renderer::Blit,
+        ctx: &mut ExecCtx,
+    ) -> Result<crate::gpu::renderer::BlitRoute> {
+        self.with_renderer(ctx, |renderer, _, ctx| renderer.blit(blit, ctx))
+    }
+
     /// See [`Renderer::submit_frame`].
     pub fn submit_frame(
         &mut self,

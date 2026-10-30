@@ -10,6 +10,7 @@ use crate::gpu::engine::{
     field, Registers, CLASS_2D, CLASS_3D, CLASS_COMPUTE, CLASS_COPY, CLASS_GPFIFO, CLASS_INLINE,
 };
 use crate::gpu::exec::ExecCtx;
+use crate::gpu::renderer::BlitRoute;
 use crate::gpu::syncpt::NvFence;
 use crate::{Error, Result};
 
@@ -294,7 +295,24 @@ impl Channel {
             // Flush device-resident render targets before a blit reads guest memory.
             CLASS_2D => {
                 if method == crate::gpu::engine::twod::Engine2D::LAUNCHES_BLIT {
-                    self.three_d.flush_renderer(ctx)?;
+                    self.two_d.regs.set(method, arg);
+                    // A blit the registers cannot describe reports that from `write`.
+                    let request = self.two_d.request().ok();
+                    let route = match &request {
+                        Some(blit) => self.three_d.blit_on_renderer(blit, ctx)?,
+                        None => BlitRoute::Flush,
+                    };
+                    match (route, request) {
+                        (BlitRoute::Done, Some(blit)) => {
+                            self.two_d.note(&blit, ctx);
+                            ctx.stats.copies += 1;
+                            return Ok(());
+                        }
+                        (BlitRoute::GuestMemory, _) => {}
+                        _ => {
+                            self.three_d.flush_renderer(ctx)?;
+                        }
+                    }
                 }
                 self.two_d.write(method, arg, ctx)
             }

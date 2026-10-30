@@ -4,6 +4,7 @@
 
 use crate::gpu::engine::Registers;
 use crate::gpu::exec::ExecCtx;
+use crate::gpu::renderer::Blit;
 use crate::gpu::surface::{blend, taps, ColorFormat, Layout, Surface, GOB_HEIGHT, GOB_WIDTH};
 use crate::{Error, Result};
 
@@ -129,7 +130,8 @@ impl Engine2D {
         })
     }
 
-    fn blit(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+    /// The source copy the registers describe.
+    pub fn request(&self) -> Result<Blit> {
         let operation = self.regs.get(SET_OPERATION);
         if operation != OPERATION_SRC_COPY {
             return Err(Error::Gpu(format!(
@@ -137,45 +139,67 @@ impl Engine2D {
                 operation
             )));
         }
-        let src = self.surface(false)?;
-        let dst = self.surface(true)?;
-        let dst_x0 = self.regs.get(DST_X0);
-        let dst_y0 = self.regs.get(DST_Y0);
-        let dst_w = self.regs.get(DST_WIDTH);
-        let dst_h = self.regs.get(DST_HEIGHT);
         let du_dx = fixed(self.regs.get(DU_DX_INT), self.regs.get(DU_DX_FRAC));
         let dv_dy = fixed(self.regs.get(DV_DY_INT), self.regs.get(DV_DY_FRAC));
         let src_x0 = fixed(self.regs.get(SRC_X0_INT), self.regs.get(SRC_X0_FRAC));
         let src_y0 = fixed(self.regs.get(SRC_Y0_INT), self.regs.get(SRC_Y0_FRAC));
         let bilinear = self.regs.field(SAMPLE_MODE, 4, 4) == FILTER_BILINEAR;
-
         // Taps exactly on texel centres make bilinear a point sample.
         let centred = |origin: f64, step: f64| (origin - 0.5).fract() == 0.0 && step.fract() == 0.0;
-        let filtered = bilinear && !(centred(src_x0, du_dx) && centred(src_y0, dv_dy));
+        Ok(Blit {
+            src: self.surface(false)?,
+            dst: self.surface(true)?,
+            dst_rect: (
+                self.regs.get(DST_X0),
+                self.regs.get(DST_Y0),
+                self.regs.get(DST_WIDTH),
+                self.regs.get(DST_HEIGHT),
+            ),
+            src_origin: (src_x0, src_y0),
+            step: (du_dx, dv_dy),
+            filtered: bilinear && !(centred(src_x0, du_dx) && centred(src_y0, dv_dy)),
+        })
+    }
 
-        {
-            use crate::gpu::activity::surface_text;
-            let (src_cpu, dst_cpu) = (ctx.span(src.addr, 1), ctx.span(dst.addr, 1));
-            self.activity.note(
-                crate::gpu::activity::Kind::Blit,
-                src.addr,
-                dst.addr,
-                u64::from(dst_w) * u64::from(dst_h),
-                false,
-                || {
-                    format!(
-                        "{} -> {}, {dst_w}x{dst_h} at ({dst_x0},{dst_y0}), {}",
-                        surface_text(src.addr, src_cpu, src.width, src.height, src.format.raw),
-                        surface_text(dst.addr, dst_cpu, dst.width, dst.height, dst.format.raw),
-                        if filtered {
-                            "filtered"
-                        } else {
-                            "point-sampled"
-                        }
-                    )
-                },
-            );
-        }
+    /// Count a blit, whichever side ran it.
+    pub fn note(&mut self, blit: &Blit, ctx: &ExecCtx) {
+        use crate::gpu::activity::surface_text;
+        let (src, dst) = (&blit.src, &blit.dst);
+        let (dst_x0, dst_y0, dst_w, dst_h) = blit.dst_rect;
+        let (src_cpu, dst_cpu) = (ctx.span(src.addr, 1), ctx.span(dst.addr, 1));
+        self.activity.note(
+            crate::gpu::activity::Kind::Blit,
+            src.addr,
+            dst.addr,
+            u64::from(dst_w) * u64::from(dst_h),
+            false,
+            || {
+                format!(
+                    "{} -> {}, {dst_w}x{dst_h} at ({dst_x0},{dst_y0}), {}",
+                    surface_text(src.addr, src_cpu, src.width, src.height, src.format.raw),
+                    surface_text(dst.addr, dst_cpu, dst.width, dst.height, dst.format.raw),
+                    if blit.filtered {
+                        "filtered"
+                    } else {
+                        "point-sampled"
+                    }
+                )
+            },
+        );
+    }
+
+    fn blit(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+        let request = self.request()?;
+        let Blit {
+            src,
+            dst,
+            dst_rect: (dst_x0, dst_y0, dst_w, dst_h),
+            src_origin: (src_x0, src_y0),
+            step: (du_dx, dv_dy),
+            filtered,
+        } = request;
+        let bilinear = self.regs.field(SAMPLE_MODE, 4, 4) == FILTER_BILINEAR;
+        self.note(&request, ctx);
         if ctx.trace || crate::trace::enabled(crate::trace::Trace::Copy) {
             crate::traceln!(
                 "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x} \

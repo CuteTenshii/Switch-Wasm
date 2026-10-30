@@ -3,6 +3,52 @@
 
 use switch_core::gpu::surface::{SampleGrid, MAX_SAMPLES};
 
+/// A 2D engine blit, computing what `Engine2D` does per texel: `taps` and `blend` when
+/// filtered, a clamped truncation when not.
+pub(crate) const BLIT_WGSL: &str = "\
+struct Parameters {
+  origin: vec2<f32>,
+  step: vec2<f32>,
+  first: vec2<f32>,
+  last: vec2<f32>,
+  round: f32,
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> p: Parameters;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+fn rounded(colour: vec4<f32>) -> vec4<f32> {
+  if p.round == 0.0 {
+    return colour;
+  }
+  return floor(colour * p.round + 0.5) / p.round;
+}
+
+@fragment
+fn fs_point(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = max(p.origin + p.step * (floor(at.xy) - p.first), vec2<f32>(0.0));
+  return rounded(textureLoad(src, vec2<u32>(min(floor(c), p.last)), 0));
+}
+
+@fragment
+fn fs_filtered(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = max(p.origin + p.step * (floor(at.xy) - p.first) - vec2<f32>(0.5), vec2<f32>(0.0));
+  let whole = floor(c);
+  let f = c - whole;
+  let a = vec2<u32>(min(whole, p.last));
+  let b = vec2<u32>(min(whole + vec2<f32>(1.0), p.last));
+  let top = mix(textureLoad(src, a, 0), textureLoad(src, vec2<u32>(b.x, a.y), 0), f.x);
+  let bottom = mix(textureLoad(src, vec2<u32>(a.x, b.y), 0), textureLoad(src, b, 0), f.x);
+  return rounded(mix(top, bottom, f.y));
+}
+";
+
 /// Writes an uploaded `r32float` texture into a depth surface as frag depth;
 /// a copy cannot write `depth32float`.
 pub(crate) const LOAD_DEPTH_WGSL: &str = "\

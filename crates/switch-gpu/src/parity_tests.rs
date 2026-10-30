@@ -2,7 +2,8 @@
 
 use crate::tests::device;
 
-use switch_core::gpu::renderer::{Renderer, Software, Submit};
+use switch_core::gpu::renderer::{Blit, BlitRoute, Renderer, Software, Submit};
+use switch_core::gpu::surface::{blend, taps, ColorFormat, Layout, Surface};
 use switch_core::gpu::testing::{self, Harness};
 
 /// A solid white triangle over a multisample mode, by both renderers; only coverage can differ.
@@ -1674,4 +1675,134 @@ fn presented_frames_land_in_the_order_they_were_submitted() {
         .expect("the clear");
     want.draw_with(&mut Software).expect("the draw");
     assert_eq!(h.target(), want.target());
+}
+
+const RGBA8: u32 = 0xD5;
+
+/// Where the blits below write: past everything else in the harness's mapping.
+const BLIT_TARGET: u64 = 0x1000;
+
+/// A shaded target of `Harness`'s, drawn by `renderer`.
+fn shaded(renderer: &mut dyn Renderer) -> Harness {
+    let mut h = Harness::new();
+    h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.25, 1.0]);
+    h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [0.0, 1.0, 0.5, 1.0]);
+    h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    h.clear_with(renderer, [true; 4]).expect("the clear");
+    h.draw_with(renderer).expect("the draw");
+    h
+}
+
+fn colour_surface(addr: u64, width: u32, height: u32) -> Surface {
+    Surface {
+        addr,
+        width,
+        height,
+        format: ColorFormat::from_raw(RGBA8).expect("a format"),
+        layout: Layout::Pitch { pitch: width * 4 },
+    }
+}
+
+fn downscale(h: &Harness, filtered: bool) -> Blit {
+    Blit {
+        src: colour_surface(h.base, testing::TARGET_WIDTH, testing::TARGET_HEIGHT),
+        dst: colour_surface(
+            h.base + BLIT_TARGET,
+            testing::TARGET_WIDTH / 2,
+            testing::TARGET_HEIGHT / 2,
+        ),
+        dst_rect: (0, 0, testing::TARGET_WIDTH / 2, testing::TARGET_HEIGHT / 2),
+        src_origin: (1.0, 1.0),
+        step: (2.0, 2.0),
+        filtered,
+    }
+}
+
+/// What `Engine2D` computes for a blit of `source`, `Harness::target`'s texels.
+fn expected_blit(blit: &Blit, source: &[u32]) -> Vec<u32> {
+    let (width, height) = (blit.src.width, blit.src.height);
+    let texel = |x: u32, y: u32| {
+        let raw = source[(y.min(height - 1) * width + x.min(width - 1)) as usize];
+        std::array::from_fn::<f32, 4, _>(|i| ((raw >> (8 * i)) & 0xFF) as f32 / 255.0)
+    };
+    let mut out = Vec::new();
+    for y in 0..blit.dst_rect.3 {
+        for x in 0..blit.dst_rect.2 {
+            let u = blit.src_origin.0 + blit.step.0 * f64::from(x);
+            let v = blit.src_origin.1 + blit.step.1 * f64::from(y);
+            let colour = if blit.filtered {
+                let (x0, fx) = taps(u);
+                let (y0, fy) = taps(v);
+                blend(
+                    texel(x0, y0),
+                    texel(x0 + 1, y0),
+                    texel(x0, y0 + 1),
+                    texel(x0 + 1, y0 + 1),
+                    fx,
+                    fy,
+                )
+            } else {
+                texel(u as u32, v as u32)
+            };
+            out.push(colour.iter().enumerate().fold(0u32, |word, (i, channel)| {
+                word | (((channel * 255.0 + 0.5).floor() as u32) << (8 * i))
+            }));
+        }
+    }
+    out
+}
+
+fn blit_on_device_agrees_with_the_engine(filtered: bool) {
+    let Some(mut gpu) = device() else { return };
+    let mut h = shaded(&mut gpu);
+    let blit = downscale(&h, filtered);
+    let route = gpu.blit(&blit, &mut h.ctx()).expect("the blit");
+    assert_eq!(route, BlitRoute::Done, "both surfaces can be on the device");
+    gpu.flush(&mut h.ctx()).expect("the flush");
+
+    let base = h.base;
+    let (width, height) = (blit.dst_rect.2, blit.dst_rect.3);
+    let ctx = h.ctx();
+    let got: Vec<u32> = (0..u64::from(width * height))
+        .map(|i| ctx.read_u32(base + BLIT_TARGET + i * 4).expect("a texel"))
+        .collect();
+
+    let mut reference = shaded(&mut Software);
+    assert_eq!(got, expected_blit(&blit, &reference.target()));
+}
+
+#[test]
+fn a_filtered_blit_on_the_device_agrees_with_the_engine() {
+    blit_on_device_agrees_with_the_engine(true);
+}
+
+#[test]
+fn a_point_sampled_blit_on_the_device_agrees_with_the_engine() {
+    blit_on_device_agrees_with_the_engine(false);
+}
+
+#[test]
+fn a_blit_away_from_held_surfaces_stays_in_guest_memory() {
+    let Some(mut gpu) = device() else { return };
+    let mut h = shaded(&mut gpu);
+    let blit = Blit {
+        src: colour_surface(h.base + BLIT_TARGET, 4, 4),
+        dst: colour_surface(h.base + BLIT_TARGET + 0x100, 4, 4),
+        dst_rect: (0, 0, 4, 4),
+        src_origin: (0.0, 0.0),
+        step: (1.0, 1.0),
+        filtered: false,
+    };
+    let route = gpu.blit(&blit, &mut h.ctx()).expect("the blit");
+    assert_eq!(route, BlitRoute::GuestMemory);
+}
+
+#[test]
+fn a_blit_out_of_a_surface_on_another_format_flushes() {
+    let Some(mut gpu) = device() else { return };
+    let mut h = shaded(&mut gpu);
+    let mut blit = downscale(&h, false);
+    blit.src.format = ColorFormat::from_raw(0xCA).expect("a format");
+    let route = gpu.blit(&blit, &mut h.ctx()).expect("the blit");
+    assert_eq!(route, BlitRoute::Flush);
 }

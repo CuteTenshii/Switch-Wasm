@@ -496,6 +496,23 @@ impl Target {
         }))
     }
 
+    /// A 2D engine surface as a colour target.
+    pub fn of_surface(surface: &crate::gpu::surface::Surface) -> Result<Target> {
+        let unit = surface.format.bytes_per_pixel;
+        Ok(Target {
+            format: crate::gpu::pipeline::color_format(surface.format)
+                .map_err(|e| Error::Gpu(format!("upload: 2D surface: {e}")))?,
+            addr: surface.addr,
+            width: surface.width,
+            height: surface.height,
+            layout: surface.layout,
+            row_bytes: surface.width * unit,
+            rows: surface.height,
+            unit,
+            depth: None,
+        })
+    }
+
     pub fn depth_surface(engine: &Engine3D) -> Result<Option<Target>> {
         let Some(dt) = engine.depth_target()? else {
             return Ok(None);

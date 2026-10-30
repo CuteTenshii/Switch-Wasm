@@ -56,7 +56,7 @@ pub use wgpu;
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state, Pipeline};
-use switch_core::gpu::renderer::{Flush, Renderer, Software, Submit};
+use switch_core::gpu::renderer::{Blit, BlitRoute, Flush, Renderer, Software, Submit};
 #[cfg(test)]
 use switch_core::gpu::shader::compiled::Compiled;
 #[cfg(test)]
@@ -362,6 +362,7 @@ pub struct Gpu {
     packed_depth: Option<wgpu::RenderPipeline>,
     /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
     clear_pipelines: std::collections::HashMap<ClearKey, wgpu::RenderPipeline>,
+    blit_pipelines: std::collections::HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
     /// Every present brings every surface back, to compare against keeping them.
     sync_every_present: bool,
     /// Multisample resampling pipelines. See [`resample_wgsl`].
@@ -518,6 +519,7 @@ macro_rules! timed {
 }
 
 mod bind;
+mod blit;
 mod clear;
 mod device;
 mod held;
@@ -775,6 +777,19 @@ impl Renderer for Gpu {
                 self.software.clear_depth_stencil(engine, ctx, true, false)
             }
         }
+    }
+
+    fn blit(&mut self, blit: &Blit, ctx: &mut ExecCtx) -> Result<BlitRoute> {
+        self.enter_space(ctx.as_id);
+        if self.give_up() || self.software_frame {
+            return Ok(BlitRoute::Flush);
+        }
+        if self.blit_touches_nothing_held(blit) {
+            return Ok(BlitRoute::GuestMemory);
+        }
+        let route = self.blit_on_device(blit, ctx);
+        self.release_scratch();
+        Ok(route)
     }
 
     fn flush(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {

@@ -4,7 +4,34 @@
 
 use crate::gpu::engine::threed::Engine3D;
 use crate::gpu::exec::ExecCtx;
+use crate::gpu::surface::Surface;
 use crate::Result;
+
+/// A 2D engine source copy, as its registers describe it.
+#[derive(Debug, Clone, Copy)]
+pub struct Blit {
+    pub src: Surface,
+    pub dst: Surface,
+    /// In destination texels: x, y, width and height.
+    pub dst_rect: (u32, u32, u32, u32),
+    /// The source position the first destination texel reads.
+    pub src_origin: (f64, f64),
+    /// Source texels per destination texel.
+    pub step: (f64, f64),
+    /// Four taps blended, rather than one texel read.
+    pub filtered: bool,
+}
+
+/// What [`Renderer::blit`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlitRoute {
+    /// The backend ran it.
+    Done,
+    /// It touches nothing the backend holds, so the engine can run it on guest memory as it is.
+    GuestMemory,
+    /// The engine has to flush the backend, then run it on guest memory.
+    Flush,
+}
 
 /// A backend that turns the 3D engine's draws and clears into pixels.
 pub trait Renderer: std::fmt::Debug {
@@ -31,6 +58,12 @@ pub trait Renderer: std::fmt::Debug {
         depth: bool,
         stencil: bool,
     ) -> Result<()>;
+
+    /// Run a 2D blit where its surfaces are, or say what the engine must do first.
+    fn blit(&mut self, blit: &Blit, ctx: &mut ExecCtx) -> Result<BlitRoute> {
+        let _ = (blit, ctx);
+        Ok(BlitRoute::Flush)
+    }
 
     /// Make guest memory agree with whatever the backend is holding. Draws
     /// must not block on readback; this is where waiting is allowed.

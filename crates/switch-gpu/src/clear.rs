@@ -266,7 +266,7 @@ impl Gpu {
     }
 
     /// Hold a surface without reading it, for a clear that writes every texel.
-    fn hold_blank(&mut self, target: &Target) -> Result<()> {
+    pub(super) fn hold_blank(&mut self, target: &Target) -> Result<()> {
         match self.space.held.get(&target.addr) {
             // Already held: clear it in place.
             Some(held) if held.target == *target => return Ok(()),
