@@ -678,6 +678,7 @@ impl Gpu {
                 return Ok(texture.clone());
             }
         }
+        self.note_read_of(upload.key.addr..upload.key.addr + upload.bytes.len() as u64);
         let (texture, len) = self.upload_texture(upload, view, fold)?;
         // Kept only alongside its cached bytes, which a guest write evicts.
         if self.space.texture_cache.contains_key(&upload.key) {

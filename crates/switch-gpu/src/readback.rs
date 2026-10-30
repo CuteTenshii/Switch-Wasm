@@ -45,6 +45,9 @@ pub(crate) struct Held {
     /// What draws render into when coverage is not measured in the surface's texels.
     /// See [`Shape`].
     pub(crate) companion: Option<Companion>,
+    /// The CPU pages being watched for guest writes; empty until they can be.
+    /// See [`Gpu::watch_held`](crate::Gpu).
+    pub(crate) watched: Vec<u32>,
 }
 
 /// A surface's stand-in, and the grid it stands in for (kept until the flush).

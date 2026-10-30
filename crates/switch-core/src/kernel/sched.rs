@@ -48,7 +48,12 @@ impl Cpu {
     ) -> crate::Result<()> {
         use crate::gpu::renderer::Submit;
         self.complete_pending_present();
-        match self.machine.nv.gpu.submit_frame(self.pid, &self.mem)? {
+        match self
+            .machine
+            .nv
+            .gpu
+            .submit_frame(self.pid, &self.mem, &buffer)?
+        {
             Submit::Done => {
                 self.machine.nv.gpu.present(self.pid, &self.mem, &buffer)?;
                 if crate::trace::enabled(crate::trace::Trace::Nv) {

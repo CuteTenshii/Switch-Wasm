@@ -3,11 +3,27 @@
 use crate::builtin::LOAD_DEPTH_WGSL;
 use crate::convert::{depth_texture_format, device_attachment_format};
 use crate::readback::{Held, Pending, MAP_FAILED, MAP_READY, MAP_WAITING};
+use crate::resources::guest_pages;
 use crate::{Gpu, Space, COPY_ALIGNMENT, MAX_FRAMES_IN_FLIGHT};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::{Flush, Submit};
 use switch_core::gpu::upload::{DepthKind, Target};
+use switch_core::mem::PAGE_BITS;
 use switch_core::{Error, Result};
+
+/// Past this much held across a present, it all goes back to guest memory and is freed.
+const MAX_HELD_BYTES: u64 = 512 << 20;
+
+/// Guest memory a target's texels occupy; block-linear rows pad out to whole blocks.
+pub(super) fn surface_span(target: &Target) -> std::ops::Range<u64> {
+    let len =
+        u64::from(target.layout.layer_stride(target.row_bytes, target.rows)).max(target.len());
+    target.addr..target.addr + len
+}
+
+pub(super) fn spans_overlap(a: &std::ops::Range<u64>, b: &std::ops::Range<u64>) -> bool {
+    a.start < b.end && b.start < a.end
+}
 
 impl Gpu {
     /// Make `as_id`'s surfaces and caches current, parking the previous address space's.
@@ -56,6 +72,7 @@ impl Gpu {
             }
             None => {}
         }
+        self.note_aliases(target);
         let texture = self.upload_target(target, ctx)?;
         self.space.held.insert(
             target.addr,
@@ -64,6 +81,7 @@ impl Gpu {
                 target: *target,
                 dirty: false,
                 companion: None,
+                watched: Vec::new(),
             },
         );
         Ok(())
@@ -415,9 +433,76 @@ impl Gpu {
         target.write_depth(ctx, rows, target.width)
     }
 
+    /// A new surface sharing memory with another at a different address only sees it through
+    /// guest memory, which has to catch up.
+    pub(super) fn note_aliases(&mut self, target: &Target) {
+        let new = surface_span(target);
+        if self.space.held.values().any(|held| {
+            held.target.addr != target.addr && spans_overlap(&surface_span(&held.target), &new)
+        }) {
+            self.space.sync_all = true;
+        }
+    }
+
+    /// Whether a surface being drawn into shares memory with what is about to be read from it.
+    pub(super) fn note_read_of(&mut self, read: std::ops::Range<u64>) {
+        if self
+            .space
+            .held
+            .values()
+            .any(|held| held.dirty && spans_overlap(&surface_span(&held.target), &read))
+        {
+            self.space.sync_all = true;
+        }
+    }
+
+    /// Start watching the pages of surfaces no readback is about to write, and ask for a full
+    /// sync when a page already watched was written, which only the guest can have done.
+    pub(super) fn watch_held(&mut self, ctx: &ExecCtx, written: &[u32]) {
+        if !written.is_empty()
+            && self
+                .space
+                .held
+                .values()
+                .any(|held| held.watched.iter().any(|page| written.contains(page)))
+        {
+            self.space.sync_all = true;
+        }
+        let pending: Vec<_> = self
+            .space
+            .pending
+            .iter()
+            .map(|pending| surface_span(&pending.target))
+            .collect();
+        for held in self.space.held.values_mut() {
+            let span = surface_span(&held.target);
+            if !held.watched.is_empty() || pending.iter().any(|p| spans_overlap(p, &span)) {
+                continue;
+            }
+            held.watched = guest_pages(ctx, span.start, span.end - span.start);
+            for &page in &held.watched {
+                ctx.mem.mark_gpu_page(page << PAGE_BITS);
+            }
+        }
+    }
+
+    /// Ask for only the surface the display reads, with whatever the guest rebound.
+    fn ask_for_scanout(&mut self, scanout: Option<u64>) {
+        timed!(self, flush_ask, {
+            self.space.asked += 1;
+            for held in std::mem::take(&mut self.space.evicted) {
+                self.ask_for(held);
+            }
+            if let Some(addr) = scanout {
+                self.flush_one(addr);
+            }
+        });
+    }
+
     /// Ask for every held and evicted surface as one generation.
     fn ask_for_all(&mut self) {
         timed!(self, flush_ask, {
+            self.space.sync_all = false;
             self.space.asked += 1;
             for held in std::mem::take(&mut self.space.evicted) {
                 self.ask_for(held);
@@ -469,17 +554,50 @@ impl Gpu {
     }
 
     /// Start a presented frame's readbacks while earlier frames' are still on their way.
-    pub(super) fn submit_frame_inner(&mut self, ctx: &mut ExecCtx) -> Result<Submit> {
+    ///
+    /// Only the surface the display reads goes back; the rest stay on the device, since
+    /// a readback and a re-upload per surface per frame was most of a frame's time. Whatever
+    /// reads guest memory instead flushes first, or asks for this to do it all ([`Space::sync_all`]).
+    /// A guest reading a render target's memory directly, with no copy, is not seen.
+    pub(super) fn submit_frame_inner(
+        &mut self,
+        ctx: &mut ExecCtx,
+        scanout: Option<u32>,
+    ) -> Result<Submit> {
         if self.give_up() {
             return Ok(Submit::Done);
         }
-        if !self.space.held.is_empty() || !self.space.evicted.is_empty() {
+        let held_bytes: u64 = self.space.held.values().map(|h| h.target.len()).sum();
+        let everything = scanout.is_none()
+            || self.sync_every_present
+            || self.space.sync_all
+            || held_bytes > MAX_HELD_BYTES;
+        let shown = scanout.and_then(|cpu| {
+            self.space
+                .held
+                .values()
+                .map(|held| &held.target)
+                .find_map(|target| {
+                    (ctx.vmm.translate(target.addr).map(|(at, _)| at) == Some(cpu))
+                        .then_some(target.addr)
+                })
+        });
+        let owed = if everything {
+            !self.space.held.is_empty()
+        } else {
+            shown.is_some()
+        };
+        if owed || !self.space.evicted.is_empty() {
             let mut asks: Vec<u64> = self.space.pending.iter().map(|p| p.generation).collect();
             asks.dedup();
             if asks.len() >= MAX_FRAMES_IN_FLIGHT {
                 return Ok(Submit::Full);
             }
-            self.ask_for_all();
+            if everything {
+                self.ask_for_all();
+            } else {
+                self.ask_for_scanout(shown);
+            }
         }
         timed!(self, flush_wait, self.land_ready(ctx))?;
         if self.space.pending.is_empty() {

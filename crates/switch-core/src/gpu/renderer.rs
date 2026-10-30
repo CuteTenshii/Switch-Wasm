@@ -39,10 +39,11 @@ pub trait Renderer: std::fmt::Debug {
         Ok(Flush::Done)
     }
 
-    /// Start getting a presented frame's surfaces back without waiting for the ones
-    /// already on their way; see [`Submit`].
-    fn submit_frame(&mut self, ctx: &mut ExecCtx) -> Result<Submit> {
-        let _ = ctx;
+    /// Start getting a presented frame back without waiting for the ones already on their
+    /// way; see [`Submit`]. `scanout` is the CPU address the display reads, when known; a
+    /// backend may keep every other surface for later.
+    fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u32>) -> Result<Submit> {
+        let _ = (ctx, scanout);
         Ok(Submit::Done)
     }
 

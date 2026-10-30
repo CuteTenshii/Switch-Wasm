@@ -49,6 +49,7 @@ impl Gpu {
             depth_loaders: std::collections::HashMap::new(),
             packed_depth: None,
             clear_pipelines: std::collections::HashMap::new(),
+            sync_every_present: false,
             resample_pipelines: std::collections::HashMap::new(),
             failed,
             lost,
@@ -199,6 +200,11 @@ impl Gpu {
     /// The `GPU_DEFER_READBACKS` flag. See [`Gpu::defer_readbacks`].
     pub fn set_defer_readbacks(&mut self, defer_readbacks: bool) {
         self.defer_readbacks = defer_readbacks;
+    }
+
+    /// The `GPU_SYNC_EVERY_PRESENT` flag. See [`Gpu::sync_every_present`].
+    pub fn set_sync_every_present(&mut self, sync: bool) {
+        self.sync_every_present = sync;
     }
 
     /// The `GPU_TIMES` flag: record phase timings, which a browser always does.

@@ -76,6 +76,7 @@ fn main() {
 fn configure(gpu: &mut switch_gpu::Gpu) {
     let on = |name: &str| std::env::var(name).is_ok();
     gpu.set_defer_readbacks(on("GPU_DEFER_READBACKS"));
+    gpu.set_sync_every_present(on("GPU_SYNC_EVERY_PRESENT"));
     gpu.set_interleave(on("GPU_INTERLEAVE"));
     gpu.set_web_limits(on("GPU_WEB_LIMITS"));
     gpu.set_device_msaa(on("GPU_DEVICE_MSAA"));

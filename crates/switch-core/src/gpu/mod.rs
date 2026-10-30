@@ -312,9 +312,19 @@ impl Gpu {
     }
 
     /// Starts getting the frame process `owner` presented back from the backend.
-    pub fn submit_frame(&mut self, owner: u64, mem: &Memory) -> Result<renderer::Submit> {
+    pub fn submit_frame(
+        &mut self,
+        owner: u64,
+        mem: &Memory,
+        buffer: &DisplayBuffer,
+    ) -> Result<renderer::Submit> {
+        let scanout = self
+            .nvmap
+            .by_id(buffer.nvmap_id)
+            .filter(|handle| handle.allocated)
+            .map(|handle| handle.cpu_addr.wrapping_add(buffer.offset));
         self.on_flush_channel(owner, mem, renderer::Submit::Done, |three_d, ctx| {
-            three_d.submit_frame(ctx)
+            three_d.submit_frame(ctx, scanout)
         })
     }
 

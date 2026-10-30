@@ -242,8 +242,12 @@ impl Engine3D {
     }
 
     /// See [`Renderer::submit_frame`].
-    pub fn submit_frame(&mut self, ctx: &mut ExecCtx) -> Result<crate::gpu::renderer::Submit> {
-        self.with_renderer(ctx, |renderer, _, ctx| renderer.submit_frame(ctx))
+    pub fn submit_frame(
+        &mut self,
+        ctx: &mut ExecCtx,
+        scanout: Option<u32>,
+    ) -> Result<crate::gpu::renderer::Submit> {
+        self.with_renderer(ctx, |renderer, _, ctx| renderer.submit_frame(ctx, scanout))
     }
 
     /// See [`Renderer::frames_landed`].

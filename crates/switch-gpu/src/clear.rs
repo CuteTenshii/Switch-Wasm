@@ -277,6 +277,7 @@ impl Gpu {
             }
             None => {}
         }
+        self.note_aliases(target);
         let texture = self.blank_target(target)?;
         self.space.held.insert(
             target.addr,
@@ -285,6 +286,7 @@ impl Gpu {
                 target: *target,
                 dirty: false,
                 companion: None,
+                watched: Vec::new(),
             },
         );
         Ok(())

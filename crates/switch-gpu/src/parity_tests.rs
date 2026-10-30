@@ -1647,7 +1647,7 @@ fn presented_frames_land_in_the_order_they_were_submitted() {
         h.triangle(colour);
         h.clear_with(gpu, [true; 4]).expect("the clear");
         h.draw_with(gpu).expect("the draw");
-        gpu.submit_frame(&mut h.ctx()).expect("the submit")
+        gpu.submit_frame(&mut h.ctx(), None).expect("the submit")
     };
     let first = submit(&mut h, &mut gpu, [1.0, 0.0, 0.0, 1.0]);
     let second = submit(&mut h, &mut gpu, [0.0, 0.0, 1.0, 1.0]);

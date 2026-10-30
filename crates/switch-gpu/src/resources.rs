@@ -5,6 +5,27 @@ use crate::{Gpu, PAGE_BITS, TEXTURE_CACHE_BYTES};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::upload::TextureKey;
 
+/// The CPU pages behind `len` bytes at `addr`, as far as the mapping goes.
+pub(super) fn guest_pages(ctx: &ExecCtx, addr: u64, len: u64) -> Vec<u32> {
+    let end = addr.saturating_add(len);
+    let mut pages = Vec::new();
+    let mut at = addr;
+    while at < end {
+        let Some((cpu, run)) = ctx.vmm.translate(at) else {
+            break;
+        };
+        let take = run.min(end - at);
+        if take == 0 {
+            break;
+        }
+        let first = u64::from(cpu) >> PAGE_BITS;
+        let last = (u64::from(cpu) + take - 1) >> PAGE_BITS;
+        pages.extend((first..=last).map(|p| p as u32));
+        at += take;
+    }
+    pages
+}
+
 impl Gpu {
     /// The module for this WGSL and its cache key; rejections arrive via the error handler.
     pub(super) fn module(&mut self, what: &str, source: &str) -> (u64, wgpu::ShaderModule) {
@@ -64,9 +85,11 @@ impl Gpu {
     /// Drop every cached texture the guest has written over.
     pub(super) fn evict_written(&mut self, ctx: &mut ExecCtx) {
         if !ctx.mem.has_dirty_gpu() {
+            self.watch_held(ctx, &[]);
             return;
         }
         let dirty = ctx.mem.dirty_gpu_pages();
+        self.watch_held(ctx, &dirty);
         self.evict_shaders(&dirty);
         for page in dirty {
             let Some(keys) = self.space.page_owners.remove(&page) else {
@@ -103,22 +126,7 @@ impl Gpu {
             }
             self.texture_misses += 1;
             // `source_len` is an upper bound that can exceed the mapping, so stop where the mapping does.
-            let end = key.addr.saturating_add(source_len);
-            let mut pages: Vec<u32> = Vec::new();
-            let mut at = key.addr;
-            while at < end {
-                let Some((cpu, run)) = ctx.vmm.translate(at) else {
-                    break;
-                };
-                let take = run.min(end - at);
-                if take == 0 {
-                    break;
-                }
-                let first = u64::from(cpu) >> PAGE_BITS;
-                let last = (u64::from(cpu) + take - 1) >> PAGE_BITS;
-                pages.extend((first..=last).map(|p| p as u32));
-                at += take;
-            }
+            let pages = guest_pages(ctx, key.addr, source_len);
             if pages.is_empty() {
                 continue;
             }

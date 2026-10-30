@@ -313,6 +313,9 @@ struct Space {
     evicted: Vec<Held>,
     /// Readbacks asked for and not yet collected, oldest first.
     pending: Vec<Pending>,
+    /// Guest memory has to catch up with every surface at the next present: something
+    /// other than a device surface is about to depend on it. See [`Gpu::submit_frame_inner`].
+    sync_all: bool,
     /// Asks made for a whole frame's surfaces; each readback carries its ask's number.
     asked: u64,
     /// Deswizzled texture bytes, evicted when the guest writes their pages.
@@ -359,6 +362,8 @@ pub struct Gpu {
     packed_depth: Option<wgpu::RenderPipeline>,
     /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
     clear_pipelines: std::collections::HashMap<ClearKey, wgpu::RenderPipeline>,
+    /// Every present brings every surface back, to compare against keeping them.
+    sync_every_present: bool,
     /// Multisample resampling pipelines. See [`resample_wgsl`].
     resample_pipelines: std::collections::HashMap<ResampleKey, wgpu::RenderPipeline>,
     /// `GPU_WEB_LIMITS=1`: hide native-only features so a native run takes the browser's routes.
@@ -782,9 +787,9 @@ impl Renderer for Gpu {
         result
     }
 
-    fn submit_frame(&mut self, ctx: &mut ExecCtx) -> Result<Submit> {
+    fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u32>) -> Result<Submit> {
         self.enter_space(ctx.as_id);
-        self.submit_frame_inner(ctx)
+        self.submit_frame_inner(ctx, scanout)
     }
 
     fn frames_landed(&mut self, ctx: &mut ExecCtx) -> Result<u64> {
