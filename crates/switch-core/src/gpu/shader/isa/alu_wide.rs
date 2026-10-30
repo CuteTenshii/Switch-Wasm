@@ -205,6 +205,27 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
+    // pset, 0x5088/0xfff8: Eden's `PSET`.
+    if insn & 0xfff8_0000_0000_0000 == 0x5088_0000_0000_0000 {
+        let (Some(op1), Some(op2)) = (bool_op(field(insn, 24, 2)), bool_op(field(insn, 45, 2)))
+        else {
+            return un;
+        };
+        // Bit 47 writes the condition codes, which this form does not model.
+        if field(insn, 47, 1) != 0 {
+            return un;
+        }
+        return Op::Pset {
+            dst: reg(insn, 0, 8),
+            a: src_pred(insn, 12, 15),
+            b: src_pred(insn, 29, 32),
+            c: src_pred(insn, 39, 42),
+            op1,
+            op2,
+            float: field(insn, 44, 1) != 0,
+        };
+    }
+
     // csetp, 0x50a0/0xfff8: Eden's `CSETP`.
     if insn & 0xfff8_0000_0000_0000 == 0x50a0_0000_0000_0000 {
         let Some(op) = bool_op(field(insn, 45, 2)) else {

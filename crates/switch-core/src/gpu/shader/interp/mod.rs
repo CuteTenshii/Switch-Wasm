@@ -649,6 +649,7 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::Sel { dst, .. }
         | Op::I2f { dst, .. }
         | Op::F2i { dst, .. }
+        | Op::Pset { dst, .. }
         | Op::F2f { dst, .. }
         | Op::I2i { dst, .. }
         | Op::Shfl { dst, .. }

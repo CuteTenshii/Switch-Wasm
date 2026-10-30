@@ -160,6 +160,23 @@ impl Emitter<'_> {
                 self.set_p(p0, &value);
                 self.set_p(p1, &format!("!{value}"));
             }
+            Op::Pset {
+                dst,
+                a,
+                b,
+                c,
+                op1,
+                op2,
+                float,
+            } => {
+                let x = self.holds(a);
+                let y = self.holds(b);
+                let first = self.combine(op1, &x, &y);
+                let z = self.holds(c);
+                let value = self.combine(op2, &first, &z);
+                let on = if float { "0x3f800000u" } else { "0xffffffffu" };
+                self.set_r(dst, &format!("select(0u, {on}, {value})"));
+            }
             Op::Csetp {
                 p0,
                 p1,

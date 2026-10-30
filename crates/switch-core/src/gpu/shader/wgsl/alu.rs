@@ -65,7 +65,7 @@ impl Emitter<'_> {
 
             Op::Iadd { .. } | Op::Iadd3 { .. } | Op::Iscadd { .. } | Op::Lea { .. } | Op::Vmnmx { .. } | Op::Imnmx { .. } | Op::Imul { .. } | Op::Xmad { .. } | Op::Isetp { .. } | Op::Iset { .. } | Op::Icmp { .. } | Op::Bfi { .. } | Op::R2p { .. } | Op::Lop { .. } | Op::Lop3 { .. } | Op::Shl { .. } | Op::Shr { .. } | Op::Shf { .. } | Op::Bfe { .. } | Op::Popc { .. } | Op::Flo { .. } | Op::Sel { .. } => self.emit_integer(op)?,
 
-            Op::I2f { .. } | Op::F2i { .. } | Op::F2f { .. } | Op::I2i { .. } | Op::Mov { .. } | Op::Mov32i { .. } | Op::S2r { .. } | Op::Psetp { .. } | Op::Csetp { .. } => self.emit_conversion(at, op)?,
+            Op::I2f { .. } | Op::F2i { .. } | Op::F2f { .. } | Op::I2i { .. } | Op::Mov { .. } | Op::Mov32i { .. } | Op::S2r { .. } | Op::Psetp { .. } | Op::Pset { .. } | Op::Csetp { .. } => self.emit_conversion(at, op)?,
 
             // ---- memory ----
             Op::Ldc {

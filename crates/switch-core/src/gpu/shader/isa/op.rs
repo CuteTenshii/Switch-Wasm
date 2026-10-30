@@ -447,6 +447,17 @@ pub enum Op {
         op1: BoolOp,
         op2: BoolOp,
     },
+    /// `pset.<op1>.<op2> dst, a, b, c`: 1.0 or all ones (`float` picks) when the
+    /// predicates combine true, 0 otherwise.
+    Pset {
+        dst: u8,
+        a: Pred,
+        b: Pred,
+        c: Pred,
+        op1: BoolOp,
+        op2: BoolOp,
+        float: bool,
+    },
     /// `csetp.<test>.<op> p0, p1, cc, src`.
     Csetp {
         p0: u8,

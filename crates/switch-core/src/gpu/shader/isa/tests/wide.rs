@@ -838,3 +838,21 @@ fn f2i_reads_a_half_source_from_the_half_its_selector_names() {
     let high = crate::gpu::shader::isa::decode(0x5cb0_0180_0047_0602 | 1 << 41).op;
     assert!(matches!(high, Op::F2i { hi: true, .. }));
 }
+
+#[test]
+fn pset_keeps_its_three_predicates_and_picks_the_true_value() {
+    // The instruction after `f2i` that Just Dance 2023's vertex shader needs.
+    let Op::Pset { dst, a, float, .. } = crate::gpu::shader::isa::decode(0x5088_0380_e007_1006).op
+    else {
+        panic!("not decoded as pset");
+    };
+    assert_eq!((dst, a.reg, a.negate, float), (6, 1, false, false));
+    assert!(matches!(
+        crate::gpu::shader::isa::decode(0x5088_0380_e007_1006 | 1 << 44).op,
+        Op::Pset { float: true, .. }
+    ));
+    assert!(matches!(
+        crate::gpu::shader::isa::decode(0x5088_0380_e007_1006 | 1 << 47).op,
+        Op::Unimplemented { .. }
+    ));
+}

@@ -833,6 +833,26 @@ impl Invocation {
                 self.set_pred(p0, r);
                 self.set_pred(p1, !r);
             }
+            Op::Pset {
+                dst,
+                a,
+                b,
+                c,
+                op1,
+                op2,
+                float,
+            } => {
+                let first = combine(op1, self.holds(a), self.holds(b));
+                let on = if float { 1f32.to_bits() } else { u32::MAX };
+                self.set_reg(
+                    dst,
+                    if combine(op2, first, self.holds(c)) {
+                        on
+                    } else {
+                        0
+                    },
+                );
+            }
             Op::Csetp {
                 p0,
                 p1,
