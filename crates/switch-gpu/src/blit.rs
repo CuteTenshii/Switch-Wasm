@@ -5,6 +5,7 @@ use crate::builtin::BLIT_WGSL;
 use crate::convert::device_attachment_format;
 use crate::held::{spans_overlap as overlap, surface_span as span};
 use crate::Gpu;
+use std::ops::Range;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::Format;
 use switch_core::gpu::renderer::{Blit, BlitRoute};
@@ -32,6 +33,14 @@ fn rounding(format: Format) -> Option<f32> {
     }
 }
 
+/// Past this many destination texels, filtering on the CPU every frame costs more than
+/// uploading the source once; smaller blits are mostly texture uploads, cheap where they are.
+const UPLOAD_BLIT_TEXELS: u64 = 256 * 256;
+
+pub(super) fn worth_uploading(blit: &Blit) -> bool {
+    u64::from(blit.dst_rect.2) * u64::from(blit.dst_rect.3) >= UPLOAD_BLIT_TEXELS
+}
+
 impl Gpu {
     /// Whether guest memory is current for both surfaces and stays so if the engine writes it.
     pub(super) fn blit_touches_nothing_held(&self, blit: &Blit) -> bool {
@@ -39,10 +48,14 @@ impl Gpu {
             let len = u64::from(surface.size());
             surface.addr..surface.addr + len
         };
-        let (src, dst) = (surface_span(&blit.src), surface_span(&blit.dst));
+        self.touches_nothing_held(&[surface_span(&blit.src), surface_span(&blit.dst)])
+    }
+
+    /// Whether nothing held, rebound or on its way back shares memory with `ranges`.
+    pub(super) fn touches_nothing_held(&self, ranges: &[Range<u64>]) -> bool {
         let clear = |target: &Target| {
             let held = span(target);
-            !overlap(&held, &src) && !overlap(&held, &dst)
+            !ranges.iter().any(|range| overlap(&held, range))
         };
         self.space.held.values().all(|held| clear(&held.target))
             && self.space.evicted.iter().all(|held| clear(&held.target))
@@ -53,8 +66,8 @@ impl Gpu {
                 .all(|pending| clear(&pending.target))
     }
 
-    /// Run `blit` on the device if its source is held there as the plain colour surface the
-    /// registers name; anything else is for the engine, after a flush.
+    /// Run `blit` on the device if its source is, or can be held there as the plain colour
+    /// surface the registers name; anything else is for the engine, after a flush.
     pub(super) fn blit_on_device(&mut self, blit: &Blit, ctx: &ExecCtx) -> BlitRoute {
         match self.try_blit_on_device(blit, ctx) {
             Some(()) => BlitRoute::Done,
@@ -74,9 +87,13 @@ impl Gpu {
             || x1 > target.width
             || y1 > target.height
             || overlap(&span(&source), &span(&target))
-            || self.space.held.get(&source.addr)?.target != source
         {
             return None;
+        }
+        match self.space.held.get(&source.addr) {
+            Some(held) if held.target != source => return None,
+            Some(_) => {}
+            None => self.hold(&source, ctx).ok()?,
         }
         let format = device_attachment_format(self.features(), target.format).ok()?;
         self.resolve_companion(source.addr).ok()?;

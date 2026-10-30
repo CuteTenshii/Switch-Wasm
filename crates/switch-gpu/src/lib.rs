@@ -830,12 +830,31 @@ impl Renderer for Gpu {
         if self.give_up() || self.software_frame {
             return Ok(BlitRoute::Flush);
         }
-        if self.blit_touches_nothing_held(blit) {
+        // A write since the last draw has to count before a held source is read.
+        self.evict_written(ctx);
+        let in_guest_memory = self.blit_touches_nothing_held(blit);
+        if in_guest_memory && !blit::worth_uploading(blit) {
             return Ok(BlitRoute::GuestMemory);
         }
-        let route = self.blit_on_device(blit, ctx);
+        let route = if self.space.sync_all && !in_guest_memory {
+            BlitRoute::Flush
+        } else {
+            self.blit_on_device(blit, ctx)
+        };
         self.release_scratch();
-        Ok(route)
+        Ok(match route {
+            BlitRoute::Flush if in_guest_memory => BlitRoute::GuestMemory,
+            route => route,
+        })
+    }
+
+    fn guest_memory_is_current(
+        &mut self,
+        ranges: &[std::ops::Range<u64>],
+        ctx: &mut ExecCtx,
+    ) -> bool {
+        self.enter_space(ctx.as_id);
+        !self.give_up() && !self.software_frame && self.touches_nothing_held(ranges)
     }
 
     fn flush(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {

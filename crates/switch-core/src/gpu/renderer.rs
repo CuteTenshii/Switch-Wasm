@@ -6,6 +6,7 @@ use crate::gpu::engine::threed::Engine3D;
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::surface::Surface;
 use crate::Result;
+use std::ops::Range;
 
 /// A 2D engine source copy, as its registers describe it.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +64,13 @@ pub trait Renderer: std::fmt::Debug {
     fn blit(&mut self, blit: &Blit, ctx: &mut ExecCtx) -> Result<BlitRoute> {
         let _ = (blit, ctx);
         Ok(BlitRoute::Flush)
+    }
+
+    /// Whether guest memory is current for these GPU ranges, and stays so if an engine
+    /// writes them, so that the engine need not flush the backend first.
+    fn guest_memory_is_current(&mut self, ranges: &[Range<u64>], ctx: &mut ExecCtx) -> bool {
+        let _ = (ranges, ctx);
+        false
     }
 
     /// Make guest memory agree with whatever the backend is holding. Draws

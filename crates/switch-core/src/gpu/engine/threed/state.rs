@@ -241,6 +241,17 @@ impl Engine3D {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.flush(ctx))
     }
 
+    /// See [`Renderer::guest_memory_is_current`].
+    pub fn guest_memory_is_current(
+        &mut self,
+        ranges: &[std::ops::Range<u64>],
+        ctx: &mut ExecCtx,
+    ) -> bool {
+        self.with_renderer(ctx, |renderer, _, ctx| {
+            renderer.guest_memory_is_current(ranges, ctx)
+        })
+    }
+
     /// See [`Renderer::blit`].
     pub fn blit_on_renderer(
         &mut self,

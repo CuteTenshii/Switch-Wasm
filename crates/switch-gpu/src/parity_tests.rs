@@ -1806,3 +1806,52 @@ fn a_blit_out_of_a_surface_on_another_format_flushes() {
     let route = gpu.blit(&blit, &mut h.ctx()).expect("the blit");
     assert_eq!(route, BlitRoute::Flush);
 }
+
+#[test]
+fn a_copy_away_from_held_surfaces_needs_no_flush() {
+    let Some(mut gpu) = device() else { return };
+    let mut h = shaded(&mut gpu);
+    let base = h.base;
+    let away = base + BLIT_TARGET;
+    let upload = away..away + 48;
+    let run = std::slice::from_ref(&upload);
+    assert!(gpu.guest_memory_is_current(run, &mut h.ctx()));
+    assert!(
+        !gpu.guest_memory_is_current(&[away..away + 48, base + 4..base + 8], &mut h.ctx()),
+        "the harness's target is held"
+    );
+}
+
+#[test]
+fn a_blit_out_of_guest_memory_uploads_its_source_and_agrees_with_the_engine() {
+    let Some(mut gpu) = device() else { return };
+    let mut h = Harness::new();
+    let base = h.base;
+    let source = base + BLIT_TARGET;
+    let texels: Vec<u32> = (0..16 * 8u32)
+        .map(|i| 0xFF00_0000 | ((i * 0x0003_0507) & 0x00FF_FFFF))
+        .collect();
+    {
+        let mut ctx = h.ctx();
+        for (i, texel) in texels.iter().enumerate() {
+            ctx.write_u32(source + i as u64 * 4, *texel)
+                .expect("a texel");
+        }
+    }
+    let blit = Blit {
+        src: colour_surface(source, 16, 8),
+        dst: colour_surface(source + 0x400, 8, 4),
+        dst_rect: (0, 0, 8, 4),
+        src_origin: (1.0, 1.0),
+        step: (2.0, 2.0),
+        filtered: true,
+    };
+    let route = gpu.blit_on_device(&blit, &h.ctx());
+    assert_eq!(route, BlitRoute::Done);
+    gpu.flush(&mut h.ctx()).expect("the flush");
+    let ctx = h.ctx();
+    let got: Vec<u32> = (0..8 * 4u64)
+        .map(|i| ctx.read_u32(source + 0x400 + i * 4).expect("a texel"))
+        .collect();
+    assert_eq!(got, expected_blit(&blit, &texels));
+}

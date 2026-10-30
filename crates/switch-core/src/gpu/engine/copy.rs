@@ -53,6 +53,18 @@ impl EngineCopy {
         Ok(())
     }
 
+    /// The source and destination a launch with `flags` touches, when it is one plain run
+    /// of bytes; other shapes do not say so without walking them.
+    pub fn plain_ranges(&self, flags: u32) -> Option<[std::ops::Range<u64>; 2]> {
+        let (multi_line, remap) = (field(flags, 9, 9) != 0, field(flags, 10, 10) != 0);
+        if multi_line || remap {
+            return None;
+        }
+        let len = u64::from(self.regs.get(LINE_LENGTH_IN));
+        let (src, dst) = (self.regs.iova(OFFSET_IN), self.regs.iova(OFFSET_OUT));
+        Some([src..src + len, dst..dst + len])
+    }
+
     fn launch(&mut self, flags: u32, ctx: &mut ExecCtx) -> Result<()> {
         let src_pitch_layout = field(flags, 7, 7) != 0;
         let dst_pitch_layout = field(flags, 8, 8) != 0;

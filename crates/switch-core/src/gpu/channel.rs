@@ -318,7 +318,15 @@ impl Channel {
             }
             CLASS_COPY => {
                 if method == crate::gpu::engine::copy::LAUNCH_DMA {
-                    self.three_d.flush_renderer(ctx)?;
+                    self.copy.regs.set(method, arg);
+                    // Titles upload constants this way, hundreds of small runs a frame.
+                    let current = self
+                        .copy
+                        .plain_ranges(arg)
+                        .is_some_and(|ranges| self.three_d.guest_memory_is_current(&ranges, ctx));
+                    if !current {
+                        self.three_d.flush_renderer(ctx)?;
+                    }
                 }
                 self.copy.write(method, arg, ctx)
             }

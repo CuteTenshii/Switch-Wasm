@@ -31,5 +31,5 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
 - Just Dance 2019 stops presenting on "Hold on... and warm up..." after one to two minutes and stays there (0 fps, over 100B instructions). The main thread only sleeps and polls, while two priority-29 threads run flat out on the other cores (a float-to-16-bit conversion loop, and `nn::hid::VibrationMixer`). Whether it waits on something the emulator never delivers is not known.
 - `emit_selftest` has 48 cases of three programs differing from the interpreter, on the sign of a zero or NaN in `FMAXNM` and `FNMUL`.
-- Copy-engine and compute flushes still send every held surface back; a per-surface flush would keep the rest on the device.
+- Compute dispatches, and copy-engine transfers that are not one plain run or that overlap a held surface, still send every held surface back; a per-surface flush would keep the rest on the device.
 - Minecraft frame 20 is clean on the WebGPU device but the software rasterizer differs from it, mostly in the right half.
