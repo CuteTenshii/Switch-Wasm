@@ -1,6 +1,7 @@
 //! Thread scheduling, display pacing and context switching.
 
 use crate::cpu::*;
+use crate::kernel::cores::Handback;
 use crate::trace::Level;
 
 /// Instructions per 60 Hz display refresh at 1.02 GHz; vsync fires even without a present.
@@ -14,6 +15,9 @@ const IDLE_WAIT_CYCLES: u64 = 1_020_000_000 / 5_000;
 
 /// Instructions a thread runs before preemption.
 pub(crate) const TIME_SLICE: u64 = 20_000;
+
+/// How far ahead of real time a paced clock has the host wait: 50 ms.
+const MAX_AHEAD_CYCLES: u64 = 1_020_000_000 / 20;
 
 /// Default thread priority (also what most retail manifests declare); 0 is most urgent, 63 least.
 pub const DEFAULT_THREAD_PRIORITY: u8 = 44;
@@ -124,6 +128,23 @@ impl Cpu {
         self.reschedule();
     }
 
+    /// Tie the clock to real time for a host that has it: `elapsed` cycles have passed since
+    /// the last call. A clock behind jumps forward, so a title that cannot keep up misses
+    /// frames rather than slowing down; a clock ahead is what this returns, for the host to
+    /// wait out, and idling past real time ends [`Cpu::run`] early. A host that never calls
+    /// this gets the instruction-counted clock, which replays exactly.
+    pub fn pace_to_real_time(&mut self, elapsed: u64) -> u64 {
+        let mut real = self.real_cycles.unwrap_or(self.cycles) + elapsed;
+        if self.cycles < real {
+            self.cycles = real;
+            self.publish_clock();
+        }
+        // A long timeout may be the only thing left to idle to; no host waits for that.
+        real = real.max(self.cycles.saturating_sub(MAX_AHEAD_CYCLES));
+        self.real_cycles = Some(real);
+        self.cycles - real
+    }
+
     /// Switch away after blocking. If nothing can run, idle or wake everything.
     pub(crate) fn reschedule(&mut self) {
         if self.switch_to_next_runnable() {
@@ -136,16 +157,15 @@ impl Cpu {
                 return;
             }
         }
-        // Idle the clock to the earliest deadline of any kind, as the console idles.
-        if let Some(deadline) = self.earliest_deadline() {
-            if deadline > self.cycles {
-                self.cycles = deadline;
-                self.publish_clock();
-            }
-            self.expire_timed_waits();
-            if self.settled() {
-                return;
-            }
+        // Only core 0 serves the other cores, so a clock ahead of real time, which the host
+        // waits out, must not leave them unserved: wait here for what they do first.
+        let hold = self.cores_busy()
+            && self.real_cycles.is_some_and(|real| {
+                self.earliest_deadline()
+                    .is_some_and(|deadline| deadline > real)
+            });
+        if !hold && self.idle_to_earliest_deadline() {
+            return;
         }
         // A thread out on another core may yet wake one here.
         while self.cores_busy() {
@@ -158,11 +178,32 @@ impl Cpu {
                 return;
             }
         }
+        if hold && self.idle_to_earliest_deadline() {
+            return;
+        }
         // No deadline either: wake everything rather than hang.
         for pid in self.pids() {
             self.in_process(pid, Cpu::wake_all_waiters);
         }
         self.switch_to_next_runnable();
+    }
+
+    /// Idle the clock to the earliest deadline of any kind, as the console idles. Whether
+    /// that let something run.
+    fn idle_to_earliest_deadline(&mut self) -> bool {
+        let Some(deadline) = self.earliest_deadline() else {
+            return false;
+        };
+        if deadline > self.cycles {
+            self.cycles = deadline;
+            self.publish_clock();
+            // Whoever runs next does so once real time has come this far.
+            if self.real_cycles.is_some_and(|real| deadline > real) {
+                self.handback = Some(Handback::Paced);
+            }
+        }
+        self.expire_timed_waits();
+        self.settled()
     }
 
     fn wake_all_waiters(&mut self) {
@@ -301,6 +342,47 @@ mod tests {
     use crate::cpu::{
         Cpu, CURRENT_THREAD_PSEUDO_HANDLE, DEFAULT_THREAD_PRIORITY, MAIN_THREAD_HANDLE,
     };
+
+    #[test]
+    fn real_time_pulls_a_clock_behind_forward_and_reports_one_ahead() {
+        let mut cpu = Cpu::new();
+        cpu.cycles = 1_000;
+        assert_eq!(
+            cpu.pace_to_real_time(500),
+            0,
+            "behind is nothing to wait for"
+        );
+        assert_eq!(cpu.cycles, 1_500, "the clock caught up");
+        cpu.cycles += 700;
+        assert_eq!(cpu.pace_to_real_time(200), 500, "ahead by what ran past it");
+        assert_eq!(cpu.cycles, 2_200, "a clock never runs backwards");
+    }
+
+    #[test]
+    fn a_long_idle_costs_a_paced_host_a_short_wait() {
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        cpu.pace_to_real_time(0);
+        cpu.sleep_until(cpu.cycles + 4_000 * 1_020_000_000);
+        assert_eq!(cpu.pace_to_real_time(0), super::MAX_AHEAD_CYCLES);
+    }
+
+    #[test]
+    fn idling_past_real_time_ends_the_slice_only_when_a_host_paces_the_clock() {
+        let mut unpaced = Cpu::new();
+        unpaced.bootstrap();
+        unpaced.sleep_until(unpaced.cycles + 1_000_000);
+        assert!(unpaced.handback.is_none(), "a replay runs straight on");
+
+        let mut paced = Cpu::new();
+        paced.bootstrap();
+        paced.pace_to_real_time(0);
+        paced.sleep_until(paced.cycles + 1_000_000);
+        assert!(matches!(
+            paced.handback,
+            Some(crate::kernel::cores::Handback::Paced)
+        ));
+    }
 
     #[test]
     fn the_idle_moves_the_clock_and_leaves_the_step_count_alone() {

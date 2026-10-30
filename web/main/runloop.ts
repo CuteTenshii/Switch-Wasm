@@ -75,7 +75,7 @@ async function onSlice(report: SliceReport): Promise<void> {
   noteFrame(report);
   if (!report.stopped) return;
   loopEnded();
-  if (report.steps >= 0 && report.steps >= report.budget) {
+  if (!report.ended) {
     endLoad();
     setState('paused');
     return;

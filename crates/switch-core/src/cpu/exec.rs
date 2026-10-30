@@ -117,7 +117,12 @@ impl Cpu {
                 Err(e) if self.pid != self.root => {
                     self.end_process(self.pid, Ending::Faulted(e.to_string()))
                 }
-                ran => return ran,
+                ran => {
+                    if matches!(self.handback, Some(Handback::Paced)) {
+                        self.handback = None;
+                    }
+                    return ran;
+                }
             }
         }
     }

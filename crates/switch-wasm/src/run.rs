@@ -24,6 +24,13 @@ pub extern "C" fn switch_run(handle: u32, max_steps: u64) -> i64 {
     }
 }
 
+/// Tie the guest clock to real time: `elapsed` cycles have passed since the last call.
+/// Returns how many cycles the clock is ahead, to wait out before the next slice.
+#[no_mangle]
+pub extern "C" fn switch_pace(handle: u32, elapsed: u64) -> u64 {
+    session(handle).cpu.pace_to_real_time(elapsed)
+}
+
 /// True if the machine halted via SVC #0.
 #[no_mangle]
 pub extern "C" fn switch_halted(handle: u32) -> i32 {

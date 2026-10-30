@@ -71,6 +71,7 @@ export interface WasmExports {
   switch_vibration(handle: number): number;
 
   switch_run(handle: number, maxSteps: bigint): bigint;
+  switch_pace(handle: number, elapsed: bigint): bigint;
   switch_halted(handle: number): number;
   switch_guest_fatal(handle: number, buf: number, maxlen: number): number;
   switch_log_regs(handle: number): void;

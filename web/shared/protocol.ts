@@ -327,6 +327,8 @@ export interface Housekeeping {
 
 // One slice of the worker's run loop.
 export interface SliceReport {
+  // The guest ended or failed; a slice also stops early for a pause.
+  ended: boolean;
   // Retired this slice; fewer than `budget` means the guest halted, negative a fault.
   steps: number;
   budget: number;

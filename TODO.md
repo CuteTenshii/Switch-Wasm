@@ -30,7 +30,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
 - Just Dance 2019 stops presenting on "Hold on... and warm up..." after one to two minutes and stays there (0 fps, over 100B instructions). The main thread only sleeps and polls, while two priority-29 threads run flat out on the other cores (a float-to-16-bit conversion loop, and `nn::hid::VibrationMixer`). Whether it waits on something the emulator never delivers is not known.
-- The guest clock counts instructions and jumps over idle time, so it is not tied to real time: a busy title's vsync costs 17M instructions on core 0 whatever it needs (60 fps asks for 1.02B/s there), and a mostly idle one runs ahead of real time (appstore produced 152 s of audio in 60 s and the page dropped the rest).
 - `emit_selftest` has 48 cases of three programs differing from the interpreter, on the sign of a zero or NaN in `FMAXNM` and `FNMUL`.
 - Copy-engine and compute flushes still send every held surface back; a per-surface flush would keep the rest on the device.
 - Minecraft frame 20 is clean on the WebGPU device but the software rasterizer differs from it, mostly in the right half.

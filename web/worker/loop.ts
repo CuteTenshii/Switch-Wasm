@@ -18,6 +18,15 @@ const MIN_SLICE = 100_000;
 const MAX_SLICE = 50_000_000;
 // Tracing prints a line per instruction.
 const TRACE_SLICE = 5000;
+// The guest's clock rate, which `Cpu::pace_to_real_time` counts in.
+const CYCLES_PER_MS = 1_020_000;
+// Real time a slice can credit the guest with: past this a stall is lost rather than
+// jumped over, or one long load would run every timeout in the title out at once.
+const MAX_CREDIT_MS = 100;
+// Waits are at most this long, so housekeeping and presents keep going through a long idle.
+const MAX_WAIT_MS = 16;
+// Closer to real time than this is not worth a timer.
+const MIN_WAIT_MS = 1;
 // Slices between housekeeping reports.
 const HOUSEKEEPING_EVERY = 8;
 
@@ -26,6 +35,7 @@ let pauseRequested = false;
 let tracing = false;
 let budget = FIRST_SLICE;
 let tick = 0;
+let lastPace = 0;
 
 // A zero-delay task: a `setTimeout` chain is clamped to 4 ms after a few calls.
 const wake = new MessageChannel();
@@ -38,6 +48,7 @@ export function startLoop(trace: boolean): void {
   tracing = trace;
   budget = trace ? TRACE_SLICE : FIRST_SLICE;
   tick = 0;
+  lastPace = performance.now();
   // Every title draws: open the device as it starts rather than once it asks.
   tryGpu();
   wake.port2.postMessage(null);
@@ -59,6 +70,17 @@ function slice(): void {
     return;
   }
   const at = performance.now();
+  // A trace replays an exact run, which real time would change.
+  if (!tracing) {
+    const credit = Math.min(at - lastPace, MAX_CREDIT_MS);
+    lastPace = at;
+    const elapsed = BigInt(Math.round(credit * CYCLES_PER_MS));
+    const aheadMs = Number(core.switch_pace(state.handle, elapsed)) / CYCLES_PER_MS;
+    if (aheadMs >= MIN_WAIT_MS && !pauseRequested) {
+      setTimeout(slice, Math.min(aheadMs, MAX_WAIT_MS));
+      return;
+    }
+  }
   let steps: number;
   try {
     steps = CMD.run(budget) as number;
@@ -68,8 +90,8 @@ function slice(): void {
     return;
   }
   const ms = performance.now() - at;
-  // A short slice means the machine halted.
-  const done = steps < 0 || steps < budget;
+  // A slice also ends short when the clock idles past real time.
+  const done = steps < 0 || core.switch_halted(state.handle) !== 0;
   const stopped = done || pauseRequested;
   tryGpu();
   reportActivity(done);
@@ -79,6 +101,7 @@ function slice(): void {
 
   core.switch_audio_feed(state.handle);
   const report: SliceReport = {
+    ended: done,
     steps,
     budget,
     ms,

@@ -155,6 +155,10 @@ The emulator thread was saturated while retiring tens of millions of instruction
 
 Browser, 60 to 140 s on an NVIDIA Ampere adapter, none of it A/B-controlled against load: Short Hike about 1.1 to 5.8-9.3 fps, Minecraft's boot 0 to 6.6, hbmenu 6 to 11-16, Mario Kart 8 Deluxe's title 13.9 at the end of its run. `wasm_bench` draws in software and cannot see any of the GPU changes.
 
+### The clock follows real time in a browser
+
+It counted instructions and jumped over idle time, so a busy title's vsync cost 17M core-0 instructions whatever it needed, and an idle one ran ahead (appstore produced 152 s of audio in about 60 s and the page dropped the rest). Now audio keeps up (1.0 s produced per 1.0 s taken), and A Short Hike drew about 690 frames in 140 s against 325. Waiting out an idle jump in full hung A Short Hike at 349M instructions: its threads hold timeouts of over a thousand hours, and nothing serves the other cores during the wait.
+
 ## Tuning the IR executor
 
 Emitted regions sit on top of the IR executor (`exec_block`/`exec_op`), which still runs every cold or refused block. About seventy experiments on it (September 2026, `wasm_bench` under V8, hbmenu around 290M instructions/s) came down to this.

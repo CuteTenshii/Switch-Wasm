@@ -94,6 +94,8 @@ pub(crate) enum Handback {
     Quantum,
     /// Core 0 asked for it.
     Recalled,
+    /// Core 0's clock idled past real time; see [`Cpu::pace_to_real_time`].
+    Paced,
 }
 
 #[derive(Debug)]
