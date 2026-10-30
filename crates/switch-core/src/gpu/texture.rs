@@ -200,7 +200,7 @@ impl DepthTexel {
     }
 
     /// The depth in red; the TIC's swizzle decides the rest.
-    fn decode(self, raw: u128) -> [f32; 4] {
+    pub(crate) fn decode(self, raw: u128) -> [f32; 4] {
         match self {
             DepthTexel::F32X24S8 => [f32::from_bits(raw as u32), 0.0, 0.0, 1.0],
             // Integer channels reach the shader as bits.

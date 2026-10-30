@@ -646,6 +646,72 @@ fn a_float_depth_image_with_stencil_samples_as_its_depth() {
     assert_eq!(got, want, "the colour surface differs");
 }
 
+/// An `S8D24` image in guest memory samples as the rasterizer reads it: unorm depth in green.
+#[test]
+fn a_packed_depth_image_samples_its_depth_in_green() {
+    let Some(mut gpu) = device() else { return };
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+        h.bindless_texture();
+        let size = testing::BINDLESS_TEXTURE_SIZE;
+        let (tic, image) = (h.base + 0x1400 + 32, h.base + 0x1000);
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        let mut ctx = h.ctx();
+        for y in 0..size {
+            for x in 0..size {
+                let at = image + u64::from((y * size + x) * 4);
+                let depth = (y * size + x) * 4 * 0x01_0101;
+                ctx.write_u32(at, depth << 8 | 0xA5).unwrap();
+            }
+        }
+        // Pitch-linear, rows of eight 4-byte texels, every channel unsigned.
+        for (word, value) in [
+            (
+                0,
+                0x29 | (4 << 7) | (4 << 10) | (4 << 13) | (4 << 16) | identity,
+            ),
+            (1, image as u32),
+            (2, (image >> 32) as u32 | (2 << 21)),
+            (3, size * 4 / 32),
+            (4, (size - 1) | (1 << 23)),
+            (5, size - 1),
+        ] {
+            ctx.write_u32(tic + word * 4, value).unwrap();
+        }
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        match gpu {
+            Some(gpu) => {
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => h.draw_with(&mut Software).expect("the draw"),
+        }
+        h.target()
+    };
+    let want = build(None);
+    let greens: std::collections::BTreeSet<u32> = want
+        .iter()
+        .filter(|&&c| c != 0)
+        .map(|&c| c >> 8 & 0xff)
+        .collect();
+    assert!(
+        greens.len() >= 8,
+        "the reference drew too few depths: {greens:x?}"
+    );
+    let fallbacks = gpu.fallbacks;
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// A held depth surface sampled as a shadow map, whole and as a padded surface's corner.
 #[test]
 fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
