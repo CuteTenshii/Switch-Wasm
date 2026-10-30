@@ -147,7 +147,7 @@ fn main() {
     let program = args.open_program();
     let frames = args.rest_num(0).unwrap_or(30).max(1);
 
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     program.boot(&mut cpu);
 

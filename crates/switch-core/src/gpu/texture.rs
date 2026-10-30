@@ -588,8 +588,8 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
         layers,
         block_depth_gobs,
     };
-    if let Some(dir) = dump_textures() {
-        dump_texture(&texture, ctx, dir)?;
+    if crate::dump::wants(crate::dump::Artefact::Texture) {
+        dump_texture(&texture, ctx)?;
     }
     if trace_textures() {
         crate::traceln!(
@@ -657,15 +657,8 @@ fn mipmapped_layer_stride(
     total.div_ceil(block) * block
 }
 
-/// `DUMP_TEX=<dir>`: write every texture as a PPM.
-fn dump_textures() -> Option<&'static str> {
-    static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| std::env::var("DUMP_TEX").ok())
-        .as_deref()
-}
-
-/// Decode a whole texture through the sampling path and write it out.
-fn dump_texture(texture: &Texture, ctx: &ExecCtx, dir: &str) -> Result<()> {
+/// Decode a whole texture through the sampling path and hand it to the dump sink.
+fn dump_texture(texture: &Texture, ctx: &ExecCtx) -> Result<()> {
     let (w, h) = (texture.width.min(4096), texture.height.min(4096));
     let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
     let blocks = RefCell::new(BlockCache::default());
@@ -677,9 +670,9 @@ fn dump_texture(texture: &Texture, ctx: &ExecCtx, dir: &str) -> Result<()> {
             }
         }
     }
-    let path = format!("{dir}/tex_{:x}_{w}x{h}.ppm", texture.addr);
-    std::fs::write(&path, ppm).map_err(|e| Error::Io(format!("{path}: {e}")))?;
-    crate::traceln!("[tex] wrote {path}");
+    let name = format!("tex_{:x}_{w}x{h}.ppm", texture.addr);
+    crate::dump::keep(crate::dump::Artefact::Texture, &name, &ppm);
+    crate::traceln!("[tex] dumped {name}");
     Ok(())
 }
 

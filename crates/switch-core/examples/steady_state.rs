@@ -7,7 +7,6 @@ mod common;
 
 use common::profile::Profile;
 use common::{Flow, Pace};
-use switch_core::cpu::Cpu;
 
 const USAGE: &str = "steady_state <container> <prod.keys> [title.keys] [frame] [steps]";
 
@@ -26,7 +25,7 @@ fn main() {
     let want_frame = args.rest_num(0).unwrap_or(60);
     let steps = args.rest_num(1).unwrap_or(DEFAULT_STEPS);
 
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     title.boot(&mut cpu);
 

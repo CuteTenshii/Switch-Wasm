@@ -1,10 +1,10 @@
-//! Diagnostic channels: a runtime mask seeded from the environment, severity
-//! levels, and a sink the host drains alongside stderr.
+//! Diagnostic channels: a runtime mask the host sets, severity levels, and a
+//! sink the host drains alongside stderr.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// One diagnostic channel, named by the environment variable that seeds it.
+/// One diagnostic channel, named as harnesses and the page refer to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trace {
     /// Guest syscalls, minus the three that fire every scheduling round.
@@ -91,7 +91,7 @@ impl Trace {
         1 << self as u32
     }
 
-    /// The environment variable that seeds this channel, also its host-facing name.
+    /// The channel's host-facing name, which native harnesses read as an environment variable.
     pub const fn name(self) -> &'static str {
         match self {
             Trace::Svc => "TRACE_SVC",
@@ -153,31 +153,19 @@ impl Level {
     }
 }
 
-/// Mask value before the environment has been read; unreachable by real masks.
-const UNSEEDED: u32 = u32::MAX;
-
-static MASK: AtomicU32 = AtomicU32::new(UNSEEDED);
-
-/// Read the environment once and record what it asked for.
-#[cold]
-fn seed() -> u32 {
-    let mut mask = 0;
-    for channel in ALL {
-        if std::env::var(channel.name()).is_ok() {
-            mask |= channel.bit();
-        }
-    }
-    MASK.store(mask, Ordering::Relaxed);
-    mask
-}
+static MASK: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 pub fn mask() -> u32 {
-    let mask = MASK.load(Ordering::Relaxed);
-    if mask == UNSEEDED {
-        return seed();
-    }
-    mask
+    MASK.load(Ordering::Relaxed)
+}
+
+/// Turn on exactly `channels`.
+pub fn set_mask(channels: &[Trace]) {
+    let mask = channels
+        .iter()
+        .fold(0, |mask, channel| mask | channel.bit());
+    MASK.store(mask, Ordering::Relaxed);
 }
 
 /// Turn every channel on or off.
@@ -262,7 +250,6 @@ mod tests {
             assert_eq!(seen & channel.bit(), 0, "{} repeats a bit", channel.name());
             seen |= channel.bit();
         }
-        assert_ne!(seen, UNSEEDED, "the sentinel has to stay unreachable");
     }
 
     #[test]

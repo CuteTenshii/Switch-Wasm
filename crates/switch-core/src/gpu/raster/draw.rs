@@ -158,14 +158,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // Only when a diagnostic asked; see `examples/shader_coverage.rs`.
     crate::gpu::shader::uses::note(wgsl::Stage::Vertex, vs_binding.addr, &vs_decoded);
     crate::gpu::shader::uses::note(wgsl::Stage::Fragment, fs_binding.addr, &fs_decoded);
-    // `TRACE_WGSL=1`: whether each shader translates. `TRACE_WGSL=dir`
-    // writes each module to `dir/<stage>_<addr>.wgsl` for `naga --validate`.
+    // `TRACE_WGSL`: whether each shader translates, and each module as
+    // `<stage>_<addr>.wgsl` for `naga --validate` when a dump sink wants it.
     if crate::trace::enabled(crate::trace::Trace::Wgsl) {
-        // No directory in a browser, so only the summary there.
-        let where_to = match std::env::var("TRACE_WGSL").unwrap_or_default() {
-            dir if dir.is_empty() || dir == "1" => None,
-            dir => Some(dir),
-        };
+        let keep = crate::dump::wants(crate::dump::Artefact::RasterWgsl);
         use crate::gpu::shader::wgsl::{self, Layout, Stage};
         // Unfolded, as the device translates it: folding turns the constant
         // operands a `ldg` descriptor is traced through into immediates.
@@ -187,7 +183,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 layout.depth_minus_one_to_one = pipeline.viewport.depth_minus_one_to_one();
             }
             match wgsl::module(&translated, stage, &layout) {
-                Ok(_) if where_to.is_none() => crate::traceln!(
+                Ok(_) if !keep => crate::traceln!(
                     "[wgsl] {name}@{addr:#x} {} regs, {} attribs, {} varyings, \
                      {} banks, {} textures",
                     translated.registers.len(),
@@ -197,14 +193,9 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     layout.textures.len()
                 ),
                 Ok(module) => {
-                    let dir = where_to.as_deref().unwrap_or_default();
-                    let path = format!("{dir}/{name}_{addr:x}.wgsl");
-                    match std::fs::write(&path, module) {
-                        Ok(()) => crate::traceln!("[wgsl] {name}@{addr:#x} -> {path}"),
-                        Err(e) => {
-                            crate::traceln!("[wgsl] {name}@{addr:#x} cannot write {path}: {e}")
-                        }
-                    }
+                    let file = format!("{name}_{addr:x}.wgsl");
+                    crate::dump::keep(crate::dump::Artefact::RasterWgsl, &file, module.as_bytes());
+                    crate::traceln!("[wgsl] {name}@{addr:#x} -> {file}");
                 }
                 Err(e) => crate::traceln!("[wgsl] {name}@{addr:#x} no module: {e}"),
             }

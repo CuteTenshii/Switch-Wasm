@@ -1,7 +1,7 @@
 //! Opening the device, falling back, and backend settings.
 
 use crate::stats::{DeviceErrors, Times, UploadBytes};
-use crate::{device_descriptor, draw_range, Gpu, Space};
+use crate::{device_descriptor, Gpu, Space};
 use switch_core::gpu::engine::threed::Engine3D;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Software;
@@ -52,8 +52,8 @@ impl Gpu {
             failed,
             lost,
             deferred_readbacks: false,
-            defer_readbacks: switch_core::env_flag!("GPU_DEFER_READBACKS"),
-            interleave: switch_core::env_flag!("GPU_INTERLEAVE"),
+            defer_readbacks: false,
+            interleave: false,
             software_frame: false,
             fell_back_this_frame: false,
             checked_this_frame: false,
@@ -62,8 +62,8 @@ impl Gpu {
             clean_frames_needed: 1,
             unlatched: 0,
             gave_up: false,
-            web_limits: switch_core::env_flag!("GPU_WEB_LIMITS"),
-            device_msaa: switch_core::env_flag!("GPU_DEVICE_MSAA"),
+            web_limits: false,
+            device_msaa: false,
             report: None,
             software: Software,
             drawn: 0,
@@ -75,8 +75,7 @@ impl Gpu {
             multisampled: 0,
             per_pixel: 0,
             in_frame: 0,
-            times: (cfg!(target_arch = "wasm32") || switch_core::env_flag!("GPU_TIMES"))
-                .then(Times::default),
+            times: cfg!(target_arch = "wasm32").then(Times::default),
             uploaded: UploadBytes::default(),
             shader_to_watch: Vec::new(),
             cached_bytes: 0,
@@ -86,10 +85,7 @@ impl Gpu {
             texture_misses: 0,
             gpu_texture_bytes: 0,
             to_remember: Vec::new(),
-            only: std::env::var("GPU_ONLY")
-                .ok()
-                .as_deref()
-                .and_then(draw_range),
+            only: None,
         }
     }
 
@@ -197,5 +193,22 @@ impl Gpu {
     /// The `GPU_DEVICE_MSAA` flag. See [`Gpu::route`].
     pub fn set_device_msaa(&mut self, device_msaa: bool) {
         self.device_msaa = device_msaa;
+    }
+
+    /// The `GPU_DEFER_READBACKS` flag. See [`Gpu::defer_readbacks`].
+    pub fn set_defer_readbacks(&mut self, defer_readbacks: bool) {
+        self.defer_readbacks = defer_readbacks;
+    }
+
+    /// The `GPU_TIMES` flag: record phase timings, which a browser always does.
+    pub fn set_times(&mut self, on: bool) {
+        if on != self.times.is_some() {
+            self.times = on.then(Times::default);
+        }
+    }
+
+    /// The `GPU_ONLY` range. See [`Gpu::only`].
+    pub fn set_only(&mut self, only: Option<std::ops::Range<u32>>) {
+        self.only = only;
     }
 }

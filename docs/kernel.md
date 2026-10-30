@@ -120,7 +120,7 @@ Guest memory layout, threads, scheduling, synchronization, boot and diagnostics.
 
 ## `crates/switch-core/src/trace.rs`
 
-- Channels are a runtime mask (seeded from the environment natively) and output goes to stderr plus a sink the host drains, since environment variables and stderr do not exist on `wasm32-unknown-unknown`. Channel names are the env var names, so there is one spelling.
+- Channels are a runtime mask (set by the host: from the environment by the examples, from the log level by the page) and output goes to stderr plus a sink the host drains, since environment variables and stderr do not exist on `wasm32-unknown-unknown`. Channel names are the env var names, so there is one spelling.
 - Severity travels in the text stream as a leading control byte (no printable prefix is unambiguous against disassembly or register dumps). Unmarked lines inherit the previous level, so a fault's register dump stays with the fault.
 - The global `PENDING` sink exists so code with no `Cpu` in reach (rasterizer, shader translator, texture decoder) can trace without threading a sink through hot free functions. Its length is mirrored in an atomic so the empty case costs a relaxed load. It is capped and drops oldest first (native runs never drain it).
 - `trace!` evaluates its format arguments only when the channel is on, which lets it sit in per-syscall and per-draw paths. `traceln!` exists for sites already gated by their own condition.

@@ -151,19 +151,22 @@ enum Resource {
     Sampler(u32, wgpu::Sampler),
 }
 
-/// Write a draw's two WGSL modules under `dir`, named by hash.
-fn dump_wgsl(dir: &str, vs: &str, fs: &str) {
-    let _ = std::fs::create_dir_all(dir);
+/// Hand a draw's two WGSL modules to the dump sink, named by hash.
+fn dump_wgsl(vs: &str, fs: &str) {
     for (what, src) in [("vs", vs), ("fs", fs)] {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(src, &mut h);
         let key = std::hash::Hasher::finish(&h);
-        let _ = std::fs::write(format!("{dir}/{key:016x}.{what}.wgsl"), src);
+        switch_core::dump::keep(
+            switch_core::dump::Artefact::DeviceWgsl,
+            &format!("{key:016x}.{what}.wgsl"),
+            src.as_bytes(),
+        );
     }
 }
 
 /// `GPU_ONLY`'s value: one draw index, or the half-open range `a..b`.
-fn draw_range(spec: &str) -> Option<std::ops::Range<u32>> {
+pub fn draw_range(spec: &str) -> Option<std::ops::Range<u32>> {
     match spec.trim().split_once("..") {
         Some((from, to)) => Some(from.trim().parse().ok()?..to.trim().parse().ok()?),
         None => {

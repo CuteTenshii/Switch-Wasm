@@ -88,7 +88,7 @@ NCA, NSP/XCI, RomFS, tickets, NSO/NRO, NPDM and the range-reading stack.
 
 ## `crates/switch-core/src/lib.rs`
 
-- `env_flag!` caches per call site in a `OnceLock`: `std::env::var` scans the whole environment, and these switches sit on per-syscall/IPC/draw paths (`getenv` was 37% of a Home Menu run). `TRACE_*` diagnostics are not env flags; they live in `trace`'s runtime mask, which the environment only seeds, because browsers have no environment.
+- The core reads no environment: browsers have none, and `getenv` on per-syscall/IPC/draw paths was 37% of a Home Menu run. Switches are fields set through the API (`Cpu::set_jit_enabled`, `Cpu::set_vsync_throttle`, `trace::set_mask`, `switch_gpu::Gpu`'s setters), and diagnostic files go to a `dump::Sink`; the examples' `common::apply_env` and `common::new_cpu` read the environment into them once.
 - `IdHasher` (fxhash-style) replaces SipHash for self-minted keys: SipHash was 18.7% of a Home Menu run. Iteration order was already nondeterministic with the default hasher. `finish` must fold the high half down because one multiply moves entropy upward only and `HashMap` buckets by low bits; without it 4096 page-aligned addresses shared one bucket.
 - `FB_BASE`/`INPUT_ADDR` sit above the heap and alias regions and below `GUEST_SPACE_END` (`kernel/layout.rs`); a region that grows must not reach them. `switch_fb_snapshot` prefers the GPU framebuffer and falls back to `FB_BASE`.
 

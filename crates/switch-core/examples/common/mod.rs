@@ -22,6 +22,75 @@ use switch_core::source::ByteSource;
 /// The font `pl:u` serves when no firmware fonts are registered.
 pub const FALLBACK_FONT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
 
+/// Hand the core what the environment asks for, once: the `TRACE_*` channels and
+/// the dump directories. The core itself reads no environment.
+pub fn apply_env() {
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    APPLIED.call_once(|| {
+        let channels: Vec<_> = switch_core::trace::ALL
+            .iter()
+            .copied()
+            .filter(|channel| env::var(channel.name()).is_ok())
+            .collect();
+        switch_core::trace::set_mask(&channels);
+        switch_core::dump::install(Box::new(DumpDirs::from_env()));
+    });
+}
+
+/// A machine with [`apply_env`] done and `SWITCH_NO_JIT` and `NO_VSYNC_THROTTLE` applied.
+pub fn new_cpu() -> Cpu {
+    apply_env();
+    let mut cpu = Cpu::new();
+    cpu.set_jit_enabled(env::var("SWITCH_NO_JIT").is_err());
+    cpu.set_vsync_throttle(env::var("NO_VSYNC_THROTTLE").is_err());
+    cpu
+}
+
+/// `DUMP_TEX=<dir>`, `TRACE_WGSL=<dir>` and `GPU_DUMP_WGSL=<dir>`: where each artefact is written.
+struct DumpDirs {
+    texture: Option<String>,
+    raster_wgsl: Option<String>,
+    device_wgsl: Option<String>,
+}
+
+impl DumpDirs {
+    fn from_env() -> DumpDirs {
+        DumpDirs {
+            texture: env::var("DUMP_TEX").ok(),
+            // `TRACE_WGSL=1` asks only for the summary lines.
+            raster_wgsl: env::var("TRACE_WGSL")
+                .ok()
+                .filter(|dir| !dir.is_empty() && dir != "1"),
+            device_wgsl: env::var("GPU_DUMP_WGSL").ok(),
+        }
+    }
+
+    fn dir(&self, what: switch_core::dump::Artefact) -> Option<&str> {
+        use switch_core::dump::Artefact;
+        match what {
+            Artefact::Texture => self.texture.as_deref(),
+            Artefact::RasterWgsl => self.raster_wgsl.as_deref(),
+            Artefact::DeviceWgsl => self.device_wgsl.as_deref(),
+        }
+    }
+}
+
+impl switch_core::dump::Sink for DumpDirs {
+    fn wants(&self, what: switch_core::dump::Artefact) -> bool {
+        self.dir(what).is_some()
+    }
+
+    fn keep(&self, what: switch_core::dump::Artefact, name: &str, bytes: &[u8]) {
+        let Some(dir) = self.dir(what) else {
+            return;
+        };
+        let path = Path::new(dir).join(name);
+        if let Err(e) = fs::create_dir_all(dir).and_then(|()| fs::write(&path, bytes)) {
+            eprintln!("cannot write {}: {e}", path.display());
+        }
+    }
+}
+
 /// Print a usage line and exit.
 pub fn usage(line: &str) -> ! {
     eprintln!("usage: {line}");
@@ -116,6 +185,7 @@ pub struct Args {
 }
 
 pub fn container_args(line: &str) -> Args {
+    apply_env();
     let mut positional = env::args().skip(1);
     let (Some(container), Some(prod)) = (positional.next(), positional.next()) else {
         usage(line)
@@ -138,6 +208,7 @@ pub fn container_args(line: &str) -> Args {
 /// Arguments of a tool that runs a `.nro` or a retail container with its
 /// keys. A `.ttf` anywhere in the tail is the shared font.
 pub fn program_args(line: &str) -> Args {
+    apply_env();
     let mut positional = env::args().skip(1);
     let Some(container) = positional.next() else {
         usage(line)

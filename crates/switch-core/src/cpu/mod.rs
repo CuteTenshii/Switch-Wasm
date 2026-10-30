@@ -117,9 +117,10 @@ pub struct Cpu {
     jit: jit::Jit,
     /// Translated code of the other processes this core has run, by pid.
     parked_jits: BTreeMap<u64, jit::Jit>,
-    /// Whether [`Cpu::run`] uses the JIT. `SWITCH_NO_JIT` disables it on the host;
-    /// see [`Cpu::set_jit_enabled`].
+    /// Whether [`Cpu::run`] uses the JIT; see [`Cpu::set_jit_enabled`].
     jit_enabled: bool,
+    /// Whether a blocking wait on vsync parks until the tick; see [`Cpu::set_vsync_throttle`].
+    pub(crate) vsync_throttle: bool,
     /// Set by a service call that would block; acted on after the reply is written to the caller's X0.
     pub(crate) pending_yield: bool,
     /// A park deadline applied at the same point as [`Cpu::pending_yield`].
@@ -483,7 +484,8 @@ impl Cpu {
             next_expiry: 0,
             jit: jit::Jit::default(),
             parked_jits: BTreeMap::new(),
-            jit_enabled: !crate::env_flag!("SWITCH_NO_JIT"),
+            jit_enabled: true,
+            vsync_throttle: true,
             pending_yield: false,
             pending_sleep: None,
             switched_in_at: 0,

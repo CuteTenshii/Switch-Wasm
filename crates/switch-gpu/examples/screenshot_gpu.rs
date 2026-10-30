@@ -6,7 +6,6 @@
 mod common;
 
 use common::Flow;
-use switch_core::cpu::Cpu;
 
 const USAGE: &str = "screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]";
 
@@ -17,14 +16,17 @@ fn main() {
     let want = args.rest_num(1).unwrap_or(1);
 
     let mut gpu = match switch_gpu::Gpu::open() {
-        Ok(gpu) => Some(gpu),
+        Ok(mut gpu) => {
+            configure(&mut gpu);
+            Some(gpu)
+        }
         Err(why) => {
             eprintln!("no GPU backend ({why}): this is `screenshot_title` with extra steps");
             None
         }
     };
 
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     // Booting docks at once for `DOCKED=1`; `DOCK_AT=<frame>` docks after that frame.
     let dock_at = common::env_u64("DOCK_AT", u64::MAX);
@@ -68,4 +70,20 @@ fn main() {
         return;
     }
     common::write_ppm(&out, &cpu.nv.gpu.framebuffer);
+}
+
+/// The device's diagnostic switches, from the environment.
+fn configure(gpu: &mut switch_gpu::Gpu) {
+    let on = |name: &str| std::env::var(name).is_ok();
+    gpu.set_defer_readbacks(on("GPU_DEFER_READBACKS"));
+    gpu.set_interleave(on("GPU_INTERLEAVE"));
+    gpu.set_web_limits(on("GPU_WEB_LIMITS"));
+    gpu.set_device_msaa(on("GPU_DEVICE_MSAA"));
+    gpu.set_times(on("GPU_TIMES"));
+    gpu.set_only(
+        std::env::var("GPU_ONLY")
+            .ok()
+            .as_deref()
+            .and_then(switch_gpu::draw_range),
+    );
 }

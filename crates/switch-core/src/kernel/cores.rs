@@ -25,6 +25,8 @@ pub struct CoreSlot {
     clock: Arc<AtomicU64>,
     /// The priority of the thread lent to it, which a more urgent one recalls.
     held: AtomicU8,
+    /// Core 0's [`Cpu::jit_enabled`] when the core was added.
+    jit: bool,
 }
 
 #[derive(Debug)]
@@ -45,6 +47,7 @@ impl CoreSlot {
 /// Run guest code for core 0 on this thread until [`Cpu::stop_cores`].
 pub fn serve(slot: Arc<CoreSlot>) {
     let mut cpu = Cpu::borrower(slot.core);
+    cpu.set_jit_enabled(slot.jit);
     cpu.recall = slot.recall.clone();
     cpu.share_clock(slot.clock.clone());
     loop {
@@ -111,6 +114,7 @@ impl Cpu {
             recall: Arc::default(),
             clock: self.clock.clone(),
             held: AtomicU8::new(LOWEST_PRIORITY),
+            jit: self.jit_enabled(),
         });
         self.machine.cores.push(slot.clone());
         slot

@@ -12,7 +12,7 @@ Game images and keys (`.nro`, `.nsp`, `.xci`, `.nca`, `.keys`) are gitignored.
 - Every tool that boots a retail title boots it as the page does, with the NACP's save-data quota and add-on content base id, and takes `UPDATE=<update.nsp>` to run it patched, `DLC=<a.nsp>,<b.nsp>` to mount its add-on content (the page's pairing with no page in the way), and `DOCKED=1` to boot docked.
 - The shared font is `web/font.ttf` unless a tool is given another; firmware fonts replace it when `SWITCH_FIRMWARE` holds them.
 - **The shared debugging knobs**, on `boot_nsp`, `boot_nx`, `screenshot_title` and `screenshot_gpu` alike: `TRAP_WRITE=<addr>:<hex size>` and `TRAP_READ=…` name the code that writes to or reads a region (`TRAP_ZERO=1` includes zero writes, `TRAP_LAST=<n>` prints only the last n when the run stops), `WATCH_PC=<addr>[,...]` the code that reaches one (`WATCH_REGS=1`, `WATCH_DUMP=<spec>`, `WATCH_LAST=<n>`), and `DUMP=<base>[+<hex>][:<hex len>][,...]` hex-dumps guest memory wherever the run stopped, `<base>` being a register, `sp`, `pc` or an address (a leading `*` follows the pointer), as in `DUMP=x23+0x1830:0x40`.
-- `SWITCH_NO_JIT=1` disables translation for host tools.
+- `SWITCH_NO_JIT=1` disables translation for host tools (applied by `common::new_cpu`, as is `NO_VSYNC_THROTTLE=1`).
 
 ## Tools
 
@@ -28,7 +28,7 @@ Game images and keys (`.nro`, `.nsp`, `.xci`, `.nca`, `.keys`) are gitignored.
 
 ## Tracing
 
-- Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, ...; the list is `switch_core::trace::ALL`). The environment seeds it on the host. `std::env::var` always fails on wasm, so in the browser the console's log level decides: **Debug** turns every channel on, any other level turns them off. Debug is slow on a busy title; leave it on Log unless a channel is needed.
+- Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, ...; the list is `switch_core::trace::ALL`). Host tools set it from the environment in `common::apply_env`; the core reads no environment, so in the browser the console's log level decides: **Debug** turns every channel on, any other level turns them off. Debug is slow on a busy title; leave it on Log unless a channel is needed.
 - The channels to start from when a title misbehaves without faulting are the low-volume ones. `TRACE_FS` names every filesystem request, its path and the `Result` it was answered with (`2002-0001` is path-not-found), so a title looking for content it cannot find says so. `TRACE_IO` is the host side of the same reads: each range pulled out of the container. `TRACE_DRAW` is one line per draw and clear with the surface it lands in, on either backend; `TRACE_COPY` the DMA copies, inline uploads and 2D blits between them; and `TRACE_PRESENT` one line per frame scanned out. `TRACE_GPU` prints the draw, copy and present lines too, among every method write.
 
 ## In the browser

@@ -58,8 +58,8 @@ impl Gpu {
             let fs_source = wgsl::module(&p.fs, Stage::Fragment, &p.fs_layout);
             match (vs_source, fs_source) {
                 (Ok(vs), Ok(fs)) => {
-                    if let Ok(dir) = std::env::var("GPU_DUMP_WGSL") {
-                        dump_wgsl(&dir, &vs, &fs);
+                    if switch_core::dump::wants(switch_core::dump::Artefact::DeviceWgsl) {
+                        dump_wgsl(&vs, &fs);
                     }
                     Ok((self.module("vertex", &vs), self.module("fragment", &fs)))
                 }

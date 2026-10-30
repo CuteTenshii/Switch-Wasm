@@ -3,7 +3,7 @@
 mod common;
 
 use std::collections::BTreeMap;
-use switch_core::cpu::{Cpu, ExecMode};
+use switch_core::cpu::ExecMode;
 
 const USAGE: &str = "a32_coverage <image> <base> <text length> [<image> <base> <text length>...]";
 
@@ -42,7 +42,7 @@ fn main() {
                 continue;
             }
             scanned += 1;
-            let mut cpu = Cpu::new();
+            let mut cpu = common::new_cpu();
             cpu.mem.map_zero(SCRATCH, SCRATCH_SIZE).unwrap();
             cpu.mem.map(CODE, &word.to_le_bytes()).unwrap();
             cpu.set_mode(ExecMode::A32);

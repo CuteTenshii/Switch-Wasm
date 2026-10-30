@@ -395,7 +395,7 @@ fn code_bytes(program: &[u32]) -> Vec<u8> {
 
 /// A `Cpu` with the window mapped and filled, `code` loaded and the watchpoint armed.
 fn mapped_cpu(code: &[u8]) -> Cpu {
-    let cpu = Cpu::new();
+    let cpu = common::new_cpu();
     cpu.mem
         .map_zero(WINDOW_AT, WINDOW_BYTES as usize)
         .expect("cannot map the guest window");

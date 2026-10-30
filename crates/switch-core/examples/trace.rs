@@ -4,7 +4,6 @@ mod common;
 
 use common::{Flow, Pace};
 use std::collections::{HashMap, HashSet};
-use switch_core::cpu::Cpu;
 
 const SAMPLE_EVERY: u64 = 64;
 
@@ -16,7 +15,7 @@ fn main() {
     let watch: HashSet<u32> = args.map(|a| common::hex(&a)).collect();
 
     let data = common::read(&path);
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     cpu.boot_homebrew(&data).expect("boot");
 

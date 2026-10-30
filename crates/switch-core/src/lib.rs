@@ -1,16 +1,6 @@
 //! switch-core: a from-scratch Nintendo Switch emulation core targeting the
 //! browser (WASM) and the host for testing.
 
-/// Whether an environment switch such as `SWITCH_NO_JIT` is set, read once
-/// and remembered.
-#[macro_export]
-macro_rules! env_flag {
-    ($name:literal) => {{
-        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *FLAG.get_or_init(|| std::env::var($name).is_ok())
-    }};
-}
-
 /// A fast non-cryptographic hasher for integer keys this emulator minted:
 /// kernel handles, guest addresses, object ids.
 #[derive(Default, Clone, Copy)]
@@ -75,6 +65,7 @@ pub mod cpu;
 pub mod crypto;
 pub mod disasm;
 pub mod display;
+pub mod dump;
 pub mod elf;
 pub mod error;
 pub mod gpu;

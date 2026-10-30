@@ -10,7 +10,6 @@
 mod common;
 
 use std::env;
-use switch_core::cpu::Cpu;
 
 const USAGE: &str = "retail_trace <container> <prod.keys> [title.keys] [tail_len] [max_steps]";
 
@@ -20,7 +19,7 @@ fn main() {
     let tail: usize = args.rest_num(0).unwrap_or(4000) as usize;
     let budget = args.rest_num(1).unwrap_or(400_000_000);
 
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     title.boot(&mut cpu);
 

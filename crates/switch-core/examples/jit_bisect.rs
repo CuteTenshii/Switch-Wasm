@@ -16,7 +16,7 @@ const USAGE: &str = "jit_bisect <target> [prod.keys] [title.keys] [max_steps] [w
 const SLICE: u64 = 4096;
 
 fn boot(program: &common::Program, jit: bool) -> Cpu {
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     cpu.set_jit_enabled(jit);
     program.boot(&mut cpu);

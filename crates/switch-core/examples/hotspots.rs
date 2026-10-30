@@ -9,7 +9,6 @@ const USAGE: &str = "hotspots <target> [prod.keys] [title.keys] [font.ttf]";
 
 use common::{Flow, Pace};
 use std::collections::BTreeMap;
-use switch_core::cpu::Cpu;
 
 /// Bytes of guest code per row of the address histogram.
 const BUCKET: u32 = 4096;
@@ -29,7 +28,7 @@ fn group_of(insn: u32) -> &'static str {
 fn main() {
     let args = common::program_args(USAGE);
     let program = args.open_program();
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     let booted = program.boot(&mut cpu);
 

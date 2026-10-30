@@ -625,7 +625,7 @@ impl Cpu {
                 }
                 // A blocking wait on vsync is certain to fire, so park until the tick.
                 if timeout != 0
-                    && !crate::env_flag!("NO_VSYNC_THROTTLE")
+                    && self.vsync_throttle
                     && self.vsync_event.is_some_and(|v| handles.contains(&v))
                 {
                     self.pc = self.pc.wrapping_sub(4);

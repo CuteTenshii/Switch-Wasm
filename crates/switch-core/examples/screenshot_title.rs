@@ -33,7 +33,7 @@ fn main() {
     let out = args.need(0).to_string();
     let want = args.rest_num(1).unwrap_or(1);
 
-    let mut cpu = switch_core::cpu::Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     program.boot(&mut cpu);
 

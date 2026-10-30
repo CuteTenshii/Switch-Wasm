@@ -101,6 +101,11 @@ impl Cpu {
         self.reschedule();
     }
 
+    /// Off answers a blocking vsync wait at once instead of parking until the tick.
+    pub fn set_vsync_throttle(&mut self, on: bool) {
+        self.vsync_throttle = on;
+    }
+
     /// The next display refresh, a deadline that always arrives.
     pub(crate) fn next_display_tick(&self) -> u64 {
         self.last_vsync_cycles.wrapping_add(VSYNC_PERIOD_CYCLES)

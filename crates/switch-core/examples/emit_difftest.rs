@@ -15,7 +15,7 @@ use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
 use common::{Flow, Pace};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
-use switch_core::cpu::{defers, Cpu, Refused};
+use switch_core::cpu::{defers, Refused};
 use switch_core::disasm::disassemble;
 
 /// Encodings listed in the refusal report.
@@ -30,7 +30,7 @@ fn main() {
     let args = common::program_args(USAGE);
     let out_dir = std::env::var("OUT").unwrap_or_else(|_| "target/emit-difftest".into());
     let program = args.open_program();
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     program.boot(&mut cpu);
 

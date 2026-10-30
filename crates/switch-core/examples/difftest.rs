@@ -3,7 +3,6 @@
 mod common;
 
 use common::{Flow, Pace};
-use switch_core::cpu::Cpu;
 
 const USAGE: &str = "difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>";
 
@@ -15,7 +14,7 @@ fn main() {
     // Must match the test ELF's .data address.
     let inputs_addr = common::hex(&common::arg(4, USAGE));
     const OUTPUT: u32 = 0x2_0000;
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.mem.map_zero(CODE, code.len() + 16).unwrap();
     cpu.mem.map(CODE, &code).unwrap();
     cpu.mem.map_zero(inputs_addr, inputs.len() + 4096).unwrap();

@@ -6,7 +6,6 @@
 mod common;
 
 use std::collections::BTreeMap;
-use switch_core::cpu::Cpu;
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Caps, Stage, Unsupported};
 use switch_core::gpu::shader::{uses, Program};
@@ -158,7 +157,7 @@ fn main() {
     let title = args.open();
     let want_frame = args.rest_num(0).unwrap_or(4);
 
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     title.boot(&mut cpu);
 

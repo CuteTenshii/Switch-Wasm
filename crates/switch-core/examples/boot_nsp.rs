@@ -12,7 +12,6 @@ mod common;
 
 use common::profile::Profile;
 use common::Flow;
-use switch_core::cpu::Cpu;
 
 const USAGE: &str = "boot_nsp <container> <prod.keys> [title.keys] [max_steps]";
 
@@ -26,7 +25,7 @@ fn main() {
         title.exefs_pfs0.files.len()
     );
 
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     let booted = title.boot(&mut cpu);
     if let Some(quota) = booted.quota {

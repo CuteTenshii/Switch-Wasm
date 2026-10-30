@@ -7,7 +7,6 @@ const USAGE: &str = "jit_coverage <target> [prod.keys] [title.keys] [font.ttf]";
 
 use common::{Flow, Pace};
 use std::collections::HashMap;
-use switch_core::cpu::Cpu;
 use switch_core::disasm::disassemble;
 
 const ROWS: usize = 20;
@@ -15,7 +14,7 @@ const ROWS: usize = 20;
 fn main() {
     let args = common::program_args(USAGE);
     let program = args.open_program();
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     program.boot(&mut cpu);
 

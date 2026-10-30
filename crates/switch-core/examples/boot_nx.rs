@@ -16,7 +16,7 @@ fn main() {
         common::usage("boot_nx <path.nro>")
     };
     let data = common::read(&path);
-    let mut cpu = Cpu::new();
+    let mut cpu = common::new_cpu();
     cpu.bootstrap();
     let sd_path = std::env::var("SD")
         .ok()
