@@ -200,7 +200,9 @@ impl Cpu {
                 }
                 // GetBootMode: Normal.
                 Some(8) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
-                // GetAcquiredSleepLockEvent: never signalled.
+                // GetBuiltInDisplayType: what the values mean is undocumented; 0 is Eden's stub.
+                Some(68) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+                // GetAcquiredSleepLockEvent: never signaled.
                 Some(13) => {
                     let h = match self.process().sleep_lock_event {
                         Some(h) => h,

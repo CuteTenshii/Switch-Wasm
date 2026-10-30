@@ -277,6 +277,15 @@ fn am_reports_the_handheld_operation_mode_it_always_claimed_to() {
 }
 
 #[test]
+fn am_answers_the_built_in_display_type() {
+    let mut cpu = request(false, 68, &[]);
+    cpu.register_service_handle(9, "am:common-state-getter");
+    cpu.applet_request(TLS, 9, Some(68)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+    assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "the type");
+}
+
+#[test]
 fn the_copyright_notice_for_captures_is_accepted() {
     for cmd in [100, 101, 102] {
         let mut cpu = request(false, cmd, &[]);
