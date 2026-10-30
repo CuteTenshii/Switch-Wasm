@@ -9,6 +9,7 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Browser bindings
 
+- A service worker that caches the page, the worker scripts and the `.wasm`, so the emulator starts offline and installs as an app with the existing `manifest.webmanifest`. Vite hashes asset names, so the build must hand it the list; it must sit under `base: './'`; and cached responses must keep the COOP/COEP headers, or the page loses cross-origin isolation and `SharedArrayBuffer`.
 - Stretch audio when emulation runs below full speed, so it plays slowed down rather than in bursts with gaps.
 - Motion controls from real controllers. The Gamepad API exposes no gyro or accelerometer and Web Bluetooth cannot reach classic HID, so read Joy-Con, DualShock 4 and DualSense reports through WebHID (Chromium desktop only, permission from a user gesture, main thread only) and forward the samples to the worker into the six-axis shared memory states. A Joy-Con needs subcommand `0x40` (enable IMU) and `0x03` with `0x30` (full reports, 3 samples per ~15 ms report); its calibration at SPI `0x6020` (factory) and `0x8026` (user), read with subcommand `0x10`, is what `hid:server` 87 (LoadSixAxisSensorCalibrationParameter, zeros today) should return.
 
