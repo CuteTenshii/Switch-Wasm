@@ -589,19 +589,13 @@ impl Targets {
     }
 }
 
-/// One GOB, the block-linear unit rows are padded to.
-const GOB_BYTES: u64 = 512;
-
-/// Resolve a texture slot and copy it out. A `texs` immediate indexes the
-/// `TexCbIndex` constant bank for a bindless handle into the TIC/TSC pools.
-fn read_texture(
+/// The constant word at `(bank, offset)` of `stage`'s bound banks.
+fn handle_word(
     engine: &Engine3D,
     ctx: &ExecCtx,
     stage: ShaderStage,
-    slot: TextureSlot,
-    cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
-) -> Result<TextureUpload> {
-    let (bank, offset) = slot.handle_at(engine.tex_cb_index());
+    (bank, offset): (u8, u16),
+) -> Result<u32> {
     let bank = u32::from(bank);
     let (addr, size) = engine.bound_constbuf(stage, bank).ok_or_else(|| {
         Error::Gpu(format!(
@@ -614,7 +608,26 @@ fn read_texture(
             "upload: texture handle at c{bank}[{offset:#x}] is past the bound buffer's {size:#x}"
         )));
     }
-    let handle = ctx.read_u32(addr + u64::from(offset))?;
+    ctx.read_u32(addr + u64::from(offset))
+}
+
+/// One GOB, the block-linear unit rows are padded to.
+const GOB_BYTES: u64 = 512;
+
+/// Resolve a texture slot and copy it out. A `texs` immediate indexes the
+/// `TexCbIndex` constant bank for a bindless handle into the TIC/TSC pools.
+fn read_texture(
+    engine: &Engine3D,
+    ctx: &ExecCtx,
+    stage: ShaderStage,
+    slot: TextureSlot,
+    cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
+) -> Result<TextureUpload> {
+    let (first, second) = slot.handle_words(engine.tex_cb_index());
+    let mut handle = handle_word(engine, ctx, stage, first)?;
+    if let Some(word) = second {
+        handle |= handle_word(engine, ctx, stage, word)?;
+    }
     let Some(descriptors) = texture::read_descriptors(
         ctx,
         engine.tex_header_pool(),

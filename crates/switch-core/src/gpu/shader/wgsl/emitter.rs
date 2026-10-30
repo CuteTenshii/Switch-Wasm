@@ -2,7 +2,8 @@
 
 use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::isa::{
-    BoolOp, FCmp, FMod, FRound, HMerge, HSwizzle, ICmp, MemSize, Op, Operand, Pred, TexDim, RZ,
+    BoolOp, FCmp, FMod, FRound, HMerge, HSwizzle, ICmp, LogicOp, MemSize, Op, Operand, Pred,
+    TexDim, RZ,
 };
 use crate::gpu::texture::TextureSlot;
 use std::collections::BTreeSet;
@@ -161,15 +162,43 @@ impl<'a> Emitter<'a> {
         Some((bank, offset))
     }
 
-    /// The constant word a bindless `tex.b` reads its handle from:
+    /// The constant words a bindless `tex.b` reads its handle from:
     ///
     /// ```text
     /// ldc   r2, c3[0x10]
     /// tex.b r0, r4, r2, 0x2, 2D, 0xf
     /// ```
+    ///
+    /// or two of them ORed, NVN's image and sampler halves:
+    ///
+    /// ```text
+    /// mov    r6, c2[0x168]
+    /// lop.or r6, r6, c2[0x568]
+    /// ```
     pub(super) fn bindless_slot(&self, at: usize, reg: u8) -> Option<TextureSlot> {
         let writer = self.sole_writer(at, reg)?;
         match self.program.op(writer) {
+            Op::Lop {
+                dst,
+                a,
+                ainv: false,
+                b:
+                    Operand::Const {
+                        bank: other_bank,
+                        offset: other_offset,
+                    },
+                binv: false,
+                op: LogicOp::Or,
+                pred: None,
+            } if dst == reg => match self.bindless_slot(writer, a)? {
+                TextureSlot::Bindless { bank, offset } => Some(TextureSlot::BindlessPair {
+                    bank,
+                    offset,
+                    other_bank,
+                    other_offset,
+                }),
+                _ => None,
+            },
             Op::Mov {
                 src: Operand::Const { bank, offset },
                 ..

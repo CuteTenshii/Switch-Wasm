@@ -629,6 +629,79 @@ fn a_bindless_handle_that_is_not_a_constant_is_refused() {
     );
 }
 
+/// Just Dance 2023's split handle: `mov r2, c2[0x168]; lop.or r2, r2, <second>; tex.b ..., r2`.
+fn split_handle(second: Operand) -> Vec<(Op, Pred)> {
+    use crate::gpu::shader::isa::LogicOp;
+    let tex = crate::gpu::shader::isa::decode(TEX_B).op;
+    vec![
+        (
+            Op::Mov {
+                dst: 2,
+                src: Operand::Const {
+                    bank: 2,
+                    offset: 0x168,
+                },
+            },
+            ALWAYS,
+        ),
+        (
+            Op::Lop {
+                dst: 2,
+                a: 2,
+                ainv: false,
+                b: second,
+                binv: false,
+                op: LogicOp::Or,
+                pred: None,
+            },
+            ALWAYS,
+        ),
+        (tex, ALWAYS),
+    ]
+}
+
+fn sampler_word(offset: u16) -> Operand {
+    Operand::Const { bank: 2, offset }
+}
+
+#[test]
+fn a_handle_ored_from_two_constant_words_binds_both() {
+    let mut ops = split_handle(sampler_word(0x568));
+    ops.push((Op::Exit, ALWAYS));
+    let translated = translate(&program(&ops)).unwrap();
+    let slot = TextureSlot::BindlessPair {
+        bank: 2,
+        offset: 0x168,
+        other_bank: 2,
+        other_offset: 0x568,
+    };
+    assert_eq!(translated.textures, vec![(slot, TexDim::T2d, false)]);
+    let layout = Layout::of(&translated, Stage::Fragment);
+    module(&translated, Stage::Fragment, &layout).unwrap();
+}
+
+#[test]
+fn a_handle_ored_with_a_register_is_refused() {
+    let mut ops = split_handle(Operand::Reg(5));
+    ops.push((Op::Exit, ALWAYS));
+    assert_eq!(
+        translate(&program(&ops)).unwrap_err(),
+        Unsupported::UntracedHandle { at: 2 }
+    );
+}
+
+#[test]
+fn two_handles_keyed_by_one_first_word_are_refused() {
+    // The same image word with two sampler words would share one sampling case.
+    let mut ops = split_handle(sampler_word(0x568));
+    ops.extend(split_handle(sampler_word(0x56c)));
+    ops.push((Op::Exit, ALWAYS));
+    assert_eq!(
+        translate(&program(&ops)).unwrap_err(),
+        Unsupported::SharedHandleKey { at: 5 }
+    );
+}
+
 #[test]
 fn a_global_load_through_a_descriptor_loaded_whole_reads_that_descriptor() {
     let ldg = Op::Ldg {

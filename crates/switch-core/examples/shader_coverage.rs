@@ -40,6 +40,7 @@ fn blocker(why: Unsupported) -> String {
         Unsupported::UndecodedTarget { .. } => "branch to an undecoded target".into(),
         Unsupported::IndirectBranch { .. } => "brx with an unread jump table".into(),
         Unsupported::UntracedHandle { .. } => "bindless handle not from a constant bank".into(),
+        Unsupported::SharedHandleKey { .. } => "two bindless handles keyed alike".into(),
     }
 }
 
@@ -62,7 +63,8 @@ fn blocked_at(why: &Unsupported) -> Option<usize> {
         | Unsupported::IndirectBranch { at }
         | Unsupported::Quad { at }
         | Unsupported::DepthCompare { at }
-        | Unsupported::UntracedHandle { at } => Some(at),
+        | Unsupported::UntracedHandle { at }
+        | Unsupported::SharedHandleKey { at } => Some(at),
         Unsupported::TextureDimension { .. } => None,
     }
 }

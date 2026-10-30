@@ -31,23 +31,40 @@ pub enum TextureSlot {
     Bound(u16),
     /// A bindless `tex.b` handle loaded from this word of any bank.
     Bindless { bank: u8, offset: u16 },
+    /// A bindless handle ORed from two words, as NVN splits the image and sampler indices.
+    BindlessPair {
+        bank: u8,
+        offset: u16,
+        other_bank: u8,
+        other_offset: u16,
+    },
 }
 
 impl TextureSlot {
-    /// The bank and byte offset holding this slot's handle.
-    pub fn handle_at(self, tex_cb_index: u8) -> (u8, u16) {
+    /// The bank and byte offset of each word ORed into this slot's handle.
+    pub fn handle_words(self, tex_cb_index: u8) -> ((u8, u16), Option<(u8, u16)>) {
         match self {
-            TextureSlot::Bound(immediate) => (tex_cb_index, handle_offset(immediate)),
-            TextureSlot::Bindless { bank, offset } => (bank, offset),
+            TextureSlot::Bound(immediate) => ((tex_cb_index, handle_offset(immediate)), None),
+            TextureSlot::Bindless { bank, offset } => ((bank, offset), None),
+            TextureSlot::BindlessPair {
+                bank,
+                offset,
+                other_bank,
+                other_offset,
+            } => ((bank, offset), Some((other_bank, other_offset))),
         }
     }
 
-    /// A unique key for the WGSL sampling hooks; the top bit marks bindless slots.
+    /// A key for the WGSL sampling hooks: the top bit marks bindless slots, the next a pair.
+    /// A pair keys by its first word, so two pairs sharing it clash; the translator refuses those.
     pub fn key(self) -> u32 {
         match self {
             TextureSlot::Bound(immediate) => u32::from(immediate),
             TextureSlot::Bindless { bank, offset } => {
                 1 << 31 | u32::from(bank) << 16 | u32::from(offset)
+            }
+            TextureSlot::BindlessPair { bank, offset, .. } => {
+                1 << 31 | 1 << 30 | u32::from(bank) << 16 | u32::from(offset)
             }
         }
     }

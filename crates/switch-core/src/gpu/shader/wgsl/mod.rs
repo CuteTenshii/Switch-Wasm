@@ -45,6 +45,8 @@ pub enum Unsupported {
     DepthCompare { at: usize },
     /// A bindless `tex.b` whose handle is not loaded straight from a constant bank.
     UntracedHandle { at: usize },
+    /// Two bindless handles of one program that the sampling hooks would key alike.
+    SharedHandleKey { at: usize },
 }
 
 impl fmt::Display for Unsupported {
@@ -81,6 +83,12 @@ impl fmt::Display for Unsupported {
                 write!(
                     f,
                     "instruction {at}: a bindless handle not loaded from a constant bank"
+                )
+            }
+            Unsupported::SharedHandleKey { at } => {
+                write!(
+                    f,
+                    "instruction {at}: two bindless handles ORed from the same first word"
                 )
             }
         }

@@ -20,6 +20,14 @@ impl Emitter<'_> {
             // A slot sampled both as colour and depth cannot be one binding.
             Some(&(_, _, was)) if was != compare => Err(Unsupported::DepthCompare { at }),
             Some(_) => Ok(()),
+            // Two slots answering to one key would sample each other's image.
+            None if self
+                .textures
+                .iter()
+                .any(|&(seen, _, _)| seen.key() == slot.key()) =>
+            {
+                Err(Unsupported::SharedHandleKey { at })
+            }
             None => {
                 self.textures.push((slot, dim, compare));
                 Ok(())
