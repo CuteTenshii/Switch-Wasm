@@ -23,6 +23,62 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @builtin(frag_depth) f32 {
 }
 ";
 
+/// A held `depth32float` sampled as `S8D24`: the guest image's stencil in red, and in green
+/// the depth as guest memory would hold it, read back the way the rasterizer reads it.
+/// The integer arithmetic reproduces both conversions exactly; floats would round.
+pub(crate) const PACKED_DEPTH_WGSL: &str = "\
+@group(0) @binding(0) var depth: texture_depth_2d;
+@group(0) @binding(1) var guest: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+// `DepthLayout::encode_depth`'s round(d * (2^24 - 1)), with d = m * 2^-k and the product in 48 bits.
+fn unorm24(d: f32) -> u32 {
+  if (!(d > 0.0)) { return 0u; }
+  if (d >= 1.0) { return 0xffffffu; }
+  let bits = bitcast<u32>(d);
+  let exponent = (bits >> 23u) & 0xffu;
+  let k = 150u - exponent;
+  if (exponent == 0u || k >= 49u) { return 0u; }
+  let m = (bits & 0x7fffffu) | 0x800000u;
+  var lo = m << 24u;
+  var hi = (m >> 8u) - select(0u, 1u, lo < m);
+  lo = lo - m;
+  if (k <= 32u) {
+    let sum = lo + (1u << (k - 1u));
+    hi = hi + select(0u, 1u, sum < lo);
+    lo = sum;
+  } else {
+    hi = hi + (1u << (k - 33u));
+  }
+  if (k < 32u) { return (lo >> k) | (hi << (32u - k)); }
+  return hi >> (k - 32u);
+}
+
+// `n / (2^24 - 1)` rounded to f32: its bits are n's 24 repeating, so after the leading one
+// come n's lower bits, then n's top bit (a one) and more, which always rounds up.
+fn from_unorm24(n: u32) -> f32 {
+  if (n == 0u) { return 0.0; }
+  if (n == 0xffffffu) { return 1.0; }
+  let lz = countLeadingZeros(n) - 8u;
+  let mantissa = (n << lz) + 1u;
+  return bitcast<f32>(((126u - lz) << 23u) | (mantissa & 0x7fffffu));
+}
+
+@fragment
+fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  let at = vec2<u32>(position.xy);
+  let stencil = textureLoad(guest, at, 0).x;
+  let d = textureLoad(depth, at, 0);
+  return vec4<f32>(stencil, from_unorm24(unorm24(d)), 0.0, 1.0);
+}
+";
+
 /// A partial clear: a fullscreen triangle under a scissor, for rectangles or
 /// channel masks a load operation cannot express.
 pub(crate) const CLEAR_RECT_WGSL: &str = "\

@@ -355,6 +355,8 @@ pub struct Gpu {
         std::collections::HashMap<Vec<wgpu::BindGroupLayoutEntry>, wgpu::BindGroupLayout>,
     /// Depth upload pipelines by depth format. See [`LOAD_DEPTH_WGSL`].
     depth_loaders: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// See [`builtin::PACKED_DEPTH_WGSL`].
+    packed_depth: Option<wgpu::RenderPipeline>,
     /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
     clear_pipelines: std::collections::HashMap<ClearKey, wgpu::RenderPipeline>,
     /// Multisample resampling pipelines. See [`resample_wgsl`].
@@ -560,6 +562,8 @@ enum HeldLayer {
     Colour(wgpu::Texture),
     /// A `depth32float` copied into an `r32float` through a buffer.
     Depth(wgpu::Texture),
+    /// A `depth32float` drawn into the green of an `S8D24` image's `rg32float`.
+    PackedDepth(wgpu::Texture),
     /// A `depth32float` copied whole into its layer of a shadow map.
     Shadow(wgpu::Texture),
     /// A larger `depth32float` whose corner is drawn into a shadow map layer.

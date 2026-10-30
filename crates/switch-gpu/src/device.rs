@@ -47,6 +47,7 @@ impl Gpu {
             samplers: std::collections::HashMap::new(),
             group_layouts: std::collections::HashMap::new(),
             depth_loaders: std::collections::HashMap::new(),
+            packed_depth: None,
             clear_pipelines: std::collections::HashMap::new(),
             resample_pipelines: std::collections::HashMap::new(),
             failed,

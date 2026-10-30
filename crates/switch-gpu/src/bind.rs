@@ -1,5 +1,6 @@
 //! Bind groups and the textures and samplers they bind.
 
+use crate::builtin::PACKED_DEPTH_WGSL;
 use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
 use crate::readback::Scratch;
 use crate::{
@@ -262,12 +263,25 @@ impl Gpu {
                         upload.key.layout
                     ));
                 }
-                let refused = if !float {
+                // `S8D24` sampled as itself takes its depth from the device; see [`PACKED_DEPTH_WGSL`].
+                let packed = (
+                    depth.bytes,
+                    depth.depth_bits,
+                    depth.depth_shift,
+                    depth.stencil_shift,
+                ) == (4, 24, 8, Some(0));
+                let wanted = if packed {
+                    wgpu::TextureFormat::Rg32Float
+                } else {
+                    wgpu::TextureFormat::R32Float
+                };
+                let refused = if !float && !packed {
                     Some(format!(
                         "packed {depth:?}, which is not the float it would be read as"
                     ))
-                } else if format != wgpu::TextureFormat::R32Float
+                } else if format != wanted
                     || held.texture.format() != wgpu::TextureFormat::Depth32Float
+                    || (packed && held.texture.sample_count() != 1)
                 {
                     Some(format!(
                         "held as {:?} and sampled as {format:?}",
@@ -292,7 +306,15 @@ impl Gpu {
                 if let Some(why) = refused {
                     return Err(format!("samples a depth surface held on the device, {why}"));
                 }
-                layers.push((layer, HeldLayer::Depth(held.texture.clone())));
+                let surface = held.texture.clone();
+                layers.push((
+                    layer,
+                    if packed {
+                        HeldLayer::PackedDepth(surface)
+                    } else {
+                        HeldLayer::Depth(surface)
+                    },
+                ));
                 continue;
             }
             if held.companion.is_some() {
@@ -354,8 +376,14 @@ impl Gpu {
             texture
         };
         for (layer, surface) in held {
-            if let HeldLayer::ShadowCorner(surface) = surface {
-                self.draw_shadow_corner(&texture, *layer, surface)?;
+            match surface {
+                HeldLayer::ShadowCorner(surface) => {
+                    self.draw_shadow_corner(&texture, *layer, surface)?;
+                }
+                HeldLayer::PackedDepth(surface) => {
+                    self.draw_packed_depth(&texture, *layer, surface)?;
+                }
+                _ => {}
             }
         }
         let mut encoder = self
@@ -384,7 +412,7 @@ impl Gpu {
                     encoder.copy_texture_to_texture(surface.as_image_copy(), into, extent);
                 }
                 // Drawn above, before these copies were encoded.
-                HeldLayer::ShadowCorner(_) => {}
+                HeldLayer::ShadowCorner(_) | HeldLayer::PackedDepth(_) => {}
                 HeldLayer::Depth(surface) => {
                     // A depth copy takes the whole surface; the sampled corner is taken from the buffer.
                     let (width, height) = (surface.width(), surface.height());
@@ -433,6 +461,138 @@ impl Gpu {
         }
         self.queue.submit([encoder.finish()]);
         Ok(texture)
+    }
+
+    /// Overwrite `layer` of an uploaded `S8D24` image with a held `depth32float`'s depth, keeping
+    /// the image's stencil; see [`PACKED_DEPTH_WGSL`].
+    pub(super) fn draw_packed_depth(
+        &mut self,
+        texture: &wgpu::Texture,
+        layer: u32,
+        surface: &wgpu::Texture,
+    ) -> std::result::Result<(), String> {
+        let size = wgpu::Extent3d {
+            width: texture.width(),
+            height: texture.height(),
+            depth_or_array_layers: 1,
+        };
+        let staging = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("held packed depth"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let pipeline = self.packed_depth_pipeline();
+        let depth = surface.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            aspect: wgpu::TextureAspect::DepthOnly,
+            ..Default::default()
+        });
+        let guest = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: layer,
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("held packed depth"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&guest),
+                },
+            ],
+        });
+        let target = staging.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("held packed depth"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("held packed depth"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_texture(
+            staging.as_image_copy(),
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            size,
+        );
+        self.queue.submit([encoder.finish()]);
+        self.scratch.push(Scratch::Texture(staging));
+        Ok(())
+    }
+
+    /// The pipeline of [`Gpu::draw_packed_depth`], built once.
+    fn packed_depth_pipeline(&mut self) -> wgpu::RenderPipeline {
+        if let Some(pipeline) = &self.packed_depth {
+            return pipeline.clone();
+        }
+        let (_, module) = self.module("held packed depth", PACKED_DEPTH_WGSL);
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("held packed depth"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        self.packed_depth = Some(pipeline.clone());
+        pipeline
     }
 
     /// Draw the top-left corner of a held `depth32float` into a smaller shadow map layer, via `r32float`.

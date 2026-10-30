@@ -551,3 +551,136 @@ fn the_report_is_the_json_the_page_reads() {
         )
     );
 }
+
+/// The packed-depth pass converts every depth exactly as guest memory and the rasterizer would.
+#[test]
+fn the_packed_depth_pass_converts_depths_bit_for_bit() {
+    let Some(mut gpu) = device() else { return };
+    let mut depths: Vec<f32> = vec![
+        0.0,
+        -0.5,
+        f32::from_bits(1),
+        f32::MIN_POSITIVE,
+        2f32.powi(-25),
+        2f32.powi(-24),
+        2f32.powi(-24) * 1.5,
+        0.25,
+        0.5,
+        f32::from_bits(0.5f32.to_bits() - 1),
+        f32::from_bits(0.5f32.to_bits() + 1),
+        f32::from_bits(1f32.to_bits() - 1),
+        1.0,
+    ];
+    let width = 256u32;
+    let mut x = 0x1234_5678u32;
+    while depths.len() < (width * width) as usize {
+        // Uniform in [0, 1) and log-spread small values, from a fixed xorshift.
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        depths.push(if x & 1 == 0 {
+            (x >> 8) as f32 / 16_777_216.0
+        } else {
+            f32::from_bits(x % 0x3f80_0000)
+        });
+    }
+    let size = wgpu::Extent3d {
+        width,
+        height: width,
+        depth_or_array_layers: 1,
+    };
+    let texture = |format, usage| {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let surface = texture(
+        wgpu::TextureFormat::Depth32Float,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let staging = texture(
+        wgpu::TextureFormat::R32Float,
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    );
+    let image = texture(
+        wgpu::TextureFormat::Rg32Float,
+        wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+    );
+    let bytes: Vec<u8> = depths.iter().flat_map(|d| d.to_le_bytes()).collect();
+    gpu.queue.write_texture(
+        staging.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(width),
+        },
+        size,
+    );
+    gpu.load_depth(&surface, &staging, wgpu::TextureFormat::Depth32Float)
+        .expect("the depth upload");
+    gpu.draw_packed_depth(&image, 0, &surface)
+        .expect("the packed depth pass");
+
+    let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(width * width * 8),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    encoder.copy_texture_to_buffer(
+        image.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &out,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 8),
+                rows_per_image: Some(width),
+            },
+        },
+        size,
+    );
+    gpu.queue.submit([encoder.finish()]);
+    out.slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.expect("the readback"));
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("the device");
+    let read = out
+        .slice(..)
+        .get_mapped_range()
+        .expect("the mapped readback")
+        .to_vec();
+
+    let layout = switch_core::gpu::engine::threed::DepthLayout {
+        bytes: 4,
+        depth_bits: 24,
+        depth_shift: 8,
+        stencil_shift: Some(0),
+    };
+    for (i, &d) in depths.iter().enumerate() {
+        // Depth32Float holds what the upload wrote; read it as the device does.
+        let stored = (layout.encode_depth(d) >> 8) as u32;
+        let want = stored as f32 / 16_777_215.0;
+        let at = i * 8 + 4;
+        let got = f32::from_le_bytes(read[at..at + 4].try_into().unwrap());
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "depth {d:e} ({:#x}): stored {stored:#x}",
+            d.to_bits()
+        );
+    }
+}
