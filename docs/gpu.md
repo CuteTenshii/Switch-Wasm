@@ -112,7 +112,7 @@ The Maxwell engines, shader translation, the software rasterizer and texture han
 ## `crates/switch-core/src/gpu/vmm.rs`
 
 - There is no VRAM: guests allocate CPU memory, nvmap wraps it, and `/dev/nvhost-as-gpu` maps whole nvmap ranges at contiguous GPU VAs, so a sorted list of ranges translates exactly with no per-page cost.
-- `MAP_BUFFER_EX` with `NVGPU_AS_MAP_BUFFER_FLAGS_MODIFY` (bit 8) re-maps a sub-range of an existing mapping with a new kind (how drivers give block-linear images their swizzle within one buffer). `offset` names the existing mapping; handle is 0. Treating it as a normal map failed with `BadParameter`. The covering mapping is split (the map is keyed by start VA), and backing addresses do not move.
+- `MAP_BUFFER_EX` with `NVGPU_AS_MAP_BUFFER_FLAGS_MODIFY` (bit 8) re-maps a sub-range of an existing mapping with a new kind (how drivers give block-linear images their swizzle within one buffer). `offset` names the existing mapping; handle is 0. Treating it as a normal map failed with `BadParameter`. The covering mapping is split (the map is keyed by start VA), and backing addresses do not move. A remap may span several pieces of earlier splits: Unity re-kinds a reused range of its render-target pool across old cuts, and refusing that left A Short Hike's scene with no target bound.
 - `translate` assumes non-overlapping ranges; `unmap_range` (for `REMAP`) trims partial overlaps for that reason.
 - Translation cache: 8 ways, round-robin, since a single entry thrashed between constant buffers, textures and the render target per pixel. Fields are split into separate `Cell` arrays because a `Cell<Option<(u64,u32,u64)>>` per way copied 32 bytes on every rejected way. Any mapping change flushes the cache.
 

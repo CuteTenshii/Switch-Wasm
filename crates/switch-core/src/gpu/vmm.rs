@@ -176,45 +176,57 @@ impl AddressSpace {
         Ok(gpu_va)
     }
 
-    /// Re-map a sub-range of an existing mapping with a different kind, splitting
-    /// the covering mapping. Returns whether a mapping covered it.
+    /// Re-map a range of existing mappings with a different kind, splitting the
+    /// mappings at its edges. Returns whether mappings covered it without a gap.
     pub fn remap(&mut self, gpu_va: u64, size: u64, kind: Option<u8>) -> bool {
         if size == 0 {
             return false;
         }
-        let Some((_, &covering)) = self.mappings.range(..=gpu_va).next_back() else {
-            return false;
-        };
-        let covering_end = covering.gpu_va.saturating_add(covering.size);
         let end = gpu_va.saturating_add(size);
-        if !covering.contains(gpu_va) || end > covering_end {
+        // Earlier remaps split a pool into pieces, and a later one may span several.
+        let mut covering: Vec<Mapping> = self
+            .mappings
+            .range(..end)
+            .rev()
+            .take_while(|(_, m)| m.gpu_va.saturating_add(m.size) > gpu_va)
+            .map(|(_, m)| *m)
+            .collect();
+        covering.reverse();
+        let mut covered_to = gpu_va;
+        for m in &covering {
+            if m.gpu_va > covered_to {
+                return false;
+            }
+            covered_to = m.gpu_va.saturating_add(m.size);
+        }
+        if covered_to < end {
             return false;
         }
         // `NV_KIND_INVALID` keeps the existing kind.
-        let kind = match kind {
-            Some(kind) if kind != covering.kind => kind,
-            _ => return true,
+        let Some(kind) = kind else {
+            return true;
         };
-        let piece = |gpu_va: u64, size: u64, kind: u8| Mapping {
-            gpu_va,
-            size,
-            cpu_addr: covering
-                .cpu_addr
-                .wrapping_add((gpu_va - covering.gpu_va) as u32),
-            handle: covering.handle,
-            kind,
-        };
-        self.mappings.remove(&covering.gpu_va);
-        if gpu_va > covering.gpu_va {
-            self.mappings.insert(
-                covering.gpu_va,
-                piece(covering.gpu_va, gpu_va - covering.gpu_va, covering.kind),
-            );
-        }
-        self.mappings.insert(gpu_va, piece(gpu_va, size, kind));
-        if end < covering_end {
+        for m in covering.into_iter().filter(|m| m.kind != kind) {
+            let m_end = m.gpu_va.saturating_add(m.size);
+            let piece = |at: u64, to: u64, kind: u8| Mapping {
+                gpu_va: at,
+                size: to - at,
+                cpu_addr: m.cpu_addr.wrapping_add((at - m.gpu_va) as u32),
+                handle: m.handle,
+                kind,
+            };
+            self.mappings.remove(&m.gpu_va);
+            let (inner_start, inner_end) = (m.gpu_va.max(gpu_va), m_end.min(end));
+            if inner_start > m.gpu_va {
+                self.mappings
+                    .insert(m.gpu_va, piece(m.gpu_va, inner_start, m.kind));
+            }
             self.mappings
-                .insert(end, piece(end, covering_end - end, covering.kind));
+                .insert(inner_start, piece(inner_start, inner_end, kind));
+            if m_end > inner_end {
+                self.mappings
+                    .insert(inner_end, piece(inner_end, m_end, m.kind));
+            }
         }
         self.forget_translations();
         true
@@ -493,6 +505,46 @@ mod tests {
         assert_eq!(vmm.translate(a), None);
         assert_eq!(vmm.translate(a + 0x1000), None);
         assert_eq!(vmm.translate(a + 0x2000), Some((0x2200_0000, 0x1000)));
+    }
+
+    #[test]
+    fn remap_spans_pieces_an_earlier_remap_split() {
+        // Unity re-kinds sub-ranges of one pool, then reuses a range across the old cuts.
+        let (mut vmm, va) = space_with_buffer(0x2000_0000, 0x10_0000);
+        assert!(vmm.remap(va + 0x1_0000, 0x1_0000, Some(0xfe)));
+        assert!(vmm.remap(va + 0x2_0000, 0x1_0000, Some(0xdb)));
+        assert!(vmm.remap(va + 0x1_8000, 0x7_0000, Some(0x0e)));
+        for (offset, kind) in [
+            (0x0, 0),
+            (0x1_0000, 0xfe),
+            (0x1_7fff, 0xfe),
+            (0x1_8000, 0x0e),
+            (0x2_0000, 0x0e),
+            (0x8_7fff, 0x0e),
+            (0x8_8000, 0),
+            (0xf_ffff, 0),
+        ] {
+            assert_eq!(
+                vmm.mapping_at(va + offset).map(|m| m.kind),
+                Some(kind),
+                "{offset:#x}"
+            );
+            assert_eq!(
+                vmm.translate(va + offset).map(|(cpu, _)| cpu),
+                Some(0x2000_0000 + offset as u32),
+                "{offset:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn remap_refuses_a_range_with_a_gap() {
+        let (mut vmm, va) = space_with_buffer(0x2000_0000, 0x4000);
+        vmm.unmap_range(va + 0x1000, 0x1000);
+        assert!(!vmm.remap(va, 0x3000, Some(0xdb)));
+        assert!(!vmm.remap(va + 0x3000, 0x2000, Some(0xdb)));
+        assert_eq!(vmm.mapping_at(va).map(|m| m.kind), Some(0));
+        assert!(vmm.remap(va + 0x2000, 0x2000, None));
     }
 
     #[test]

@@ -709,7 +709,7 @@ impl NvDrv {
                         if crate::trace::enabled(crate::trace::Trace::Nv) {
                             crate::traceln!(
                                 "[nv] remap refused: {gpu_va:#x}+{mapping_size:#x} (offset \
-                                 {requested:#x} + {buffer_offset:#x}) is not inside one mapping"
+                                 {requested:#x} + {buffer_offset:#x}) is not fully mapped"
                             );
                         }
                         Ok(NV_BAD_PARAMETER)
