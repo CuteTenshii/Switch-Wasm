@@ -15,6 +15,7 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 ## Performance
 
 - Blocks with an instruction the emitter lacks stay in the op walk and break their region. `LDXP`/`STXP` are interpreted (Asphalt 9 runs them); the 64-bit pair store compares 16 bytes, which wasm has no atomic for. Double-precision FMADD and FRINTA/FRINTX/FRINTI are interpreted too.
+- The device converts `S8D24` textures twice over: on the CPU at upload for an image in guest memory (`Copy::PackedDepth`, every texel through `DepthTexel::decode`), and on the GPU for one held on the device (`PACKED_DEPTH_WGSL`). Upload the raw texels as an integer texture and run the same pass for both, so the device has one conversion and the upload no CPU work; `the_packed_depth_pass_converts_depths_bit_for_bit` keeps it to the rasterizer's values.
 
 ## Mobile
 
