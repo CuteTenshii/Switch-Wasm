@@ -34,8 +34,16 @@ impl Emitter<'_> {
                 dst_signed,
                 round,
                 ftz,
+                src_bits,
+                hi,
             } => {
-                let x = self.operand_f(src);
+                let x = if src_bits == 16 {
+                    let raw = self.operand(src);
+                    let lane = if hi { "y" } else { "x" };
+                    format!("unpack2x16float({raw}).{lane}")
+                } else {
+                    self.operand_f(src)
+                };
                 let x = self.flush(ftz, x);
                 let x = self.fmod(sm, x);
                 let x = self.round(round, x);

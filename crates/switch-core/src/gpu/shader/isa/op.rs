@@ -392,6 +392,9 @@ pub enum Op {
         dst_signed: bool,
         round: FRound,
         ftz: bool,
+        /// 16 or 32; a half source is read from the half of its register that `hi` names.
+        src_bits: u8,
+        hi: bool,
     },
     /// Float -> float.
     F2f {

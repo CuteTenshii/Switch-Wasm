@@ -295,10 +295,19 @@ pub(super) fn decode_alu(insn: u64) -> Op {
         }
         // f2i.
         0xb0 => {
-            let Some(src) = rhs_float else { return un };
-            if field(insn, 10, 2) != 2 {
-                return un; // only f32 sources
-            }
+            let Some(src_bits) = float_width(field(insn, 10, 2)) else {
+                return un; // f64, which nothing here models
+            };
+            let src = if src_bits == 16 {
+                match rhs_int {
+                    Some(Operand::Imm(v)) => Operand::Imm((v & 0xffff) | (v << 16)),
+                    Some(other) => other,
+                    None => return un,
+                }
+            } else {
+                let Some(src) = rhs_float else { return un };
+                src
+            };
             let bits = field(insn, 8, 2) | (field(insn, 12, 1) << 2);
             let Some((dst_bytes, dst_signed)) = int_type(bits) else {
                 return un;
@@ -314,6 +323,8 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                 dst_signed,
                 round: fround(field(insn, 39, 2)),
                 ftz: field(insn, 44, 1) != 0,
+                src_bits,
+                hi: field(insn, 41, 1) != 0,
             }
         }
         // f2f, f16 and f32 in either direction, and the rounding a same-width conversion names.

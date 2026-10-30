@@ -465,6 +465,8 @@ fn decodes_conversions() {
             dst_signed: true,
             round: FRound::Trunc,
             ftz: false,
+            src_bits: 32,
+            hi: false,
         }
     );
 }
@@ -817,4 +819,22 @@ fn a_lea_that_writes_a_carry_or_predicate_is_refused() {
     ] {
         assert!(matches!(op(word), Op::Unimplemented { .. }), "{word:#x}");
     }
+}
+
+#[test]
+fn f2i_reads_a_half_source_from_the_half_its_selector_names() {
+    // The instruction Just Dance 2023's vertex shader stopped the translator on.
+    let Op::F2i {
+        src_bits,
+        hi,
+        dst_bytes,
+        dst_signed,
+        ..
+    } = crate::gpu::shader::isa::decode(0x5cb0_0180_0047_0602).op
+    else {
+        panic!("not decoded as f2i");
+    };
+    assert_eq!((src_bits, hi, dst_bytes, dst_signed), (16, false, 4, false));
+    let high = crate::gpu::shader::isa::decode(0x5cb0_0180_0047_0602 | 1 << 41).op;
+    assert!(matches!(high, Op::F2i { hi: true, .. }));
 }

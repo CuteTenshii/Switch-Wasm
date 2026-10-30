@@ -697,6 +697,8 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             dst_signed,
             round,
             ftz,
+            src_bits,
+            hi,
         } => Op::F2i {
             dst,
             src: f(src),
@@ -705,6 +707,8 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             dst_signed,
             round,
             ftz,
+            src_bits,
+            hi,
         },
         Op::F2f {
             dst,

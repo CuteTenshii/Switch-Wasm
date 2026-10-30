@@ -709,8 +709,16 @@ impl Invocation {
                 dst_signed,
                 round,
                 ftz,
+                src_bits,
+                hi,
             } => {
-                let x = sm.apply(flush(self.operand_f32(src, env)?, ftz));
+                let x = if src_bits == 16 {
+                    let raw = self.operand(src, env)?;
+                    f16_to_f32((raw >> if hi { 16 } else { 0 }) as u16)
+                } else {
+                    self.operand_f32(src, env)?
+                };
+                let x = sm.apply(flush(x, ftz));
                 let r = apply_round(x, round);
                 let v = if dst_signed {
                     let lo = -(2f64.powi(dst_bytes as i32 * 8 - 1)) as f32;

@@ -184,6 +184,8 @@ fn home_menu_opcodes() -> Vec<Op> {
             dst_signed: true,
             round: FRound::Trunc,
             ftz: true,
+            src_bits: 32,
+            hi: false,
         },
         Op::Iscadd {
             dst: 1,
