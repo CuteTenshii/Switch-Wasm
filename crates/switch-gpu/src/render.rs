@@ -21,6 +21,10 @@ impl Gpu {
         p: &Prepared,
         ctx: &mut ExecCtx,
     ) -> std::result::Result<(), String> {
+        // No vertices, so nothing is uploaded and nothing is drawn.
+        if p.count == 0 {
+            return Ok(());
+        }
         let target_format = match p.color {
             Some(color) => Some(
                 device_attachment_format(self.features(), color.format)

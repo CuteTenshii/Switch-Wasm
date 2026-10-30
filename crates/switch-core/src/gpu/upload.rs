@@ -200,7 +200,8 @@ impl Uploads {
                     None => (call.first, call.count),
                 },
             };
-            if count == 0 || buffer.stride == 0 {
+            // A zero stride is one element every vertex reads; only an empty draw reads nothing.
+            if count == 0 {
                 continue;
             }
             let length = vertex_span(count, buffer);

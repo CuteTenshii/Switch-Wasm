@@ -494,6 +494,24 @@ impl Harness {
         self.engine.set_instance_id(instance);
     }
 
+    /// Move the colour attribute to vertex array 1 with a zero stride: every vertex reads `colour`.
+    pub fn shared_colour(&mut self, colour: [f32; 4]) {
+        let addr = self.base + 0x800;
+        for (c, v) in colour.iter().enumerate() {
+            self.vmm
+                .write_u32(&self.mem, addr + c as u64 * 4, v.to_bits())
+                .unwrap();
+        }
+        // VertexAttribState[1] = aColor: buffer 1, offset 0, 4x32 float.
+        self.engine.regs.set(0x459, 1 | (0x01 << 21) | (7 << 27));
+        // VertexArray[1]: stride 0, enabled, per vertex.
+        self.engine.regs.set(0x704, 1 << 12);
+        self.engine.regs.set(0x705, (addr >> 32) as u32);
+        self.engine.regs.set(0x706, addr as u32);
+        self.engine.regs.set(0x7C2, (addr >> 32) as u32);
+        self.engine.regs.set(0x7C3, addr as u32 + 15);
+    }
+
     /// Bind a `Z24S8` depth surface after the colour target and enable the depth test.
     pub fn depth_target(&mut self, func: u32) {
         self.depth_target_sized(func, TARGET_WIDTH, TARGET_HEIGHT);

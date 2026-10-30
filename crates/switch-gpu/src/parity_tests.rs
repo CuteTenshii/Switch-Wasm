@@ -1126,6 +1126,20 @@ fn an_instanced_array_reads_this_instance_and_not_the_first() {
 }
 
 #[test]
+fn a_zero_stride_array_feeds_every_vertex_its_one_element() {
+    let set_up = |h: &mut Harness| {
+        h.depth_target(0x0207);
+        h.triangle([1.0, 0.0, 0.0, 1.0]);
+        h.shared_colour([0.0, 1.0, 0.0, 1.0]);
+    };
+    agrees(set_up);
+    let mut h = Harness::new();
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    assert_eq!(h.texel(1, 1), 0xff00_ff00, "green from the shared element");
+}
+
+#[test]
 fn a_bgra_attribute_is_swapped_the_way_the_rasterizer_swaps_one() {
     // Red and blue tell a BGRA swap apart.
     let set_up = |h: &mut Harness| {
