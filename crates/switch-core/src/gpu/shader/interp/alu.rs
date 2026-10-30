@@ -527,6 +527,22 @@ impl Invocation {
                 };
                 self.set_reg(dst, v);
             }
+            Op::Fcmp {
+                dst,
+                a,
+                b,
+                test,
+                cmp,
+                ftz,
+            } => {
+                let test = flush(self.operand_f32(test, env)?, ftz);
+                let v = if float_compare(cmp, test, 0.0) {
+                    self.reg(a)
+                } else {
+                    self.operand(b, env)?
+                };
+                self.set_reg(dst, v);
+            }
             Op::Bfi {
                 dst,
                 insert,

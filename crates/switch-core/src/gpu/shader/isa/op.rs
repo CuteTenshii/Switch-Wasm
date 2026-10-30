@@ -277,6 +277,16 @@ pub enum Op {
         cmp: ICmp,
         signed: bool,
     },
+    /// `fcmp dst, a, b, test`: `a` when `test` compares true against zero, else `b`.
+    /// Both are copied as raw bits.
+    Fcmp {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        test: Operand,
+        cmp: FCmp,
+        ftz: bool,
+    },
     /// `bfi dst, insert, src, base`.
     Bfi {
         dst: u8,

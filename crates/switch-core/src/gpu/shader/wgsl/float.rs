@@ -265,6 +265,21 @@ impl Emitter<'_> {
                 }
             }
 
+            Op::Fcmp {
+                dst,
+                a,
+                b,
+                test,
+                cmp,
+                ftz,
+            } => {
+                let test = self.operand_f(test);
+                let test = self.flush(ftz, test);
+                let taken = self.float_compare(cmp, &test, "0.0");
+                let x = self.r(a);
+                let y = self.operand(b);
+                self.set_r(dst, &format!("select({y}, {x}, {taken})"));
+            }
             Op::Fsetp {
                 p0,
                 p1,

@@ -61,7 +61,7 @@ impl Emitter<'_> {
                 self.set_f(dst, &value);
             }
 
-            Op::Rro { .. } | Op::Fadd { .. } | Op::Fmul { .. } | Op::Ffma { .. } | Op::Fmnmx { .. } | Op::Mufu { .. } | Op::Hadd2 { .. } | Op::Hmul2 { .. } | Op::Hfma2 { .. } | Op::Hset2 { .. } | Op::Hsetp2 { .. } | Op::Fsetp { .. } | Op::Fset { .. } => self.emit_float(op)?,
+            Op::Fcmp { .. } | Op::Rro { .. } | Op::Fadd { .. } | Op::Fmul { .. } | Op::Ffma { .. } | Op::Fmnmx { .. } | Op::Mufu { .. } | Op::Hadd2 { .. } | Op::Hmul2 { .. } | Op::Hfma2 { .. } | Op::Hset2 { .. } | Op::Hsetp2 { .. } | Op::Fsetp { .. } | Op::Fset { .. } => self.emit_float(op)?,
 
             Op::Iadd { .. } | Op::Iadd3 { .. } | Op::Iscadd { .. } | Op::Lea { .. } | Op::Vmnmx { .. } | Op::Imnmx { .. } | Op::Imul { .. } | Op::Xmad { .. } | Op::Isetp { .. } | Op::Iset { .. } | Op::Icmp { .. } | Op::Bfi { .. } | Op::R2p { .. } | Op::Lop { .. } | Op::Lop3 { .. } | Op::Shl { .. } | Op::Shr { .. } | Op::Shf { .. } | Op::Bfe { .. } | Op::Popc { .. } | Op::Flo { .. } | Op::Sel { .. } => self.emit_integer(op)?,
 

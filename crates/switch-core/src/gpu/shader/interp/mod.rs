@@ -638,6 +638,7 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::Lea { dst, .. }
         | Op::Iset { dst, .. }
         | Op::Icmp { dst, .. }
+        | Op::Fcmp { dst, .. }
         | Op::Lop { dst, .. }
         | Op::Lop3 { dst, .. }
         | Op::Shl { dst, .. }

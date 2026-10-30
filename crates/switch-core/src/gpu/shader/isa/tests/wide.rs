@@ -856,3 +856,22 @@ fn pset_keeps_its_three_predicates_and_picks_the_true_value() {
         Op::Unimplemented { .. }
     ));
 }
+
+#[test]
+fn fcmp_immediate_selects_between_a_register_and_the_immediate() {
+    // The instruction Just Dance 2023's fragment shader needs after its handle.
+    let Op::Fcmp {
+        dst,
+        a,
+        b,
+        test,
+        ftz,
+        ..
+    } = crate::gpu::shader::isa::decode(0x36a4_81bf_8007_0308).op
+    else {
+        panic!("not decoded as fcmp");
+    };
+    assert_eq!((dst, a, ftz), (8, 3, true));
+    assert_eq!(b, Operand::Imm(0x3f80_0000));
+    assert_eq!(test, Operand::Reg(3));
+}

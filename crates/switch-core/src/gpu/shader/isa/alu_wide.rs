@@ -88,6 +88,24 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 bf: field(insn, 44, 1) != 0,
             };
         }
+        // fcmp: ftz 47, cmp 48..52.
+        0x5ba | 0x4ba | 0x53a | 0x36a | 0x37a => {
+            let test = Operand::Reg(reg(insn, 39, 8));
+            let (b, test) = match form >> 4 {
+                0x5ba => (Operand::Reg(reg(insn, 20, 8)), test),
+                0x4ba => (const_operand(insn), test),
+                0x53a => (test, const_operand(insn)),
+                _ => (Operand::Imm(imm20f(insn)), test),
+            };
+            return Op::Fcmp {
+                dst: reg(insn, 0, 8),
+                a: reg(insn, 8, 8),
+                b,
+                test,
+                cmp: fcmp(field(insn, 48, 4)),
+                ftz: field(insn, 47, 1) != 0,
+            };
+        }
         // icmp.
         0x5b4 | 0x4b4 | 0x534 | 0x364 | 0x374 => {
             let (b, c) = match form >> 4 {

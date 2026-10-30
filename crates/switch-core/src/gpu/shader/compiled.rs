@@ -554,6 +554,21 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             cmp,
             signed,
         },
+        Op::Fcmp {
+            dst,
+            a,
+            b,
+            test,
+            cmp,
+            ftz,
+        } => Op::Fcmp {
+            dst,
+            a,
+            b: f(b),
+            test: f(test),
+            cmp,
+            ftz,
+        },
         Op::Imul {
             dst,
             a,

@@ -213,8 +213,7 @@ The Maxwell engines, shader translation, the software rasterizer and texture han
 
 ## `crates/switch-core/src/gpu/texture.rs`
 
-- `f2i` takes neg from bit 45 and abs from bit 49, as Mesa's `emitF2I` emits and the other conversions do; Eden's `F2I` names them the other way round, so do not take its field names as proof. It reads an f16 source from the half bit 41 names, which only Eden documents.
-- `f2i` takes neg from bit 45 and abs from bit 49, as Mesa's `emitF2I` emits and the other conversions do; Eden's `F2I` names them the other way round, so do not take its field names as proof. It reads an f16 source from the half bit 41 names, which only Eden documents. `pset` writes 1.0 or all ones (bit 44) from three predicates.
+- `f2i` takes neg from bit 45 and abs from bit 49, as Mesa's `emitF2I` emits and the other conversions do; Eden's `F2I` names them the other way round, so do not take its field names as proof. It reads an f16 source from the half bit 41 names, which only Eden documents. `pset` writes 1.0 or all ones (bit 44) from three predicates. `fcmp` copies raw bits, picking between two values by how a third compares with 0.0. Just Dance 2023's shaders use all three.
 - Vertex shaders sample through the same `MemoryTextures` as fragments, so the rasterizer can run a draw the device refused.
 - `texs` immediates are dword indices into the `TexCbIndex` bank (nouveau 15, deko3d 0), which holds the bindless handle into the TIC/TSC pools; the two stages index different constant buffers with the same slot. Reading them as bytes lands in nouveau's fixed header (`0, 1, 2, ...` on GM107), which looks like a handle table, so every draw resolved to the same handle and text drew one glyph repeatedly.
 - Compressed surfaces are swizzled/addressed in blocks; using texel units makes the stride a block too large and shreds the image into diagonal ribbons.

@@ -306,6 +306,98 @@ fn lop3_evaluates_its_truth_table() {
 }
 
 #[test]
+fn f2i_pset_and_fcmp_run_the_way_just_dance_2023_uses_them() {
+    let imm = |dst, imm| (Op::Mov32i { dst, imm }, Pred::ALWAYS);
+    let program = prog_at(&[
+        // 2.5 and 7.0 as f16, in the low and high halves.
+        imm(0, 0x4700_4100),
+        (
+            Op::F2i {
+                dst: 1,
+                src: Operand::Reg(0),
+                sm: FMod::NONE,
+                dst_bytes: 4,
+                dst_signed: false,
+                round: FRound::Trunc,
+                ftz: false,
+                src_bits: 16,
+                hi: false,
+            },
+            Pred::ALWAYS,
+        ),
+        (
+            Op::F2i {
+                dst: 2,
+                src: Operand::Reg(0),
+                sm: FMod::NONE,
+                dst_bytes: 4,
+                dst_signed: false,
+                round: FRound::Trunc,
+                ftz: false,
+                src_bits: 16,
+                hi: true,
+            },
+            Pred::ALWAYS,
+        ),
+        (
+            Op::Pset {
+                dst: 3,
+                a: Pred::ALWAYS,
+                b: Pred::ALWAYS,
+                c: Pred::ALWAYS,
+                op1: BoolOp::And,
+                op2: BoolOp::And,
+                float: false,
+            },
+            Pred::ALWAYS,
+        ),
+        (
+            Op::Pset {
+                dst: 4,
+                a: Pred::ALWAYS,
+                b: Pred::ALWAYS,
+                c: Pred::ALWAYS,
+                op1: BoolOp::And,
+                op2: BoolOp::And,
+                float: true,
+            },
+            Pred::ALWAYS,
+        ),
+        imm(5, 0xaaaa),
+        imm(6, (-1.0f32).to_bits()),
+        (
+            Op::Fcmp {
+                dst: 7,
+                a: 5,
+                b: Operand::Imm(0xbbbb),
+                test: Operand::Reg(6),
+                cmp: FCmp::Lt,
+                ftz: false,
+            },
+            Pred::ALWAYS,
+        ),
+        (
+            Op::Fcmp {
+                dst: 8,
+                a: 5,
+                b: Operand::Imm(0xbbbb),
+                test: Operand::Reg(6),
+                cmp: FCmp::Gt,
+                ftz: false,
+            },
+            Pred::ALWAYS,
+        ),
+        (Op::Exit, Pred::ALWAYS),
+    ]);
+    let mut inv = Invocation::new();
+    inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+        .unwrap();
+    assert_eq!((inv.reg(1), inv.reg(2)), (2, 0x7000 >> 12));
+    assert_eq!((inv.reg(3), inv.reg(4)), (u32::MAX, 1f32.to_bits()));
+    assert_eq!((inv.reg(7), inv.reg(8)), (0xaaaa, 0xbbbb));
+}
+
+#[test]
 fn conversions_round_the_way_the_instruction_asks() {
     let program = prog_at(&[
         (
