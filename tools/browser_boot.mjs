@@ -185,6 +185,7 @@ try {
   }
 
   const started = Date.now();
+  let stopped = false;
   const tap = async (key) => {
     await page.evaluate(() => document.querySelector('dialog[open] button')?.click());
     await page.keyboard.down(key);
@@ -194,9 +195,9 @@ try {
   };
   const tapping = presses.map(async ({ key, next, every }) => {
     let at = next;
-    while (running && !crashed && at < seconds) {
+    while (running && !crashed && !stopped && at < seconds) {
       await page.waitForTimeout(started + at * 1000 - Date.now());
-      if (crashed || Date.now() - started >= seconds * 1000) return;
+      if (crashed || stopped || Date.now() - started >= seconds * 1000) return;
       await tap(key);
       if (!every) return;
       at += every;
@@ -204,9 +205,9 @@ try {
   });
   const shooting = (async () => {
     if (!screenshot || !screenshotEvery) return;
-    for (let at = screenshotEvery; running && !crashed && at < seconds; at += screenshotEvery) {
+    for (let at = screenshotEvery; running && !crashed && !stopped && at < seconds; at += screenshotEvery) {
       await page.waitForTimeout(started + at * 1000 - Date.now());
-      if (crashed) return;
+      if (crashed || stopped) return;
       const path = screenshot.replace(/(\.\w+)?$/, `-${at}s$1`);
       await page.locator('#screen').screenshot({ path });
     }
@@ -238,6 +239,12 @@ try {
     say(`${at}s: ${sample.state}, ${sample.instructions}, ${sample.fps}, ${sample.rows} console lines${quiet}; last: ${sample.last.slice(0, 160)}`);
     lastRows = sample.rows;
     lastLine = sample.last;
+    // Nothing more will happen, and the log is what the run is for.
+    if (sample.state === 'fault') {
+      stopped = true;
+      process.exitCode = 1;
+      break;
+    }
     if (jitStats) {
       const blocks = await page.locator('#jit-debug-data').innerText();
       say(`${at}s blocks: ${blocks.replace(/\n+/g, ' ').replace(/\t/g, ': ')}`);
