@@ -142,6 +142,9 @@ fn result_text(result: u32) -> String {
     format!("{:04}-{description:04} ({result:#x})", 2000 + module)
 }
 
+/// More than any save's extra data, so a guest's size cannot make a huge allocation here.
+const EXTRA_DATA_MAX: u32 = 0x1000;
+
 fn fsp_srv_command(cmd: u32) -> Option<&'static str> {
     Some(match cmd {
         0 => "OpenFileSystem",
@@ -516,7 +519,16 @@ impl Cpu {
                 self.report_refused_open(tls, cmd_id);
                 self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
             }
-            // Fabricated success, with a warning since the caller may read zeroes.
+            // ReadSaveDataFileSystemExtraData and its variants: no extra data is kept, and
+            // a caller reads whatever is in the buffer as if it were.
+            Some(57) | Some(58) | Some(69) => {
+                self.warn_no_implementation("fsp-srv", cmd_id);
+                if let Some((_, size)) = self.ipc_output_buffer(tls, 0) {
+                    self.write_output_buffer(tls, 0, &vec![0; size.min(EXTRA_DATA_MAX) as usize]);
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // Fabricated success, with a warning.
             _ => {
                 self.warn_no_implementation("fsp-srv", cmd_id);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -1539,6 +1551,22 @@ mod tests {
         write_request(&mut cpu, 202, &[]);
         cpu.fs_device_operator_request(TLS, Some(202)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
+    }
+
+    #[test]
+    fn save_extra_data_reads_are_zeroes_not_what_the_buffer_held() {
+        const BUFFER: u32 = 0x4000;
+        for cmd in [57u32, 58, 69] {
+            let mut cpu = request_with_recv_buffer(cmd, &[0; 8], BUFFER, 0x40);
+            cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+            for offset in 0..0x40 {
+                cpu.mem.write_u8(BUFFER + offset, 0xAA).unwrap();
+            }
+            cpu.fsp_srv_dispatch(TLS, Some(cmd), 9).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "cmd {cmd}");
+            assert_eq!(cpu.mem.read_u8(BUFFER).unwrap(), 0, "cmd {cmd}");
+            assert_eq!(cpu.mem.read_u8(BUFFER + 0x3F).unwrap(), 0, "cmd {cmd}");
+        }
     }
 
     #[test]
