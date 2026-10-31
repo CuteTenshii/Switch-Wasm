@@ -21,6 +21,7 @@ const ACCOUNT_USER_DATA_LEN: usize = 0x80;
 
 /// acc's "that user does not exist" (module 124, description 100).
 const ACCOUNT_USER_NOT_EXIST: u32 = 124 | (100 << 9);
+const ACCOUNT_REGISTRATION_REQUIRED: u32 = 124 | (200 << 9);
 
 /// Arbitrary but nonzero: zero means "no account".
 const NETWORK_SERVICE_ACCOUNT_ID: u64 = 0x0000_0001_0000_0001;
@@ -567,20 +568,9 @@ impl Cpu {
             Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
             // GetNetworkServiceLicenseCacheEx (15.0.0+) -> u32 license, s64 expiry, zeroed.
             Some(143) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
-            // GetNintendoAccountUserResourceCache -> u64 account id; output buffers zeroed.
-            Some(130) => {
-                for index in 0..2 {
-                    if let Some((addr, size)) = self.ipc_output_buffer(tls, index) {
-                        if addr != 0 {
-                            for offset in 0..size {
-                                self.mem.write_u8(addr.wrapping_add(offset), 0)?;
-                            }
-                        }
-                    }
-                }
-                let id = NETWORK_SERVICE_ACCOUNT_ID.to_le_bytes();
-                self.write_ipc_response(tls, 0, &[], &id, &[])
-            }
+            // GetNintendoAccountUserResourceCache: no Nintendo Account is linked here. Shop skips
+            // the whole block on this result, and parses a date out of any success.
+            Some(130) => self.write_ipc_response(tls, ACCOUNT_REGISTRATION_REQUIRED, &[], &[], &[]),
             _ => self.unimplemented_command(tls, "acc:manager", cmd_id),
         }
     }

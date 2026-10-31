@@ -149,6 +149,22 @@ impl Cpu {
             }
             // ICommonStateGetter.
             "am:common-state-getter" => match cmd_id {
+                // GetAppletLaunchedHistory -> s32 count, the running applet then its callers.
+                Some(120) => {
+                    let mut ids = Vec::new();
+                    let mut at = Some(self.pid);
+                    while let Some(process) = at.and_then(|pid| self.machine.processes.get(&pid)) {
+                        ids.extend_from_slice(&applet_id_for(process.program_id).to_le_bytes());
+                        at = process.caller.map(|(pid, _)| pid);
+                    }
+                    let room = self
+                        .ipc_output_buffer(tls, 0)
+                        .map_or(0, |(_, size)| size as usize);
+                    ids.truncate(room - room % 4);
+                    self.write_output_buffer(tls, 0, &ids);
+                    let count = (ids.len() / 4) as i32;
+                    self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
+                }
                 // PushToGeneralChannel: no Home Menu here reads what is pushed.
                 Some(20) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // GetSettingsPlatformRegion: 1 is Global.
