@@ -895,6 +895,7 @@ impl Cpu {
                         | "ns:web"
                         | "ns:ro"
                         | "ns:su"
+                        | "ns:system-update-control"
                         | "ns:vm"
                         | "ns:dev"
                         | "ns:app-manager"

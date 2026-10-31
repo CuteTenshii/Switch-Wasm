@@ -54,6 +54,8 @@ impl Cpu {
             "ns:su" => match cmd_id {
                 // GetBackgroundNetworkUpdateState -> u8: nothing staged.
                 Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // OpenSystemUpdateControl.
+                Some(1) => self.ns_reply_with_interface(tls, handle, "ns:system-update-control"),
                 // NotifyExFatDriverRequired / NotifyBackgroundNetworkUpdate /
                 // NotifySystemUpdateForContentDelivery / PrepareShutdown.
                 Some(2) | Some(5) | Some(10) | Some(11) => {
@@ -64,6 +66,12 @@ impl Cpu {
                     let h = self.alloc_event("ns:system-update", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // `ISystemUpdateControl`: no update is ever downloaded, prepared or received.
+            "ns:system-update-control" => match cmd_id {
+                // HasDownloaded / HasPreparedCardUpdate / HasReceived -> false.
+                Some(0) | Some(7) | Some(15) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // `IVulnerabilityManagerInterface::NeedsUpdateVulnerability` -> false.
@@ -572,6 +580,26 @@ mod tests {
         cpu.ns_request(TLS, 9, Some(400)).unwrap();
         const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
+    }
+
+    #[test]
+    fn the_system_update_control_reports_no_update() {
+        let mut cpu = request(false, 1, &[]);
+        cpu.register_service_handle(9, "ns:su");
+        cpu.ns_request(TLS, 9, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let control = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.service_name(control), Some("ns:system-update-control"));
+
+        let mut cpu = request(false, 0, &[]);
+        cpu.register_service_handle(9, "ns:system-update-control");
+        cpu.ns_request(TLS, 9, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(
+            cpu.mem.read_u8(TLS + 0x20).unwrap(),
+            0,
+            "nothing downloaded"
+        );
     }
 
     /// Drive one `aoc:u` command on a session opened under that service.
