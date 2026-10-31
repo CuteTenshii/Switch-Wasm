@@ -68,6 +68,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 
 - `nnSdk` calls methods on the `IAppletResource` returned by `CreateAppletResource`, so it must be a real object (libnx only maps shared memory by size).
 - `hid` and `hid:dbg` are both `IHidServer`; `hid:sys` is `IHidSystemServer` with its own dispatch (libnx opens it in `hidsysInitialize`).
+- `hid:sys` `GetPlatformConfig` (161) answers 3, a rail interface and an SIO MCU, agreeing with `set:sys`'s `hid` settings. A title panics on the refusal.
 - `acc:manager` `GetNintendoAccountUserResourceCache` (130) fails with 124-0200 (registration required), since no Nintendo Account is linked: Shop parses a birthday out of any success. `ICommonStateGetter::GetAppletLaunchedHistory` (120) lists the running applet and its callers.
 - A refused command is fatal under `nnSdk`, so many void setters are accepted (e.g. `SetGestureOutputRanges`, which Tomodachi Life sends with 1280x720; `ActivateGesture` pairs with it; `GetLastActiveNpad` blocked the Mii editor).
 - `SetSupportedNpadStyleSet` determines how pads are published (`NPAD_PRESENTATIONS`): publishing FullKey and Handheld regardless made titles that only accept Joy-Con pairs abort with 2202-0710. Style set 0 (libnx defaults) means a Pro Controller in slot 0 and handheld in slot 8. Resolution is best-first.

@@ -194,6 +194,8 @@ impl Cpu {
             },
             // `IHidSystemServer`; command ids from libnx `hidsys.c`.
             "hid:sys" => match cmd_id {
+                // GetPlatformConfig: rail interface and SIO MCU, as `set:sys` reports them.
+                Some(161) => self.write_ipc_response(tls, 0, &[], &3u32.to_le_bytes(), &[]),
                 // Acquire{Home,Sleep,Capture}ButtonEventHandle: never signalled.
                 Some(101) => {
                     let event = self.alloc_event("hid:sys-home-button", true);
@@ -584,6 +586,15 @@ mod tests {
                 "command {command}"
             );
         }
+    }
+
+    #[test]
+    fn hid_sys_answers_the_platform_config() {
+        let mut cpu = request(false, 161, &[]);
+        cpu.register_service_handle(9, "hid:sys");
+        cpu.hid_request(TLS, 9, Some(161)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 3);
     }
 
     #[test]
