@@ -1168,6 +1168,16 @@ impl Cpu {
                     7 => "CppException",
                     _ => "Unknown",
                 };
+                // Only tells a debugger something, such as a module about to load: it returns.
+                const NOTIFICATION_ONLY: u64 = 0x8000_0000;
+                if reason & NOTIFICATION_ONLY != 0 {
+                    self.log(
+                        crate::trace::Level::Debug,
+                        &format!("[svcBreak] notification: {reason_name} arg={arg:#x}"),
+                    );
+                    self.write_zr(0, 0);
+                    return Ok(());
+                }
                 let mut msg = format!(
                     "[svcBreak] reason={reason_name} ({reason:#x}) arg={arg:#x} size={size:#x}"
                 );

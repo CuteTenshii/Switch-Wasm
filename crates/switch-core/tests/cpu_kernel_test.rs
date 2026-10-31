@@ -1195,3 +1195,19 @@ fn homebrew_launched_from_the_sd_card_is_told_its_own_path() {
     cpu.boot_homebrew(&homebrew_nro()).unwrap();
     assert_eq!(argv0(&cpu), switch_core::nro::HOMEBREW_NRO_PATH);
 }
+
+#[test]
+fn a_notification_only_break_returns_and_a_real_one_ends_the_process() {
+    let run = |reason: u64| {
+        let mut cpu = cpu_at(0x1000);
+        cpu.bootstrap();
+        cpu.set_pc(0x1000);
+        cpu.mem.map(0x1000, &svc(0x26).to_le_bytes()).unwrap();
+        cpu.set_reg(0, reason);
+        cpu.run(1).unwrap();
+        (cpu.halted, cpu.get_pc(), cpu.read_x(0))
+    };
+    // PreLoadDll with NotificationOnly, as Shop sends before loading a module.
+    assert_eq!(run(0x8000_0003), (false, 0x1004, 0));
+    assert!(run(0).0, "a panic ends the only process");
+}
