@@ -1864,6 +1864,17 @@ button.files-main:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* A tiny duration rather than `none`, so end states and transitionend still arrive. */
+  *,
+  *::before,
+  *::after {
+    animation-delay: 0s !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-delay: 0s !important;
+    transition-duration: .01ms !important;
+  }
   body.panel-open .panel { animation: none; }
   /* Reduced motion: a dim full-width rule instead of a sweep. */
   .loading-bar span {
