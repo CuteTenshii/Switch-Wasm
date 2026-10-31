@@ -41,6 +41,12 @@ const SYSTEM_TITLES: Record<string, string> = {
   '0100000000001013': 'My Page',
 };
 
+// What Eden offers to launch on its own. The rest expect a caller's launch arguments, which a launch
+// from here could only make up, so they panic for reasons no title would ever hit.
+const STANDALONE_TITLES = new Set([
+  '0100000000001000', '0100000000001003', '0100000000001009', '010000000000100d',
+]);
+
 // Library applets a title or the Home Menu can start.
 const LIBRARY_APPLETS = new Set(Object.keys(SYSTEM_TITLES).filter((id) =>
   !['0100000000001000', '010000000000100c', '0100000000001012'].includes(id)));
@@ -168,16 +174,12 @@ export function titleLabel(id: string): string {
   return SYSTEM_TITLES[id] || id;
 }
 
-// Installed programs, one launchable row each.
+// One row for each installed program that can run on its own.
 function renderNandTitles(): void {
   const host = $('nand-titles');
   host.textContent = '';
-  const programs = nandTitles.filter(([, entry]) => entry.kind === 0);
-  // Named applets first; unknown ids sort last.
-  programs.sort((a, b) => {
-    const named = Number(a[0] in SYSTEM_TITLES) - Number(b[0] in SYSTEM_TITLES);
-    return named !== 0 ? -named : titleLabel(a[0]).localeCompare(titleLabel(b[0]));
-  });
+  const programs = nandTitles.filter(([id, entry]) => entry.kind === 0 && STANDALONE_TITLES.has(id));
+  programs.sort((a, b) => titleLabel(a[0]).localeCompare(titleLabel(b[0])));
   $('nand-tools').hidden = nandTitles.length === 0;
   if (!programs.length) {
     host.appendChild(el('p', 'muted tiny empty-note',

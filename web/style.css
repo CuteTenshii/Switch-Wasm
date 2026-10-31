@@ -749,10 +749,13 @@ body.resizing {
   display: flex;
   align-items: stretch;
   gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .tab {
   position: relative;
+  flex: none;
   background: none;
   border: none;
   color: var(--muted);

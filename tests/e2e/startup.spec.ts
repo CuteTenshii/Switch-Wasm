@@ -203,3 +203,11 @@ test('a narrow bar moves its secondary controls into the More menu and back', as
   await expect(page.locator('.topbar-actions #btn-dock')).toHaveCount(1);
   await expect(more).toBeHidden();
 });
+
+test('the NAND has a panel tab of its own', async ({ page }) => {
+  await openPage(page);
+  await page.locator('#btn-panel').click();
+  await page.getByRole('tab', { name: 'NAND' }).click();
+  await expect(page.getByRole('button', { name: 'Install firmware' }).or(page.getByText('Install firmware').last())).toBeVisible();
+  await expect(page.locator('#nand-titles')).toBeVisible();
+});
