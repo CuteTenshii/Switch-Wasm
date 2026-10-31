@@ -382,8 +382,9 @@ impl Cpu {
         let effect_count = self.mem.read_u32(data.wrapping_add(24)).unwrap_or(0);
         let revision_magic = self.mem.read_u32(data.wrapping_add(48)).unwrap_or(0);
         match cmd_id {
-            // GetWorkBufferSize: nothing is allocated from it.
-            Some(1) => self.write_ipc_response(tls, 0, &[], &0x10_0000u64.to_le_bytes(), &[]),
+            // GetWorkBufferSize: nothing is allocated from it, so this only sizes what the title
+            // sets aside. 1 MiB left Starter's 4 MiB sound heap too little for its sounds.
+            Some(1) => self.write_ipc_response(tls, 0, &[], &0x4_0000u64.to_le_bytes(), &[]),
             // OpenAudioRenderer.
             Some(0) => {
                 let renderer = self.alloc_handle();

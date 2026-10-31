@@ -291,6 +291,14 @@ fn am_answers_the_current_application_id() {
 }
 
 #[test]
+fn a_push_to_the_general_channel_is_accepted() {
+    let mut cpu = request(false, 20, &[]);
+    cpu.register_service_handle(9, "am:common-state-getter");
+    cpu.applet_request(TLS, 9, Some(20)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+}
+
+#[test]
 fn am_answers_the_built_in_display_type() {
     let mut cpu = request(false, 68, &[]);
     cpu.register_service_handle(9, "am:common-state-getter");

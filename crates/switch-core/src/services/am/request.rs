@@ -149,6 +149,8 @@ impl Cpu {
             }
             // ICommonStateGetter.
             "am:common-state-getter" => match cmd_id {
+                // PushToGeneralChannel: no Home Menu here reads what is pushed.
+                Some(20) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // GetSettingsPlatformRegion: 1 is Global.
                 Some(300) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
                 // GetOperationModeSystemInfo.

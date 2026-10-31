@@ -453,6 +453,8 @@ impl Cpu {
                 let data: &[u8] = if cmd_id == Some(21) { &[0; 4] } else { &[] };
                 self.write_ipc_response(tls, 0, &[], data, &[])
             }
+            // SetChangeEnvironmentIdentifierDisabled: no environment here changes.
+            Some(15) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             _ => self.unimplemented_command(tls, "nsd", cmd_id),
         }
     }
