@@ -545,6 +545,12 @@ impl Cpu {
             },
             // IAppletCommonFunctions.
             "am:applet-common-functions" => match cmd_id {
+                // GetCurrentApplicationId: the base title of what this session started.
+                Some(300) => {
+                    let root = self.machine.processes.get(&self.root);
+                    let id = root.map_or(0, |process| process.program_id) & !0xFFF;
+                    self.write_ipc_response(tls, 0, &[], &id.to_le_bytes(), &[])
+                }
                 // Set/GetHomeButtonDoubleClickEnabled.
                 Some(50) => {
                     let data = self.ipc_request_data(tls);
