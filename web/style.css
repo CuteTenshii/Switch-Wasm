@@ -750,7 +750,7 @@ body.resizing {
   align-items: stretch;
   gap: 2px;
   min-width: 0;
-  overflow-x: auto;
+  overflow: auto hidden;
 }
 
 .tab {
