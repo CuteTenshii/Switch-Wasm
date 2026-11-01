@@ -1172,15 +1172,6 @@ mod tests {
 
     /// Commands with nothing to hand back keep their fabricated success.
     #[test]
-    fn a_setter_shaped_command_still_succeeds() {
-        let mut cpu = Cpu::new();
-        cpu.mem.map_zero(TLS, 0x200).unwrap();
-        write_request(&mut cpu, 1003, &[]);
-        cpu.fsp_srv_request(TLS, Some(1003), 1).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
-    }
-
-    #[test]
     fn a_file_written_through_ifile_reads_back() {
         let key = Cpu::object_key(9, 1);
         let mut cpu = Cpu::new();

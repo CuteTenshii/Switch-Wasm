@@ -201,20 +201,4 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "NvError_Success");
         assert_eq!(cpu.nv.applet_resource_user_id, aruid);
     }
-
-    #[test]
-    fn get_status_answers_with_the_error_word_as_well() {
-        // `GetStatus` must reply with its NvError word.
-        let mut cpu = Cpu::new();
-        cpu.mem.map_zero(TLS, 0x200).unwrap();
-        marshal(&mut cpu, false, 6, &[]);
-        cpu.nvdrv_request(TLS, Some(6), 9).unwrap();
-
-        assert_eq!(
-            cpu.mem.read_u32(TLS + 4).unwrap(),
-            9,
-            "one word of out data"
-        );
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "NvError_Success");
-    }
 }

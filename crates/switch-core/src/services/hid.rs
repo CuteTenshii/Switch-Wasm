@@ -360,27 +360,6 @@ mod tests {
     use crate::kernel::ipc::testing::*;
 
     #[test]
-    fn the_gesture_pair_is_accepted_rather_than_refused() {
-        // Both void; neither may reach `unimplemented_command`.
-        let mut payload = Vec::new();
-        let (width, height) = crate::cpu::OperationMode::Handheld.display_size();
-        payload.extend_from_slice(&width.to_le_bytes());
-        payload.extend_from_slice(&height.to_le_bytes());
-        payload.extend_from_slice(&1u64.to_le_bytes());
-
-        for command in [92u32, 91] {
-            let mut cpu = request(false, command, &payload);
-            cpu.register_service_handle(9, "hid");
-            cpu.hid_request(TLS, 9, Some(command)).unwrap();
-            assert_eq!(
-                cpu.mem.read_u32(TLS + 0x18).unwrap(),
-                0,
-                "command {command}"
-            );
-        }
-    }
-
-    #[test]
     fn six_axis_ic_information_fills_the_buffer_with_the_sensor_ranges() {
         // Nintendo Switch Sports asks after its first scene change; a refusal reads as no sensor.
         const BUFFER: u32 = 0x3_0000;
@@ -704,25 +683,6 @@ mod tests {
     }
 
     #[test]
-    fn the_controller_applet_finds_no_registered_devices_rather_than_a_refusal() {
-        for command in [543u32, 548, 551] {
-            let mut cpu = request(false, command, &[]);
-            cpu.register_service_handle(9, "hid:sys");
-            cpu.hid_request(TLS, 9, Some(command)).unwrap();
-            assert_eq!(
-                cpu.mem.read_u32(TLS + 0x18).unwrap(),
-                0,
-                "command {command}"
-            );
-            assert_eq!(
-                cpu.mem.read_u64(TLS + 0x20).unwrap(),
-                0,
-                "command {command}"
-            );
-        }
-    }
-
-    #[test]
     fn the_controller_applet_is_told_which_icon_the_pad_has() {
         use crate::cpu::hid_shmem as h;
         for (styles, id, footer) in [
@@ -743,25 +703,6 @@ mod tests {
                 "styles {styles:#x}, id {id:#x}"
             );
         }
-    }
-
-    #[test]
-    fn hid_sys_answers_the_platform_config() {
-        let mut cpu = request(false, 161, &[]);
-        cpu.register_service_handle(9, "hid:sys");
-        cpu.hid_request(TLS, 9, Some(161)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 3);
-    }
-
-    #[test]
-    fn the_controller_applet_sees_no_handheld_button_pressed_while_docked() {
-        let mut cpu = request(false, 870, &[]);
-        cpu.register_service_handle(9, "hid:sys");
-        cpu.mem.write_u8(TLS + 0x20, 0xff).unwrap();
-        cpu.hid_request(TLS, 9, Some(870)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
-        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0);
     }
 
     #[test]

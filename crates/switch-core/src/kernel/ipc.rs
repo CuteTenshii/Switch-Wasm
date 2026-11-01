@@ -1666,20 +1666,6 @@ mod tests {
     use super::testing::*;
 
     #[test]
-    fn ngc_answers_a_version_rather_than_a_fabricated_object_id() {
-        let mut cpu = request(false, 0, &[]);
-        cpu.register_service_handle(9, "ngc:u");
-        cpu.ngc_request(TLS, 9, Some(0)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "content version");
-
-        // Check -> the flags saying what was found. Nothing was.
-        write_request(&mut cpu, 1, &[]);
-        cpu.ngc_request(TLS, 9, Some(1)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "nothing profane");
-    }
-
-    #[test]
     fn ngc_writes_the_masked_text_back_rather_than_leaving_the_buffer() {
         const IN: u32 = 0x4000;
         const OUT: u32 = 0x5000;

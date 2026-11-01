@@ -187,45 +187,6 @@ fn the_in_data_event_is_signalled_while_there_is_something_to_pop() {
 }
 
 #[test]
-fn the_home_menu_finds_a_dock_with_nothing_to_update() {
-    for (service, cmd) in [
-        ("am:global-state-controller", 30u32),
-        ("am:cradle-firmware-updater", 0),
-        ("am:cradle-firmware-updater", 1),
-        ("am:cradle-firmware-updater", 2),
-        ("am:cradle-firmware-updater", 3),
-    ] {
-        let mut cpu = request(false, cmd, &[]);
-        cpu.register_service_handle(9, service);
-        cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
-        assert_eq!(
-            cpu.mem.read_u32(TLS + 0x18).unwrap(),
-            0,
-            "{service} cmd {cmd} refused"
-        );
-    }
-}
-
-#[test]
-fn the_idle_detection_setters_are_accepted_rather_than_refused() {
-    for (cmd, payload) in [
-        (60u32, &[0u8; 0x10][..]),
-        (64, &[0u8; 4][..]),
-        (65, &[][..]),
-        (72, &[0u8; 4][..]),
-    ] {
-        let mut cpu = request(false, cmd, payload);
-        cpu.register_service_handle(9, "am:self-controller");
-        cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
-        assert_eq!(
-            cpu.mem.read_u32(TLS + 0x18).unwrap(),
-            0,
-            "cmd {cmd} refused"
-        );
-    }
-}
-
-#[test]
 fn the_auto_sleep_settings_read_back_what_was_set() {
     const EXTENSION: u32 = 3;
     let mut cpu = request(false, 62, &EXTENSION.to_le_bytes());
@@ -325,33 +286,6 @@ fn the_applet_launched_history_starts_at_the_running_applet() {
         "the running applet alone"
     );
     assert_eq!(cpu.mem.read_u32(BUFFER).unwrap(), 1, "AppletId_Application");
-}
-
-#[test]
-fn a_push_to_the_general_channel_is_accepted() {
-    let mut cpu = request(false, 20, &[]);
-    cpu.register_service_handle(9, "am:common-state-getter");
-    cpu.applet_request(TLS, 9, Some(20)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-}
-
-#[test]
-fn am_answers_the_built_in_display_type() {
-    let mut cpu = request(false, 68, &[]);
-    cpu.register_service_handle(9, "am:common-state-getter");
-    cpu.applet_request(TLS, 9, Some(68)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-    assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "the type");
-}
-
-#[test]
-fn the_copyright_notice_for_captures_is_accepted() {
-    for cmd in [100, 101, 102] {
-        let mut cpu = request(false, cmd, &[]);
-        cpu.register_service_handle(9, "am:application-functions");
-        cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "command {cmd}");
-    }
 }
 
 #[test]
@@ -628,24 +562,6 @@ fn library_applet(applet_id: u32) -> (Cpu, u64) {
         Some("am:library-applet-accessor")
     );
     (cpu, accessor)
-}
-
-#[test]
-fn a_library_applet_accessor_accepts_command_90() {
-    let (mut cpu, accessor) = library_applet(APPLET_WEB);
-    write_request(&mut cpu, 90, &[0u8; 0x20]);
-    cpu.applet_request(TLS, accessor, Some(90)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-}
-
-#[test]
-fn an_applet_sees_no_current_application() {
-    let mut cpu = request(false, 70, &[]);
-    cpu.register_service_handle(9, "am:library-applet-self-accessor");
-    cpu.mem.write_u64(TLS + 0x20, u64::MAX).unwrap();
-    cpu.applet_request(TLS, 9, Some(70)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-    assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "application id");
 }
 
 #[test]

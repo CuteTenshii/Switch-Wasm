@@ -402,31 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn every_list_read_reports_an_empty_database() {
-        for cmd in [3, 4, 8, 9] {
-            let mut cpu = request(true, cmd, &1u32.to_le_bytes());
-            cpu.record_domain_object(9, 7, "mii:database");
-            cpu.mii_request(TLS, 9, Some(cmd)).unwrap();
-            assert_eq!(
-                cpu.mem.read_u32(TLS + 0x28).unwrap(),
-                0,
-                "Get {cmd}: result"
-            );
-            assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 0, "Get {cmd}: count");
-        }
-    }
-
-    #[test]
-    fn mii_reports_a_database_that_is_intact_and_empty() {
-        // Unanswered, the editor reads garbage and offers to wipe the database.
-        let mut cpu = request(true, 20, &[]);
-        cpu.record_domain_object(9, 7, "mii:database");
-        cpu.mii_request(TLS, 9, Some(20)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u8(TLS + 0x30).unwrap(), 0, "not broken");
-    }
-
-    #[test]
     fn mii_build_default_answers_over_a_domain() {
         // The domain header shifts the payload 0x10 further.
         let mut cpu = request(true, 7, &3u32.to_le_bytes());

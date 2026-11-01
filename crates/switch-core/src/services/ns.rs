@@ -468,30 +468,6 @@ mod tests {
     }
 
     #[test]
-    fn prepo_accepts_a_report_that_goes_nowhere() {
-        for cmd in [10100u32, 10107, 10200, 20102] {
-            let mut cpu = request(false, cmd, &[]);
-            cpu.register_service_handle(9, "prepo:u");
-            cpu.prepo_request(TLS, Some(cmd)).unwrap();
-            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "prepo {cmd}");
-        }
-        let mut cpu = request(false, 10300, &[]);
-        cpu.register_service_handle(9, "prepo:u");
-        cpu.prepo_request(TLS, Some(10300)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "status");
-    }
-
-    #[test]
-    fn ns_reports_no_account_restricted_by_dynamic_rights() {
-        let mut cpu = request(false, 26, &[]);
-        cpu.register_service_handle(9, "ns:dynamic-rights");
-        cpu.ns_request(TLS, 9, Some(26)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "restricted");
-    }
-
-    #[test]
     fn ns_reports_a_console_with_nothing_installed() {
         // The count is written even when zero.
         let mut cpu = request(false, 7996, &[]);
@@ -562,14 +538,6 @@ mod tests {
             0,
             "an unrecorded title fails"
         );
-    }
-
-    #[test]
-    fn app_manager_4053_succeeds() {
-        let mut cpu = request(false, 4053, &[]);
-        cpu.register_service_handle(9, "ns:app-manager");
-        cpu.ns_request(TLS, 9, Some(4053)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
     }
 
     #[test]

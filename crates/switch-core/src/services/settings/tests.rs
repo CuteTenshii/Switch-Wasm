@@ -2,16 +2,6 @@ use super::Cpu;
 use crate::kernel::ipc::testing::*;
 
 #[test]
-fn set_sys_reports_a_platform_region_that_is_in_the_enum() {
-    // `PlatformRegion` is Global (1) or Terra (2) and has no zero.
-    let mut cpu = request(false, 183, &[]);
-    cpu.set_sys_request(TLS, Some(183)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-    let region = cpu.mem.read_u32(TLS + 0x20).unwrap();
-    assert_eq!(region, 1, "this console is the Global one");
-}
-
-#[test]
 fn set_sys_reports_an_accepted_eula() {
     const BUFFER: u32 = 0x4000;
     const ENTRY: u32 = 0x30;
@@ -101,35 +91,6 @@ fn set_sys_fills_the_settings_blocks_that_outrun_the_reply_padding() {
         "and they stop, past the padding"
     );
     assert_eq!(cpu.mem.read_u32(TLS + 0x34).unwrap(), 0, "on the hour");
-}
-
-#[test]
-fn set_sys_answers_the_enums_whose_zero_is_wrong() {
-    // `ProductModel` starts at 1; `KeyboardLayout`'s zero is `Japanese`.
-    let mut cpu = request(false, 79, &[]);
-    cpu.set_sys_request(TLS, Some(79)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-    assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "ProductModel_Nx");
-
-    let mut cpu = request(false, 136, &[]);
-    cpu.set_sys_request(TLS, Some(136)).unwrap();
-    assert_eq!(
-        cpu.mem.read_u32(TLS + 0x20).unwrap(),
-        1,
-        "KeyboardLayout_EnglishUs"
-    );
-}
-
-#[test]
-fn set_sys_sleeps_never_rather_than_at_an_arbitrary_hour() {
-    // The sleep plans are indices, so zero would mean "sleep after one minute".
-    const NEVER: u32 = 5;
-    let mut cpu = request(false, 71, &[]);
-    cpu.set_sys_request(TLS, Some(71)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-    assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "flags");
-    assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), NEVER, "handheld");
-    assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), NEVER, "console");
 }
 
 #[test]

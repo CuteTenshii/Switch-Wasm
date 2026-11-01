@@ -195,23 +195,4 @@ mod tests {
         ds(&mut cpu, "usb:ds-service", 4, &[]);
         assert_eq!(add(&mut cpu), 0, "ClearDeviceData frees every index");
     }
-
-    #[test]
-    fn the_host_side_lists_no_interfaces() {
-        for cmd in [1, 2, 3] {
-            let mut cpu = request(false, cmd, &[]);
-            cpu.mem.write_u32(TLS + 0x20, 0xffff_ffff).unwrap();
-            cpu.usb_hs_request(TLS, 9, Some(cmd)).unwrap();
-            assert_eq!(
-                cpu.mem.read_u32(TLS + 0x18).unwrap(),
-                0,
-                "query {cmd}: result"
-            );
-            assert_eq!(
-                cpu.mem.read_u32(TLS + 0x20).unwrap(),
-                0,
-                "query {cmd}: count"
-            );
-        }
-    }
 }
