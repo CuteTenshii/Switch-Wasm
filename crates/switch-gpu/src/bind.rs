@@ -528,7 +528,7 @@ impl Gpu {
                 }
             }
         }
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         Ok(texture)
     }
 
@@ -600,7 +600,7 @@ impl Gpu {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
     }
 
     /// The pipeline of [`Gpu::convert_packed_depth`], built once per source of depth.
@@ -697,7 +697,7 @@ impl Gpu {
             staging.as_image_copy(),
             size,
         );
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         let drawn = self
             .load_depth_layer(
                 shadow,

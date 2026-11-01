@@ -132,6 +132,7 @@ impl Gpu {
     /// Destroy a cached texture's device copy.
     fn drop_gpu_texture(&mut self, key: &TextureKey, bytes: u64) {
         if let Some(made) = self.space.gpu_textures.remove(key) {
+            self.submit_batch();
             for (_, texture) in made {
                 texture.destroy();
                 self.gpu_texture_bytes = self.gpu_texture_bytes.saturating_sub(bytes);
@@ -158,6 +159,7 @@ impl Gpu {
             // Whole-cache eviction, every address space's: the limit is shared.
             let len = bytes.len() as u64;
             if self.cached_bytes + len > TEXTURE_CACHE_BYTES {
+                self.submit_batch();
                 for space in std::iter::once(&mut self.space).chain(self.parked.values_mut()) {
                     for (_, made) in space.gpu_textures.drain() {
                         for (_, texture) in made {
@@ -179,7 +181,32 @@ impl Gpu {
         }
     }
 
+    /// Submit the draws recorded so far. A queue submit costs over a millisecond in a browser,
+    /// so draws share one; anything else that submits, or destroys what they use, goes first.
+    pub(super) fn submit_batch(&mut self) {
+        if let Some(batch) = self.batch.take() {
+            self.batched_draws = 0;
+            timed!(self, encode, self.queue.submit([batch.finish()]));
+        }
+    }
+
+    /// Submit an encoder after the draws recorded before it.
+    pub(super) fn submit_with_batch(&mut self, encoder: wgpu::CommandEncoder) {
+        let batch = self.batch.take().map(|batch| batch.finish());
+        self.batched_draws = 0;
+        timed!(
+            self,
+            encode,
+            self.queue
+                .submit(batch.into_iter().chain([encoder.finish()]))
+        );
+    }
+
     pub(super) fn release_scratch(&mut self) {
+        // Recorded draws still use it.
+        if self.batch.is_some() {
+            return;
+        }
         for made in self.scratch.drain(..) {
             match made {
                 Scratch::Buffer(buffer) => buffer.destroy(),

@@ -336,12 +336,13 @@ impl Gpu {
         // See [`Prepared::color_scratch`].
         let scratch = match (p.color, p.color_scratch) {
             (Some(color), Some((width, height))) => {
-                let held = &self
+                let held = self
                     .space
                     .held
                     .get(&color.addr)
                     .ok_or("the surface was not held")?
-                    .texture;
+                    .texture
+                    .clone();
                 let size = wgpu::Extent3d {
                     width,
                     height,
@@ -369,8 +370,8 @@ impl Gpu {
                     texture.as_image_copy(),
                     size,
                 );
-                self.queue.submit([encoder.finish()]);
-                Some((held.clone(), texture, size))
+                self.submit_with_batch(encoder);
+                Some((held, texture, size))
             }
             _ => None,
         };
@@ -408,11 +409,12 @@ impl Gpu {
             }),
         };
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("draw"),
-            });
+        let mut encoder = self.batch.take().unwrap_or_else(|| {
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("draws"),
+                })
+        });
         {
             let colour: Vec<Option<wgpu::RenderPassColorAttachment>> = colour_view
                 .as_ref()
@@ -506,7 +508,11 @@ impl Gpu {
             encoder.copy_texture_to_texture(texture.as_image_copy(), held.as_image_copy(), *size);
             self.scratch.push(Scratch::Texture(texture.clone()));
         }
-        timed!(self, encode, self.queue.submit([encoder.finish()]));
+        self.batch = Some(encoder);
+        self.batched_draws += 1;
+        if self.batched_draws >= crate::MAX_BATCHED_DRAWS {
+            self.submit_batch();
+        }
         Ok(())
     }
 

@@ -56,6 +56,8 @@ impl Gpu {
             lost,
             deferred_readbacks: false,
             crop_switches: 0,
+            batch: None,
+            batched_draws: 0,
             device_is_shared: false,
             defer_readbacks: false,
             interleave: false,

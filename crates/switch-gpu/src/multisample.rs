@@ -145,6 +145,7 @@ impl Gpu {
 
     /// Drop the companion without resolving it, for a caller about to overwrite the surface.
     pub(super) fn discard_companion(&mut self, addr: u64) {
+        self.submit_batch();
         if let Some(held) = self.space.held.get_mut(&addr) {
             if let Some(companion) = held.companion.take() {
                 companion.texture.destroy();
@@ -257,7 +258,7 @@ impl Gpu {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         Ok(())
     }
 
