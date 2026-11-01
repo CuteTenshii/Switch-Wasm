@@ -41,10 +41,7 @@ impl Cpu {
 
     /// Requested `HidNpadStyleTag` bits (0 before any) and the presented style.
     pub fn npad_styles(&self) -> (u32, u32) {
-        (
-            self.npad_style_set,
-            npad_presentation_for(self.npad_style_set).style,
-        )
+        (self.npad_style_set, self.active_npad().1.style)
     }
 
     pub fn thread_dump(&self) -> String {

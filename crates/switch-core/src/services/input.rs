@@ -180,6 +180,10 @@ const NPAD_HANDHELD: NpadPresentation = NpadPresentation {
     joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
 };
 
+/// `HidNpadIdType` values of the two slots a pad can occupy.
+const NPAD_ID_PLAYER_1: u32 = 0;
+const NPAD_ID_HANDHELD: u32 = 0x20;
+
 /// Every style the pad can be published in, as reported to the controller applet and `hid:sys`.
 pub(crate) fn supported_npad_style_set() -> u32 {
     NPAD_PRESENTATIONS.iter().fold(
@@ -279,30 +283,61 @@ impl Cpu {
         mask
     }
 
-    /// Mirror the pad into `HidSharedMemory` as both player 1 and handheld, in the
-    /// styles the title requested (see [`NPAD_PRESENTATIONS`]).
+    /// Publish the pad into `HidSharedMemory` in the one slot and style the title
+    /// can use (see [`Cpu::active_npad`]); the other slot reads as nothing connected.
     fn write_hid_gamepad_state(&mut self, buttons: u64, lx: i32, ly: i32, rx: i32, ry: i32) {
         use hid_shmem as h;
         self.sample_counter = self.sample_counter.wrapping_add(1);
         let sample = self.sample_counter;
-        let supported = self.npad_style_set;
         // Published on mapping, before the guest reads a pad.
         self.write_npad_condition();
-        self.write_npad_slot(
-            0,
-            npad_presentation_for(supported),
-            sample,
-            buttons,
-            (lx, ly, rx, ry),
-        );
-        // The handheld slot is always published.
-        self.write_npad_slot(
-            h::HANDHELD_SLOT,
-            NPAD_HANDHELD,
-            sample,
-            buttons,
-            (lx, ly, rx, ry),
-        );
+        let (slot, presentation) = self.active_npad();
+        self.write_npad_slot(slot, presentation, sample, buttons, (lx, ly, rx, ry));
+        let idle = if slot == h::HANDHELD_SLOT {
+            0
+        } else {
+            h::HANDHELD_SLOT
+        };
+        self.write_npad_disconnected(idle, sample);
+    }
+
+    /// The one pad there is: on the rails when undocked, else player 1, as far as the title
+    /// accepts either.
+    pub(crate) fn active_npad(&self) -> (u32, NpadPresentation) {
+        let styles = self.npad_style_set;
+        let id_accepted = |id| self.npad_id_types.is_empty() || self.npad_id_types.contains(&id);
+        let handheld =
+            (styles == 0 || styles & NPAD_HANDHELD.style != 0) && id_accepted(NPAD_ID_HANDHELD);
+        let player_1 = id_accepted(NPAD_ID_PLAYER_1)
+            && (styles == 0 || NPAD_PRESENTATIONS.iter().any(|pad| styles & pad.style != 0));
+        if handheld && (self.operation_mode == OperationMode::Handheld || !player_1) {
+            (hid_shmem::HANDHELD_SLOT, NPAD_HANDHELD)
+        } else {
+            (0, npad_presentation_for(styles))
+        }
+    }
+
+    fn write_npad_disconnected(&mut self, slot: u32, sample: u64) {
+        use hid_shmem as h;
+        let base = h::NPAD.wrapping_add(slot.wrapping_mul(h::ENTRY_SIZE));
+        for field in [
+            h::STYLE_SET,
+            h::JOY_ASSIGNMENT_MODE,
+            h::DEVICE_TYPE,
+            h::SYSTEM_PROPERTIES,
+        ] {
+            let _ = self.hid_shmem.write_u32(base + field, 0);
+        }
+        for lifo in [
+            h::FULL_KEY_LIFO,
+            h::HANDHELD_LIFO,
+            h::JOY_DUAL_LIFO,
+            h::JOY_LEFT_LIFO,
+            h::JOY_RIGHT_LIFO,
+            h::SYSTEM_EXT_LIFO,
+        ] {
+            self.write_npad_lifo(base.wrapping_add(lifo), sample, 0, (0, 0, 0, 0), 0);
+        }
     }
 
     /// Publish `nn::hid::NpadCondition`, including the stored joy-con hold type.

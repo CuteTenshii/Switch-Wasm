@@ -260,6 +260,8 @@ pub struct Machine {
     pub(crate) error_dialogs: VecDeque<am::ErrorDialog>,
     /// Supported npad styles and joy-con hold type, read back by their getters.
     pub(crate) npad_style_set: u32,
+    /// `SetSupportedNpadIdType`; empty until the title says.
+    pub(crate) npad_id_types: Vec<u32>,
     /// `AcquireNpadStyleSetUpdateEventHandle`'s auto-clearing event.
     pub(crate) npad_style_update_event: Option<u64>,
     pub(crate) npad_joy_hold_type: u64,
@@ -542,6 +544,7 @@ impl Cpu {
                 touch_published: 0,
                 touch_down: Vec::new(),
                 npad_style_set: 0,
+                npad_id_types: Vec::new(),
                 npad_style_update_event: None,
                 npad_joy_hold_type: 0,
                 six_axis_passthrough: false,

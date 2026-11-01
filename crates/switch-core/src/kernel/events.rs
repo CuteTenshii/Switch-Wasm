@@ -95,6 +95,10 @@ impl Cpu {
                 if let Some(event) = cpu.process().display_resolution_event {
                     cpu.signal_event(event);
                 }
+                // The pad moves between the rails and player 1.
+                if let Some(event) = cpu.npad_style_update_event {
+                    cpu.signal_event(event);
+                }
             });
         }
     }

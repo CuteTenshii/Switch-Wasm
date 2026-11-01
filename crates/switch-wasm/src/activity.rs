@@ -649,16 +649,10 @@ fn input(before: (u32, u32), now: (u32, u32)) {
     if now == before || supported == 0 {
         return;
     }
-    // The handheld slot carries every button, so accepting it means full input.
-    let handheld = if supported & (1 << 1) != 0 {
-        ", and the handheld slot has every button"
-    } else {
-        ""
-    };
     push(
         PageLevel::Log,
         &format!(
-            "[input] the title accepts {}; player 1 is presented as {}{handheld}",
+            "[input] the title accepts {}; the pad is presented as {}",
             style_names(supported),
             style_names(presented)
         ),

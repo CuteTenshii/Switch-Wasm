@@ -93,8 +93,17 @@ impl Cpu {
                     let styles = self.npad_style_set;
                     self.write_ipc_response(tls, 0, &[], &styles.to_le_bytes(), &[])
                 }
-                // SetSupportedNpadIdType: there is one pad regardless of the slots asked for.
-                Some(102) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // SetSupportedNpadIdType: the one pad goes in a slot the title reads.
+                Some(102) => {
+                    let mut ids = Vec::new();
+                    if let Some((addr, len)) = self.ipc_input_buffer(tls, 0) {
+                        for i in 0..len / 4 {
+                            ids.push(self.mem.read_u32(addr.wrapping_add(i * 4))?);
+                        }
+                    }
+                    self.npad_id_types = ids;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 // AcquireNpadStyleSetUpdateEventHandle: one event, starting signalled since the pad is already published.
                 Some(106) => {
                     let event = match self.npad_style_update_event {
@@ -172,6 +181,8 @@ impl Cpu {
                 }
                 // HasBattery, HasLeftRightBattery, GetNpadInterfaceType, GetNpadLeftRightInterfaceType:
                 // the handheld pad is on the rails, the Pro Controller in slot 0 is wired (USB).
+                // HasBattery, HasLeftRightBattery, GetNpadInterfaceType, GetNpadLeftRightInterfaceType:
+                // the handheld pad is on the rails, the Pro Controller in slot 0 is wired (USB).
                 Some(403..=406) => {
                     /// `HidNpadIdType_Handheld`; players 1-8 are 0-7.
                     const HANDHELD: u32 = 0x20;
@@ -245,7 +256,7 @@ impl Cpu {
                 }
                 // GetNpadCaptureButtonAssignment: no capture buttons assigned.
                 Some(313) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
-                // SetNpadSystemExtStateEnabled: every slot already carries SystemExt.
+                // SetNpadSystemExtStateEnabled: the pad always carries SystemExt.
                 Some(322) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // Firmware update setup and teardown: no pad firmware to flash.
                 Some(1000) | Some(1120) | Some(1131) | Some(1135) => {
@@ -493,17 +504,134 @@ mod tests {
         let full_key = slot + h::FULL_KEY_LIFO + h::LIFO_STORAGE;
         assert_eq!(cpu.mem.read_u64(full_key + h::STATE_BUTTONS).unwrap(), 0);
 
-        // The handheld slot is still published.
+        // The handheld slot, which the title did not ask for, is empty.
         let handheld = SHMEM + h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE;
-        assert_eq!(
-            cpu.mem.read_u32(handheld + h::STYLE_SET).unwrap(),
-            h::STYLE_HANDHELD
-        );
+        assert_eq!(cpu.mem.read_u32(handheld + h::STYLE_SET).unwrap(), 0);
     }
 
     #[test]
-    fn every_slot_carries_the_system_ext_lifo_the_home_menu_reads() {
-        // SystemExt is a second copy every pad carries, whatever style was asked for.
+    fn there_is_one_pad_in_the_one_slot_the_title_can_use() {
+        use crate::cpu::hid_shmem as h;
+        use crate::cpu::OperationMode::{Docked, Handheld};
+        const SHMEM: u32 = 0x3000_0000;
+        const BUTTONS: u64 = 0x3;
+        const PLAYER_1: u32 = 0;
+
+        let both = h::STYLE_FULL_KEY | h::STYLE_HANDHELD;
+        for (styles, ids, mode, slot, style, lifo) in [
+            (
+                both,
+                vec![],
+                Handheld,
+                h::HANDHELD_SLOT,
+                h::STYLE_HANDHELD,
+                h::HANDHELD_LIFO,
+            ),
+            (
+                both,
+                vec![],
+                Docked,
+                PLAYER_1,
+                h::STYLE_FULL_KEY,
+                h::FULL_KEY_LIFO,
+            ),
+            (
+                both,
+                vec![0],
+                Handheld,
+                PLAYER_1,
+                h::STYLE_FULL_KEY,
+                h::FULL_KEY_LIFO,
+            ),
+            (
+                both,
+                vec![0x20],
+                Docked,
+                h::HANDHELD_SLOT,
+                h::STYLE_HANDHELD,
+                h::HANDHELD_LIFO,
+            ),
+            (
+                h::STYLE_HANDHELD,
+                vec![],
+                Docked,
+                h::HANDHELD_SLOT,
+                h::STYLE_HANDHELD,
+                h::HANDHELD_LIFO,
+            ),
+            (
+                h::STYLE_FULL_KEY,
+                vec![],
+                Handheld,
+                PLAYER_1,
+                h::STYLE_FULL_KEY,
+                h::FULL_KEY_LIFO,
+            ),
+            (
+                0,
+                vec![],
+                Handheld,
+                h::HANDHELD_SLOT,
+                h::STYLE_HANDHELD,
+                h::HANDHELD_LIFO,
+            ),
+            (
+                0,
+                vec![],
+                Docked,
+                PLAYER_1,
+                h::STYLE_FULL_KEY,
+                h::FULL_KEY_LIFO,
+            ),
+        ] {
+            let case = format!("styles {styles:#x}, ids {ids:?}, {mode:?}");
+            let mut cpu = request(false, 100, &styles.to_le_bytes());
+            map_hid(&mut cpu, SHMEM);
+            cpu.register_service_handle(9, "hid");
+            cpu.hid_request(TLS, 9, Some(100)).unwrap();
+            cpu.npad_id_types = ids;
+            cpu.set_operation_mode(mode);
+            cpu.set_gamepad_state(BUTTONS, 0, 0, 0, 0);
+
+            let entry = |slot: u32| SHMEM + h::NPAD + slot * h::ENTRY_SIZE;
+            let live = entry(slot);
+            assert_eq!(
+                cpu.mem.read_u32(live + h::STYLE_SET).unwrap(),
+                style,
+                "{case}"
+            );
+            let state = live + lifo + h::LIFO_STORAGE;
+            assert_eq!(
+                cpu.mem.read_u64(state + h::STATE_BUTTONS).unwrap(),
+                BUTTONS,
+                "{case}"
+            );
+
+            let idle = entry(if slot == PLAYER_1 {
+                h::HANDHELD_SLOT
+            } else {
+                PLAYER_1
+            });
+            assert_eq!(cpu.mem.read_u32(idle + h::STYLE_SET).unwrap(), 0, "{case}");
+            for lifo in [lifo, h::SYSTEM_EXT_LIFO] {
+                let state = idle + lifo + h::LIFO_STORAGE;
+                assert_eq!(
+                    cpu.mem.read_u64(state + h::STATE_BUTTONS).unwrap(),
+                    0,
+                    "{case}"
+                );
+                assert_eq!(
+                    cpu.mem.read_u32(state + h::STATE_ATTRIBUTES).unwrap(),
+                    0,
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pad_carries_the_system_ext_lifo_the_home_menu_reads() {
+        // SystemExt is a second copy the pad carries, whatever style was asked for.
         use crate::cpu::hid_shmem as h;
         const SHMEM: u32 = 0x3000_0000;
 
@@ -513,32 +641,25 @@ mod tests {
         cpu.hid_request(TLS, 9, Some(100)).unwrap();
         cpu.set_gamepad_state(0x3, 1000, -2000, 3000, -4000);
 
-        for (name, slot) in [
-            ("player 1", SHMEM + h::NPAD),
-            (
-                "handheld",
-                SHMEM + h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE,
-            ),
-        ] {
-            let entry = slot + h::SYSTEM_EXT_LIFO + h::LIFO_STORAGE;
-            assert_eq!(
-                cpu.mem.read_u64(entry + h::STATE_BUTTONS).unwrap(),
-                0x3,
-                "{name} publishes buttons in the SystemExt LIFO"
-            );
-            assert_eq!(
-                cpu.mem.read_u32(entry + h::STATE_STICK_L).unwrap() as i32,
-                1000,
-                "{name} publishes sticks there too"
-            );
-            assert_eq!(
-                cpu.mem
-                    .read_u64(slot + h::SYSTEM_EXT_LIFO + h::LIFO_COUNT)
-                    .unwrap(),
-                1,
-                "{name}'s SystemExt LIFO header says it holds an entry"
-            );
-        }
+        let slot = SHMEM + h::NPAD;
+        let entry = slot + h::SYSTEM_EXT_LIFO + h::LIFO_STORAGE;
+        assert_eq!(
+            cpu.mem.read_u64(entry + h::STATE_BUTTONS).unwrap(),
+            0x3,
+            "player 1 publishes buttons in the SystemExt LIFO"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(entry + h::STATE_STICK_L).unwrap() as i32,
+            1000,
+            "player 1 publishes sticks there too"
+        );
+        assert_eq!(
+            cpu.mem
+                .read_u64(slot + h::SYSTEM_EXT_LIFO + h::LIFO_COUNT)
+                .unwrap(),
+            1,
+            "player 1's SystemExt LIFO header says it holds an entry"
+        );
 
         // The style tag names only the physical controller.
         assert_eq!(
