@@ -187,6 +187,26 @@ fn the_in_data_event_is_signalled_while_there_is_something_to_pop() {
 }
 
 #[test]
+fn the_home_menu_finds_a_dock_with_nothing_to_update() {
+    for (service, cmd) in [
+        ("am:global-state-controller", 30u32),
+        ("am:cradle-firmware-updater", 0),
+        ("am:cradle-firmware-updater", 1),
+        ("am:cradle-firmware-updater", 2),
+        ("am:cradle-firmware-updater", 3),
+    ] {
+        let mut cpu = request(false, cmd, &[]);
+        cpu.register_service_handle(9, service);
+        cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "{service} cmd {cmd} refused"
+        );
+    }
+}
+
+#[test]
 fn the_idle_detection_setters_are_accepted_rather_than_refused() {
     for (cmd, payload) in [
         (60u32, &[0u8; 0x10][..]),

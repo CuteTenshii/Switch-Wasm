@@ -844,6 +844,7 @@ impl Cpu {
                         | "am:process-winding-controller"
                         | "am:home-menu-functions"
                         | "am:global-state-controller"
+                        | "am:cradle-firmware-updater"
                         | "am:application-creator"
                         | "am:lock-accessor"
                         | "am:storage"

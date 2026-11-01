@@ -664,6 +664,24 @@ impl Cpu {
                     let h = self.alloc_event("am:hdcp-failed", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
+                // OpenCradleFirmwareUpdater: the Home Menu asks while docked.
+                Some(30) => {
+                    self.reply_with_interface(tls, handle, "am:cradle-firmware-updater")?;
+                    Ok(())
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // ICradleFirmwareUpdater: there is no dock to update.
+            "am:cradle-firmware-updater" => match cmd_id {
+                // StartUpdate, FinishUpdate.
+                Some(0) | Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // GetCradleDeviceInfo: all zero, as in Eden.
+                Some(2) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
+                // GetCradleDeviceInfoChangeEvent: never signalled.
+                Some(3) => {
+                    let h = self.alloc_event("am:cradle-device-info", false);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IProcessWindingController.

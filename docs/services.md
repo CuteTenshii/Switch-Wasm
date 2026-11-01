@@ -132,6 +132,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 - Capture buffer acquires must name a real slot (the first past the two shared frame buffers, soft-mapped zeros); answering "nothing written, slot -1" makes `nnSdk` retry forever.
 - `ILockAccessor` events are created signalled and manual-reset: the Home Menu aborts if the <kbd>HOME</kbd> lock event reads clear.
 - `IGlobalStateController` sleep/shutdown/reboot are deliberately not implemented: answering "done" to a shutdown not performed is worse than refusing.
+- `OpenCradleFirmwareUpdater` (30) hands out an `ICradleFirmwareUpdater` with nothing to update: start and finish succeed, the device info is zero and its change event never fires. The docked Home Menu panics without it.
 - Interface-returning commands must return a real object: `nnSdk` reads a move handle, and a bare success yields a null `SharedPointer` that faults later.
 - Setters with a matching getter (idle time detection, auto-sleep, <kbd>HOME</kbd> double-click) must store and read back the value.
 - `CreateTransferMemoryStorage` returns a zero-filled storage of the requested size: transfer memory records no address here, and refusing it stopped swkbd's caller before `Start`. `CreateHandleStorage` is refused.
