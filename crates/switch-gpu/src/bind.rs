@@ -459,7 +459,7 @@ impl Gpu {
                 }
             }
         }
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         Ok(texture)
     }
 
@@ -553,7 +553,7 @@ impl Gpu {
             },
             size,
         );
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         self.scratch.push(Scratch::Texture(staging));
         Ok(())
     }
@@ -652,7 +652,7 @@ impl Gpu {
             staging.as_image_copy(),
             size,
         );
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         let drawn = self
             .load_depth_layer(
                 shadow,

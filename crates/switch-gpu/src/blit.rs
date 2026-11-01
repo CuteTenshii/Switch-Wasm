@@ -183,7 +183,7 @@ impl Gpu {
             pass.set_scissor_rect(x0, y0, width, height);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         Some(())
     }
 

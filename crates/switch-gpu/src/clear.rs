@@ -163,7 +163,7 @@ impl Gpu {
                 pass.draw(0..3, 0..1);
             }
         }
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         Ok(())
     }
 

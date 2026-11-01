@@ -61,6 +61,7 @@ impl Gpu {
 
     /// Destroy an address space's device textures; nothing is owed to guest memory that is gone.
     pub(super) fn drop_space(&mut self, space: Space) {
+        self.submit_batch();
         for held in space.held.into_values().chain(space.evicted) {
             held.texture.destroy();
             if let Some(other) = &held.other {
@@ -135,6 +136,7 @@ impl Gpu {
             Some(other) if other.target == *target => *other,
             stale => {
                 if let Some(stale) = stale {
+                    self.submit_batch();
                     stale.texture.destroy();
                 }
                 Held {
@@ -167,6 +169,7 @@ impl Gpu {
             return held;
         };
         let mut other = *other;
+        self.submit_batch();
         if held.target.width >= other.target.width && held.target.height >= other.target.height {
             held.dirty |= other.dirty;
             other.texture.destroy();
@@ -228,7 +231,7 @@ impl Gpu {
             );
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
     }
 
     /// Write one held surface back into guest memory and stop holding it.
@@ -241,6 +244,7 @@ impl Gpu {
 
     /// Ask for a surface back without waiting; [`Gpu::flush`] collects it.
     fn ask_for(&mut self, held: Held) {
+        self.submit_batch();
         let held = self.merge_crop(held);
         // A companion's contents must be in the surface before it is copied.
         if let Some(companion) = &held.companion {
@@ -441,7 +445,7 @@ impl Gpu {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
         Ok(())
     }
 
@@ -485,7 +489,7 @@ impl Gpu {
     }
 
     /// Start copying a surface off the device, with rows padded to 256 bytes.
-    fn start_read_back(&self, target: &Target, texture: &wgpu::Texture) -> Pending {
+    fn start_read_back(&mut self, target: &Target, texture: &wgpu::Texture) -> Pending {
         // Device row width, which for depth is not the guest's texel width.
         let row_bytes = match target.depth_kind() {
             Some(kind) => target.width * kind.unit(),
@@ -528,7 +532,7 @@ impl Gpu {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit([encoder.finish()]);
+        self.submit_with_batch(encoder);
 
         // Asked for, not waited on.
         let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(MAP_WAITING));
@@ -715,6 +719,8 @@ impl Gpu {
         if self.give_up() {
             return Ok(Submit::Done);
         }
+        self.submit_batch();
+        self.release_scratch();
         let held_bytes: u64 = self.space.held.values().map(|h| h.target.len()).sum();
         let everything = scanout.is_none()
             || self.sync_every_present
@@ -769,6 +775,8 @@ impl Gpu {
         if self.give_up() {
             return Ok(Flush::Done);
         }
+        self.submit_batch();
+        self.release_scratch();
         // Nothing held, owed or in flight: nothing to do (and no poll).
         if self.space.held.is_empty()
             && self.space.evicted.is_empty()

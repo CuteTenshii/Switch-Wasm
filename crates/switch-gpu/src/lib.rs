@@ -83,6 +83,9 @@ struct GlobalUpload {
 /// Upper bound on one `ldg` buffer, since the program does not say how far it reads.
 const MAX_GLOBAL: u64 = 8 << 20;
 
+/// Draws recorded before they are submitted anyway, which bounds the buffers they keep alive.
+const MAX_BATCHED_DRAWS: u32 = 256;
+
 /// A depth surface is cropped to the colour target beside it along each axis it is larger,
 /// as every draw does, since a pass's attachments must match in size.
 fn crop_depth(depth: Target, color: Option<Target>) -> Target {
@@ -428,6 +431,9 @@ pub struct Gpu {
     deferred_readbacks: bool,
     /// Tests share a device, which one test ending must not destroy.
     device_is_shared: bool,
+    /// Draws recorded and not yet submitted. See [`Gpu::submit_batch`].
+    batch: Option<wgpu::CommandEncoder>,
+    batched_draws: u32,
     /// Depth surfaces switched between sizes on the device. See [`Gpu::switch_crop`].
     crop_switches: u64,
     /// `GPU_DEFER_READBACKS=1`: never wait for readbacks, to reproduce a browser natively.
@@ -549,6 +555,7 @@ impl Drop for Gpu {
         for space in std::iter::once(current).chain(parked) {
             self.drop_space(space);
         }
+        self.submit_batch();
         self.release_scratch();
         if !self.device_is_shared {
             self.device.destroy();
