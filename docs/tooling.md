@@ -50,6 +50,12 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 - What the tools share: the repo root, `fail`, flag parsing and launching Chromium. Playwright loads only when a tool launches it.
 
+## `tools/shader_compile.mjs`
+
+- Times the driver over shaders from `--dump-wgsl`, slowest first, with Chromium's GPU watchdog off. A literal is changed per run, since the driver's disk cache otherwise answers in about 100 ms.
+- `--replace=pattern::text` times a change to the WGSL next to the original. This is how a branch in `ftz` was found to cost 50 s of a 54 s compile.
+- Opens a window, because only a headed browser gets the machine's GPU. Times are `createRenderPipelineAsync`, not what a synchronous pipeline costs the worker.
+
 ## `crates/switch-core/examples/difftest.rs`
 
 - Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, and reports the first differing register (found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.
