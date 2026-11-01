@@ -62,6 +62,10 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 - Writes `report.txt`, `perf.data`, `top.txt` and `boot.txt` to `--dir`. It resolves wasm function names itself from V8's `/tmp/perf-<pid>.map`, because perf does not apply it to V8's anonymous pages.
 - Chromium's sandbox is off for the run, or perf cannot attach. The GPU process refuses perf, so it only appears through `top`'s per-thread CPU.
 
+## `tools/log_summary.mjs`
+
+- Prints a timeline, faults, refused commands, the pad, device timers, the last frames and the busiest guest threads from a `browser_boot.mjs --out` report or a saved page log.
+
 ## `crates/switch-core/examples/difftest.rs`
 
 - Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, and reports the first differing register (found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.
