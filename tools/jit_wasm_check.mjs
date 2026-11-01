@@ -4,12 +4,11 @@
 //
 // Needs `make wasm` to have been run.
 import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { repoRoot } from './common.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, '..');
-const out = join(root, 'target/wasm32-unknown-unknown/debug');
+const out = join(repoRoot, 'target/wasm32-unknown-unknown/debug');
 const wasmPath = process.argv[2] || join(out, 'switch_wasm_bg.wasm');
 
 // Node cannot resolve `@host/files`, so point it at a shim that refuses.

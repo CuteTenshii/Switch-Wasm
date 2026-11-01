@@ -69,8 +69,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   [--seconds=N] [--out=log.txt]` boots a container in the built site in a real
   browser and saves what the page and its worker said. It serves `dist` itself,
   so run `make assets` first. The browser is Playwright's
-  (`bunx playwright install chromium`, once per machine), or the Chromium that
-  `CHROMIUM` names.
+  (`bunx playwright install chromium`, once per machine); `--headed` opens a
+  window, which gets the machine's GPU.
 - `make all` runs the Rust tests and builds the browser site.
 - `make wasm` builds `switch-wasm` with the WebGPU feature in cargo's dev
   profile and runs `wasm-bindgen`. The installed CLI version must match

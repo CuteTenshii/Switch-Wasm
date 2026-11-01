@@ -44,6 +44,12 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 - The console comes from the page's Save download: the view keeps only the newest 2000 lines. Debug from the start floods the log and can leave the page too busy for the Rendering section, so `--debug-from=<text>` switches to debug once a line contains the text.
 - `--no-webgpu` gives the software rasterizer every frame, the reference a device frame is compared against. No Chromium switch removes WebGPU (`--disable-features=WebGPU` leaves it on), so the tool deletes `gpu` from the page's and the worker's navigator. `--screenshot=<file>` saves the screen canvas at the end.
 
+- `--nand=<name>` launches a title from the NAND tab instead of a container, and `--docked` starts docked. `--dump-wgsl=<dir>` writes every shader the worker hands the browser. `--browser-arg=<switch>` passes a Chromium switch.
+
+## `tools/common.mjs`
+
+- What the tools share: the repo root, `fail`, flag parsing and launching Chromium. Playwright loads only when a tool launches it.
+
 ## `crates/switch-core/examples/difftest.rs`
 
 - Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, and reports the first differing register (found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.

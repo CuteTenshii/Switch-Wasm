@@ -16,24 +16,19 @@
 // for performance claims. For a wasm CPU profile:
 //   node --cpu-prof --cpu-prof-name=w.cpuprofile tools/wasm_bench.mjs prog.nro
 import { openSync, readSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
+import { commandLine, fail, repoRoot } from './common.mjs';
 
 const USAGE =
   'usage: node tools/wasm_bench.mjs <container> [switch_wasm.wasm]'
   + ' [--frames=N] [--warmup=N] [--shot=frame.ppm] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf] [--build=dir] [--cores=N]';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, '..');
-const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
-const flag = (name) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+const { flag, positional } = commandLine();
 const containerPath = positional[0];
-if (!containerPath) {
-  console.error(USAGE);
-  process.exit(1);
-}
-const release = flag('build') ?? join(root, 'target/wasm32-unknown-unknown/release');
+if (!containerPath) fail(USAGE);
+const release = flag('build') ?? join(repoRoot, 'target/wasm32-unknown-unknown/release');
 const wasmPath = positional[1] || join(release, 'switch_wasm_bg.wasm');
 
 // Untimed frames cover loading and let V8 tier up from Liftoff to TurboFan.
@@ -194,7 +189,7 @@ if (prod || titleKeys) {
 }
 
 try {
-  const font = readFileSync(join(root, 'web/font.ttf'));
+  const font = readFileSync(join(repoRoot, 'web/font.ttf'));
   api.switch_load_font(handle, toWasm(font), font.length);
 } catch {
   // Without a font a guest renders no text, which skews the frame cost.
@@ -300,8 +295,7 @@ while (deltas.length <= FRAMES && !api.switch_halted(handle)) {
 
 const steady = deltas.slice(1);
 if (steady.length === 0) {
-  console.error('no frame was presented in the window');
-  process.exit(1);
+  fail('no frame was presented in the window');
 }
 const sorted = [...steady].sort((a, b) => a - b);
 const mean = steady.reduce((a, b) => a + b, 0) / steady.length;
