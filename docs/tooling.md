@@ -44,7 +44,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 - The console comes from the page's Save download: the view keeps only the newest 2000 lines. Debug from the start floods the log and can leave the page too busy for the Rendering section, so `--debug-from=<text>` switches to debug once a line contains the text.
 - `--no-webgpu` gives the software rasterizer every frame, the reference a device frame is compared against. No Chromium switch removes WebGPU (`--disable-features=WebGPU` leaves it on), so the tool deletes `gpu` from the page's and the worker's navigator. `--screenshot=<file>` saves the screen canvas at the end.
 
-- `--nand=<name>` launches a title from the NAND tab instead of a container, and `--docked` starts docked. `--dump-wgsl=<dir>` writes every shader the worker hands the browser. `--browser-arg=<switch>` passes a Chromium switch.
+- `--nand=<name>` launches a title from the NAND tab instead of a container, and `--docked` starts docked. `--dump-wgsl=<dir>` writes every shader the worker hands the browser. `--browser-arg=<switch>` passes a Chromium switch. `--stream=<regex>` prints matching console lines as they appear, for reading a run while it goes. `--trace=<file>@<seconds>:<length>` records a Chromium trace from that long after the title starts, which `tools/trace_summary.mjs` totals by event per thread: the only view into the GPU process, which refuses perf.
 
 ## `tools/common.mjs`
 

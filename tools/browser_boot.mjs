@@ -5,6 +5,9 @@
 // `--nand` launches the title of that name from the NAND tab, in place of a container.
 // `--docked` starts the console docked.
 // `--dump-wgsl` writes every shader the worker hands the browser into a directory.
+// `--stream` prints console lines matching a regular expression as they appear; `--stream=.` is all.
+// `--trace=file@seconds:length` records a Chromium trace of the GPU process from that long after the
+// title starts; `tools/trace_summary.mjs` reads it.
 // `--browser-arg` passes a switch to Chromium, and can be repeated.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
 // a device frame is compared against.
@@ -23,7 +26,7 @@ import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
   [--firmware=dir] [--log-level=debug] [--debug-from=text] [--no-webgpu] [--headed] [--docked]
-  [--dump-wgsl=dir] [--browser-arg=switch]
+  [--dump-wgsl=dir] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...]`;
 
@@ -51,6 +54,9 @@ const noWebGpu = hasFlag('no-webgpu');
 const headed = hasFlag('headed');
 const docked = hasFlag('docked');
 const dumpWgsl = pathFlag('dump-wgsl');
+const stream = flag('stream');
+const traceSpec = /^(.+)@(\d+):(\d+)$/.exec(flag('trace') ?? '');
+if (flag('trace') && !traceSpec) fail('--trace: expected file@seconds:length');
 const browserArgs = flags('browser-arg');
 const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
   const match = /^(.+)@(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?))?$/.exec(spec);
@@ -137,6 +143,19 @@ try {
     };
   });
   if (logLevel) await page.evaluate((level) => window.setLogLevel(level), logLevel);
+  if (stream) {
+    const matching = new RegExp(stream);
+    await page.exposeFunction('streamLine', (line) => {
+      if (matching.test(line)) console.log(line);
+    });
+    await page.evaluate(() => {
+      new MutationObserver((changes) => {
+        for (const change of changes) {
+          for (const row of change.addedNodes) window.streamLine(row.textContent);
+        }
+      }).observe(document.getElementById('console'), { childList: true });
+    });
+  }
   // Watched in the page, so the switch lands with the line rather than at the next sample.
   if (debugFrom) {
     await page.evaluate((text) => {
@@ -229,6 +248,18 @@ try {
     ? repeat(screenshotEvery, screenshotEvery, (at) =>
         page.locator('#screen').screenshot({ path: screenshot.replace(/(\.\w+)?$/, `-${at}s$1`) }))
     : null;
+  const tracing = (async () => {
+    if (!traceSpec) return;
+    await page.waitForTimeout(started + Number(traceSpec[2]) * 1000 - Date.now());
+    if (crashed || stopped) return;
+    await browser.startTracing(page, {
+      path: resolve(traceSpec[1]),
+      categories: ['toplevel', 'gpu', 'gpu.dawn', 'disabled-by-default-gpu.dawn', 'webgpu', 'ipc'],
+    });
+    await page.waitForTimeout(Number(traceSpec[3]) * 1000);
+    await browser.stopTracing();
+    say(`wrote the trace to ${traceSpec[1]}`);
+  })();
   let lastRows = -1;
   let lastLine = '';
   while (running && !crashed && Date.now() - started < seconds * 1000) {
@@ -269,7 +300,7 @@ try {
     }
   }
 
-  await Promise.allSettled([...tapping, shooting]);
+  await Promise.allSettled([...tapping, shooting, tracing]);
   if (screenshot && !crashed) {
     await page.locator('#screen').screenshot({ path: screenshot });
     say(`saved the screen to ${screenshot}`);
