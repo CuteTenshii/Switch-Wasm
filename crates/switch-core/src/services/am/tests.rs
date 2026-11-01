@@ -728,7 +728,7 @@ fn an_applet_that_pushes_its_result_and_exits_stops_the_process() {
 }
 
 #[test]
-fn the_controller_applet_is_told_what_it_may_offer() {
+fn the_controller_applet_launched_alone_is_opened_as_the_home_menu_would() {
     const CONTROLLER: u64 = 0x0100_0000_0000_1003;
     let storages =
         super::applet_launch_storages(CONTROLLER, crate::services::acc::DEFAULT_USER_UID);
@@ -742,21 +742,8 @@ fn the_controller_applet_is_told_what_it_may_offer() {
         storages[1].len()
     );
     assert_eq!(super::applet_interface_version(CONTROLLER), 8);
-
-    let styles = u32::from_le_bytes(private[0x0C..0x10].try_into().unwrap());
-    assert_ne!(
-        styles & crate::cpu::hid_shmem::STYLE_HANDHELD,
-        0,
-        "handheld is not on offer"
-    );
-    for pad in crate::cpu::NPAD_PRESENTATIONS {
-        assert_ne!(
-            styles & pad.style,
-            0,
-            "style {:#x} is not on offer",
-            pad.style
-        );
-    }
+    assert_eq!(private[8], 1, "IsHomeMenu");
+    assert_eq!(storages[1][..2], [1, 4], "player counts");
 }
 
 #[test]

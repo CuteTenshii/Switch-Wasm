@@ -404,17 +404,17 @@ fn home_menu_identity() -> [u8; 16] {
     info
 }
 
-/// `nn::hid::system::ControllerSupportArgPrivate`.
+/// `nn::hid::system::ControllerSupportArgPrivate`, as the Home Menu opens the applet: it is
+/// only launched this way with no caller, and otherwise answers "cancelled" at once.
 fn controller_support_arg_private() -> Vec<u8> {
     const SIZE: u32 = 0x14;
     let mut arg = Vec::with_capacity(SIZE as usize);
     arg.extend_from_slice(&SIZE.to_le_bytes());
     arg.extend_from_slice(&(CONTROLLER_SUPPORT_ARG_SIZE as u32).to_le_bytes());
-    // Flag0, Flag1, ShowControllerSupport, caller Application.
-    arg.extend_from_slice(&[0, 0, 0, 0]);
-    // `GetSupportedNpadStyleSet`, see `NPAD_PRESENTATIONS`.
-    arg.extend_from_slice(&crate::cpu::supported_npad_style_set().to_le_bytes());
-    // `GetNpadJoyHoldType`: Vertical.
+    // IsHomeMenu, Flag1, ShowControllerSupport, caller Application.
+    arg.extend_from_slice(&[1, 1, 0, 0]);
+    // No style set, and hold type Vertical.
+    arg.extend_from_slice(&0u32.to_le_bytes());
     arg.extend_from_slice(&0u32.to_le_bytes());
     arg
 }
@@ -424,11 +424,8 @@ const CONTROLLER_SUPPORT_ARG_SIZE: usize = 0x430;
 
 fn controller_support_arg() -> Vec<u8> {
     let mut arg = vec![0u8; CONTROLLER_SUPPORT_ARG_SIZE];
-    // sdknso's defaults; the next byte permits dual Joy-Con.
-    arg[..4].copy_from_slice(&0x0101_0400u32.to_le_bytes());
-    arg[4] = 1;
-    // enableSingleMode, needed for handheld to be an allowed answer.
-    arg[5] = 1;
+    // Players 1 to 4, connections may be taken over, dual Joy-Con permitted.
+    arg[..5].copy_from_slice(&[1, 4, 1, 0, 1]);
     arg
 }
 

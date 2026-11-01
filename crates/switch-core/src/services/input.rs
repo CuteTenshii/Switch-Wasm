@@ -182,7 +182,7 @@ const NPAD_HANDHELD: NpadPresentation = NpadPresentation {
 
 /// `HidNpadIdType` values of the two slots a pad can occupy.
 const NPAD_ID_PLAYER_1: u32 = 0;
-const NPAD_ID_HANDHELD: u32 = 0x20;
+pub(crate) const NPAD_ID_HANDHELD: u32 = 0x20;
 
 /// Every style the pad can be published in, as reported to the controller applet and `hid:sys`.
 pub(crate) fn supported_npad_style_set() -> u32 {
@@ -314,6 +314,32 @@ impl Cpu {
             (hid_shmem::HANDHELD_SLOT, NPAD_HANDHELD)
         } else {
             (0, npad_presentation_for(styles))
+        }
+    }
+
+    /// `nn::hid::system::AppletFooterUiType` of the pad behind an npad id; 0 is no pad.
+    pub(crate) fn npad_footer_type(&self, id: u32) -> u8 {
+        use hid_shmem as h;
+        const HANDHELD_JOY_CON_PAIR: u8 = 4;
+        const JOY_DUAL: u8 = 5;
+        const JOY_LEFT_HORIZONTAL: u8 = 8;
+        const JOY_RIGHT_HORIZONTAL: u8 = 10;
+        const PRO_CONTROLLER: u8 = 12;
+        let (slot, presentation) = self.active_npad();
+        let active_id = if slot == h::HANDHELD_SLOT {
+            NPAD_ID_HANDHELD
+        } else {
+            NPAD_ID_PLAYER_1
+        };
+        if id != active_id {
+            return 0;
+        }
+        match presentation.style {
+            h::STYLE_FULL_KEY => PRO_CONTROLLER,
+            h::STYLE_HANDHELD => HANDHELD_JOY_CON_PAIR,
+            h::STYLE_JOY_DUAL => JOY_DUAL,
+            h::STYLE_JOY_LEFT => JOY_LEFT_HORIZONTAL,
+            _ => JOY_RIGHT_HORIZONTAL,
         }
     }
 

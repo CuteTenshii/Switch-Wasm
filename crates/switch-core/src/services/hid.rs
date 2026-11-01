@@ -5,6 +5,25 @@ use crate::cpu::Cpu;
 use crate::Result;
 
 impl Cpu {
+    /// HasBattery, HasLeftRightBattery, GetNpadInterfaceType, GetNpadLeftRightInterfaceType:
+    /// the handheld pad is on the rails, the Pro Controller in slot 0 is wired (USB).
+    fn npad_power_or_interface(&mut self, tls: u32, data: u32, cmd_id: Option<u32>) -> Result<()> {
+        /// `HidNpadInterfaceType_Rail` and `_USB`.
+        const RAIL: u8 = 2;
+        const USB: u8 = 3;
+        let handheld = self.mem.read_u32(data)? == crate::cpu::NPAD_ID_HANDHELD;
+        let reply: &[u8] = match cmd_id {
+            Some(403) => &[1],
+            Some(404) if handheld => &[1, 1],
+            Some(404) => &[0, 0],
+            Some(406) if handheld => &[RAIL, RAIL],
+            Some(406) => &[USB, USB],
+            _ if handheld => &[RAIL],
+            _ => &[USB],
+        };
+        self.write_ipc_response(tls, 0, &[], reply, &[])
+    }
+
     /// Which `hid` interface a session stands for; `hid:dbg` is `IHidServer`, `hid:sys` is not.
     fn hid_interface_for(name: Option<&str>) -> String {
         match name {
@@ -181,26 +200,7 @@ impl Cpu {
                 }
                 // HasBattery, HasLeftRightBattery, GetNpadInterfaceType, GetNpadLeftRightInterfaceType:
                 // the handheld pad is on the rails, the Pro Controller in slot 0 is wired (USB).
-                // HasBattery, HasLeftRightBattery, GetNpadInterfaceType, GetNpadLeftRightInterfaceType:
-                // the handheld pad is on the rails, the Pro Controller in slot 0 is wired (USB).
-                Some(403..=406) => {
-                    /// `HidNpadIdType_Handheld`; players 1-8 are 0-7.
-                    const HANDHELD: u32 = 0x20;
-                    /// `HidNpadInterfaceType_Rail` and `_USB`.
-                    const RAIL: u8 = 2;
-                    const USB: u8 = 3;
-                    let handheld = self.mem.read_u32(data)? == HANDHELD;
-                    let reply: &[u8] = match cmd_id {
-                        Some(403) => &[1],
-                        Some(404) if handheld => &[1, 1],
-                        Some(404) => &[0, 0],
-                        Some(406) if handheld => &[RAIL, RAIL],
-                        Some(406) => &[USB, USB],
-                        _ if handheld => &[RAIL],
-                        _ => &[USB],
-                    };
-                    self.write_ipc_response(tls, 0, &[], reply, &[])
-                }
+                Some(403..=406) => self.npad_power_or_interface(tls, data, cmd_id),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // `IHidSystemServer`; command ids from libnx `hidsys.c`.
@@ -256,6 +256,19 @@ impl Cpu {
                 }
                 // GetNpadCaptureButtonAssignment: no capture buttons assigned.
                 Some(313) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+                // GetAppletDetailedUiType(npad id): variant 0 and, in the last byte, the footer icon.
+                Some(315) => {
+                    let id = self.mem.read_u32(data)?;
+                    let footer = self.npad_footer_type(id);
+                    self.write_ipc_response(tls, 0, &[], &[0, 0, 0, footer], &[])
+                }
+                // The same four as `hid` commands 405, 406, 403 and 404.
+                Some(316) => self.npad_power_or_interface(tls, data, Some(405)),
+                Some(317) => self.npad_power_or_interface(tls, data, Some(406)),
+                Some(318) => self.npad_power_or_interface(tls, data, Some(403)),
+                Some(319) => self.npad_power_or_interface(tls, data, Some(404)),
+                // GetUniquePadsFromNpad(npad id) -> count: no pad has a unique id, as in Eden.
+                Some(321) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
                 // SetNpadSystemExtStateEnabled: the pad always carries SystemExt.
                 Some(322) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // Firmware update setup and teardown: no pad firmware to flash.
@@ -705,6 +718,29 @@ mod tests {
                 cpu.mem.read_u64(TLS + 0x20).unwrap(),
                 0,
                 "command {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_controller_applet_is_told_which_icon_the_pad_has() {
+        use crate::cpu::hid_shmem as h;
+        for (styles, id, footer) in [
+            (h::STYLE_FULL_KEY | h::STYLE_HANDHELD, 0x20u32, 4u8),
+            (h::STYLE_FULL_KEY | h::STYLE_HANDHELD, 0, 0),
+            (h::STYLE_FULL_KEY, 0, 12),
+            (h::STYLE_FULL_KEY, 0x20, 0),
+            (h::STYLE_JOY_LEFT, 0, 8),
+        ] {
+            let mut cpu = request(false, 315, &id.to_le_bytes());
+            cpu.npad_style_set = styles;
+            cpu.register_service_handle(9, "hid:sys");
+            cpu.hid_request(TLS, 9, Some(315)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x20).unwrap(),
+                u32::from(footer) << 24,
+                "styles {styles:#x}, id {id:#x}"
             );
         }
     }
