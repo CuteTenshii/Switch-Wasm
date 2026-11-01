@@ -56,6 +56,12 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 - `--replace=pattern::text` times a change to the WGSL next to the original. This is how a branch in `ftz` was found to cost 50 s of a 54 s compile.
 - Opens a window, because only a headed browser gets the machine's GPU. Times are `createRenderPipelineAsync`, not what a synchronous pipeline costs the worker.
 
+## `tools/profile_ingame.mjs`
+
+- Runs `browser_boot.mjs`, waits until `--settle` samples past `--after` sit inside `--when-fps=low-high`, then records `--record` seconds with perf and ends the run. Other flags go to `browser_boot.mjs`.
+- Writes `report.txt`, `perf.data`, `top.txt` and `boot.txt` to `--dir`. It resolves wasm function names itself from V8's `/tmp/perf-<pid>.map`, because perf does not apply it to V8's anonymous pages.
+- Chromium's sandbox is off for the run, or perf cannot attach. The GPU process refuses perf, so it only appears through `top`'s per-thread CPU.
+
 ## `crates/switch-core/examples/difftest.rs`
 
 - Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, and reports the first differing register (found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.
