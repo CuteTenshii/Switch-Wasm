@@ -240,9 +240,9 @@ try {
     lastRows = sample.rows;
     lastLine = sample.last;
     // Nothing more will happen, and the log is what the run is for.
-    if (sample.state === 'fault') {
+    if (sample.state === 'fault' || sample.state === 'halted') {
       stopped = true;
-      process.exitCode = 1;
+      if (sample.state === 'fault') process.exitCode = 1;
       break;
     }
     if (jitStats) {
