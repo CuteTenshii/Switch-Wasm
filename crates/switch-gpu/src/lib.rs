@@ -436,6 +436,8 @@ pub struct Gpu {
     deferred_readbacks: bool,
     /// Tests share a device, which one test ending must not destroy.
     device_is_shared: bool,
+    /// Depth surfaces switched between sizes on the device. See [`Gpu::switch_crop`].
+    crop_switches: u64,
     /// `--defer-readbacks` on `screenshot_gpu`: never wait for readbacks, to reproduce a browser natively.
     defer_readbacks: bool,
     /// `--interleave` on `screenshot_gpu`: interleave fallback draws into device frames even with late readbacks.
@@ -926,6 +928,7 @@ impl Renderer for Gpu {
             // `held` grows with flush cost.
             .field("held", self.space.held.len())
             .field("evicted", self.space.evicted.len())
+            .field("cropSwitches", self.crop_switches)
             .field("pending", self.space.pending.len());
         out.object("read", |read| {
             read.field("textures", self.uploaded.textures)
