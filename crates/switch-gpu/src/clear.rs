@@ -7,6 +7,7 @@ use crate::{ClearKey, Gpu};
 use switch_core::gpu::engine::threed::Engine3D;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state};
+use switch_core::gpu::renderer::Renderer;
 use switch_core::gpu::upload::Target;
 use switch_core::Result;
 
@@ -230,21 +231,27 @@ impl Gpu {
     pub(super) fn clear_depth_here(
         &mut self,
         engine: &Engine3D,
-        ctx: &ExecCtx,
+        ctx: &mut ExecCtx,
     ) -> std::result::Result<(), String> {
         let Some(surface) = Target::depth_surface(engine).map_err(|e| format!("{e:?}"))? else {
             return Ok(());
         };
-        let rect = self.clear_texels(engine, &surface)?;
+        let mut rect = self.clear_texels(engine, &surface)?;
         // The cropped surface the draws use, when the clear stays inside it, so the two share a hold.
         let color =
             Target::color(engine, engine.render_target_slot(0)).map_err(|e| format!("{e:?}"))?;
         let cropped = crate::crop_depth(surface, color);
-        let surface = if rect.x1 <= cropped.width && rect.y1 <= cropped.height {
-            cropped
-        } else {
-            surface
-        };
+        // Past it the clear goes to guest memory. Holding the whole surface here would have the
+        // next draw's crop upload depth this clear has not reached guest memory with yet.
+        if rect.x1 > cropped.width || rect.y1 > cropped.height {
+            self.writing_guest_memory(ctx, |software, ctx| {
+                software.clear_depth_stencil(engine, ctx, true, false)
+            })
+            .map_err(|e| format!("{e:?}"))?;
+            rect.x1 = rect.x1.min(cropped.width);
+            rect.y1 = rect.y1.min(cropped.height);
+        }
+        let surface = cropped;
         self.clear_on_device(None, Some((surface, engine.clear_depth_value())), rect, ctx)
     }
 

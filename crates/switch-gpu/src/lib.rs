@@ -83,17 +83,19 @@ struct GlobalUpload {
 /// Upper bound on one `ldg` buffer, since the program does not say how far it reads.
 const MAX_GLOBAL: u64 = 8 << 20;
 
-/// A depth surface at least as large as the colour target beside it is cropped to it, as every
-/// draw does, since a pass's attachments must match in size.
+/// A depth surface is cropped to the colour target beside it along each axis it is larger,
+/// as every draw does, since a pass's attachments must match in size.
 fn crop_depth(depth: Target, color: Option<Target>) -> Target {
-    match color {
-        Some(c) if depth.width >= c.width && depth.height >= c.height => Target {
-            width: c.width,
-            height: c.height,
-            rows: c.height,
-            ..depth
+    let Some(c) = color else { return depth };
+    Target {
+        width: depth.width.min(c.width),
+        height: depth.height.min(c.height),
+        rows: if depth.height > c.height {
+            c.height
+        } else {
+            depth.rows
         },
-        _ => depth,
+        ..depth
     }
 }
 
@@ -807,8 +809,9 @@ impl Renderer for Gpu {
         }
         // The device holds no stencil, so a stencil clear goes straight to guest memory.
         if stencil {
-            self.software
-                .clear_depth_stencil(engine, ctx, false, true)?;
+            self.writing_guest_memory(ctx, |software, ctx| {
+                software.clear_depth_stencil(engine, ctx, false, true)
+            })?;
         }
         if !depth {
             return Ok(());

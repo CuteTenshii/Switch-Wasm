@@ -24,8 +24,9 @@ impl Gpu {
             .depth
             .is_some_and(|d| d.write_enabled || d.compare != state::Compare::Always);
         let depth = targets.depth.filter(|_| uses_depth);
-        // Attachments must match in size, so the pass covers the intersection. A larger depth surface is
-        // cropped; a larger colour target draws into a scratch texture copied back afterwards.
+        // Attachments must match in size, so the pass covers the intersection. A depth surface is
+        // cropped along each axis it is larger; a colour target larger along either draws into a
+        // scratch texture copied back afterwards.
         let mut depth = depth;
         let mut color_scratch = None;
         if let (Some(full_color), Some(full_depth)) = (color, depth) {
@@ -33,18 +34,16 @@ impl Gpu {
             let (dw, dh) = (full_depth.width, full_depth.height);
             if dw >= cw && dh >= ch {
                 depth = Some(crate::crop_depth(full_depth, Some(full_color)));
-            } else if dw <= cw && dh <= ch {
-                color_scratch = Some((dw, dh));
+            } else {
+                let (width, height) = (cw.min(dw), ch.min(dh));
+                depth = Some(crate::crop_depth(full_depth, Some(full_color)));
+                color_scratch = Some((width, height));
                 // The scissor is confined to the depth surface only for draws that reach it.
-                let (pixels_x, pixels_y) = state.grid.pixels(dw, dh);
+                let (pixels_x, pixels_y) = state.grid.pixels(width, height);
                 state.scissor.x1 = state.scissor.x1.min(pixels_x);
                 state.scissor.y1 = state.scissor.y1.min(pixels_y);
                 state.scissor.x0 = state.scissor.x0.min(state.scissor.x1);
                 state.scissor.y0 = state.scissor.y0.min(state.scissor.y1);
-            } else {
-                return Err(format!(
-                    "a {cw}x{ch} colour target beside a {dw}x{dh} depth one, each larger one way"
-                ));
             }
         }
         if color.is_none() && depth.is_none() {

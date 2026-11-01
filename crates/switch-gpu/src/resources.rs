@@ -3,6 +3,7 @@
 use crate::readback::Scratch;
 use crate::{Gpu, PAGE_BITS, TEXTURE_CACHE_BYTES};
 use switch_core::gpu::exec::ExecCtx;
+use switch_core::gpu::renderer::Software;
 use switch_core::gpu::upload::TextureKey;
 
 /// The CPU pages behind `len` bytes at `addr`, as far as the mapping goes.
@@ -90,6 +91,30 @@ impl Gpu {
         }
         let dirty = ctx.mem.dirty_gpu_pages();
         self.watch_held(ctx, &dirty);
+        self.evict_pages(dirty);
+    }
+
+    /// Stencil the device does not hold goes straight to guest memory, on a held surface's
+    /// pages: what was just written there is ours, and no reason to sync. Run `write`
+    /// between what the guest wrote before it and what it writes after.
+    pub(super) fn writing_guest_memory<T>(
+        &mut self,
+        ctx: &mut ExecCtx,
+        write: impl FnOnce(&mut Software, &mut ExecCtx) -> T,
+    ) -> T {
+        self.evict_written(ctx);
+        let out = write(&mut self.software, ctx);
+        let dirty = ctx.mem.dirty_gpu_pages();
+        for held in self.space.held.values() {
+            for page in held.watched.iter().filter(|page| dirty.contains(page)) {
+                ctx.mem.mark_gpu_page(page << PAGE_BITS);
+            }
+        }
+        self.evict_pages(dirty);
+        out
+    }
+
+    fn evict_pages(&mut self, dirty: Vec<u32>) {
         self.evict_shaders(&dirty);
         for page in dirty {
             let Some(keys) = self.space.page_owners.remove(&page) else {

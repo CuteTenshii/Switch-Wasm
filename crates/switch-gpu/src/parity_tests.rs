@@ -1855,3 +1855,31 @@ fn a_blit_out_of_guest_memory_uploads_its_source_and_agrees_with_the_engine() {
         .collect();
     assert_eq!(got, expected_blit(&blit, &texels));
 }
+
+/// Minecraft's world pass: each surface is larger one way, and the draw lands in their overlap.
+#[test]
+fn a_draw_beside_a_depth_surface_larger_only_one_way_agrees() {
+    let Some(mut gpu) = device() else { return };
+    let (width, height) = (testing::TARGET_WIDTH * 2, testing::TARGET_HEIGHT / 2);
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::new();
+        h.depth_target_sized(0x0201, width, height);
+        h.engine.regs.set(0x364, 0.75f32.to_bits());
+        h.triangle([1.0, 0.0, 1.0, 1.0]);
+        h.clear_with(renderer, [true; 4]).expect("the clear");
+        h.clear_depth_with(renderer).expect("the depth clear");
+        h.draw_with(renderer).expect("the draw");
+        h.flush_with(renderer);
+        (h.target(), h.depth())
+    };
+    let want = build(&mut Software);
+    let before = gpu.fallbacks;
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, before,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(got.0, want.0, "colour");
+    assert_eq!(got.1, want.1, "depth");
+}
