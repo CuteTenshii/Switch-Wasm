@@ -1858,6 +1858,60 @@ fn a_blit_out_of_guest_memory_uploads_its_source_and_agrees_with_the_engine() {
 
 /// Minecraft's world pass: each surface is larger one way, and the draw lands in their overlap.
 #[test]
+fn a_depth_surface_alternating_with_its_crop_stays_on_the_device_and_agrees() {
+    const COLOUR_ADDRESS_LOW: u32 = 0x201;
+    const COLOUR_PITCH: u32 = 0x202;
+    const NARROW_TARGET: u64 = 0x3000;
+    let Some(mut gpu) = device() else { return };
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::new();
+        h.depth_target(0x0203);
+        h.engine.regs.set(0x364, 0.75f32.to_bits());
+        let wide = h.base as u32;
+        let narrow = h.base + NARROW_TARGET;
+        for _ in 0..2 {
+            h.engine.regs.set(COLOUR_ADDRESS_LOW, wide);
+            h.engine.regs.set(COLOUR_PITCH, testing::TARGET_WIDTH * 4);
+            h.triangle([1.0, 0.0, 1.0, 1.0]);
+            h.clear_with(renderer, [true; 4]).expect("the clear");
+            h.clear_depth_with(renderer).expect("the depth clear");
+            h.draw_with(renderer).expect("the full draw");
+            // A narrower target beside the same depth, which keeps what was drawn above.
+            h.engine.regs.set(COLOUR_ADDRESS_LOW, narrow as u32);
+            h.engine.regs.set(COLOUR_PITCH, testing::TARGET_WIDTH * 2);
+            h.triangle([0.0, 1.0, 0.0, 1.0]);
+            h.draw_with(renderer).expect("the cropped draw");
+        }
+        h.flush_with(renderer);
+        let narrow_row: Vec<u32> = {
+            let ctx = h.ctx();
+            (0..testing::TARGET_WIDTH / 2)
+                .map(|x| ctx.read_u32(narrow + u64::from(x) * 4).unwrap())
+                .collect()
+        };
+        h.engine.regs.set(COLOUR_ADDRESS_LOW, wide);
+        h.engine.regs.set(COLOUR_PITCH, testing::TARGET_WIDTH * 4);
+        (h.target(), narrow_row, h.depth())
+    };
+    let want = build(&mut Software);
+    let before = gpu.fallbacks;
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, before,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert!(
+        gpu.crop_switches >= 3,
+        "switched {} times",
+        gpu.crop_switches
+    );
+    assert_eq!(got.0, want.0, "wide colour");
+    assert_eq!(got.1, want.1, "narrow colour");
+    assert_eq!(got.2, want.2, "depth");
+}
+
+#[test]
 fn a_draw_beside_a_depth_surface_larger_only_one_way_agrees() {
     let Some(mut gpu) = device() else { return };
     let (width, height) = (testing::TARGET_WIDTH * 2, testing::TARGET_HEIGHT / 2);

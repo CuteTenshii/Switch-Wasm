@@ -556,7 +556,7 @@ fn the_report_is_the_json_the_page_reads() {
         switch_core::json::object(|o| gpu.report(o)),
         concat!(
             r#"{"backend":"device","drawn":12,"fallbacks":3,"pipelines":0,"modules":0,"held":0,"#,
-            r#""evicted":0,"pending":0,"read":{"textures":4,"vertex":1,"constants":3,"index":2},"#,
+            r#""evicted":0,"cropSwitches":0,"pending":0,"read":{"textures":4,"vertex":1,"constants":3,"index":2},"#,
             r#""textureCacheBytes":9,"deviceTextureBytes":10,"#,
             r#""textureHits":5,"textureMisses":6,"shaderHits":7,"shaderMisses":8,"#,
             r#""softwareFrame":true,"unlatched":2,"gaveUp":false,"lostBecause":"Out of memory","#,

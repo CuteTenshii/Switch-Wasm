@@ -21,6 +21,28 @@ pub(super) fn surface_span(target: &Target) -> std::ops::Range<u64> {
     target.addr..target.addr + len
 }
 
+/// Whether two targets are one depth surface, one cropped from the other.
+fn crop_of_each_other(a: &Target, b: &Target) -> bool {
+    let contains = |x: &Target, y: &Target| x.width >= y.width && x.height >= y.height;
+    a.depth_kind().is_some()
+        && Target {
+            width: b.width,
+            height: b.height,
+            rows: b.rows,
+            ..*a
+        } == *b
+        && (contains(a, b) || contains(b, a))
+}
+
+/// The memory a held surface owes, which a crop's target alone understates.
+fn held_span(held: &Held) -> std::ops::Range<u64> {
+    let span = surface_span(&held.target);
+    match &held.other {
+        Some(other) => span.start..span.end.max(surface_span(&other.target).end),
+        None => span,
+    }
+}
+
 pub(super) fn spans_overlap(a: &std::ops::Range<u64>, b: &std::ops::Range<u64>) -> bool {
     a.start < b.end && b.start < a.end
 }
@@ -41,6 +63,9 @@ impl Gpu {
     pub(super) fn drop_space(&mut self, space: Space) {
         for held in space.held.into_values().chain(space.evicted) {
             held.texture.destroy();
+            if let Some(other) = &held.other {
+                other.texture.destroy();
+            }
             if let Some(companion) = &held.companion {
                 companion.texture.destroy();
             }
@@ -61,6 +86,9 @@ impl Gpu {
 
     /// The device texture for a surface, uploaded on first use.
     pub(super) fn hold(&mut self, target: &Target, ctx: &ExecCtx) -> Result<()> {
+        if self.switch_crop(target, true)? {
+            return Ok(());
+        }
         match self.space.held.get(&target.addr) {
             // The same surface as last time.
             Some(held) if held.target == *target => return Ok(()),
@@ -82,9 +110,125 @@ impl Gpu {
                 dirty: false,
                 companion: None,
                 watched: Vec::new(),
+                other: None,
             },
         );
         Ok(())
+    }
+
+    /// A depth surface drawn beside colour targets of different sizes, cropped for the smaller,
+    /// stays on the device at both sizes. Going through guest memory cost two readbacks and an
+    /// upload a frame.
+    pub(super) fn switch_crop(&mut self, target: &Target, keep_contents: bool) -> Result<bool> {
+        let eligible = self.space.held.get(&target.addr).is_some_and(|held| {
+            held.companion.is_none()
+                && held.target != *target
+                && crop_of_each_other(&held.target, target)
+        });
+        if !eligible {
+            return Ok(false);
+        }
+        let Some(mut old) = self.space.held.remove(&target.addr) else {
+            return Ok(false);
+        };
+        let mut new = match old.other.take() {
+            Some(other) if other.target == *target => *other,
+            stale => {
+                if let Some(stale) = stale {
+                    stale.texture.destroy();
+                }
+                Held {
+                    texture: self.blank_target(target)?,
+                    target: *target,
+                    dirty: false,
+                    companion: None,
+                    watched: Vec::new(),
+                    other: None,
+                }
+            }
+        };
+        if keep_contents {
+            self.copy_depth(&old.texture, &new.texture);
+        }
+        self.crop_switches += 1;
+        new.dirty |= old.dirty;
+        // Pages are the larger surface's, whichever is current.
+        if old.watched.len() > new.watched.len() {
+            new.watched = old.watched.clone();
+        }
+        new.other = Some(Box::new(old));
+        self.space.held.insert(target.addr, new);
+        Ok(true)
+    }
+
+    /// The whole surface for a readback, with what the crop holds in it.
+    fn merge_crop(&mut self, mut held: Held) -> Held {
+        let Some(other) = held.other.take() else {
+            return held;
+        };
+        let mut other = *other;
+        if held.target.width >= other.target.width && held.target.height >= other.target.height {
+            held.dirty |= other.dirty;
+            other.texture.destroy();
+            held
+        } else {
+            self.copy_depth(&held.texture, &other.texture);
+            other.dirty |= held.dirty;
+            held.texture.destroy();
+            other
+        }
+    }
+
+    /// Draw the part of one depth texture that fits into the top left of another.
+    fn copy_depth(&mut self, from: &wgpu::Texture, to: &wgpu::Texture) {
+        let pipeline = self.depth_loader(to.format());
+        let layout = pipeline.get_bind_group_layout(0);
+        let source = from.create_view(&wgpu::TextureViewDescriptor {
+            aspect: wgpu::TextureAspect::DepthOnly,
+            ..Default::default()
+        });
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth crop"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&source),
+            }],
+        });
+        let view = to.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("depth crop"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("depth crop"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            // Past the smaller texture there is nothing to read.
+            pass.set_scissor_rect(
+                0,
+                0,
+                from.width().min(to.width()),
+                from.height().min(to.height()),
+            );
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([encoder.finish()]);
     }
 
     /// Write one held surface back into guest memory and stop holding it.
@@ -97,6 +241,7 @@ impl Gpu {
 
     /// Ask for a surface back without waiting; [`Gpu::flush`] collects it.
     fn ask_for(&mut self, held: Held) {
+        let held = self.merge_crop(held);
         // A companion's contents must be in the surface before it is copied.
         if let Some(companion) = &held.companion {
             let depth = held.target.depth_kind().is_some();
@@ -437,9 +582,12 @@ impl Gpu {
     /// guest memory, which has to catch up.
     pub(super) fn note_aliases(&mut self, target: &Target) {
         let new = surface_span(target);
-        if self.space.held.values().any(|held| {
-            held.target.addr != target.addr && spans_overlap(&surface_span(&held.target), &new)
-        }) {
+        if self
+            .space
+            .held
+            .values()
+            .any(|held| held.target.addr != target.addr && spans_overlap(&held_span(held), &new))
+        {
             self.space.sync_all = true;
         }
     }
@@ -450,7 +598,7 @@ impl Gpu {
             .space
             .held
             .values()
-            .any(|held| held.dirty && spans_overlap(&surface_span(&held.target), &read))
+            .any(|held| held.dirty && spans_overlap(&held_span(held), &read))
         {
             self.space.sync_all = true;
         }
@@ -475,7 +623,7 @@ impl Gpu {
             .map(|pending| surface_span(&pending.target))
             .collect();
         for held in self.space.held.values_mut() {
-            let span = surface_span(&held.target);
+            let span = held_span(held);
             if !held.watched.is_empty() || pending.iter().any(|p| spans_overlap(p, &span)) {
                 continue;
             }

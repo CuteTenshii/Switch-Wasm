@@ -48,6 +48,8 @@ pub(crate) struct Held {
     /// The CPU pages being watched for guest writes; empty until they can be.
     /// See [`Gpu::watch_held`](crate::Gpu).
     pub(crate) watched: Vec<u32>,
+    /// The same depth surface at its other size. See [`Gpu::switch_crop`](crate::Gpu).
+    pub(crate) other: Option<Box<Held>>,
 }
 
 /// A surface's stand-in, and the grid it stands in for (kept until the flush).

@@ -57,8 +57,9 @@ impl Gpu {
             let held = span(target);
             !ranges.iter().any(|range| overlap(&held, range))
         };
-        self.space.held.values().all(|held| clear(&held.target))
-            && self.space.evicted.iter().all(|held| clear(&held.target))
+        self.space.held.values().all(|held| {
+            clear(&held.target) && held.other.as_ref().is_none_or(|other| clear(&other.target))
+        }) && self.space.evicted.iter().all(|held| clear(&held.target))
             && self
                 .space
                 .pending

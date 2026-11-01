@@ -219,12 +219,17 @@ impl Gpu {
             let other = span(t);
             other.start < cleared.end && cleared.start < other.end
         };
-        !self.space.held.values().any(|held| overlaps(&held.target))
-            && !self
-                .space
-                .pending
-                .iter()
-                .any(|pending| overlaps(&pending.target))
+        !self.space.held.values().any(|held| {
+            overlaps(&held.target)
+                || held
+                    .other
+                    .as_ref()
+                    .is_some_and(|other| overlaps(&other.target))
+        }) && !self
+            .space
+            .pending
+            .iter()
+            .any(|pending| overlaps(&pending.target))
     }
 
     /// Clear the depth surface, on the device.
@@ -274,6 +279,9 @@ impl Gpu {
 
     /// Hold a surface without reading it, for a clear that writes every texel.
     pub(super) fn hold_blank(&mut self, target: &Target) -> Result<()> {
+        if self.switch_crop(target, false)? {
+            return Ok(());
+        }
         match self.space.held.get(&target.addr) {
             // Already held: clear it in place.
             Some(held) if held.target == *target => return Ok(()),
@@ -294,13 +302,14 @@ impl Gpu {
                 dirty: false,
                 companion: None,
                 watched: Vec::new(),
+                other: None,
             },
         );
         Ok(())
     }
 
     /// A device texture for a surface, with nothing in it.
-    fn blank_target(&self, target: &Target) -> Result<wgpu::Texture> {
+    pub(super) fn blank_target(&self, target: &Target) -> Result<wgpu::Texture> {
         let (format, usage) = match target.depth_kind() {
             Some(kind) => (
                 depth_texture_format(kind),
