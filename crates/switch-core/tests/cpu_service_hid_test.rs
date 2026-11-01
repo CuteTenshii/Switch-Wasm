@@ -152,26 +152,36 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
     const SHMEM: u32 = 0x3000_0000;
     const NPAD: u32 = SHMEM + 0x9A00;
     const HANDHELD: u32 = NPAD + 8 * 0x5000;
-    let mut cpu = cpu_at(0x1000);
-    cpu.set_reg(1, SHMEM as u64);
-    cpu.set_reg(2, 0x40000);
-    cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
-    cpu.run(1).unwrap();
-    assert_eq!(cpu.read_x(0), 0);
+    use switch_core::cpu::OperationMode;
 
-    cpu.set_gamepad_state(0x3, -1000, 30000, 0, 0);
-
-    // StickLUp (1 << 17) is added; the small horizontal deflection is below threshold.
-    let expected_buttons = 0x3 | (1 << 17);
-    assert_eq!(
-        cpu.mem.read_u64(switch_core::INPUT_ADDR).unwrap(),
-        expected_buttons
-    );
-
-    for (base, lifo_off, style, device) in [
-        (NPAD, 0x28, 1 << 0, 1 << 0), // player 1, Pro Controller
-        (HANDHELD, 0x378, 1 << 1, (1 << 2) | (1 << 3)), // handheld
+    for (mode, base, idle, lifo_off, style, device) in [
+        (OperationMode::Docked, NPAD, HANDHELD, 0x28, 1 << 0, 1 << 0), // player 1, Pro Controller
+        (
+            OperationMode::Handheld,
+            HANDHELD,
+            NPAD,
+            0x378,
+            1 << 1,
+            (1 << 2) | (1 << 3),
+        ),
     ] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_reg(1, SHMEM as u64);
+        cpu.set_reg(2, 0x40000);
+        cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
+        cpu.run(1).unwrap();
+        assert_eq!(cpu.read_x(0), 0);
+
+        cpu.set_operation_mode(mode);
+        cpu.set_gamepad_state(0x3, -1000, 30000, 0, 0);
+
+        // StickLUp (1 << 17) is added; the small horizontal deflection is below threshold.
+        let expected_buttons = 0x3 | (1 << 17);
+        assert_eq!(
+            cpu.mem.read_u64(switch_core::INPUT_ADDR).unwrap(),
+            expected_buttons
+        );
+
         assert_eq!(cpu.mem.read_u32(base).unwrap(), style, "style_set");
         assert_eq!(
             cpu.mem.read_u32(base + 0x4188).unwrap(),
@@ -204,6 +214,14 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
         let properties = cpu.mem.read_u32(base + 0x4190).unwrap();
         assert_eq!(properties & 0x38, 0x38, "PowerConnected");
         assert_eq!(properties & 0x7, 0, "Charging");
+
+        // One pad: the other slot is nothing connected.
+        assert_eq!(cpu.mem.read_u32(idle).unwrap(), 0, "idle style_set");
+        assert_eq!(
+            cpu.mem.read_u32(idle + 0x4188).unwrap(),
+            0,
+            "idle device_type"
+        );
     }
 }
 
