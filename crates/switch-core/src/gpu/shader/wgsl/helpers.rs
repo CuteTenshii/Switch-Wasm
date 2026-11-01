@@ -28,11 +28,10 @@ fn setLocalByte(i: u32, v: u32) {
         "ftz",
         "\
 fn ftz(v: f32) -> f32 {
-  // `.ftz` flushes a subnormal to a zero of the same sign.
-  if (v != 0.0 && abs(v) < 1.1754943508222875e-38) {
-    return bitcast<f32>(bitcast<u32>(v) & 0x80000000u);
-  }
-  return v;
+  // `.ftz` flushes a subnormal to a zero of the same sign. No branch: inlined hundreds of
+  // times, one made the driver take 50 s over a shader, and Chromium kills that as a hang.
+  let bits = bitcast<u32>(v);
+  return bitcast<f32>(select(bits, bits & 0x80000000u, (bits & 0x7f800000u) == 0u));
 }",
     ),
     (
