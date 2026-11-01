@@ -55,6 +55,7 @@ impl Gpu {
             failed,
             lost,
             deferred_readbacks: false,
+            device_is_shared: false,
             defer_readbacks: false,
             interleave: false,
             software_frame: false,
@@ -94,6 +95,13 @@ impl Gpu {
 
     /// Open a device by blocking on it, which only a native thread may do.
     pub fn open() -> std::result::Result<Gpu, String> {
+        let (instance, adapter, device, queue) = Gpu::open_parts()?;
+        Ok(Gpu::with_device(instance, adapter, device, queue))
+    }
+
+    pub(crate) fn open_parts(
+    ) -> std::result::Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue), String>
+    {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
@@ -101,7 +109,7 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
                 .map_err(|e| format!("no device: {e}"))?;
-        Ok(Gpu::with_device(instance, adapter, device, queue))
+        Ok((instance, adapter, device, queue))
     }
 
     pub fn describe(&self) -> String {

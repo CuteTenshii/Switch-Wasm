@@ -2,10 +2,24 @@
 
 use switch_core::gpu::testing::Harness;
 
-/// The device, or `None` with a notice; with `REQUIRE_GPU` set, a panic.
+/// The one device every test shares, since opening one takes most of a test's time.
+static SHARED: std::sync::OnceLock<
+    Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue), String>,
+> = std::sync::OnceLock::new();
+
+/// A fresh backend on the shared device, or `None` with a notice; with `REQUIRE_GPU` set, a panic.
 pub(crate) fn device() -> Option<super::Gpu> {
-    match super::Gpu::open() {
-        Ok(gpu) => Some(gpu),
+    match SHARED.get_or_init(super::Gpu::open_parts) {
+        Ok((instance, adapter, device, queue)) => {
+            let mut gpu = super::Gpu::with_device(
+                instance.clone(),
+                adapter.clone(),
+                device.clone(),
+                queue.clone(),
+            );
+            gpu.device_is_shared = true;
+            Some(gpu)
+        }
         Err(why) if std::env::var_os("REQUIRE_GPU").is_some_and(|v| !v.is_empty()) => {
             panic!("REQUIRE_GPU is set and there is no device: {why}")
         }

@@ -426,6 +426,8 @@ pub struct Gpu {
     /// Whether a readback has ever completed after the flush that asked for it (always in a browser).
     /// Then a mid-frame fallback would read stale memory, so frames are not interleaved.
     deferred_readbacks: bool,
+    /// Tests share a device, which one test ending must not destroy.
+    device_is_shared: bool,
     /// `GPU_DEFER_READBACKS=1`: never wait for readbacks, to reproduce a browser natively.
     defer_readbacks: bool,
     /// `GPU_INTERLEAVE=1`: interleave fallback draws into device frames even with late readbacks.
@@ -546,7 +548,9 @@ impl Drop for Gpu {
             self.drop_space(space);
         }
         self.release_scratch();
-        self.device.destroy();
+        if !self.device_is_shared {
+            self.device.destroy();
+        }
     }
 }
 
