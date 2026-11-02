@@ -371,12 +371,19 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
         "GetCurrentIpAddress did not answer with an address"
     );
     ipc_request_plain(&mut cpu, general, 18, &[]); // GetInternetConnectionStatus
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1, "not a Wi-Fi link");
+    assert_eq!(cpu.mem.read_u8(tls + 0x22).unwrap(), 2, "not connected");
+
+    // IsWirelessCommunicationEnabled: off reads as Airplane Mode in the home menu.
+    ipc_request_plain(&mut cpu, general, 17, &[]);
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1, "Airplane Mode");
+    ipc_request_plain(&mut cpu, general, 16, &[0]); // SetWirelessCommunicationEnabled(false)
+    ipc_request_plain(&mut cpu, general, 17, &[]);
     assert_eq!(
         cpu.mem.read_u8(tls + 0x20).unwrap(),
-        2,
-        "not an ethernet link"
+        0,
+        "the flag did not stick"
     );
-    assert_eq!(cpu.mem.read_u8(tls + 0x22).unwrap(), 2, "not connected");
 
     // A request on an up link is accepted immediately, its events already fired.
     ipc_request_plain(&mut cpu, general, 4, &[]); // CreateRequest

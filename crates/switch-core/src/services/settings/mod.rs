@@ -89,10 +89,10 @@ pub(crate) struct SystemSettings {
     automatic_application_download: bool,
     speaker_auto_mute: bool,
     usb30_enable: bool,
-    /// `nfc:sys` and `btm:sys` read the radio switches from here.
+    /// `nfc:sys`, `btm:sys` and `nifm` read the radio switches from here.
     pub(crate) nfc_enable: bool,
     pub(crate) bluetooth_enable: bool,
-    wireless_lan_enable: bool,
+    pub(crate) wireless_lan_enable: bool,
     auto_update_enable: bool,
     battery_percentage: bool,
     field_testing: bool,
@@ -199,7 +199,7 @@ impl Default for SystemSettings {
             automatic_application_download: false,
             speaker_auto_mute: false,
             usb30_enable: false,
-            nfc_enable: false,
+            nfc_enable: true,
             bluetooth_enable: true,
             wireless_lan_enable: true,
             auto_update_enable: false,

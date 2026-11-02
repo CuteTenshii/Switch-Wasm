@@ -1167,7 +1167,7 @@ impl Cpu {
         }
     }
 
-    /// `IGeneralService`: a wired link that is up with internet access.
+    /// `IGeneralService`: a Wi-Fi link that is up with internet access.
     pub(crate) fn nifm_general_service_request(
         &mut self,
         tls: u32,
@@ -1207,10 +1207,19 @@ impl Cpu {
                 raw.resize(0x18, 0); // the DnsSetting, which resolves nothing
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            // IsWirelessCommunicationEnabled: wired, so no.
-            Some(17) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-            // GetInternetConnectionStatus -> { type, wifi strength, status }: Ethernet, 0, connected.
-            Some(18) => self.write_ipc_response(tls, 0, &[], &[2u8, 0u8, 2u8], &[]),
+            // SetWirelessCommunicationEnabled / IsWirelessCommunicationEnabled: the setting, whose
+            // radios off together are Airplane Mode in the home menu.
+            Some(16) => {
+                let on = self.ipc_arg_u8(tls, 0) != 0;
+                self.store_system_settings(|settings| settings.wireless_lan_enable = on);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            Some(17) => {
+                let enabled = u8::from(self.system_settings().wireless_lan_enable);
+                self.write_ipc_response(tls, 0, &[], &[enabled], &[])
+            }
+            // GetInternetConnectionStatus -> { type, wifi strength, status }: Ieee80211, 3, connected.
+            Some(18) => self.write_ipc_response(tls, 0, &[], &[1u8, 3u8, 2u8], &[]),
             // IsEthernetCommunicationEnabled.
             Some(20) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
             // IsAnyInternetRequestAccepted / IsAnyForegroundRequestAccepted.

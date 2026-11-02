@@ -144,7 +144,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 
 ### `crates/switch-core/src/services/net.rs`
 
-- Model: an empty network, a state a real console reaches and every caller handles. `sfdnsres` resolves nothing; `nifm` reports a wired LAN link that is up with internet; `ssl` builds contexts that never handshake; `bsd` connections to anything but this process are refused immediately (`ECONNREFUSED`, not a timeout, since a frame loop has no other thread to run while blocked).
+- Model: an empty network, a state a real console reaches and every caller handles. `sfdnsres` resolves nothing; `nifm` reports a Wi-Fi link that is up with internet; `ssl` builds contexts that never handshake; `bsd` connections to anything but this process are refused immediately (`ECONNREFUSED`, not a timeout, since a frame loop has no other thread to run while blocked).
 - Loopback works: asio builds a socket pair per `io_context` (bind `127.0.0.1:0`, connect to the port `getsockname` reports, accept) to wake its own `select`; Asphalt 9 asserts on it. Connect completes immediately because both ends are this process.
 - `GetSockName` must report a normalized address (`sin_len` set, real port for a port-0 bind) and the third reply word (length) on `GetSockName`, `GetPeerName`, `Accept`, `RecvFrom`, `GetSockOpt`: nnSdk passes the length on, and a zero length made Asphalt 9's connect fail with `EINVAL` inside the SDK.
 - Errnos are FreeBSD's (`EAGAIN` 35). `sfdnsres` uses FreeBSD positive `EAI_*`. Failures are definitive (`EAI_NONAME`, `HOST_NOT_FOUND`), not try-again. Numeric addresses also fail (the packed `addrinfo` layout is unverified). The error goes in the first word of `SfdnsresRequestResults`, errno 0.
@@ -156,7 +156,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 - `DuplicateSocket` copies local state only, not the connection.
 - Descriptors are allocated monotonically; listings are sorted for deterministic runs.
 - `ssl`: `GetCertificates` must return the firmware store (system data 0x0100000000000800, `/ssl_TrustedCerts.bdf`); an empty store aborted the browser applet. Imported PKI is accepted and given an id but not kept.
-- `nifm`: all three names (`nifm:u`, `nifm:s`, `nifm:a`) route here. `IGeneralService` command ids: 12 `GetCurrentIpAddress`, 15 `GetCurrentIpConfigInfo`, 18 `GetInternetConnectionStatus` (12 and 18 were once crossed). IP config (address, /24, gateway .1) must agree with `bsd`. `GetCurrentNetworkProfile` must write its buffer. `IRequest` is accepted immediately, and `GetSystemEventReadableHandles` returns two copy handles, both signalled.
+- `nifm`: all three names (`nifm:u`, `nifm:s`, `nifm:a`) route here. `IGeneralService` command ids: 12 `GetCurrentIpAddress`, 15 `GetCurrentIpConfigInfo`, 18 `GetInternetConnectionStatus` (12 and 18 were once crossed). IP config (address, /24, gateway .1) must agree with `bsd`. `GetCurrentNetworkProfile` must write its buffer. The home menu shows Airplane Mode unless `IsWirelessCommunicationEnabled` (17), `btm:core` `IsRadioEnabled` and `nfc:system` `IsNfcEnabled` all say yes; 17 reads `set:sys`'s wireless LAN flag and the NFC flag defaults on. `IRequest` is accepted immediately, and `GetSystemEventReadableHandles` returns two copy handles, both signalled.
 
 ### `crates/switch-core/src/services/erpt.rs`
 
