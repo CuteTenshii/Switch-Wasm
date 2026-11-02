@@ -1184,8 +1184,9 @@ impl Cpu {
             }
             // EnumerateNetworkInterfaces / EnumerateNetworkProfiles: zero.
             Some(6) | Some(7) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-            // GetCurrentNetworkProfile: the buffer must still be written.
-            Some(5) => {
+            // GetCurrentNetworkProfile / GetCurrentAccessPoint (wired, so no access point): the
+            // buffer must still be written.
+            Some(5) | Some(36) => {
                 if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
                     for i in 0..len {
                         self.mem.write_u8(addr.wrapping_add(i), 0)?;
