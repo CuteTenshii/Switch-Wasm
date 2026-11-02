@@ -1047,8 +1047,10 @@ impl Cpu {
                     let started = u8::from(self.bt_gamepad_pairing);
                     self.write_ipc_response(tls, 0, &[], &[started], &[])
                 }
-                // GetConnectedAudioDevices -> count: no Bluetooth audio device is connected.
-                Some(17) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+                // GetConnectedAudioDevices / GetPairedAudioDevices -> count: no Bluetooth audio device.
+                Some(17) | Some(20) => {
+                    self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[])
+                }
                 // RequestAudioDeviceConnectionRejection: no connection to reject.
                 Some(22) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),

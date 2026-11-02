@@ -222,10 +222,14 @@ fn btm_core_reports_no_audio_device() {
     ipc_request(&mut cpu, BTM, 4, Some(server), 0); // GetCore
     let core = cpu.mem.read_u32(tls + 0x30).unwrap();
 
-    // GetConnectedAudioDevices -> count 0, then RequestAudioDeviceConnectionRejection.
-    ipc_request(&mut cpu, BTM, 4, Some(core), 17);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0);
+    // GetConnectedAudioDevices / GetPairedAudioDevices -> count 0.
+    for cmd in [17u32, 20] {
+        ipc_request(&mut cpu, BTM, 4, Some(core), cmd);
+        assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
+        assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0, "cmd {cmd}");
+    }
+
+    // RequestAudioDeviceConnectionRejection.
     ipc_request(&mut cpu, BTM, 4, Some(core), 22);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 
