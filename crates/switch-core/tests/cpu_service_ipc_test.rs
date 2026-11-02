@@ -229,9 +229,11 @@ fn btm_core_reports_no_audio_device() {
         assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0, "cmd {cmd}");
     }
 
-    // RequestAudioDeviceConnectionRejection.
-    ipc_request(&mut cpu, BTM, 4, Some(core), 22);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    // Request/CancelAudioDeviceConnectionRejection.
+    for cmd in [22u32, 23] {
+        ipc_request(&mut cpu, BTM, 4, Some(core), cmd);
+        assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
+    }
 
     // AcquireAudioDeviceConnectionEvent -> (acquired, copy handle).
     ipc_request(&mut cpu, BTM, 4, Some(core), 14);

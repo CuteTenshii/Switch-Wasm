@@ -1051,8 +1051,8 @@ impl Cpu {
                 Some(17) | Some(20) => {
                     self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[])
                 }
-                // RequestAudioDeviceConnectionRejection: no connection to reject.
-                Some(22) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // Request/CancelAudioDeviceConnectionRejection: no connection to reject.
+                Some(22) | Some(23) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IBtmSystem: GetCore.
