@@ -138,6 +138,11 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
     assert_ne!(cpu.mem.read_u32(tls + 0x0c).unwrap(), 0);
 
+    // AcquireUniquePadConnectionEventHandle -> a copy handle, never signalled.
+    ipc_request(&mut cpu, HIDSYS, 4, Some(server), 702);
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
+    assert_ne!(cpu.mem.read_u32(tls + 0x0c).unwrap(), 0);
+
     // A domain conversion must not turn hid:sys into IHidServer.
     const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
     ipc_request(&mut cpu, HIDSYS, 4, Some(server), 0);

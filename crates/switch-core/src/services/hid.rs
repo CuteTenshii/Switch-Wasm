@@ -220,9 +220,14 @@ impl Cpu {
                     let event = self.alloc_event("hid:sys-capture-button", true);
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
-                // AcquireJoyDetachOnBluetoothOffEventHandle: never signalled.
-                Some(751) => {
-                    let event = self.alloc_event("hid:sys-joy-detach", true);
+                // AcquireJoyDetachOnBluetoothOffEventHandle / AcquireUniquePadConnectionEventHandle: never signalled.
+                Some(751) | Some(702) => {
+                    let name = if cmd_id == Some(751) {
+                        "hid:sys-joy-detach"
+                    } else {
+                        "hid:sys-unique-pad-connection"
+                    };
+                    let event = self.alloc_event(name, true);
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
                 // AcquireConnectionTriggerTimeoutEvent / AcquireDeviceRegisteredEventForControllerSupport: never signalled.
