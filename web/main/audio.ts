@@ -28,7 +28,7 @@ export function noteAudio(format: number): void {
     const rate = format & 0xffffff;
     const channels = format >>> 24;
     const layout = channels === 2 ? 'stereo' : channels === 1 ? 'mono' : `${channels} channels`;
-    log(`[audio] page: playing ${rate} Hz, ${layout} through a ${audioCtx.sampleRate} Hz output`);
+    log(`[audio] page: playing ${rate} Hz, ${layout} through a ${audioCtx.sampleRate} Hz output`, 'debug');
     lastFormat = format;
   }
   if (audioCtx.state === 'suspended') void resume(audioCtx);
@@ -58,7 +58,7 @@ async function open(options: RingOptions): Promise<void> {
       if (gaps) {
         parts.push(`${gaps} ${gaps === 1 ? 'gap' : 'gaps'} (${Math.round(silence * 1000)} ms of silence)`);
       }
-      log(`[audio] page: ${parts.join(', ')}`);
+      log(`[audio] page: ${parts.join(', ')}`, 'debug');
     };
     node.connect(ctx.destination);
     audioCtx = ctx;

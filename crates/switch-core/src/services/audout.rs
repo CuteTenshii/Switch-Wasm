@@ -405,7 +405,7 @@ impl Cpu {
             device.released_buffers += tags.len() as u64;
         }
         if crate::trace::enabled(crate::trace::Trace::Audio) {
-            crate::traceln!("[audio] release room={room} addr={addr:x?} tags={tags:#x?}");
+            crate::traceln!("[audio] release room={room} addr={addr:x?} tags={tags:x?}");
         }
         if let Some(addr) = addr {
             for (i, &tag) in tags.iter().enumerate() {
