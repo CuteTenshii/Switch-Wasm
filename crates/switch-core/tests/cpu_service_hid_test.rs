@@ -107,6 +107,12 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
     assert_ne!(styles & (1 << 1), 0, "handheld is not supported");
     assert_ne!(styles & (1 << 0), 0, "a full-key pad is not supported");
 
+    // SetSupportedNpadStyleSetAll leaves the set ApplyNpadSystemCommonPolicy granted alone.
+    ipc_request_with_payload(&mut cpu, HIDSYS, server, 312, &[0u8; 0x10]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    ipc_request_with_payload(&mut cpu, HIDSYS, server, 310, &[0u8; 8]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), styles);
+
     // SetNpadSystemExtStateEnabled(bool, u64 aruid).
     let mut args = [0u8; 0x10];
     args[0] = 1;

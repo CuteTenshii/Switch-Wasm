@@ -241,8 +241,10 @@ impl Cpu {
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
                 // Activate{Home,Sleep,Capture}Button and EnableAppletToGetInput: no state to set.
+                // SetSupportedNpadStyleSetAll is accepted without changing the set, which
+                // ApplyNpadSystemCommonPolicy has already granted in full.
                 Some(111) | Some(131) | Some(151) | Some(301) | Some(304) | Some(305)
-                | Some(503) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                | Some(312) | Some(503) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // ApplyNpadSystemCommonPolicy(Full): how system applets ask for controllers; grants every publishable style.
                 Some(303) | Some(308) => {
                     let styles = crate::cpu::supported_npad_style_set();
