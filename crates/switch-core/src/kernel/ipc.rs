@@ -1031,12 +1031,13 @@ impl Cpu {
                     let enabled = u8::from(self.system_settings().bluetooth_enable);
                     self.write_ipc_response(tls, 0, &[], &[enabled], &[])
                 }
-                // AcquireRadioEvent / AcquireGamepadPairingEvent -> (acquired, event).
-                Some(7) | Some(8) => {
-                    let purpose = if cmd_id == Some(7) {
-                        "btm:radio"
-                    } else {
-                        "btm:gamepad-pairing"
+                // AcquireRadioEvent / AcquireGamepadPairingEvent / AcquireAudioDeviceConnectionEvent
+                // -> (acquired, event).
+                Some(7) | Some(8) | Some(14) => {
+                    let purpose = match cmd_id {
+                        Some(7) => "btm:radio",
+                        Some(8) => "btm:gamepad-pairing",
+                        _ => "btm:audio-device-connection",
                     };
                     let event = self.kept_event(purpose, handle);
                     self.write_ipc_reply(tls, 0, &[event], &[], &[1u8], &[])
@@ -1046,6 +1047,10 @@ impl Cpu {
                     let started = u8::from(self.bt_gamepad_pairing);
                     self.write_ipc_response(tls, 0, &[], &[started], &[])
                 }
+                // GetConnectedAudioDevices -> count: no Bluetooth audio device is connected.
+                Some(17) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+                // RequestAudioDeviceConnectionRejection: no connection to reject.
+                Some(22) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IBtmSystem: GetCore.

@@ -209,6 +209,34 @@ fn a_service_with_no_stub_still_answers_its_control_commands() {
 }
 
 #[test]
+fn btm_core_reports_no_audio_device() {
+    const BTM: u64 = 0xD100;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(BTM, "btm:sys");
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, BTM, 5, None, 0); // ConvertToDomain
+    let server = cpu.mem.read_u32(tls + 0x20).unwrap();
+    ipc_request(&mut cpu, BTM, 4, Some(server), 0); // GetCore
+    let core = cpu.mem.read_u32(tls + 0x30).unwrap();
+
+    // GetConnectedAudioDevices -> count 0, then RequestAudioDeviceConnectionRejection.
+    ipc_request(&mut cpu, BTM, 4, Some(core), 17);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0);
+    ipc_request(&mut cpu, BTM, 4, Some(core), 22);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+
+    // AcquireAudioDeviceConnectionEvent -> (acquired, copy handle).
+    ipc_request(&mut cpu, BTM, 4, Some(core), 14);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u8(tls + 0x30).unwrap(), 1);
+    assert_ne!(cpu.mem.read_u32(tls + 0x0c).unwrap(), 0);
+}
+
+#[test]
 fn closing_a_domain_object_is_not_command_zero() {
     // `CmifDomainRequestType_Close` has no command id; it must not dispatch as command 0.
     const FS: u64 = 0xC000;
