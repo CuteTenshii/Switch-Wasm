@@ -123,7 +123,9 @@ async function updateRenderDebug(): Promise<void> {
   const lookups = hits + (g.textureMisses ?? 0);
   $('render-texture-hits').textContent = lookups ? `${((hits * 100) / lookups).toFixed(1)}%` : '-';
   const r = g.read;
-  $('render-read').textContent = formatBytes(r ? r.textures + r.vertex + r.constants + r.index : 0);
+  for (const kind of ['textures', 'vertex', 'constants', 'index'] as const) {
+    $(`render-read-${kind}`).textContent = formatBytes(r?.[kind] ?? 0);
+  }
   const frames = Math.max(g.frames ?? 0, 1);
   for (const phase of RENDER_PHASES) {
     const total = g.times?.[phase];
