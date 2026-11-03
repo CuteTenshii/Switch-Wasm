@@ -409,8 +409,8 @@ impl Cpu {
             Some(5) => self.acc_open_profile(tls, handle, "acc:profile"),
             // IsUserRegistrationRequestPermitted -> false: there is no account applet.
             Some(50) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-            // TrySelectUserWithoutInteraction -> AccountUid: the user playing.
-            Some(51) => {
+            // TrySelectUserWithoutInteraction(bool) -> AccountUid: the user playing.
+            Some(51) | Some(52) => {
                 let uid = self.current_user().uid;
                 self.write_ipc_response(tls, 0, &[], &uid, &[])
             }
@@ -737,13 +737,15 @@ mod tests {
         let uid = cpu.read_bytes(TLS + 0x20, 16);
         assert_eq!(uid, super::DEFAULT_USER_UID.to_vec());
 
-        // TrySelectUserWithoutInteraction hands back the same one.
-        let mut cpu = request(false, 51, &[0, 0, 0, 0]);
-        acc(&mut cpu, "acc:u0", 51);
-        assert_eq!(
-            cpu.read_bytes(TLS + 0x20, 16),
-            super::DEFAULT_USER_UID.to_vec()
-        );
+        // TrySelectUserWithoutInteraction (51, and 52 from 19.0.0) hands back the same one.
+        for command in [51, 52] {
+            let mut cpu = request(false, command, &[0, 0, 0, 0]);
+            acc(&mut cpu, "acc:su", command);
+            assert_eq!(
+                cpu.read_bytes(TLS + 0x20, 16),
+                super::DEFAULT_USER_UID.to_vec()
+            );
+        }
     }
 
     #[test]
