@@ -33,7 +33,6 @@ wasm wasm-release:
 # The Vite site in dist, which takes the release core as an input.
 assets: wasm-release
 	bun run build
-	@ls -la $(DIST) $(DIST)/assets
 
 clean:
 	cargo clean
