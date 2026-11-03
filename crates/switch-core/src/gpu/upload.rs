@@ -1080,24 +1080,25 @@ fn read_indices(
     })
 }
 
-/// `len` bytes from a GPU virtual address, a word at a time where possible.
+/// `len` bytes from a GPU virtual address, one mapping at a time.
 fn read_range(ctx: &ExecCtx, gpu_va: u64, len: u64, what: &str) -> Result<Vec<u8>> {
     if len > MAX_UPLOAD {
         return Err(Error::Gpu(format!(
             "upload: {what} at {gpu_va:#x} is {len} bytes, past the {MAX_UPLOAD}-byte cap"
         )));
     }
-    let mut out = Vec::with_capacity(len as usize);
-    let mut at = gpu_va;
-    let end = gpu_va + len;
-    while at < end {
-        if at.is_multiple_of(4) && end - at >= 4 {
-            out.extend_from_slice(&ctx.read_u32(at)?.to_le_bytes());
-            at += 4;
-        } else {
-            out.push(ctx.vmm_read_u8(at)?);
-            at += 1;
-        }
+    let mut out = vec![0; len as usize];
+    let mut at = 0;
+    while at < out.len() {
+        let va = gpu_va + at as u64;
+        let Some((_, left)) = ctx.vmm.translate(va) else {
+            return Err(Error::Gpu(format!("gpu va {va:#x} is not mapped")));
+        };
+        let end = out
+            .len()
+            .min(at.saturating_add(usize::try_from(left).unwrap_or(usize::MAX)));
+        ctx.vmm.read_into(ctx.mem, va, &mut out[at..end])?;
+        at = end;
     }
     Ok(out)
 }
