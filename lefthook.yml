@@ -28,3 +28,15 @@ pre-commit:
     - name: typecheck
       glob: "*.ts"
       run: bun run typecheck
+
+# The page tests need `make wasm` first.
+pre-push:
+  piped: true
+  jobs:
+    - name: tests
+      run: make test
+      fail_text: "Host tests failed."
+
+    - name: e2e
+      run: bun run test:e2e
+      fail_text: "Page tests failed."
