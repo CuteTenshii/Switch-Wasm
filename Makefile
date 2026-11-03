@@ -27,10 +27,8 @@ wasm-release: PROFILE := release
 wasm-release: RELEASE_FLAG := --release
 wasm wasm-release:
 	$(if $(NIGHTLY_CARGO),,$(error $(NIGHTLY) is not installed; run: $(NIGHTLY_HINT)))
-	RUSTC=$(NIGHTLY_RUSTC) $(NIGHTLY_CARGO) build -Z build-std=std,panic_abort \
-		--target $(TARGET) $(RELEASE_FLAG) -p switch-wasm --features gpu
-	wasm-bindgen --target web --out-dir target/$(TARGET)/$(PROFILE) \
-		target/$(TARGET)/$(PROFILE)/switch_wasm.wasm
+	RUSTC=$(NIGHTLY_RUSTC) $(NIGHTLY_CARGO) build --target $(TARGET) $(RELEASE_FLAG) -p switch-wasm --features gpu
+	wasm-bindgen --target web --out-dir target/$(TARGET)/$(PROFILE) target/$(TARGET)/$(PROFILE)/switch_wasm.wasm
 
 # The Vite site in dist, which takes the release core as an input.
 assets: wasm-release

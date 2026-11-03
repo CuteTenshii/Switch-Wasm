@@ -12,3 +12,7 @@ rustflags = [
   "-C", "link-arg=--export=__tls_align",
   "-C", "link-arg=--export=__tls_base",
 ]
+
+# std rebuilt with atomics for the shared memory; only nightly cargo reads this.
+[unstable]
+build-std = ["std", "panic_abort"]
