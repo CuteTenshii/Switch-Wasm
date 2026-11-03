@@ -856,8 +856,8 @@ impl Cpu {
                         self.log(
                             Level::Warn,
                             &format!(
-                                "[am] CreateLibraryApplet: {} (mode {mode}); it is not on the \
-                                 NAND, so it will report itself cancelled",
+                                "[am] CreateLibraryApplet: {} (id {id:#x}, mode {mode}); it is not on \
+                                 the NAND, so it will report itself cancelled",
                                 applet_name(id)
                             ),
                         );
