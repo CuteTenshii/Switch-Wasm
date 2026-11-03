@@ -687,7 +687,6 @@ body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-stat
   font-family: var(--mono);
   font-weight: 500;
 }
-.statusbar .dim { color: var(--dim); }
 
 /* side panel */
 
@@ -844,12 +843,6 @@ body.resizing {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.checks {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 2px 10px;
 }
 
 /* collapsible section */

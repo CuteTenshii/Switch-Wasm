@@ -6,6 +6,7 @@ import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
 import { $, el } from './dom';
+import './elements/info-tip';
 import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
 import { log } from './log';
@@ -78,17 +79,60 @@ const renderSection = $<HTMLDetailsElement>('render-debug-section');
 const RENDER_PHASES = ['translate', 'upload', 'modules', 'bind', 'pipeline', 'encode', 'flush'] as const;
 
 // Who draws, in a word for the badge and a sentence for the section.
-function renderState(g: GpuReport): [string, string, boolean] {
-  if (!g.backend) return ['software', 'No device: the software rasterizer draws every frame.', false];
+interface AdapterInfo {
+  vendor: string;
+  architecture: string;
+  description: string;
+  isFallbackAdapter: boolean;
+}
+
+// The page asks for the default adapter, as the worker does; wgpu reports only the description.
+let adapterInfo: Promise<AdapterInfo | null> | undefined;
+function queryAdapter(): Promise<AdapterInfo | null> {
+  const gpu = (navigator as { gpu?: { requestAdapter(): Promise<{ info: AdapterInfo } | null> } }).gpu;
+  adapterInfo ??= gpu
+    ? gpu.requestAdapter().then((adapter) => adapter?.info ?? null, () => null)
+    : Promise.resolve(null);
+  return adapterInfo;
+}
+
+function adapterLabel(info: AdapterInfo | null): string {
+  if (!info) return 'unknown';
+  const name = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ');
+  const fallback = info.isFallbackAdapter ? ' (CPU fallback)' : '';
+  return (name || 'not named by the browser') + fallback;
+}
+
+interface RenderState {
+  badge: string;
+  status: string;
+  on: boolean;
+  detail: string;
+}
+
+function renderState(g: GpuReport, fallback: boolean): RenderState {
+  const rasterizer = 'The software rasterizer draws every frame.';
+  if (!g.backend) return { badge: 'software', status: 'No WebGPU device.', on: false, detail: rasterizer };
   if (g.gaveUp) {
     const why = g.lostBecause ? ` (${g.lostBecause})` : '';
-    return ['lost', `The device was lost${why}: the rasterizer draws every frame.`, false];
+    return { badge: 'lost', status: `The device was lost${why}.`, on: false, detail: rasterizer };
   }
   if (g.softwareFrame) {
-    return ['software', 'A draw fell back, so the rasterizer draws until the device can take whole '
-      + 'frames again.', false];
+    return {
+      badge: 'software',
+      status: 'The software rasterizer is drawing.',
+      on: false,
+      detail: 'A draw the device could not take fell back to the rasterizer, which draws every frame '
+        + 'until the device can take whole frames again.',
+    };
   }
-  return ['device', 'The device draws.', true];
+  return {
+    badge: 'WebGPU',
+    status: fallback ? 'WebGPU draws, on a CPU fallback adapter.' : 'WebGPU draws.',
+    on: true,
+    detail: 'A draw the device cannot take runs on the software rasterizer instead, and once enough '
+      + 'have, the rasterizer keeps every frame after, however well the device is working.',
+  };
 }
 
 function showList(block: string, list: string, items: string[]): void {
@@ -98,10 +142,12 @@ function showList(block: string, list: string, items: string[]): void {
 
 async function updateRenderDebug(): Promise<void> {
   const g = await call('gpu_report');
-  const [badge, status, on] = renderState(g);
+  const info = g.backend ? await queryAdapter() : null;
+  const { badge, status, on, detail } = renderState(g, info?.isFallbackAdapter ?? false);
   setNote('render-debug-badge', badge, on);
   const unlatched = g.unlatched ? ` It has handed frames back to the device ${g.unlatched} time(s).` : '';
   $('render-status').textContent = status + unlatched;
+  $('render-tip').setAttribute('text', detail);
   $('render-debug-data').hidden = !g.backend;
   showList('render-reasons-block', 'render-reasons', g.reasons ?? []);
   const errors = g.deviceErrors ?? [];
@@ -113,6 +159,7 @@ async function updateRenderDebug(): Promise<void> {
   const drawn = g.drawn ?? 0;
   const fallbacks = g.fallbacks ?? 0;
   const share = drawn + fallbacks ? ((drawn * 100) / (drawn + fallbacks)).toFixed(1) : '0';
+  $('render-adapter').textContent = adapterLabel(info);
   $('render-drawn').textContent = `${fmtCount(drawn)} (${share}%)`;
   $('render-fallbacks').textContent = fmtCount(fallbacks);
   $('render-rejected').textContent = fmtCount(g.deviceErrorCount ?? 0);
@@ -166,13 +213,8 @@ function showTiming(name: string, sample: DisplayTiming): void {
 function updateDisplayDebug(): void {
   const metrics = displayMetrics();
   const sampled = metrics.runSlice.count > 0;
-  $('display-debug-empty').hidden = sampled;
   $('display-debug-data').hidden = !sampled;
-  setNote(
-    'display-debug-badge',
-    sampled ? `${metrics.canvasUpdates}/${metrics.guestFrames} shown` : 'no samples',
-    sampled,
-  );
+  $<HTMLButtonElement>('btn-reset-display-debug').disabled = !sampled;
   if (!sampled) return;
   $('display-guest-frames').textContent = String(metrics.guestFrames);
   $('display-canvas-updates').textContent = String(metrics.canvasUpdates);

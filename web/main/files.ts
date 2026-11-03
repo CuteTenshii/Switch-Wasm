@@ -455,6 +455,7 @@ async function renderFiles(volume: Volume, dir: string, mine: number): Promise<v
   const entries = [...children(all, dir)].sort(([a, x], [b, y]) =>
     x.kind === y.kind ? a.localeCompare(b) : x.kind === 'dir' ? -1 : 1);
   list.textContent = '';
+  $<HTMLButtonElement>('btn-files-export').disabled = !entries.length;
   if (!entries.length) {
     message('Empty. Drop files or a folder here, or upload them.');
     return;
@@ -595,6 +596,7 @@ async function render(): Promise<void> {
   viewing = null;
   view.textContent = '';
   viewTools.textContent = '';
+  $<HTMLButtonElement>('btn-files-export').disabled = true;
   renderCrumbs();
   renderTools();
   message('Reading…');

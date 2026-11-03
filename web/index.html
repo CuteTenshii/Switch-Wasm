@@ -92,7 +92,7 @@
 
     <!-- Touch devices without a gamepad; read by touchpad.ts. Keyboard users have the keys. -->
     <div class="touchpad" id="touchpad" aria-hidden="true">
-      <div class="tp-side tp-left">
+      <div class="tp-side">
         <div class="tp-row"><span class="tp-btn tp-shoulder" data-button="ZL">ZL</span><span class="tp-btn tp-shoulder" data-button="L">L</span></div>
         <div class="tp-cross">
           <span class="tp-btn tp-up" data-button="UP"></span>
@@ -183,7 +183,7 @@
   </dialog>
 
   <dialog class="keyboard" id="keyboard" aria-labelledby="keyboard-title">
-    <form class="keyboard-form" id="keyboard-form" method="dialog">
+    <form id="keyboard-form" method="dialog">
       <h2 id="keyboard-title"></h2>
       <p class="muted tiny" id="keyboard-sub" hidden></p>
       <input class="text keyboard-text" id="keyboard-text" autocomplete="off" spellcheck="false"
@@ -335,15 +335,13 @@
     <details class="section" id="render-debug-section" data-debug-section="graphics" open hidden>
       <summary class="section-head">
         <span class="section-title">Rendering</span>
-        <span class="section-note" id="render-debug-badge">-</span>
+        <span class="section-note" id="render-debug-badge"></span>
       </summary>
       <div class="section-body">
-        <p class="muted tiny">Which renderer is drawing, and why. A draw the device cannot take runs
-          on the software rasterizer instead - and once enough of them have, the rasterizer keeps
-          every frame after, however well the device is working.</p>
-        <p class="tiny" id="render-status"></p>
+        <p class="tiny"><span id="render-status"></span> <info-tip id="render-tip"></info-tip></p>
         <div id="render-debug-data" hidden>
-          <dl class="debug-totals stacked">
+          <dl class="debug-totals">
+            <div><dt>GPU adapter</dt><dd id="render-adapter">-</dd></div>
             <div><dt>Draws on the device</dt><dd id="render-drawn">0</dd></div>
             <div><dt>Fell back</dt><dd id="render-fallbacks">0</dd></div>
             <div><dt>Rejected by the device</dt><dd id="render-rejected">0</dd></div>
@@ -353,7 +351,7 @@
             <div><dt>Texture cache hits</dt><dd id="render-texture-hits">-</dd></div>
           </dl>
           <p class="muted tiny debug-caption">Read from guest memory</p>
-          <dl class="debug-totals stacked">
+          <dl class="debug-totals">
             <div><dt>Textures</dt><dd id="render-read-textures">0 B</dd></div>
             <div><dt>Vertices</dt><dd id="render-read-vertex">0 B</dd></div>
             <div><dt>Constants</dt><dd id="render-read-constants">0 B</dd></div>
@@ -395,11 +393,9 @@
     <details class="section" id="display-debug-section" data-debug-section="graphics" open hidden>
       <summary class="section-head">
         <span class="section-title">Display</span>
-        <span class="section-note" id="display-debug-badge">no samples</span>
       </summary>
       <div class="section-body">
         <p class="muted tiny">Worker-side timing of each run slice and of painting its newest frame on the canvas. Guest frames presented between paints are counted as skipped.</p>
-        <p class="muted tiny" id="display-debug-empty">Run a title to collect display samples.</p>
         <div id="display-debug-data" hidden>
           <dl class="debug-totals">
             <div><dt>Guest frames</dt><dd id="display-guest-frames">0</dd></div>
@@ -427,12 +423,11 @@
     <details class="section" id="memory-debug-section" data-debug-section="memory" open hidden>
       <summary class="section-head">
         <span class="section-title">Guest RAM</span>
-        <span class="section-note" id="memory-debug-badge">-</span>
+        <span class="section-note" id="memory-debug-badge"></span>
       </summary>
       <div class="section-body">
         <p class="muted tiny">Pages of the title's address space that hold real memory. A page gets
           memory the first time the title writes to it and keeps it until the title unmaps it.</p>
-        <p class="muted tiny" id="memory-debug-empty">Run a title to see its memory.</p>
         <p class="tiny" id="memory-debug-error" hidden></p>
         <div id="memory-debug-data" hidden>
           <dl class="debug-totals">
@@ -468,7 +463,7 @@
     <details class="section" id="heap-debug-section" data-debug-section="memory" open hidden>
       <summary class="section-head">
         <span class="section-title">WebAssembly heap</span>
-        <span class="section-note" id="heap-debug-badge">-</span>
+        <span class="section-note" id="heap-debug-badge"></span>
       </summary>
       <div class="section-body">
         <p class="muted tiny">The emulator's linear memory, which holds every process's guest RAM

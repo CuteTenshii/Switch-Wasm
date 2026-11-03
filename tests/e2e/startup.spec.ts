@@ -20,22 +20,18 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   await page.getByRole('button', { name: 'Graphics' }).click();
   await expect(display).toBeVisible();
   await expect(page.getByText('Tracing', { exact: true })).toBeHidden();
-  await expect(display.locator('#display-debug-badge')).toHaveText('no samples');
-  await expect(display.locator('#display-debug-empty')).toHaveText(
-    'Run a title to collect display samples.',
-  );
   await expect(display.locator('#display-debug-data')).toBeHidden();
+  await expect(display.getByRole('button', { name: 'Reset samples' })).toBeDisabled();
 
   await bootElf(page, aarch64Elf([SVC_EXIT_PROCESS]));
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
-  await expect(display.locator('#display-debug-badge')).not.toHaveText('no samples');
   await expect(display.locator('#display-debug-data')).toBeVisible();
   // The renderer's state shows in its own section, not the log.
-  await expect(page.locator('#render-debug-badge')).toHaveText(/^(device|software|lost)$/);
+  await expect(page.locator('#render-debug-badge')).toHaveText(/^(WebGPU|software|lost)$/);
 
   await display.getByRole('button', { name: 'Reset samples' }).click();
-  await expect(display.locator('#display-debug-badge')).toHaveText('no samples');
   await expect(display.locator('#display-debug-data')).toBeHidden();
+  await expect(display.getByRole('button', { name: 'Reset samples' })).toBeDisabled();
 
   await page.setViewportSize({ width: 320, height: 700 });
   const categoryHeight = await page.getByRole('button', { name: 'Graphics' })
@@ -110,7 +106,6 @@ test('the memory section waits for a title, then shows where its RAM is', async 
   await expect(page.getByText('Tracing', { exact: true })).toBeHidden();
 
   const ram = page.locator('#memory-debug-section');
-  await expect(ram.locator('#memory-debug-empty')).toHaveText('Run a title to see its memory.');
   await expect(ram.locator('#memory-debug-data')).toBeHidden();
   // The heap is the core's, so it reports before any title runs.
   await expect(page.locator('#heap-size')).toHaveText(/^\d+(\.\d+)? [KMG]iB of 4 GiB$/);
@@ -128,7 +123,7 @@ test('the memory section waits for a title, then shows where its RAM is', async 
 
   await page.locator('#btn-stop').click();
   await expect(page.locator('body')).toHaveAttribute('data-state', 'idle');
-  await expect(ram.locator('#memory-debug-empty')).toBeVisible();
+  await expect(ram.locator('#memory-debug-data')).toBeHidden();
   await expect(page.locator('#heap-size')).not.toHaveText('-');
 });
 

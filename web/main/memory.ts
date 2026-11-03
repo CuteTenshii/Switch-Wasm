@@ -204,10 +204,9 @@ export async function updateMemoryDebug(): Promise<void> {
   $('memory-debug-error').hidden = true;
   await showHeap(report);
   const running = titleBooted();
-  $('memory-debug-empty').hidden = running;
   $('memory-debug-data').hidden = !running;
   if (!running) {
-    setNote('memory-debug-badge', '-', false);
+    setNote('memory-debug-badge', '', false);
     return;
   }
   setNote('memory-debug-badge', formatRate(rate()), false);
