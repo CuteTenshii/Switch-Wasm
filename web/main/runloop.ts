@@ -70,7 +70,7 @@ async function onSlice(report: SliceReport): Promise<void> {
   recordRunSlice(report.ms);
   // Stop does not wait for the slice in flight, so the session may be gone.
   if (aborted) return;
-  noteAudio(report.audioFormat);
+  noteAudio();
   if (report.housekeeping) applyHousekeeping(report.housekeeping);
   noteFrame(report);
   if (!report.stopped) return;

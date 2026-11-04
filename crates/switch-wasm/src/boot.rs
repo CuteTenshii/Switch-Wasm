@@ -13,6 +13,7 @@ use crate::{container, nsp_file_source, session, Added, Dlc};
 pub extern "C" fn switch_end_title(handle: u32) {
     let s = session(handle);
     s.cpu.end_title();
+    crate::audio::drop_queued();
     s.control = None;
     s.last_error.clear();
 }

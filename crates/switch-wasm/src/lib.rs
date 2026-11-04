@@ -265,6 +265,8 @@ pub extern "C" fn switch_free(ptr: *mut u8, len: u32) {
 pub extern "C" fn switch_init() {
     install_panic_hook();
     attach_jit();
+    #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+    audio::announce_ring();
 }
 
 /// Let the core run the blocks it emits, where the build can compile them.

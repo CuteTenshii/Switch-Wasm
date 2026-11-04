@@ -8,8 +8,7 @@ use crate::session;
 
 /// The PCM format the guest produces, packed as `(channels << 24) | sample_rate`.
 /// Zero until the guest opens an audio device.
-#[no_mangle]
-pub extern "C" fn switch_audio_format(handle: u32) -> u32 {
+fn format(handle: u32) -> u32 {
     let (rate, channels) = session(handle).cpu.audio_format();
     if rate == 0 {
         return 0;
@@ -38,22 +37,56 @@ static RING: Ring = Ring {
     samples: [const { AtomicI16::new(0) }; RING_SAMPLES],
 };
 
-/// The ring's address and capacity in samples, for the worklet.
-#[no_mangle]
-pub extern "C" fn switch_audio_ring() -> u32 {
-    &RING as *const Ring as u32
+/// Hand the page the ring over the shared memory, for its audio worklet to read.
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+pub(crate) fn announce_ring() {
+    use js_sys::{Object, Reflect, WebAssembly};
+    use wasm_bindgen::JsCast;
+    let memory: WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
+    let message = Object::new();
+    for (key, value) in [
+        ("type", "audio_ring".into()),
+        ("buffer", memory.buffer()),
+        ("at", (&RING as *const Ring as u32).into()),
+        ("samples", (RING_SAMPLES as u32).into()),
+    ] {
+        Reflect::set(&message, &key.into(), &value).ok();
+    }
+    post(&message);
 }
 
-#[no_mangle]
-pub extern "C" fn switch_audio_ring_samples() -> u32 {
-    RING_SAMPLES as u32
+/// Tell the page the format changed, so it opens the output on the first sound.
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+fn announce_format(format: u32) {
+    use js_sys::{Object, Reflect};
+    let message = Object::new();
+    Reflect::set(&message, &"type".into(), &"audio_format".into()).ok();
+    Reflect::set(&message, &"format".into(), &format.into()).ok();
+    post(&message);
+}
+
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+fn post(message: &js_sys::Object) {
+    use wasm_bindgen::JsCast;
+    let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
+    scope.post_message(message).ok();
+}
+
+/// Drop what is queued in the ring, for a title that has ended.
+pub(crate) fn drop_queued() {
+    RING.read.store(RING.written.load(Acquire), Release);
 }
 
 /// Move what the guest queued into the ring, as far as it has room.
-#[no_mangle]
-pub extern "C" fn switch_audio_feed(handle: u32) {
+pub(crate) fn feed(handle: u32) {
     let s = session(handle);
-    RING.format.store(switch_audio_format(handle), Relaxed);
+    let format = format(handle);
+    #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+    if RING.format.swap(format, Relaxed) != format {
+        announce_format(format);
+    }
+    #[cfg(not(all(feature = "gpu", target_arch = "wasm32")))]
+    RING.format.store(format, Relaxed);
     let written = RING.written.load(Relaxed);
     let free = RING_SAMPLES - written.wrapping_sub(RING.read.load(Acquire)) as usize;
     const CHUNK: usize = 4096;

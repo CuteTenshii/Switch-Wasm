@@ -9,6 +9,7 @@ let audioCtx: AudioContext | null = null;
 // Opening is tried once per page: a failure is reported and sound stays off.
 let opening = false;
 let unavailable = false;
+let format = 0;
 let lastFormat = 0;
 // Warnings already given, so a persisting state is reported once.
 let saidSuspended = false;
@@ -17,8 +18,12 @@ export function setAudioRing(options: RingOptions): void {
   ring = options;
 }
 
-// Each slice's audio format; the first sound opens the output.
-export function noteAudio(format: number): void {
+export function setAudioFormat(next: number): void {
+  format = next;
+}
+
+// Each slice: the first sound opens the output, and a held-back one is retried.
+export function noteAudio(): void {
   if (!format || !ring) return;
   if (!audioCtx) {
     if (!opening && !unavailable) void open(ring);
@@ -84,11 +89,8 @@ async function resume(ctx: AudioContext): Promise<void> {
   }
 }
 
-// For a session being replaced: drop what its guest queued.
+// For a session being replaced; the worker drops what its guest queued.
 export function resetAudio(): void {
   lastFormat = 0;
   saidSuspended = false;
-  if (!ring) return;
-  const head = new Uint32Array(ring.buffer, ring.at, 2);
-  Atomics.store(head, 1, Atomics.load(head, 0));
 }

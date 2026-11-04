@@ -1,7 +1,7 @@
 // Promise-based RPC to the emulator worker over postMessage.
 
 import type { CallRequest, Commands, SliceReport, WorkerMessage } from '../shared/protocol';
-import { setAudioRing } from './audio';
+import { setAudioFormat, setAudioRing } from './audio';
 import { log } from './log';
 
 let worker: Worker | null = null;
@@ -73,38 +73,40 @@ export function initWorker(): void {
   worker = new Worker(new URL('../worker/index.ts', import.meta.url), { type: 'module' });
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
     const d = e.data;
-    if ('type' in d && d.type === 'log') {
-      log(d.text, d.level);
+    if (!('type' in d)) {
+      const p = pending.get(d.id);
+      if (!p) return;
+      pending.delete(d.id);
+      if (d.ok) p.resolve(d.result);
+      else p.reject(new Error(d.error || 'unknown error'));
       return;
     }
-    if ('type' in d && d.type === 'slice') {
-      loopEvents?.slice(d.report);
-      return;
+    switch (d.type) {
+      case 'log':
+        log(d.text, d.level);
+        break;
+      case 'slice':
+        loopEvents?.slice(d.report);
+        break;
+      case 'loop_failed':
+        loopEvents?.failed(d.error);
+        break;
+      case 'audio_ring':
+        setAudioRing(d);
+        break;
+      case 'audio_format':
+        setAudioFormat(d.format);
+        break;
+      case 'nand_progress':
+        nandProgress?.(d.done, d.total);
+        break;
+      case 'ready':
+        ready = true;
+        // A core that failed to load still reports ready, with the error.
+        if (d.error) log('core failed to load: ' + d.error, 'error');
+        readyResolve();
+        break;
     }
-    if ('type' in d && d.type === 'loop_failed') {
-      loopEvents?.failed(d.error);
-      return;
-    }
-    if ('type' in d && d.type === 'nand_progress') {
-      nandProgress?.(d.done, d.total);
-      return;
-    }
-    if ('type' in d && d.type === 'audio_ring') {
-      setAudioRing(d);
-      return;
-    }
-    if ('type' in d) {
-      ready = true;
-      // A core that failed to load still reports ready, with the error.
-      if (d.error) log('core failed to load: ' + d.error, 'error');
-      readyResolve();
-      return;
-    }
-    const p = pending.get(d.id);
-    if (!p) return;
-    pending.delete(d.id);
-    if (d.ok) p.resolve(d.result);
-    else p.reject(new Error(d.error || 'unknown error'));
   };
   worker.onerror = (e) => {
     readyResolve();

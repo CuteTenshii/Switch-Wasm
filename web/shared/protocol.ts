@@ -326,8 +326,6 @@ export interface SliceReport {
   width: number;
   height: number;
   paintMs: number | null;
-  // `(channels << 24) | rate` of the audio in the ring; 0 before a device opens.
-  audioFormat: number;
   housekeeping: Housekeeping | null;
 }
 
@@ -342,5 +340,7 @@ export type WorkerMessage =
   | { type: 'nand_progress'; done: number; total: number }
   // Once at startup: the ring audio is written to, in the worker's shared memory.
   | { type: 'audio_ring'; buffer: SharedArrayBuffer; at: number; samples: number }
+  // `(channels << 24) | rate` of the audio in the ring, sent when it changes; 0 before a device opens.
+  | { type: 'audio_format'; format: number }
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: string };

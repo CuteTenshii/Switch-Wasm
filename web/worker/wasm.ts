@@ -80,11 +80,6 @@ export interface WasmExports {
   switch_frame_count(handle: number): number;
   switch_fb_snapshot(handle: number, buf: number, maxlen: number): number;
 
-  switch_audio_format(handle: number): number;
-  switch_audio_feed(handle: number): void;
-  switch_audio_ring(): number;
-  switch_audio_ring_samples(): number;
-
   switch_sd_write_file(
     handle: number, pathPtr: number, pathLen: number,
     dataPtr: number, dataLen: number): number;

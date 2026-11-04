@@ -17,13 +17,15 @@ pub extern "C" fn switch_run(handle: u32, max_steps: u64) -> i64 {
     }
     #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
     crate::idb::usage::refresh_if_due(handle, s.cpu.take_storage_usage_wanted());
-    match s.cpu.run(max_steps) {
+    let steps = match s.cpu.run(max_steps) {
         Ok(report) => report.steps as i64,
         Err(e) => {
             s.last_error = e.to_string();
             -1
         }
-    }
+    };
+    crate::audio::feed(handle);
+    steps
 }
 
 /// Tie the guest clock to real time: `elapsed` cycles have passed since the last call.

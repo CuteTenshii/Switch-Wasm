@@ -98,7 +98,6 @@ function slice(): void {
   flushLog();
   const paintMs = paint();
 
-  core.switch_audio_feed(state.handle);
   const report: SliceReport = {
     ended: done,
     steps,
@@ -109,7 +108,6 @@ function slice(): void {
     width: core.switch_fb_width(state.handle),
     height: core.switch_fb_height(state.handle),
     paintMs,
-    audioFormat: core.switch_audio_format(state.handle),
     housekeeping: stopped || ++tick % HOUSEKEEPING_EVERY === 0 ? housekeeping() : null,
   };
   ctx.postMessage({ type: 'slice', report } satisfies WorkerMessage);
