@@ -2,8 +2,7 @@
 
 use switch_core::cpu::SaveKey;
 
-use crate::{session, write_into};
-use switch_core::json;
+use crate::session;
 
 // The emulated SD card. Paths are guest paths; `sdmc:` and extra slashes are
 // normalized away.
@@ -74,84 +73,10 @@ pub extern "C" fn switch_sd_read_file(
     }
 }
 
-/// How many paths the guest has changed and not yet drained.
-#[no_mangle]
-pub extern "C" fn switch_sd_pending_changes(handle: u32) -> u32 {
-    session(handle).cpu.fs.pending_changes() as u32
-}
-
-/// Drain the guest's SD card changes as JSON, e.g.
-/// `[{"path":"/switch/a.json","kind":"file","size":12}]`. Drains even if the
-/// result does not fit; size `buf` from `switch_sd_pending_changes`.
-#[no_mangle]
-pub extern "C" fn switch_sd_take_changes_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let changes = session(handle).cpu.fs.take_changes();
-    write_changes_json(&changes, buf, maxlen)
-}
-
-/// Serialize drained [`Change`](switch_core::vfs::Change)s into `buf`.
-fn write_changes_json(changes: &[switch_core::vfs::Change], buf: *mut u8, maxlen: u32) -> u32 {
-    let json = json::array(|a| {
-        for change in changes {
-            let kind = match change.kind {
-                Some(switch_core::vfs::ENTRY_TYPE_DIR) => "dir",
-                Some(_) => "file",
-                None => "deleted",
-            };
-            a.object(|o| {
-                o.field("path", &change.path)
-                    .field("kind", kind)
-                    .field("size", change.size);
-            });
-        }
-    });
-    write_into(buf, maxlen, json.as_bytes())
-}
-
 // save data
 //
 // A save is `save_id` plus the uid as `user_lo` (first eight bytes) and `user_hi`
 // (last eight), little-endian, both zero for a save no user owns. See `SaveKey`.
-
-/// Every save the session has opened, as JSON:
-/// `["8000000000000050","0100000000001000@<32 hex digits of uid>"]`.
-#[no_mangle]
-pub extern "C" fn switch_save_ids_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let mut keys = session(handle).cpu.save_keys();
-    keys.sort_unstable();
-    let json = json::array(|a| {
-        a.extend(keys.iter().map(ToString::to_string));
-    });
-    write_into(buf, maxlen, json.as_bytes())
-}
-
-/// How many paths the guest has changed in this save and not yet had drained.
-#[no_mangle]
-pub extern "C" fn switch_save_pending_changes(
-    handle: u32,
-    save_id: u64,
-    user_lo: u64,
-    user_hi: u64,
-) -> u32 {
-    let key = SaveKey::from_halves(save_id, user_lo, user_hi);
-    session(handle).cpu.save_data_mut(key).pending_changes() as u32
-}
-
-/// Drain a save's changes, as `switch_sd_take_changes_json` does. Drains even if the
-/// result does not fit.
-#[no_mangle]
-pub extern "C" fn switch_save_take_changes_json(
-    handle: u32,
-    save_id: u64,
-    user_lo: u64,
-    user_hi: u64,
-    buf: *mut u8,
-    maxlen: u32,
-) -> u32 {
-    let key = SaveKey::from_halves(save_id, user_lo, user_hi);
-    let changes = session(handle).cpu.save_data_mut(key).take_changes();
-    write_changes_json(&changes, buf, maxlen)
-}
 
 /// Put a file into a save, creating the save. Not reported as a change.
 #[no_mangle]

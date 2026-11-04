@@ -7,15 +7,11 @@ use crate::container::{switch_nsp_files_json, switch_open_nsp, switch_read_file}
 use crate::debug::switch_set_trace_channels;
 use crate::log::{switch_log_line, switch_log_next};
 use crate::storage::{
-    switch_save_create_dir, switch_save_file_size, switch_save_ids_json,
-    switch_save_pending_changes, switch_save_read_file, switch_save_take_changes_json,
-    switch_save_write_file, switch_sd_file_size, switch_sd_pending_changes, switch_sd_read_file,
-    switch_sd_take_changes_json, switch_sd_write_file,
+    switch_save_create_dir, switch_save_file_size, switch_save_read_file, switch_save_write_file,
+    switch_sd_file_size, switch_sd_read_file, switch_sd_write_file,
 };
-use crate::users::{
-    switch_take_profile_edits, switch_user_picture, switch_user_stage, switch_users_commit,
-    switch_users_json,
-};
+use crate::users::{switch_user_stage, switch_users_commit};
+use switch_core::vfs::{Change, ENTRY_TYPE_DIR, ENTRY_TYPE_FILE};
 
 /// Serializes tests: the session table is not thread-safe under `cargo test`.
 static HOST: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -182,11 +178,12 @@ fn a_new_session_inherits_the_log_but_not_the_panic_of_the_one_before_it() {
     );
 }
 
-fn take_changes(handle: u32) -> String {
-    let cap = 64 * 1024;
-    let mut buf = vec![0u8; cap];
-    let n = switch_sd_take_changes_json(handle, buf.as_mut_ptr(), cap as u32);
-    String::from_utf8(buf[..n as usize].to_vec()).unwrap()
+fn change(path: &str, kind: Option<u8>, size: u64) -> Change {
+    Change {
+        path: path.to_owned(),
+        kind,
+        size,
+    }
 }
 
 fn put(handle: u32, path: &str, data: &[u8]) {
@@ -223,18 +220,23 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
         ),
         0
     );
-    assert_eq!(
-        switch_save_pending_changes(handle, SAVE, USER_LO, USER_HI),
-        0
-    );
+    assert_eq!(session(handle).cpu.save_data_mut(key).pending_changes(), 0);
 
     // A save with only a directory is listed; the shared save is a separate one.
     switch_save_create_dir(handle, SAVE, 0, 0, b"/".as_ptr(), 1);
-    let mut ids = [0u8; 128];
-    let n = switch_save_ids_json(handle, ids.as_mut_ptr(), ids.len() as u32) as usize;
+    let mut ids: Vec<String> = session(handle)
+        .cpu
+        .save_keys()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    ids.sort_unstable();
     assert_eq!(
-        std::str::from_utf8(&ids[..n]).unwrap(),
-        r#"["0100000000001000","0100000000001000@000102030405060708090a0b0c0d0e0f"]"#
+        ids,
+        [
+            "0100000000001000",
+            "0100000000001000@000102030405060708090a0b0c0d0e0f"
+        ]
     );
 
     // A guest write is a change, in the save rather than on the card.
@@ -243,28 +245,19 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
         .save_data_mut(key)
         .write("/settings.dat", 0, b"12345")
         .unwrap();
+    assert_eq!(session(handle).cpu.save_data_mut(key).pending_changes(), 1);
     assert_eq!(
-        switch_save_pending_changes(handle, SAVE, USER_LO, USER_HI),
-        1
-    );
-    assert_eq!(switch_save_pending_changes(handle, SAVE, 0, 0), 0);
-    let mut buf = [0u8; 256];
-    let n = switch_save_take_changes_json(
-        handle,
-        SAVE,
-        USER_LO,
-        USER_HI,
-        buf.as_mut_ptr(),
-        buf.len() as u32,
-    );
-    assert_eq!(
-        std::str::from_utf8(&buf[..n as usize]).unwrap(),
-        r#"[{"path":"/settings.dat","kind":"file","size":5}]"#
-    );
-    assert_eq!(
-        switch_save_pending_changes(handle, SAVE, USER_LO, USER_HI),
+        session(handle)
+            .cpu
+            .save_data_mut(SaveKey::shared(SAVE))
+            .pending_changes(),
         0
     );
+    assert_eq!(
+        session(handle).cpu.save_data_mut(key).take_changes(),
+        [change("/settings.dat", Some(ENTRY_TYPE_FILE), 5)]
+    );
+    assert_eq!(session(handle).cpu.save_data_mut(key).pending_changes(), 0);
     assert_eq!(session(handle).cpu.fs.entry_type("/settings.dat"), None);
 
     assert_eq!(
@@ -322,33 +315,23 @@ fn users_are_staged_committed_and_read_back() {
     assert_eq!(switch_users_commit(handle, ben_lo, ben_hi), 0);
     assert_eq!(session(handle).cpu.user_nickname(), "Ben");
 
-    let mut buf = [0u8; 512];
-    let n = switch_users_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    let users = session(handle).cpu.users();
+    assert_eq!(users.len(), 2);
     assert_eq!(
-        std::str::from_utf8(&buf[..n]).unwrap(),
-        concat!(
-            r#"[{"uid":"000102030405060708090a0b0c0d0e0f","nickname":"Ann \"A\"","#,
-            r#""editedAt":1700000000,"pictureLen":4},"#,
-            r#"{"uid":"11110000000000002222000000000000","nickname":"Ben","#,
-            r#""editedAt":1700000000,"pictureLen":0}]"#
-        )
+        users[0].uid,
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
-    let mut out = [0u8; 8];
-    assert_eq!(
-        switch_user_picture(handle, ann_lo, ann_hi, out.as_mut_ptr(), out.len() as u32),
-        4
-    );
-    assert_eq!(&out[..4], &picture);
-    assert_eq!(
-        switch_user_picture(handle, ben_lo, ben_hi, out.as_mut_ptr(), out.len() as u32),
-        0
-    );
+    assert_eq!(users[0].nickname, "Ann \"A\"");
+    assert_eq!(users[0].edited_at, 1_700_000_000);
+    assert_eq!(users[0].picture.as_deref(), Some(&picture[..]));
+    assert_eq!(users[1].nickname, "Ben");
+    assert_eq!(users[1].picture, None);
 
     // A list naming a player not in it is refused and changes nothing.
     stage(ann_lo, ann_hi, "Ann", &[]);
     assert_eq!(switch_users_commit(handle, 9, 9), 4);
     assert_eq!(session(handle).cpu.users().len(), 2);
-    assert_eq!(switch_take_profile_edits(handle), 0);
+    assert!(!session(handle).cpu.take_profile_edits());
 }
 
 #[test]
@@ -357,8 +340,8 @@ fn the_sd_card_round_trips_through_the_host_entry_points() {
 
     // Restores are not reported as changes.
     put(handle, "sdmc:/switch/restored.txt", b"hello");
-    assert_eq!(switch_sd_pending_changes(handle), 0);
-    assert_eq!(take_changes(handle), "[]");
+    assert_eq!(session(handle).cpu.fs.pending_changes(), 0);
+    assert!(session(handle).cpu.fs.take_changes().is_empty());
 
     // A guest write is: `IFile::Write` at offset 0 of a new file.
     {
@@ -368,16 +351,18 @@ fn the_sd_card_round_trips_through_the_host_entry_points() {
         cpu.fs.guest_create_dir("/switch/saves");
         cpu.fs.remove("/switch/restored.txt");
     }
-    assert_eq!(switch_sd_pending_changes(handle), 3);
+    assert_eq!(session(handle).cpu.fs.pending_changes(), 3);
     assert_eq!(
-        take_changes(handle),
-        r#"[{"path":"/switch/cfg.json","kind":"file","size":7},"#.to_owned()
-            + r#"{"path":"/switch/restored.txt","kind":"deleted","size":0},"#
-            + r#"{"path":"/switch/saves","kind":"dir","size":0}]"#
+        session(handle).cpu.fs.take_changes(),
+        [
+            change("/switch/cfg.json", Some(ENTRY_TYPE_FILE), 7),
+            change("/switch/restored.txt", None, 0),
+            change("/switch/saves", Some(ENTRY_TYPE_DIR), 0),
+        ]
     );
     // Draining clears them.
-    assert_eq!(switch_sd_pending_changes(handle), 0);
-    assert_eq!(take_changes(handle), "[]");
+    assert_eq!(session(handle).cpu.fs.pending_changes(), 0);
+    assert!(session(handle).cpu.fs.take_changes().is_empty());
 
     let path = "/switch/cfg.json";
     assert_eq!(
@@ -534,18 +519,6 @@ fn a_cartridge_image_opens_as_a_container() {
     assert_eq!(got, 16);
     assert_eq!(out[..], payload[0x700..0x710]);
 
-    switch_free_session(handle);
-}
-
-#[test]
-fn a_path_json_cannot_carry_raw_is_escaped() {
-    let (_host, handle) = new_session();
-    session(handle).cpu.fs.create_file(r#"/switch/a"b\c"#, 0);
-    let json = take_changes(handle);
-    assert_eq!(
-        json,
-        r#"[{"path":"/switch/a\"b\\c","kind":"file","size":0}]"#
-    );
     switch_free_session(handle);
 }
 

@@ -1,8 +1,7 @@
 //! The console's user accounts.
 
+use crate::session;
 use crate::storage::sd_path;
-use crate::{session, write_into};
-use switch_core::json;
 
 // The console's users: staged one at a time, committed whole before the title starts.
 // A uid travels as two little-endian halves.
@@ -55,52 +54,4 @@ pub extern "C" fn switch_users_commit(handle: u32, current_lo: u64, current_hi: 
         Err(UsersRefused::DuplicateUid) => 3,
         Err(UsersRefused::UnknownCurrent) => 4,
     }
-}
-
-/// Whether the guest has edited a profile since the last call.
-#[no_mangle]
-pub extern "C" fn switch_take_profile_edits(handle: u32) -> u32 {
-    u32::from(session(handle).cpu.take_profile_edits())
-}
-
-/// The users as JSON: `[{"uid":"<32 hex digits>","nickname":"Player","editedAt":0,
-/// "pictureLen":0}]`. Pictures come from `switch_user_picture`.
-#[no_mangle]
-pub extern "C" fn switch_users_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let json = json::array(|a| {
-        for user in session(handle).cpu.users() {
-            a.object(|o| {
-                let uid: String = user.uid.iter().map(|byte| format!("{byte:02x}")).collect();
-                o.field("uid", uid)
-                    .field("nickname", &user.nickname)
-                    .field("editedAt", user.edited_at)
-                    .field("pictureLen", user.picture.as_ref().map_or(0, Vec::len));
-            });
-        }
-    });
-    write_into(buf, maxlen, json.as_bytes())
-}
-
-/// Copy a user's picture into `buf`. Returns bytes copied, or 0.
-#[no_mangle]
-pub extern "C" fn switch_user_picture(
-    handle: u32,
-    uid_lo: u64,
-    uid_hi: u64,
-    buf: *mut u8,
-    maxlen: u32,
-) -> u32 {
-    let uid = uid_from_halves(uid_lo, uid_hi);
-    let users = session(handle).cpu.users();
-    let Some(picture) = users
-        .iter()
-        .find(|user| user.uid == uid)
-        .and_then(|user| user.picture.as_ref())
-    else {
-        return 0;
-    };
-    let n = picture.len().min(maxlen as usize);
-    let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
-    dst.copy_from_slice(&picture[..n]);
-    n as u32
 }
