@@ -80,7 +80,7 @@ pub(crate) struct Process {
     /// Base DLC id from the NACP; zero means derive it from the program id.
     pub(crate) add_on_content_base_id: u64,
     /// The save an `fsp-srv` object addresses; absent for the SD card.
-    pub(crate) fs_mount: IdMap<u64, SaveKey>,
+    pub(crate) fs_mount: IdMap<u64, Mount>,
     /// The data archive an open `IStorage` serves; absent for the process's own RomFS.
     pub(crate) fs_storage_archive: IdMap<u64, u64>,
     /// `FsSaveDataInfo` records an open save scan has yet to yield.

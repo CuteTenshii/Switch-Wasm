@@ -1,7 +1,7 @@
 //! `fsp-srv` and its objects: `IFileSystem`, `IFile`, `IDirectory`, `IStorage`
 //! and the save-data interfaces. Storage reads stream from a [`crate::source::ByteSource`].
 
-use crate::cpu::{Cpu, SaveKey};
+use crate::cpu::{Cpu, Mount, SaveKey};
 use crate::trace::{Level, Trace};
 use crate::Result;
 use std::collections::VecDeque;
@@ -128,6 +128,10 @@ impl SaveDataFilter {
             && self.index.is_none_or(|i| i == 0)
     }
 }
+
+/// The `BisPartitionId`s a console serves.
+const BIS_PRODINFOF: u32 = 28;
+pub(crate) const BIS_SYSTEM: u32 = 31;
 
 /// `fs`'s "path not found" (2002-0001).
 const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
@@ -301,7 +305,7 @@ impl FsActivity {
     }
 }
 
-fn file_text(mount: Option<SaveKey>, path: &str) -> String {
+fn file_text(mount: Mount, path: &str) -> String {
     format!("{}:{path}", mount_text(mount))
 }
 
@@ -312,10 +316,17 @@ fn storage_text(archive: Option<u64>) -> String {
     }
 }
 
-fn mount_text(mount: Option<SaveKey>) -> String {
+fn mount_text(mount: Mount) -> String {
     match mount {
-        Some(key) => format!("save {key}"),
-        None => "sdmc".to_owned(),
+        Mount::Save(key) => format!("save {key}"),
+        Mount::Bis(partition) => match partition {
+            28 => "bis PRODINFOF".to_owned(),
+            29 => "bis SAFE".to_owned(),
+            30 => "bis USER".to_owned(),
+            31 => "bis SYSTEM".to_owned(),
+            other => format!("bis {other}"),
+        },
+        Mount::Sd => "sdmc".to_owned(),
     }
 }
 
@@ -407,9 +418,19 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
             }
             Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // 18 = OpenSdCardFileSystem, 11 = OpenBisFileSystem.
-            Some(18) | Some(11) => {
+            Some(18) => {
                 self.reply_with_interface(tls, handle, "fsp-srv-fs")?;
+                Ok(())
+            }
+            // 11 = OpenBisFileSystem(BisPartitionId): PRODINFOF, SAFE, USER and SYSTEM.
+            Some(11) => {
+                let partition = self.mem.read_u32(self.ipc_request_data(tls))?;
+                if !(BIS_PRODINFOF..=BIS_SYSTEM).contains(&partition) {
+                    self.warn_no_implementation("fsp-srv", cmd_id);
+                    return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
+                }
+                let key = self.reply_with_interface(tls, handle, "fsp-srv-fs")?;
+                self.set_mount(key, Mount::Bis(partition));
                 Ok(())
             }
             // 200 = OpenDataStorageByCurrentProcess: the title's RomFS as a raw `IStorage`.
@@ -463,7 +484,7 @@ impl Cpu {
                     return self.write_ipc_response(tls, 0, &[], &[], &[]);
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-fs")?;
-                self.set_mount(key, Some(id));
+                self.set_mount(key, Mount::Save(id));
                 Ok(())
             }
             // 60 = all spaces, 61 = one space, 62 = cache storage (none), 68 = filtered.
@@ -975,7 +996,8 @@ impl Cpu {
             },
             // GetFreeSpaceSize / GetTotalSpaceSize
             Some(11) | Some(12) => {
-                let bytes = 32u64 << 30;
+                let (free, total) = self.space_of(mount);
+                let bytes = if cmd_id == Some(11) { free } else { total };
                 self.write_ipc_response(tls, 0, &[], &bytes.to_le_bytes(), &[])
             }
             // GetFileTimeStampRaw: times are not recorded, so `is_valid` is 0.
@@ -1384,6 +1406,77 @@ mod tests {
             cpu.mem.read_u32(TLS + 0x20).unwrap(),
             u32::from(crate::vfs::ENTRY_TYPE_DIR)
         );
+    }
+
+    #[test]
+    fn each_bis_partition_is_its_own_storage_apart_from_the_sd_card() {
+        let mut cpu = request(false, 11, &[]);
+        cpu.record_handle(9, "fsp-srv");
+
+        let open = |cpu: &mut Cpu, partition: u32| {
+            write_request(cpu, 11, &partition.to_le_bytes());
+            cpu.fsp_srv_request(TLS, Some(11), 9).unwrap();
+            (
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64,
+            )
+        };
+        let (result, user) = open(&mut cpu, 30);
+        assert_eq!(result, 0, "opening USER");
+        let (_, system) = open(&mut cpu, 31);
+
+        write_path_request(&mut cpu, 2, "/Album", &[]);
+        cpu.fs_request(TLS, Some(2), user).unwrap();
+        assert_eq!(
+            cpu.bis[&30].entry_type("/Album"),
+            Some(crate::vfs::ENTRY_TYPE_DIR)
+        );
+        assert_eq!(
+            cpu.bis.get(&31).and_then(|vfs| vfs.entry_type("/Album")),
+            None
+        );
+        assert_eq!(
+            cpu.fs.entry_type("/Album"),
+            None,
+            "must not land on the SD card"
+        );
+
+        write_path_request(&mut cpu, 7, "/Album", &[]);
+        cpu.fs_request(TLS, Some(7), system).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), super::PATH_NOT_FOUND);
+
+        assert_eq!(
+            open(&mut cpu, 5).0,
+            super::PATH_NOT_FOUND,
+            "a boot partition"
+        );
+    }
+
+    #[test]
+    fn free_and_total_space_follow_what_the_host_reports_per_storage() {
+        let mut cpu = request(false, 11, &[]);
+        cpu.record_handle(9, "fsp-srv");
+        cpu.set_storage_usage(crate::cpu::StorageUsage {
+            sd: 100,
+            system: 300,
+            user: 0,
+            free: 1000,
+        });
+        let space = |cpu: &mut Cpu, partition: Option<u32>, cmd: u32| {
+            let open = if partition.is_some() { 11 } else { 18 };
+            write_request(cpu, open, &partition.unwrap_or(0).to_le_bytes());
+            cpu.fsp_srv_request(TLS, Some(open), 9).unwrap();
+            let fs = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+            write_path_request(cpu, cmd, "/", &[]);
+            cpu.fs_request(TLS, Some(cmd), fs).unwrap();
+            cpu.mem.read_u64(TLS + 0x20).unwrap()
+        };
+        assert_eq!(space(&mut cpu, None, 11), 1000, "SD free");
+        assert_eq!(space(&mut cpu, None, 12), 1100, "SD total");
+        assert_eq!(space(&mut cpu, Some(31), 12), 1300, "SYSTEM total");
+        assert_eq!(space(&mut cpu, Some(29), 12), 1000, "SAFE total");
+        assert!(cpu.take_storage_usage_wanted());
+        assert!(!cpu.take_storage_usage_wanted());
     }
 
     /// Open a save scan with `cmd` and `payload`, then read it one entry at a time.

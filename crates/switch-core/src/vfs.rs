@@ -1,6 +1,9 @@
 //! The emulated SD card: a path-addressed in-memory filesystem behind `fsp-srv`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+
+use crate::source::ByteSource;
 
 /// `FsDirEntryType`.
 pub const ENTRY_TYPE_DIR: u8 = 0;
@@ -14,10 +17,12 @@ pub struct DirEntry {
     pub size: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum Node {
     Dir,
     File(Vec<u8>),
+    /// Read-only, read from its source on demand.
+    Mounted(Rc<dyn ByteSource>),
 }
 
 #[derive(Debug, Default)]
@@ -219,19 +224,32 @@ impl Vfs {
     pub fn entry_type(&self, path: &str) -> Option<u8> {
         match self.nodes.get(&Self::normalize(path))? {
             Node::Dir => Some(ENTRY_TYPE_DIR),
-            Node::File(_) => Some(ENTRY_TYPE_FILE),
+            Node::File(_) | Node::Mounted(_) => Some(ENTRY_TYPE_FILE),
         }
     }
 
     pub fn file(&self, path: &str) -> Option<&[u8]> {
         match self.nodes.get(&Self::normalize(path))? {
             Node::File(data) => Some(data),
-            Node::Dir => None,
+            Node::Dir | Node::Mounted(_) => None,
         }
     }
 
     pub fn size(&self, path: &str) -> Option<u64> {
-        self.file(path).map(|data| data.len() as u64)
+        match self.nodes.get(&Self::normalize(path))? {
+            Node::File(data) => Some(data.len() as u64),
+            Node::Mounted(source) => Some(source.len()),
+            Node::Dir => None,
+        }
+    }
+
+    /// Put a read-only file backed by `source` at `path`, with its parents. Not a guest change.
+    pub fn mount_source(&mut self, path: &str, source: Rc<dyn ByteSource>) {
+        let path = Self::normalize(path);
+        if let Some(parent) = Self::parent_of(&path) {
+            self.create_dir(&parent);
+        }
+        self.nodes.insert(path, Node::Mounted(source));
     }
 
     /// Immediate children of a directory, or `None` when it is not one.
@@ -258,11 +276,12 @@ impl Vfs {
                 name: name.to_owned(),
                 kind: match node {
                     Node::Dir => ENTRY_TYPE_DIR,
-                    Node::File(_) => ENTRY_TYPE_FILE,
+                    Node::File(_) | Node::Mounted(_) => ENTRY_TYPE_FILE,
                 },
                 size: match node {
                     Node::Dir => 0,
                     Node::File(data) => data.len() as u64,
+                    Node::Mounted(source) => source.len(),
                 },
             });
         }
@@ -271,6 +290,9 @@ impl Vfs {
 
     /// Read from `offset`. `None` when not a file.
     pub fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Option<usize> {
+        if let Node::Mounted(source) = self.nodes.get(&Self::normalize(path))? {
+            return Some(source.read_at(offset, buf).unwrap_or(0));
+        }
         let data = self.file(path)?;
         let start = (offset as usize).min(data.len());
         let n = buf.len().min(data.len() - start);
@@ -282,6 +304,24 @@ impl Vfs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mounted_source_lists_and_reads_but_refuses_writes() {
+        let mut vfs = Vfs::empty();
+        vfs.mount_source(
+            "/Contents/registered/a.nca",
+            Rc::new(crate::source::MemSource(b"abcdef".to_vec())),
+        );
+        assert_eq!(vfs.entry_type("/Contents/registered"), Some(ENTRY_TYPE_DIR));
+        assert_eq!(vfs.size("/Contents/registered/a.nca"), Some(6));
+        let listed = vfs.read_dir("/Contents/registered").unwrap();
+        assert_eq!((listed[0].name.as_str(), listed[0].size), ("a.nca", 6));
+        let mut buf = [0u8; 4];
+        assert_eq!(vfs.read("/Contents/registered/a.nca", 3, &mut buf), Some(3));
+        assert_eq!(&buf[..3], b"def");
+        assert_eq!(vfs.write("/Contents/registered/a.nca", 0, b"x"), None);
+        assert!(vfs.pending_changes() == 0);
+    }
 
     #[test]
     fn normalize_strips_the_device_and_resolves_dot_components() {

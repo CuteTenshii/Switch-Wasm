@@ -9,6 +9,25 @@ pub struct SaveKey {
     pub user: [u8; 16],
 }
 
+/// What an `IFileSystem` object serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mount {
+    #[default]
+    Sd,
+    Save(SaveKey),
+    /// A BIS partition id (28 PRODINFOF, 29 SAFE, 30 USER, 31 SYSTEM).
+    Bis(u32),
+}
+
+/// Bytes the host has stored per storage, and what the origin has left to share between them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageUsage {
+    pub sd: u64,
+    pub system: u64,
+    pub user: u64,
+    pub free: u64,
+}
+
 impl SaveKey {
     pub const fn shared(id: u64) -> SaveKey {
         SaveKey { id, user: [0; 16] }
@@ -108,24 +127,69 @@ impl Cpu {
         self.saves.keys().copied().collect()
     }
 
-    pub(crate) fn vfs_for(&mut self, mount: Option<SaveKey>) -> &mut crate::vfs::Vfs {
+    pub(crate) fn vfs_for(&mut self, mount: Mount) -> &mut crate::vfs::Vfs {
         match mount {
-            Some(key) => self.saves.entry(key).or_insert_with(crate::vfs::Vfs::empty),
-            None => &mut self.fs,
+            Mount::Save(key) => self.saves.entry(key).or_insert_with(crate::vfs::Vfs::empty),
+            Mount::Bis(partition) => self
+                .bis
+                .entry(partition)
+                .or_insert_with(crate::vfs::Vfs::empty),
+            Mount::Sd => &mut self.fs,
         }
     }
 
-    pub(crate) fn mount_of(&self, key: u64) -> Option<SaveKey> {
-        self.process().fs_mount.get(&key).copied()
+    /// List NAND content `name` on the SYSTEM partition, read from `source`.
+    pub fn add_nand_content(
+        &mut self,
+        name: &str,
+        source: std::rc::Rc<dyn crate::source::ByteSource>,
+    ) {
+        self.bis
+            .entry(super::fs::BIS_SYSTEM)
+            .or_insert_with(crate::vfs::Vfs::empty)
+            .mount_source(&format!("/Contents/registered/{name}"), source);
     }
 
-    pub(crate) fn set_mount(&mut self, key: u64, mount: Option<SaveKey>) {
+    /// Report what the host has stored; until it does, every storage shows the stock card.
+    pub fn set_storage_usage(&mut self, usage: StorageUsage) {
+        self.storage_usage = Some(usage);
+    }
+
+    /// Whether a space query has run since the host last reported, so it should report again.
+    pub fn take_storage_usage_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.storage_usage_wanted)
+    }
+
+    /// `(free, total)` of the storage `mount` serves.
+    pub(crate) fn space_of(&mut self, mount: Mount) -> (u64, u64) {
+        self.storage_usage_wanted = true;
+        let Some(usage) = self.storage_usage else {
+            return (super::fs::SD_FREE_SPACE, super::fs::SD_TOTAL_SPACE);
+        };
+        let used = match mount {
+            Mount::Sd => usage.sd,
+            Mount::Bis(super::fs::BIS_SYSTEM) => usage.system,
+            Mount::Bis(30) | Mount::Save(_) => usage.user,
+            Mount::Bis(_) => 0,
+        };
+        (usage.free, used.saturating_add(usage.free))
+    }
+
+    pub(crate) fn mount_of(&self, key: u64) -> Mount {
+        self.process()
+            .fs_mount
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_mount(&mut self, key: u64, mount: Mount) {
         match mount {
-            Some(id) => {
-                self.process_mut().fs_mount.insert(key, id);
-            }
-            None => {
+            Mount::Sd => {
                 self.process_mut().fs_mount.remove(&key);
+            }
+            _ => {
+                self.process_mut().fs_mount.insert(key, mount);
             }
         }
     }

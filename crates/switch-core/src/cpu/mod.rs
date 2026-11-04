@@ -43,7 +43,7 @@ pub use crate::kernel::ipc::POINTER_BUFFER_SIZE;
 pub use crate::kernel::ipc::{GapKind, ServiceGap};
 pub use crate::kernel::thread_report::ThreadReport;
 pub use crate::services::fs::{FsActivity, SaveDataQuota};
-pub use crate::services::storage::SaveKey;
+pub use crate::services::storage::{Mount, SaveKey, StorageUsage};
 pub use a32::ExecMode;
 pub use jit::{
     defers, emits, set_jit_host, simd_probe, tail_call_probe, translates, Entry, JitHost, JitStats,
@@ -245,6 +245,9 @@ pub struct Machine {
     pub(crate) data_archives: IdMap<u64, Box<dyn crate::source::ByteSource>>,
     /// Save data, by save key.
     pub(crate) saves: HashMap<SaveKey, crate::vfs::Vfs>,
+    pub(crate) bis: HashMap<u32, crate::vfs::Vfs>,
+    pub(crate) storage_usage: Option<StorageUsage>,
+    pub(crate) storage_usage_wanted: bool,
     /// `SetGlobalAccessLogMode`'s value; round-trips because `nnSdk` reads it at startup.
     pub(crate) fs_access_log_mode: u32,
     /// `SetSpeedEmulationMode`'s value; round-trips, no effect.
@@ -533,6 +536,9 @@ impl Cpu {
                 last_vsync_cycles: 0,
                 data_archives: IdMap::default(),
                 saves: HashMap::new(),
+                bis: HashMap::new(),
+                storage_usage: None,
+                storage_usage_wanted: false,
                 fs_access_log_mode: 0,
                 fs_speed_emulation_mode: 0,
                 last_ipc_result: None,
