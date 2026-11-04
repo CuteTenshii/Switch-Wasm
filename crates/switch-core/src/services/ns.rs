@@ -387,6 +387,20 @@ impl Cpu {
         }
     }
 
+    /// `es` (`IETicketService`): no ticket is ever imported.
+    pub(crate) fn es_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
+        }
+        match cmd_id {
+            // CountCommonTicket / CountPersonalizedTicket and the matching
+            // ListCommonTicketRightsIds / ListPersonalizedTicketRightsIds
+            // -> s32 count, nothing written to the buffer.
+            Some(9..=12) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+            _ => self.unimplemented_command(tls, "es", cmd_id),
+        }
+    }
+
     /// `pdm:qry` (`IQueryService`): an empty play history, as on a
     /// factory-fresh console.
     pub(crate) fn pdm_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
@@ -413,6 +427,16 @@ impl Cpu {
 mod tests {
     use crate::cpu::Cpu;
     use crate::kernel::ipc::testing::*;
+
+    #[test]
+    fn es_holds_no_tickets() {
+        for cmd in 9..=12 {
+            let mut cpu = request(false, cmd, &[]);
+            cpu.es_request(TLS, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+            assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "count");
+        }
+    }
 
     #[test]
     fn pdm_reports_a_console_nothing_has_been_played_on() {

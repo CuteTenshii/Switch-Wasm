@@ -919,6 +919,7 @@ impl Cpu {
                         "spl:" | "spl:mig" | "spl:fs" | "spl:ssl" | "spl:es" | "spl:manu" => {
                             self.spl_request(tls, cmd_id)?
                         }
+                        "es" => self.es_request(tls, cmd_id)?,
                         // pdm, play history.
                         "pdm:qry" | "pdm:ntfy" | "pdm:info" => self.pdm_request(tls, cmd_id)?,
                         // prepo, play reports.
