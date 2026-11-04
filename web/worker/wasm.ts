@@ -19,6 +19,7 @@ export interface WasmExports {
   switch_open_nca(handle: number, size: bigint): number;
   switch_add_archive(handle: number, file: number, size: bigint): number;
   switch_add_applet(handle: number, file: number, size: bigint): number;
+  switch_nand_mount(handle: number, file: number, size: bigint, name: number, nameLen: number): void;
   switch_add_update(handle: number, file: number, size: bigint): bigint;
   switch_update_version(handle: number, buf: number, maxlen: number): number;
   switch_add_dlc(handle: number, file: number, size: bigint): number;

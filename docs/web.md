@@ -140,12 +140,14 @@ The page, the worker, and the wasm bindings between them.
 ## `web/main/nand.ts`
 
 - The NAND lives in IndexedDB in two stores: `content` (NCA bytes by file name, stored as `Blob` so the browser owns the bytes and the worker reads ranges from a handle) and `titles` (index by title id, so the panel lists installs without reading content).
+- Every stored NCA is also listed read-only at `/Contents/registered/<name>` on the SYSTEM BIS partition (`nand_mount`), read by range from its host file; a rebuilt session needs them again, like archives.
 - Data archives and library applets (`add_applet`) are registered per session; a rebuilt session needs them again (`restoreArchives` is awaited on rebuild because a title mounting an archive still being registered will not find it). A generation ticket lets a newer restore cancel an older one.
 - A launched program is booted from full bytes (the loader maps the whole image); archives and applets are range-read, and the core runs an applet as a process beside its caller.
 
 ## `web/worker/persist.ts`
 
 - The worker owns the SD card's and saves' persistence: it restores them from IndexedDB into the core when a session starts and stores guest-changed paths as its housekeeping finds them, so no file crosses to the page. Restores go through host entry points (not recorded as changes) so restoring does not queue a full write-back. Drained changes cannot be returned to the core, so IndexedDB failures (quota) stay in a per-path backlog until the next flush. Flushes run one after another, so one that resolves has stored its changes.
+- Free and total space come from the wasm side (`usage.rs`), which scans IndexedDB itself: `navigator.storage.estimate()` gives the origin's free bytes, the `entries` store the SD card's used bytes, `content` the SYSTEM partition's and `saves` USER's. A scan starts on the first slice and again after a guest space query (at most every 2 s); queries answer from the last scan. Databases are only opened if `indexedDB.databases()` lists them, so the scan never creates one with the wrong version.
 - The page asks for persistent storage (`navigator.storage.persist`, main thread only) so the card is not evicted.
 
 ## `web/main/files.ts`

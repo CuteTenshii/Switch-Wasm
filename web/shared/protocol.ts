@@ -217,6 +217,7 @@ export interface Commands {
   open_nca(file: File): number;
   add_archive(file: Blob): number;
   add_applet(file: Blob): number;
+  nand_mount(file: File): void;
   add_update(file: File): string;
   update_version(): string;
   add_dlc(file: File): number;

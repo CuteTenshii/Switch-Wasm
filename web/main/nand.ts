@@ -121,6 +121,7 @@ async function registerArchives(gen: number): Promise<number | null> {
   archiveCount = registered;
   updateFirmwareState();
   await registerApplets(gen);
+  await mountContent(gen);
   return registered;
 }
 
@@ -135,6 +136,18 @@ async function registerApplets(gen: number): Promise<void> {
       const named = content instanceof File ? content : content && new File([content], entry.name);
       if (named) await call('add_applet', named);
     } catch { /* that applet just ends cancelled */ }
+  }
+}
+
+// List every stored NCA in the SYSTEM partition.
+async function mountContent(gen: number): Promise<void> {
+  for (const [, entry] of nandTitles) {
+    if (gen !== restoreGen) return;
+    try {
+      const content = await nandContent(entry.name);
+      if (gen !== restoreGen) return;
+      if (content) await call('nand_mount', content instanceof File ? content : new File([content], entry.name));
+    } catch { /* that file is just not listed */ }
   }
 }
 

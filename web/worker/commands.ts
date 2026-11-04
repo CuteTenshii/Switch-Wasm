@@ -170,6 +170,13 @@ export const CMD: CommandHandlers = {
     if (result < 0) workerLog(`[io] applet ${describe(file)}: refused (${lastError()})`, 'warn');
     return result;
   },
+  // List a NAND file in the SYSTEM partition's registered content.
+  nand_mount(file) {
+    const size = BigInt(file.size);
+    const index = addHostFile(file);
+    withPath(file instanceof File ? file.name : '', (ptr, len) =>
+      core.switch_nand_mount(state.handle, index, size, ptr, len));
+  },
   // Returns the base title id the update patches, or '' if it is not an update.
   add_update(file) {
     const index = addHostFile(file);
