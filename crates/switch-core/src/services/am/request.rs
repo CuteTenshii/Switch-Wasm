@@ -382,7 +382,6 @@ impl Cpu {
                 }
                 // GetGpuErrorDetectedSystemEvent: never signalled.
                 Some(130) => {
-                    self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = self.alloc_event("am:gpu-error", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
@@ -419,7 +418,6 @@ impl Cpu {
                 }
                 // 210 (20.0.0+, unnamed): one out event, never signalled.
                 Some(210) => {
-                    self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = match self.process().application_functions_210_event {
                         Some(h) => h,
                         None => {
@@ -476,7 +474,6 @@ impl Cpu {
                 }
                 // GetAccumulatedSuspendedTickChangedEvent.
                 Some(91) => {
-                    self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = self.kept_event("am:accumulated-suspended-tick-changed", handle);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
