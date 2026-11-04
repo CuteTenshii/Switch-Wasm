@@ -294,6 +294,13 @@ impl Cpu {
                 Some(1150) | Some(1152) | Some(1155) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // GetTouchScreenFirmwareVersion: FTS version 0x31, device identifier "TS".
+                Some(1151) => {
+                    let mut version = [0u8; 0x10];
+                    version[0] = 0x31;
+                    version[4..8].copy_from_slice(&0x5354u32.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &version, &[])
+                }
                 // GetTouchScreenDefaultConfiguration: mode 0 is `UseSystemSetting`.
                 Some(1153) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
                 // GetLastActiveNpad: always npad 0.

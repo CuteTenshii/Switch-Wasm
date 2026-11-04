@@ -169,6 +169,8 @@ impl Cpu {
                 Some(20) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // GetSettingsPlatformRegion: 1 is Global.
                 Some(300) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
+                // GetCradleFwVersion: four words, all zero with no cradle attached.
+                Some(40) => self.write_ipc_response(tls, 0, &[], &[0u8; 16], &[]),
                 // GetOperationModeSystemInfo.
                 Some(200) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 // GetHomeButtonReaderLockAccessor / GetReaderLockAccessorEx / GetWriterLockAccessorEx.
