@@ -83,7 +83,7 @@ The page, the worker, and the wasm bindings between them.
 ## `web/main/index.ts`, `boot.ts`, `dock.ts`, `wakelock.ts`
 
 - After a homebrew load the screen is shown but the loading screen stays over it until `display.noteFrame` sees a real frame (homebrew can run a long time before presenting).
-- Init awaits only the NAND index; archives register in the background (`switch_restore_nand` registers archives, library applets and the SYSTEM listing in one call, so the page shows no per-archive progress) so a firmware dump does not delay the first boot. A core that fails to start keeps the loading screen with the error rather than an idle splash.
+- Init awaits only the NAND index; archives register in the background (`switch_restore_nand` registers archives, library applets and the SYSTEM listing in one call and posts a `nand_progress` message after each archive, which drives the firmware panel's count) so a firmware dump does not delay the first boot. A core that fails to start keeps the loading screen with the error rather than an idle splash.
 - Operation mode affects `vi` resolution, `am`/`apm` performance mode, `clkrst` GPU clock and touchscreen presence. Titles read it once, so changes queue the two AM messages a real dock sends.
 - Screen Wake Lock needs a secure context (missing in Firefox and Safari before 16.4). The browser drops the lock when the document is hidden and does not return it, so it is re-taken on visibility; a lock acquired after the run ended is released immediately.
 - Icons are Lucide (`icons.ts`), imported per icon so the bundle carries only those used.

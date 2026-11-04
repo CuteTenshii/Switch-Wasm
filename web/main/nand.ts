@@ -12,7 +12,7 @@ import {
 import { $, el } from './dom';
 import { beginLoad, failLoad } from './loading';
 import { log } from './log';
-import { call } from './rpc';
+import { call, onNandProgress } from './rpc';
 import { setNote } from './shell';
 import { doLaunchNca } from './container';
 
@@ -90,10 +90,18 @@ let restoring: Promise<unknown> = Promise.resolve();
 
 let registering = false;
 
+let restoreProgress: { done: number; total: number } | null = null;
+
+onNandProgress((done, total) => {
+  restoreProgress = { done, total };
+  updateFirmwareState();
+});
+
 // Resolves to the number of archives registered.
 function beginArchiveRestore(): Promise<number> {
   const run = restoring.catch(() => {}).then(async () => {
     registering = true;
+    restoreProgress = null;
     updateFirmwareState();
     try {
       archiveCount = await call('restore_nand');
@@ -224,7 +232,10 @@ function updateFirmwareState(): void {
   const held = nandTitles.length ? ', ' + nandTitles.length + ' on the NAND' : '';
   let state: string;
   if (registering) {
-    state = 'Registering system data archives \u2026';
+    state = restoreProgress
+      ? 'Registering system data archives: ' + restoreProgress.done + ' of '
+      + restoreProgress.total + ' \u2026'
+      : 'Registering system data archives \u2026';
   } else if (archiveCount === 0) {
     state = 'No system data archives. A title that mounts one - an applet\'s'
       + ' shared assets, the Mii and amiibo models - will not find it.';

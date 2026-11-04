@@ -20,6 +20,12 @@ let loopEvents: {
   failed: (error: string) => void;
 } | null = null;
 
+let nandProgress: ((done: number, total: number) => void) | null = null;
+
+export function onNandProgress(handler: NonNullable<typeof nandProgress>): void {
+  nandProgress = handler;
+}
+
 export function onLoopEvents(handlers: NonNullable<typeof loopEvents>): void {
   loopEvents = handlers;
 }
@@ -77,6 +83,10 @@ export function initWorker(): void {
     }
     if ('type' in d && d.type === 'loop_failed') {
       loopEvents?.failed(d.error);
+      return;
+    }
+    if ('type' in d && d.type === 'nand_progress') {
+      nandProgress?.(d.done, d.total);
       return;
     }
     if ('type' in d && d.type === 'audio_ring') {

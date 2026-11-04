@@ -338,6 +338,8 @@ export type WorkerMessage =
   | { type: 'log'; text: string; level: LogLevel }
   | { type: 'slice'; report: SliceReport }
   | { type: 'loop_failed'; error: string }
+  // From `switch_restore_nand`: system data archives registered so far, of all stored.
+  | { type: 'nand_progress'; done: number; total: number }
   // Once at startup: the ring audio is written to, in the worker's shared memory.
   | { type: 'audio_ring'; buffer: SharedArrayBuffer; at: number; samples: number }
   | { id: number; ok: true; result: unknown }

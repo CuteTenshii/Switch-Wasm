@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 
-use js_sys::{Array, ArrayBuffer, Reflect};
+use js_sys::{Array, ArrayBuffer, Object, Reflect};
 use switch_core::trace::Level;
 use wasm_bindgen::prelude::*;
-use web_sys::{Blob, File};
+use web_sys::{Blob, DedicatedWorkerGlobalScope, File};
 
 use super::{self as idb, NAND_CONTENT, NAND_DB, NAND_STORES, NAND_TITLES, NAND_VERSION};
 use crate::{add_host_file, applets, container, session_if_live, HostSource};
@@ -97,8 +97,11 @@ async fn restore(handle: u32) -> Result<u32, JsValue> {
     }
 
     let (mut registered, mut bytes) = (0, 0);
-    for title in titles.iter().filter(|t| t.kind == KIND_ARCHIVE) {
+    let archives: Vec<&Title> = titles.iter().filter(|t| t.kind == KIND_ARCHIVE).collect();
+    post_progress(0, archives.len());
+    for (done, title) in archives.iter().enumerate() {
         let Some(&src) = hosts.get(title.name.as_str()) else {
+            post_progress(done + 1, archives.len());
             continue;
         };
         if container::add_archive(s, src) < 0 {
@@ -111,6 +114,7 @@ async fn restore(handle: u32) -> Result<u32, JsValue> {
             registered += 1;
             bytes += src.len;
         }
+        post_progress(done + 1, archives.len());
     }
     if registered > 0 {
         s.cpu.log(
@@ -142,6 +146,20 @@ async fn restore(handle: u32) -> Result<u32, JsValue> {
         }
     }
     Ok(registered)
+}
+
+/// Tell the page how many archives are registered so far.
+fn post_progress(done: usize, total: usize) {
+    let message = Object::new();
+    for (key, value) in [
+        ("type", JsValue::from_str("nand_progress")),
+        ("done", JsValue::from_f64(done as f64)),
+        ("total", JsValue::from_f64(total as f64)),
+    ] {
+        Reflect::set(&message, &key.into(), &value).ok();
+    }
+    let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
+    scope.post_message(&message).ok();
 }
 
 /// Stored content as a `File` named `name`: a `Blob`, or an `ArrayBuffer` from older builds.
