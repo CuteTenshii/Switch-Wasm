@@ -236,8 +236,8 @@ pub struct Machine {
     /// Handles modelled as kernel events. Other handles are treated as always signalled
     /// by `WaitSynchronization`.
     pub(crate) events: IdMap<u64, Event>,
-    /// The vsync event, fired on present and at each display refresh.
-    pub(crate) vsync_event: Option<u64>,
+    /// The vsync events every process asked for, fired on present and at each display refresh.
+    pub(crate) vsync_events: Vec<u64>,
     pub(crate) last_vsync_frame: u64,
     /// For the refresh that fires without a present.
     pub(crate) last_vsync_cycles: u64,
@@ -528,7 +528,7 @@ impl Cpu {
                 nv_errors: BTreeMap::new(),
                 fabricated_objects: HashMap::new(),
                 events: IdMap::default(),
-                vsync_event: None,
+                vsync_events: Vec::new(),
                 last_vsync_frame: 0,
                 last_vsync_cycles: 0,
                 data_archives: IdMap::default(),

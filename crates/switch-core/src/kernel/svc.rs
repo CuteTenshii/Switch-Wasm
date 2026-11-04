@@ -592,7 +592,7 @@ impl Cpu {
                 if self.nv.gpu.frames != self.last_vsync_frame || refreshed {
                     self.last_vsync_frame = self.nv.gpu.frames;
                     self.last_vsync_cycles = self.cycles;
-                    if let Some(vsync) = self.vsync_event {
+                    for vsync in self.vsync_events.clone() {
                         self.signal_event(vsync);
                     }
                 }
@@ -628,7 +628,7 @@ impl Cpu {
                 // A blocking wait on vsync is certain to fire, so park until the tick.
                 if timeout != 0
                     && self.vsync_throttle
-                    && self.vsync_event.is_some_and(|v| handles.contains(&v))
+                    && self.vsync_events.iter().any(|v| handles.contains(v))
                 {
                     self.pc = self.pc.wrapping_sub(4);
                     self.park_on_events(self.next_display_tick());

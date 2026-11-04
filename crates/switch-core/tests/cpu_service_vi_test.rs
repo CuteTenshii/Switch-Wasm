@@ -228,6 +228,37 @@ fn the_display_answers_what_it_is() {
 }
 
 #[test]
+fn every_vsync_event_handed_out_fires_on_a_refresh() {
+    const VI: u64 = 0xB500;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+    ipc_request_plain(&mut cpu, VI, 2, &[]);
+    let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        ipc_request_plain(&mut cpu, display, 5202, &[]);
+        events.push(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    }
+
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &nop().to_le_bytes()).unwrap();
+    for _ in 0..switch_core::cpu::VSYNC_PERIOD_CYCLES {
+        cpu.set_pc(0x2000);
+        cpu.step().unwrap();
+    }
+    for event in events {
+        assert_eq!(
+            wait_sync(&mut cpu, &[event], 0).0,
+            0,
+            "{event:#x} stayed quiet"
+        );
+    }
+}
+
+#[test]
 fn the_display_refreshes_without_being_drawn_to() {
     // Vsync fires on a period as well as on present, since titles wait for it
     // before rendering.

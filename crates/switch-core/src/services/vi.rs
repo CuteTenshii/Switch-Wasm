@@ -76,7 +76,7 @@ impl Cpu {
                     // GetDisplayVsyncEvent: a copy handle, signalled per presented frame.
                     Some(5202) => {
                         let h = self.alloc_console_event("vi:vsync", true);
-                        self.vsync_event = Some(h);
+                        self.vsync_events.push(h);
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
                     _ => self.vi_unhandled(tls, &iface, cmd_id),
@@ -116,7 +116,7 @@ impl Cpu {
                     // GetDisplayVsyncEvent: a copy handle, signalled per presented frame.
                     Some(5202) => {
                         let h = self.alloc_console_event("vi:vsync", true);
-                        self.vsync_event = Some(h);
+                        self.vsync_events.push(h);
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
                     _ => self.vi_unhandled(tls, "vi:iads", cmd_id),
