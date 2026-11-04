@@ -6,21 +6,14 @@ use std::rc::Rc;
 
 use js_sys::{Array, ArrayBuffer, Function, Promise, Reflect, Uint8Array};
 use switch_core::cpu::StorageUsage;
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
-    Blob, Event, IdbCursorWithValue, IdbDatabase, IdbFactory, IdbRequest, StorageEstimate,
-    WorkerGlobalScope,
+    Blob, IdbCursorWithValue, IdbDatabase, IdbFactory, StorageEstimate, WorkerGlobalScope,
 };
 
+use super::{drive, NAND_CONTENT, NAND_DB, NAND_SAVES, SD_DB, SD_STORE};
 use crate::session_if_live;
-
-const SD_DB: &str = "switch-wasm-sd";
-const SD_STORE: &str = "entries";
-const NAND_DB: &str = "switch-wasm-nand";
-const NAND_CONTENT: &str = "content";
-const NAND_SAVES: &str = "saves";
 
 /// Least time between two scans.
 const REFRESH_INTERVAL_MS: f64 = 2000.0;
@@ -130,44 +123,6 @@ async fn store_bytes(
     };
     db.close();
     outcome.map(|()| total.get())
-}
-
-/// Await `request` until `step` (called with each result) returns true.
-async fn drive(
-    request: &IdbRequest,
-    step: impl FnMut(JsValue) -> bool + 'static,
-) -> Result<(), JsValue> {
-    let mut handlers = None;
-    let mut step = Some(step);
-    let done = Promise::new(&mut |resolve: Function, reject: Function| {
-        let mut step = step.take().expect("the executor runs once");
-        let source = request.clone();
-        let on_success = Closure::<dyn FnMut(Event)>::new(move |_| {
-            let finished = match source.result() {
-                Ok(result) => step(result),
-                Err(_) => true,
-            };
-            if finished {
-                resolve.call0(&JsValue::NULL).ok();
-            }
-        });
-        let source = request.clone();
-        let on_error = Closure::<dyn FnMut(Event)>::new(move |_| {
-            let error = source
-                .error()
-                .ok()
-                .flatten()
-                .map_or(JsValue::NULL, JsValue::from);
-            reject.call1(&JsValue::NULL, &error).ok();
-        });
-        request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
-        request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
-        handlers = Some((on_success, on_error));
-    });
-    let result = JsFuture::from(done).await.map(|_| ());
-    request.set_onsuccess(None);
-    request.set_onerror(None);
-    result
 }
 
 /// An SD card or save entry: `{ kind, data? }`.

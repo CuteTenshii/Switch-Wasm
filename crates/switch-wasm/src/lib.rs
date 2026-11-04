@@ -38,6 +38,8 @@ mod container;
 mod cores;
 mod debug;
 mod display;
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+mod idb;
 mod input;
 mod keyboard;
 mod log;
@@ -46,8 +48,6 @@ mod run;
 mod stats;
 mod storage;
 mod system;
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
-mod usage;
 mod users;
 
 use switch_core::cpu::Cpu;

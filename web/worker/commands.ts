@@ -1,7 +1,7 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, ErrorDialog, FsChange, GpuReport, JitStats, KeyboardRequest, MemoryReport,
+  CommandHandlers, ErrorDialog, GpuReport, JitStats, KeyboardRequest, MemoryReport,
   UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
@@ -9,9 +9,8 @@ import { noteRegistered } from './activity';
 import { serveCores } from './coreworkers';
 import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
-import { switch_clear_screen } from '@core/switch_wasm.js';
+import { switch_clear_screen, switch_flush_storage, switch_restore_storage } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
-import { flushStorage, restoreStorage } from './persist';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
   core,
@@ -58,9 +57,6 @@ function saveKey(id: string): [bigint, bigint, bigint] {
   const [lo, hi] = user ? uidHalves(user) : [0n, 0n];
   return [BigInt('0x' + save), lo, hi];
 }
-
-// The wasm side drains whether or not the JSON fits, so size for 0x301-byte paths per entry.
-const changesCap = (pending: number) => 2 + pending * (0x301 * 2 + 64);
 
 const READ_CHUNK = 1 << 20;
 
@@ -313,11 +309,10 @@ export const CMD: CommandHandlers = {
     return 0;
   },
   restore_storage() {
-    return restoreStorage();
+    return switch_restore_storage(state.handle);
   },
-  async flush_storage() {
-    await flushStorage();
-    return 0;
+  flush_storage() {
+    return switch_flush_storage(state.handle);
   },
   clear_screen() {
     switch_clear_screen();
@@ -436,43 +431,9 @@ export const CMD: CommandHandlers = {
       });
     });
   },
-  sd_take_changes() {
-    if (state.handle < 0) return [];
-    const pending = core.switch_sd_pending_changes(state.handle);
-    if (!pending) return [];
-    return readJson<FsChange[]>(
-      changesCap(pending),
-      (buf, cap) => core.switch_sd_take_changes_json(state.handle, buf, cap),
-      [],
-    );
-  },
 
   // Save data: the SD card calls keyed by save.
 
-  save_ids() {
-    if (state.handle < 0) return [];
-    return readJson<string[]>(
-      4096,
-      (buf, cap) => core.switch_save_ids_json(state.handle, buf, cap),
-      [],
-    );
-  },
-  saves_pending() {
-    if (state.handle < 0) return false;
-    const ids = CMD.save_ids() as string[];
-    return ids.some((id) => core.switch_save_pending_changes(state.handle, ...saveKey(id)) !== 0);
-  },
-  save_take_changes(id) {
-    if (state.handle < 0) return [];
-    const save = saveKey(id);
-    const pending = core.switch_save_pending_changes(state.handle, ...save);
-    if (!pending) return [];
-    return readJson<FsChange[]>(
-      changesCap(pending),
-      (buf, cap) => core.switch_save_take_changes_json(state.handle, ...save, buf, cap),
-      [],
-    );
-  },
   save_write_file(id, path, bytes) {
     return withPath(path, (pptr, plen) =>
       withBytes(bytes, (dptr, dlen) =>

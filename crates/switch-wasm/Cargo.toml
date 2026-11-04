@@ -52,6 +52,7 @@ features = [
   "IdbOpenDbRequest",
   "IdbRequest",
   "IdbTransaction",
+  "IdbTransactionMode",
   "ImageData",
   "OffscreenCanvas",
   "OffscreenCanvasRenderingContext2d",

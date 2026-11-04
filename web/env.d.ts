@@ -27,6 +27,9 @@ declare module '@core/switch_wasm.js' {
   export function switch_attach_screen(canvas: OffscreenCanvas): void;
   export function switch_present(handle: number): boolean;
   export function switch_clear_screen(): void;
+  // `crates/switch-wasm/src/idb/persist.rs`: the SD card and saves, to and from IndexedDB.
+  export function switch_restore_storage(handle: number): Promise<number>;
+  export function switch_flush_storage(handle: number): Promise<number>;
 }
 
 // The commit the site was built from; see `vite.config.ts`.

@@ -16,7 +16,7 @@ pub extern "C" fn switch_run(handle: u32, max_steps: u64) -> i64 {
             .set_unix_time((now.get_time() / 1000.0).floor() as i64);
     }
     #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
-    crate::usage::refresh_if_due(handle, s.cpu.take_storage_usage_wanted());
+    crate::idb::usage::refresh_if_due(handle, s.cpu.take_storage_usage_wanted());
     match s.cpu.run(max_steps) {
         Ok(report) => report.steps as i64,
         Err(e) => {

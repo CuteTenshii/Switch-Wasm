@@ -5,8 +5,7 @@ import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
 import { flushLog } from './log';
-import { flushStorage } from './persist';
-import { switch_present } from '@core/switch_wasm.js';
+import { switch_flush_storage, switch_present } from '@core/switch_wasm.js';
 import { core, state } from './wasm';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -133,7 +132,7 @@ export function paint(): number | null {
 }
 
 function housekeeping(): Housekeeping {
-  void flushStorage();
+  void switch_flush_storage(state.handle);
   const errors: ErrorDialog[] = [];
   for (let error = CMD.error_dialog(); error; error = CMD.error_dialog()) {
     errors.push(error as ErrorDialog);

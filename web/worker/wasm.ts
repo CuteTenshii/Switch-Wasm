@@ -101,10 +101,6 @@ export interface WasmExports {
   switch_sd_read_file(
     handle: number, pathPtr: number, pathLen: number,
     offset: bigint, buf: number, maxlen: number): bigint;
-  switch_sd_pending_changes(handle: number): number;
-  switch_sd_take_changes_json(handle: number, buf: number, maxlen: number): number;
-
-  switch_save_ids_json(handle: number, buf: number, maxlen: number): number;
 
   switch_user_stage(
     handle: number, uidLo: bigint, uidHi: bigint, namePtr: number, nameLen: number,
@@ -119,11 +115,6 @@ export interface WasmExports {
   switch_user_picture(
     handle: number, uidLo: bigint, uidHi: bigint, buf: number, maxlen: number): number;
   // A save is keyed by its id and its user's uid in two halves.
-  switch_save_pending_changes(
-    handle: number, saveId: bigint, userLo: bigint, userHi: bigint): number;
-  switch_save_take_changes_json(
-    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
-    buf: number, maxlen: number): number;
   switch_save_write_file(
     handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number, dataPtr: number, dataLen: number): number;

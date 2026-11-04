@@ -3,12 +3,6 @@
 // Byte payloads own a plain ArrayBuffer, so they can go to ImageData, Blob or a transfer.
 export type Bytes = Uint8Array<ArrayBuffer>;
 
-// One path the guest touched, from `switch_sd_take_changes_json`.
-export interface FsChange {
-  kind: 'file' | 'dir' | 'deleted';
-  path: string;
-}
-
 // `wasm` is the worker's linear memory size.
 export interface RamUsage {
   guest: number;
@@ -246,7 +240,7 @@ export interface Commands {
   // The worker runs slices itself until paused, halted or faulted, reporting each.
   start_loop(tracing: boolean): number;
   pause_loop(): number;
-  // The SD card and saves: loaded from IndexedDB into the core, and written back.
+  // The SD card and saves: the worker loads them from IndexedDB and writes changes back itself.
   restore_storage(): number;
   flush_storage(): number;
   clear_screen(): number;
@@ -273,11 +267,7 @@ export interface Commands {
   sd_create_dir(path: string): number;
   sd_remove(path: string): number;
   sd_read_file(path: string): Bytes | null;
-  sd_take_changes(): FsChange[];
 
-  save_ids(): string[];
-  saves_pending(): boolean;
-  save_take_changes(id: string): FsChange[];
   save_write_file(id: string, path: string, bytes: Bytes): number;
   save_create_dir(id: string, path: string): number;
   save_remove(id: string, path: string): number;
