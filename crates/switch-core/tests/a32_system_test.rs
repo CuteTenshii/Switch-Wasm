@@ -3,7 +3,7 @@
 
 mod a32;
 
-use a32::{cpu, r, run, run_failing, BASE, HALT};
+use a32::{cpu, load, r, run, run_failing, BASE, HALT};
 
 use switch_core::cpu::{Cpu, ExecMode};
 
@@ -73,11 +73,7 @@ fn the_thread_pointer_comes_from_cp15_c13() {
         0xEE1D_3F70, // mrc p15, 0, r3, c13, c0, 3   (TPIDRURO)
         HALT,
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(BASE, &bytes).unwrap();
+    load(&mut cpu, &code);
     cpu.run(code.len() as u64).unwrap();
     assert_eq!(
         r(&cpu, 0),
@@ -113,11 +109,7 @@ fn a_syscall_retires_before_it_dispatches() {
         0xE3A0_0001, // mov r0, #1
         HALT,        // svc #0
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(BASE, &bytes).unwrap();
+    load(&mut cpu, &code);
     cpu.run(2).unwrap();
     assert!(cpu.halted);
     assert_eq!(cpu.get_pc(), BASE + 8, "past the svc, not on it");
@@ -132,11 +124,7 @@ fn a_fault_names_a32_mnemonics() {
         0xE3A0_0001, // mov r0, #1
         0xE7F0_00F0, // udf, an encoding nothing here claims
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(BASE, &bytes).unwrap();
+    load(&mut cpu, &code);
     assert!(cpu.run(2).is_err());
     let trace = String::from_utf8_lossy(&cpu.trace);
     assert!(trace.contains("mov r0, #0x1"), "{trace}");

@@ -476,11 +476,7 @@ fn widening_from_half_handles_subnormals_and_infinities() {
 fn every_half_survives_a_round_trip_through_single() {
     let code = [fcvt(0b11, 0b00, 1, 0), fcvt(0b00, 0b11, 2, 1)];
     let mut cpu = cpu_at(0x1000);
-    let mut bytes = Vec::new();
-    for insn in &code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    map_code(&mut cpu, 0x1000, &code);
     for raw in 0u32..=0xFFFF {
         let half = raw as u16;
         if (half >> 10) & 0x1F == 0x1F {
@@ -708,8 +704,7 @@ fn simd_fixed_point_converts_in_both_directions() {
         nop(),
     ];
     let mut cpu = cpu_at(0x1000);
-    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    map_code(&mut cpu, 0x1000, &code);
     cpu.set_vreg(0, f32s([0.5, -1.0, 1e10, f32::NAN]));
     cpu.set_vreg(2, f64s([-3.0, 2.75]));
     cpu.set_vreg(4, words([0x4000, 0xFFFF_8000, 1, 0]));
@@ -757,8 +752,7 @@ fn simd_fp_reductions_across_lanes() {
         nop(),
     ];
     let mut cpu = cpu_at(0x1000);
-    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    map_code(&mut cpu, 0x1000, &code);
     let lanes = f32s([1.5, -7.0, 42.0, 0.25]);
     for reg in [0, 2, 4, 6] {
         cpu.set_vreg(reg, lanes);
@@ -785,8 +779,7 @@ fn simd_scalar_pairwise_reduces_two_lanes_into_one() {
         nop(),
     ];
     let mut cpu = cpu_at(0x1000);
-    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    map_code(&mut cpu, 0x1000, &code);
     // Lanes above the pair hold something, which the result must not keep.
     cpu.set_vreg(0, singles(-2.5, 9.0) | (u128::MAX << 64));
     cpu.set_vreg(1, singles(1.25, 2.5));

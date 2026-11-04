@@ -12,14 +12,16 @@ pub fn cpu_at(pc: u32) -> Cpu {
     cpu
 }
 
+/// Map `code` at `pc` and point the core at it.
+pub fn map_code(cpu: &mut Cpu, pc: u32, code: &[u32]) {
+    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+    cpu.mem.map(pc, &bytes).unwrap();
+    cpu.set_pc(pc);
+}
+
 pub fn exec(code: &[u32], max: u64) -> Cpu {
     let mut cpu = cpu_at(0x1000);
-    let mut bytes = Vec::with_capacity(code.len() * 4);
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, code);
     let steps = max.min(code.len() as u64);
     cpu.run(steps).unwrap();
     cpu
@@ -27,12 +29,7 @@ pub fn exec(code: &[u32], max: u64) -> Cpu {
 
 /// Map code, run exactly `code.len()` instructions, return the CPU.
 pub fn run_program(mut cpu: Cpu, pc: u32, code: &[u32]) -> Cpu {
-    let mut bytes = Vec::with_capacity(code.len() * 4);
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(pc, &bytes).unwrap();
-    cpu.set_pc(pc);
+    map_code(&mut cpu, pc, code);
     cpu.run(code.len() as u64).unwrap();
     cpu
 }

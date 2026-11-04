@@ -17,11 +17,7 @@ fn simd_dup_umov_and_q_store() {
         0x3D80_0060u32, // str q0, [x3]
         nop(),
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(3).unwrap();
     assert_eq!(cpu.read_x(2), 0x5A5A_5A5A_5A5A_5A5A);
     assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x5A5A_5A5A_5A5A_5A5A);
@@ -790,8 +786,7 @@ fn simd_scalar_compares_and_add_sub_on_a_doubleword() {
         nop(),
     ];
     let mut cpu = cpu_at(0x1000);
-    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    map_code(&mut cpu, 0x1000, &code);
     let minus_one = u128::from(ONES) | (7u128 << 64);
     cpu.set_vreg(19, 5);
     cpu.set_vreg(4, 5 | (9u128 << 64));

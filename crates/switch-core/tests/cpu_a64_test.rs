@@ -70,12 +70,7 @@ fn load_store_immediate() {
         ldur64(5, 2, -8),
         ldr32(6, 2, 0),
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x2000, &bytes).unwrap();
-    cpu.set_pc(0x2000);
+    map_code(&mut cpu, 0x2000, &code);
     cpu.set_reg(1, 0xDEAD_BEEF_CAFE_F00D);
     cpu.set_reg(3, 0x1122_3344_5566_7788);
     cpu.run(5).unwrap();
@@ -95,12 +90,7 @@ fn stp_ldp_pre_index() {
         0xA940_0FE2, // LDP X2, X3, [SP]  (offset mode, imm 0)
         0xA8C2_07E0, // LDP X0, X1, [SP], #32 (post-index)
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x2000, &bytes).unwrap();
-    cpu.set_pc(0x2000);
+    map_code(&mut cpu, 0x2000, &code);
     cpu.set_pc_and_sp(0x2000, 0x4000);
     cpu.set_reg(0, 0x1111_1111_1111_1111);
     cpu.set_reg(1, 0x2222_2222_2222_2222);
@@ -194,12 +184,7 @@ fn logical_immediate_masks() {
         | (7 << 10)
         | (2 << 5)
         | 1];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(1), 0xFF);
 }
@@ -213,12 +198,7 @@ fn multiply_add() {
     cpu.set_reg(4, 11);
     // MADD X1, X2, X3, X4: sf=1, 11011000, rm=3, o0=0, ra=4, rn=2, rd=1
     let code = [1u32 << 31 | 0b11011000 << 21 | (3 << 16) | (4 << 10) | (2 << 5) | 1];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(1), 46);
 }
@@ -234,12 +214,7 @@ fn csel_selects_by_condition() {
         cmp_reg(1, 2, true),
         1u32 << 31 | 0b011010100 << 21 | (2 << 16) | (0xC << 12) | (1 << 5) | 3,
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(2).unwrap();
     assert_eq!(cpu.read_x(3), 9); // GT false → take else operand (x2=9)
 }
@@ -282,12 +257,7 @@ fn udiv_sdiv() {
     cpu.set_reg(7, 7);
     let udiv = 1u32 << 31 | 0b11010110 << 21 | (7 << 16) | 0b000010 << 10 | (6 << 5) | 1;
     let sdiv = 1u32 << 31 | 0b11010110 << 21 | (7 << 16) | 0b000011 << 10 | (6 << 5) | 2;
-    let mut bytes = Vec::new();
-    for insn in [udiv, sdiv] {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &[udiv, sdiv]);
     cpu.run(2).unwrap();
     assert_eq!(cpu.read_x(1), 7);
     assert_eq!(cpu.read_x(2), 7);
@@ -307,26 +277,14 @@ fn bitfield_extract_and_insert() {
     cpu.set_reg(2, 0xABCD_EF12_3456_78FF);
     let ubfm =
         1u32 << 31 | 0b10 << 29 | 0b100110 << 23 | 1 << 22 | (4 << 16) | (11 << 10) | (2 << 5) | 1;
-    let mut bytes = Vec::new();
-    {
-        let insn = ubfm;
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &[ubfm]);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(1), (0xABCD_EF12_3456_78FFu64 >> 4) & 0xFF);
 
     // SBFX: SBFM X3, X2, #0, #7 (sign-extend 8 bits) gives -1
     let sbfm =
         1u32 << 31 | 0b00 << 29 | 0b100110 << 23 | 1 << 22 | (0 << 16) | (7 << 10) | (2 << 5) | 3;
-    let mut bytes = Vec::new();
-    {
-        let insn = sbfm;
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &[sbfm]);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(3), 0xFFFF_FFFF_FFFF_FFFF); // 0xFF sign-extended = -1
 }
@@ -350,12 +308,7 @@ fn ldr_literal() {
 fn halt_via_svc() {
     let mut cpu = Cpu::new();
     let code = [svc(0)];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     let report = cpu.run(10).unwrap();
     assert!(report.halted);
 }
@@ -373,12 +326,7 @@ fn mrs_msr_nzcv() {
         mrs_nzcv(6),
         svc(0),
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.set_reg(5, 0x9000_0000);
     cpu.run(code.len() as u64).unwrap();
     assert_eq!(cpu.read_x(4), 0x6000_0000, "Z and C after an equal compare");
@@ -438,12 +386,7 @@ fn stack_memory_and_rt_eq_rn() {
     cpu.mem.map_zero(0x3000, 8).unwrap();
     cpu.mem.write_u64(0x3000, 0x5555).unwrap();
     let code = [ldr64(1, 1, 0)];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(1), 0x5555);
 }
@@ -457,12 +400,7 @@ fn reverse_and_count_ops() {
     let clz = 1u32 << 31 | 0b10 << 29 | 0b11010110 << 21 | (0b000100 << 10) | (1 << 5) | 3;
     let ctz = 1u32 << 31 | 0b10 << 29 | 0b11010110 << 21 | (0b000110 << 10) | (1 << 5) | 4;
     let rev32 = 1u32 << 31 | 0b10 << 29 | 0b11010110 << 21 | (0b000010 << 10) | (1 << 5) | 5;
-    let mut bytes = Vec::new();
-    for insn in [rbit, clz, ctz, rev32] {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &[rbit, clz, ctz, rev32]);
     cpu.run(4).unwrap();
     assert_eq!(cpu.read_x(2), 0x0F00_0000_0000_0000); // bit-reversed
     assert_eq!(cpu.read_x(3), 56); // clz(0xF0) = 56
@@ -482,12 +420,7 @@ fn add_immediate_preserves_flags() {
         movz(3, 0xEE, 0, true),
         movz(4, 0xFF, 0, true),
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(4).unwrap();
     assert_eq!(cpu.read_x(2), 5 + 48);
     assert_eq!(cpu.read_x(3), 0); // EQ branch taken → movz(3) skipped
@@ -508,12 +441,7 @@ fn tpidr_el0_roundtrips_and_tpidrro_el0_does_not() {
         0xD51B_D061,    // msr tpidrro_el0, x1
         0xD53B_D063,    // mrs x3, tpidrro_el0
     ];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(4).unwrap();
     assert_eq!(cpu.read_x(2), VALUE, "TPIDR_EL0 is the guest's to write");
     assert_eq!(
@@ -534,12 +462,7 @@ fn the_generic_timer_counts_and_reports_its_own_rate() {
     code.push(0xD53B_E022); // mrs x2, cntpct_el0
     code.push(0xD53B_E043); // mrs x3, cntvct_el0
     code.push(0xD53B_E004); // mrs x4, cntfrq_el0
-    let mut bytes = Vec::new();
-    for insn in &code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(code.len() as u64).unwrap();
     assert_eq!(cpu.read_x(1), 0, "read at cycle 0");
     // 2001 cycles of the 1.02 GHz clock are 37.66 ticks of the 19.2 MHz one.
@@ -563,12 +486,7 @@ fn sub_shifted_register() {
         0xCB01_0002u32, // sub x2, x0, x1
         0x9100_0003u32, // add x3, x0, #0
     ];
-    let mut bytes = Vec::new();
-    for w in code {
-        bytes.extend_from_slice(&w.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(2).unwrap();
     assert_eq!(cpu.read_x(2), 0x1000 - 0x123);
     assert_eq!(cpu.read_x(3), 0x1000);
@@ -587,12 +505,7 @@ fn adds_shifted_register() {
         0xD280_1DC3u32, // movz x3, #0xee
         0xD503_201Fu32, // nop
     ];
-    let mut bytes = Vec::new();
-    for w in code {
-        bytes.extend_from_slice(&w.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(4).unwrap();
     assert_eq!(cpu.read_x(2), 0x30); // 0x10 + 0x20, not subtraction
     assert_eq!(cpu.read_x(3), 0xEE); // Z clear (result nonzero) -> branch not taken
@@ -604,10 +517,7 @@ fn cmp_does_not_clobber_sp() {
     let mut cpu = Cpu::new();
     cpu.set_reg(0, 0x10);
     cpu.set_pc_and_sp(0x1000, 0x30441ef9);
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&0xF100401Fu32.to_le_bytes()); // cmp x0, #0x10
-    bytes.extend_from_slice(&0xD503201Fu32.to_le_bytes()); // nop
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    map_code(&mut cpu, 0x1000, &[0xF100401F, 0xD503201F]); // cmp x0, #0x10; nop
     cpu.run(2).unwrap();
     assert_eq!(cpu.sp(), 0x30441ef9, "CMP must leave SP untouched");
     assert_eq!(cpu.nzcv() & (1 << 30), 1 << 30); // Z set (0x10 - 0x10 == 0)
@@ -617,11 +527,7 @@ fn cmp_does_not_clobber_sp() {
 fn fault_trace_shows_recent_instructions() {
     let mut cpu = Cpu::new();
     cpu.mem.map_zero(0x1000, 0x20).unwrap();
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&movz(1, 7, 0, true).to_le_bytes());
-    bytes.extend_from_slice(&0x0000_0000u32.to_le_bytes()); // executes as UDF
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &[movz(1, 7, 0, true), 0]); // 0 executes as UDF
     assert!(cpu.run(10).is_err());
     let trace = String::from_utf8_lossy(&cpu.trace).to_string();
     assert!(
@@ -770,11 +676,7 @@ fn register_offset_load_32bit() {
     cpu.set_reg(0, 0x30);
     cpu.mem.write_u32(0x2030, 0xDEAD_BEEF).unwrap();
     let code = [0xB860_6A62u32, nop()];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(2), 0xDEAD_BEEF);
 }
@@ -914,12 +816,7 @@ fn ccmp_eq_sets_carry_for_unsigned_ge() {
         0x540000a2, // b.hs #+20
     ];
     let mut cpu = cpu_at(0x1000);
-    let mut bytes = Vec::new();
-    for insn in &code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
+    map_code(&mut cpu, 0x1000, &code);
     cpu.run(code.len() as u64).unwrap();
     assert_eq!(
         cpu.get_pc(),
