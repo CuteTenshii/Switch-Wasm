@@ -1,5 +1,7 @@
 //! IndexedDB from the worker, as futures.
 
+pub(crate) mod controls;
+pub(crate) mod nand;
 pub(crate) mod persist;
 pub(crate) mod usage;
 pub(crate) mod users;
@@ -21,12 +23,19 @@ pub(crate) const NAND_DB: &str = "switch-wasm-nand";
 pub(crate) const NAND_CONTENT: &str = "content";
 pub(crate) const NAND_SAVES: &str = "saves";
 pub(crate) const NAND_USERS: &str = "users";
+pub(crate) const NAND_TITLES: &str = "titles";
+pub(crate) const NAND_CONTROLS: &str = "controls";
 
 /// The page creates and upgrades these databases too (`web/shared/db.ts`); keep both in step.
 pub(crate) const SD_VERSION: u32 = 1;
 pub(crate) const NAND_VERSION: u32 = 4;
-pub(crate) const NAND_STORES: [&str; 5] =
-    [NAND_CONTENT, "titles", NAND_SAVES, NAND_USERS, "controls"];
+pub(crate) const NAND_STORES: [&str; 5] = [
+    NAND_CONTENT,
+    NAND_TITLES,
+    NAND_SAVES,
+    NAND_USERS,
+    NAND_CONTROLS,
+];
 
 /// Open `name` at `version`, creating any of `stores` it lacks.
 pub(crate) async fn open(

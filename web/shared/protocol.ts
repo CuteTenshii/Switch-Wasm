@@ -209,9 +209,7 @@ export interface Commands {
 
   open_nsp(file: File): number;
   open_nca(file: File): number;
-  add_archive(file: Blob): number;
-  add_applet(file: Blob): number;
-  nand_mount(file: File): void;
+  restore_nand(): number;
   add_update(file: File): string;
   update_version(): string;
   add_dlc(file: File): number;
@@ -231,9 +229,8 @@ export interface Commands {
   load_control_from_nca(): number;
   control_json(): string;
   control_icon(size: number): Bytes;
-  control_nacp(): Bytes;
-  // Record a title's NACP and icon for ns's GetApplicationControlData.
-  add_application_control(titleId: string, nacp: Bytes, icon: Bytes): number;
+  // Store the control data just read, so a later session's ns can describe the title.
+  remember_control(): number;
   parse_nca(header: Bytes): string;
 
   run(budget: number): number;

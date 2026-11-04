@@ -62,7 +62,7 @@ The page, the worker, and the wasm bindings between them.
 ## `web/worker/hostfiles.ts`
 
 - Containers are never handed to wasm whole (multi-GB, beyond wasm32). The File/Blob stays in the browser and wasm pulls ranges through the synchronous `hostRead` import; it must be synchronous because RomFS reads happen inside `switch_run`, and `FileReaderSync` only exists in workers.
-- NAND content comes back from IndexedDB as Blobs, so firmware is registered for the cost of its headers rather than copied through the wasm heap.
+- NAND content comes back from IndexedDB as Blobs, so firmware is registered for the cost of its headers rather than copied through the wasm heap. The wasm side reads IndexedDB itself (`idb/nand.rs`) and hands each Blob to the `addHostFile` import, which returns its index; one host file serves every registration made from an NCA.
 - The chunk cache is per file, not shared: a title with an update reads two containers at once and a shared LRU thrashes at every crossing.
 - Reads larger than a chunk (ExeFS pulled in one go) bypass the cache so they don't evict the working set.
 - The host file table only grows (wasm sources address archives by index). System archives and applets are added once per page; each update or DLC added appends a file with its chunk cache.
@@ -83,7 +83,7 @@ The page, the worker, and the wasm bindings between them.
 ## `web/main/index.ts`, `boot.ts`, `dock.ts`, `wakelock.ts`
 
 - After a homebrew load the screen is shown but the loading screen stays over it until `display.noteFrame` sees a real frame (homebrew can run a long time before presenting).
-- Init awaits only the NAND index; archives register in the background so a firmware dump does not delay the first boot. A core that fails to start keeps the loading screen with the error rather than an idle splash.
+- Init awaits only the NAND index; archives register in the background (`switch_restore_nand` registers archives, library applets and the SYSTEM listing in one call, so the page shows no per-archive progress) so a firmware dump does not delay the first boot. A core that fails to start keeps the loading screen with the error rather than an idle splash.
 - Operation mode affects `vi` resolution, `am`/`apm` performance mode, `clkrst` GPU clock and touchscreen presence. Titles read it once, so changes queue the two AM messages a real dock sends.
 - Screen Wake Lock needs a secure context (missing in Firefox and Safari before 16.4). The browser drops the lock when the document is hidden and does not return it, so it is re-taken on visibility; a lock acquired after the run ended is released immediately.
 - Icons are Lucide (`icons.ts`), imported per icon so the bundle carries only those used.
@@ -139,7 +139,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/main/nand.ts`
 
-- The NAND lives in IndexedDB in two stores: `content` (NCA bytes by file name, stored as `Blob` so the browser owns the bytes and the worker reads ranges from a handle) and `titles` (index by title id, so the panel lists installs without reading content).
+- The NAND lives in IndexedDB in two stores: `content` (NCA bytes by file name, stored as `Blob` so the browser owns the bytes and the worker reads ranges from a handle) and `titles` (index by title id, so the panel lists installs without reading content). A third store, `controls`, holds each opened title's NACP and icon: `idb/controls.rs` stores them when the page loads a title's details and hands them to the session at start.
 - Every stored NCA is also listed read-only at `/Contents/registered/<name>` on the SYSTEM BIS partition (`nand_mount`), read by range from its host file; a rebuilt session needs them again, like archives.
 - Data archives and library applets (`add_applet`) are registered per session; a rebuilt session needs them again (`restoreArchives` is awaited on rebuild because a title mounting an archive still being registered will not find it). A generation ticket lets a newer restore cancel an older one.
 - A launched program is booted from full bytes (the loader maps the whole image); archives and applets are range-read, and the core runs an applet as a process beside its caller.

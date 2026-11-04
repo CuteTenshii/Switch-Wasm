@@ -8,7 +8,10 @@ import { noteRegistered } from './activity';
 import { serveCores } from './coreworkers';
 import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
-import { switch_clear_screen, switch_flush_storage, switch_restore_storage, switch_store_profile_edits } from '@core/switch_wasm.js';
+import {
+  switch_clear_screen, switch_flush_storage, switch_remember_control, switch_restore_nand,
+  switch_restore_storage, switch_store_profile_edits,
+} from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
@@ -58,8 +61,6 @@ function saveKey(id: string): [bigint, bigint, bigint] {
 }
 
 const READ_CHUNK = 1 << 20;
-
-const NACP_SIZE = 0x4000;
 
 function describe(file: Blob): string {
   const name = file instanceof File ? `"${file.name}" ` : '';
@@ -150,27 +151,9 @@ export const CMD: CommandHandlers = {
     logLoad(`opened ${describe(file)} as a standalone NCA`, result);
     return result;
   },
-  // Register a firmware NCA (picked File or NAND Blob) as a system data archive.
-  add_archive(file) {
-    const index = addHostFile(file);
-    const result = core.switch_add_archive(state.handle, index, BigInt(file.size));
-    if (result < 0) {
-      workerLog(`[io] system archive ${describe(file)}: refused (${lastError()})`, 'warn');
-    } else noteRegistered('system archives', file.size);
-    return result;
-  },
-  // Register a library applet's Program NCA from the NAND.
-  add_applet(file) {
-    const result = core.switch_add_applet(state.handle, addHostFile(file), BigInt(file.size));
-    if (result < 0) workerLog(`[io] applet ${describe(file)}: refused (${lastError()})`, 'warn');
-    return result;
-  },
-  // List a NAND file in the SYSTEM partition's registered content.
-  nand_mount(file) {
-    const size = BigInt(file.size);
-    const index = addHostFile(file);
-    withPath(file instanceof File ? file.name : '', (ptr, len) =>
-      core.switch_nand_mount(state.handle, index, size, ptr, len));
+  // Register the stored firmware with the session; how many system data archives it took.
+  restore_nand() {
+    return switch_restore_nand(state.handle);
   },
   // Returns the base title id the update patches, or '' if it is not an update.
   add_update(file) {
@@ -277,17 +260,10 @@ export const CMD: CommandHandlers = {
       return n > 0 ? fromWasm(buf, n) : new Uint8Array(0);
     });
   },
-  control_nacp() {
-    return withBuffer(NACP_SIZE, (buf) => {
-      const n = Number(core.switch_control_nacp(state.handle, buf, NACP_SIZE));
-      return n > 0 ? fromWasm(buf, n) : new Uint8Array(0);
-    });
-  },
-  add_application_control(titleId, nacp, icon) {
-    return withBytes(nacp, (nptr, nlen) =>
-      withBytes(icon, (iptr, ilen) =>
-        core.switch_add_application_control(
-          state.handle, BigInt('0x' + titleId), nptr, nlen, iptr, ilen)));
+  // Store the control data just read, for the next session's ns.
+  async remember_control() {
+    await switch_remember_control(state.handle);
+    return 0;
   },
   parse_nca(header) {
     return withBytes(header, (ptr, len) =>

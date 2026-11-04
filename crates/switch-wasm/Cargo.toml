@@ -45,6 +45,7 @@ optional = true
 features = [
   "Blob",
   "Event",
+  "File",
   "IdbCursorWithValue",
   "IdbDatabase",
   "IdbFactory",

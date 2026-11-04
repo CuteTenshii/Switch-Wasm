@@ -6,14 +6,11 @@ use switch_core::cpu::Installed;
 use switch_core::nca::{ContentType, Nca};
 use switch_core::source::ByteSource;
 
-use crate::{session, HostSource};
+use crate::{HostSource, Session};
 
 /// Install a Program NCA from the NAND, so the kernel can start it as a library applet.
 /// Returns 0, or -1 with the reason in `switch_last_error`.
-#[no_mangle]
-pub extern "C" fn switch_add_applet(handle: u32, file: u32, size: u64) -> i32 {
-    let s = session(handle);
-    let src = HostSource { file, len: size };
+pub(crate) fn add_applet(s: &mut Session, src: HostSource) -> i32 {
     let installed = Nca::parse_source(&src, Some(&s.keys)).and_then(|nca| {
         if nca.content_type != ContentType::Program {
             return Err(switch_core::Error::Nca("not a Program NCA".into()));

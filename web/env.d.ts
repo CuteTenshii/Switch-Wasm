@@ -30,6 +30,10 @@ declare module '@core/switch_wasm.js' {
   // `crates/switch-wasm/src/idb/persist.rs`: the SD card and saves, to and from IndexedDB.
   export function switch_restore_storage(handle: number): Promise<number>;
   export function switch_flush_storage(handle: number): Promise<number>;
+  // `idb/nand.rs`: registers the stored firmware; the system data archives it took.
+  export function switch_restore_nand(handle: number): Promise<number>;
+  // `idb/controls.rs`: stores the control data the session has just read.
+  export function switch_remember_control(handle: number): Promise<void>;
   // `idb/users.rs`: stores the guest's profile edits; whether there were any.
   export function switch_store_profile_edits(handle: number): Promise<boolean>;
 }

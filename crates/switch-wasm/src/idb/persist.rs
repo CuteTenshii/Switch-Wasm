@@ -74,6 +74,7 @@ pub async fn switch_restore_storage(handle: u32) -> u32 {
             &format!("Saves: could not be read ({err:?})"),
         ),
     }
+    super::controls::restore(handle).await;
     0
 }
 

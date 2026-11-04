@@ -17,9 +17,6 @@ export interface WasmExports {
 
   switch_open_nsp(handle: number, size: bigint): number;
   switch_open_nca(handle: number, size: bigint): number;
-  switch_add_archive(handle: number, file: number, size: bigint): number;
-  switch_add_applet(handle: number, file: number, size: bigint): number;
-  switch_nand_mount(handle: number, file: number, size: bigint, name: number, nameLen: number): void;
   switch_add_update(handle: number, file: number, size: bigint): bigint;
   switch_update_version(handle: number, buf: number, maxlen: number): number;
   switch_add_dlc(handle: number, file: number, size: bigint): number;
@@ -38,10 +35,6 @@ export interface WasmExports {
   switch_load_control_from_nca(handle: number): number;
   switch_control_json(handle: number, buf: number, maxlen: number): number;
   switch_control_icon(handle: number, buf: number, maxlen: number): bigint;
-  switch_control_nacp(handle: number, buf: number, maxlen: number): bigint;
-  switch_add_application_control(
-    handle: number, applicationId: bigint, nacpPtr: number, nacpLen: number,
-    iconPtr: number, iconLen: number): number;
 
   switch_load_keys(
     handle: number, prodPtr: number, prodLen: number,

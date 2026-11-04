@@ -50,18 +50,3 @@ pub extern "C" fn switch_nand_launch(handle: u32, ptr: *const u8, len: u32) -> i
         Added::default(),
     )
 }
-
-/// List host file `file` as `name` in the SYSTEM partition's registered content.
-#[no_mangle]
-pub extern "C" fn switch_nand_mount(
-    handle: u32,
-    file: u32,
-    size: u64,
-    name_ptr: *const u8,
-    name_len: u32,
-) {
-    let name = crate::storage::sd_path(name_ptr, name_len);
-    session(handle)
-        .cpu
-        .add_nand_content(&name, std::rc::Rc::new(HostSource { file, len: size }));
-}

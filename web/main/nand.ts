@@ -47,10 +47,6 @@ const STANDALONE_TITLES = new Set([
   '0100000000001000', '0100000000001003', '0100000000001009', '010000000000100d',
 ]);
 
-// Library applets a title or the Home Menu can start.
-const LIBRARY_APPLETS = new Set(Object.keys(SYSTEM_TITLES).filter((id) =>
-  !['0100000000001000', '010000000000100c', '0100000000001012'].includes(id)));
-
 // Content and index entry go in one transaction so the index never names missing content.
 function nandInstall(name: string, content: Blob, titleId: string, kind: number) {
   return nandIdb().then((db) => new Promise<void>((resolve, reject) => {
@@ -89,76 +85,24 @@ async function nandContent(name: string): Promise<Blob | undefined> {
 // In-memory copy of the title index, refreshed on install and erase.
 let nandTitles: [string, NandEntry][] = [];
 
-// Registration is per session; a newer restore supersedes older ones at their next check.
-let restoreGen = 0;
+// Registrations run one after another, each handing the stored firmware to the worker.
 let restoring: Promise<unknown> = Promise.resolve();
 
-let restoreProgress: { done: number; total: number } | null = null;
+let registering = false;
 
-// Hand the stored data archives to the current session; null if superseded.
-async function registerArchives(gen: number): Promise<number | null> {
-  const archives = nandTitles.filter(([, entry]) => entry.kind === 1);
-  let registered = 0;
-  let done = 0;
-  if (archives.length) {
-    restoreProgress = { done: 0, total: archives.length };
+// Resolves to the number of archives registered.
+function beginArchiveRestore(): Promise<number> {
+  const run = restoring.catch(() => {}).then(async () => {
+    registering = true;
     updateFirmwareState();
-  }
-  for (const [, entry] of archives) {
-    if (gen !== restoreGen) return null;
     try {
-      const content = await nandContent(entry.name);
-      if (gen !== restoreGen) return null;
-      // Named so the worker's I/O lines can say which archive they read.
-      const named = content instanceof File ? content : content && new File([content], entry.name);
-      if (named && await call('add_archive', named) === 0) registered++;
-    } catch { /* one unreadable archive should not cost the rest */ }
-    restoreProgress = { done: ++done, total: archives.length };
-    archiveCount = registered;
-    updateFirmwareState();
-  }
-  restoreProgress = null;
-  archiveCount = registered;
-  updateFirmwareState();
-  await registerApplets(gen);
-  await mountContent(gen);
-  return registered;
-}
-
-// Hand the stored library applets to the current session.
-async function registerApplets(gen: number): Promise<void> {
-  const applets = nandTitles.filter(([id, entry]) => entry.kind === 0 && LIBRARY_APPLETS.has(id));
-  for (const [, entry] of applets) {
-    if (gen !== restoreGen) return;
-    try {
-      const content = await nandContent(entry.name);
-      if (gen !== restoreGen) return;
-      const named = content instanceof File ? content : content && new File([content], entry.name);
-      if (named) await call('add_applet', named);
-    } catch { /* that applet just ends cancelled */ }
-  }
-}
-
-// List every stored NCA in the SYSTEM partition.
-async function mountContent(gen: number): Promise<void> {
-  for (const [, entry] of nandTitles) {
-    if (gen !== restoreGen) return;
-    try {
-      const content = await nandContent(entry.name);
-      if (gen !== restoreGen) return;
-      if (content) await call('nand_mount', content instanceof File ? content : new File([content], entry.name));
-    } catch { /* that file is just not listed */ }
-  }
-}
-
-// Resolves to the number of archives registered, or null if superseded.
-function beginArchiveRestore(): Promise<number | null> {
-  const gen = ++restoreGen;
-  const earlier = restoring;
-  const run = (async () => {
-    await earlier.catch(() => {});
-    return gen === restoreGen ? registerArchives(gen) : null;
-  })();
+      archiveCount = await call('restore_nand');
+      return archiveCount;
+    } finally {
+      registering = false;
+      updateFirmwareState();
+    }
+  });
   restoring = run.catch(() => null);
   return run;
 }
@@ -276,17 +220,11 @@ export async function removeNandTitle(id: string): Promise<void> {
   document.dispatchEvent(new Event('nand-changed'));
 }
 
-// Awaited: a title cannot find an archive that is still being registered.
-export async function restoreArchives(): Promise<void> {
-  await beginArchiveRestore();
-}
-
 function updateFirmwareState(): void {
   const held = nandTitles.length ? ', ' + nandTitles.length + ' on the NAND' : '';
   let state: string;
-  if (restoreProgress) {
-    state = 'Registering system data archives: ' + restoreProgress.done
-      + ' of ' + restoreProgress.total + ' \u2026';
+  if (registering) {
+    state = 'Registering system data archives \u2026';
   } else if (archiveCount === 0) {
     state = 'No system data archives. A title that mounts one - an applet\'s'
       + ' shared assets, the Mii and amiibo models - will not find it.';
@@ -336,7 +274,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   const registered = await beginArchiveRestore();
   updateFirmwareState();
   log('Installed ' + installed + ' title(s) of ' + files.length + ' file(s); '
-    + (registered ?? archiveCount) + ' registered as system data archives.',
+    + registered + ' registered as system data archives.',
   installed ? 'info' : 'log');
   document.dispatchEvent(new Event('nand-changed'));
 });

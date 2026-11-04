@@ -31,6 +31,7 @@ mod jit;
 mod screen;
 
 mod activity;
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 mod applets;
 mod audio;
 mod boot;
@@ -135,6 +136,9 @@ fn new_handle(session: Session) -> u32 {
 extern "C" {
     #[wasm_bindgen(js_name = hostRead)]
     fn host_read_js(file: u32, offset: u64, ptr: u32, len: u32) -> u32;
+    /// Register a `File` or `Blob` as the next host file, returning its index.
+    #[wasm_bindgen(js_name = addHostFile)]
+    pub(crate) fn add_host_file(file: &web_sys::Blob) -> u32;
 }
 
 /// # Safety

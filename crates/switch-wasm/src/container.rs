@@ -40,12 +40,10 @@ pub extern "C" fn switch_open_nca(handle: u32, size: u64) -> i32 {
     0
 }
 
-/// Register host file `file` as a system data archive for `OpenDataStorageByDataId`.
-/// Returns 0, or -1 if it is not a readable data archive.
-#[no_mangle]
-pub extern "C" fn switch_add_archive(handle: u32, file: u32, size: u64) -> i32 {
-    let s = session(handle);
-    let src = HostSource { file, len: size };
+/// Register `src` as a system data archive for `OpenDataStorageByDataId`. Returns 0, or -1
+/// if it is not a readable data archive.
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+pub(crate) fn add_archive(s: &mut Session, src: HostSource) -> i32 {
     let nca = match Nca::parse_source(&src, Some(&s.keys)) {
         Ok(nca) => nca,
         Err(e) => {
@@ -408,40 +406,6 @@ pub extern "C" fn switch_load_control_from_nca(handle: u32) -> i32 {
             -1
         }
     }
-}
-
-/// Record another title's `control.nacp` and icon for `ns`'s `GetApplicationControlData`.
-#[no_mangle]
-pub extern "C" fn switch_add_application_control(
-    handle: u32,
-    application_id: u64,
-    nacp_ptr: *const u8,
-    nacp_len: u32,
-    icon_ptr: *const u8,
-    icon_len: u32,
-) -> i32 {
-    let nacp = unsafe { std::slice::from_raw_parts(nacp_ptr, nacp_len as usize) };
-    let icon = unsafe { std::slice::from_raw_parts(icon_ptr, icon_len as usize) };
-    session(handle)
-        .cpu
-        .add_application_control(application_id, nacp, icon);
-    0
-}
-
-/// The cached `control.nacp` as stored; returns its length, or -1 with none cached.
-#[no_mangle]
-pub extern "C" fn switch_control_nacp(handle: u32, buf: *mut u8, maxlen: u32) -> i64 {
-    let s = session(handle);
-    let Some(control) = &s.control else {
-        return -1;
-    };
-    let n = control.nacp_raw.len().min(maxlen as usize);
-    if n > 0 && !buf.is_null() {
-        unsafe {
-            std::ptr::copy_nonoverlapping(control.nacp_raw.as_ptr(), buf, n);
-        }
-    }
-    n as i64
 }
 
 /// The cached control data as JSON, or `{}`. `icon_size` sizes `switch_control_icon`'s buffer.

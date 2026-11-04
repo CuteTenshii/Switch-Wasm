@@ -3,7 +3,6 @@
 
 import { resetAudio } from './audio';
 import { watchBattery } from './battery';
-import { controlRestore } from './controls';
 import { resetDisplay } from './display';
 import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
@@ -50,7 +49,6 @@ async function init(): Promise<void> {
       stageFont(),
       sdRequestPersistence(),
       call('restore_storage'),
-      controlRestore(),
       loadProfiles().then(stageUsers),
       offerPreviousLog(),
       call('set_trace_channels', logLevel() === 'debug'),
