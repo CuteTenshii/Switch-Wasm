@@ -124,6 +124,11 @@ impl Cpu {
                 Some(26) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            // `IReadOnlyApplicationControlDataInterface`.
+            "ns:read-only-control" => match cmd_id {
+                Some(0) => self.ns_application_control_data(tls),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
             // `IReadOnlyApplicationRecordInterface`.
             "ns:read-only-record" => match cmd_id {
                 // HasApplicationRecord(u64 application_id) -> false.
@@ -330,32 +335,35 @@ impl Cpu {
                 self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
             }
             // GetApplicationControlData(u8 source, u64 application_id) -> u32 size.
-            Some(400) => {
-                /// ncm `ContentMetaNotFound` (2005-0007).
-                const CONTENT_META_NOT_FOUND: u32 = 5 | (7 << 9);
-                let application_id = self
-                    .mem
-                    .read_u64(self.ipc_request_data(tls).wrapping_add(8))?;
-                let Some(data) = self.application_controls.get(&application_id).cloned() else {
-                    self.log(
-                        crate::trace::Level::Warn,
-                        &format!(
-                            "[ns] no control data for {application_id:016x}; open that title once to record it"
-                        ),
-                    );
-                    return self.write_ipc_response(tls, CONTENT_META_NOT_FOUND, &[], &[], &[]);
-                };
-                let (addr, len) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
-                let n = data.len().min(len as usize);
-                self.mem.write_bytes(addr, &data[..n])?;
-                self.write_ipc_response(tls, 0, &[], &(n as u32).to_le_bytes(), &[])
-            }
+            Some(400) => self.ns_application_control_data(tls),
             // 20.0.0+, unnamed: one u64 out, 0 (as in Eden).
             Some(4023) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // 20.0.0+, unnamed: no input, no output; qlaunch panics if it fails.
             Some(4053) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             _ => self.unimplemented_command(tls, iface, cmd_id),
         }
+    }
+
+    /// `GetApplicationControlData(u8 source, u64 application_id) -> u32 size`.
+    fn ns_application_control_data(&mut self, tls: u32) -> Result<()> {
+        /// ncm `ContentMetaNotFound` (2005-0007).
+        const CONTENT_META_NOT_FOUND: u32 = 5 | (7 << 9);
+        let application_id = self
+            .mem
+            .read_u64(self.ipc_request_data(tls).wrapping_add(8))?;
+        let Some(data) = self.application_controls.get(&application_id).cloned() else {
+            self.log(
+                crate::trace::Level::Warn,
+                &format!(
+                    "[ns] no control data for {application_id:016x}; open that title once to record it"
+                ),
+            );
+            return self.write_ipc_response(tls, CONTENT_META_NOT_FOUND, &[], &[], &[]);
+        };
+        let (addr, len) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
+        let n = data.len().min(len as usize);
+        self.mem.write_bytes(addr, &data[..n])?;
+        self.write_ipc_response(tls, 0, &[], &(n as u32).to_le_bytes(), &[])
     }
 
     /// `prepo:u` and its privileged aliases (`IPrepoService`): play reports
