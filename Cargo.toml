@@ -7,6 +7,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+strip = "symbols"
 
 # Used by `make wasm` and the host tools; not shipped.
 [profile.dev]
@@ -15,6 +16,7 @@ debug = "line-tables-only"
 
 [profile.test]
 opt-level = 0
+debug = false
 
 # The core tests execute guest code, so keep some optimisation there.
 [profile.test.package.switch-core]
