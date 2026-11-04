@@ -12,7 +12,7 @@ switch-core = { path = "../switch-core" }
 crate-type = ["cdylib"]
 
 [features]
-default = []
+default = ["gpu"]
 # WebGPU backend; makes the artifact a wasm-bindgen module.
 gpu = ["dep:switch-gpu", "dep:wasm-bindgen-futures", "dep:web-sys", "jit"]
 
@@ -42,7 +42,26 @@ optional = true
 [dependencies.web-sys]
 version = "0.3"
 optional = true
-features = ["ImageData", "OffscreenCanvas", "OffscreenCanvasRenderingContext2d"]
+features = [
+  "Blob",
+  "Event",
+  "IdbCursorWithValue",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "ImageData",
+  "OffscreenCanvas",
+  "OffscreenCanvasRenderingContext2d",
+  "StorageEstimate",
+  "StorageManager",
+  "WorkerGlobalScope",
+  "WorkerNavigator",
+  "DomStringList",
+  "DomException",
+]
 
 [lints]
 workspace = true
