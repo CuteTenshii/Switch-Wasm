@@ -94,7 +94,7 @@ fn main() {
             "  thread {} ({}, runs {}, priority {}): {}; {}",
             thread.index,
             thread.name.as_deref().unwrap_or("unnamed"),
-            thread.entry,
+            thread.entry.as_deref().unwrap_or("main"),
             thread.priority,
             thread.state,
             thread.at

@@ -25,8 +25,8 @@ pub struct ThreadReport {
     pub handle: u64,
     /// The `nn::os` name, formatted by [`Cpu::name_text`].
     pub name: Option<String>,
-    /// Entry point, as `module+offset` when inside a loaded module.
-    pub entry: String,
+    /// Entry point, as `module+offset` when inside a loaded module; none for the main thread.
+    pub entry: Option<String>,
     /// Current pc and callers, as `module+offset`.
     pub at: String,
     pub state: String,
@@ -100,7 +100,7 @@ impl Cpu {
                 index: 0,
                 handle: crate::cpu::MAIN_THREAD_HANDLE,
                 name: None,
-                entry: "the process entry".to_owned(),
+                entry: None,
                 at: self.where_is(0),
                 state: "running".to_owned(),
                 priority: self.process().main_thread_priority,
@@ -115,11 +115,7 @@ impl Cpu {
         let mut reports = Vec::with_capacity(self.process().threads.len());
         for index in 0..self.process().threads.len() {
             let thread = &self.process().threads[index];
-            let entry = if index == 0 {
-                "the process entry".to_owned()
-            } else {
-                self.locate(thread.entry)
-            };
+            let entry = (index != 0).then(|| self.locate(thread.entry));
             reports.push(ThreadReport {
                 index,
                 handle: thread.handle,
@@ -371,7 +367,7 @@ mod tests {
         let (threads, log, dropped) = cpu.take_thread_report();
         assert_eq!(dropped, 0);
         assert_eq!(threads.len(), 2, "{threads:?}");
-        assert_eq!(threads[1].entry, "main+0x100");
+        assert_eq!(threads[1].entry.as_deref(), Some("main+0x100"));
         assert_eq!(
             threads[1].at,
             format!(

@@ -253,14 +253,16 @@ fn threads(cpu: &mut Cpu, reporter: &mut Reporter) -> Vec<ThreadReport> {
         } else {
             "did not run".to_owned()
         };
-        let who = match &thread.name {
-            Some(name) => format!("{name}, via {}", thread.entry),
-            None => thread.entry.clone(),
+        let who = match (&thread.name, &thread.entry) {
+            (Some(name), Some(entry)) => format!("{name}, via {entry}, "),
+            (Some(name), None) => format!("{name}, "),
+            (None, Some(entry)) => format!("{entry}, "),
+            (None, None) => String::new(),
         };
         push(
             PageLevel::Debug,
             &format!(
-                "[thread] {}{} ({who}, handle {:x}, priority {}): {ran}; {}; {}",
+                "[thread] {}{} ({who}handle {:x}, priority {}): {ran}; {}; {}",
                 thread.index,
                 if thread.running { "*" } else { "" },
                 thread.handle,
@@ -600,9 +602,9 @@ fn idle_threads(reporter: &mut Reporter, threads: &[ThreadReport]) {
             continue;
         }
         reporter.idle_warned.insert(thread.index, idle);
-        let who = match &thread.name {
-            Some(name) => format!("{} ({name})", thread.index),
-            None => format!("{} ({})", thread.index, thread.entry),
+        let who = match (&thread.name, &thread.entry) {
+            (Some(label), _) | (None, Some(label)) => format!("{} ({label})", thread.index),
+            (None, None) => thread.index.to_string(),
         };
         push(
             PageLevel::Debug,

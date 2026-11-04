@@ -76,7 +76,7 @@ fn the_activity_report_names_each_file_and_hands_it_over_once() {
     assert!(
         first
             .iter()
-            .any(|(_, line)| line.starts_with("[thread] 0* (the process entry, ")),
+            .any(|(_, line)| line.starts_with("[thread] 0* (handle ")),
         "{first:?}"
     );
     assert!(
