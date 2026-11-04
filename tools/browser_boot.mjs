@@ -11,7 +11,7 @@
 // `--browser-arg` passes a switch to Chromium, and can be repeated.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
 // a device frame is compared against.
-// `--debug-from` switches the console to debug once a line contains the text: debug from
+// `--trace-from` switches the console to trace once a line contains the text: trace from
 // the start floods the log long before the moment worth reading.
 // `--headed` opens a window, whose browser gets the machine's GPU instead of a software adapter.
 // `--jit-stats` records the cumulative block stats with every sample.
@@ -25,7 +25,7 @@ import { preview } from 'vite';
 import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
-  [--firmware=dir] [--log-level=debug] [--debug-from=text] [--no-webgpu] [--headed] [--docked]
+  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headed] [--docked]
   [--dump-wgsl=dir] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...]`;
@@ -46,7 +46,7 @@ const firmware = pathFlag('firmware');
 const screenshot = pathFlag('screenshot');
 const out = flag('out');
 const logLevel = flag('log-level');
-const debugFrom = flag('debug-from');
+const traceFrom = flag('trace-from');
 const seconds = Number(flag('seconds') ?? 60);
 const screenshotEvery = Number(flag('screenshot-every') ?? 0);
 const jitStats = hasFlag('jit-stats');
@@ -157,16 +157,16 @@ try {
     });
   }
   // Watched in the page, so the switch lands with the line rather than at the next sample.
-  if (debugFrom) {
+  if (traceFrom) {
     await page.evaluate((text) => {
       const consoleEl = document.getElementById('console');
       const observer = new MutationObserver(() => {
         if (!consoleEl.textContent.includes(text)) return;
         observer.disconnect();
-        window.setLogLevel('debug');
+        window.setLogLevel('trace');
       });
       observer.observe(consoleEl, { childList: true });
-    }, debugFrom);
+    }, traceFrom);
   }
   if (keys) await page.setInputFiles('#prod-keys', keys);
   if (titleKeys) await page.setInputFiles('#title-keys', titleKeys);

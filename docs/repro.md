@@ -28,7 +28,7 @@ Game images and keys (`.nro`, `.nsp`, `.xci`, `.nca`, `.keys`) are gitignored.
 
 ## Tracing
 
-- Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, ...; the list is `switch_core::trace::ALL`). Host tools set it from the environment in `common::apply_env`; the core reads no environment, so in the browser the console's log level decides: **Debug** turns every channel on, any other level turns them off. Debug is slow on a busy title; leave it on Log unless a channel is needed.
+- Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, ...; the list is `switch_core::trace::ALL`). Host tools set it from the environment in `common::apply_env`; the core reads no environment, so in the browser the console's log level decides: **Trace** turns every channel on, any other level turns them off. Trace is slow on a busy title and `TRACE_GPU` alone prints a line per method write; leave the level on Log unless a channel is needed.
 - The channels to start from when a title misbehaves without faulting are the low-volume ones. `TRACE_FS` names every filesystem request, its path and the `Result` it was answered with (`2002-0001` is path-not-found), so a title looking for content it cannot find says so. `TRACE_IO` is the host side of the same reads: each range pulled out of the container. `TRACE_DRAW` is one line per draw and clear with the surface it lands in, on either backend; `TRACE_COPY` the DMA copies, inline uploads and 2D blits between them; and `TRACE_PRESENT` one line per frame scanned out. `TRACE_GPU` prints the draw, copy and present lines too, among every method write.
 
 ## In the browser
