@@ -14,6 +14,7 @@ pub extern "C" fn switch_end_title() {
     let s = session();
     s.cpu.end_title();
     crate::audio::drop_queued();
+    crate::input::reset();
     s.control = None;
     s.last_error.clear();
 }

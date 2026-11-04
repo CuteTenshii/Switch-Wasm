@@ -44,6 +44,8 @@ mod input;
 mod keyboard;
 mod log;
 mod nand;
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+mod post;
 mod run;
 mod stats;
 mod storage;
@@ -243,6 +245,7 @@ pub extern "C" fn switch_init() {
     install_panic_hook();
     attach_jit();
     forget_the_last_session();
+    input::reset();
     if let Some(old) = session_if_live() {
         old.cpu.stop_cores();
         log::collect(&mut old.cpu);

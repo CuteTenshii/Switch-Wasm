@@ -1,7 +1,7 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, ErrorDialog, GpuReport, JitStats, KeyboardRequest, MemoryReport,
+  Bytes, CommandHandlers, GpuReport, JitStats, MemoryReport,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
@@ -12,7 +12,6 @@ import {
   switch_restore_storage, switch_store_profile_edits,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
-import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
   core,
   fromWasm,
@@ -61,7 +60,6 @@ export const CMD: CommandHandlers = {
   end_title() {
     stopLoop();
     core.switch_end_title();
-    resetInput(); // the frame counter restarts at 0
     return 0;
   },
 
@@ -80,11 +78,12 @@ export const CMD: CommandHandlers = {
     return core.switch_vibration();
   },
   set_input(mask, slx, sly, srx, sry) {
-    setGamepad(mask, slx, sly, srx, sry);
+    core.switch_set_input(BigInt(mask), slx, sly, srx, sry);
     return 0;
   },
   set_touch(points) {
-    setTouch(points);
+    const bytes = new Uint8Array(points.buffer, points.byteOffset, points.byteLength) as Bytes;
+    withBytes(bytes, (ptr) => core.switch_set_touch(ptr, points.length / 3));
     return 0;
   },
   // The Battery Status API is Window-only, so the main thread sends it.
@@ -127,9 +126,7 @@ export const CMD: CommandHandlers = {
     return result;
   },
   // Register the stored firmware with the session; how many system data archives it took.
-  restore_nand() {
-    return switch_restore_nand();
-  },
+  restore_nand: switch_restore_nand,
   // Returns the base title id the update patches, or '' if it is not an update.
   add_update(file) {
     const index = addHostFile(file);
@@ -236,19 +233,14 @@ export const CMD: CommandHandlers = {
     });
   },
   // Store the control data just read, for the next session's ns.
-  async remember_control() {
-    await switch_remember_control();
-    return 0;
-  },
+  remember_control: switch_remember_control,
   parse_nca(header) {
     return withBytes(header, (ptr, len) =>
       readString(4096, (buf, cap) => core.switch_parse_nca(ptr, len, buf, cap)));
   },
 
   run(budget) {
-    const steps = Number(core.switch_run(BigInt(budget)));
-    releaseLatchIfSeen();
-    return steps;
+    return Number(core.switch_run(BigInt(budget)));
   },
   start_loop(tracing) {
     startLoop(tracing);
@@ -258,12 +250,8 @@ export const CMD: CommandHandlers = {
     pauseLoop();
     return 0;
   },
-  restore_storage() {
-    return switch_restore_storage();
-  },
-  flush_storage() {
-    return switch_flush_storage();
-  },
+  restore_storage: switch_restore_storage,
+  flush_storage: switch_flush_storage,
   clear_screen() {
     switch_clear_screen();
     return 0;
@@ -323,9 +311,7 @@ export const CMD: CommandHandlers = {
       {},
     );
   },
-  last_error() {
-    return lastError();
-  },
+  last_error: lastError,
 
   fb_width() {
     return core.switch_fb_width();
@@ -427,19 +413,8 @@ export const CMD: CommandHandlers = {
     }
     return core.switch_users_commit(...uidHalves(current));
   },
-  store_profile_edits() {
-    return switch_store_profile_edits();
-  },
+  store_profile_edits: switch_store_profile_edits,
 
-  error_dialog() {
-    // Taken from the queue; 16 KiB holds any message.
-    return readJson<ErrorDialog | null>(
-      16384, (buf, cap) => core.switch_error_dialog_json(buf, cap), null);
-  },
-  keyboard_request() {
-    return readJson<KeyboardRequest | null>(
-      8192, (buf, cap) => core.switch_keyboard_json(buf, cap), null);
-  },
   keyboard_answer(text) {
     return withPath(text ?? '', (ptr, len) =>
       core.switch_keyboard_answer(ptr, len, text === null ? 0 : 1));

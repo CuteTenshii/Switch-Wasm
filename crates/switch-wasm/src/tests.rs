@@ -5,6 +5,7 @@ use crate::activity::switch_log_activity;
 use crate::boot::switch_load_nca_from_nsp;
 use crate::container::{switch_nsp_files_json, switch_open_nsp, switch_read_file};
 use crate::debug::switch_set_trace_channels;
+use crate::input::switch_set_input;
 use crate::log::{switch_log_line, switch_log_next};
 use crate::storage::{
     switch_save_create_dir, switch_save_file_size, switch_save_read_file, switch_save_write_file,
@@ -621,5 +622,81 @@ fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
     assert_eq!(
         std::str::from_utf8(&buf[..n]).unwrap(),
         r#"{"error":"NCA header: expected at least 1024 bytes, got 16"}"#
+    );
+}
+
+fn published_buttons() -> u32 {
+    session()
+        .cpu
+        .mem
+        .read_u32(switch_core::INPUT_ADDR)
+        .expect("the input register is mapped")
+}
+
+fn advance_frames(n: u64) {
+    session().cpu.nv.gpu.frames += n;
+    crate::input::release_if_seen(&mut session().cpu);
+}
+
+#[test]
+fn a_tap_between_slices_stays_down_until_the_guest_has_had_a_frame() {
+    let _host = new_session();
+    switch_set_input(0b1, 0, 0, 0, 0);
+    switch_set_input(0, 0, 0, 0, 0);
+    assert_eq!(published_buttons(), 0b1, "released before any frame ran");
+
+    advance_frames(1);
+    assert_eq!(published_buttons(), 0b1, "one frame may not have been seen");
+
+    advance_frames(1);
+    assert_eq!(published_buttons(), 0, "two frames have passed");
+}
+
+#[test]
+fn a_held_button_stays_down_after_its_latch_lets_go() {
+    let _host = new_session();
+    switch_set_input(0b10, 0, 0, 0, 0);
+    advance_frames(2);
+    assert_eq!(published_buttons(), 0b10);
+    switch_set_input(0, 0, 0, 0, 0);
+    assert_eq!(published_buttons(), 0);
+}
+
+#[test]
+fn a_press_is_let_go_after_enough_slices_even_if_nothing_is_presented() {
+    let _host = new_session();
+    switch_set_input(0b100, 0, 0, 0, 0);
+    switch_set_input(0, 0, 0, 0, 0);
+    for _ in 0..63 {
+        advance_frames(0);
+    }
+    assert_eq!(published_buttons(), 0b100);
+    advance_frames(0);
+    assert_eq!(published_buttons(), 0);
+}
+
+#[test]
+fn a_stick_flick_latches_like_a_press_and_a_reset_forgets_it() {
+    let _host = new_session();
+    let stick = |cpu: &switch_core::cpu::Cpu| {
+        cpu.mem
+            .read_u32(switch_core::INPUT_ADDR + 8)
+            .expect("the input register is mapped") as i32
+    };
+    switch_set_input(0, 30000, 0, 0, 0);
+    switch_set_input(0, 0, 0, 0, 0);
+    assert_eq!(stick(&session().cpu), 30000);
+    advance_frames(2);
+    assert_eq!(stick(&session().cpu), 0);
+
+    switch_set_input(0b1, 0, 0, 0, 0);
+    crate::input::reset();
+    switch_set_input(0b1, 0, 0, 0, 0);
+    switch_set_input(0, 0, 0, 0, 0);
+    advance_frames(0);
+    assert_eq!(
+        published_buttons(),
+        0b1,
+        "a press after a reset latches afresh"
     );
 }

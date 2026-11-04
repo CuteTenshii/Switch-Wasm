@@ -16,7 +16,7 @@ import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log } from './log';
 import { noteRam } from './memory';
-import { call, explainFailure, onLoopEvents, readLastError } from './rpc';
+import { call, explainFailure, onLoopEvents } from './rpc';
 import { pullProfileEdits, reloadProfiles } from './users';
 import { loaded, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
@@ -63,6 +63,9 @@ function loopEnded(): void {
 onLoopEvents({
   slice: (report) => void onSlice(report),
   failed: (error) => void onFailed(error),
+  keyboard: offerKeyboard,
+  errorDialog: (dialog) => offerErrors([dialog]),
+  profilesEdited: () => void reloadProfiles(),
 });
 
 async function onSlice(report: SliceReport): Promise<void> {
@@ -71,7 +74,7 @@ async function onSlice(report: SliceReport): Promise<void> {
   // Stop does not wait for the slice in flight, so the session may be gone.
   if (aborted) return;
   noteAudio();
-  if (report.housekeeping) applyHousekeeping(report.housekeeping);
+  if (report.housekeeping) showReadouts(report.housekeeping.steps, report.housekeeping.ram);
   noteFrame(report);
   if (!report.stopped) return;
   loopEnded();
@@ -81,13 +84,6 @@ async function onSlice(report: SliceReport): Promise<void> {
     return;
   }
   await finishRun(report.steps);
-}
-
-function applyHousekeeping(h: Housekeeping): void {
-  showReadouts(h.steps, h.ram);
-  if (h.profilesEdited) void reloadProfiles();
-  offerKeyboard(h.keyboard);
-  offerErrors(h.errors);
 }
 
 async function onFailed(error: string): Promise<void> {
@@ -140,7 +136,7 @@ $('btn-step').addEventListener('click', async () => {
 
 async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   endLoad();
-  const err = await readLastError();
+  const err = await call('last_error');
   if (steps < 0) {
     setState('fault');
     log('Fault: ' + err, 'error');

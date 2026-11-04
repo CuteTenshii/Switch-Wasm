@@ -1,6 +1,8 @@
 // Promise-based RPC to the emulator worker over postMessage.
 
-import type { CallRequest, Commands, SliceReport, WorkerMessage } from '../shared/protocol';
+import type {
+  CallRequest, Commands, ErrorDialog, KeyboardRequest, SliceReport, WorkerMessage,
+} from '../shared/protocol';
 import { setAudioFormat, setAudioRing } from './audio';
 import { log } from './log';
 
@@ -18,6 +20,9 @@ let loaded = false;
 let loopEvents: {
   slice: (report: SliceReport) => void;
   failed: (error: string) => void;
+  keyboard: (request: KeyboardRequest) => void;
+  errorDialog: (dialog: ErrorDialog) => void;
+  profilesEdited: () => void;
 } | null = null;
 
 let nandProgress: ((done: number, total: number) => void) | null = null;
@@ -87,6 +92,15 @@ export function initWorker(): void {
       case 'loop_failed':
         loopEvents?.failed(d.error);
         break;
+      case 'keyboard':
+        loopEvents?.keyboard(d);
+        break;
+      case 'error_dialog':
+        loopEvents?.errorDialog(d);
+        break;
+      case 'profiles_edited':
+        loopEvents?.profilesEdited();
+        break;
       case 'audio_ring':
         setAudioRing(d);
         break;
@@ -116,15 +130,11 @@ export function attachScreen(canvas: OffscreenCanvas): void {
   worker?.postMessage({ type: 'screen', canvas }, [canvas]);
 }
 
-export async function readLastError(): Promise<string> {
-  return await call('last_error');
-}
-
 // A panic traps as `unreachable`; `switch_last_error` recovers the message the hook kept.
 export async function explainFailure(err: unknown): Promise<string> {
   let why = err instanceof Error ? err.message : String(err);
   try {
-    const captured = await readLastError();
+    const captured = await call('last_error');
     if (captured) why += ' - ' + captured;
   } catch {
     // The module may be too far gone to answer.

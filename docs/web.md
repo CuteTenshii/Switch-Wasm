@@ -68,9 +68,9 @@ The page, the worker, and the wasm bindings between them.
 - The host file table only grows (wasm sources address archives by index). System archives and applets are added once per page; each update or DLC added appends a file with its chunk cache.
 - A failed read (file moved or replaced) reports a short read; the wasm side turns it into an error with the offset.
 
-## `web/worker/latch.ts`
+## `crates/switch-wasm/src/input.rs`
 
-- Input messages pile up while the worker is inside `switch_run`, so a tap can press and release entirely between guest polls. The unit a press must survive is a guest frame, not a run slice: the guest polls hid and presents once per loop iteration, so a press is held until the frame counter advances twice (only a full present-to-present interval is guaranteed to contain a poll). A slice cap releases the latch for programs that never present.
+- The latch lives in Rust: `switch_set_input` and `switch_set_touch` apply it, and `switch_run` lets go of what the guest has had a frame to see. Input messages pile up while the worker is inside `switch_run`, so a tap can press and release entirely between guest polls. The unit a press must survive is a guest frame, not a run slice: the guest polls hid and presents once per loop iteration, so a press is held until the frame counter advances twice (only a full present-to-present interval is guaranteed to contain a poll). A slice cap releases the latch for programs that never present.
 - Only bits the guest may not have seen are latched; keys the host still reports down publish live, so release takes effect on the next slice (an extra slice of stickiness made one d-pad tap step two menu entries).
 - Stick flicks past `HID_STICK_THRESHOLD` latch like buttons, since menus navigate with the derived stick pseudo-buttons. Touch uses the same latch.
 
@@ -95,7 +95,7 @@ The page, the worker, and the wasm bindings between them.
 ## `web/worker/loop.ts` and `web/main/runloop.ts`
 
 - The worker runs the loop: slices back to back, each queued as a `MessageChannel` task so input and commands still get in between them (a `setTimeout` chain is clamped to 4 ms). Slices are sized by wall time to about one display frame.
-- After each slice the worker posts one report: steps, timing, frame count and size, audio format, and every 8 slices the housekeeping (readouts, guest output, diagnostics, whether the SD card, saves or profiles changed, keyboard and error dialogs). The page reacts and polls nothing; it reads file contents only when told they changed.
+- After each slice the worker posts one report: steps, timing, frame count and size, audio format, and every 8 slices the housekeeping (readouts). The wasm side posts the rest itself: log lines go through the worker, and `error_dialog`, `keyboard` and `profiles_edited` messages arrive when the guest raises one (`keyboard.rs`) or an edit is stored. The page reacts and polls nothing; it reads file contents only when told they changed.
 - Run starts the loop and Pause asks it to stop after the slice in flight. Freeing the session stops it, and the page ignores reports that arrive after Stop.
 - The release profile aborts on panic, which on wasm is an empty `unreachable` trap; the panic hook stores the message and `switch_last_error` returns it without a live session. Linear memory survives the trap, so panic context is collected afterwards, each piece separately.
 - The status bar shows instructions retired, not the guest clock, which jumps forward when all threads are blocked.
@@ -146,7 +146,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `crates/switch-wasm/src/idb/persist.rs`
 
-- The wasm side owns the SD card's and saves' persistence and talks to IndexedDB itself (`idb/mod.rs`, via web-sys): `switch_restore_storage` loads them into the core when a session starts and `switch_flush_storage` (called by the worker's housekeeping and the page's `flush_storage`) stores guest-changed paths, so no file crosses JavaScript. It creates the databases with the same versions and stores as `web/shared/db.ts`; keep both in step. Restores go through host entry points (not recorded as changes) so restoring does not queue a full write-back. Drained changes cannot be returned to the core, so IndexedDB failures (quota) stay in a per-path backlog until the next flush. Flushes run one after another, so one that resolves has stored its changes.
+- The wasm side owns the SD card's and saves' persistence and talks to IndexedDB itself (`idb/mod.rs`, via web-sys): `switch_restore_storage` loads them into the core when a session starts and `switch_flush_storage` (called by `switch_run` through `persist::tick`, at most every 100 ms, and by the page's `flush_storage`) stores guest-changed paths, so no file crosses JavaScript. It creates the databases with the same versions and stores as `web/shared/db.ts`; keep both in step. Restores go through host entry points (not recorded as changes) so restoring does not queue a full write-back. Drained changes cannot be returned to the core, so IndexedDB failures (quota) stay in a per-path backlog until the next flush. Flushes run one after another, so one that resolves has stored its changes.
 - Free and total space come from the wasm side (`idb/usage.rs`), which scans IndexedDB itself: `navigator.storage.estimate()` gives the origin's free bytes, the `entries` store the SD card's used bytes, `content` the SYSTEM partition's and `saves` USER's. A scan starts on the first slice and again after a guest space query (at most every 2 s); queries answer from the last scan. Databases are only opened if `indexedDB.databases()` lists them, so the scan never creates one with the wrong version.
 - The page asks for persistent storage (`navigator.storage.persist`, main thread only) so the card is not evicted.
 
@@ -163,7 +163,7 @@ The page, the worker, and the wasm bindings between them.
 - A title asks which user is playing once at startup, so profile changes apply from the next title. Idle sessions get changes immediately; running titles keep their user.
 - The last profile cannot be deleted (no title starts without a user), nor the one a running title uses (its saves would be orphaned).
 - Profiles are stored in the NAND database next to their saves.
-- Profile edits the guest makes through `acc` are stored by the wasm side (`idb/users.rs`) over the stored profile of the same uid; housekeeping then reports `profilesEdited` and the page reloads its list from IndexedDB.
+- Profile edits the guest makes through `acc` are stored by the wasm side (`idb/users.rs`) over the stored profile of the same uid; the same tick then posts `profiles_edited` and the page reloads its list from IndexedDB.
 
 ## `web/main/log.ts`
 

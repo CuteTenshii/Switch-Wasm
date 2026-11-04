@@ -3,12 +3,13 @@
 
 use std::collections::HashMap;
 
-use js_sys::{Array, ArrayBuffer, Object, Reflect};
+use js_sys::{Array, ArrayBuffer, Reflect};
 use switch_core::trace::Level;
 use wasm_bindgen::prelude::*;
-use web_sys::{Blob, DedicatedWorkerGlobalScope, File};
+use web_sys::{Blob, File};
 
 use super::{self as idb, NAND_CONTENT, NAND_DB, NAND_STORES, NAND_TITLES, NAND_VERSION};
+use crate::post::post;
 use crate::{add_host_file, applets, container, session_if_live, HostSource};
 
 /// Program ids of the library applets a title or the Home Menu can start.
@@ -150,16 +151,13 @@ async fn restore() -> Result<u32, JsValue> {
 
 /// Tell the page how many archives are registered so far.
 fn post_progress(done: usize, total: usize) {
-    let message = Object::new();
-    for (key, value) in [
-        ("type", JsValue::from_str("nand_progress")),
-        ("done", JsValue::from_f64(done as f64)),
-        ("total", JsValue::from_f64(total as f64)),
-    ] {
-        Reflect::set(&message, &key.into(), &value).ok();
-    }
-    let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-    scope.post_message(&message).ok();
+    post(
+        "nand_progress",
+        &[
+            ("done", JsValue::from_f64(done as f64)),
+            ("total", JsValue::from_f64(total as f64)),
+        ],
+    );
 }
 
 /// Stored content as a `File` named `name`: a `Blob`, or an `ArrayBuffer` from older builds.

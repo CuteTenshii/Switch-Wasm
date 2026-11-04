@@ -6,7 +6,7 @@ import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { log } from './log';
-import { call, explainFailure, readLastError } from './rpc';
+import { call, explainFailure } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { endTitle, noteBooted } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
@@ -292,7 +292,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
   loadPhase('looking for the title\'s program');
   const index = await call('program_nca_index');
   if (index < 0 || !nspFiles[index]) {
-    const why = await readLastError();
+    const why = await call('last_error');
     setState('fault');
     failLoad(why);
     log('Nothing to boot in ' + file.name + ': ' + why, 'error');
@@ -315,7 +315,7 @@ async function handleNspFile(file: File): Promise<void> {
   try {
     const ok = await call('open_nsp', file);
     if (ok !== 0) {
-      const why = await readLastError();
+      const why = await call('last_error');
       status.textContent = 'NSP error: ' + why;
       setNote('container-badge', 'none open', false);
       log('NSP error: ' + why, 'error');
@@ -386,7 +386,7 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
   let info: ControlInfo;
   try {
     if (await loader() !== 0) {
-      log('No title details: ' + await readLastError(), 'debug');
+      log('No title details: ' + await call('last_error'), 'debug');
       return null;
     }
     info = JSON.parse(await call('control_json')) as ControlInfo;
@@ -627,7 +627,7 @@ export async function doLaunchNca(
     return;
   }
   if (entry < 0) {
-    const why = await readLastError();
+    const why = await call('last_error');
     setState('fault');
     failLoad('Launch failed: ' + why);
     log('Launch failed: ' + why, 'error');

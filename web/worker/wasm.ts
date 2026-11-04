@@ -93,8 +93,6 @@ export interface WasmExports {
     uidLo: bigint, uidHi: bigint, namePtr: number, nameLen: number,
     editedAt: bigint, picturePtr: number, pictureLen: number): void;
   switch_users_commit(currentLo: bigint, currentHi: bigint): number;
-  switch_keyboard_json(buf: number, maxlen: number): number;
-  switch_error_dialog_json(buf: number, maxlen: number): number;
   switch_keyboard_answer(
     textPtr: number, textLen: number, submitted: number): number;
   switch_save_write_file(

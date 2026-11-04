@@ -8,7 +8,7 @@ import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
 import { log } from './log';
-import { call, explainFailure, readLastError } from './rpc';
+import { call, explainFailure } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { endTitle, noteBooted } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
@@ -46,7 +46,7 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
     return false;
   }
   if (entry < 0) {
-    const why = await readLastError();
+    const why = await call('last_error');
     setState('fault');
     failLoad('Load failed: ' + why);
     log('Load failed: ' + why, 'error');

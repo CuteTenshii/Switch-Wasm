@@ -40,36 +40,17 @@ static RING: Ring = Ring {
 /// Hand the page the ring over the shared memory, for its audio worklet to read.
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 pub(crate) fn announce_ring() {
-    use js_sys::{Object, Reflect, WebAssembly};
+    use js_sys::WebAssembly;
     use wasm_bindgen::JsCast;
     let memory: WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
-    let message = Object::new();
-    for (key, value) in [
-        ("type", "audio_ring".into()),
-        ("buffer", memory.buffer()),
-        ("at", (&RING as *const Ring as u32).into()),
-        ("samples", (RING_SAMPLES as u32).into()),
-    ] {
-        Reflect::set(&message, &key.into(), &value).ok();
-    }
-    post(&message);
-}
-
-/// Tell the page the format changed, so it opens the output on the first sound.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
-fn announce_format(format: u32) {
-    use js_sys::{Object, Reflect};
-    let message = Object::new();
-    Reflect::set(&message, &"type".into(), &"audio_format".into()).ok();
-    Reflect::set(&message, &"format".into(), &format.into()).ok();
-    post(&message);
-}
-
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
-fn post(message: &js_sys::Object) {
-    use wasm_bindgen::JsCast;
-    let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-    scope.post_message(message).ok();
+    crate::post::post(
+        "audio_ring",
+        &[
+            ("buffer", memory.buffer()),
+            ("at", (&RING as *const Ring as u32).into()),
+            ("samples", (RING_SAMPLES as u32).into()),
+        ],
+    );
 }
 
 /// Drop what is queued in the ring, for a title that has ended.
@@ -83,7 +64,7 @@ pub(crate) fn feed() {
     let format = format();
     #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
     if RING.format.swap(format, Relaxed) != format {
-        announce_format(format);
+        crate::post::post("audio_format", &[("format", format.into())]);
     }
     #[cfg(not(all(feature = "gpu", target_arch = "wasm32")))]
     RING.format.store(format, Relaxed);

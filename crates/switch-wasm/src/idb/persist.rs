@@ -14,6 +14,7 @@ use wasm_bindgen_futures::JsFuture;
 use super::{
     self as idb, NAND_DB, NAND_SAVES, NAND_STORES, NAND_VERSION, SD_DB, SD_STORE, SD_VERSION,
 };
+use crate::post::post;
 use crate::session_if_live;
 
 /// Stored entries by key; `None` deletes the key.
@@ -31,6 +32,32 @@ struct Flush {
 
 thread_local! {
     static FLUSH: RefCell<Flush> = RefCell::new(Flush::default());
+}
+
+/// Least time between two housekeeping rounds.
+const TICK_INTERVAL_MS: f64 = 100.0;
+
+static TICK_AT: crate::SyncCell<f64> = crate::SyncCell::new(f64::NEG_INFINITY);
+static TICK_RUNNING: crate::SyncCell<bool> = crate::SyncCell::new(false);
+
+/// Store what the guest changed since the last round, and tell the page when it edited a
+/// profile. Called after every slice; acts at most every [`TICK_INTERVAL_MS`].
+pub(crate) fn tick() {
+    let now = js_sys::Date::now();
+    // SAFETY: only the system worker calls exports; see the `SESSION` comment.
+    let (at, running) = unsafe { (&mut *TICK_AT.get(), &mut *TICK_RUNNING.get()) };
+    if *running || now - *at < TICK_INTERVAL_MS {
+        return;
+    }
+    *at = now;
+    *running = true;
+    wasm_bindgen_futures::spawn_local(async {
+        switch_flush_storage().await;
+        if super::users::switch_store_profile_edits().await {
+            post("profiles_edited", &[]);
+        }
+        unsafe { *TICK_RUNNING.get() = false };
+    });
 }
 
 /// Paths shown in a store line before the rest is summarized.

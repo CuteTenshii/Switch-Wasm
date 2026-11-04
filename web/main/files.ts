@@ -11,7 +11,7 @@ import { $, el } from './dom';
 import { showView } from './fileview';
 import { fmtSize } from './format';
 import { icon } from './icons';
-import { listNandTitles, readNandContent, removeNandTitle, titleLabel } from './nand';
+import { listNandTitles, nandContent, removeNandTitle, titleLabel } from './nand';
 import { call, hasSession } from './rpc';
 import { zip, type ZipEntry } from './zip';
 
@@ -580,7 +580,7 @@ async function renderNand(mine: number): Promise<void> {
     const { actions } = row(title.kind === 0 ? Package : Database, titleLabel(title.id),
       title.id + ' · ' + kind + ' · ' + fmtSize(title.size), null);
     action(actions, 'Download ' + title.name, () => void guarded(async () => {
-      const content = await readNandContent(title.name);
+      const content = await nandContent(title.name);
       if (!content) throw new Error(title.name + ' is indexed but its content is missing.');
       saveBlob(title.name, content);
     }), false, Download);

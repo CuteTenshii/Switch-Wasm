@@ -227,7 +227,7 @@ export interface Commands {
   control_json(): string;
   control_icon(size: number): Bytes;
   // Store the control data just read, so a later session's ns can describe the title.
-  remember_control(): number;
+  remember_control(): void;
   parse_nca(header: Bytes): string;
 
   run(budget: number): number;
@@ -272,10 +272,6 @@ export interface Commands {
   // Stores any profile edits the guest made; whether there were any.
   store_profile_edits(): boolean;
 
-  // The next error the title asked to show, or null.
-  error_dialog(): ErrorDialog | null;
-  // The keyboard waiting for text, or null.
-  keyboard_request(): KeyboardRequest | null;
   // Send the typed text, or null to cancel; 1 if a keyboard was waiting.
   keyboard_answer(text: string | null): number;
 }
@@ -302,10 +298,6 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug';
 export interface Housekeeping {
   steps: number;
   ram: { guest: number; wasm: number };
-  // The guest's profile edits were stored since the last report; the page reloads them.
-  profilesEdited: boolean;
-  keyboard: KeyboardRequest | null;
-  errors: ErrorDialog[];
 }
 
 // One slice of the worker's run loop.
@@ -339,5 +331,10 @@ export type WorkerMessage =
   | { type: 'audio_ring'; buffer: SharedArrayBuffer; at: number; samples: number }
   // `(channels << 24) | rate` of the audio in the ring, sent when it changes; 0 before a device opens.
   | { type: 'audio_format'; format: number }
+  // From `crates/switch-wasm/src/keyboard.rs`: the guest raised an error applet, or waits for text.
+  | ({ type: 'error_dialog' } & ErrorDialog)
+  | ({ type: 'keyboard' } & KeyboardRequest)
+  // The guest's profile edits are stored; the page reloads them.
+  | { type: 'profiles_edited' }
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: string };

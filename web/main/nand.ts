@@ -71,7 +71,7 @@ function nandErase() {
 }
 
 // Content stored by older builds as an ArrayBuffer is rewritten as a Blob on read.
-async function nandContent(name: string): Promise<Blob | undefined> {
+export async function nandContent(name: string): Promise<Blob | undefined> {
   const stored = await idbGet<Blob | ArrayBuffer>(await nandIdb(), NAND_CONTENT, name);
   if (!stored) return undefined;
   if (stored instanceof Blob) return stored;
@@ -203,10 +203,6 @@ export async function listNandTitles(): Promise<NandTitle[]> {
     out.push({ id, name: entry.name, kind: entry.kind, size: content?.size ?? 0 });
   }
   return out;
-}
-
-export function readNandContent(name: string): Promise<Blob | undefined> {
-  return nandContent(name);
 }
 
 // Content and index entry go together; a registered archive stays until the session is replaced.

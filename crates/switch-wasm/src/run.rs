@@ -24,6 +24,12 @@ pub extern "C" fn switch_run(max_steps: u64) -> i64 {
             -1
         }
     };
+    crate::input::release_if_seen(&mut s.cpu);
+    #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+    {
+        crate::keyboard::announce(&mut s.cpu);
+        crate::idb::persist::tick();
+    }
     crate::audio::feed();
     steps
 }
