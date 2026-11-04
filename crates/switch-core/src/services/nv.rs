@@ -30,12 +30,17 @@ impl Cpu {
         let data = self.ipc_request_data(tls);
         let (send, recv) = self.ipc_buffers(tls);
         if crate::trace::enabled(crate::trace::Trace::Nv) {
+            let frames: Vec<String> = self
+                .backtrace(6)
+                .iter()
+                .map(|pc| format!("{pc:#x}"))
+                .collect();
             crate::traceln!(
-                "[nv] cmd={:?} send={:x?} recv={:x?} from {:#x?}",
+                "[nv] cmd={:?} send={:x?} recv={:x?} from [{}]",
                 cmd_id,
                 send,
                 recv,
-                self.backtrace(6)
+                frames.join(", ")
             );
         }
         match cmd_id {
