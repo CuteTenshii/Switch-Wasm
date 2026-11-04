@@ -11,8 +11,8 @@ const readyPromise = new Promise<void>((r) => {
   readyResolve = r;
 });
 
-// Mirrors the worker's session handle.
-let session = -1;
+// Whether the worker has loaded the core, which builds its session.
+let loaded = false;
 
 // The run loop's handlers for what the worker's loop reports; set by `runloop.ts`.
 let loopEvents: {
@@ -45,11 +45,7 @@ export function whenReady(): Promise<void> {
 }
 
 export function hasSession(): boolean {
-  return session >= 0;
-}
-
-export function setSession(handle: number): void {
-  session = handle;
+  return loaded;
 }
 
 export function call<K extends keyof Commands>(
@@ -104,6 +100,7 @@ export function initWorker(): void {
         ready = true;
         // A core that failed to load still reports ready, with the error.
         if (d.error) log('core failed to load: ' + d.error, 'error');
+        else loaded = true;
         readyResolve();
         break;
     }

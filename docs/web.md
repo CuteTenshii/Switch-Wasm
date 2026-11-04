@@ -6,7 +6,7 @@ The page, the worker, and the wasm bindings between them.
 
 - Exports are `extern "C"` taking pointers JS owns for the call; marking them `unsafe fn` would not help a JS caller, hence `#![allow(clippy::not_unsafe_ptr_arg_deref)]`.
 - The session table uses `SyncCell` (an `UnsafeCell`), not `Mutex`: a reentrant `lock()` deadlocks and a panic while held leaves it locked. It is sound only because one worker calls exports; the core workers on the shared memory only instantiate. Host tests serialize on a `HOST` mutex because `cargo test` is multi-threaded, and a panic crossing `extern "C"` aborts the harness.
-- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing (so do `switch_new` and `switch_alloc`), so panics before the first session are captured instead of trapping as bare `unreachable`. The panic message is cleared on each new session, otherwise the first error after Stop described the dead session. Log lines are not: what the dead session said still reaches the page.
+- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing (so does `switch_alloc`), so panics are captured instead of trapping as bare `unreachable`. The panic message is cleared whenever `switch_init` builds the machine, otherwise the first error after Stop described the dead session. Log lines are not: what the dead session said still reaches the page.
 - With the `gpu` feature the host read is a wasm-bindgen import (`@host/files`, resolved by Vite) because wasm-bindgen owns the whole import object.
 - `switch_alloc` returns null rather than trapping for sizes above `isize::MAX` (2 GiB on wasm32).
 - `nul_reserved`: the terminating NUL takes a byte of the buffer, not of the message.
@@ -104,7 +104,7 @@ The page, the worker, and the wasm bindings between them.
 
 - The history comes from housekeeping, so it is there when the group is opened: one sample a second, five minutes kept, reset by `endTitle`. The region table and the heap are asked for once a second only while the group is on screen.
 - `switch_guest_ram` counts the title's process (`Cpu::title_backed`), not the running one: an applet on screen would otherwise dip the line and the status bar.
-- The heap section reports before a title boots, so `memory` is a sessionless command. The guest RAM section waits for `titleBooted`, not `hasSession`, which is true as soon as the console's session exists.
+- The heap section reports before a title boots, and the guest RAM section waits for `titleBooted`, not `hasSession`, which is true as soon as the core has loaded and built the console's one session.
 - The chart's `viewBox` stretches to the panel: strokes use `vector-effect: non-scaling-stroke`, and the marker and the scale are HTML, since SVG circles and text would stretch with it. The scale sits on the caption row, where a line near the top cannot run through it.
 
 ## `web/main/loading.ts`

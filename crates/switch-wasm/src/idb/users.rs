@@ -13,8 +13,8 @@ type Edited = (String, String, i64, Option<Vec<u8>>);
 /// If the guest edited a profile since the last call, store the core's nickname, edit time
 /// and picture over the stored profiles of the same uid. Returns whether it did.
 #[wasm_bindgen]
-pub async fn switch_store_profile_edits(handle: u32) -> bool {
-    let Some(s) = session_if_live(handle) else {
+pub async fn switch_store_profile_edits() -> bool {
+    let Some(s) = session_if_live() else {
         return false;
     };
     if !s.cpu.take_profile_edits() {
@@ -37,7 +37,7 @@ pub async fn switch_store_profile_edits(handle: u32) -> bool {
     match store(&users).await {
         Ok(()) => true,
         Err(err) => {
-            if let Some(s) = session_if_live(handle) {
+            if let Some(s) = session_if_live() {
                 s.cpu.log(
                     Level::Error,
                     &format!("Profiles: the guest's edits could not be saved ({err:?})"),

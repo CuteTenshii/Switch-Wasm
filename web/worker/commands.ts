@@ -5,7 +5,6 @@ import type {
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
-import { serveCores } from './coreworkers';
 import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
 import {
@@ -21,25 +20,10 @@ import {
   readJson,
   readString,
   readWholeJson,
-  state,
   withBuffer,
   withBytes,
   withPath,
 } from './wasm';
-
-// The Battery Status API is Window-only, so the main thread sends it. Cached for new sessions.
-let lastBattery = { percent: 100, charging: true };
-function pushBattery(): void {
-  if (state.handle < 0) return;
-  core.switch_set_battery(state.handle, lastBattery.percent, lastBattery.charging ? 1 : 0);
-}
-
-// Cached so a reset session keeps the dock state.
-let docked = false;
-function pushOperationMode(): void {
-  if (state.handle < 0) return;
-  core.switch_set_operation_mode(state.handle, docked ? 1 : 0);
-}
 
 // A uid (32 hex digits in memory order) as two little-endian halves.
 export function uidHalves(hex: string): [bigint, bigint] {
@@ -74,34 +58,26 @@ function logLoad(what: string, result: number | bigint): void {
 }
 
 export const CMD: CommandHandlers = {
-  new() {
-    state.handle = core.switch_new();
-    serveCores(state.handle);
-    resetInput(); // the new session's frame counter restarts at 0
-    pushOperationMode();
-    pushBattery();
-    return state.handle;
-  },
   end_title() {
     stopLoop();
-    core.switch_end_title(state.handle);
+    core.switch_end_title();
     resetInput(); // the frame counter restarts at 0
     return 0;
   },
 
   set_trace(on) {
-    core.switch_set_trace(state.handle, on ? 1 : 0);
+    core.switch_set_trace(on ? 1 : 0);
     return 0;
   },
   set_trace_channels(on) {
     core.switch_set_trace_channels(on ? 1 : 0);
   },
   set_jit(on) {
-    core.switch_set_jit(state.handle, on ? 1 : 0);
+    core.switch_set_jit(on ? 1 : 0);
     return 0;
   },
   vibration() {
-    return core.switch_vibration(state.handle);
+    return core.switch_vibration();
   },
   set_input(mask, slx, sly, srx, sry) {
     setGamepad(mask, slx, sly, srx, sry);
@@ -111,66 +87,65 @@ export const CMD: CommandHandlers = {
     setTouch(points);
     return 0;
   },
+  // The Battery Status API is Window-only, so the main thread sends it.
   set_battery(percent, charging) {
-    lastBattery = { percent, charging: !!charging };
-    pushBattery();
+    core.switch_set_battery(percent, charging ? 1 : 0);
     return 0;
   },
   set_operation_mode(next) {
-    docked = !!next;
-    pushOperationMode();
+    core.switch_set_operation_mode(next ? 1 : 0);
     return 0;
   },
 
   load_font(bytes) {
-    const result = withBytes(bytes, (ptr, len) => core.switch_load_font(state.handle, ptr, len));
+    const result = withBytes(bytes, (ptr, len) => core.switch_load_font(ptr, len));
     logLoad(`loaded the shared font (${fmtSize(bytes.length)})`, result);
     return result;
   },
   load_nro(bytes, sdPath) {
     const result = withBytes(bytes, (ptr, len) => withPath(sdPath ?? '', (pathPtr, pathLen) =>
-      Number(core.switch_load_nro(state.handle, ptr, len, pathPtr, pathLen))));
+      Number(core.switch_load_nro(ptr, len, pathPtr, pathLen))));
     logLoad(`loaded an NRO (${fmtSize(bytes.length)})${sdPath ? ' from ' + sdPath : ''}`, result);
     return result;
   },
   load_elf(bytes) {
     const result =
-      withBytes(bytes, (ptr, len) => Number(core.switch_load_elf(state.handle, ptr, len)));
+      withBytes(bytes, (ptr, len) => Number(core.switch_load_elf(ptr, len)));
     logLoad(`loaded an ELF (${fmtSize(bytes.length)})`, result);
     return result;
   },
 
   // The File is kept and read by range.
   open_nsp(file) {
-    const result = core.switch_open_nsp(state.handle, openHostFile(file));
+    const result = core.switch_open_nsp(openHostFile(file));
     logLoad(`opened ${describe(file)} as the container`, result);
     return result;
   },
   open_nca(file) {
-    const result = core.switch_open_nca(state.handle, openHostFile(file));
+    const result = core.switch_open_nca(openHostFile(file));
     logLoad(`opened ${describe(file)} as a standalone NCA`, result);
     return result;
   },
   // Register the stored firmware with the session; how many system data archives it took.
   restore_nand() {
-    return switch_restore_nand(state.handle);
+    return switch_restore_nand();
   },
   // Returns the base title id the update patches, or '' if it is not an update.
   add_update(file) {
     const index = addHostFile(file);
-    const id = core.switch_add_update(state.handle, index, BigInt(file.size));
+    const id = core.switch_add_update(index, BigInt(file.size));
     const title = id ? id.toString(16).padStart(16, '0') : '';
     if (title) workerLog(`[io] opened ${describe(file)} as an update for ${title}`);
     else workerLog(`[io] ${describe(file)} is not an update`);
     return title;
   },
   update_version() {
-    return readString(256, (buf, cap) => core.switch_update_version(state.handle, buf, cap));
+    return readString(256, (buf, cap) => core.switch_update_version(buf, cap));
   },
   // Returns how many pieces the add-on content container holds.
   add_dlc(file) {
     const index = addHostFile(file);
-    const pieces = core.switch_add_dlc(state.handle, index, BigInt(file.size));
+    const pieces = core.switch_add_dlc(index, BigInt(file.size));
     // Zero, not a negative, is a refusal.
     if (pieces === 0) {
       workerLog(`[io] add-on content ${describe(file)}: refused (${lastError()})`, 'warn');
@@ -180,14 +155,14 @@ export const CMD: CommandHandlers = {
     return pieces;
   },
   dlc_json() {
-    return readString(8192, (buf, cap) => core.switch_dlc_json(state.handle, buf, cap));
+    return readString(8192, (buf, cap) => core.switch_dlc_json(buf, cap));
   },
   clear_dlc() {
-    core.switch_clear_dlc(state.handle);
+    core.switch_clear_dlc();
     return 0;
   },
   clear_update() {
-    core.switch_clear_update(state.handle);
+    core.switch_clear_update();
     return 0;
   },
   // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; null if unreadable.
@@ -195,36 +170,36 @@ export const CMD: CommandHandlers = {
     const index = addHostFile(file);
     noteRegistered('NAND files to identify', file.size);
     return withBuffer(4, (kindPtr) => {
-      const id = core.switch_nand_identify(state.handle, index, BigInt(file.size), kindPtr);
+      const id = core.switch_nand_identify(index, BigInt(file.size), kindPtr);
       const kind = new DataView(core.memory.buffer).getUint32(kindPtr, true);
       return id ? { id: id.toString(16).padStart(16, '0'), kind } : null;
     });
   },
   nand_launch(bytes) {
     const result =
-      withBytes(bytes, (ptr, len) => Number(core.switch_nand_launch(state.handle, ptr, len)));
+      withBytes(bytes, (ptr, len) => Number(core.switch_nand_launch(ptr, len)));
     logLoad(`launched a program from the NAND (${fmtSize(bytes.length)})`, result);
     return result;
   },
   load_nca_from_nsp(index) {
-    const result = Number(core.switch_load_nca_from_nsp(state.handle, index));
+    const result = Number(core.switch_load_nca_from_nsp(index));
     logLoad(`booted the program in container file ${index}`, result);
     return result;
   },
   load_nca() {
-    const result = Number(core.switch_load_nca(state.handle));
+    const result = Number(core.switch_load_nca());
     logLoad('booted the program in the standalone NCA', result);
     return result;
   },
   program_nca_index() {
-    return core.switch_program_nca_index(state.handle);
+    return core.switch_program_nca_index();
   },
   load_keys(prod, title) {
     const prodBytes = prod || new Uint8Array(0);
     const titleBytes = title || new Uint8Array(0);
     const result = withBytes(prodBytes, (pptr, plen) =>
       withBytes(titleBytes, (tptr, tlen) =>
-        core.switch_load_keys(state.handle, plen ? pptr : 0, plen, tlen ? tptr : 0, tlen)));
+        core.switch_load_keys(plen ? pptr : 0, plen, tlen ? tptr : 0, tlen)));
     logLoad(
       `loaded keys: prod ${fmtSize(prodBytes.length)}, title ${fmtSize(titleBytes.length)}`,
       result,
@@ -232,46 +207,46 @@ export const CMD: CommandHandlers = {
     return result;
   },
   nsp_files_json() {
-    return readString(8192, (buf, cap) => core.switch_nsp_files_json(state.handle, buf, cap));
+    return readString(8192, (buf, cap) => core.switch_nsp_files_json(buf, cap));
   },
   read_file(index, offset, len) {
     return withBuffer(len, (buf) => {
-      const got = Number(core.switch_read_file(state.handle, index, BigInt(offset), buf, len));
+      const got = Number(core.switch_read_file(index, BigInt(offset), buf, len));
       if (got < 0) return { error: lastError() };
       return fromWasm(buf, got);
     });
   },
 
   load_control_from_nsp() {
-    return core.switch_load_control_from_nsp(state.handle);
+    return core.switch_load_control_from_nsp();
   },
   load_control_from_nca() {
-    return core.switch_load_control_from_nca(state.handle);
+    return core.switch_load_control_from_nca();
   },
   control_json() {
     // Worst case: the export truncates silently.
-    return readString(16384, (buf, cap) => core.switch_control_json(state.handle, buf, cap));
+    return readString(16384, (buf, cap) => core.switch_control_json(buf, cap));
   },
   // `size` is control_json's icon_size.
   control_icon(size) {
     if (!size) return new Uint8Array(0);
     return withBuffer(size, (buf) => {
-      const n = Number(core.switch_control_icon(state.handle, buf, size));
+      const n = Number(core.switch_control_icon(buf, size));
       return n > 0 ? fromWasm(buf, n) : new Uint8Array(0);
     });
   },
   // Store the control data just read, for the next session's ns.
   async remember_control() {
-    await switch_remember_control(state.handle);
+    await switch_remember_control();
     return 0;
   },
   parse_nca(header) {
     return withBytes(header, (ptr, len) =>
-      readString(4096, (buf, cap) => core.switch_parse_nca(state.handle, ptr, len, buf, cap)));
+      readString(4096, (buf, cap) => core.switch_parse_nca(ptr, len, buf, cap)));
   },
 
   run(budget) {
-    const steps = Number(core.switch_run(state.handle, BigInt(budget)));
+    const steps = Number(core.switch_run(BigInt(budget)));
     releaseLatchIfSeen();
     return steps;
   },
@@ -284,41 +259,41 @@ export const CMD: CommandHandlers = {
     return 0;
   },
   restore_storage() {
-    return switch_restore_storage(state.handle);
+    return switch_restore_storage();
   },
   flush_storage() {
-    return switch_flush_storage(state.handle);
+    return switch_flush_storage();
   },
   clear_screen() {
     switch_clear_screen();
     return 0;
   },
   halted() {
-    return core.switch_halted(state.handle);
+    return core.switch_halted();
   },
   guest_fatal() {
-    return readString(2048, (buf, cap) => core.switch_guest_fatal(state.handle, buf, cap));
+    return readString(2048, (buf, cap) => core.switch_guest_fatal(buf, cap));
   },
   flush_log() {
     return flushLog();
   },
   log_regs() {
-    core.switch_log_regs(state.handle);
+    core.switch_log_regs();
     return 0;
   },
   log_threads() {
-    core.switch_log_threads(state.handle);
+    core.switch_log_threads();
     return 0;
   },
   get_steps() {
-    return Number(core.switch_get_steps(state.handle));
+    return Number(core.switch_get_steps());
   },
   get_reg(i) {
-    return '0x' + core.switch_get_reg(state.handle, i).toString(16).padStart(16, '0');
+    return '0x' + core.switch_get_reg(i).toString(16).padStart(16, '0');
   },
   ram() {
     return {
-      guest: state.handle < 0 ? 0 : Number(core.switch_guest_ram(state.handle)),
+      guest: Number(core.switch_guest_ram()),
       wasm: core.memory.buffer.byteLength,
     };
   },
@@ -327,29 +302,24 @@ export const CMD: CommandHandlers = {
     const none: Omit<MemoryReport, 'wasmHeap'> = {
       backed: 0, cap: 0, regions: [], elsewhere: 0, allProcesses: 0,
     };
-    if (state.handle < 0) return { ...none, wasmHeap };
     const report = readJson<Omit<MemoryReport, 'wasmHeap'>>(
       4096,
-      (buf, cap) => core.switch_memory_json(state.handle, buf, cap),
+      (buf, cap) => core.switch_memory_json(buf, cap),
       none,
     );
     return { ...report, wasmHeap };
   },
   jit_stats() {
-    if (state.handle < 0) {
-      return { enabled: false, blocks: 0, translated: 0, executed: 0, linked: 0, invalidated: 0 };
-    }
     return readWholeJson<JitStats>(
       256,
-      (buf, cap) => core.switch_jit_stats_json(state.handle, buf, cap),
+      (buf, cap) => core.switch_jit_stats_json(buf, cap),
       { enabled: false, blocks: 0, translated: 0, executed: 0, linked: 0, invalidated: 0 },
     );
   },
   gpu_report() {
-    if (state.handle < 0) return {};
     return readWholeJson<GpuReport>(
       2048,
-      (buf, cap) => core.switch_gpu_report_json(state.handle, buf, cap),
+      (buf, cap) => core.switch_gpu_report_json(buf, cap),
       {},
     );
   },
@@ -358,17 +328,17 @@ export const CMD: CommandHandlers = {
   },
 
   fb_width() {
-    return core.switch_fb_width(state.handle);
+    return core.switch_fb_width();
   },
   fb_height() {
-    return core.switch_fb_height(state.handle);
+    return core.switch_fb_height();
   },
   frame_count() {
-    return core.switch_frame_count(state.handle);
+    return core.switch_frame_count();
   },
   fb_snapshot(len) {
     return withBuffer(len, (buf) => {
-      const n = core.switch_fb_snapshot(state.handle, buf, len);
+      const n = core.switch_fb_snapshot(buf, len);
       return n > 0 ? fromWasm(buf, n) : null;
     });
   },
@@ -378,18 +348,18 @@ export const CMD: CommandHandlers = {
   sd_write_file(path, bytes) {
     return withPath(path, (pptr, plen) =>
       withBytes(bytes, (dptr, dlen) =>
-        core.switch_sd_write_file(state.handle, pptr, plen, dptr, dlen)));
+        core.switch_sd_write_file(pptr, plen, dptr, dlen)));
   },
   sd_create_dir(path) {
-    return withPath(path, (ptr, len) => core.switch_sd_create_dir(state.handle, ptr, len));
+    return withPath(path, (ptr, len) => core.switch_sd_create_dir(ptr, len));
   },
   sd_remove(path) {
-    return withPath(path, (ptr, len) => core.switch_sd_remove(state.handle, ptr, len));
+    return withPath(path, (ptr, len) => core.switch_sd_remove(ptr, len));
   },
   // The whole file, read in slices, or null when the path is not one.
   sd_read_file(path) {
     return withPath(path, (pptr, plen) => {
-      const size = Number(core.switch_sd_file_size(state.handle, pptr, plen));
+      const size = Number(core.switch_sd_file_size(pptr, plen));
       if (size < 0) return null;
       const out = new Uint8Array(size);
       const cap = Math.min(Math.max(size, 1), READ_CHUNK);
@@ -397,7 +367,7 @@ export const CMD: CommandHandlers = {
         let off = 0;
         while (off < size) {
           const n = Number(
-            core.switch_sd_read_file(state.handle, pptr, plen, BigInt(off), buf, cap));
+            core.switch_sd_read_file(pptr, plen, BigInt(off), buf, cap));
           if (n <= 0) break;
           out.set(fromWasm(buf, n), off);
           off += n;
@@ -412,21 +382,21 @@ export const CMD: CommandHandlers = {
   save_write_file(id, path, bytes) {
     return withPath(path, (pptr, plen) =>
       withBytes(bytes, (dptr, dlen) =>
-        core.switch_save_write_file(state.handle, ...saveKey(id), pptr, plen, dptr, dlen)));
+        core.switch_save_write_file(...saveKey(id), pptr, plen, dptr, dlen)));
   },
   save_create_dir(id, path) {
     return withPath(path, (ptr, len) =>
-      core.switch_save_create_dir(state.handle, ...saveKey(id), ptr, len));
+      core.switch_save_create_dir(...saveKey(id), ptr, len));
   },
   save_remove(id, path) {
     return withPath(path, (ptr, len) =>
-      core.switch_save_remove(state.handle, ...saveKey(id), ptr, len));
+      core.switch_save_remove(...saveKey(id), ptr, len));
   },
   // The whole file, read in slices, or null when the path is not one.
   save_read_file(id, path) {
     const save = saveKey(id);
     return withPath(path, (pptr, plen) => {
-      const size = Number(core.switch_save_file_size(state.handle, ...save, pptr, plen));
+      const size = Number(core.switch_save_file_size(...save, pptr, plen));
       if (size < 0) return null;
       const out = new Uint8Array(size);
       const cap = Math.min(Math.max(size, 1), READ_CHUNK);
@@ -434,7 +404,7 @@ export const CMD: CommandHandlers = {
         let off = 0;
         while (off < size) {
           const n = Number(
-            core.switch_save_read_file(state.handle, ...save, pptr, plen, BigInt(off), buf, cap));
+            core.switch_save_read_file(...save, pptr, plen, BigInt(off), buf, cap));
           if (n <= 0) break;
           out.set(fromWasm(buf, n), off);
           off += n;
@@ -447,35 +417,31 @@ export const CMD: CommandHandlers = {
   // Users: staged one at a time, committed whole before a title starts.
 
   users_set(users, current) {
-    if (state.handle < 0) return 1;
     for (const user of users) {
       const [lo, hi] = uidHalves(user.uid);
       withPath(user.nickname, (nptr, nlen) =>
         withBytes(user.picture ?? new Uint8Array(0), (pptr, plen) =>
           core.switch_user_stage(
-            state.handle, lo, hi, nptr, nlen, BigInt(user.editedAt), pptr,
+            lo, hi, nptr, nlen, BigInt(user.editedAt), pptr,
             user.picture ? plen : 0)));
     }
-    return core.switch_users_commit(state.handle, ...uidHalves(current));
+    return core.switch_users_commit(...uidHalves(current));
   },
   store_profile_edits() {
-    return state.handle < 0 ? Promise.resolve(false) : switch_store_profile_edits(state.handle);
+    return switch_store_profile_edits();
   },
 
   error_dialog() {
-    if (state.handle < 0) return null;
     // Taken from the queue; 16 KiB holds any message.
     return readJson<ErrorDialog | null>(
-      16384, (buf, cap) => core.switch_error_dialog_json(state.handle, buf, cap), null);
+      16384, (buf, cap) => core.switch_error_dialog_json(buf, cap), null);
   },
   keyboard_request() {
-    if (state.handle < 0) return null;
     return readJson<KeyboardRequest | null>(
-      8192, (buf, cap) => core.switch_keyboard_json(state.handle, buf, cap), null);
+      8192, (buf, cap) => core.switch_keyboard_json(buf, cap), null);
   },
   keyboard_answer(text) {
-    if (state.handle < 0) return 0;
     return withPath(text ?? '', (ptr, len) =>
-      core.switch_keyboard_answer(state.handle, ptr, len, text === null ? 0 : 1));
+      core.switch_keyboard_answer(ptr, len, text === null ? 0 : 1));
   },
 };

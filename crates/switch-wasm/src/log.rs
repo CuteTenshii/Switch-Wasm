@@ -113,12 +113,12 @@ pub(crate) fn collect(cpu: &mut Cpu) {
     }
 }
 
-/// Take the next line, collecting from session `handle` first when it is live (the
+/// Take the next line, collecting from the session first when there is one (the
 /// diagnostics of code with no session are collected either way). Returns its level,
 /// or 0 when there is none; [`switch_log_line`] has its text.
 #[no_mangle]
-pub extern "C" fn switch_log_next(handle: i32) -> u32 {
-    match u32::try_from(handle).ok().and_then(session_if_live) {
+pub extern "C" fn switch_log_next() -> u32 {
+    match session_if_live() {
         Some(s) => collect(&mut s.cpu),
         None => {
             let pending = switch_core::trace::take_pending();

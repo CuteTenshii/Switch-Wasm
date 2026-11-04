@@ -4,7 +4,7 @@
 import { fmtSize } from '../shared/format';
 import { takeHostIo, type HostIo } from './hostfiles';
 import { flushLog, workerLog } from './log';
-import { core, state } from './wasm';
+import { core } from './wasm';
 
 const REPORT_EVERY_MS = 1000;
 
@@ -23,13 +23,12 @@ export function noteRegistered(what: string, bytes: number): void {
 // Log what changed if a second has passed, or at once when `now` (the run just
 // stopped). Never throws.
 export function reportActivity(now = false): void {
-  if (state.handle < 0) return;
   const at = performance.now();
   const elapsed = at - reportedAt;
   if (!now && reportedAt && elapsed < REPORT_EVERY_MS) return;
   try {
     logRegistered();
-    core.switch_log_activity(state.handle, reportedAt ? elapsed / 1000 : 0);
+    core.switch_log_activity(reportedAt ? elapsed / 1000 : 0);
     flushLog();
     logHostFiles(takeHostIo());
     reportedAt = at;

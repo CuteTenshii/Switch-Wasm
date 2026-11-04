@@ -10,112 +10,109 @@ export interface WasmExports {
   switch_free(ptr: number, len: number): void;
 
   switch_init(): void;
-  switch_new(): number;
-  switch_add_core(handle: number): number;
-  switch_end_title(handle: number): void;
-  switch_last_error(handle: number, buf: number, maxlen: number): number;
+  switch_add_core(): number;
+  switch_end_title(): void;
+  switch_last_error(buf: number, maxlen: number): number;
 
-  switch_open_nsp(handle: number, size: bigint): number;
-  switch_open_nca(handle: number, size: bigint): number;
-  switch_add_update(handle: number, file: number, size: bigint): bigint;
-  switch_update_version(handle: number, buf: number, maxlen: number): number;
-  switch_add_dlc(handle: number, file: number, size: bigint): number;
-  switch_dlc_json(handle: number, buf: number, maxlen: number): number;
-  switch_clear_dlc(handle: number): void;
-  switch_clear_update(handle: number): void;
-  switch_nand_identify(handle: number, file: number, size: bigint, kindOut: number): bigint;
-  switch_nand_launch(handle: number, ptr: number, len: number): bigint;
-  switch_nsp_files_json(handle: number, buf: number, maxlen: number): number;
+  switch_open_nsp(size: bigint): number;
+  switch_open_nca(size: bigint): number;
+  switch_add_update(file: number, size: bigint): bigint;
+  switch_update_version(buf: number, maxlen: number): number;
+  switch_add_dlc(file: number, size: bigint): number;
+  switch_dlc_json(buf: number, maxlen: number): number;
+  switch_clear_dlc(): void;
+  switch_clear_update(): void;
+  switch_nand_identify(file: number, size: bigint, kindOut: number): bigint;
+  switch_nand_launch(ptr: number, len: number): bigint;
+  switch_nsp_files_json(buf: number, maxlen: number): number;
   switch_read_file(
-    handle: number, index: number, fileOffset: bigint, buf: number, maxlen: number): bigint;
+    index: number, fileOffset: bigint, buf: number, maxlen: number): bigint;
   switch_parse_nca(
-    handle: number, ptr: number, len: number, buf: number, maxlen: number): number;
+    ptr: number, len: number, buf: number, maxlen: number): number;
 
-  switch_load_control_from_nsp(handle: number): number;
-  switch_load_control_from_nca(handle: number): number;
-  switch_control_json(handle: number, buf: number, maxlen: number): number;
-  switch_control_icon(handle: number, buf: number, maxlen: number): bigint;
+  switch_load_control_from_nsp(): number;
+  switch_load_control_from_nca(): number;
+  switch_control_json(buf: number, maxlen: number): number;
+  switch_control_icon(buf: number, maxlen: number): bigint;
 
   switch_load_keys(
-    handle: number, prodPtr: number, prodLen: number,
+    prodPtr: number, prodLen: number,
     titlePtr: number, titleLen: number): number;
-  switch_load_font(handle: number, ptr: number, len: number): number;
+  switch_load_font(ptr: number, len: number): number;
   switch_load_nro(
-    handle: number, ptr: number, len: number, pathPtr: number, pathLen: number): bigint;
-  switch_load_elf(handle: number, ptr: number, len: number): bigint;
-  switch_load_nca(handle: number): bigint;
-  switch_load_nca_from_nsp(handle: number, index: number): bigint;
-  switch_program_nca_index(handle: number): number;
+    ptr: number, len: number, pathPtr: number, pathLen: number): bigint;
+  switch_load_elf(ptr: number, len: number): bigint;
+  switch_load_nca(): bigint;
+  switch_load_nca_from_nsp(index: number): bigint;
+  switch_program_nca_index(): number;
 
-  switch_set_trace(handle: number, enabled: number): void;
-  switch_set_jit(handle: number, enabled: number): void;
+  switch_set_trace(enabled: number): void;
+  switch_set_jit(enabled: number): void;
   switch_set_trace_channels(on: number): void;
-  switch_jit_stats_json(handle: number, buf: number, maxlen: number): number;
-  switch_gpu_report_json(handle: number, buf: number, maxlen: number): number;
-  switch_gpu_lost(handle: number): number;
-  switch_log_activity(handle: number, seconds: number): void;
-  switch_log_next(handle: number): number;
+  switch_jit_stats_json(buf: number, maxlen: number): number;
+  switch_gpu_report_json(buf: number, maxlen: number): number;
+  switch_gpu_lost(): number;
+  switch_log_activity(seconds: number): void;
+  switch_log_next(): number;
   switch_log_line(buf: number, maxlen: number): number;
   switch_set_input(
-    handle: number, buttons: bigint,
+    buttons: bigint,
     stickLx: number, stickLy: number, stickRx: number, stickRy: number): void;
-  switch_set_touch(handle: number, ptr: number, count: number): void;
-  switch_set_battery(handle: number, percent: number, charging: number): void;
-  switch_set_operation_mode(handle: number, docked: number): void;
-  switch_vibration(handle: number): number;
+  switch_set_touch(ptr: number, count: number): void;
+  switch_set_battery(percent: number, charging: number): void;
+  switch_set_operation_mode(docked: number): void;
+  switch_vibration(): number;
 
-  switch_run(handle: number, maxSteps: bigint): bigint;
-  switch_pace(handle: number, elapsed: bigint): bigint;
-  switch_halted(handle: number): number;
-  switch_guest_fatal(handle: number, buf: number, maxlen: number): number;
-  switch_log_regs(handle: number): void;
-  switch_log_threads(handle: number): void;
-  switch_get_reg(handle: number, idx: number): bigint;
-  switch_get_steps(handle: number): bigint;
-  switch_guest_ram(handle: number): bigint;
-  switch_memory_json(handle: number, buf: number, maxlen: number): number;
+  switch_run(maxSteps: bigint): bigint;
+  switch_pace(elapsed: bigint): bigint;
+  switch_halted(): number;
+  switch_guest_fatal(buf: number, maxlen: number): number;
+  switch_log_regs(): void;
+  switch_log_threads(): void;
+  switch_get_reg(idx: number): bigint;
+  switch_get_steps(): bigint;
+  switch_guest_ram(): bigint;
+  switch_memory_json(buf: number, maxlen: number): number;
 
-  switch_fb_width(handle: number): number;
-  switch_fb_height(handle: number): number;
-  switch_frame_count(handle: number): number;
-  switch_fb_snapshot(handle: number, buf: number, maxlen: number): number;
+  switch_fb_width(): number;
+  switch_fb_height(): number;
+  switch_frame_count(): number;
+  switch_fb_snapshot(buf: number, maxlen: number): number;
 
   switch_sd_write_file(
-    handle: number, pathPtr: number, pathLen: number,
+    pathPtr: number, pathLen: number,
     dataPtr: number, dataLen: number): number;
-  switch_sd_create_dir(handle: number, pathPtr: number, pathLen: number): number;
-  switch_sd_remove(handle: number, pathPtr: number, pathLen: number): number;
-  switch_sd_file_size(handle: number, pathPtr: number, pathLen: number): bigint;
+  switch_sd_create_dir(pathPtr: number, pathLen: number): number;
+  switch_sd_remove(pathPtr: number, pathLen: number): number;
+  switch_sd_file_size(pathPtr: number, pathLen: number): bigint;
   switch_sd_read_file(
-    handle: number, pathPtr: number, pathLen: number,
+    pathPtr: number, pathLen: number,
     offset: bigint, buf: number, maxlen: number): bigint;
 
   switch_user_stage(
-    handle: number, uidLo: bigint, uidHi: bigint, namePtr: number, nameLen: number,
+    uidLo: bigint, uidHi: bigint, namePtr: number, nameLen: number,
     editedAt: bigint, picturePtr: number, pictureLen: number): void;
-  switch_users_commit(handle: number, currentLo: bigint, currentHi: bigint): number;
-  switch_keyboard_json(handle: number, buf: number, maxlen: number): number;
-  switch_error_dialog_json(handle: number, buf: number, maxlen: number): number;
+  switch_users_commit(currentLo: bigint, currentHi: bigint): number;
+  switch_keyboard_json(buf: number, maxlen: number): number;
+  switch_error_dialog_json(buf: number, maxlen: number): number;
   switch_keyboard_answer(
-    handle: number, textPtr: number, textLen: number, submitted: number): number;
+    textPtr: number, textLen: number, submitted: number): number;
   switch_save_write_file(
-    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number, dataPtr: number, dataLen: number): number;
   switch_save_create_dir(
-    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number): number;
   switch_save_remove(
-    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number): number;
   switch_save_file_size(
-    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number): bigint;
   switch_save_read_file(
-    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number, offset: bigint, buf: number, maxlen: number): bigint;
 }
-
-export const state = { handle: -1 };
 
 // The core's exports, set once at load. A live binding: importers see the assignment.
 export let core = null as unknown as WasmExports;
@@ -226,7 +223,7 @@ export function readJson<T>(
 }
 
 export function lastError(): string {
-  const s = readString(2048, (buf, cap) => core.switch_last_error(state.handle, buf, cap));
+  const s = readString(2048, (buf, cap) => core.switch_last_error(buf, cap));
   // The buffer is NUL-padded past the message.
   const end = s.indexOf('\0');
   return end < 0 ? s : s.slice(0, end);

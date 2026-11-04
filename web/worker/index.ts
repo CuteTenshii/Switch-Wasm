@@ -9,7 +9,7 @@ import { tryGpu } from './gpu';
 import { flushLog, workerLog } from './log';
 import init, { switch_attach_screen } from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
-import { core, setCore, state, type WasmExports } from './wasm';
+import { core, setCore, type WasmExports } from './wasm';
 import { startCores } from './coreworkers';
 
 // `self` is typed as the shared WorkerGlobalScope, which lacks postMessage.
@@ -26,11 +26,6 @@ interface ScreenHandoff {
   canvas: OffscreenCanvas;
 }
 
-// Commands valid with no session open.
-const SESSIONLESS = new Set([
-  'new', 'set_battery', 'last_error', 'clear_screen', 'memory',
-]);
-
 ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
   if ('type' in e.data) {
     try {
@@ -44,12 +39,6 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
   try {
     const handler = CMD[cmd] as ((...a: unknown[]) => unknown) | undefined;
     if (!handler) throw new Error('unknown command ' + cmd);
-    // A stale handle would panic (trap) the module; Reset frees the session
-    // while a slice's follow-up calls are still in flight.
-    if (state.handle < 0 && !SESSIONLESS.has(cmd)) {
-      reply({ id, ok: false, error: 'there is no session (it has been freed)' });
-      return;
-    }
     const result = handler(...args);
     // IndexedDB work answers when it is done.
     if (result instanceof Promise) {

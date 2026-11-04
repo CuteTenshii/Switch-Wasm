@@ -10,8 +10,8 @@ use switch_core::json;
 /// there is none, taken from the queue. Writes nothing when none is waiting. A message is at
 /// most 2 KiB, so 16 KiB holds any escaping.
 #[no_mangle]
-pub extern "C" fn switch_error_dialog_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let Some(dialog) = session(handle).cpu.take_error_dialog() else {
+pub extern "C" fn switch_error_dialog_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let Some(dialog) = session().cpu.take_error_dialog() else {
         return 0;
     };
     write_into(buf, maxlen, error_dialog_json(&dialog).as_bytes())
@@ -27,8 +27,8 @@ fn error_dialog_json(dialog: &ErrorDialog) -> String {
 /// The waiting keyboard as JSON: `{"header":"","sub":"","guide":"","ok":"","maxLength":500,
 /// "minLength":0,"password":false}`. Writes nothing when no keyboard is waiting.
 #[no_mangle]
-pub extern "C" fn switch_keyboard_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let Some(request) = session(handle).cpu.keyboard_request() else {
+pub extern "C" fn switch_keyboard_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let Some(request) = session().cpu.keyboard_request() else {
         return 0;
     };
     write_into(buf, maxlen, keyboard_json(request).as_bytes())
@@ -50,13 +50,12 @@ fn keyboard_json(request: &KeyboardRequest) -> String {
 /// Returns 1 if a keyboard was waiting.
 #[no_mangle]
 pub extern "C" fn switch_keyboard_answer(
-    handle: u32,
     text_ptr: *const u8,
     text_len: u32,
     submitted: u32,
 ) -> u32 {
     let text = (submitted != 0).then(|| sd_path(text_ptr, text_len));
-    u32::from(session(handle).cpu.answer_keyboard(text.as_deref()))
+    u32::from(session().cpu.answer_keyboard(text.as_deref()))
 }
 
 #[cfg(test)]

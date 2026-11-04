@@ -6,8 +6,8 @@ use switch_core::cpu::CoreSlot;
 
 /// Another core for the session; its slot goes to [`switch_serve_core`] on a core worker.
 #[no_mangle]
-pub extern "C" fn switch_add_core(handle: u32) -> u32 {
-    Arc::into_raw(session(handle).cpu.add_core()) as u32
+pub extern "C" fn switch_add_core() -> u32 {
+    Arc::into_raw(session().cpu.add_core()) as u32
 }
 
 /// Run the core `slot` names on this worker until its session stops it. Blocks.

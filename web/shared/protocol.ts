@@ -187,9 +187,6 @@ export interface ErrorDialog {
 }
 
 export interface Commands {
-  // Quoted, since unquoted `new()` is a construct signature.
-  // eslint-disable-next-line @stylistic/quote-props
-  'new'(): number;
   // End the running title and its applets; the console stays.
   end_title(): number;
 

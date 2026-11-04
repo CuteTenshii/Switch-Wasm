@@ -43,11 +43,11 @@ struct Title {
 /// Register what the NAND holds with the session. Returns how many system data archives
 /// were registered.
 #[wasm_bindgen]
-pub async fn switch_restore_nand(handle: u32) -> u32 {
-    match restore(handle).await {
+pub async fn switch_restore_nand() -> u32 {
+    match restore().await {
         Ok(registered) => registered,
         Err(err) => {
-            if let Some(s) = session_if_live(handle) {
+            if let Some(s) = session_if_live() {
                 s.cpu.log(
                     Level::Error,
                     &format!("NAND: the archives could not be registered ({err:?})"),
@@ -58,7 +58,7 @@ pub async fn switch_restore_nand(handle: u32) -> u32 {
     }
 }
 
-async fn restore(handle: u32) -> Result<u32, JsValue> {
+async fn restore() -> Result<u32, JsValue> {
     let db = idb::open(NAND_DB, NAND_VERSION, &NAND_STORES).await?;
     let titles = idb::get_all(&db, NAND_TITLES).await;
     let content = idb::get_all(&db, NAND_CONTENT).await;
@@ -74,7 +74,7 @@ async fn restore(handle: u32) -> Result<u32, JsValue> {
         })
         .collect();
     let content: HashMap<String, JsValue> = content?.into_iter().collect();
-    let Some(s) = session_if_live(handle) else {
+    let Some(s) = session_if_live() else {
         return Ok(0);
     };
 

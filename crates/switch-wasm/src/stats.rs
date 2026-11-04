@@ -5,8 +5,8 @@ use switch_core::json;
 
 /// What the translator has been doing, as JSON.
 #[no_mangle]
-pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_jit_stats_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session();
     let stats = s.cpu.jit_stats();
     let json = json::object(|o| {
         o.field("enabled", s.cpu.jit_enabled())
@@ -28,8 +28,8 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
 
 /// The GPU backend's report as JSON, or `{}` for the software rasterizer.
 #[no_mangle]
-pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_gpu_report_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session();
     // The frame count comes from the core; the backend only sees clears and draws.
     let gpu = &s.cpu.nv.gpu;
     let json = json::object(|o| {
@@ -41,15 +41,15 @@ pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32)
 
 /// Whether the GPU backend has lost its device. Cheap; polled every slice.
 #[no_mangle]
-pub extern "C" fn switch_gpu_lost(handle: u32) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_gpu_lost() -> u32 {
+    let s = session();
     u32::from(s.cpu.nv.gpu.renderer_lost())
 }
 
 /// The title's backed guest memory by region, as JSON. The page adds the heap size itself.
 #[no_mangle]
-pub extern "C" fn switch_memory_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let memory = session(handle).cpu.title_memory();
+pub extern "C" fn switch_memory_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let memory = session().cpu.title_memory();
     let json = json::object(|o| {
         o.field("backed", memory.backed).field("cap", memory.cap);
         o.array("regions", |a| {

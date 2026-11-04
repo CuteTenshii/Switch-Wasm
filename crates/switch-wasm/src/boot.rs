@@ -10,8 +10,8 @@ use crate::{container, nsp_file_source, session, Added, Dlc};
 
 /// End the running title and its applets, leaving the console ready for the next one.
 #[no_mangle]
-pub extern "C" fn switch_end_title(handle: u32) {
-    let s = session(handle);
+pub extern "C" fn switch_end_title() {
+    let s = session();
     s.cpu.end_title();
     crate::audio::drop_queued();
     s.control = None;
@@ -22,14 +22,13 @@ pub extern "C" fn switch_end_title(handle: u32) {
 /// `path_len` is not 0. Returns entry address or -1.
 #[no_mangle]
 pub extern "C" fn switch_load_nro(
-    handle: u32,
     ptr: *const u8,
     len: u32,
     path_ptr: *const u8,
     path_len: u32,
 ) -> i64 {
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    let s = session(handle);
+    let s = session();
     // Booting empties the output and trace buffers.
     crate::log::collect(&mut s.cpu);
     let booted = if path_len == 0 {
@@ -223,8 +222,8 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
 /// Boot the open container as a standalone Program NCA. Returns entry or -1;
 /// check `switch_last_error`, since 0 can be a valid entry.
 #[no_mangle]
-pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
-    let s = session(handle);
+pub extern "C" fn switch_load_nca() -> i64 {
+    let s = session();
     let Some(container) = container(s) else {
         return -1;
     };
@@ -238,8 +237,8 @@ pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
 /// The index of the Program NCA in the open container, or -1 (including when no
 /// `prod.keys` are loaded). Pass it to `switch_load_nca_from_nsp`.
 #[no_mangle]
-pub extern "C" fn switch_program_nca_index(handle: u32) -> i32 {
-    let s = session(handle);
+pub extern "C" fn switch_program_nca_index() -> i32 {
+    let s = session();
     let Some(container) = container(s) else {
         return -1;
     };
@@ -266,8 +265,8 @@ pub extern "C" fn switch_program_nca_index(handle: u32) -> i32 {
 /// Boot NSP file `index` as a Program NCA. Returns entry or -1; check
 /// `switch_last_error`, since 0 can be a valid entry.
 #[no_mangle]
-pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
-    let s = session(handle);
+pub extern "C" fn switch_load_nca_from_nsp(index: u32) -> i64 {
+    let s = session();
     let Some(container) = container(s) else {
         return -1;
     };
@@ -294,8 +293,8 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
 
 /// Load an AArch64 ELF into the CPU. Returns entry address or -1.
 #[no_mangle]
-pub extern "C" fn switch_load_elf(handle: u32, ptr: *const u8, len: u32) -> i64 {
-    let s = session(handle);
+pub extern "C" fn switch_load_elf(ptr: *const u8, len: u32) -> i64 {
+    let s = session();
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     // An ELF carries no control data.
     s.control = None;

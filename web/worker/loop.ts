@@ -6,7 +6,7 @@ import { CMD } from './commands';
 import { tryGpu } from './gpu';
 import { flushLog } from './log';
 import { switch_flush_storage, switch_present, switch_store_profile_edits } from '@core/switch_wasm.js';
-import { core, state } from './wasm';
+import { core } from './wasm';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -64,7 +64,7 @@ export function stopLoop(): void {
 }
 
 function slice(): void {
-  if (!running || state.handle < 0) {
+  if (!running) {
     running = false;
     return;
   }
@@ -74,7 +74,7 @@ function slice(): void {
     const credit = Math.min(at - lastPace, MAX_CREDIT_MS);
     lastPace = at;
     const elapsed = BigInt(Math.round(credit * CYCLES_PER_MS));
-    const aheadMs = Number(core.switch_pace(state.handle, elapsed)) / CYCLES_PER_MS;
+    const aheadMs = Number(core.switch_pace(elapsed)) / CYCLES_PER_MS;
     if (aheadMs >= MIN_WAIT_MS && !pauseRequested) {
       setTimeout(slice, Math.min(aheadMs, MAX_WAIT_MS));
       return;
@@ -90,7 +90,7 @@ function slice(): void {
   }
   const ms = performance.now() - at;
   // A slice also ends short when the clock idles past real time.
-  const done = steps < 0 || core.switch_halted(state.handle) !== 0;
+  const done = steps < 0 || core.switch_halted() !== 0;
   const stopped = done || pauseRequested;
   tryGpu();
   reportActivity(done);
@@ -104,9 +104,9 @@ function slice(): void {
     budget,
     ms,
     stopped,
-    frame: core.switch_frame_count(state.handle),
-    width: core.switch_fb_width(state.handle),
-    height: core.switch_fb_height(state.handle),
+    frame: core.switch_frame_count(),
+    width: core.switch_fb_width(),
+    height: core.switch_fb_height(),
     paintMs,
     housekeeping: stopped || ++tick % HOUSEKEEPING_EVERY === 0 ? housekeeping() : null,
   };
@@ -126,7 +126,7 @@ function slice(): void {
 // Paint a new frame on the page's canvas; how long it took, or null if there was none.
 export function paint(): number | null {
   const at = performance.now();
-  return switch_present(state.handle) ? performance.now() - at : null;
+  return switch_present() ? performance.now() - at : null;
 }
 
 // Set once the core's profile edits are in IndexedDB, for the next report.
@@ -139,8 +139,8 @@ function takeProfilesStored(): boolean {
 }
 
 function housekeeping(): Housekeeping {
-  void switch_flush_storage(state.handle);
-  void switch_store_profile_edits(state.handle).then((edited) => {
+  void switch_flush_storage();
+  void switch_store_profile_edits().then((edited) => {
     profilesStored ||= edited;
   });
   const errors: ErrorDialog[] = [];

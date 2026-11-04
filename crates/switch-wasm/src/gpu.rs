@@ -7,11 +7,11 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// What the worker matches on.
 const INSTALLED: &str = "installed";
 
-/// Open a device and install the backend on session `handle`'s `Gpu`,
+/// Open a device and install the backend on the session's `Gpu`,
 /// returning a message. `device_msaa` and `interleave` are the browser's
 /// `GPU_DEVICE_MSAA` and `GPU_INTERLEAVE`.
 #[wasm_bindgen]
-pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -> String {
+pub async fn switch_gpu_open(device_msaa: bool, interleave: bool) -> String {
     let instance = switch_gpu::wgpu::Instance::new(
         switch_gpu::wgpu::InstanceDescriptor::new_without_display_handle(),
     );
@@ -34,6 +34,6 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
     let mut gpu = switch_gpu::Gpu::with_device(instance, adapter, device, queue);
     gpu.set_device_msaa(device_msaa);
     gpu.set_interleave(interleave);
-    crate::install_gpu(handle, gpu);
+    crate::install_gpu(gpu);
     INSTALLED.to_string()
 }

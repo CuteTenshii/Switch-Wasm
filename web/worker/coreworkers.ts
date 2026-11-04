@@ -2,7 +2,7 @@
 
 import type { CoreMessage, CoreStarted } from './core';
 import { workerLog } from './log';
-import { core, state } from './wasm';
+import { core } from './wasm';
 
 const CORE_WORKERS = 2;
 
@@ -18,22 +18,12 @@ export function startCores(module: WebAssembly.Module, memory: WebAssembly.Memor
         return;
       }
       started.push(worker);
-      // A session opened before this worker was ready gets its core now.
-      if (state.handle >= 0) {
-        worker.postMessage({ slot: core.switch_add_core(state.handle) } satisfies CoreMessage);
-      }
+      worker.postMessage({ slot: core.switch_add_core() } satisfies CoreMessage);
       if (started.length === CORE_WORKERS) {
         workerLog(`[core] ${CORE_WORKERS} core workers started on shared memory`);
       }
     };
     worker.onerror = (e) => workerLog(`[core] core worker ${i + 1} failed: ${e.message}`, 'error');
     worker.postMessage({ module, memory } satisfies CoreMessage);
-  }
-}
-
-// Give session `handle` a core on each started worker.
-export function serveCores(handle: number): void {
-  for (const worker of started) {
-    worker.postMessage({ slot: core.switch_add_core(handle) } satisfies CoreMessage);
   }
 }

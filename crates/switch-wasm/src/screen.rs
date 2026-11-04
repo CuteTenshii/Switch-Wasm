@@ -48,8 +48,8 @@ pub fn switch_attach_screen(canvas: OffscreenCanvas) -> Result<(), JsValue> {
 /// Paint the session's newest frame if it is one the screen has not shown. Returns
 /// whether it painted.
 #[wasm_bindgen]
-pub fn switch_present(handle: u32) -> Result<bool, JsValue> {
-    let gpu = &session(handle).cpu.nv.gpu;
+pub fn switch_present() -> Result<bool, JsValue> {
+    let gpu = &session().cpu.nv.gpu;
     SCREEN.with_borrow_mut(|screen| {
         let Some(screen) = screen else {
             return Ok(false);

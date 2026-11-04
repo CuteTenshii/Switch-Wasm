@@ -22,7 +22,7 @@ static IN_FLIGHT: crate::SyncCell<bool> = crate::SyncCell::new(false);
 static LAST_START: crate::SyncCell<f64> = crate::SyncCell::new(f64::NEG_INFINITY);
 
 /// Scan in the background when the guest has asked for space since the last scan, or never has.
-pub(crate) fn refresh_if_due(handle: u32, wanted: bool) {
+pub(crate) fn refresh_if_due(wanted: bool) {
     let now = js_sys::Date::now();
     // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
     let (in_flight, last) = unsafe { (&mut *IN_FLIGHT.get(), &mut *LAST_START.get()) };
@@ -35,7 +35,7 @@ pub(crate) fn refresh_if_due(handle: u32, wanted: bool) {
     spawn_local(async move {
         let usage = measure().await;
         unsafe { *IN_FLIGHT.get() = false };
-        let Some(s) = session_if_live(handle) else {
+        let Some(s) = session_if_live() else {
             return;
         };
         match usage {

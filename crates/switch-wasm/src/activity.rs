@@ -59,8 +59,8 @@ pub(crate) struct Reporter {
 /// Write what changed since the last report into the log. `seconds` is the time since
 /// it, or 0 for the first, which then gives no frame rate.
 #[no_mangle]
-pub extern "C" fn switch_log_activity(handle: u32, seconds: f64) {
-    let s = session(handle);
+pub extern "C" fn switch_log_activity(seconds: f64) {
+    let s = session();
     report(&mut s.cpu, &mut s.activity, seconds);
 }
 

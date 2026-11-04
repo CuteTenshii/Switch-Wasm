@@ -1,7 +1,7 @@
 // Worker logging, forwarded to the page's log instead of `console`.
 
 import type { LogLevel, WorkerMessage } from '../shared/protocol';
-import { core, coreLoaded, readString, state } from './wasm';
+import { core, coreLoaded, readString } from './wasm';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -17,8 +17,8 @@ const LEVELS: (LogLevel | null)[] = [null, 'error', 'warn', 'info', 'log', 'debu
 export function flushLog(): number {
   if (!coreLoaded()) return 0;
   let lines = 0;
-  for (let level = LEVELS[core.switch_log_next(state.handle)]; level;
-    level = LEVELS[core.switch_log_next(state.handle)]) {
+  for (let level = LEVELS[core.switch_log_next()]; level;
+    level = LEVELS[core.switch_log_next()]) {
     const length = core.switch_log_line(0, 0);
     workerLog(readString(length || 1, (buf, cap) => core.switch_log_line(buf, cap)), level);
     lines++;

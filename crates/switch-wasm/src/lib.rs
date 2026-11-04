@@ -1,12 +1,11 @@
 //! WASM bindings for switch-core over a raw `extern "C"` ABI. Buffers cross through
-//! linear memory, handles index a global session table, structured results are
+//! linear memory, the one session is a global, structured results are
 //! hand-written JSON, and errors are read back with `switch_last_error`.
 
 // Exports take pointers into linear memory that the JS caller owns for the call.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::alloc::{alloc, dealloc, Layout};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 /// A `Sync` wrapper for interior mutability touched only by the worker that calls exports.
 #[repr(transparent)]
@@ -79,7 +78,7 @@ struct Session {
 }
 
 // Only the system worker calls exports, each to completion; a `Mutex` would deadlock on reentry.
-static SESSIONS: SyncCell<Vec<Option<Session>>> = SyncCell::new(Vec::new());
+static SESSION: SyncCell<Option<Session>> = SyncCell::new(None);
 
 /// Last panic message, in a fixed buffer readable without a live session.
 static PANIC_MSG: SyncCell<[u8; 2048]> = SyncCell::new([0u8; 2048]);
@@ -96,37 +95,14 @@ fn floor_char_boundary(s: &str, limit: usize) -> usize {
     n
 }
 
-/// Session-handle counter, independent of slot reuse so stale handles never alias.
-static HANDLE_COUNTER: AtomicU32 = AtomicU32::new(0);
-
-fn session(handle: u32) -> &'static mut Session {
-    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
-    let slots = unsafe { &mut *SESSIONS.get() };
-    let len = slots.len();
-    let slot = slots
-        .get_mut(handle as usize)
-        .and_then(|s| s.as_mut())
-        .unwrap_or_else(|| panic!("invalid session handle {handle} (slots len {len})"));
-    unsafe { std::mem::transmute::<&mut Session, &'static mut Session>(slot) }
+fn session() -> &'static mut Session {
+    session_if_live().expect("there is no session")
 }
 
-/// The session `handle` names, or `None` once it has been freed.
-fn session_if_live(handle: u32) -> Option<&'static mut Session> {
-    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
-    let slots = unsafe { &mut *SESSIONS.get() };
-    slots.get_mut(handle as usize)?.as_mut()
-}
-
-fn new_handle(session: Session) -> u32 {
-    let id = HANDLE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
-    let slots = unsafe { &mut *SESSIONS.get() };
-    if id as usize >= slots.len() {
-        slots.push(Some(session));
-    } else {
-        slots[id as usize] = Some(session);
-    }
-    id
+/// The session, or `None` before `switch_init`.
+fn session_if_live() -> Option<&'static mut Session> {
+    // SAFETY: only the system worker calls exports; see the `SESSION` comment.
+    unsafe { &mut *SESSION.get() }.as_mut()
 }
 
 /// The host read as a `wasm-bindgen` import, since wasm-bindgen owns the import object.
@@ -182,7 +158,7 @@ static HOST_CONTAINER: SyncCell<Vec<u8>> = SyncCell::new(Vec::new());
 /// Install the bytes host builds serve as the open container.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn set_host_container(data: Vec<u8>) {
-    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
+    // SAFETY: only the system worker calls exports; see the `SESSION` comment.
     unsafe { *HOST_CONTAINER.get() = data };
 }
 
@@ -260,11 +236,34 @@ pub extern "C" fn switch_free(ptr: *mut u8, len: u32) {
     unsafe { dealloc(ptr, layout) }
 }
 
-/// Install the panic hook, once. Call right after instantiating.
+/// Set up the module and build its machine, replacing any earlier one (which keeps its
+/// logged lines). Call right after instantiating.
 #[no_mangle]
 pub extern "C" fn switch_init() {
     install_panic_hook();
     attach_jit();
+    forget_the_last_session();
+    if let Some(old) = session_if_live() {
+        old.cpu.stop_cores();
+        log::collect(&mut old.cpu);
+    }
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    // SAFETY: only the system worker calls exports; see the `SESSION` comment.
+    unsafe {
+        *SESSION.get() = Some(Session {
+            container: None,
+            nsp_files: Vec::new(),
+            update: None,
+            dlc: Vec::new(),
+            keys: switch_core::keys::KeySet::default(),
+            control: None,
+            staged_users: Vec::new(),
+            cpu,
+            last_error: String::new(),
+            activity: activity::Reporter::default(),
+        });
+    }
     #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
     audio::announce_ring();
 }
@@ -294,45 +293,8 @@ fn install_panic_hook() {
 
 /// Clear the panic message the previous session left; its log lines stay queued.
 fn forget_the_last_session() {
-    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
+    // SAFETY: only the system worker calls exports; see the `SESSION` comment.
     unsafe { &mut *PANIC_MSG.get() }.fill(0);
-}
-
-/// Create a fresh machine, return its handle.
-#[no_mangle]
-pub extern "C" fn switch_new() -> u32 {
-    install_panic_hook();
-    // Also here for hosts that never call `switch_init`.
-    attach_jit();
-    forget_the_last_session();
-    let mut cpu = Cpu::new();
-    cpu.bootstrap();
-    new_handle(Session {
-        container: None,
-        nsp_files: Vec::new(),
-        update: None,
-        dlc: Vec::new(),
-        keys: switch_core::keys::KeySet::default(),
-        control: None,
-        staged_users: Vec::new(),
-        cpu,
-        last_error: String::new(),
-        activity: activity::Reporter::default(),
-    })
-}
-
-/// Drop a machine.
-#[no_mangle]
-pub extern "C" fn switch_free_session(handle: u32) {
-    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
-    let slots = unsafe { &mut *SESSIONS.get() };
-    if let Some(slot) = slots.get_mut(handle as usize) {
-        if let Some(session) = slot.as_mut() {
-            session.cpu.stop_cores();
-            log::collect(&mut session.cpu);
-        }
-        *slot = None;
-    }
 }
 
 /// Message bytes that fit in `maxlen` alongside a terminating NUL.
@@ -343,9 +305,9 @@ fn nul_reserved(maxlen: u32) -> usize {
 /// Copy the last error message into `buf` (NUL-terminated). Returns length.
 /// Also surfaces any Rust panic captured by the panic hook.
 #[no_mangle]
-pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    // A captured panic takes priority and needs no valid handle.
-    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
+pub extern "C" fn switch_last_error(buf: *mut u8, maxlen: u32) -> u32 {
+    // A captured panic takes priority and needs no session.
+    // SAFETY: only the system worker calls exports; see the `SESSION` comment.
     let panicked = unsafe { &mut *PANIC_MSG.get() };
     if panicked[0] != 0 {
         let len = panicked
@@ -362,7 +324,9 @@ pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u
         panicked.fill(0);
         return n as u32;
     }
-    let s = session(handle);
+    let Some(s) = session_if_live() else {
+        return 0;
+    };
     let bytes = s.last_error.as_bytes();
     let n = bytes.len().min(nul_reserved(maxlen));
     if n > 0 && !buf.is_null() {
@@ -465,6 +429,6 @@ mod tests;
 
 /// Install a GPU backend on the session's `Gpu` (not a channel).
 #[cfg(feature = "gpu")]
-fn install_gpu(handle: u32, gpu: switch_gpu::Gpu) {
-    session(handle).cpu.nv.gpu.set_renderer(Box::new(gpu));
+fn install_gpu(gpu: switch_gpu::Gpu) {
+    session().cpu.nv.gpu.set_renderer(Box::new(gpu));
 }

@@ -10,8 +10,8 @@ use crate::{container, nsp_file_source, session, write_into, Dlc, HostSource, Se
 /// Open the `size`-byte container (NSP or XCI) the host has ready, read through
 /// `host_read`. Returns 0 on success, -1 on error.
 #[no_mangle]
-pub extern "C" fn switch_open_nsp(handle: u32, size: u64) -> i32 {
-    let s = session(handle);
+pub extern "C" fn switch_open_nsp(size: u64) -> i32 {
+    let s = session();
     let container = HostSource { file: 0, len: size };
     s.container = Some(container);
     s.nsp_files = Vec::new();
@@ -31,8 +31,8 @@ pub extern "C" fn switch_open_nsp(handle: u32, size: u64) -> i32 {
 
 /// Open the host's container as a single standalone `.nca`. Returns 0.
 #[no_mangle]
-pub extern "C" fn switch_open_nca(handle: u32, size: u64) -> i32 {
-    let s = session(handle);
+pub extern "C" fn switch_open_nca(size: u64) -> i32 {
+    let s = session();
     s.container = Some(HostSource { file: 0, len: size });
     s.nsp_files = Vec::new();
     s.control = None;
@@ -83,8 +83,8 @@ pub(crate) fn add_archive(s: &mut Session, src: HostSource) -> i32 {
 /// base program id it patches, or 0 with the reason in `switch_last_error`.
 /// Pairing is checked at boot.
 #[no_mangle]
-pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
-    let s = session(handle);
+pub extern "C" fn switch_add_update(file: u32, size: u64) -> u64 {
+    let s = session();
     let src = HostSource { file, len: size };
     let files = match Pfs0::read_from(&src) {
         Ok(pfs0) => pfs0.files,
@@ -127,8 +127,8 @@ pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
 
 /// The update's NACP display version ("1.0.1") into `buf`, or empty.
 #[no_mangle]
-pub extern "C" fn switch_update_version(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_update_version(buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session();
     let version = s
         .update
         .as_ref()
@@ -147,8 +147,8 @@ pub extern "C" fn switch_update_version(handle: u32, buf: *mut u8, maxlen: u32) 
 /// Register a container of add-on content. Returns how many pieces it holds, or 0
 /// with the reason in `switch_last_error`. Pairing is checked at boot.
 #[no_mangle]
-pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_add_dlc(file: u32, size: u64) -> u32 {
+    let s = session();
     let src = HostSource { file, len: size };
     let files = match Pfs0::read_from(&src) {
         Ok(pfs0) => pfs0.files,
@@ -212,8 +212,8 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
 
 /// The session's add-on content as JSON: content id, index and base title.
 #[no_mangle]
-pub extern "C" fn switch_dlc_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_dlc_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session();
     let json = dlc_json(s.dlc.iter().map(|dlc| dlc.content_id));
     write_into(buf, maxlen, json.as_bytes())
 }
@@ -232,13 +232,13 @@ fn dlc_json(content_ids: impl Iterator<Item = u64>) -> String {
 }
 
 #[no_mangle]
-pub extern "C" fn switch_clear_dlc(handle: u32) {
-    session(handle).dlc.clear();
+pub extern "C" fn switch_clear_dlc() {
+    session().dlc.clear();
 }
 
 #[no_mangle]
-pub extern "C" fn switch_clear_update(handle: u32) {
-    session(handle).update = None;
+pub extern "C" fn switch_clear_update() {
+    session().update = None;
 }
 
 /// Whether a title id is add-on content: the base plus 0x1000 and an 11-bit index.
@@ -249,8 +249,8 @@ fn is_add_on_content_id(title_id: u64) -> bool {
 /// Parse the file table of the current NSP and return it as JSON.
 /// Writes up to `maxlen` bytes into `buf`; returns bytes written.
 #[no_mangle]
-pub extern "C" fn switch_nsp_files_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_nsp_files_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session();
     let json = json::array(|a| {
         for f in &s.nsp_files {
             a.object(|o| {
@@ -266,14 +266,8 @@ pub extern "C" fn switch_nsp_files_json(handle: u32, buf: *mut u8, maxlen: u32) 
 /// Read a slice of NSP file `index` from `file_offset` into `buf`. Returns bytes
 /// copied or -1.
 #[no_mangle]
-pub extern "C" fn switch_read_file(
-    handle: u32,
-    index: u32,
-    file_offset: u64,
-    buf: *mut u8,
-    maxlen: u32,
-) -> i64 {
-    let s = session(handle);
+pub extern "C" fn switch_read_file(index: u32, file_offset: u64, buf: *mut u8, maxlen: u32) -> i64 {
+    let s = session();
     let Some(file) = nsp_file_source(s, index) else {
         return -1;
     };
@@ -294,14 +288,8 @@ pub extern "C" fn switch_read_file(
 
 /// Parse an NCA from `ptr`/`len` and return a JSON summary, decrypting with loaded keys.
 #[no_mangle]
-pub extern "C" fn switch_parse_nca(
-    handle: u32,
-    ptr: *const u8,
-    len: u32,
-    buf: *mut u8,
-    maxlen: u32,
-) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_parse_nca(ptr: *const u8, len: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session();
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     let json = match Nca::parse_with_keys(data, Some(&s.keys)) {
         Ok(nca) => json::object(|o| {
@@ -356,8 +344,8 @@ fn cache_control(s: &mut Session, control: switch_core::control::Control) {
 /// Read and cache the open container's Control NCA. Returns 0, or -1 when it has
 /// none readable (including when no `prod.keys` are loaded).
 #[no_mangle]
-pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
-    let s = session(handle);
+pub extern "C" fn switch_load_control_from_nsp() -> i32 {
+    let s = session();
     s.control = None;
     let Some(container) = container(s) else {
         return -1;
@@ -389,8 +377,8 @@ pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
 
 /// Same, for a container opened as a standalone Control NCA.
 #[no_mangle]
-pub extern "C" fn switch_load_control_from_nca(handle: u32) -> i32 {
-    let s = session(handle);
+pub extern "C" fn switch_load_control_from_nca() -> i32 {
+    let s = session();
     s.control = None;
     let Some(container) = container(s) else {
         return -1;
@@ -410,8 +398,8 @@ pub extern "C" fn switch_load_control_from_nca(handle: u32) -> i32 {
 
 /// The cached control data as JSON, or `{}`. `icon_size` sizes `switch_control_icon`'s buffer.
 #[no_mangle]
-pub extern "C" fn switch_control_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_control_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session();
     let Some(control) = &s.control else {
         return write_into(buf, maxlen, b"{}");
     };
@@ -466,8 +454,8 @@ pub extern "C" fn switch_control_json(handle: u32, buf: *mut u8, maxlen: u32) ->
 
 /// Copy the cached icon into `buf`. Returns bytes copied, or -1.
 #[no_mangle]
-pub extern "C" fn switch_control_icon(handle: u32, buf: *mut u8, maxlen: u32) -> i64 {
-    let s = session(handle);
+pub extern "C" fn switch_control_icon(buf: *mut u8, maxlen: u32) -> i64 {
+    let s = session();
     let Some(control) = &s.control else {
         return -1;
     };
@@ -484,13 +472,12 @@ pub extern "C" fn switch_control_icon(handle: u32, buf: *mut u8, maxlen: u32) ->
 /// may be NULL with length 0. Returns 0 on success, -1 on parse failure.
 #[no_mangle]
 pub extern "C" fn switch_load_keys(
-    handle: u32,
     prod_ptr: *const u8,
     prod_len: u32,
     title_ptr: *const u8,
     title_len: u32,
 ) -> i32 {
-    let s = session(handle);
+    let s = session();
     let prod = if !prod_ptr.is_null() && prod_len > 0 {
         unsafe { std::slice::from_raw_parts(prod_ptr, prod_len as usize) }
     } else {

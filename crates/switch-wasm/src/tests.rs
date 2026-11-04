@@ -17,11 +17,11 @@ use switch_core::vfs::{Change, ENTRY_TYPE_DIR, ENTRY_TYPE_FILE};
 static HOST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A session and the lock. Restores the default panic hook so failures are readable.
-fn new_session() -> (std::sync::MutexGuard<'static, ()>, u32) {
+fn new_session() -> std::sync::MutexGuard<'static, ()> {
     let guard = HOST.lock().unwrap_or_else(|e| e.into_inner());
-    let handle = switch_new();
+    switch_init();
     let _ = std::panic::take_hook();
-    (guard, handle)
+    guard
 }
 
 #[test]
@@ -51,11 +51,11 @@ fn the_page_turns_every_trace_channel_on_and_off() {
     assert_eq!(switch_core::trace::mask(), 0);
 }
 
-/// Every queued log line, collecting from `handle` first, as `(level, text)`.
-fn take_log(handle: i32) -> Vec<(u32, String)> {
+/// Every queued log line, collecting from the session first, as `(level, text)`.
+fn take_log() -> Vec<(u32, String)> {
     let mut lines = Vec::new();
     loop {
-        let level = switch_log_next(handle);
+        let level = switch_log_next();
         if level == 0 {
             return lines;
         }
@@ -68,10 +68,10 @@ fn take_log(handle: i32) -> Vec<(u32, String)> {
 
 #[test]
 fn the_activity_report_names_each_file_and_hands_it_over_once() {
-    let (_host, handle) = new_session();
-    take_log(handle as i32);
-    switch_log_activity(handle, 0.0);
-    let first = take_log(handle as i32);
+    let _host = new_session();
+    take_log();
+    switch_log_activity(0.0);
+    let first = take_log();
     assert!(
         first
             .iter()
@@ -83,13 +83,13 @@ fn the_activity_report_names_each_file_and_hands_it_over_once() {
         "{first:?}"
     );
 
-    let activity = &mut session(handle).cpu.fs_activity;
+    let activity = &mut session().cpu.fs_activity;
     activity.read("romfs", 0x100);
     activity.read("romfs", 0x20);
     activity.wrote("sdmc:/cfg.json", 7);
     activity.record("fs OpenFile \"/b\" on sdmc -> 2002-0001 (0x202)".to_owned());
-    switch_log_activity(handle, 1.0);
-    let fs: Vec<(u32, String)> = take_log(handle as i32)
+    switch_log_activity(1.0);
+    let fs: Vec<(u32, String)> = take_log()
         .into_iter()
         .filter(|(_, line)| line.starts_with("[fs]"))
         .collect();
@@ -105,8 +105,8 @@ fn the_activity_report_names_each_file_and_hands_it_over_once() {
             ),
         ]
     );
-    switch_log_activity(handle, 1.0);
-    let again = take_log(handle as i32);
+    switch_log_activity(1.0);
+    let again = take_log();
     assert!(
         !again.iter().any(|(_, line)| line.starts_with("[fs]")),
         "taken, not read: {again:?}"
@@ -115,16 +115,16 @@ fn the_activity_report_names_each_file_and_hands_it_over_once() {
 
 #[test]
 fn each_line_carries_its_level_so_the_page_reads_none_of_its_text() {
-    let (_host, handle) = new_session();
-    take_log(handle as i32);
-    let cpu = &mut session(handle).cpu;
+    let _host = new_session();
+    take_log();
+    let cpu = &mut session().cpu;
     cpu.out
         .extend_from_slice(b"[lm/WARN/nn::fs] low on space\n[lm/TRACE] tick\nplain stdout\n");
     cpu.trace.push(switch_core::trace::Level::Error.marker());
     cpu.trace.extend_from_slice(b"fault at 0x80\n  x0=0x1\n");
     use log::PageLevel::*;
     assert_eq!(
-        take_log(handle as i32),
+        take_log(),
         [
             (Warn as u32, "[lm/WARN/nn::fs] low on space".to_owned()),
             (Debug as u32, "[lm/TRACE] tick".to_owned()),
@@ -138,8 +138,8 @@ fn each_line_carries_its_level_so_the_page_reads_none_of_its_text() {
 /// A new session starts without the old one's panic, but keeps every line it logged.
 #[test]
 fn a_new_session_inherits_the_log_but_not_the_panic_of_the_one_before_it() {
-    let (_host, first) = new_session();
-    take_log(first as i32);
+    let _host = new_session();
+    take_log();
 
     // SAFETY: single-threaded under the `HOST` lock.
     let planted = b"PANIC: the old session died here";
@@ -147,18 +147,14 @@ fn a_new_session_inherits_the_log_but_not_the_panic_of_the_one_before_it() {
     guard[..planted.len()].copy_from_slice(planted);
     guard[planted.len()] = 0;
     switch_core::trace::emit("[test] the old session traced this");
-    session(first)
+    session()
         .cpu
         .out
         .extend_from_slice(b"the old session printed this\n");
 
-    switch_free_session(first);
-    let second = switch_new();
+    switch_init();
 
-    let lines: Vec<String> = take_log(second as i32)
-        .into_iter()
-        .map(|(_, line)| line)
-        .collect();
+    let lines: Vec<String> = take_log().into_iter().map(|(_, line)| line).collect();
     for kept in [
         "the old session printed this",
         "[test] the old session traced this",
@@ -170,7 +166,7 @@ fn a_new_session_inherits_the_log_but_not_the_panic_of_the_one_before_it() {
     }
 
     let mut buf = [0u8; 256];
-    let n = switch_last_error(second, buf.as_mut_ptr(), buf.len() as u32);
+    let n = switch_last_error(buf.as_mut_ptr(), buf.len() as u32);
     assert_eq!(
         &buf[..n as usize],
         b"",
@@ -186,9 +182,8 @@ fn change(path: &str, kind: Option<u8>, size: u64) -> Change {
     }
 }
 
-fn put(handle: u32, path: &str, data: &[u8]) {
+fn put(path: &str, data: &[u8]) {
     switch_sd_write_file(
-        handle,
         path.as_ptr(),
         path.len() as u32,
         data.as_ptr(),
@@ -202,14 +197,13 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
     const USER_LO: u64 = 0x0706_0504_0302_0100;
     const USER_HI: u64 = 0x0f0e_0d0c_0b0a_0908;
     let key = SaveKey::from_halves(SAVE, USER_LO, USER_HI);
-    let (_host, handle) = new_session();
+    let _host = new_session();
 
     // Restores are not reported as changes.
     let path = "/settings.dat";
     let body = b"saved";
     assert_eq!(
         switch_save_write_file(
-            handle,
             SAVE,
             USER_LO,
             USER_HI,
@@ -220,11 +214,11 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
         ),
         0
     );
-    assert_eq!(session(handle).cpu.save_data_mut(key).pending_changes(), 0);
+    assert_eq!(session().cpu.save_data_mut(key).pending_changes(), 0);
 
     // A save with only a directory is listed; the shared save is a separate one.
-    switch_save_create_dir(handle, SAVE, 0, 0, b"/".as_ptr(), 1);
-    let mut ids: Vec<String> = session(handle)
+    switch_save_create_dir(SAVE, 0, 0, b"/".as_ptr(), 1);
+    let mut ids: Vec<String> = session()
         .cpu
         .save_keys()
         .iter()
@@ -240,45 +234,37 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
     );
 
     // A guest write is a change, in the save rather than on the card.
-    session(handle)
+    session()
         .cpu
         .save_data_mut(key)
         .write("/settings.dat", 0, b"12345")
         .unwrap();
-    assert_eq!(session(handle).cpu.save_data_mut(key).pending_changes(), 1);
+    assert_eq!(session().cpu.save_data_mut(key).pending_changes(), 1);
     assert_eq!(
-        session(handle)
+        session()
             .cpu
             .save_data_mut(SaveKey::shared(SAVE))
             .pending_changes(),
         0
     );
     assert_eq!(
-        session(handle).cpu.save_data_mut(key).take_changes(),
+        session().cpu.save_data_mut(key).take_changes(),
         [change("/settings.dat", Some(ENTRY_TYPE_FILE), 5)]
     );
-    assert_eq!(session(handle).cpu.save_data_mut(key).pending_changes(), 0);
-    assert_eq!(session(handle).cpu.fs.entry_type("/settings.dat"), None);
+    assert_eq!(session().cpu.save_data_mut(key).pending_changes(), 0);
+    assert_eq!(session().cpu.fs.entry_type("/settings.dat"), None);
 
     assert_eq!(
-        switch_save_file_size(
-            handle,
-            SAVE,
-            USER_LO,
-            USER_HI,
-            path.as_ptr(),
-            path.len() as u32
-        ),
+        switch_save_file_size(SAVE, USER_LO, USER_HI, path.as_ptr(), path.len() as u32),
         5
     );
     assert_eq!(
-        switch_save_file_size(handle, SAVE, 0, 0, path.as_ptr(), path.len() as u32),
+        switch_save_file_size(SAVE, 0, 0, path.as_ptr(), path.len() as u32),
         -1,
         "another user's save, or the shared one, does not have it"
     );
     let mut out = [0u8; 16];
     let read = switch_save_read_file(
-        handle,
         SAVE,
         USER_LO,
         USER_HI,
@@ -294,13 +280,12 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
 
 #[test]
 fn users_are_staged_committed_and_read_back() {
-    let (_host, handle) = new_session();
+    let _host = new_session();
     let (ann_lo, ann_hi) = (0x0706_0504_0302_0100u64, 0x0f0e_0d0c_0b0a_0908u64);
     let (ben_lo, ben_hi) = (0x1111u64, 0x2222u64);
     let picture = [0xFFu8, 0xD8, 0xFF, 0xD9];
     let stage = |lo, hi, name: &str, picture: &[u8]| {
         switch_user_stage(
-            handle,
             lo,
             hi,
             name.as_ptr(),
@@ -312,10 +297,10 @@ fn users_are_staged_committed_and_read_back() {
     };
     stage(ann_lo, ann_hi, "Ann \"A\"", &picture);
     stage(ben_lo, ben_hi, "Ben", &[]);
-    assert_eq!(switch_users_commit(handle, ben_lo, ben_hi), 0);
-    assert_eq!(session(handle).cpu.user_nickname(), "Ben");
+    assert_eq!(switch_users_commit(ben_lo, ben_hi), 0);
+    assert_eq!(session().cpu.user_nickname(), "Ben");
 
-    let users = session(handle).cpu.users();
+    let users = session().cpu.users();
     assert_eq!(users.len(), 2);
     assert_eq!(
         users[0].uid,
@@ -329,31 +314,31 @@ fn users_are_staged_committed_and_read_back() {
 
     // A list naming a player not in it is refused and changes nothing.
     stage(ann_lo, ann_hi, "Ann", &[]);
-    assert_eq!(switch_users_commit(handle, 9, 9), 4);
-    assert_eq!(session(handle).cpu.users().len(), 2);
-    assert!(!session(handle).cpu.take_profile_edits());
+    assert_eq!(switch_users_commit(9, 9), 4);
+    assert_eq!(session().cpu.users().len(), 2);
+    assert!(!session().cpu.take_profile_edits());
 }
 
 #[test]
 fn the_sd_card_round_trips_through_the_host_entry_points() {
-    let (_host, handle) = new_session();
+    let _host = new_session();
 
     // Restores are not reported as changes.
-    put(handle, "sdmc:/switch/restored.txt", b"hello");
-    assert_eq!(session(handle).cpu.fs.pending_changes(), 0);
-    assert!(session(handle).cpu.fs.take_changes().is_empty());
+    put("sdmc:/switch/restored.txt", b"hello");
+    assert_eq!(session().cpu.fs.pending_changes(), 0);
+    assert!(session().cpu.fs.take_changes().is_empty());
 
     // A guest write is: `IFile::Write` at offset 0 of a new file.
     {
-        let cpu = &mut session(handle).cpu;
+        let cpu = &mut session().cpu;
         assert!(cpu.fs.create_file("/switch/cfg.json", 0));
         cpu.fs.write("/switch/cfg.json", 0, br#"{"v":5}"#).unwrap();
         cpu.fs.guest_create_dir("/switch/saves");
         cpu.fs.remove("/switch/restored.txt");
     }
-    assert_eq!(session(handle).cpu.fs.pending_changes(), 3);
+    assert_eq!(session().cpu.fs.pending_changes(), 3);
     assert_eq!(
-        session(handle).cpu.fs.take_changes(),
+        session().cpu.fs.take_changes(),
         [
             change("/switch/cfg.json", Some(ENTRY_TYPE_FILE), 7),
             change("/switch/restored.txt", None, 0),
@@ -361,17 +346,13 @@ fn the_sd_card_round_trips_through_the_host_entry_points() {
         ]
     );
     // Draining clears them.
-    assert_eq!(session(handle).cpu.fs.pending_changes(), 0);
-    assert!(session(handle).cpu.fs.take_changes().is_empty());
+    assert_eq!(session().cpu.fs.pending_changes(), 0);
+    assert!(session().cpu.fs.take_changes().is_empty());
 
     let path = "/switch/cfg.json";
-    assert_eq!(
-        switch_sd_file_size(handle, path.as_ptr(), path.len() as u32),
-        7
-    );
+    assert_eq!(switch_sd_file_size(path.as_ptr(), path.len() as u32), 7);
     let mut out = [0u8; 16];
     let n = switch_sd_read_file(
-        handle,
         path.as_ptr(),
         path.len() as u32,
         0,
@@ -382,7 +363,6 @@ fn the_sd_card_round_trips_through_the_host_entry_points() {
     assert_eq!(&out[..7], br#"{"v":5}"#);
 
     let n = switch_sd_read_file(
-        handle,
         path.as_ptr(),
         path.len() as u32,
         4,
@@ -393,14 +373,10 @@ fn the_sd_card_round_trips_through_the_host_entry_points() {
     assert_eq!(&out[..3], b":5}");
 
     let dir = "/switch";
-    assert_eq!(
-        switch_sd_file_size(handle, dir.as_ptr(), dir.len() as u32),
-        -1
-    );
+    assert_eq!(switch_sd_file_size(dir.as_ptr(), dir.len() as u32), -1);
     let missing = "/switch/nope";
     assert_eq!(
         switch_sd_read_file(
-            handle,
             missing.as_ptr(),
             missing.len() as u32,
             0,
@@ -409,7 +385,6 @@ fn the_sd_card_round_trips_through_the_host_entry_points() {
         ),
         -1
     );
-    switch_free_session(handle);
 }
 
 /// Build a PFS0: header, entry table, string table, payloads.
@@ -447,16 +422,16 @@ fn build_nsp(files: &[(&str, &[u8])]) -> Vec<u8> {
 /// The container is read through `host_read` without being staged.
 #[test]
 fn a_container_is_read_through_the_host_without_being_staged() {
-    let (_host, handle) = new_session();
+    let _host = new_session();
     let payload: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
     let image = build_nsp(&[("main.nca", &payload), ("notes.txt", b"hello")]);
     let size = image.len() as u64;
     set_host_container(image);
 
-    assert_eq!(switch_open_nsp(handle, size), 0);
+    assert_eq!(switch_open_nsp(size), 0);
 
     let mut buf = vec![0u8; 4096];
-    let n = switch_nsp_files_json(handle, buf.as_mut_ptr(), buf.len() as u32);
+    let n = switch_nsp_files_json(buf.as_mut_ptr(), buf.len() as u32);
     let json = String::from_utf8(buf[..n as usize].to_vec()).unwrap();
     assert!(json.contains(r#"{"name":"main.nca","offset":"#), "{json}");
     assert!(json.contains(r#""size":4096}"#), "{json}");
@@ -464,26 +439,24 @@ fn a_container_is_read_through_the_host_without_being_staged() {
 
     // Reads are relative to the inner file and stop at its end.
     let mut out = vec![0u8; 32];
-    let got = switch_read_file(handle, 0, 0x1000 - 8, out.as_mut_ptr(), out.len() as u32);
+    let got = switch_read_file(0, 0x1000 - 8, out.as_mut_ptr(), out.len() as u32);
     assert_eq!(got, 8);
     assert_eq!(&out[..8], &payload[0x1000 - 8..]);
 
-    let got = switch_read_file(handle, 1, 0, out.as_mut_ptr(), out.len() as u32);
+    let got = switch_read_file(1, 0, out.as_mut_ptr(), out.len() as u32);
     assert_eq!(got, 5);
     assert_eq!(&out[..5], b"hello");
 
     // Past a file's end is empty; past the table is an error.
-    assert_eq!(switch_read_file(handle, 1, 5, out.as_mut_ptr(), 32), 0);
-    assert_eq!(switch_read_file(handle, 7, 0, out.as_mut_ptr(), 32), -1);
+    assert_eq!(switch_read_file(1, 5, out.as_mut_ptr(), 32), 0);
+    assert_eq!(switch_read_file(7, 0, out.as_mut_ptr(), 32), -1);
 
     // A non-NCA payload fails with a readable error.
-    assert_eq!(switch_load_nca_from_nsp(handle, 0), -1);
+    assert_eq!(switch_load_nca_from_nsp(0), -1);
     let mut err = vec![0u8; 512];
-    let n = switch_last_error(handle, err.as_mut_ptr(), err.len() as u32);
+    let n = switch_last_error(err.as_mut_ptr(), err.len() as u32);
     let text = String::from_utf8(err[..n as usize].to_vec()).unwrap();
     assert!(text.contains("bad magic"), "{text}");
-
-    switch_free_session(handle);
 }
 
 /// A cartridge image opens through the same entry point as an `.nsp`.
@@ -492,7 +465,7 @@ fn a_cartridge_image_opens_as_a_container() {
     use switch_core::nsp::testing::partition_fs;
     use switch_core::nsp::PartitionKind;
 
-    let (_host, handle) = new_session();
+    let _host = new_session();
     let payload: Vec<u8> = (0..=255u8).cycle().take(2048).collect();
     let secure = partition_fs(
         PartitionKind::Hfs0,
@@ -504,10 +477,10 @@ fn a_cartridge_image_opens_as_a_container() {
     let size = image.len() as u64;
     set_host_container(image);
 
-    assert_eq!(switch_open_nsp(handle, size), 0);
+    assert_eq!(switch_open_nsp(size), 0);
 
     let mut buf = vec![0u8; 4096];
-    let n = switch_nsp_files_json(handle, buf.as_mut_ptr(), buf.len() as u32);
+    let n = switch_nsp_files_json(buf.as_mut_ptr(), buf.len() as u32);
     let json = String::from_utf8(buf[..n as usize].to_vec()).unwrap();
     assert!(json.contains(r#"{"name":"program.nca""#), "{json}");
     assert!(json.contains(r#"{"name":"meta.cnmt.nca""#), "{json}");
@@ -515,44 +488,40 @@ fn a_cartridge_image_opens_as_a_container() {
 
     // Offsets are the image's own.
     let mut out = vec![0u8; 16];
-    let got = switch_read_file(handle, 0, 0x700, out.as_mut_ptr(), out.len() as u32);
+    let got = switch_read_file(0, 0x700, out.as_mut_ptr(), out.len() as u32);
     assert_eq!(got, 16);
     assert_eq!(out[..], payload[0x700..0x710]);
-
-    switch_free_session(handle);
 }
 
 #[test]
 fn an_error_message_keeps_its_last_character() {
     // The NUL comes out of the buffer, not the message.
-    let (_host, handle) = new_session();
+    let _host = new_session();
     const MSG: &str = "no container is open";
-    session(handle).last_error = MSG.to_string();
+    session().last_error = MSG.to_string();
 
     let mut buf = [0xAAu8; 64];
-    let n = switch_last_error(handle, buf.as_mut_ptr(), buf.len() as u32);
+    let n = switch_last_error(buf.as_mut_ptr(), buf.len() as u32);
     assert_eq!(n as usize, MSG.len());
     assert_eq!(&buf[..n as usize], MSG.as_bytes());
     assert_eq!(buf[n as usize], 0, "the copy has to stay NUL-terminated");
 
     // A message that does not fit loses exactly what the buffer cannot hold.
-    session(handle).last_error = MSG.to_string();
+    session().last_error = MSG.to_string();
     let mut small = [0xAAu8; 8];
-    let n = switch_last_error(handle, small.as_mut_ptr(), small.len() as u32);
+    let n = switch_last_error(small.as_mut_ptr(), small.len() as u32);
     assert_eq!(n as usize, small.len() - 1);
     assert_eq!(&small[..n as usize], &MSG.as_bytes()[..small.len() - 1]);
     assert_eq!(small[small.len() - 1], 0);
-
-    switch_free_session(handle);
 }
 
 /// The translator's and the GPU's reports, in the bytes the page parses.
 #[test]
 fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
     use crate::stats::{switch_gpu_report_json, switch_jit_stats_json};
-    let (_guard, handle) = new_session();
+    let _guard = new_session();
     let mut buf = vec![0u8; 4096];
-    let n = switch_jit_stats_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    let n = switch_jit_stats_json(buf.as_mut_ptr(), buf.len() as u32) as usize;
     assert_eq!(
         std::str::from_utf8(&buf[..n]).unwrap(),
         concat!(
@@ -561,7 +530,7 @@ fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
             r#""emitted":0,"enteredEmitted":0,"chained":0}"#
         )
     );
-    let n = crate::stats::switch_memory_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    let n = crate::stats::switch_memory_json(buf.as_mut_ptr(), buf.len() as u32) as usize;
     let memory = std::str::from_utf8(&buf[..n]).unwrap();
     assert!(
         memory.starts_with(r#"{"backed":"#)
@@ -573,9 +542,8 @@ fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
         "{memory}"
     );
     // The software rasterizer reports nothing of its own.
-    let n = switch_gpu_report_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    let n = switch_gpu_report_json(buf.as_mut_ptr(), buf.len() as u32) as usize;
     assert_eq!(&buf[..n], br#"{"frames":0}"#);
-    switch_free_session(handle);
 }
 
 /// A title's control data and an unreadable NCA, in the bytes the page parses.
@@ -583,9 +551,9 @@ fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
 fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
     use crate::container::{switch_control_json, switch_parse_nca};
     use switch_core::control::{CaptureSupport, Control, Nacp, Rating, StartupUserAccount, Title};
-    let (_guard, handle) = new_session();
+    let _guard = new_session();
     let mut buf = vec![0u8; 4096];
-    let n = switch_control_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    let n = switch_control_json(buf.as_mut_ptr(), buf.len() as u32) as usize;
     assert_eq!(&buf[..n], b"{}", "nothing cached");
 
     let mut nacp = Nacp::empty();
@@ -619,7 +587,7 @@ fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
     nacp.device_save_data_journal_size = 2;
     nacp.bcat_delivery_cache_storage_size = 3;
     nacp.application_error_code_category = "2181\n".into();
-    session(handle).control = Some(Control {
+    session().control = Some(Control {
         title_id: 0x0100_0000_0000_1000,
         language: "AmericanEnglish",
         name: "JUST DANCE® 2017".into(),
@@ -628,7 +596,7 @@ fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
         nacp,
         nacp_raw: Vec::new(),
     });
-    let n = switch_control_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+    let n = switch_control_json(buf.as_mut_ptr(), buf.len() as u32) as usize;
     assert_eq!(
         std::str::from_utf8(&buf[..n]).unwrap(),
         concat!(
@@ -645,7 +613,6 @@ fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
 
     let garbage = [0u8; 16];
     let n = switch_parse_nca(
-        handle,
         garbage.as_ptr(),
         garbage.len() as u32,
         buf.as_mut_ptr(),
@@ -655,5 +622,4 @@ fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
         std::str::from_utf8(&buf[..n]).unwrap(),
         r#"{"error":"NCA header: expected at least 1024 bytes, got 16"}"#
     );
-    switch_free_session(handle);
 }

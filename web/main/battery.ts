@@ -1,6 +1,6 @@
 // Host battery state for the psm service (Chromium only, via the Battery Status API).
 
-import { call } from './rpc';
+import { call, hasSession, whenReady } from './rpc';
 
 interface BatteryManager extends EventTarget {
   level: number;
@@ -12,8 +12,9 @@ type NavigatorWithBattery = Navigator & { getBattery?: () => Promise<BatteryMana
 export function watchBattery(): void {
   const nav = navigator as NavigatorWithBattery;
   if (!nav.getBattery) return;
-  void nav.getBattery().then((battery) => {
+  void Promise.all([nav.getBattery(), whenReady()]).then(([battery]) => {
     const push = () => {
+      if (!hasSession()) return;
       void call('set_battery', Math.round(battery.level * 100), battery.charging ? 1 : 0);
     };
     push();

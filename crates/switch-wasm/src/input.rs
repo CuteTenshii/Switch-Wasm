@@ -6,8 +6,8 @@ use crate::session;
 
 /// The last rumble request, packed as `(weak << 16) | strong`, each 0..=1000.
 #[no_mangle]
-pub extern "C" fn switch_vibration(handle: u32) -> u32 {
-    let s = session(handle);
+pub extern "C" fn switch_vibration() -> u32 {
+    let s = session();
     let (low, high) = s.cpu.vibration();
     let scale = |v: f32| (v * 1000.0).round().clamp(0.0, 1000.0) as u32;
     (scale(high) << 16) | scale(low)
@@ -19,14 +19,13 @@ pub extern "C" fn switch_vibration(handle: u32) -> u32 {
 /// DpadDown=1<<15); sticks are -32768..32767, positive right and up.
 #[no_mangle]
 pub extern "C" fn switch_set_input(
-    handle: u32,
     buttons: u64,
     stick_lx: i32,
     stick_ly: i32,
     stick_rx: i32,
     stick_ry: i32,
 ) {
-    session(handle)
+    session()
         .cpu
         .set_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
 }
@@ -34,7 +33,7 @@ pub extern "C" fn switch_set_input(
 /// Feed touch contacts: `count` packed `u32` triples (`finger_id`, `x`, `y`) in
 /// 1280x720 digitizer space, truncated to 16. `count` 0 is a lift.
 #[no_mangle]
-pub extern "C" fn switch_set_touch(handle: u32, ptr: *const u32, count: u32) {
+pub extern "C" fn switch_set_touch(ptr: *const u32, count: u32) {
     let n = (count as usize).min(switch_core::cpu::TOUCH_MAX);
     let mut points = [TouchPoint::default(); switch_core::cpu::TOUCH_MAX];
     if n > 0 && !ptr.is_null() {
@@ -45,5 +44,5 @@ pub extern "C" fn switch_set_touch(handle: u32, ptr: *const u32, count: u32) {
             point.y = raw[i * 3 + 2];
         }
     }
-    session(handle).cpu.set_touch_state(&points[..n]);
+    session().cpu.set_touch_state(&points[..n]);
 }

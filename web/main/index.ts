@@ -8,7 +8,7 @@ import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
 import { log, logLevel, offerPreviousLog, onLogLevel } from './log';
 import { initNand } from './nand';
-import { attachScreen, call, initWorker, setSession, whenReady } from './rpc';
+import { attachScreen, call, initWorker, whenReady } from './rpc';
 import { updateReadouts, updateRam } from './runloop';
 import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence } from './sdcard';
@@ -41,10 +41,8 @@ async function init(): Promise<void> {
     await whenReady();
     // The worker paints the screen from here on.
     attachScreen(screenEl.transferControlToOffscreen());
-    loadPhase('creating a session');
-    setSession(await call('new'));
     loadPhase('restoring the SD card, saves, profiles and keys');
-    // Independent of each other once the session exists.
+    // Independent of each other; the worker built the session when it loaded the core.
     await Promise.all([
       stageFont(),
       sdRequestPersistence(),

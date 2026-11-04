@@ -8,7 +8,7 @@ use super::{self as idb, NAND_CONTROLS, NAND_DB, NAND_STORES, NAND_VERSION};
 use crate::session_if_live;
 
 /// Hand every stored control to the session.
-pub(crate) async fn restore(handle: u32) {
+pub(crate) async fn restore() {
     let result = async {
         let db = idb::open(NAND_DB, NAND_VERSION, &NAND_STORES).await?;
         let entries = idb::get_all(&db, NAND_CONTROLS).await;
@@ -16,7 +16,7 @@ pub(crate) async fn restore(handle: u32) {
         entries
     }
     .await;
-    let Some(s) = session_if_live(handle) else {
+    let Some(s) = session_if_live() else {
         return;
     };
     match result {
@@ -43,8 +43,8 @@ pub(crate) async fn restore(handle: u32) {
 
 /// Store the control data the session has just read, for the next session's `ns`.
 #[wasm_bindgen]
-pub async fn switch_remember_control(handle: u32) {
-    let Some(s) = session_if_live(handle) else {
+pub async fn switch_remember_control() {
+    let Some(s) = session_if_live() else {
         return;
     };
     let Some(control) = &s.control else {
@@ -62,7 +62,7 @@ pub async fn switch_remember_control(handle: u32) {
     Reflect::set(&entry, &"nacp".into(), &nacp).ok();
     Reflect::set(&entry, &"icon".into(), &icon).ok();
     let outcome = write(&id, entry.into()).await;
-    if let (Err(err), Some(s)) = (outcome, session_if_live(handle)) {
+    if let (Err(err), Some(s)) = (outcome, session_if_live()) {
         s.cpu.log(
             Level::Error,
             &format!("Title details: could not be stored ({err:?})"),

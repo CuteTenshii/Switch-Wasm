@@ -39,42 +39,29 @@ const STORED_NAMED_MAX: usize = 8;
 /// Read at a time when copying a file out of the core.
 const CHUNK: usize = 1 << 20;
 
-fn log(handle: u32, level: Level, line: &str) {
-    if let Some(s) = session_if_live(handle) {
+fn log(level: Level, line: &str) {
+    if let Some(s) = session_if_live() {
         s.cpu.log(level, line);
     }
 }
 
 /// Load the stored card and saves through the host's restore path, which is not a guest change.
 #[wasm_bindgen]
-pub async fn switch_restore_storage(handle: u32) -> u32 {
-    match restore_sd(handle).await {
+pub async fn switch_restore_storage() -> u32 {
+    match restore_sd().await {
         Ok(0) => {}
-        Ok(n) => log(
-            handle,
-            Level::Debug,
-            &format!("SD card: restored {n} entries"),
-        ),
+        Ok(n) => log(Level::Debug, &format!("SD card: restored {n} entries")),
         Err(err) => log(
-            handle,
             Level::Error,
             &format!("SD card: could not be read ({err:?})"),
         ),
     }
-    match restore_saves(handle).await {
+    match restore_saves().await {
         Ok(0) => {}
-        Ok(n) => log(
-            handle,
-            Level::Debug,
-            &format!("Saves: restored {n} entries"),
-        ),
-        Err(err) => log(
-            handle,
-            Level::Error,
-            &format!("Saves: could not be read ({err:?})"),
-        ),
+        Ok(n) => log(Level::Debug, &format!("Saves: restored {n} entries")),
+        Err(err) => log(Level::Error, &format!("Saves: could not be read ({err:?})")),
     }
-    super::controls::restore(handle).await;
+    super::controls::restore().await;
     0
 }
 
@@ -118,9 +105,9 @@ impl Stored {
     }
 }
 
-async fn restore_sd(handle: u32) -> Result<usize, JsValue> {
+async fn restore_sd() -> Result<usize, JsValue> {
     let entries = stored(SD_DB, SD_VERSION, &[SD_STORE], SD_STORE).await?;
-    let Some(s) = session_if_live(handle) else {
+    let Some(s) = session_if_live() else {
         return Ok(0);
     };
     for Stored { key, data } in &entries {
@@ -132,9 +119,9 @@ async fn restore_sd(handle: u32) -> Result<usize, JsValue> {
     Ok(entries.len())
 }
 
-async fn restore_saves(handle: u32) -> Result<usize, JsValue> {
+async fn restore_saves() -> Result<usize, JsValue> {
     let entries = stored(NAND_DB, NAND_VERSION, &NAND_STORES, NAND_SAVES).await?;
-    let Some(s) = session_if_live(handle) else {
+    let Some(s) = session_if_live() else {
         return Ok(0);
     };
     let mut restored = 0;
@@ -173,8 +160,8 @@ fn parse_save_key(text: &str) -> Option<SaveKey> {
 /// Take what the guest changed and store it. Resolves once everything taken is stored, or
 /// has failed to be and is kept for the next flush.
 #[wasm_bindgen]
-pub async fn switch_flush_storage(handle: u32) -> u32 {
-    take_changes(handle);
+pub async fn switch_flush_storage() -> u32 {
+    take_changes();
     if FLUSH.with_borrow(|f| f.running) {
         let waiting = Promise::new(&mut |resolve: Function, _| {
             FLUSH.with_borrow_mut(|f| f.waiters.push(resolve));
@@ -183,7 +170,7 @@ pub async fn switch_flush_storage(handle: u32) -> u32 {
         return 0;
     }
     FLUSH.with_borrow_mut(|f| f.running = true);
-    while store(handle).await {}
+    while store().await {}
     FLUSH.with_borrow_mut(|f| {
         f.running = false;
         for waiter in f.waiters.drain(..) {
@@ -193,8 +180,8 @@ pub async fn switch_flush_storage(handle: u32) -> u32 {
     0
 }
 
-fn take_changes(handle: u32) {
-    let Some(s) = session_if_live(handle) else {
+fn take_changes() {
+    let Some(s) = session_if_live() else {
         return;
     };
     let sd: Vec<_> = s
@@ -245,7 +232,7 @@ fn entry(vfs: &Vfs, change: &Change) -> Option<JsValue> {
 
 /// Store the backlogs. Returns whether anything was written, so the caller can go again for
 /// what was taken meanwhile.
-async fn store(handle: u32) -> bool {
+async fn store() -> bool {
     let mut wrote = false;
     for (what, db, version, stores, store, is_sd) in [
         (
@@ -276,7 +263,7 @@ async fn store(handle: u32) -> bool {
         match write(db, version, stores, store, &changes).await {
             Ok(()) => {
                 wrote = true;
-                log_stored(handle, what, &changes);
+                log_stored(what, &changes);
             }
             Err(err) => {
                 // Put them back under anything newer that arrived meanwhile.
@@ -287,7 +274,6 @@ async fn store(handle: u32) -> bool {
                     }
                 });
                 log(
-                    handle,
                     Level::Error,
                     &format!(
                         "{what}: could not be written ({err:?}) - retrying on the next flush."
@@ -312,7 +298,7 @@ async fn write(
     outcome
 }
 
-fn log_stored(handle: u32, what: &str, changes: &[(String, Option<JsValue>)]) {
+fn log_stored(what: &str, changes: &[(String, Option<JsValue>)]) {
     let mut bytes = 0.0;
     let mut named = Vec::new();
     for (path, entry) in changes {
@@ -336,7 +322,6 @@ fn log_stored(handle: u32, what: &str, changes: &[(String, Option<JsValue>)]) {
         n => format!(", and {n} more"),
     };
     log(
-        handle,
         Level::Debug,
         &format!(
             "[io] {what}: stored {} changes ({:.1} KiB) in IndexedDB: {}{more}",

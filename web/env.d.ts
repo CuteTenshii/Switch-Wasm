@@ -22,20 +22,20 @@ declare module '@core/switch_wasm.js' {
   ): Record<string, unknown>;
   // `crates/switch-wasm/src/gpu.rs`: what it renders on, or why it cannot.
   export function switch_gpu_open(
-    handle: number, deviceMsaa: boolean, interleave: boolean): Promise<string>;
+    deviceMsaa: boolean, interleave: boolean): Promise<string>;
   // `crates/switch-wasm/src/screen.rs`; the first throws when the canvas has no 2d context.
   export function switch_attach_screen(canvas: OffscreenCanvas): void;
-  export function switch_present(handle: number): boolean;
+  export function switch_present(): boolean;
   export function switch_clear_screen(): void;
   // `crates/switch-wasm/src/idb/persist.rs`: the SD card and saves, to and from IndexedDB.
-  export function switch_restore_storage(handle: number): Promise<number>;
-  export function switch_flush_storage(handle: number): Promise<number>;
+  export function switch_restore_storage(): Promise<number>;
+  export function switch_flush_storage(): Promise<number>;
   // `idb/nand.rs`: registers the stored firmware; the system data archives it took.
-  export function switch_restore_nand(handle: number): Promise<number>;
+  export function switch_restore_nand(): Promise<number>;
   // `idb/controls.rs`: stores the control data the session has just read.
-  export function switch_remember_control(handle: number): Promise<void>;
+  export function switch_remember_control(): Promise<void>;
   // `idb/users.rs`: stores the guest's profile edits; whether there were any.
-  export function switch_store_profile_edits(handle: number): Promise<boolean>;
+  export function switch_store_profile_edits(): Promise<boolean>;
 }
 
 // The commit the site was built from; see `vite.config.ts`.

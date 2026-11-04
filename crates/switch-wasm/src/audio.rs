@@ -8,8 +8,8 @@ use crate::session;
 
 /// The PCM format the guest produces, packed as `(channels << 24) | sample_rate`.
 /// Zero until the guest opens an audio device.
-fn format(handle: u32) -> u32 {
-    let (rate, channels) = session(handle).cpu.audio_format();
+fn format() -> u32 {
+    let (rate, channels) = session().cpu.audio_format();
     if rate == 0 {
         return 0;
     }
@@ -78,9 +78,9 @@ pub(crate) fn drop_queued() {
 }
 
 /// Move what the guest queued into the ring, as far as it has room.
-pub(crate) fn feed(handle: u32) {
-    let s = session(handle);
-    let format = format(handle);
+pub(crate) fn feed() {
+    let s = session();
+    let format = format();
     #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
     if RING.format.swap(format, Relaxed) != format {
         announce_format(format);
