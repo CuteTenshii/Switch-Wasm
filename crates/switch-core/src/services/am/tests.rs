@@ -1029,3 +1029,26 @@ fn an_applet_is_not_told_about_focus() {
     assert!(cpu.process().in_focus);
     assert!(cpu.process().applet_messages.is_empty());
 }
+
+#[test]
+fn a_pushed_context_is_popped_back_newest_first() {
+    const STORAGE: u64 = 0x21;
+    let mut cpu = Cpu::new();
+    cpu.mem.map_zero(TLS, 0x200).unwrap();
+    cpu.register_service_handle(9, "am:process-winding-controller");
+    cpu.register_service_handle(STORAGE, "am:storage");
+    cpu.process_mut()
+        .am_storages
+        .insert(Cpu::object_key(STORAGE, 0), vec![1, 2, 3]);
+    push_storage(&mut cpu, 21, STORAGE);
+    cpu.applet_request(TLS, 9, Some(21)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "push refused");
+    assert_eq!(cpu.process().am_contexts, [vec![1, 2, 3]]);
+
+    cpu.applet_request(TLS, 9, Some(22)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "pop refused");
+    assert!(cpu.process().am_contexts.is_empty());
+
+    cpu.applet_request(TLS, 9, Some(22)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (3 << 9));
+}

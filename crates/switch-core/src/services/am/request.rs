@@ -688,6 +688,25 @@ impl Cpu {
             "am:process-winding-controller" => match cmd_id {
                 // GetLaunchReason: all zero is a normal start.
                 Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8; 4], &[]),
+                // PushContext(IStorage).
+                Some(21) => {
+                    let data = self
+                        .ipc_input_object_key(tls, handle, 0)
+                        .and_then(|key| self.process().am_storages.get(&key))
+                        .cloned()
+                        .unwrap_or_default();
+                    self.process_mut().am_contexts.push(data);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // PopContext -> IStorage, or 2128-0003 when nothing was pushed.
+                Some(22) => match self.process_mut().am_contexts.pop() {
+                    Some(data) => {
+                        let key = self.reply_with_interface(tls, handle, "am:storage")?;
+                        self.process_mut().am_storages.insert(key, data);
+                        Ok(())
+                    }
+                    None => self.write_ipc_response(tls, 128 | (3 << 9), &[], &[], &[]),
+                },
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // ILibraryAppletSelfAccessor.

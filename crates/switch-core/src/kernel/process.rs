@@ -73,6 +73,8 @@ pub(crate) struct Process {
     pub(crate) fs_files: IdMap<u64, String>,
     /// `am` `IStorage` contents, by object.
     pub(crate) am_storages: IdMap<u64, Vec<u8>>,
+    /// Contexts `IProcessWindingController::PushContext` saved, newest last.
+    pub(crate) am_contexts: Vec<Vec<u8>>,
     /// DLC indices `aoc:u` reports; the content is in `data_archives`.
     pub(crate) add_on_content: std::collections::BTreeSet<u32>,
     /// Base DLC id from the NACP; zero means derive it from the program id.
@@ -193,6 +195,7 @@ impl Process {
             am_pop_events: [None; 2],
             am_launch_parameters: IdMap::default(),
             am_storages: IdMap::default(),
+            am_contexts: Vec::new(),
             am_storage_of: IdMap::default(),
             am_applets: IdMap::default(),
             am_keyboard: None,
