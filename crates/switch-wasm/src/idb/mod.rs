@@ -2,6 +2,7 @@
 
 pub(crate) mod persist;
 pub(crate) mod usage;
+pub(crate) mod users;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,11 +20,13 @@ pub(crate) const SD_STORE: &str = "entries";
 pub(crate) const NAND_DB: &str = "switch-wasm-nand";
 pub(crate) const NAND_CONTENT: &str = "content";
 pub(crate) const NAND_SAVES: &str = "saves";
+pub(crate) const NAND_USERS: &str = "users";
 
 /// The page creates and upgrades these databases too (`web/shared/db.ts`); keep both in step.
 pub(crate) const SD_VERSION: u32 = 1;
 pub(crate) const NAND_VERSION: u32 = 4;
-pub(crate) const NAND_STORES: [&str; 5] = [NAND_CONTENT, "titles", NAND_SAVES, "users", "controls"];
+pub(crate) const NAND_STORES: [&str; 5] =
+    [NAND_CONTENT, "titles", NAND_SAVES, NAND_USERS, "controls"];
 
 /// Open `name` at `version`, creating any of `stores` it lacks.
 pub(crate) async fn open(

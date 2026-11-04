@@ -30,6 +30,8 @@ declare module '@core/switch_wasm.js' {
   // `crates/switch-wasm/src/idb/persist.rs`: the SD card and saves, to and from IndexedDB.
   export function switch_restore_storage(handle: number): Promise<number>;
   export function switch_flush_storage(handle: number): Promise<number>;
+  // `idb/users.rs`: stores the guest's profile edits; whether there were any.
+  export function switch_store_profile_edits(handle: number): Promise<boolean>;
 }
 
 // The commit the site was built from; see `vite.config.ts`.

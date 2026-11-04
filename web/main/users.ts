@@ -75,33 +75,47 @@ function firstProfile(): Profile {
   return { uid: newUid(), nickname: 'Player', editedAt: 0, picture: null, created: Date.now() };
 }
 
+async function readProfiles(): Promise<void> {
+  const db = await nandIdb();
+  const [keys, values] = await new Promise<[IDBValidKey[], unknown[]]>((resolve, reject) => {
+    const tx = db.transaction(NAND_USERS, 'readonly');
+    const store = tx.objectStore(NAND_USERS);
+    const k = store.getAllKeys();
+    const v = store.getAll();
+    tx.oncomplete = () => resolve([k.result, v.result]);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+  });
+  profiles = [];
+  keys.forEach((key, i) => {
+    if (key === CURRENT_KEY) current = String(values[i]);
+    else profiles.push(values[i] as Profile);
+  });
+  profiles.sort((a, b) => a.created - b.created);
+  if (!profiles.length) {
+    const first = firstProfile();
+    profiles.push(first);
+    await storeProfile(first);
+  }
+  if (!profiles.some((p) => p.uid === current)) current = profiles[0].uid;
+}
+
 export async function loadProfiles(): Promise<void> {
   try {
-    const db = await nandIdb();
-    const [keys, values] = await new Promise<[IDBValidKey[], unknown[]]>((resolve, reject) => {
-      const tx = db.transaction(NAND_USERS, 'readonly');
-      const store = tx.objectStore(NAND_USERS);
-      const k = store.getAllKeys();
-      const v = store.getAll();
-      tx.oncomplete = () => resolve([k.result, v.result]);
-      tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-    });
-    profiles = [];
-    keys.forEach((key, i) => {
-      if (key === CURRENT_KEY) current = String(values[i]);
-      else profiles.push(values[i] as Profile);
-    });
-    profiles.sort((a, b) => a.created - b.created);
-    if (!profiles.length) {
-      const first = firstProfile();
-      profiles.push(first);
-      await storeProfile(first);
-    }
-    if (!profiles.some((p) => p.uid === current)) current = profiles[0].uid;
+    await readProfiles();
   } catch (err) {
     log('Profiles: could not be read (' + (err as Error).message + ') - playing as "Player".', 'error');
     profiles = [firstProfile()];
     current = profiles[0].uid;
+  }
+  renderProfiles();
+}
+
+// Picks up what the worker stored for the guest's profile edits.
+export async function reloadProfiles(): Promise<void> {
+  try {
+    await readProfiles();
+  } catch (err) {
+    log('Profiles: the guest\'s edits could not be read (' + (err as Error).message + ')', 'error');
   }
   renderProfiles();
 }
@@ -117,24 +131,9 @@ async function stageIfIdle(): Promise<void> {
   if (!titleBooted()) await stageUsers();
 }
 
-// Stores profile edits made by system software through `acc`.
+// Reloads the profiles if the worker stored edits the guest made through `acc`.
 export async function pullProfileEdits(): Promise<void> {
-  if (!hasSession() || !(await call('users_take_edits'))) return;
-  await storeProfileEdits();
-}
-
-// Store the profiles the guest edited, once told it did.
-export async function storeProfileEdits(): Promise<void> {
-  if (!hasSession()) return;
-  for (const edited of await call('users_read')) {
-    const profile = profiles.find((p) => p.uid === edited.uid);
-    if (!profile) continue;
-    profile.nickname = edited.nickname;
-    profile.editedAt = edited.editedAt;
-    if (edited.picture) profile.picture = edited.picture;
-    await storeProfile(profile);
-  }
-  renderProfiles();
+  if (hasSession() && await call('store_profile_edits')) await reloadProfiles();
 }
 
 // Deletes keys of the form "<save id>@<uid>/<path>".

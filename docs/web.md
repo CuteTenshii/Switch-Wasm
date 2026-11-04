@@ -163,6 +163,7 @@ The page, the worker, and the wasm bindings between them.
 - A title asks which user is playing once at startup, so profile changes apply from the next title. Idle sessions get changes immediately; running titles keep their user.
 - The last profile cannot be deleted (no title starts without a user), nor the one a running title uses (its saves would be orphaned).
 - Profiles are stored in the NAND database next to their saves.
+- Profile edits the guest makes through `acc` are stored by the wasm side (`idb/users.rs`) over the stored profile of the same uid; housekeeping then reports `profilesEdited` and the page reloads its list from IndexedDB.
 
 ## `web/main/log.ts`
 

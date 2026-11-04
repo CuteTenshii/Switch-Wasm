@@ -5,7 +5,7 @@ import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
 import { flushLog } from './log';
-import { switch_flush_storage, switch_present } from '@core/switch_wasm.js';
+import { switch_flush_storage, switch_present, switch_store_profile_edits } from '@core/switch_wasm.js';
 import { core, state } from './wasm';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -131,8 +131,20 @@ export function paint(): number | null {
   return switch_present(state.handle) ? performance.now() - at : null;
 }
 
+// Set once the core's profile edits are in IndexedDB, for the next report.
+let profilesStored = false;
+
+function takeProfilesStored(): boolean {
+  const stored = profilesStored;
+  profilesStored = false;
+  return stored;
+}
+
 function housekeeping(): Housekeeping {
   void switch_flush_storage(state.handle);
+  void switch_store_profile_edits(state.handle).then((edited) => {
+    profilesStored ||= edited;
+  });
   const errors: ErrorDialog[] = [];
   for (let error = CMD.error_dialog(); error; error = CMD.error_dialog()) {
     errors.push(error as ErrorDialog);
@@ -140,7 +152,7 @@ function housekeeping(): Housekeeping {
   return {
     steps: CMD.get_steps() as number,
     ram: CMD.ram() as Housekeeping['ram'],
-    profilesEdited: CMD.users_take_edits() as boolean,
+    profilesEdited: takeProfilesStored(),
     keyboard: CMD.keyboard_request() as Housekeeping['keyboard'],
     errors,
   };

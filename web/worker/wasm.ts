@@ -106,15 +106,10 @@ export interface WasmExports {
     handle: number, uidLo: bigint, uidHi: bigint, namePtr: number, nameLen: number,
     editedAt: bigint, picturePtr: number, pictureLen: number): void;
   switch_users_commit(handle: number, currentLo: bigint, currentHi: bigint): number;
-  switch_take_profile_edits(handle: number): number;
   switch_keyboard_json(handle: number, buf: number, maxlen: number): number;
   switch_error_dialog_json(handle: number, buf: number, maxlen: number): number;
   switch_keyboard_answer(
     handle: number, textPtr: number, textLen: number, submitted: number): number;
-  switch_users_json(handle: number, buf: number, maxlen: number): number;
-  switch_user_picture(
-    handle: number, uidLo: bigint, uidHi: bigint, buf: number, maxlen: number): number;
-  // A save is keyed by its id and its user's uid in two halves.
   switch_save_write_file(
     handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
     pathPtr: number, pathLen: number, dataPtr: number, dataLen: number): number;

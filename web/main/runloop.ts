@@ -17,7 +17,7 @@ import { endLoad } from './loading';
 import { log } from './log';
 import { noteRam } from './memory';
 import { call, explainFailure, onLoopEvents, readLastError } from './rpc';
-import { pullProfileEdits, storeProfileEdits } from './users';
+import { pullProfileEdits, reloadProfiles } from './users';
 import { loaded, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
 
@@ -85,7 +85,7 @@ async function onSlice(report: SliceReport): Promise<void> {
 
 function applyHousekeeping(h: Housekeeping): void {
   showReadouts(h.steps, h.ram);
-  if (h.profilesEdited) void storeProfileEdits();
+  if (h.profilesEdited) void reloadProfiles();
   offerKeyboard(h.keyboard);
   offerErrors(h.errors);
 }

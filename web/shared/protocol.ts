@@ -275,10 +275,8 @@ export interface Commands {
 
   // Install `users` with `current` playing; 0 or `switch_users_commit`'s error code.
   users_set(users: UserRecord[], current: string): number;
-  // Whether the guest edited a profile since the last call.
-  users_take_edits(): boolean;
-  // The users as the session holds them, including guest edits.
-  users_read(): UserRecord[];
+  // Stores any profile edits the guest made; whether there were any.
+  store_profile_edits(): boolean;
 
   // The next error the title asked to show, or null.
   error_dialog(): ErrorDialog | null;
@@ -310,7 +308,7 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug';
 export interface Housekeeping {
   steps: number;
   ram: { guest: number; wasm: number };
-  // Changed since the last report; the page reads the profiles itself.
+  // The guest's profile edits were stored since the last report; the page reloads them.
   profilesEdited: boolean;
   keyboard: KeyboardRequest | null;
   errors: ErrorDialog[];

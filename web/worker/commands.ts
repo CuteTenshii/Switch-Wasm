@@ -2,14 +2,13 @@
 
 import type {
   CommandHandlers, ErrorDialog, GpuReport, JitStats, KeyboardRequest, MemoryReport,
-  UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
 import { serveCores } from './coreworkers';
 import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
-import { switch_clear_screen, switch_flush_storage, switch_restore_storage } from '@core/switch_wasm.js';
+import { switch_clear_screen, switch_flush_storage, switch_restore_storage, switch_store_profile_edits } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
@@ -483,23 +482,8 @@ export const CMD: CommandHandlers = {
     }
     return core.switch_users_commit(state.handle, ...uidHalves(current));
   },
-  users_take_edits() {
-    return state.handle >= 0 && core.switch_take_profile_edits(state.handle) !== 0;
-  },
-  users_read() {
-    if (state.handle < 0) return [];
-    const users = readJson<(Omit<UserRecord, 'picture'> & { pictureLen: number })[]>(
-      8192,
-      (buf, cap) => core.switch_users_json(state.handle, buf, cap),
-      [],
-    );
-    return users.map(({ pictureLen, ...user }) => ({
-      ...user,
-      picture: pictureLen
-        ? withBuffer(pictureLen, (buf) =>
-            fromWasm(buf, core.switch_user_picture(state.handle, ...uidHalves(user.uid), buf, pictureLen)))
-        : null,
-    }));
+  store_profile_edits() {
+    return state.handle < 0 ? Promise.resolve(false) : switch_store_profile_edits(state.handle);
   },
 
   error_dialog() {
