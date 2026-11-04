@@ -52,7 +52,6 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
     log('Load failed: ' + why, 'error');
     return false;
   }
-  log('Loaded ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'info');
   const title = await homebrewTitle(name);
   setRunning(title);
   loadIdentity(title.name, runningIconUrl());
@@ -75,9 +74,6 @@ async function homebrewTitle(filename: string): Promise<RunningTitle> {
     return { name: filename, publisher: '', icon: null, version: '' };
   }
   const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
-  if (info.name) {
-    log('Homebrew: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'info');
-  }
   return {
     name: info.name || filename,
     publisher: info.publisher || '',

@@ -104,7 +104,7 @@ export const CMD: CommandHandlers = {
   load_nro(bytes, sdPath) {
     const result = withBytes(bytes, (ptr, len) => withPath(sdPath ?? '', (pathPtr, pathLen) =>
       Number(core.switch_load_nro(ptr, len, pathPtr, pathLen))));
-    logLoad(`loaded an NRO (${fmtSize(bytes.length)})${sdPath ? ' from ' + sdPath : ''}`, result);
+    if (Number(result) < 0) logLoad(`loaded an NRO (${fmtSize(bytes.length)})${sdPath ? ' from ' + sdPath : ''}`, result);
     return result;
   },
   load_elf(bytes) {

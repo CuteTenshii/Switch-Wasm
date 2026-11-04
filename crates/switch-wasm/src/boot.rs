@@ -43,6 +43,16 @@ pub extern "C" fn switch_load_nro(
         Ok(loaded) => {
             // Cached for display only: homebrew runs in another title's process.
             s.control = switch_core::control::Control::from_nro(data);
+            let what = match &s.control {
+                Some(c) if !c.publisher.is_empty() => format!("{} - {}", c.name, c.publisher),
+                Some(c) if !c.name.is_empty() => c.name.clone(),
+                _ => "an NRO".to_owned(),
+            };
+            s.cpu.log(
+                Level::Info,
+                &format!("Loaded {what}, entry {:#010x}", loaded.entry),
+            );
+            crate::log::collect(&mut s.cpu);
             s.cpu.halted = false;
             s.last_error.clear();
             loaded.entry as i64
@@ -303,6 +313,10 @@ pub extern "C" fn switch_load_elf(ptr: *const u8, len: u32) -> i64 {
         Ok(elf) => {
             s.cpu.set_pc(elf.entry as u32);
             boot_entry_regs(&mut s.cpu, 0);
+            s.cpu.log(
+                Level::Info,
+                &format!("Loaded an ELF, entry {:#010x}", elf.entry),
+            );
             crate::log::collect(&mut s.cpu);
             s.cpu.halted = false;
             s.last_error.clear();
