@@ -11,7 +11,7 @@ const consoleEl = $('console');
 const autoscrollCb = $<HTMLInputElement>('autoscroll-cb');
 const levelSelect = $<HTMLSelectElement>('log-level');
 
-const LEVELS: LogLevel[] = ['error', 'warn', 'info', 'log', 'debug'];
+const LEVELS: LogLevel[] = ['error', 'warn', 'info', 'log', 'debug', 'trace'];
 const LEVEL_KEY = 'switch-wasm-log-level';
 
 function storedLevel(): LogLevel {

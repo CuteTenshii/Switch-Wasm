@@ -292,7 +292,7 @@ export interface CallRequest {
 }
 
 // A log line's severity; the console shows those at or above its chosen level.
-export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug';
+export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug' | 'trace';
 
 // What the worker gathers every few slices, so the page polls for nothing.
 export interface Housekeeping {

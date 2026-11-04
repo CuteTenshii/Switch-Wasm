@@ -268,12 +268,13 @@
     <div class="panel-bar">
       <label class="check"><input type="checkbox" id="autoscroll-cb" checked><span>Autoscroll</span></label>
       <select id="log-level" class="select" aria-label="Log level"
-        title="The least severe messages the console shows. Debug also records every diagnostic channel, which slows the emulator down.">
+        title="The least severe messages the console shows. Trace also records every diagnostic channel (each syscall, IPC request and GPU method), which slows the emulator down.">
         <option value="error">Errors</option>
         <option value="warn">Warnings</option>
         <option value="info">Info</option>
         <option value="log" selected>Log</option>
         <option value="debug">Debug</option>
+        <option value="trace">Trace</option>
       </select>
       <span class="spacer"></span>
       <button id="btn-save-console" class="btn small ghost" title="Save the whole log as a file - including the lines the view has scrolled past">Save</button>

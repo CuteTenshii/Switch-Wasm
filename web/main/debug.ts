@@ -47,7 +47,7 @@ export function traceEnabled(): boolean {
 traceCb.addEventListener('change', () => {
   void call('set_trace', traceCb.checked ? 1 : 0);
   setNote('trace-badge', traceCb.checked ? 'on' : 'off', traceCb.checked);
-  if (traceCb.checked) log('Tracing enabled - run slices are capped for readability. The trace shows at the Debug log level.');
+  if (traceCb.checked) log('Tracing enabled - run slices are capped for readability. The trace shows at the Trace log level.');
 });
 
 const jitCb = $<HTMLInputElement>('jit-cb');

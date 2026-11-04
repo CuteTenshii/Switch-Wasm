@@ -31,8 +31,8 @@ if (ios) {
   for (const input of document.querySelectorAll('input[type=file][accept^="."]')) input.removeAttribute('accept');
 }
 
-// Diagnostic channels record only at debug log level.
-onLogLevel((level) => void call('set_trace_channels', level === 'debug'));
+// Diagnostic channels record only at trace log level.
+onLogLevel((level) => void call('set_trace_channels', level === 'trace'));
 
 // The loading screen is up from first paint (see index.html); this names each step.
 async function init(): Promise<void> {
@@ -49,7 +49,7 @@ async function init(): Promise<void> {
       call('restore_storage'),
       loadProfiles().then(stageUsers),
       offerPreviousLog(),
-      call('set_trace_channels', logLevel() === 'debug'),
+      call('set_trace_channels', logLevel() === 'trace'),
       hasKeys() ? stageKeys() : undefined,
     ]);
     updateKeysState();

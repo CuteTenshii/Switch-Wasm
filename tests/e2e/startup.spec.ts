@@ -78,7 +78,7 @@ test('the guest crash screen exposes recovery paths', async ({ page }) => {
   await page.evaluate(() => document.getElementById('btn-clear-console')!.click());
 });
 
-test('trace channels record and show only at the debug level', async ({ page }) => {
+test('trace channels record and show only at the trace level', async ({ page }) => {
   await openPage(page);
   // svc #0x29 (GetInfo), then svc #0: the host's halt trap.
   const program = aarch64Elf([0xd4000521, 0xd4000001]);
@@ -89,8 +89,11 @@ test('trace channels record and show only at the debug level', async ({ page }) 
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await page.locator('#btn-panel').click();
   await page.locator('#log-level').selectOption('debug');
+  await bootElf(page, program);
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await expect(svcLine).toHaveCount(0);
 
+  await page.locator('#log-level').selectOption('trace');
   await bootElf(page, program);
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
   await expect(svcLine).toHaveCount(1);
