@@ -332,6 +332,21 @@ pub(in crate::cpu) enum Op {
         rn: u8,
         sz: u8,
     },
+    /// `LDXP`/`LDAXP`: two words, or with `wide` two doublewords.
+    LoadExclusivePair {
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        wide: bool,
+    },
+    /// `STXP`/`STLXP`; `rs` takes the status.
+    StoreExclusivePair {
+        rs: u8,
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        wide: bool,
+    },
     /// `LDAR`/`STLR`: the access at `rn`, fenced against the other cores.
     Ordered {
         rt: u8,

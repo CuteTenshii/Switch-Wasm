@@ -165,10 +165,13 @@ fn main() {
                         .expect("the window is mapped");
                     seed(&mut cpu, set, nzcv);
                     for i in 0..32 {
-                        cpu.set_vreg(i, vreg_seed(i, set == SPECIALS_SET));
+                        cpu.set_vreg(i, vreg_seed(i, seed_kind(set)));
                     }
 
                     cpu.set_fpsr(0);
+                    // Every rounding mode, which only FRINTX and FRINTI read.
+                    let fpcr = ((set % 4) as u32) << 22;
+                    cpu.set_fpcr(fpcr);
                     cpu.set_thread_pointers(TPIDR_SEED, TPIDR_RW_SEED);
                     cpu.cycles = CLOCK_SEEDS[set % CLOCK_SEEDS.len()];
                     // The fuel is zero, so the origin is the clock itself.
@@ -248,23 +251,27 @@ fn main() {
                     }
                     manifest.push_str(" !");
                     manifest.push_str(&memory_delta(&cpu, &start));
-                    manifest.push_str(&emit::vreg_delta(&cpu, |i| {
-                        vreg_seed(i, set == SPECIALS_SET)
-                    }));
-                    if set == SPECIALS_SET {
-                        manifest.push_str(" specials");
+                    manifest.push_str(&emit::vreg_delta(&cpu, |i| vreg_seed(i, seed_kind(set))));
+                    if let Some(kind) = seed_kind(set) {
+                        let _ = write!(manifest, " {kind}");
                     }
-                    let _ = write!(manifest, " fpsr:0:{:x} clock:{origin:x}", cpu.fpsr());
+                    let _ = write!(
+                        manifest,
+                        " fpsr:0:{:x} fpcr:{fpcr:x} clock:{origin:x}",
+                        cpu.fpsr()
+                    );
                     let monitor_after = cpu.exclusive_state();
                     let _ = write!(
                         manifest,
-                        " excl:{:x}:{}:{:x}:{:x}:{}:{:x}",
+                        " excl:{:x}:{}:{:x}:{:x}:{:x}:{}:{:x}:{:x}",
                         monitor_before.0,
                         u8::from(monitor_before.1),
-                        monitor_before.2,
+                        monitor_before.2[0],
+                        monitor_before.2[1],
                         monitor_after.0,
                         u8::from(monitor_after.1),
-                        monitor_after.2,
+                        monitor_after.2[0],
+                        monitor_after.2[1],
                     );
                     manifest.push('\n');
                     cases += 1;
@@ -312,13 +319,38 @@ fn main() {
     println!("now run: node tools/emit_difftest.mjs {out_dir}");
 }
 
-/// [`emit::vreg_seed`], or IEEE special values for the specials set.
-fn vreg_seed(i: u8, specials: bool) -> u128 {
-    if specials {
-        special_floats(i)
-    } else {
-        emit::vreg_seed(i)
+/// What the vector registers hold for a seed set besides noise: `specials` or `doubles`.
+fn seed_kind(set: usize) -> Option<&'static str> {
+    match set {
+        SPECIALS_SET => Some("specials"),
+        DOUBLES_SET => Some("doubles"),
+        _ => None,
     }
+}
+
+/// [`emit::vreg_seed`], IEEE special values for the specials set, or ordinary doubles for the
+/// doubles set.
+fn vreg_seed(i: u8, kind: Option<&str>) -> u128 {
+    match kind {
+        Some("specials") => special_floats(i),
+        Some("doubles") => {
+            u128::from(mixed_double(2 * u64::from(i) + 1)) << 64
+                | u128::from(mixed_double(2 * u64::from(i)))
+        }
+        _ => emit::vreg_seed(i),
+    }
+}
+
+/// A double with few significant bits and a small exponent, so that sums and products of
+/// several of them land on exact ties and near-cancellations where noise never would.
+fn mixed_double(n: u64) -> u64 {
+    let mut h = (n + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h = (h ^ (h >> 29)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 32;
+    let bits = 1 + (h >> 1) % 53;
+    let significand = ((h >> 8) & ((1 << bits) - 1)) | (1 << (bits - 1));
+    let scale = f64::from_bits((1023 - 60 + (h >> 40) % 121) << 52);
+    (significand as f64 * scale).to_bits() | (h & 1) << 63
 }
 
 /// Signed zeros, infinities, denormals and unit values: as doubles in the even registers, as
@@ -444,6 +476,17 @@ fn memory_delta(cpu: &Cpu, baseline: &[u8]) -> String {
 }
 
 /// The encodings the emitter can write, grouped by [`form`].
+/// The bucket an encoding belongs to. The disassembler names no Advanced SIMD form; those are
+/// keyed by encoding.
+fn bucket_key(insn: u32) -> String {
+    let text = disassemble(insn);
+    if text.starts_with(".word") {
+        format!(".word {:08x}", insn & !(0x1F | 0x1F << 5 | 0x1F << 16))
+    } else {
+        form(&text)
+    }
+}
+
 fn survey() -> BTreeMap<String, Vec<u32>> {
     let mut rng = 0x243F_6A88_85A3_08D3u64;
     let mut buckets: BTreeMap<String, Vec<u32>> = BTreeMap::new();
@@ -453,14 +496,7 @@ fn survey() -> BTreeMap<String, Vec<u32>> {
             if !emits(insn) {
                 continue;
             }
-            // The disassembler names no Advanced SIMD form; key those by encoding.
-            let text = disassemble(insn);
-            let key = if text.starts_with(".word") {
-                format!(".word {:08x}", insn & !(0x1F | 0x1F << 5 | 0x1F << 16))
-            } else {
-                form(&text)
-            };
-            let slot = buckets.entry(key).or_default();
+            let slot = buckets.entry(bucket_key(insn)).or_default();
             if slot.len() < PER_FORM {
                 slot.push(insn);
             }
@@ -482,6 +518,23 @@ fn survey() -> BTreeMap<String, Vec<u32>> {
             }
         }
     }
+    // Nor do they land on the scalar FRINTs, whose opcode and fixed bits are 11 matching bits.
+    for ftype in 0..2u32 {
+        for opcode in [8, 9, 10, 11, 12, 14, 15u32] {
+            for pick in 0..PER_FORM as u32 {
+                let insn = 0x1E20_4000 | ftype << 22 | opcode << 15 | (pick * 5 % 32) << 5 | pick;
+                if !emits(insn) {
+                    continue;
+                }
+                let slot = buckets
+                    .entry(format!("frint ftype {ftype} opcode {opcode}"))
+                    .or_default();
+                if slot.len() < PER_FORM {
+                    slot.push(insn);
+                }
+            }
+        }
+    }
     buckets
 }
 
@@ -491,25 +544,44 @@ const SEEDS: usize = 12;
 /// The set whose vector registers hold zeros, infinities and NaNs instead of noise.
 const SPECIALS_SET: usize = SEEDS - 1;
 
+/// The set whose vector registers hold ordinary doubles.
+const DOUBLES_SET: usize = SEEDS - 2;
+
 /// Arm the monitor for an exclusive load or store at the address its base register holds:
 /// not at all, with what memory holds, or with something else, by seed set.
 fn arm_monitor(cpu: &mut Cpu, insn: u32, set: usize) {
-    let exclusive = matches!((insn >> 21) & 0x1FF, 0b001000000 | 0b001000010);
+    let group = (insn >> 21) & 0x1FF;
+    let exclusive = matches!(group, 0b001000000..=0b001000011);
+    let pair = group & 1 == 1;
     let rn = ((insn >> 5) & 0x1F) as usize;
     if !exclusive || rn == 31 || set.is_multiple_of(3) {
-        cpu.set_exclusive(false, 0, 0);
+        cpu.set_exclusive(false, 0, [0, 0]);
         return;
     }
     let addr = cpu.reg_slots()[rn] as u32;
-    let held = match (insn >> 30) & 0b11 {
-        0 => cpu.mem.read_u8(addr).map(u64::from),
-        1 => cpu.mem.read_u16(addr).map(u64::from),
-        2 => cpu.mem.read_u32(addr).map(u64::from),
-        _ => cpu.mem.read_u64(addr),
+    let size = (insn >> 30) & 0b11;
+    let held = match (pair, size) {
+        (_, 0) => cpu.mem.read_u8(addr).map(|v| [u64::from(v), 0]),
+        (_, 1) => cpu.mem.read_u16(addr).map(|v| [u64::from(v), 0]),
+        (false, 2) => cpu.mem.read_u32(addr).map(|v| [u64::from(v), 0]),
+        (false, _) => cpu.mem.read_u64(addr).map(|v| [v, 0]),
+        (true, 2) => cpu.mem.read_u64(addr).map(|v| [v, 0]),
+        (true, _) => cpu
+            .mem
+            .read_u64(addr)
+            .and_then(|lo| Ok([lo, cpu.mem.read_u64(addr.wrapping_add(8))?])),
     };
     match held {
-        Ok(value) => cpu.set_exclusive(true, addr, if set % 3 == 1 { value } else { value ^ 1 }),
-        Err(_) => cpu.set_exclusive(false, 0, 0),
+        // A mismatch in either doubleword must fail the store.
+        Ok([lo, hi]) => {
+            let value = match set % 3 {
+                1 => [lo, hi],
+                _ if set.is_multiple_of(2) && pair && size == 3 => [lo, hi ^ 1],
+                _ => [lo ^ 1, hi],
+            };
+            cpu.set_exclusive(true, addr, value);
+        }
+        Err(_) => cpu.set_exclusive(false, 0, [0, 0]),
     }
 }
 

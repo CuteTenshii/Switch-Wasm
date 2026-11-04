@@ -627,6 +627,55 @@ impl Cpu {
         Ok(())
     }
 
+    /// `LDXP`/`LDAXP`: both halves loaded and the monitor armed over them. The word form
+    /// zero-extends each half and keeps the pair as one doubleword.
+    pub(super) fn load_exclusive_pair(
+        &mut self,
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        wide: bool,
+    ) -> Result<()> {
+        let addr = self.reg_at(rn) as u32;
+        let (v0, v1) = if wide {
+            (
+                self.mem.read_u64(addr)?,
+                self.mem.read_u64(addr.wrapping_add(8))?,
+            )
+        } else {
+            (
+                u64::from(self.mem.read_u32(addr)?),
+                u64::from(self.mem.read_u32(addr.wrapping_add(4))?),
+            )
+        };
+        self.exclusive
+            .arm(addr, if wide { [v0, v1] } else { [v0 | (v1 << 32), 0] });
+        self.set_reg_at(rt, v0);
+        self.set_reg_at(rt2, v1);
+        Ok(())
+    }
+
+    /// `STXP`/`STLXP`: stores both halves only against this thread's monitor at the same
+    /// address; otherwise stores nothing and writes 1 to `rs`.
+    pub(super) fn store_exclusive_pair(
+        &mut self,
+        rs: u8,
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        wide: bool,
+    ) -> Result<()> {
+        let addr = self.reg_at(rn) as u32;
+        let (v0, v1) = (self.reg_at(rt), self.reg_at(rt2));
+        let stored = if wide {
+            self.store_exclusive_at(addr, 16, [v0, v1])?
+        } else {
+            self.store_exclusive_at(addr, 8, [(v0 & 0xFFFF_FFFF) | (v1 << 32), 0])?
+        };
+        self.set_reg_at(rs, u64::from(!stored));
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn try_load_store(&mut self, insn: u32, _next_pc: &mut u32) -> Result<bool> {
         let grp_excl = (insn >> 21) & 0x1FF;
@@ -649,39 +698,19 @@ impl Cpu {
                 0b001000010 => {
                     self.load_exclusive(Self::zr_write_slot(rt), Self::x_slot(rn), sz as u8)?
                 }
-                0b001000001 => {
-                    // STXP: `sz` 10 is two words, 11 two doublewords.
-                    let (v0, v1) = (self.read_zr(rt), self.read_zr(rt2));
-                    let stored = if sz == 0b10 {
-                        let both = (v0 & 0xFFFF_FFFF) | (v1 << 32);
-                        self.store_exclusive_at(base as u32, 8, [both, 0])?
-                    } else {
-                        self.store_exclusive_at(base as u32, 16, [v0, v1])?
-                    };
-                    self.write_zr(((insn >> 16) & 0x1F) as u8, u64::from(!stored));
-                }
-                0b001000011 => {
-                    // LDXP: the 32-bit form zero-extends each half.
-                    let (v0, v1) = if sz == 0b10 {
-                        (
-                            u64::from(self.mem.read_u32(base as u32)?),
-                            u64::from(self.mem.read_u32(base.wrapping_add(4) as u32)?),
-                        )
-                    } else {
-                        (
-                            self.mem.read_u64(base as u32)?,
-                            self.mem.read_u64(base.wrapping_add(8) as u32)?,
-                        )
-                    };
-                    let value = if sz == 0b10 {
-                        [v0 | (v1 << 32), 0]
-                    } else {
-                        [v0, v1]
-                    };
-                    self.exclusive.arm(base as u32, value);
-                    self.write_zr(rt, v0);
-                    self.write_zr(rt2, v1);
-                }
+                0b001000001 => self.store_exclusive_pair(
+                    Self::zr_write_slot(((insn >> 16) & 0x1F) as u8),
+                    rt,
+                    rt2,
+                    Self::x_slot(rn),
+                    sz == 0b11,
+                )?,
+                0b001000011 => self.load_exclusive_pair(
+                    Self::zr_write_slot(rt),
+                    Self::zr_write_slot(rt2),
+                    Self::x_slot(rn),
+                    sz == 0b11,
+                )?,
                 0b001000100 => {
                     // STLR: store-release
                     fence(SeqCst);

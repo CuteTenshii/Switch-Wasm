@@ -772,7 +772,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         };
     }
 
-    // Exclusive and acquire/release; the pairs stay with the interpreter.
+    // Exclusive and acquire/release.
     let grp_excl = (insn >> 21) & 0x1FF;
     let sz = ((insn >> 30) & 0b11) as u8;
     let rn = sp_form(insn >> 5);
@@ -798,6 +798,25 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
                 rt: rt_slot(insn, acc),
                 rn,
                 acc,
+            };
+        }
+        0b001000001 | 0b001000011 if sz >= 0b10 => {
+            let rt2 = ((insn >> 10) & 0x1F) as u8;
+            return if grp_excl == 0b001000001 {
+                Op::StoreExclusivePair {
+                    rs: zr_write(insn >> 16),
+                    rt: (insn & 0x1F) as u8,
+                    rt2,
+                    rn,
+                    wide: sz == 0b11,
+                }
+            } else {
+                Op::LoadExclusivePair {
+                    rt: zr_write(insn),
+                    rt2: zr_write(insn >> 10),
+                    rn,
+                    wide: sz == 0b11,
+                }
             };
         }
         0b001000001 | 0b001000011 => return Op::Interpret { insn },

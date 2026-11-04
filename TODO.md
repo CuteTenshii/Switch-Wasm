@@ -13,10 +13,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - Stretch audio when emulation runs below full speed, so it plays slowed down rather than in bursts with gaps.
 - Motion controls from real controllers. The Gamepad API exposes no gyro or accelerometer and Web Bluetooth cannot reach classic HID, so read Joy-Con, DualShock 4 and DualSense reports through WebHID (Chromium desktop only, permission from a user gesture, main thread only) and forward the samples to the worker into the six-axis shared memory states. A Joy-Con needs subcommand `0x40` (enable IMU) and `0x03` with `0x30` (full reports, 3 samples per ~15 ms report); its calibration at SPI `0x6020` (factory) and `0x8026` (user), read with subcommand `0x10`, is what `hid:server` 87 (LoadSixAxisSensorCalibrationParameter, zeros today) should return.
 
-## Performance
-
-- Blocks with an instruction the emitter lacks stay in the op walk and break their region. `LDXP`/`STXP` are interpreted (Asphalt 9 runs them); the 64-bit pair store compares 16 bytes, which wasm has no atomic for. Double-precision FMADD and FRINTA/FRINTX/FRINTI are interpreted too.
-
 ## Mobile
 
 - Performance on phones and tablets.
@@ -31,6 +27,5 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
 - Just Dance 2019 stops presenting on "Hold on... and warm up..." after one to two minutes and stays there (0 fps, over 100B instructions). The main thread only sleeps and polls, while two priority-29 threads run flat out on the other cores (a float-to-16-bit conversion loop, and `nn::hid::VibrationMixer`). Whether it waits on something the emulator never delivers is not known.
-- `emit_selftest` has 48 cases of three programs differing from the interpreter, on the sign of a zero or NaN in `FMAXNM` and `FNMUL`.
 - Compute dispatches, and copy-engine transfers that are not one plain run or that overlap a held surface, still send every held surface back; a per-surface flush would keep the rest on the device.
 - Minecraft frame 20 is clean on the WebGPU device but the software rasterizer differs from it, mostly in the right half.

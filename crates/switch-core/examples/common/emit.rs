@@ -14,11 +14,15 @@ pub const WATCH_LO_AT: u32 = 0x1010;
 pub const WATCH_HI_AT: u32 = 0x1014;
 /// Where the pointer to the watched-page bitmap is.
 pub const WATCHED_AT: u32 = 0x1020;
+/// The byte that serialises 16-byte exclusive stores, zero while free.
+pub const PAIR_LOCK_AT: u32 = 0x1080;
 /// Guest `pc`, written by a taken branch.
 pub const PC_AT: u32 = 0x1024;
 /// Fuel, read only by branches between blocks, which a single block never takes.
 pub const FUEL_AT: u32 = 0x1028;
 pub const FPSR_AT: u32 = 0x102C;
+/// FPCR, whose rounding mode FRINTX and FRINTI read.
+pub const FPCR_AT: u32 = 0x1084;
 /// A zero word: the `Memory` address, so the offsets above are absolute.
 pub const MEMORY_AT: u32 = 0x1030;
 /// The exclusive monitor: address, armed flag, then two doublewords.
@@ -42,6 +46,7 @@ pub const LAYOUT: Layout = Layout {
     regs: REGS_AT,
     nzcv: NZCV_AT,
     fpsr: FPSR_AT,
+    fpcr: FPCR_AT,
     memory: MEMORY_AT,
     pages: PAGES_AT,
     read_watch_lo: READ_WATCH_LO_AT,
@@ -49,6 +54,7 @@ pub const LAYOUT: Layout = Layout {
     watch_lo: WATCH_LO_AT,
     watch_hi: WATCH_HI_AT,
     watched: WATCHED_AT,
+    pair_lock: PAIR_LOCK_AT,
     pc: PC_AT,
     fuel: FUEL_AT,
     vregs: VREGS_AT,
@@ -85,6 +91,7 @@ pub fn header() -> String {
         "regs_at {REGS_AT}\n\
          nzcv_at {NZCV_AT}\n\
          fpsr_at {FPSR_AT}\n\
+         fpcr_at {FPCR_AT}\n\
          read_watch_lo_at {READ_WATCH_LO_AT}\n\
          read_watch_hi_at {READ_WATCH_HI_AT}\n\
          watch_lo_at {WATCH_LO_AT}\n\

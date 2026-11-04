@@ -71,6 +71,7 @@ pub(crate) struct Offsets {
     pub(crate) watch_lo: u32,
     pub(crate) watch_hi: u32,
     pub(crate) watched: u32,
+    pub(crate) pair_lock: u32,
 }
 
 impl Offsets {
@@ -81,6 +82,7 @@ impl Offsets {
         watch_lo: Self::meta(std::mem::offset_of!(Meta, watch.0)),
         watch_hi: Self::meta(std::mem::offset_of!(Meta, watch.1)),
         watched: std::mem::offset_of!(Memory, watched_pages) as u32,
+        pair_lock: std::mem::offset_of!(Memory, pair_lock) as u32,
     };
 
     /// A [`Meta`] field's offset; `UnsafeCell` is transparent.
@@ -186,6 +188,8 @@ pub struct Memory {
     /// A second independent channel: bytes a host operation wrote (depth clears).
     fill_watch: AtomicPtr<WatchWords>,
     fill_written: AtomicBool,
+    /// Held while a 16-byte exclusive store compares and writes; emitted code takes it too.
+    pair_lock: AtomicBool,
 }
 
 // SAFETY: pages are reached through their cells and races between guest
@@ -391,6 +395,7 @@ impl Memory {
             copy_written: AtomicBool::new(false),
             fill_watch: AtomicPtr::new(std::ptr::null_mut()),
             fill_written: AtomicBool::new(false),
+            pair_lock: AtomicBool::new(false),
         }
     }
 
@@ -1111,8 +1116,8 @@ impl Memory {
     /// [`Memory::compare_exchange`] for a 16-byte pair, which wasm has no atomic
     /// for: serialised against other pairs, not against plain stores.
     pub fn compare_exchange_pair(&self, addr: u32, old: [u64; 2], new: [u64; 2]) -> Result<bool> {
-        static PAIRS: AtomicBool = AtomicBool::new(false);
-        while PAIRS
+        while self
+            .pair_lock
             .compare_exchange_weak(false, true, SeqCst, Relaxed)
             .is_err()
         {
@@ -1127,7 +1132,7 @@ impl Memory {
             self.write_u64(second, new[1])?;
             Ok(true)
         })();
-        PAIRS.store(false, SeqCst);
+        self.pair_lock.store(false, SeqCst);
         swapped
     }
 

@@ -72,6 +72,7 @@ const SCRATCH: Layout = Layout {
     regs: 0,
     nzcv: 0,
     fpsr: 0,
+    fpcr: 0,
     pc: 0,
     fuel: 0,
     memory: 0,
@@ -81,6 +82,7 @@ const SCRATCH: Layout = Layout {
     watch_lo: 0,
     watch_hi: 0,
     watched: 0,
+    pair_lock: 0,
     vregs: 0,
     exclusive: 0,
     tpidr: 0,
@@ -100,6 +102,8 @@ pub struct Layout {
     pub nzcv: u32,
     /// FPSR, whose cumulative exception bits some conversions and divides set.
     pub fpsr: u32,
+    /// FPCR, whose rounding mode FRINTX and FRINTI follow.
+    pub fpcr: u32,
     /// The guest program counter, written only by a taken branch leaving the region.
     pub pc: u32,
     /// Instructions blocks left through a branch may still retire, as an `i32`;
@@ -121,6 +125,8 @@ pub struct Layout {
     /// Where the pointer to the cached-pages bitmap is kept; null until
     /// something watches a page. Write-protected pages are set in it too.
     pub watched: u32,
+    /// Where the byte that serialises 16-byte exclusive stores is kept.
+    pub pair_lock: u32,
     /// The exclusive monitor, `Monitor`'s `addr`, `armed` and `value` at fixed offsets from here.
     pub exclusive: u32,
     /// `TPIDRRO_EL0` and `TPIDR_EL0`, the thread's TLS base and its software register.
@@ -142,6 +148,7 @@ impl Layout {
             regs: std::mem::offset_of!(Cpu, regs) as u32,
             nzcv: std::mem::offset_of!(Cpu, nzcv) as u32,
             fpsr: std::mem::offset_of!(Cpu, fpsr) as u32,
+            fpcr: std::mem::offset_of!(Cpu, fpcr) as u32,
             pc: std::mem::offset_of!(Cpu, pc) as u32,
             fuel: (std::mem::offset_of!(Cpu, jit)
                 + std::mem::offset_of!(Jit, chain)
@@ -154,6 +161,7 @@ impl Layout {
             watch_lo: m.watch_lo,
             watch_hi: m.watch_hi,
             watched: m.watched,
+            pair_lock: m.pair_lock,
             exclusive: std::mem::offset_of!(Cpu, exclusive) as u32,
             tpidr: std::mem::offset_of!(Cpu, tpidr) as u32,
             tpidr_rw: std::mem::offset_of!(Cpu, tpidr_rw) as u32,
@@ -1458,19 +1466,7 @@ impl Emitter<'_> {
             _ => self.f.i64_load(UNALIGNED, 0),
         }
         self.f.local_set(L_T);
-        let at = self.layout.exclusive;
-        self.f.local_get(STATE);
-        self.f.local_get(L_ADDR);
-        self.f.i32_store(ALIGN_4, at + MONITOR_ADDR);
-        self.f.local_get(STATE);
-        self.f.i32_const(1);
-        self.f.i32_store(ALIGN_4, at + MONITOR_ARMED);
-        self.f.local_get(STATE);
-        self.f.local_get(L_T);
-        self.f.i64_store(ALIGN_8, at + MONITOR_VALUE);
-        self.f.local_get(STATE);
-        self.f.i64_const(0);
-        self.f.i64_store(ALIGN_8, at + MONITOR_VALUE + 8);
+        self.arm_monitor(None);
         self.f.local_get(L_T);
         self.store_reg(rt);
     }
@@ -1488,20 +1484,8 @@ impl Emitter<'_> {
             self.deopt_if(retired);
         }
         let at = self.layout.exclusive;
-        // Armed at this address; either way the monitor is spent.
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, at + MONITOR_ARMED);
-        self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, at + MONITOR_ADDR);
-        self.f.local_get(L_ADDR);
-        self.f.i32_eq();
-        self.f.i32_and();
-        self.f.local_set(L_C);
-        self.f.local_get(STATE);
-        self.f.i32_const(0);
-        self.f.i32_store(ALIGN_4, at + MONITOR_ARMED);
-        self.f.i64_const(1);
-        self.f.local_set(L_R);
+        self.monitor_held();
+        self.spend_monitor();
         self.f.local_get(L_C);
         self.f.if_void();
         let wide = sz == 3;
@@ -1527,6 +1511,178 @@ impl Emitter<'_> {
         }
         self.f.i64_extend_i32_u();
         self.f.local_set(L_R);
+        self.f.end();
+        self.f.local_get(L_R);
+        self.store_reg(rs);
+    }
+
+    /// Arm the monitor at `L_ADDR` with `L_T` and `value1`, an `i64` local or zero.
+    fn arm_monitor(&mut self, value1: Option<u32>) {
+        let at = self.layout.exclusive;
+        self.f.local_get(STATE);
+        self.f.local_get(L_ADDR);
+        self.f.i32_store(ALIGN_4, at + MONITOR_ADDR);
+        self.f.local_get(STATE);
+        self.f.i32_const(1);
+        self.f.i32_store(ALIGN_4, at + MONITOR_ARMED);
+        self.f.local_get(STATE);
+        self.f.local_get(L_T);
+        self.f.i64_store(ALIGN_8, at + MONITOR_VALUE);
+        self.f.local_get(STATE);
+        match value1 {
+            Some(local) => self.f.local_get(local),
+            None => self.f.i64_const(0),
+        }
+        self.f.i64_store(ALIGN_8, at + MONITOR_VALUE + 8);
+    }
+
+    /// `LDXP`/`LDAXP`: the pair loaded, then the monitor armed over both halves. The word
+    /// form keeps its pair as the one doubleword it was read as.
+    fn load_exclusive_pair(&mut self, rt: u8, rt2: u8, rn: u8, wide: bool, retired: usize) {
+        self.address(rn, 0, Wb::None);
+        self.page_for_read(if wide { 16 } else { 8 }, retired);
+        self.in_page();
+        self.f.i64_load(UNALIGNED, 0);
+        self.f.local_set(L_T);
+        if wide {
+            self.in_page();
+            self.f.i64_load(UNALIGNED, 8);
+            self.f.local_set(L_S);
+        }
+        self.arm_monitor(wide.then_some(L_S));
+        self.f.local_get(L_T);
+        if !wide {
+            self.mask_to(false);
+        }
+        self.store_reg(rt);
+        if wide {
+            self.f.local_get(L_S);
+        } else {
+            self.f.local_get(L_T);
+            self.f.i64_const(32);
+            self.f.i64_shr_u();
+        }
+        self.store_reg(rt2);
+    }
+
+    /// Whether the monitor is armed at `L_ADDR`, in `L_C`.
+    fn monitor_held(&mut self) {
+        let at = self.layout.exclusive;
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, at + MONITOR_ARMED);
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, at + MONITOR_ADDR);
+        self.f.local_get(L_ADDR);
+        self.f.i32_eq();
+        self.f.i32_and();
+        self.f.local_set(L_C);
+    }
+
+    /// Disarm the monitor, whether or not the store happens, and start `L_R` at 1, the
+    /// status of a store that did not.
+    fn spend_monitor(&mut self) {
+        self.f.local_get(STATE);
+        self.f.i32_const(0);
+        self.f
+            .i32_store(ALIGN_4, self.layout.exclusive + MONITOR_ARMED);
+        self.f.i64_const(1);
+        self.f.local_set(L_R);
+    }
+
+    /// Push the address of the byte [`crate::mem::Memory::compare_exchange_pair`] serialises on.
+    fn pair_lock(&mut self) {
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, self.layout.memory);
+        self.f.i32_const(self.layout.pair_lock as i32);
+        self.f.i32_add();
+    }
+
+    /// `STXP`/`STLXP`, as `STXR` is. The word form swaps its doubleword with one `cmpxchg`
+    /// (a misaligned address is the interpreter's). Wasm has no 16-byte atomic, so the
+    /// doubleword form compares and writes under the lock the interpreter's pair store takes.
+    fn store_exclusive_pair(
+        &mut self,
+        rs: u8,
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        wide: bool,
+        retired: usize,
+    ) {
+        self.address(rn, 0, Wb::None);
+        self.page_for_write(if wide { 16 } else { 8 }, retired);
+        if !wide {
+            self.f.local_get(L_ADDR);
+            self.f.i32_const(7);
+            self.f.i32_and();
+            self.deopt_if(retired);
+        }
+        self.monitor_held();
+        if wide && self.watches {
+            // The interpreter's pair store reads both halves, which a read watchpoint reports.
+            self.f.local_get(L_C);
+            self.covers(16, self.layout.read_watch_lo, self.layout.read_watch_hi);
+            self.f.i32_and();
+            self.deopt_if(retired);
+        }
+        self.spend_monitor();
+        self.f.local_get(L_C);
+        self.f.if_void();
+        let at = self.layout.exclusive;
+        if wide {
+            let done = self.f.block_void();
+            let again = self.f.loop_void();
+            self.pair_lock();
+            self.f.i32_const(0);
+            self.f.i32_const(1);
+            self.f.atomic_cmpxchg(0);
+            self.f.i32_eqz();
+            self.f.if_void();
+            self.f.br(done);
+            self.f.end();
+            self.f.br(again);
+            self.f.end();
+            self.f.end();
+            for half in [0, 8] {
+                self.in_page();
+                self.f.i64_load(UNALIGNED, half);
+                self.f.local_get(STATE);
+                self.f.i64_load(ALIGN_8, at + MONITOR_VALUE + half);
+                self.f.i64_eq();
+            }
+            self.f.i32_and();
+            self.f.if_void();
+            for (half, slot) in [(0, rt), (8, rt2)] {
+                self.in_page();
+                self.read_reg_raw(slot);
+                self.f.i64_store(UNALIGNED, half);
+            }
+            self.f.i64_const(0);
+            self.f.local_set(L_R);
+            self.f.end();
+            self.pair_lock();
+            self.f.i32_const(1);
+            self.f.i32_const(0);
+            self.f.atomic_cmpxchg(0);
+            self.f.drop_value();
+        } else {
+            self.f.local_get(STATE);
+            self.f.i64_load(ALIGN_8, at + MONITOR_VALUE);
+            self.f.local_set(L_T);
+            self.in_page();
+            self.f.local_get(L_T);
+            self.read_reg_raw(rt);
+            self.mask_to(false);
+            self.read_reg_raw(rt2);
+            self.f.i64_const(32);
+            self.f.i64_shl();
+            self.f.i64_or();
+            self.f.atomic_cmpxchg(3);
+            self.f.local_get(L_T);
+            self.f.i64_ne();
+            self.f.i64_extend_i32_u();
+            self.f.local_set(L_R);
+        }
         self.f.end();
         self.f.local_get(L_R);
         self.store_reg(rs);
@@ -2201,6 +2357,20 @@ impl Emitter<'_> {
                 self.store_exclusive(rs, rt, rn, sz, retired);
                 true
             }
+            Op::LoadExclusivePair { rt, rt2, rn, wide } => {
+                self.load_exclusive_pair(rt, rt2, rn, wide, retired);
+                true
+            }
+            Op::StoreExclusivePair {
+                rs,
+                rt,
+                rt2,
+                rn,
+                wide,
+            } => {
+                self.store_exclusive_pair(rs, rt, rt2, rn, wide, retired);
+                true
+            }
 
             Op::Load64 { rt, rn, wb, offset } => {
                 self.address(rn, offset, wb);
@@ -2309,7 +2479,7 @@ impl Emitter<'_> {
             }
             Op::Fp { insn, scalar, form } => {
                 if scalar {
-                    self.fp(insn, form)
+                    self.fp(insn, form, retired)
                 } else {
                     self.simd(insn)
                 }
@@ -2566,20 +2736,20 @@ impl Cpu {
     }
 
     /// Arm the exclusive monitor at `addr` as having read `value`, or disarm it.
-    pub fn set_exclusive(&mut self, armed: bool, addr: u32, value: u64) {
+    pub fn set_exclusive(&mut self, armed: bool, addr: u32, value: [u64; 2]) {
         if armed {
-            self.exclusive.arm(addr, [value, 0]);
+            self.exclusive.arm(addr, value);
         } else {
             self.exclusive = Default::default();
         }
     }
 
-    /// The monitor as `(address, armed, first doubleword)`, which the difftests compare.
-    pub fn exclusive_state(&self) -> (u32, bool, u64) {
+    /// The monitor as `(address, armed, doublewords)`, which the difftests compare.
+    pub fn exclusive_state(&self) -> (u32, bool, [u64; 2]) {
         (
             self.exclusive.addr,
             self.exclusive.armed != 0,
-            self.exclusive.value[0],
+            self.exclusive.value,
         )
     }
 
@@ -2605,6 +2775,7 @@ mod tests {
         regs: 0,
         nzcv: 2048,
         fpsr: 2092,
+        fpcr: 2180,
         pc: 2084,
         fuel: 2088,
         memory: 2096,
@@ -2614,6 +2785,7 @@ mod tests {
         watch_lo: 2064,
         watch_hi: 2068,
         watched: 2080,
+        pair_lock: 2176,
         vregs: 4096,
         exclusive: 2112,
         tpidr: 2144,

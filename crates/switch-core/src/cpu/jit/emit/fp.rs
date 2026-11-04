@@ -25,6 +25,8 @@ const LT: [u8; 2] = [0x5D, 0x63];
 const NE: [u8; 2] = [0x5C, 0x62];
 /// FRINTN, FRINTP, FRINTM and FRINTZ: nearest (ties to even), ceil, floor, trunc.
 const ROUND: [[u8; 2]; 4] = [[0x90, 0x9E], [0x8D, 0x9B], [0x8E, 0x9C], [0x8F, 0x9D]];
+const COPYSIGN: [u8; 2] = [0x98, 0xA6];
+const GE: [u8; 2] = [0x60, 0x66];
 
 const F64_PROMOTE_F32: u8 = 0xBB;
 const F32_DEMOTE_F64: u8 = 0xB6;
@@ -35,6 +37,7 @@ const F64_DIV: u8 = 0xA3;
 const F64_LT: u8 = 0x63;
 const F64_GT: u8 = 0x64;
 const F64_GE: u8 = 0x66;
+const F64_LE: u8 = 0x65;
 const F64_EQ: u8 = 0x61;
 const I64_REINTERPRET_F64: u8 = 0xBD;
 const F64_REINTERPRET_I64: u8 = 0xBF;
@@ -136,7 +139,7 @@ impl Emitter<'_> {
     }
 
     /// One scalar floating-point instruction of `form`, or `false`.
-    pub(super) fn fp(&mut self, insn: u32, form: FpForm) -> bool {
+    pub(super) fn fp(&mut self, insn: u32, form: FpForm, retired: usize) -> bool {
         if !self.simd {
             return false;
         }
@@ -240,9 +243,22 @@ impl Emitter<'_> {
                     self.f.op_raw(ROUND[op as usize - 8][d]);
                     self.fset(rd, double);
                 }
+                // FRINTA.
+                12 => {
+                    self.fget(rn, double);
+                    self.frinta(double);
+                    self.fset(rd, double);
+                }
+                // FRINTX and FRINTI.
+                14 | 15 => {
+                    self.fget(rn, double);
+                    self.frint_fpcr(double);
+                    self.fset(rd, double);
+                }
                 _ => return false,
             },
             FpForm::ThreeSource if !double => self.fmadd_single(insn),
+            FpForm::ThreeSource => self.fmadd_double(insn, retired),
             FpForm::FixedConv => return self.fixed_conv(insn, double),
             FpForm::MovImm => {
                 let imm8 = (insn >> 13) & 0xFF;
@@ -321,6 +337,304 @@ impl Emitter<'_> {
             _ => return false,
         }
         true
+    }
+
+    /// FRINTA: round to nearest, ties away from zero. The truncation, moved a whole unit
+    /// away from zero when the dropped fraction is at least half; the subtraction is exact.
+    fn frinta(&mut self, double: bool) {
+        let d = usize::from(double);
+        let (x, r) = if double {
+            (L_F64, L_F64B)
+        } else {
+            (L_F32, L_F32B)
+        };
+        self.f.local_set(x);
+        self.f.local_get(x);
+        self.f.op_raw(ROUND[3][d]);
+        self.f.local_set(r);
+        self.f.local_get(r);
+        if double {
+            self.f.f64_const(1.0);
+        } else {
+            self.f.f32_const(1.0);
+        }
+        self.f.local_get(x);
+        self.f.op_raw(COPYSIGN[d]);
+        self.f.op_raw(ADD[d]);
+        self.f.local_get(r);
+        self.f.local_get(x);
+        self.f.local_get(r);
+        self.f.op_raw(SUB[d]);
+        self.f.op_raw(ABS[d]);
+        if double {
+            self.f.f64_const(0.5);
+        } else {
+            self.f.f32_const(0.5);
+        }
+        self.f.op_raw(GE[d]);
+        self.f.select();
+    }
+
+    /// FRINTX and FRINTI: round to an integral in the mode FPCR's RMode names (nearest even,
+    /// toward plus, toward minus, toward zero).
+    fn frint_fpcr(&mut self, double: bool) {
+        let d = usize::from(double);
+        let (x, r) = if double {
+            (L_F64, L_F64B)
+        } else {
+            (L_F32, L_F32B)
+        };
+        self.f.local_set(x);
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, self.layout.fpcr);
+        self.f.i32_const(22);
+        self.f.i32_shr_u();
+        self.f.i32_const(3);
+        self.f.i32_and();
+        self.f.local_set(L_C);
+        self.f.local_get(x);
+        self.f.op_raw(ROUND[0][d]);
+        self.f.local_set(r);
+        for (mode, rounding) in ROUND.iter().enumerate().skip(1) {
+            self.f.local_get(x);
+            self.f.op_raw(rounding[d]);
+            self.f.local_get(r);
+            self.f.local_get(L_C);
+            self.f.i32_const(mode as i32);
+            self.f.i32_eq();
+            self.f.select();
+            self.f.local_set(r);
+        }
+        self.f.local_get(r);
+    }
+
+    /// Push the double whose bits are in the `i64` local `bits`.
+    fn double_in(&mut self, bits: u32) {
+        self.f.local_get(bits);
+        self.f.op_raw(F64_REINTERPRET_I64);
+    }
+
+    /// Pop a double into the `i64` local `bits`.
+    fn double_to(&mut self, bits: u32) {
+        self.f.op_raw(I64_REINTERPRET_F64);
+        self.f.local_set(bits);
+    }
+
+    /// Push whether the double `get` pushes is finite: `v - v` is NaN for an infinity or a NaN.
+    fn is_finite_double(&mut self, get: &dyn Fn(&mut Self)) {
+        get(self);
+        get(self);
+        self.f.op_raw(SUB[1]);
+        self.f.f64_const(0.0);
+        self.f.op_raw(EQ[1]);
+    }
+
+    /// Push whether the double `get` pushes lies in `[2^-300, 2^300]` in magnitude, where the
+    /// products of [`Emitter::fmadd_double`] stay normal.
+    fn in_fma_window(&mut self, get: &dyn Fn(&mut Self)) {
+        get(self);
+        self.f.op_raw(ABS[1]);
+        self.f.f64_const(f64::from_bits(0x2D30_0000_0000_0000));
+        self.f.op_raw(F64_GE);
+        get(self);
+        self.f.op_raw(ABS[1]);
+        self.f.f64_const(f64::from_bits(0x52B0_0000_0000_0000));
+        self.f.op_raw(F64_LE);
+        self.f.i32_and();
+    }
+
+    /// FMADD, FMSUB, FNMADD and FNMSUB on doubles, rounded once as the interpreter's
+    /// `f64::mul_add` is. Wasm has no fused multiply-add, so a finite, nonzero case in the
+    /// middle of the exponent range is emulated with rounding to odd (Boldo and Melquiond):
+    /// the exact product as `p + ul`, the exact `z + p` as `th + tl`, and the rounding to odd
+    /// of `tl + ul` added to `th`. A zero operand needs one ordinary operation, and anything
+    /// else (infinities, NaNs, extreme exponents) goes back to the interpreter.
+    fn fmadd_double(&mut self, insn: u32, retired: usize) {
+        const SPLIT: f64 = 134_217_729.0;
+        let (rm, ra, rn, rd) = (
+            (insn >> 16) & 0x1F,
+            (insn >> 10) & 0x1F,
+            (insn >> 5) & 0x1F,
+            insn & 0x1F,
+        );
+        let o1 = (insn >> 21) & 1 == 1;
+        let o0 = (insn >> 15) & 1 == 1;
+        // `x` and `y` live in the float locals and the result is built in `y`; the rest are
+        // the bits of doubles, in the `i64` locals.
+        let (x, y) = (L_F64, L_F64B);
+        let (z, p) = (L_A, L_B);
+        let (hi_x, lo_x, hi_y, lo_y) = (L_T, L_R, L_S, L_W);
+        self.fget(rn, true);
+        if o1 != o0 {
+            self.f.op_raw(NEG[1]);
+        }
+        self.f.local_set(x);
+        self.fget(rm, true);
+        self.f.local_set(y);
+        self.fget(ra, true);
+        if o1 {
+            self.f.op_raw(NEG[1]);
+        }
+        self.double_to(z);
+
+        let get_x: &dyn Fn(&mut Self) = &|e| e.f.local_get(x);
+        let get_y: &dyn Fn(&mut Self) = &|e| e.f.local_get(y);
+        let get_z: &dyn Fn(&mut Self) = &|e| e.double_in(z);
+        for get in [get_x, get_y, get_z] {
+            self.is_finite_double(get);
+            self.f.i32_eqz();
+            self.deopt_if(retired);
+        }
+
+        let done = self.f.block_void();
+        // A zero factor makes the product an exact zero, so an ordinary add is the rounding.
+        self.f.local_get(x);
+        self.f.f64_const(0.0);
+        self.f.op_raw(EQ[1]);
+        self.f.local_get(y);
+        self.f.f64_const(0.0);
+        self.f.op_raw(EQ[1]);
+        self.f.i32_or();
+        self.f.if_void();
+        self.f.local_get(x);
+        self.f.local_get(y);
+        self.f.op_raw(MUL[1]);
+        self.double_in(z);
+        self.f.op_raw(ADD[1]);
+        self.f.local_set(y);
+        self.f.br(done);
+        self.f.end();
+        // A zero addend leaves the rounded product.
+        self.double_in(z);
+        self.f.f64_const(0.0);
+        self.f.op_raw(EQ[1]);
+        self.f.if_void();
+        self.f.local_get(x);
+        self.f.local_get(y);
+        self.f.op_raw(MUL[1]);
+        self.f.local_set(y);
+        self.f.br(done);
+        self.f.end();
+
+        for get in [get_x, get_y, get_z] {
+            self.in_fma_window(get);
+            self.f.i32_eqz();
+            self.deopt_if(retired);
+        }
+
+        // p = RN(x * y), and the error ul of that rounding, by Veltkamp's split and Dekker's product.
+        self.f.local_get(x);
+        self.f.local_get(y);
+        self.f.op_raw(MUL[1]);
+        self.double_to(p);
+        for (value, hi, lo) in [(x, hi_x, lo_x), (y, hi_y, lo_y)] {
+            self.f.f64_const(SPLIT);
+            self.f.local_get(value);
+            self.f.op_raw(MUL[1]);
+            self.f.f64_const(SPLIT);
+            self.f.local_get(value);
+            self.f.op_raw(MUL[1]);
+            self.f.local_get(value);
+            self.f.op_raw(SUB[1]);
+            self.f.op_raw(SUB[1]);
+            self.double_to(hi);
+            self.f.local_get(value);
+            self.double_in(hi);
+            self.f.op_raw(SUB[1]);
+            self.double_to(lo);
+        }
+        let product = |e: &mut Self, a: u32, b: u32| {
+            e.double_in(a);
+            e.double_in(b);
+            e.f.op_raw(MUL[1]);
+        };
+        // ul = (((xh*yh - p) + xh*yl) + xl*yh) + xl*yl, into `x`, whose value is spent.
+        product(self, hi_x, hi_y);
+        self.double_in(p);
+        self.f.op_raw(SUB[1]);
+        product(self, hi_x, lo_y);
+        self.f.op_raw(ADD[1]);
+        product(self, lo_x, hi_y);
+        self.f.op_raw(ADD[1]);
+        product(self, lo_x, lo_y);
+        self.f.op_raw(ADD[1]);
+        self.f.local_set(x);
+
+        // th = z + p and its error tl (two-sum), as bits in `hi_x` and `hi_y`.
+        let (th, tl) = (hi_x, hi_y);
+        self.double_in(z);
+        self.double_in(p);
+        self.f.op_raw(ADD[1]);
+        self.double_to(th);
+        self.double_in(th);
+        self.double_in(z);
+        self.f.op_raw(SUB[1]);
+        self.double_to(lo_x);
+        self.double_in(z);
+        self.double_in(th);
+        self.double_in(lo_x);
+        self.f.op_raw(SUB[1]);
+        self.f.op_raw(SUB[1]);
+        self.double_in(p);
+        self.double_in(lo_x);
+        self.f.op_raw(SUB[1]);
+        self.f.op_raw(ADD[1]);
+        self.double_to(tl);
+
+        // s = RN(tl + ul) and its error, then s made odd: when it is inexact and its last
+        // bit is even, the neighbour on the error's side is the odd one.
+        let s = lo_x;
+        self.double_in(tl);
+        self.f.local_get(x);
+        self.f.op_raw(ADD[1]);
+        self.double_to(s);
+        self.double_in(s);
+        self.double_in(tl);
+        self.f.op_raw(SUB[1]);
+        self.double_to(lo_y);
+        self.double_in(tl);
+        self.double_in(s);
+        self.double_in(lo_y);
+        self.f.op_raw(SUB[1]);
+        self.f.op_raw(SUB[1]);
+        self.f.local_get(x);
+        self.double_in(lo_y);
+        self.f.op_raw(SUB[1]);
+        self.f.op_raw(ADD[1]);
+        self.f.local_set(y);
+        self.f.local_get(s);
+        self.f.i64_const(1);
+        self.f.i64_const(-1);
+        self.f.local_get(s);
+        self.f.local_get(y);
+        self.f.op_raw(I64_REINTERPRET_F64);
+        self.f.i64_xor();
+        self.f.i64_const(63);
+        self.f.i64_shr_u();
+        self.f.i32_wrap_i64();
+        self.f.i32_eqz();
+        self.f.select();
+        self.f.i64_add();
+        self.f.local_get(s);
+        self.f.local_get(y);
+        self.f.f64_const(0.0);
+        self.f.op_raw(NE[1]);
+        self.f.local_get(s);
+        self.f.i64_const(1);
+        self.f.i64_and();
+        self.f.i64_eqz();
+        self.f.i32_and();
+        self.f.select();
+        self.f.local_set(s);
+
+        // result = th + v.
+        self.double_in(th);
+        self.double_in(s);
+        self.f.op_raw(ADD[1]);
+        self.f.local_set(y);
+        self.f.end();
+        self.f.local_get(y);
+        self.fset(rd, true);
     }
 
     /// FMADD, FMSUB, FNMADD and FNMSUB on singles, as the interpreter's

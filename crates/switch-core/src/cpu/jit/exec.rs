@@ -1093,6 +1093,16 @@ impl Cpu {
             }
             Op::LoadExclusive { rt, rn, sz } => self.load_exclusive(rt, rn, sz)?,
             Op::StoreExclusive { rs, rt, rn, sz } => self.store_exclusive(rs, rt, rn, sz)?,
+            Op::LoadExclusivePair { rt, rt2, rn, wide } => {
+                self.load_exclusive_pair(rt, rt2, rn, wide)?
+            }
+            Op::StoreExclusivePair {
+                rs,
+                rt,
+                rt2,
+                rn,
+                wide,
+            } => self.store_exclusive_pair(rs, rt, rt2, rn, wide)?,
             Op::Ordered { rt, rn, acc } => {
                 fence(SeqCst);
                 self.access(self.reg_at(rn) as u32, rt, acc)?;
