@@ -567,85 +567,13 @@ fn the_report_is_the_json_the_page_reads() {
     );
 }
 
-/// The packed-depth pass converts every depth exactly as guest memory and the rasterizer would.
-#[test]
-fn the_packed_depth_pass_converts_depths_bit_for_bit() {
-    let Some(mut gpu) = device() else { return };
-    let mut depths: Vec<f32> = vec![
-        0.0,
-        -0.5,
-        f32::from_bits(1),
-        f32::MIN_POSITIVE,
-        2f32.powi(-25),
-        2f32.powi(-24),
-        2f32.powi(-24) * 1.5,
-        0.25,
-        0.5,
-        f32::from_bits(0.5f32.to_bits() - 1),
-        f32::from_bits(0.5f32.to_bits() + 1),
-        f32::from_bits(1f32.to_bits() - 1),
-        1.0,
-    ];
-    let width = 256u32;
-    let mut x = 0x1234_5678u32;
-    while depths.len() < (width * width) as usize {
-        // Uniform in [0, 1) and log-spread small values, from a fixed xorshift.
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        depths.push(if x & 1 == 0 {
-            (x >> 8) as f32 / 16_777_216.0
-        } else {
-            f32::from_bits(x % 0x3f80_0000)
-        });
-    }
+/// Rows of `Rg32Float` texels read back from `image`, `width` wide and as tall.
+fn read_rg32(gpu: &super::Gpu, image: &wgpu::Texture, width: u32) -> Vec<u8> {
     let size = wgpu::Extent3d {
         width,
         height: width,
         depth_or_array_layers: 1,
     };
-    let texture = |format, usage| {
-        gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage,
-            view_formats: &[],
-        })
-    };
-    let surface = texture(
-        wgpu::TextureFormat::Depth32Float,
-        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-    );
-    let staging = texture(
-        wgpu::TextureFormat::R32Float,
-        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-    );
-    let image = texture(
-        wgpu::TextureFormat::Rg32Float,
-        wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
-    );
-    let bytes: Vec<u8> = depths.iter().flat_map(|d| d.to_le_bytes()).collect();
-    gpu.queue.write_texture(
-        staging.as_image_copy(),
-        &bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(width * 4),
-            rows_per_image: Some(width),
-        },
-        size,
-    );
-    gpu.load_depth(&surface, &staging, wgpu::TextureFormat::Depth32Float)
-        .expect("the depth upload");
-    gpu.draw_packed_depth(&image, 0, &surface)
-        .expect("the packed depth pass");
-
     let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: u64::from(width * width * 8),
@@ -678,6 +606,155 @@ fn the_packed_depth_pass_converts_depths_bit_for_bit() {
         .get_mapped_range()
         .expect("the mapped readback")
         .to_vec();
+    read
+}
+
+/// `width` x `width` words in an `R32Uint` texture, and an `Rg32Float` one to convert them into.
+fn packed_words(gpu: &super::Gpu, words: &[u32], width: u32) -> (wgpu::Texture, wgpu::Texture) {
+    let size = wgpu::Extent3d {
+        width,
+        height: width,
+        depth_or_array_layers: 1,
+    };
+    let texture = |format, usage| {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let source = texture(
+        wgpu::TextureFormat::R32Uint,
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    );
+    let image = texture(
+        wgpu::TextureFormat::Rg32Float,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    );
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    gpu.queue.write_texture(
+        source.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(width),
+        },
+        size,
+    );
+    (source, image)
+}
+
+fn xorshift(x: &mut u32) -> u32 {
+    *x ^= *x << 13;
+    *x ^= *x >> 17;
+    *x ^= *x << 5;
+    *x
+}
+
+/// An uploaded `S8D24` word converts to the stencil's bits and the unorm depth the rasterizer reads.
+#[test]
+fn the_packed_depth_pass_converts_uploaded_words_bit_for_bit() {
+    let Some(mut gpu) = device() else { return };
+    let width = 256u32;
+    let mut x = 0x9E37_79B9u32;
+    let mut words: Vec<u32> = vec![0, 0xff, 0xffff_ff00, u32::MAX, 0x0100, 0x8000_0000];
+    while words.len() < (width * width) as usize {
+        words.push(xorshift(&mut x));
+    }
+    let (source, image) = packed_words(&gpu, &words, width);
+    gpu.convert_packed_depth(&source, &image, &[]);
+    let read = read_rg32(&gpu, &image, width);
+    for (i, &word) in words.iter().enumerate() {
+        let at = i * 8;
+        let red = u32::from_le_bytes(read[at..at + 4].try_into().unwrap());
+        let green = f32::from_le_bytes(read[at + 4..at + 8].try_into().unwrap());
+        let want = (word >> 8) as f32 / 16_777_215.0;
+        assert_eq!(red, word & 0xff, "stencil of {word:#010x}");
+        assert_eq!(green.to_bits(), want.to_bits(), "depth of {word:#010x}");
+    }
+}
+
+/// The packed-depth pass converts every held depth exactly as guest memory and the rasterizer would.
+#[test]
+fn the_packed_depth_pass_converts_depths_bit_for_bit() {
+    let Some(mut gpu) = device() else { return };
+    let mut depths: Vec<f32> = vec![
+        0.0,
+        -0.5,
+        f32::from_bits(1),
+        f32::MIN_POSITIVE,
+        2f32.powi(-25),
+        2f32.powi(-24),
+        2f32.powi(-24) * 1.5,
+        0.25,
+        0.5,
+        f32::from_bits(0.5f32.to_bits() - 1),
+        f32::from_bits(0.5f32.to_bits() + 1),
+        f32::from_bits(1f32.to_bits() - 1),
+        1.0,
+    ];
+    let width = 256u32;
+    let mut x = 0x1234_5678u32;
+    while depths.len() < (width * width) as usize {
+        // Uniform in [0, 1) and log-spread small values, from a fixed xorshift.
+        let x = xorshift(&mut x);
+        depths.push(if x & 1 == 0 {
+            (x >> 8) as f32 / 16_777_216.0
+        } else {
+            f32::from_bits(x % 0x3f80_0000)
+        });
+    }
+    let size = wgpu::Extent3d {
+        width,
+        height: width,
+        depth_or_array_layers: 1,
+    };
+    let surface = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let staging = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let bytes: Vec<u8> = depths.iter().flat_map(|d| d.to_le_bytes()).collect();
+    gpu.queue.write_texture(
+        staging.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(width),
+        },
+        size,
+    );
+    gpu.load_depth(&surface, &staging, wgpu::TextureFormat::Depth32Float)
+        .expect("the depth upload");
+    // The image's own depth is overwritten; only its stencil byte survives.
+    let words: Vec<u32> = (0..width * width)
+        .map(|i| 0xffff_ff00 | (i & 0xff))
+        .collect();
+    let (source, image) = packed_words(&gpu, &words, width);
+    gpu.convert_packed_depth(&source, &image, &[(0, surface)]);
+    let read = read_rg32(&gpu, &image, width);
 
     let layout = switch_core::gpu::engine::threed::DepthLayout {
         bytes: 4,
@@ -689,8 +766,10 @@ fn the_packed_depth_pass_converts_depths_bit_for_bit() {
         // Depth32Float holds what the upload wrote; read it as the device does.
         let stored = (layout.encode_depth(d) >> 8) as u32;
         let want = stored as f32 / 16_777_215.0;
-        let at = i * 8 + 4;
-        let got = f32::from_le_bytes(read[at..at + 4].try_into().unwrap());
+        let at = i * 8;
+        let red = u32::from_le_bytes(read[at..at + 4].try_into().unwrap());
+        let got = f32::from_le_bytes(read[at + 4..at + 8].try_into().unwrap());
+        assert_eq!(red, i as u32 & 0xff, "stencil under depth {d:e}");
         assert_eq!(
             got.to_bits(),
             want.to_bits(),

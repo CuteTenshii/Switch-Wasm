@@ -406,8 +406,8 @@ pub struct Gpu {
         std::collections::HashMap<Vec<wgpu::BindGroupLayoutEntry>, wgpu::BindGroupLayout>,
     /// Depth upload pipelines by depth format. See [`LOAD_DEPTH_WGSL`].
     depth_loaders: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
-    /// See [`builtin::PACKED_DEPTH_WGSL`].
-    packed_depth: Option<wgpu::RenderPipeline>,
+    /// See [`builtin::PACKED_DEPTH_WGSL`], by whether a held surface supplies the depth.
+    packed_depth: std::collections::HashMap<bool, wgpu::RenderPipeline>,
     /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
     clear_pipelines: std::collections::HashMap<ClearKey, wgpu::RenderPipeline>,
     blit_pipelines: std::collections::HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,

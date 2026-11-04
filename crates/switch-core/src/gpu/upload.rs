@@ -723,7 +723,6 @@ fn read_texture(
             let (unit, keep) = match copy {
                 Copy::Raw { unit } => (unit, unit),
                 Copy::FloatDepth => (8, 4),
-                Copy::PackedDepth => (4, 0),
                 Copy::Decode { .. } => {
                     return Err(Error::Gpu(
                         "upload: a compressed 3D image is not decoded".into(),
@@ -745,11 +744,7 @@ fn read_texture(
                         image.block_depth_gobs,
                     );
                     let word = ctx.read_pixel(image.addr + u64::from(at), unit)?;
-                    if matches!(copy, Copy::PackedDepth) {
-                        bytes.extend_from_slice(&packed_depth(word as u32));
-                    } else {
-                        bytes.extend_from_slice(&word.to_le_bytes()[..keep as usize]);
-                    }
+                    bytes.extend_from_slice(&word.to_le_bytes()[..keep as usize]);
                 }
             }
             continue;
@@ -772,21 +767,6 @@ fn read_texture(
                 )?;
                 for texel in texels.as_chunks::<8>().0 {
                     bytes.extend_from_slice(&texel[..4]);
-                }
-            }
-            Copy::PackedDepth => {
-                let mut texels = Vec::with_capacity(source_row_bytes as usize * rows as usize);
-                deswizzle(
-                    ctx,
-                    base,
-                    image.layout,
-                    source_row_bytes,
-                    rows,
-                    4,
-                    &mut texels,
-                )?;
-                for texel in texels.as_chunks::<4>().0 {
-                    bytes.extend_from_slice(&packed_depth(u32::from_le_bytes(*texel)));
                 }
             }
             Copy::Decode { codec } => decode_blocks(ctx, &image, base, codec, &mut bytes)?,
@@ -818,18 +798,6 @@ enum Copy {
     Decode { codec: Codec },
     /// `ZF32_X24S8`'s depth, the low half of each 8-byte texel, as `R32Float`.
     FloatDepth,
-    /// `S8D24` as `Rg32Float`, each texel as the rasterizer reads it: see [`packed_depth`].
-    PackedDepth,
-}
-
-/// One `S8D24` texel as `DepthTexel::decode` gives it: the stencil's bits in red and the
-/// unorm depth in green. A device that flushes denormals reads that stencil as zero.
-fn packed_depth(raw: u32) -> [u8; 8] {
-    let [red, green, ..] = DepthTexel::S8D24Uint.decode(u128::from(raw));
-    let mut texel = [0; 8];
-    texel[..4].copy_from_slice(&red.to_le_bytes());
-    texel[4..].copy_from_slice(&green.to_le_bytes());
-    texel
 }
 
 impl Copy {
@@ -837,7 +805,6 @@ impl Copy {
     fn source_row_bytes(self, row_bytes: u32) -> u32 {
         match self {
             Copy::FloatDepth => row_bytes * 2,
-            Copy::PackedDepth => row_bytes / 2,
             Copy::Raw { .. } | Copy::Decode { .. } => row_bytes,
         }
     }
@@ -858,7 +825,13 @@ impl Copy {
                         image.height.div_ceil(block_h),
                     )
                 }
-                TexelKind::Depth(_) => unreachable!("a depth texel has no WebGPU format"),
+                // The words as they are; the device converts them. See `Widen::PackedDepth`.
+                TexelKind::Depth(DepthTexel::S8D24Uint) => {
+                    (Format::R32Uint, image.width * unit, image.height)
+                }
+                TexelKind::Depth(DepthTexel::F32X24S8) => {
+                    unreachable!("a float depth texel is copied as FloatDepth")
+                }
             },
             Copy::Decode { .. } => {
                 let format = if image.srgb {
@@ -869,7 +842,6 @@ impl Copy {
                 (format, image.width * 4, image.height)
             }
             Copy::FloatDepth => (Format::R32Float, image.width * 4, image.height),
-            Copy::PackedDepth => (Format::Rg32Float, image.width * 8, image.height),
         }
     }
 }
@@ -884,7 +856,7 @@ fn image_copy(image: &Texture) -> Result<Copy> {
             }
         }
         TexelKind::Depth(DepthTexel::F32X24S8) => Copy::FloatDepth,
-        TexelKind::Depth(DepthTexel::S8D24Uint) => Copy::PackedDepth,
+        TexelKind::Depth(DepthTexel::S8D24Uint) => Copy::Raw { unit: 4 },
         // Desktop browsers lack `texture-compression-astc`, so ASTC is decoded.
         TexelKind::Block(codec @ Codec::Astc { .. }) => Copy::Decode { codec },
         TexelKind::Block(codec) => {
@@ -1365,16 +1337,12 @@ mod tests {
     }
 
     #[test]
-    fn a_packed_depth_texture_is_its_stencil_and_depth_in_rows_twice_as_wide() {
+    fn a_packed_depth_texture_is_its_words_as_they_are() {
         let packed = image(TexelKind::Depth(DepthTexel::S8D24Uint), 16, 8, false);
         let copy = image_copy(&packed).unwrap();
-        assert!(matches!(copy, Copy::PackedDepth), "{copy:?}");
-        assert_eq!(copy.shape(&packed), (Format::Rg32Float, 128, 8));
-        assert_eq!(copy.source_row_bytes(128), 64);
-
-        let texel = packed_depth(0xFFFF_FF00 | 0xA5);
-        assert_eq!(&texel[..4], &0xA5u32.to_le_bytes(), "stencil bits in red");
-        assert_eq!(&texel[4..], &1.0f32.to_le_bytes(), "full depth in green");
+        assert!(matches!(copy, Copy::Raw { unit: 4 }), "{copy:?}");
+        assert_eq!(copy.shape(&packed), (Format::R32Uint, 64, 8));
+        assert_eq!(copy.source_row_bytes(64), 64);
     }
 
     #[test]

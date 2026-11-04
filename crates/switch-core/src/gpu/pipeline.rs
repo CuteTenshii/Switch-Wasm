@@ -149,6 +149,8 @@ pub enum Format {
     Rg16Float,
     Rgba16Float,
     R32Float,
+    /// A texture's raw 32-bit words, for a conversion pass to turn into something sampleable.
+    R32Uint,
     Rg32Float,
     Rgba32Float,
     /// `B10G11R11_FLOAT`; needs `rg11b10ufloat-renderable`, and `Rgba16Float`

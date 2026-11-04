@@ -179,6 +179,8 @@ pub(crate) enum Widen {
     None,
     Unorm16,
     Snorm16,
+    /// `S8D24` words, converted on the device to the stencil bits in red and the unorm depth in green.
+    PackedDepth,
 }
 
 /// Device format for a sampled-only texture, widening 16-bit norm formats to
@@ -187,6 +189,9 @@ pub(crate) fn sampled_texture_format(
     features: wgpu::Features,
     format: Format,
 ) -> Result<(wgpu::TextureFormat, Widen)> {
+    if format == Format::R32Uint {
+        return Ok((wgpu::TextureFormat::Rg32Float, Widen::PackedDepth));
+    }
     match device_texture_format(features, format) {
         Ok(wanted) => Ok((wanted, Widen::None)),
         Err(refused) => {
@@ -213,8 +218,8 @@ pub(crate) fn widen(bytes: &[u8], widen: Widen) -> Vec<u8> {
     for pair in bytes.as_chunks::<2>().0 {
         let raw = u16::from_le_bytes(*pair);
         let value = match widen {
-            // Never called with `None`; zero rather than a panic mid-draw.
-            Widen::None => 0.0,
+            // Never called with these; zero rather than a panic mid-draw.
+            Widen::None | Widen::PackedDepth => 0.0,
             Widen::Unorm16 => f32::from(raw) / 65535.0,
             // `i16::MIN` clamps to -1, as snorm sampling does.
             Widen::Snorm16 => (f32::from(raw as i16) / 32767.0).max(-1.0),
@@ -255,6 +260,7 @@ pub(crate) fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
         Format::Bgra8UnormSrgb => T::Bgra8UnormSrgb,
         Format::Rgb10a2Unorm => T::Rgb10a2Unorm,
         Format::R32Float => T::R32Float,
+        Format::R32Uint => T::R32Uint,
         Format::Rg32Float => T::Rg32Float,
         Format::R16Float => T::R16Float,
         Format::Rg16Float => T::Rg16Float,

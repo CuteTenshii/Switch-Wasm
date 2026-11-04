@@ -368,22 +368,23 @@ impl Gpu {
         held: &[(u32, HeldLayer)],
         compare: bool,
     ) -> std::result::Result<wgpu::Texture, String> {
+        let depths: Vec<(u32, wgpu::Texture)> = held
+            .iter()
+            .filter_map(|(layer, surface)| match surface {
+                HeldLayer::PackedDepth(surface) => Some((*layer, surface.clone())),
+                _ => None,
+            })
+            .collect();
         let texture = if compare {
             self.shadow_texture(upload)?
         } else {
-            let (texture, _) = self.upload_texture(upload, view, None)?;
+            let (texture, _) = self.upload_texture(upload, view, None, &depths)?;
             self.scratch.push(Scratch::Texture(texture.clone()));
             texture
         };
         for (layer, surface) in held {
-            match surface {
-                HeldLayer::ShadowCorner(surface) => {
-                    self.draw_shadow_corner(&texture, *layer, surface)?;
-                }
-                HeldLayer::PackedDepth(surface) => {
-                    self.draw_packed_depth(&texture, *layer, surface)?;
-                }
-                _ => {}
+            if let HeldLayer::ShadowCorner(surface) = surface {
+                self.draw_shadow_corner(&texture, *layer, surface)?;
             }
         }
         let mut encoder = self
@@ -463,64 +464,56 @@ impl Gpu {
         Ok(texture)
     }
 
-    /// Overwrite `layer` of an uploaded `S8D24` image with a held `depth32float`'s depth, keeping
-    /// the image's stencil; see [`PACKED_DEPTH_WGSL`].
-    pub(super) fn draw_packed_depth(
+    /// Convert every layer of an `S8D24` image's `words` into `into`; a layer in `depths` takes its
+    /// depth from that held `depth32float` instead of from its words. See [`PACKED_DEPTH_WGSL`].
+    pub(super) fn convert_packed_depth(
         &mut self,
-        texture: &wgpu::Texture,
-        layer: u32,
-        surface: &wgpu::Texture,
-    ) -> std::result::Result<(), String> {
-        let size = wgpu::Extent3d {
-            width: texture.width(),
-            height: texture.height(),
-            depth_or_array_layers: 1,
-        };
-        let staging = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("held packed depth"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let pipeline = self.packed_depth_pipeline();
-        let depth = surface.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2),
-            aspect: wgpu::TextureAspect::DepthOnly,
-            ..Default::default()
-        });
-        let guest = texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2),
-            base_array_layer: layer,
-            array_layer_count: Some(1),
-            ..Default::default()
-        });
-        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("held packed depth"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&guest),
-                },
-            ],
-        });
-        let target = staging.create_view(&wgpu::TextureViewDescriptor::default());
+        words: &wgpu::Texture,
+        into: &wgpu::Texture,
+        depths: &[(u32, wgpu::Texture)],
+    ) {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("held packed depth"),
+                label: Some("packed depth"),
             });
-        {
+        for layer in 0..words.depth_or_array_layers() {
+            let held = depths.iter().find(|(at, _)| *at == layer).map(|(_, d)| d);
+            let pipeline = self.packed_depth_pipeline(held.is_some());
+            let layer_view = |texture: &wgpu::Texture| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            };
+            let words = layer_view(words);
+            let depth = held.map(|surface| {
+                surface.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    aspect: wgpu::TextureAspect::DepthOnly,
+                    ..Default::default()
+                })
+            });
+            let mut entries = vec![wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&words),
+            }];
+            if let Some(depth) = &depth {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                });
+            }
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("packed depth"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &entries,
+            });
+            let target = layer_view(into);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("held packed depth"),
+                label: Some("packed depth"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &target,
                     depth_slice: None,
@@ -539,35 +532,19 @@ impl Gpu {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        encoder.copy_texture_to_texture(
-            staging.as_image_copy(),
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: layer,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            size,
-        );
         self.queue.submit([encoder.finish()]);
-        self.scratch.push(Scratch::Texture(staging));
-        Ok(())
     }
 
-    /// The pipeline of [`Gpu::draw_packed_depth`], built once.
-    fn packed_depth_pipeline(&mut self) -> wgpu::RenderPipeline {
-        if let Some(pipeline) = &self.packed_depth {
+    /// The pipeline of [`Gpu::convert_packed_depth`], built once per source of depth.
+    fn packed_depth_pipeline(&mut self, held: bool) -> wgpu::RenderPipeline {
+        if let Some(pipeline) = self.packed_depth.get(&held) {
             return pipeline.clone();
         }
-        let (_, module) = self.module("held packed depth", PACKED_DEPTH_WGSL);
+        let (_, module) = self.module("packed depth", PACKED_DEPTH_WGSL);
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("held packed depth"),
+                label: Some("packed depth"),
                 layout: None,
                 vertex: wgpu::VertexState {
                     module: &module,
@@ -580,7 +557,7 @@ impl Gpu {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(if held { "fs_held" } else { "fs_words" }),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rg32Float,
@@ -591,7 +568,7 @@ impl Gpu {
                 multiview_mask: None,
                 cache: None,
             });
-        self.packed_depth = Some(pipeline.clone());
+        self.packed_depth.insert(held, pipeline.clone());
         pipeline
     }
 
@@ -679,7 +656,7 @@ impl Gpu {
             }
         }
         self.note_read_of(upload.key.addr..upload.key.addr + upload.bytes.len() as u64);
-        let (texture, len) = self.upload_texture(upload, view, fold)?;
+        let (texture, len) = self.upload_texture(upload, view, fold, &[])?;
         // Kept only alongside its cached bytes, which a guest write evicts.
         if self.space.texture_cache.contains_key(&upload.key) {
             self.gpu_texture_bytes += len as u64;
@@ -700,11 +677,17 @@ impl Gpu {
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
         fold: Option<wgsl::Fold>,
+        depths: &[(u32, wgpu::Texture)],
     ) -> std::result::Result<(wgpu::Texture, usize), String> {
         let (format, widening) =
             sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
+        let packed = widening == Widen::PackedDepth;
+        if packed && view == wgpu::TextureViewDimension::D3 {
+            return Err("samples a packed depth image as a volume".into());
+        }
         // Formats the device lacks are widened first. See [`convert::Widen`].
-        let widened = (widening != Widen::None).then(|| widen(&upload.bytes, widening));
+        let widened = (!matches!(widening, Widen::None | Widen::PackedDepth))
+            .then(|| widen(&upload.bytes, widening));
         let (bytes, row_bytes) = match &widened {
             Some(bytes) => (bytes.as_slice(), upload.row_bytes * 2),
             None => (&*upload.bytes, upload.row_bytes),
@@ -769,13 +752,19 @@ impl Gpu {
                 upload.key.layout
             ));
         }
+        // Packed depth words are written as they are, then converted into the sampled texture.
+        let stored = if packed {
+            wgpu::TextureFormat::R32Uint
+        } else {
+            format
+        };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("texture"),
             size,
             mip_level_count: 1,
             sample_count: 1,
             dimension,
-            format,
+            format: stored,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -794,6 +783,22 @@ impl Gpu {
             },
             size,
         );
+        if packed {
+            let converted = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("texture"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.convert_packed_depth(&texture, &converted, depths);
+            self.scratch.push(Scratch::Texture(texture));
+            return Ok((converted, bytes.len() * 2));
+        }
         Ok((texture, bytes.len()))
     }
 

@@ -69,12 +69,13 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @builtin(frag_depth) f32 {
 }
 ";
 
-/// A held `depth32float` sampled as `S8D24`: the guest image's stencil in red, and in green
-/// the depth as guest memory would hold it, read back the way the rasterizer reads it.
+/// An `S8D24` image's words, uploaded as they are, as the rasterizer reads them: the stencil's
+/// bits in red and the unorm depth in green. `fs_held` takes the depth from a held
+/// `depth32float` instead, as guest memory would hold it.
 /// The integer arithmetic reproduces both conversions exactly; floats would round.
 pub(crate) const PACKED_DEPTH_WGSL: &str = "\
 @group(0) @binding(0) var depth: texture_depth_2d;
-@group(0) @binding(1) var guest: texture_2d<f32>;
+@group(0) @binding(1) var words: texture_2d<u32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
@@ -117,11 +118,17 @@ fn from_unorm24(n: u32) -> f32 {
 }
 
 @fragment
-fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_words(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  let word = textureLoad(words, vec2<u32>(position.xy), 0).x;
+  return vec4<f32>(bitcast<f32>(word & 0xffu), from_unorm24(word >> 8u), 0.0, 1.0);
+}
+
+@fragment
+fn fs_held(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let at = vec2<u32>(position.xy);
-  let stencil = textureLoad(guest, at, 0).x;
+  let stencil = textureLoad(words, at, 0).x & 0xffu;
   let d = textureLoad(depth, at, 0);
-  return vec4<f32>(stencil, from_unorm24(unorm24(d)), 0.0, 1.0);
+  return vec4<f32>(bitcast<f32>(stencil), from_unorm24(unorm24(d)), 0.0, 1.0);
 }
 ";
 
