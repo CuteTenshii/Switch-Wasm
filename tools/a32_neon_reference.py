@@ -159,6 +159,7 @@ def main():
         raw = subprocess.run(["qemu-arm", str(binary)], capture_output=True,
                              check=True).stdout
 
+    print("/// Each case: the instructions, q8-q10 before, and q8-q10 and r2 after.")
     print("const CASES: &[(&[u32], [u32; 12], [u32; 13])] = &[")
     for i, (ops, (q8, q9, q10)) in enumerate(cases):
         after = struct.unpack_from("<13I", raw, 64 * i)

@@ -3,7 +3,7 @@
 
 mod a32;
 
-use a32::{r, run};
+use a32::{cpu, load, r, BASE};
 
 const MVN_R8_0: u32 = 0xE3E0_8000;
 const MOV_R7_0: u32 = 0xE3A0_7000;
@@ -982,7 +982,10 @@ const CASES: &[(&[u32], [u32; 4], [u32; 4])] = &[
 
 #[test]
 fn the_media_instructions_agree_with_qemu() {
+    let mut cpu = cpu();
     for (words, inputs, expected) in CASES {
+        cpu.set_pc_and_sp(BASE, 0x9000);
+        cpu.halted = false;
         let mut code = Vec::new();
         for (reg, &value) in (1..=4).zip(inputs) {
             code.push(movw(reg, value & 0xFFFF));
@@ -991,7 +994,8 @@ fn the_media_instructions_agree_with_qemu() {
         code.extend([MVN_R8_0, MOV_R7_0, MOV_R0_0, USUB8_R9_R7_R7]);
         code.extend_from_slice(words);
         code.push(SEL_R6_R8_R7);
-        let cpu = run(&code);
+        load(&mut cpu, &code);
+        cpu.run(code.len() as u64 + 1).unwrap();
         let got = [r(&cpu, 0), r(&cpu, 3), r(&cpu, 4), r(&cpu, 6)];
         assert_eq!(got, *expected, "{words:08x?} on {inputs:08x?}");
     }
