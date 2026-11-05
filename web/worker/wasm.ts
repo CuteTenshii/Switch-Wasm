@@ -8,7 +8,6 @@ export interface WasmExports {
   switch_add_core(): number;
   switch_end_title(): void;
 
-  switch_open_nsp(size: bigint): number;
   switch_open_nca(size: bigint): number;
   switch_clear_dlc(): void;
   switch_clear_update(): void;

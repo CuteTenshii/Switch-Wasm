@@ -10,9 +10,10 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use crate::{container, nsp_file_source, session, Dlc, HostSource, Session, Update};
 
 /// Open the `size`-byte container (NSP or XCI) the host has ready, read through
-/// `host_read`. Returns 0 on success, -1 on error.
-#[no_mangle]
-pub extern "C" fn switch_open_nsp(size: u64) -> i32 {
+/// `host_read`. Returns its file table as JSON, or nothing with the reason in
+/// `switch_last_error`.
+#[wasm_bindgen]
+pub fn switch_open_nsp(size: u64) -> String {
     let s = session();
     let container = HostSource { file: 0, len: size };
     s.container = Some(container);
@@ -22,11 +23,19 @@ pub extern "C" fn switch_open_nsp(size: u64) -> i32 {
         Ok(pfs0) => {
             s.nsp_files = pfs0.files;
             s.last_error.clear();
-            0
+            json::array(|a| {
+                for f in &s.nsp_files {
+                    a.object(|o| {
+                        o.field("name", &f.name)
+                            .field("offset", f.offset)
+                            .field("size", f.size);
+                    });
+                }
+            })
         }
         Err(e) => {
             s.last_error = e.to_string();
-            -1
+            String::new()
         }
     }
 }
@@ -235,21 +244,6 @@ pub extern "C" fn switch_clear_update() {
 /// Whether a title id is add-on content: the base plus 0x1000 and an 11-bit index.
 fn is_add_on_content_id(title_id: u64) -> bool {
     (0x1000..0x1800).contains(&(title_id & 0x1FFF))
-}
-
-/// The current NSP's file table as JSON.
-#[wasm_bindgen]
-pub fn switch_nsp_files_json() -> String {
-    let s = session();
-    json::array(|a| {
-        for f in &s.nsp_files {
-            a.object(|o| {
-                o.field("name", &f.name)
-                    .field("offset", f.offset)
-                    .field("size", f.size);
-            });
-        }
-    })
 }
 
 /// Read up to `len` bytes of NSP file `index` from `file_offset`. Fails with the reason, also

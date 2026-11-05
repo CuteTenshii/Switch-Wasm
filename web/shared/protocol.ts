@@ -234,7 +234,8 @@ export interface Commands {
   // The NRO at `path` on the SD card, which is told to it as argv[0].
   load_sd_nro(path: string): number;
 
-  open_nsp(file: File): number;
+  // The container's file table, or null with the reason in `last_error`.
+  open_nsp(file: File): NspFile[] | null;
   open_nca(file: File): number;
   restore_nand(): number;
   add_update(file: File): UpdateInfo | null;
@@ -249,7 +250,6 @@ export interface Commands {
   load_nca(): number;
   program_nca_index(): number;
   load_keys(prod: Bytes | null, title: Bytes | null): number;
-  nsp_files_json(): string;
   read_file(index: number, offset: number, len: number): Bytes;
 
   // The title's NACP and icon, from the container's Control NCA or a standalone one.

@@ -3,7 +3,7 @@ use switch_core::cpu::SaveKey;
 
 use crate::activity::switch_log_activity;
 use crate::boot::switch_load_nca_from_nsp;
-use crate::container::{switch_nsp_files_json, switch_open_nsp, switch_read_file};
+use crate::container::{switch_open_nsp, switch_read_file};
 use crate::debug::switch_set_trace_channels;
 use crate::input::switch_set_input;
 use crate::log::{switch_log_line, switch_log_next};
@@ -364,9 +364,7 @@ fn a_container_is_read_through_the_host_without_being_staged() {
     let size = image.len() as u64;
     set_host_container(image);
 
-    assert_eq!(switch_open_nsp(size), 0);
-
-    let json = switch_nsp_files_json();
+    let json = switch_open_nsp(size);
     assert!(json.contains(r#"{"name":"main.nca","offset":"#), "{json}");
     assert!(json.contains(r#""size":4096}"#), "{json}");
     assert!(json.contains(r#"{"name":"notes.txt""#), "{json}");
@@ -406,9 +404,7 @@ fn a_cartridge_image_opens_as_a_container() {
     let size = image.len() as u64;
     set_host_container(image);
 
-    assert_eq!(switch_open_nsp(size), 0);
-
-    let json = switch_nsp_files_json();
+    let json = switch_open_nsp(size);
     assert!(json.contains(r#"{"name":"program.nca""#), "{json}");
     assert!(json.contains(r#"{"name":"meta.cnmt.nca""#), "{json}");
     assert!(!json.contains("system.nca"), "{json}");

@@ -1,7 +1,7 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, DlcEntry, GpuReport, JitStats, MemoryReport, NandIdentity, UpdateInfo,
+  CommandHandlers, DlcEntry, GpuReport, JitStats, MemoryReport, NandIdentity, NspFile, UpdateInfo,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
@@ -13,7 +13,7 @@ import {
   switch_flush_storage, switch_gpu_report_json, switch_guest_fatal, switch_jit_stats_json,
   switch_keyboard_answer, switch_last_error, switch_load_keys, switch_load_program,
   switch_load_sd_nro, switch_memory_json, switch_nand_identify, switch_nand_launch,
-  switch_nsp_files_json, switch_parse_nca, switch_read_file, switch_remember_control,
+  switch_open_nsp, switch_parse_nca, switch_read_file, switch_remember_control,
   switch_restore_nand, switch_restore_storage, switch_set_touch, switch_store_profile_edits,
   switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
@@ -87,9 +87,9 @@ export const CMD: CommandHandlers = {
 
   // The File is kept and read by range.
   open_nsp(file) {
-    const result = core.switch_open_nsp(openHostFile(file));
-    logLoad(`opened ${describe(file)} as the container`, result);
-    return result;
+    const files = switch_open_nsp(openHostFile(file));
+    logLoad(`opened ${describe(file)} as the container`, files ? 0 : -1);
+    return files ? JSON.parse(files) as NspFile[] : null;
   },
   open_nca(file) {
     const result = core.switch_open_nca(openHostFile(file));
@@ -167,7 +167,6 @@ export const CMD: CommandHandlers = {
     );
     return result;
   },
-  nsp_files_json: switch_nsp_files_json,
   read_file(index, offset, len) {
     return switch_read_file(index, BigInt(offset), len);
   },

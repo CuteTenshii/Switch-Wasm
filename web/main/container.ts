@@ -309,14 +309,15 @@ async function handleNspFile(file: File): Promise<void> {
   $('nsp-result').appendChild(status);
   log('Opening ' + file.name + ' (' + fmtSize(file.size) + ') ...');
   try {
-    const ok = await call('open_nsp', file);
-    if (ok !== 0) {
+    const opened = await call('open_nsp', file);
+    if (!opened) {
       const why = await call('last_error');
       status.textContent = 'NSP error: ' + why;
       setNote('container-badge', 'none open', false);
       log('NSP error: ' + why, 'error');
       return;
     }
+    nspFiles = opened;
     openContainer = { file, kind: 'nsp' };
     setNote('container-badge', file.name, true);
   } catch (e) {
@@ -327,7 +328,6 @@ async function handleNspFile(file: File): Promise<void> {
     return;
   }
   status.remove();
-  nspFiles = JSON.parse(await call('nsp_files_json')) as NspFile[];
   log('Parsed ' + nspFiles.length + ' file(s). Click an .nca to inspect it.', 'info');
 
   const ul = el('ul', 'nsp-list');
