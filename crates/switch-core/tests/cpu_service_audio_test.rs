@@ -390,6 +390,38 @@ fn audren_mixes_a_voice_through_to_the_host() {
 }
 
 #[test]
+fn audren_renders_in_real_time_when_updates_come_faster_than_a_frame() {
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const PCM: u32 = 0x5_0000;
+    const FRAMES: u32 = 240;
+    const UPDATES: u64 = 50;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+
+    let mut update = AudrenUpdate::new(1, 1, 1);
+    update.voice(0, PCM_INT16, 1, PCM, FRAMES * 2, FRAMES);
+    update.route(0, 0, 1.0);
+    update.route(0, 1, 1.0);
+    update.mix(2);
+    update.sink(&[0, 1]);
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+
+    let mut taken = 0;
+    let mut chunk = vec![0i16; 4096];
+    for _ in 0..UPDATES {
+        cpu.cycles += AUDREN_FRAME_CYCLES * 4 / 5;
+        update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+        taken += cpu.take_audio(&mut chunk);
+    }
+    let rendered_frames = UPDATES * 4 / 5;
+    assert_eq!(taken as u64, rendered_frames * u64::from(FRAMES) * 2);
+}
+
+#[test]
 fn audren_reports_the_wave_buffers_it_finished_with() {
     // `num_wavebufs_consumed` drives the guest's refills.
     const IN: u32 = 0x3_0000;

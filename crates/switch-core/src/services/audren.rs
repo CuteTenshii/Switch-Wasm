@@ -945,8 +945,13 @@ impl Cpu {
             return;
         }
         let elapsed = now.saturating_sub(renderer.rendered_through);
-        let due = (elapsed / FRAME_CYCLES).min(MAX_CATCHUP_FRAMES);
-        renderer.rendered_through = now;
+        let due = elapsed / FRAME_CYCLES;
+        renderer.rendered_through = if due > MAX_CATCHUP_FRAMES {
+            now
+        } else {
+            renderer.rendered_through + due * FRAME_CYCLES
+        };
+        let due = due.min(MAX_CATCHUP_FRAMES);
         if due == 0 {
             self.process_mut().audren_renderers.insert(handle, renderer);
             return;
