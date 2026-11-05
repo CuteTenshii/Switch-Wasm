@@ -5,7 +5,7 @@ It is a subset of Noto Sans Regular (version 2.015) with the TrueType hinting
 programs removed and the controller-button codepoints filled in. Regenerate it
 with (needs fonttools):
 
-    tools/make_font.py /path/to/NotoSans-Regular.ttf web/assets/font.ttf
+    tools/make_font.py /path/to/NotoSans-Regular.ttf --output web/assets/font.ttf
 
 Noto Sans is Copyright the Noto Project Authors and licensed as follows.
 

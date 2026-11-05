@@ -5,7 +5,7 @@
 //! ```text
 //! cargo run --release --example emit_difftest -- <nro> [--out <outdir>]
 //! cargo run --release --example emit_difftest -- <title> --keys <prod.keys> --from-frame <n>
-//! node tools/emit_difftest.mjs <outdir>
+//! node tools/emit_difftest.mjs --out=<outdir>
 //! ```
 mod common;
 
@@ -201,5 +201,5 @@ fn main() {
         println!("  {insn:#010x}  {count:>6}  {}", disassemble(*insn));
     }
 
-    println!("now run: node tools/emit_difftest.mjs {out_dir}");
+    println!("now run: node tools/emit_difftest.mjs --out={out_dir}");
 }

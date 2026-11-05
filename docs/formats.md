@@ -22,7 +22,7 @@ NCA, NSP/XCI, RomFS, tickets, NSO/NRO, NPDM and the range-reading stack.
 
 ## `crates/switch-core/examples/romfs_selftest.rs`
 
-- RomFS has no IVFC verification, so wrong bytes from the HostSource -> NCA window -> AES-CTR -> compression/cache stack are silently served. The self-test relies on the invariant that a range's bytes must not depend on how it is read (whole, chunked, reversed, with evicting reads between). Samples target file edges and 64 KiB block boundaries (`compressed.rs` caches `CACHED_BLOCKS`, 4). `SEED`, `WINDOW`, and `INJECT=1` (canary that must be detected) control it.
+- RomFS has no IVFC verification, so wrong bytes from the HostSource -> NCA window -> AES-CTR -> compression/cache stack are silently served. The self-test relies on the invariant that a range's bytes must not depend on how it is read (whole, chunked, reversed, with evicting reads between). Samples target file edges and 64 KiB block boundaries (`compressed.rs` caches `CACHED_BLOCKS`, 4). `--seed`, `--window`, and `--inject` (canary that must be detected) control it.
 
 ## `crates/switch-core/src/nsp.rs`
 

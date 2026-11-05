@@ -4,9 +4,10 @@
 Subsets a stock font, drops TrueType hinting, and maps Nintendo's private-use
 button glyphs to matching characters.
 
-Usage: tools/make_font.py <input.ttf> <output.ttf>
+Usage: tools/make_font.py <input.ttf> --output <output.ttf>
 """
 
+import argparse
 import sys
 
 from fontTools import subset
@@ -24,10 +25,12 @@ BUTTON_GLYPHS = {
 }
 
 
-def main(argv):
-    if len(argv) != 3:
-        sys.exit(__doc__)
-    source, output = argv[1], argv[2]
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("source", help="the stock font to subset")
+    parser.add_argument("--output", required=True, help="where the shared font is written")
+    args = parser.parse_args()
+    source, output = args.source, args.output
 
     subset.main([
         source,
@@ -52,4 +55,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    main()

@@ -2,14 +2,16 @@
 // under V8 and checks it left the guest state the interpreter left.
 //
 //   cargo run --release --example emit_difftest -- <target>
-//   node tools/emit_difftest.mjs [outdir]
+//   node tools/emit_difftest.mjs [--out=<dir>] [--inject]
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { commandLine } from './common.mjs';
 
-const dir = process.argv[2] || 'target/emit-difftest';
-// `INJECT=1` corrupts one expected register and one NZCV; exactly two failures
+const { flag, has } = commandLine();
+const dir = flag('out') || 'target/emit-difftest';
+// `--inject` corrupts one expected register and one NZCV; exactly two failures
 // must be reported.
-const inject = process.env.INJECT === '1';
+const inject = has('inject');
 // Split from the bytes: a selftest manifest outgrows the longest string V8 can hold.
 const raw = readFileSync(join(dir, 'manifest.txt'));
 const manifest = [];
@@ -339,8 +341,8 @@ console.log(`${handedBack} handed their first instruction back to the interprete
 if (inject) {
   const ok = failed === 2;
   console.log(ok
-    ? 'INJECT: both planted differences were reported, so the check is live'
-    : `INJECT: expected exactly 2 failures, got ${failed} -- the check is not reading what it thinks`);
+    ? '--inject: both planted differences were reported, so the check is live'
+    : `--inject: expected exactly 2 failures, got ${failed} -- the check is not reading what it thinks`);
   process.exit(ok ? 0 : 1);
 }
 process.exit(failed ? 1 : 0);

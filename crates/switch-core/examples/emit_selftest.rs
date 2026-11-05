@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run --release --example emit_selftest
-//! node tools/emit_difftest.mjs target/emit-selftest
+//! node tools/emit_difftest.mjs --out=target/emit-selftest
 //! ```
 
 mod common;
@@ -327,7 +327,7 @@ fn main() {
          {rewrote} that stored over their terminator)",
         buckets.len()
     );
-    println!("now run: node tools/emit_difftest.mjs {out_dir}");
+    println!("now run: node tools/emit_difftest.mjs --out={out_dir}");
 }
 
 /// What the vector registers hold for a seed set besides noise: `specials` or `doubles`.

@@ -1,15 +1,15 @@
 // Check that the browser build runs the blocks it emits, against the
 // interpreter, on small guest loops:
-//   node tools/jit_wasm_check.mjs [switch_wasm_bg.wasm]
+//   node tools/jit_wasm_check.mjs [--wasm=<switch_wasm_bg.wasm>]
 //
 // Needs `make wasm` to have been run.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { repoRoot } from './common.mjs';
+import { commandLine, repoRoot } from './common.mjs';
 
 const out = join(repoRoot, 'target/wasm32-unknown-unknown/debug');
-const wasmPath = process.argv[2] || join(out, 'switch_wasm_bg.wasm');
+const wasmPath = commandLine().flag('wasm') || join(out, 'switch_wasm_bg.wasm');
 
 // Node cannot resolve `@host/files`, so point it at a shim that refuses.
 const shim =
