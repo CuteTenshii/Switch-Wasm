@@ -50,8 +50,10 @@ pub(super) fn alpha_coverage(alpha: f32, count: u32) -> u32 {
     }
 }
 
-fn edge(a: ScreenVertex, b: ScreenVertex, px: f32, py: f32) -> f32 {
-    (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x)
+/// In f64: near-plane clipping leaves vertices hundreds of millions of pixels out, where f32 products lose whole pixels.
+fn edge(a: ScreenVertex, b: ScreenVertex, px: f32, py: f32) -> f64 {
+    (f64::from(b.x) - f64::from(a.x)) * (f64::from(py) - f64::from(a.y))
+        - (f64::from(b.y) - f64::from(a.y)) * (f64::from(px) - f64::from(a.x))
 }
 
 fn is_top_left(a: ScreenVertex, b: ScreenVertex) -> bool {
@@ -67,7 +69,7 @@ pub struct TriangleSetup {
     v2: ScreenVertex,
     /// The caller's winding was clockwise, so `w1` and `w2` swap back.
     clockwise: bool,
-    area: f32,
+    area: f64,
     /// Whether each of the edges `v0-v1`, `v1-v2`, `v2-v0` is a top or left
     /// one, in that order.
     top_left: [bool; 3],
@@ -111,7 +113,7 @@ impl TriangleSetup {
     }
 
     /// The three edge functions at `(px, py)`, in `top_left` order.
-    fn edges(&self, px: f32, py: f32) -> [f32; 3] {
+    fn edges(&self, px: f32, py: f32) -> [f64; 3] {
         [
             edge(self.v0, self.v1, px, py),
             edge(self.v1, self.v2, px, py),
@@ -120,8 +122,12 @@ impl TriangleSetup {
     }
 
     /// `w0` is opposite `v0` (edge `v1-v2`), and so on.
-    fn weights_from(&self, e: [f32; 3]) -> [f32; 3] {
-        let (w0, w1, w2) = (e[1] / self.area, e[2] / self.area, e[0] / self.area);
+    fn weights_from(&self, e: [f64; 3]) -> [f32; 3] {
+        let (w0, w1, w2) = (
+            (e[1] / self.area) as f32,
+            (e[2] / self.area) as f32,
+            (e[0] / self.area) as f32,
+        );
         if self.clockwise {
             [w0, w2, w1]
         } else {
@@ -138,7 +144,7 @@ impl TriangleSetup {
     /// Weights at `(px, py)`, or `None` where the fill rule leaves it uncovered.
     pub fn coverage(&self, px: f32, py: f32) -> Option<[f32; 3]> {
         let e = self.edges(px, py);
-        let inside = |value: f32, top_left: bool| value > 0.0 || (top_left && value == 0.0);
+        let inside = |value: f64, top_left: bool| value > 0.0 || (top_left && value == 0.0);
         (0..3)
             .all(|i| inside(e[i], self.top_left[i]))
             .then(|| self.weights_from(e))

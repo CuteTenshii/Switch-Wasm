@@ -19,7 +19,7 @@ Status, lowest to highest:
 
 | Title | Title ID | Version | Status | How far it gets | Measured |
 |---|---|---|---|---|---|
-| Minecraft | 0100D71004694000 | 1.0.0 | Menus | Frame 20 (16.4B steps, 110 draws) shows the world cleanly on the WebGPU device; the software rasterizer draws the right half wrong. On 2026-10-07, with <kbd>A</kbd>, it reached the Play screen (Worlds, Friends, Servers); creating a world needs menu navigation, so gameplay is untested. | 2026-10-13 |
+| Minecraft | 0100D71004694000 | 1.0.0 | Menus | Frame 20 (16.4B steps, 110 draws) shows the world cleanly, and the software rasterizer and the WebGPU device agree to within 3/255. On 2026-10-07, with <kbd>A</kbd>, it reached the Play screen (Worlds, Friends, Servers); creating a world needs menu navigation, so gameplay is untested. | 2026-10-13 |
 | Mario Kart 8 Deluxe | 0100152000022000 | 1.0.0 | Menus | Its title screen, at frame 146 by 4.4B steps. | 2026-10-13 |
 | Just Dance 2017 | 0100BCE000598000 | 1.0.0 | Menus | In the browser: dancer card creation and the song carousel, with its VP8 videos playing correctly. | 2026-10-07 |
 | Asphalt 9: Legends | 01007B000C834000 | 1.3.1 | Boots | Title splash, then "Connection error: could not connect to the server to launch Asphalt 9 (error 2)". It needs Gameloft's servers. | 2026-10-07 |
