@@ -61,19 +61,6 @@ pub extern "C" fn switch_get_reg(idx: u32) -> u64 {
     session().cpu.read_x(idx as u8)
 }
 
-/// Current PC.
-#[no_mangle]
-pub extern "C" fn switch_get_pc() -> u32 {
-    session().cpu.get_pc()
-}
-
-/// The guest clock in CPU cycles. It idles forward when every thread is blocked;
-/// [`switch_get_steps`] is the instruction count.
-#[no_mangle]
-pub extern "C" fn switch_get_cycles() -> u64 {
-    session().cpu.cycles
-}
-
 /// Instructions actually retired.
 #[no_mangle]
 pub extern "C" fn switch_get_steps() -> u64 {
