@@ -167,7 +167,7 @@ fn dump_wgsl(vs: &str, fs: &str) {
     }
 }
 
-/// `GPU_ONLY`'s value: one draw index, or the half-open range `a..b`.
+/// `--only`'s value: one draw index, or the half-open range `a..b`.
 pub fn draw_range(spec: &str) -> Option<std::ops::Range<u32>> {
     match spec.trim().split_once("..") {
         Some((from, to)) => Some(from.trim().parse().ok()?..to.trim().parse().ok()?),
@@ -415,9 +415,9 @@ pub struct Gpu {
     sync_every_present: bool,
     /// Multisample resampling pipelines. See [`resample_wgsl`].
     resample_pipelines: std::collections::HashMap<ResampleKey, wgpu::RenderPipeline>,
-    /// `GPU_WEB_LIMITS=1`: hide native-only features so a native run takes the browser's routes.
+    /// `--web-limits` on `screenshot_gpu`: hide native-only features so a native run takes the browser's routes.
     web_limits: bool,
-    /// `GPU_DEVICE_MSAA=1`: let the device multisample where it can. Off: see [`Gpu::route`].
+    /// `--device-msaa` on `screenshot_gpu`: let the device multisample where it can. Off: see [`Gpu::route`].
     device_msaa: bool,
     /// Device rejections, written by the uncaptured-error callback.
     failed: std::sync::Arc<std::sync::Mutex<DeviceErrors>>,
@@ -428,9 +428,9 @@ pub struct Gpu {
     deferred_readbacks: bool,
     /// Tests share a device, which one test ending must not destroy.
     device_is_shared: bool,
-    /// `GPU_DEFER_READBACKS=1`: never wait for readbacks, to reproduce a browser natively.
+    /// `--defer-readbacks` on `screenshot_gpu`: never wait for readbacks, to reproduce a browser natively.
     defer_readbacks: bool,
-    /// `GPU_INTERLEAVE=1`: interleave fallback draws into device frames even with late readbacks.
+    /// `--interleave` on `screenshot_gpu`: interleave fallback draws into device frames even with late readbacks.
     /// Slightly wrong frames for speed; off by default.
     interleave: bool,
     /// Whether the rasterizer has the whole frame. Latches; released after
@@ -464,9 +464,9 @@ pub struct Gpu {
     pub expanded: u64,
     pub multisampled: u64,
     pub per_pixel: u64,
-    /// Which draw of the current frame this is; only `GPU_ONLY` reads it.
+    /// Which draw of the current frame this is; only `--only` reads it.
     in_frame: u32,
-    /// Phase timings; always on under wasm, `GPU_TIMES=1` natively.
+    /// Phase timings; always on under wasm, `--times` on `screenshot_gpu`.
     times: Option<Times>,
     /// What every draw's `Uploads::of` read, by category.
     uploaded: UploadBytes,
@@ -481,7 +481,7 @@ pub struct Gpu {
     gpu_texture_bytes: u64,
     /// Textures `prepare` read and has not watched yet.
     to_remember: Vec<(TextureKey, std::sync::Arc<[u8]>, u64)>,
-    /// `GPU_ONLY=<i>` or `<a>..<b>`: render only those draws of each frame here, for bisecting.
+    /// `--only <i>` or `<a>..<b>`: render only those draws of each frame here, for bisecting.
     only: Option<std::ops::Range<u32>>,
 }
 

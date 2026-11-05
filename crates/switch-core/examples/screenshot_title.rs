@@ -1,62 +1,106 @@
 //! Boot a program and write its Nth presented frame to a PPM:
-//! `screenshot_title <target> [prod.keys] [title.keys] <out.ppm> [frame] [--font <ttf>]`.
+//! `screenshot_title <target> --out <out.ppm> [--keys <prod.keys>] [--frame <n>]`.
 //!
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
-//! Knobs beyond [`common::Debug`]: `SWITCH_FIRMWARE`, `STEPS`, `PROFILE`, `STACKS`,
-//! `COVER`, `WATCH_MEM`, `SCAN_MEM`, `DUMP_VERTS`, `DUMP_SURFACE`, `POKE_U32`,
-//! `POKE_AT`, `GATE_SNIFF`, `FIND_MAGIC`, and `PRESS` as `boot_nsp` takes it.
 mod common;
 
+use clap::Parser;
 use common::profile::Profile;
 use common::Flow;
-use std::env;
 
-const USAGE: &str =
-    "screenshot_title <target> [prod.keys] [title.keys] <out.ppm> [frame] [--font <ttf>]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Where the frame is written.
+    #[arg(long, value_name = "OUT.PPM")]
+    out: String,
+    /// The presented frame to write.
+    #[arg(long, default_value_t = 1)]
+    frame: u64,
+    /// Instructions to run; unlimited for a retail title, 200 million for an `.nro`.
+    #[arg(long)]
+    steps: Option<u64>,
+    /// Sample the pc every this many instructions.
+    #[arg(long, default_value_t = 0, value_name = "INTERVAL")]
+    profile: u64,
+    /// Sample call stacks too.
+    #[arg(long)]
+    stacks: bool,
+    /// Report which instructions in this `<lo>:<hi>` pc range ran.
+    #[arg(long, value_parser = bounds, value_name = "LO:HI")]
+    cover: Option<(u32, u32)>,
+    /// Report the step at which 4 KiB at this address first holds a non-zero word.
+    #[arg(long, value_parser = common::hex32, value_name = "ADDR")]
+    watch_mem: Option<u32>,
+    /// Report the non-zero spans of these `<addr>:<size>` regions at the end.
+    #[arg(long, value_delimiter = ',', value_parser = common::span, value_name = "ADDR:SIZE")]
+    scan_mem: Vec<(u32, u32)>,
+    /// Print three vertices' worth of f32s at each address at the end.
+    #[arg(long, value_delimiter = ',', value_parser = common::hex32, value_name = "ADDR")]
+    dump_verts: Vec<u32>,
+    /// Write block-linear surfaces as PPMs: `<addr>:<w>x<h>:<format>[:<block height>]`.
+    #[arg(long, value_delimiter = ',', value_name = "SPEC")]
+    dump_surface: Vec<String>,
+    /// Keep writing this `<addr>:<value>` word, once at `--poke-at` if given.
+    #[arg(long, value_parser = bounds, value_name = "ADDR:VALUE")]
+    poke_u32: Option<(u32, u32)>,
+    /// The step to poke at.
+    #[arg(long, value_name = "STEP")]
+    poke_at: Option<u64>,
+    /// Find the title's gate word and keep it zero.
+    #[arg(long)]
+    gate_sniff: bool,
+    /// Print where these four bytes sit in guest memory.
+    #[arg(long, value_name = "TEXT")]
+    find_magic: Option<String>,
+}
 
-/// Steps between the periodic memory checks and pokes, and the `STACKS` sample interval.
+/// Steps between the periodic memory checks and pokes, and the `--stacks` sample interval.
 const DEFAULT_INTERVAL: u64 = 4096;
 
-/// The default `STEPS` for an `.nro`.
+/// The default `--steps` for an `.nro`.
 const HOMEBREW_STEPS: u64 = 200_000_000;
 
 /// A hex `<lo>:<hi>` pair.
-fn env_bounds(name: &str) -> Option<(u32, u32)> {
-    let raw = env::var(name).ok()?;
-    let (lo, hi) = raw.split_once(':')?;
-    Some((common::hex(lo), common::hex(hi)))
+fn bounds(text: &str) -> Result<(u32, u32), String> {
+    let (lo, hi) = text
+        .split_once(':')
+        .ok_or_else(|| format!("{text:?} is not <hex>:<hex>"))?;
+    Ok((common::hex32(lo)?, common::hex32(hi)?))
 }
 
 fn main() {
-    let args = common::program_args(USAGE);
-    let program = args.open_program();
-    let out = args.need(0).to_string();
-    let want = args.rest_num(1).unwrap_or(1);
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let program = cli.target.open_program();
+    let (out, want) = (&cli.out, cli.frame);
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     program.boot(&mut cpu);
 
-    let mut debug = common::Debug::from_env();
+    let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
-    let mut press = common::Press::from_env();
+    let mut press = common::Press::from_flags();
 
-    let stacks = env::var("STACKS").is_ok();
-    let interval = match (common::env_u64("PROFILE", 0), stacks) {
+    let stacks = cli.stacks;
+    let interval = match (cli.profile, stacks) {
         (0, true) => DEFAULT_INTERVAL,
         (given, _) => given,
     };
     let mut profile = Profile::new(interval, u64::from(stacks));
 
-    let cover = env_bounds("COVER");
+    let cover = cli.cover;
     let mut covered: Vec<bool> = cover
         .map(|(lo, hi)| vec![false; ((hi - lo) / 4) as usize])
         .unwrap_or_default();
-    let watch_mem = common::env_hex("WATCH_MEM");
+    let watch_mem = cli.watch_mem;
     let mut seen_nonzero = false;
-    let poke = env_bounds("POKE_U32");
-    let poke_at: Option<u64> = env::var("POKE_AT").ok().and_then(|v| v.parse().ok());
-    let gate_sniff = env::var("GATE_SNIFF").is_ok();
+    let poke = cli.poke_u32;
+    let poke_at = cli.poke_at;
+    let gate_sniff = cli.gate_sniff;
     let mut gate: Option<u32> = None;
 
     // Homebrew that never presents the frame stops; a retail title needs billions of steps.
@@ -69,7 +113,7 @@ fn main() {
     let run = common::drive(
         &mut cpu,
         pace,
-        common::env_u64("STEPS", default_steps),
+        cli.steps.unwrap_or(default_steps),
         |cpu, done| {
             if cpu.nv.gpu.frames >= want {
                 return Flow::Stop;
@@ -148,7 +192,7 @@ fn main() {
     if watch_mem.is_some() && !seen_nonzero {
         println!("[watch-mem] never non-zero");
     }
-    if let Ok(magic) = env::var("FIND_MAGIC") {
+    if let Some(magic) = &cli.find_magic {
         let wanted = u32::from_le_bytes(
             magic
                 .as_bytes()
@@ -167,7 +211,7 @@ fn main() {
         }
         println!("[find] {magic}: {hits} hit(s)");
     }
-    for (lo, hi) in common::env_spans("SCAN_MEM") {
+    for &(lo, hi) in &cli.scan_mem {
         let mut spans = Vec::new();
         let mut span: Option<u32> = None;
         for at in (lo..hi).step_by(4) {
@@ -189,16 +233,13 @@ fn main() {
             println!("    {at:#x} .. +{len:#x}");
         }
     }
-    if let Ok(list) = env::var("DUMP_VERTS") {
-        for spec in list.split(',') {
-            let at = common::hex(spec);
-            let f: Vec<f32> = (0..45u32)
-                .map(|k| f32::from_bits(cpu.mem.read_u32(at + k * 4).unwrap_or(0)))
-                .collect();
-            println!("  {at:#x} as f32: {:?}", &f[..15]);
-            println!("  {at:#x} +60    : {:?}", &f[15..30]);
-            println!("  {at:#x} +120   : {:?}", &f[30..45]);
-        }
+    for &at in &cli.dump_verts {
+        let f: Vec<f32> = (0..45u32)
+            .map(|k| f32::from_bits(cpu.mem.read_u32(at + k * 4).unwrap_or(0)))
+            .collect();
+        println!("  {at:#x} as f32: {:?}", &f[..15]);
+        println!("  {at:#x} +60    : {:?}", &f[15..30]);
+        println!("  {at:#x} +120   : {:?}", &f[30..45]);
     }
 
     profile.report();
@@ -208,10 +249,8 @@ fn main() {
     debug.report();
     debug.stop_state(&cpu);
 
-    if let Ok(list) = env::var("DUMP_SURFACE") {
-        for spec in list.split(',') {
-            dump_surface(&cpu, spec, &out);
-        }
+    for spec in &cli.dump_surface {
+        dump_surface(&cpu, spec, out);
     }
 
     let fb = &cpu.nv.gpu.framebuffer;
@@ -219,18 +258,18 @@ fn main() {
         println!("no frame");
         return;
     }
-    common::write_ppm(&out, fb);
+    common::write_ppm(out, fb);
 }
 
-/// One `DUMP_SURFACE` entry: `<addr>:<w>x<h>:<format>[:<block height>]`.
+/// One `--dump-surface` entry: `<addr>:<w>x<h>:<format>[:<block height>]`.
 fn dump_surface(cpu: &switch_core::cpu::Cpu, spec: &str, out: &str) {
     use switch_core::gpu::surface::{block_linear_offset, ColorFormat};
     let fields: Vec<&str> = spec.split(':').collect();
     let parsed = (|| {
-        let addr = common::hex(fields.first()?);
+        let addr = common::parse_hex32(fields.first()?)?;
         let (w, h) = fields.get(1)?.split_once('x')?;
         let (w, h): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
-        let format = ColorFormat::from_raw(common::hex(fields.get(2)?)).ok()?;
+        let format = ColorFormat::from_raw(common::parse_hex32(fields.get(2)?)?).ok()?;
         let block_height = fields.get(3).and_then(|v| v.parse().ok()).unwrap_or(16);
         Some((addr, w, h, format, block_height))
     })();

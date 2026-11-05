@@ -633,7 +633,7 @@ impl Gpu {
             self.ask_for_all();
         }
         // `Wait` blocks natively and does nothing on the web, where the present waits for a later slice.
-        // `GPU_DEFER_READBACKS=1` skips it to reproduce the browser natively.
+        // `--defer-readbacks` skips it to reproduce the browser natively.
         let _ = timed!(self, flush_wait, {
             if self.defer_readbacks {
                 self.device.poll(wgpu::PollType::Poll)

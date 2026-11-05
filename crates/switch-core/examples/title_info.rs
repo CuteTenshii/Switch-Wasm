@@ -1,20 +1,29 @@
 //! Prints a title's NACP control data and icon from an `.nsp`, `.xci` or Control `.nca`.
 //!
-//! Usage: cargo run -p switch-core --example title_info -- <container> <prod.keys> [title.keys] [icon_out.jpg]
+//! Usage: cargo run -p switch-core --example title_info -- <container> --keys <prod.keys> [--icon <out.jpg>]
 mod common;
 
+use clap::Parser;
 use switch_core::source::{ByteSource, FileSource};
 
-const USAGE: &str = "title_info <container> <prod.keys> [title.keys] [icon_out.jpg]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    /// Write the icon here.
+    #[arg(long, value_name = "OUT")]
+    icon: Option<String>,
+}
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let mut keys = args.keys();
-    if let Ok(src) = FileSource::open(&args.container) {
-        println!("{}: {} bytes", args.container, src.len());
+    let cli = Cli::parse();
+    let container = &cli.target.target;
+    let mut keys = cli.target.keys();
+    if let Ok(src) = FileSource::open(container) {
+        println!("{container}: {} bytes", src.len());
     }
 
-    let control = match common::open_control(&args.container, &mut keys) {
+    let control = match common::open_control(container, &mut keys) {
         Ok(control) => control,
         Err(e) => {
             println!("control data unavailable: {e}");
@@ -76,7 +85,7 @@ fn main() {
         control.icon_mime()
     );
 
-    if let Some(path) = args.rest(0) {
+    if let Some(path) = &cli.icon {
         if control.icon.is_empty() {
             println!("no icon to write");
         } else {

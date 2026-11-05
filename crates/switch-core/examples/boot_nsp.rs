@@ -1,24 +1,35 @@
 //! Boot an `.nsp`, `.xci` or Program `.nca` from the command line.
 //!
-//! Usage: cargo run -p switch-core --example boot_nsp -- <container> <prod.keys> [title.keys] [max_steps]
-//!
-//! `PROFILE=<interval>` samples the pc by thread, page and caller. `CORES=<n>` runs
-//! n more guest cores on host threads; `STOP_FRAME=<n>` stops at frame n; `NO_DRAW=1`
-//! draws nothing.
-//! `SHOT=<out.ppm>` writes the last presented frame.
-//! `PRESS=<buttons>@<interval>` taps buttons periodically, e.g. `PRESS=A+DOWN@300000000`.
-//! `DUMP=`, `TRAP_WRITE=`, `TRAP_READ=` and `WATCH_PC=` are described in [`common::Debug`].
+//! Usage: cargo run -p switch-core --example boot_nsp -- <container> --keys <prod.keys> [flags]
 mod common;
 
+use clap::Parser;
 use common::profile::Profile;
 use common::Flow;
 
-const USAGE: &str = "boot_nsp <container> <prod.keys> [title.keys] [max_steps]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Instructions to run.
+    #[arg(long, default_value_t = 2_000_000)]
+    max_steps: u64,
+    /// Sample the pc by thread, page and caller every this many instructions.
+    #[arg(long, default_value_t = 0, value_name = "INTERVAL")]
+    profile: u64,
+    /// Stop at this presented frame.
+    #[arg(long, default_value_t = u64::MAX, value_name = "N")]
+    stop_frame: u64,
+    /// Write the last presented frame here.
+    #[arg(long, value_name = "OUT.PPM")]
+    shot: Option<String>,
+}
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let max_steps = args.rest_num(0).unwrap_or(2_000_000);
-    let title = args.open();
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let title = cli.target.open();
     println!(
         "program {:016x}: {} file(s) in the ExeFS",
         title.nca.program_id,
@@ -50,17 +61,16 @@ fn main() {
         );
     }
 
-    let mut debug = common::Debug::from_env();
+    let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
-    let mut profile = Profile::new(common::env_u64("PROFILE", 0), 0);
-    let mut press = common::Press::from_env();
+    let mut profile = Profile::new(cli.profile, 0);
+    let mut press = common::Press::from_flags();
     let pace = debug.pace(profile.is_on());
     common::apply_no_draw(&mut cpu);
     let cores = common::start_cores(&mut cpu);
-    let stop_frame = common::env_u64("STOP_FRAME", u64::MAX);
     let started = std::time::Instant::now();
     let mut frames_seen = 0;
-    let run = common::drive(&mut cpu, pace, max_steps, |cpu, done| {
+    let run = common::drive(&mut cpu, pace, cli.max_steps, |cpu, done| {
         debug.tick(cpu, done);
         if cpu.nv.gpu.frames != frames_seen {
             frames_seen = cpu.nv.gpu.frames;
@@ -70,7 +80,7 @@ fn main() {
                 cpu.steps,
                 cpu.steps - cpu.other_core_steps()
             );
-            if frames_seen >= stop_frame {
+            if frames_seen >= cli.stop_frame {
                 return Flow::Stop;
             }
         }
@@ -101,9 +111,9 @@ fn main() {
         );
     }
 
-    if let Ok(out) = std::env::var("SHOT") {
+    if let Some(out) = &cli.shot {
         if !cpu.nv.gpu.framebuffer.is_empty() {
-            common::write_ppm(&out, &cpu.nv.gpu.framebuffer);
+            common::write_ppm(out, &cpu.nv.gpu.framebuffer);
         }
     }
     profile.report();

@@ -229,7 +229,7 @@ impl Engine3D {
         Ok(())
     }
 
-    /// `TRACE_REGS=1`: log which registers changed since the previous draw.
+    /// `--trace regs`: log which registers changed since the previous draw.
     fn trace_reg_diff(&mut self) {
         if !crate::trace::enabled(crate::trace::Trace::Regs) {
             return;

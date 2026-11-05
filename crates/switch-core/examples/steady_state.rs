@@ -1,14 +1,27 @@
 //! Profile a title that presents frames but draws nothing, sampling only after
 //! the Nth presented frame:
-//! `steady_state <container> <prod.keys> [title.keys] [frame] [steps]`.
+//! `steady_state <container> --keys <prod.keys> [--frame <n>] [--steps <n>]`.
 //!
 //! Reports samples per thread, per 4 KiB page, per return address and per call stack.
 mod common;
 
+use clap::Parser;
 use common::profile::Profile;
 use common::{Flow, Pace};
 
-const USAGE: &str = "steady_state <container> <prod.keys> [title.keys] [frame] [steps]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Presented frame to start sampling after.
+    #[arg(long, default_value_t = 60)]
+    frame: u64,
+    /// Instructions to sample once the frame is reached.
+    #[arg(long, default_value_t = DEFAULT_STEPS)]
+    steps: u64,
+}
 
 /// Instructions to sample once the frame is reached.
 const DEFAULT_STEPS: u64 = 200_000_000;
@@ -20,10 +33,9 @@ const STACK_EVERY: u64 = 512;
 const BOOT_BUDGET: u64 = 20_000_000_000;
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let title = args.open();
-    let want_frame = args.rest_num(0).unwrap_or(60);
-    let steps = args.rest_num(1).unwrap_or(DEFAULT_STEPS);
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let title = cli.target.open();
+    let (want_frame, steps) = (cli.frame, cli.steps);
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();

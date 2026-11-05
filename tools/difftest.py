@@ -644,9 +644,10 @@ def run(work, asm_text, instructions, dump_bytes, inputs_bytes, prologue_insns):
     subprocess.run(
         ["cargo", "run", "--quiet", "--release", "-p", "switch-core",
          "--example", "difftest", "--",
-         os.path.join(work, "code.bin"), os.path.join(work, "inputs.bin"),
-         os.path.join(work, "emu.bin"), hex(sec[".data"][0]),
-         str(dump_bytes)],
+         os.path.join(work, "code.bin"),
+         "--inputs", os.path.join(work, "inputs.bin"),
+         "--out", os.path.join(work, "emu.bin"),
+         "--inputs-addr", hex(sec[".data"][0])],
         cwd=REPO, check=True,
     )
 
@@ -720,8 +721,10 @@ def main():
     subprocess.run(
         ["cargo", "run", "--quiet", "--release", "-p", "switch-core",
          "--example", "difftest", "--",
-         os.path.join(work, "code.bin"), os.path.join(work, "inputs.bin"),
-         os.path.join(work, "emu.bin"), hex(sec[".data"][0])],
+         os.path.join(work, "code.bin"),
+         "--inputs", os.path.join(work, "inputs.bin"),
+         "--out", os.path.join(work, "emu.bin"),
+         "--inputs-addr", hex(sec[".data"][0])],
         cwd=REPO, check=True,
     )
 

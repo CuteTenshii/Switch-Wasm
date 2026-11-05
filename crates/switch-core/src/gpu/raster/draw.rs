@@ -359,7 +359,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         .any(|op| matches!(op, Op::Shfl { .. } | Op::Fswzadd { .. }))
         .then(|| Box::new(std::array::from_fn(|_| Invocation::new())));
 
-    // `TRACE_PIPELINE=1`: this draw's fixed-function state, or why it is
+    // `--trace pipeline`: this draw's fixed-function state, or why it is
     // not describable.
     if crate::trace::enabled(crate::trace::Trace::Pipeline) {
         // `Viewport::flip_y` and the window origin are separate claims.
@@ -374,7 +374,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             Err(e) => crate::traceln!("[pipe] undescribable: {e}"),
         }
     }
-    // `TRACE_UPLOAD=1`: the guest bytes this draw would upload to a device.
+    // `--trace upload`: the guest bytes this draw would upload to a device.
     if crate::trace::enabled(crate::trace::Trace::Upload) {
         match crate::gpu::pipeline::Pipeline::of(engine)
             .map_err(|e| Error::Gpu(format!("pipeline: {e}")))
@@ -440,7 +440,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             Err(e) => crate::traceln!("[rt] cannot resolve: {e:?}"),
         }
     }
-    // `TRACE_CFG=1`: each shader's control flow, as a translator sees it.
+    // `--trace cfg`: each shader's control flow, as a translator sees it.
     if crate::trace::enabled(crate::trace::Trace::Cfg) {
         for (stage, addr, program) in [
             ("vs", vs_binding.addr, &vs_program),
@@ -657,7 +657,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     Ok(())
 }
 
-/// Per-draw fragment accounting for `TRACE_DRAW=1`: which stage fragments died at.
+/// Per-draw fragment accounting for `--trace draw`: which stage fragments died at.
 pub(super) struct DrawTally {
     enabled: bool,
     fs_len: usize,

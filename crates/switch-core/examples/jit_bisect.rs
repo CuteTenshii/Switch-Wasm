@@ -2,17 +2,29 @@
 //! slice after which the two machines disagree. The interpreter is the
 //! reference.
 //!
-//! Usage: jit_bisect <target> [prod.keys] [title.keys] [max_steps] [window] [--font <ttf>]
+//! Usage: jit_bisect <target> [--keys <prod.keys>] [--max-steps <n>] [--window <n>]
 //!
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
 //! Exact only until the first thread switch: the two engines can interleave
 //! threads differently and both be correct.
 mod common;
 
+use clap::Parser;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str =
-    "jit_bisect <target> [prod.keys] [title.keys] [max_steps] [window] [--font <ttf>]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Instructions to compare over.
+    #[arg(long, default_value_t = 2_000_000_000)]
+    max_steps: u64,
+    /// Instructions between comparisons.
+    #[arg(long, default_value_t = 1_000_000)]
+    window: u64,
+}
 
 const SLICE: u64 = 4096;
 
@@ -113,10 +125,10 @@ fn print_jit_stats(cpu: &Cpu) {
 }
 
 fn main() {
-    let args = common::program_args(USAGE);
-    let max_steps = args.rest_num(0).unwrap_or(2_000_000_000);
-    let window = args.rest_num(1).unwrap_or(1_000_000).max(SLICE);
-    let program = args.open_program();
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let max_steps = cli.max_steps;
+    let window = cli.window.max(SLICE);
+    let program = cli.target.open_program();
 
     println!("pass 1: comparing every {window} instructions, up to {max_steps}");
     let mut reference = boot(&program, false);

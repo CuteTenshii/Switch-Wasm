@@ -9,7 +9,7 @@
 //!
 //! The final range must match exactly; samples need only be close.
 
-use std::env;
+use clap::Parser;
 use std::fs;
 use std::path::Path;
 use switch_core::opus::{Decoder, MultiStreamDecoder};
@@ -18,11 +18,14 @@ fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
+#[derive(Parser)]
+struct Cli {
+    /// The vector directory.
+    dir: String,
+}
+
 fn main() {
-    let dir = env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: opus_difftest <vector directory>");
-        std::process::exit(2);
-    });
+    let dir = Cli::parse().dir;
     let mut names: Vec<String> = fs::read_dir(Path::new(&dir))
         .expect("read vector directory")
         .filter_map(|e| {

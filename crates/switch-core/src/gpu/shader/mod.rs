@@ -248,7 +248,7 @@ pub fn decode_program_from_memory_recording(
         },
     )
     .inspect(|program| {
-        // `TRACE_SHADER=1` prints every decoded program in walk order.
+        // `--trace shader` prints every decoded program in walk order.
         if crate::trace::enabled(crate::trace::Trace::Shader) {
             crate::traceln!(
                 "[shader] program at {addr:#x}, {} instructions",

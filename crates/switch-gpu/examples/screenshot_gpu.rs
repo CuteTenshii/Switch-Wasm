@@ -1,24 +1,66 @@
 //! `screenshot_title` with the GPU backend installed; `cmp` the two PPMs to
 //! check the backend against the software reference:
-//! `screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [--font <ttf>]`.
-//! `PRESS=<buttons>@<interval>` taps buttons on the way, as in `boot_nsp`.
+//! `screenshot_gpu <target> --out <out.ppm> [--keys <prod.keys>] [--frame <n>]`.
 #[path = "../../switch-core/examples/common/mod.rs"]
 mod common;
 
+use clap::Parser;
 use common::Flow;
 
-const USAGE: &str =
-    "screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [--font <ttf>]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Where the frame is written.
+    #[arg(long, value_name = "OUT.PPM")]
+    out: String,
+    /// The presented frame to write.
+    #[arg(long, default_value_t = 1)]
+    frame: u64,
+    /// Instructions to run.
+    #[arg(long, default_value_t = u64::MAX)]
+    steps: u64,
+    /// Dock after this presented frame, like a real dock mid-run (`--docked` docks at boot).
+    #[arg(long, default_value_t = u64::MAX, value_name = "FRAME")]
+    dock_at: u64,
+    #[command(flatten)]
+    device: Device,
+}
+
+/// The device's diagnostic switches.
+#[derive(clap::Args)]
+struct Device {
+    #[arg(long)]
+    defer_readbacks: bool,
+    #[arg(long)]
+    sync_every_present: bool,
+    #[arg(long)]
+    interleave: bool,
+    #[arg(long)]
+    web_limits: bool,
+    #[arg(long)]
+    device_msaa: bool,
+    #[arg(long)]
+    times: bool,
+    /// Draw only this draw index, or the half-open range `a..b`.
+    #[arg(long, value_parser = draw_range, value_name = "N|A..B")]
+    only: Option<std::ops::Range<u32>>,
+}
+
+fn draw_range(spec: &str) -> Result<std::ops::Range<u32>, String> {
+    switch_gpu::draw_range(spec).ok_or_else(|| format!("{spec:?} is not N or A..B"))
+}
 
 fn main() {
-    let args = common::program_args(USAGE);
-    let program = args.open_program();
-    let out = args.need(0).to_string();
-    let want = args.rest_num(1).unwrap_or(1);
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let program = cli.target.open_program();
+    let (out, want) = (&cli.out, cli.frame);
 
     let mut gpu = match switch_gpu::Gpu::open() {
         Ok(mut gpu) => {
-            configure(&mut gpu);
+            configure(&mut gpu, &cli.device);
             Some(gpu)
         }
         Err(why) => {
@@ -29,8 +71,7 @@ fn main() {
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    // Booting docks at once for `DOCKED=1`; `DOCK_AT=<frame>` docks after that frame.
-    let dock_at = common::env_u64("DOCK_AT", u64::MAX);
+    let dock_at = cli.dock_at;
     program.boot(&mut cpu);
 
     // Installed on the session so it precedes and covers every channel.
@@ -38,29 +79,24 @@ fn main() {
         println!("[gpu] installed");
         cpu.nv.gpu.set_renderer(Box::new(gpu));
     }
-    let mut debug = common::Debug::from_env();
+    let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
-    let mut press = common::Press::from_env();
+    let mut press = common::Press::from_flags();
     let pace = debug.pace(false);
-    let run = common::drive(
-        &mut cpu,
-        pace,
-        common::env_u64("STEPS", u64::MAX),
-        |cpu, done| {
-            debug.tick(cpu, done);
-            if let Some(press) = press.as_mut() {
-                press.tick(cpu, done);
-            }
-            if cpu.nv.gpu.frames >= dock_at {
-                cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
-            }
-            if cpu.nv.gpu.frames >= want {
-                Flow::Stop
-            } else {
-                Flow::Continue
-            }
-        },
-    );
+    let run = common::drive(&mut cpu, pace, cli.steps, |cpu, done| {
+        debug.tick(cpu, done);
+        if let Some(press) = press.as_mut() {
+            press.tick(cpu, done);
+        }
+        if cpu.nv.gpu.frames >= dock_at {
+            cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
+        }
+        if cpu.nv.gpu.frames >= want {
+            Flow::Stop
+        } else {
+            Flow::Continue
+        }
+    });
     common::report(&cpu, &run);
     debug.report();
     debug.stop_state(&cpu);
@@ -70,22 +106,15 @@ fn main() {
         println!("no frame");
         return;
     }
-    common::write_ppm(&out, &cpu.nv.gpu.framebuffer);
+    common::write_ppm(out, &cpu.nv.gpu.framebuffer);
 }
 
-/// The device's diagnostic switches, from the environment.
-fn configure(gpu: &mut switch_gpu::Gpu) {
-    let on = |name: &str| std::env::var(name).is_ok();
-    gpu.set_defer_readbacks(on("GPU_DEFER_READBACKS"));
-    gpu.set_sync_every_present(on("GPU_SYNC_EVERY_PRESENT"));
-    gpu.set_interleave(on("GPU_INTERLEAVE"));
-    gpu.set_web_limits(on("GPU_WEB_LIMITS"));
-    gpu.set_device_msaa(on("GPU_DEVICE_MSAA"));
-    gpu.set_times(on("GPU_TIMES"));
-    gpu.set_only(
-        std::env::var("GPU_ONLY")
-            .ok()
-            .as_deref()
-            .and_then(switch_gpu::draw_range),
-    );
+fn configure(gpu: &mut switch_gpu::Gpu, device: &Device) {
+    gpu.set_defer_readbacks(device.defer_readbacks);
+    gpu.set_sync_every_present(device.sync_every_present);
+    gpu.set_interleave(device.interleave);
+    gpu.set_web_limits(device.web_limits);
+    gpu.set_device_msaa(device.device_msaa);
+    gpu.set_times(device.times);
+    gpu.set_only(device.only.clone());
 }

@@ -1,16 +1,28 @@
 //! Disassemble a flat image dumped by `dump_exefs` at its real load address:
-//! `disasm_flat <file.bin> <base> <addr> [count]`.
+//! `disasm_flat <file.bin> --base <base> --addr <addr> [--count <n>]`.
 mod common;
 
+use clap::Parser;
 use switch_core::disasm::disassemble;
 
-const USAGE: &str = "disasm_flat <file.bin> <base> <addr> [count]";
+#[derive(Parser)]
+struct Cli {
+    file: String,
+    /// Hexadecimal load address of the image.
+    #[arg(long, value_parser = common::hex32)]
+    base: u32,
+    /// Hexadecimal address to start at.
+    #[arg(long, value_parser = common::hex32)]
+    addr: u32,
+    /// Instructions to print.
+    #[arg(long, default_value_t = 48)]
+    count: u32,
+}
 
 fn main() {
-    let data = common::read(common::arg(1, USAGE));
-    let base = common::hex(&common::arg(2, USAGE));
-    let addr = common::hex(&common::arg(3, USAGE));
-    let count = common::opt_num(4).unwrap_or(48) as u32;
+    let cli = Cli::parse();
+    let data = common::read(&cli.file);
+    let (base, addr, count) = (cli.base, cli.addr, cli.count);
     for i in 0..count {
         let va = addr.wrapping_add(i * 4);
         let Some(word) = data

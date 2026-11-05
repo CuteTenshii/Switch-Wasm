@@ -9,7 +9,7 @@ const INSTALLED: &str = "installed";
 
 /// Open a device and install the backend on the session's `Gpu`,
 /// returning a message. `device_msaa` and `interleave` are the browser's
-/// `GPU_DEVICE_MSAA` and `GPU_INTERLEAVE`.
+/// `--device-msaa` and `--interleave`.
 #[wasm_bindgen]
 pub async fn switch_gpu_open(device_msaa: bool, interleave: bool) -> String {
     let instance = switch_gpu::wgpu::Instance::new(

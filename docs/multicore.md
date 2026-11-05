@@ -36,7 +36,7 @@ Core 0 (the system worker) is the only kernel: it runs the scheduler, every SVC,
 - Before memory changes under guest code (the memory SVCs, `ldr:ro` loads and unloads), and before `SetThreadActivity` and `GetThreadContext3`, core 0 recalls every lent thread: Unity's garbage collector pauses every thread and reads its registers to scan stacks, and a lent thread went on running with stale registers.
 - The kernel's updates of guest mutex, condition-variable and arbiter words are compare-and-swap loops (`update_word`), since guest code on the other cores changes them with exclusives at the same time.
 - `ArbitrateLock` blocks only on exactly `owner | listeners`, as Horizon does. An `svc` from another core arrives late: the owner may have let go and taken the lock back by the fast path meanwhile, and a waiter blocked on a word without the listeners bit is never woken (A Short Hike stalled on such a mutex).
-- Measured natively with `NO_DRAW=1`, 3B core-0 instructions, against one core: Asphalt 9 about 3.5x the frames per second, Just Dance 2019 1.8x, A Short Hike 1.5x, Mario Kart 8 Deluxe 1.25x, Minecraft's boot even. In `wasm_bench --cores=2`, whose software rasterizer on core 0 bounds the frame, Just Dance 2019 is even to slightly ahead.
+- Measured natively with `--no-draw`, 3B core-0 instructions, against one core: Asphalt 9 about 3.5x the frames per second, Just Dance 2019 1.8x, A Short Hike 1.5x, Mario Kart 8 Deluxe 1.25x, Minecraft's boot even. In `wasm_bench --cores=2`, whose software rasterizer on core 0 bounds the frame, Just Dance 2019 is even to slightly ahead.
 
 ## Ordering
 

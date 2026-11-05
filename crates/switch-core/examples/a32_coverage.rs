@@ -1,11 +1,38 @@
 //! Lists the NEON and VFP encodings the interpreter refuses in a 32-bit title's text sections:
-//! `a32_coverage <image> <base> <text length> [<image> <base> <text length>...]`.
+//! `a32_coverage --module <image>:<base>:<text length> [--module ...]`.
 mod common;
 
+use clap::Parser;
 use std::collections::BTreeMap;
 use switch_core::cpu::ExecMode;
 
-const USAGE: &str = "a32_coverage <image> <base> <text length> [<image> <base> <text length>...]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    shared: common::Shared,
+    /// A flat image, its hexadecimal load address and its hexadecimal text length.
+    #[arg(long = "module", required = true, value_parser = module, value_name = "IMAGE:BASE:TEXT")]
+    modules: Vec<Module>,
+}
+
+#[derive(Clone)]
+struct Module {
+    image: String,
+    base: u32,
+    text: usize,
+}
+
+fn module(spec: &str) -> Result<Module, String> {
+    let parts: Vec<&str> = spec.rsplitn(3, ':').collect();
+    let [text, base, image] = parts[..] else {
+        return Err(format!("{spec:?} is not <image>:<base>:<text length>"));
+    };
+    Ok(Module {
+        image: image.to_string(),
+        base: common::hex32(base)?,
+        text: common::hex32(text)? as usize,
+    })
+}
 
 const CODE: u32 = 0x1000;
 const SCRATCH: u32 = 0x10_0000;
@@ -24,18 +51,13 @@ fn class(word: u32) -> u32 {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() || !args.len().is_multiple_of(3) {
-        eprintln!("usage: {USAGE}");
-        std::process::exit(2);
-    }
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
     // Refused classes: how many words, one example, and the reason.
     let mut refused: BTreeMap<u32, (usize, u32, u32, String)> = BTreeMap::new();
     let mut scanned = 0usize;
-    for module in args.chunks(3) {
-        let image = common::read(module[0].clone());
-        let base = common::hex(&module[1]);
-        let text = common::hex(&module[2]) as usize;
+    for module in &cli.modules {
+        let image = common::read(&module.image);
+        let (base, text) = (module.base, module.text);
         for offset in (0..text.min(image.len())).step_by(4) {
             let word = u32::from_le_bytes(image[offset..offset + 4].try_into().unwrap());
             if !in_scope(word) {

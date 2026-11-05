@@ -1,16 +1,26 @@
 //! Count the work one steady-state frame asks for (instructions, blocks,
 //! interpreter fallbacks, methods, draws, pixels) instead of timing it:
-//! `frame_work <target> [prod.keys] [title.keys] [frames] [--font <ttf>]`.
+//! `frame_work <target> [--keys <prod.keys>] [--frames <n>]`.
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
 mod common;
 
-const USAGE: &str = "frame_work <target> [prod.keys] [title.keys] [frames] [--font <ttf>]";
-
+use clap::Parser;
 use switch_core::cpu::Cpu;
 use switch_core::gpu::exec::GpuStats;
 
 const WARMUP_FRAMES: u64 = 2;
 const FRAME_BUDGET: u64 = 2_000_000_000;
+
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Frames to count.
+    #[arg(long, default_value_t = 30)]
+    frames: u64,
+}
 
 struct Snapshot {
     steps: u64,
@@ -143,9 +153,9 @@ fn frame(cpu: &mut Cpu, total_steps: &mut u64) -> Option<Delta> {
 }
 
 fn main() {
-    let args = common::program_args(USAGE);
-    let program = args.open_program();
-    let frames = args.rest_num(0).unwrap_or(30).max(1);
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let program = cli.target.open_program();
+    let frames = cli.frames.max(1);
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();

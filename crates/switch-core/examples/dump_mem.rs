@@ -1,16 +1,26 @@
 //! Hex-dump guest memory after loading an NRO:
-//! `dump_mem <path.nro> <addr> [len]`.
+//! `dump_mem <path.nro> --addr <addr> [--len <n>]`.
 mod common;
 
+use clap::Parser;
 use switch_core::mem::Memory;
 use switch_core::nro::load_nro;
 
-const USAGE: &str = "dump_mem <path.nro> <addr> [len]";
+#[derive(Parser)]
+struct Cli {
+    nro: String,
+    /// Hexadecimal address to start at.
+    #[arg(long, value_parser = common::hex32)]
+    addr: u32,
+    /// Bytes to print.
+    #[arg(long, default_value_t = 64)]
+    len: u32,
+}
 
 fn main() {
-    let data = common::read(common::arg(1, USAGE));
-    let addr = common::hex(&common::arg(2, USAGE));
-    let len = common::opt_num(3).unwrap_or(64) as u32;
+    let cli = Cli::parse();
+    let data = common::read(&cli.nro);
+    let (addr, len) = (cli.addr, cli.len);
     let mem = Memory::new();
     load_nro(&mem, &data).expect("load nro");
     for i in 0..len {

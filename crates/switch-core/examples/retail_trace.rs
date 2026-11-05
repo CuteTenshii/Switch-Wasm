@@ -1,59 +1,75 @@
 //! Boot a retail container and dump the last N executed instructions when the
 //! guest halts.
 //!
-//! Usage: retail_trace <container> <prod.keys> [title.keys] [tail_len] [max_steps]
-//!   RING_FROM=<hex pc>  start recording only once this pc is first hit.
-//!   RING_MIN=<hex pc>  skip pcs below this.
-//!   RING_STOP_AFTER=<n>  stop n steps after recording starts.
-//!   MARK=<pc>[=name][,...]  print a line each time one of these pcs runs.
-//!   MARK_DUMP=<reg>,<byte offset>,<words>  also dump memory at each mark.
+//! Usage: retail_trace <container> --keys <prod.keys> [flags]
 mod common;
 
-use std::env;
+use clap::Parser;
 
-const USAGE: &str = "retail_trace <container> <prod.keys> [title.keys] [tail_len] [max_steps]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Instructions kept in the ring.
+    #[arg(long, default_value_t = 4000)]
+    tail: usize,
+    /// Instructions to run.
+    #[arg(long, default_value_t = 400_000_000)]
+    max_steps: u64,
+    /// Start recording only once this pc is first hit.
+    #[arg(long, value_parser = common::hex32, value_name = "PC")]
+    ring_from: Option<u32>,
+    /// Skip pcs below this.
+    #[arg(long, value_parser = common::hex32, default_value = "0", value_name = "PC")]
+    ring_min: u32,
+    /// Stop this many steps after recording starts.
+    #[arg(long, value_name = "N")]
+    ring_stop_after: Option<u64>,
+    /// Print a line each time one of these pcs runs: `<pc>[=name],...`.
+    #[arg(long, value_delimiter = ',', value_parser = mark, value_name = "PC[=NAME]")]
+    mark: Vec<(u32, String)>,
+    /// Also dump memory at each mark: `<reg>,<byte offset>,<words>`.
+    #[arg(long, value_parser = mark_dump, value_name = "REG,OFFSET,WORDS")]
+    mark_dump: Option<(u8, i64, u32)>,
+}
+
+fn mark(entry: &str) -> Result<(u32, String), String> {
+    let (pc, name) = entry.split_once('=').unwrap_or((entry, entry));
+    Ok((common::hex32(pc)?, name.to_string()))
+}
+
+fn mark_dump(spec: &str) -> Result<(u8, i64, u32), String> {
+    let bad = || format!("{spec:?} is not <reg>,<byte offset>,<words>");
+    let mut parts = spec.split(',');
+    let mut next = || parts.next().map(str::trim).ok_or_else(bad);
+    Ok((
+        next()?.parse().map_err(|_| bad())?,
+        next()?.parse().map_err(|_| bad())?,
+        next()?.parse().map_err(|_| bad())?,
+    ))
+}
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let title = args.open();
-    let tail: usize = args.rest_num(0).unwrap_or(4000) as usize;
-    let budget = args.rest_num(1).unwrap_or(400_000_000);
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let title = cli.target.open();
+    let (tail, budget) = (cli.tail, cli.max_steps);
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     title.boot(&mut cpu);
 
-    let ring_from = common::env_hex("RING_FROM");
+    let ring_from = cli.ring_from;
     let mut recording = ring_from.is_none();
-    let ring_min = common::env_hex("RING_MIN").unwrap_or(0);
+    let ring_min = cli.ring_min;
     let mut ring: std::collections::VecDeque<(u64, u32, [u64; 8])> =
         std::collections::VecDeque::with_capacity(tail + 1);
 
-    let stop_after = env::var("RING_STOP_AFTER")
-        .ok()
-        .and_then(|s| s.parse().ok());
+    let stop_after = cli.ring_stop_after;
     let mut recorded = 0u64;
-    let marks: std::collections::HashMap<u32, String> = env::var("MARK")
-        .ok()
-        .map(|v| {
-            v.split(',')
-                .filter(|s| !s.is_empty())
-                .filter_map(|entry| {
-                    let (pc, name) = entry.split_once('=').unwrap_or((entry, entry));
-                    let pc = common::parse_hex32(pc)?;
-                    Some((pc, name.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let mark_dump: Option<(u8, i64, u32)> = env::var("MARK_DUMP").ok().and_then(|v| {
-        let mut parts = v.split(',');
-        Some((
-            parts.next()?.trim().parse().ok()?,
-            parts.next()?.trim().parse().ok()?,
-            parts.next()?.trim().parse().ok()?,
-        ))
-    });
+    let marks: std::collections::HashMap<u32, String> = cli.mark.iter().cloned().collect();
+    let mark_dump = cli.mark_dump;
     let mut done = 0u64;
     while !cpu.halted && done < budget {
         let pc = cpu.get_pc();
@@ -102,7 +118,7 @@ fn main() {
         if recording && pc >= ring_min {
             recorded += 1;
             if stop_after.is_some_and(|n| recorded > n) {
-                println!("stopped {recorded} steps after RING_FROM");
+                println!("stopped {recorded} steps after --ring-from");
                 break;
             }
             if ring.len() == tail {

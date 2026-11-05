@@ -2,17 +2,29 @@
 //! comparison against qemu-aarch64 by `tools/difftest.py`.
 mod common;
 
+use clap::Parser;
 use common::{Flow, Pace};
 
-const USAGE: &str = "difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>";
+#[derive(Parser)]
+struct Cli {
+    code: String,
+    #[command(flatten)]
+    shared: common::Shared,
+    #[arg(long, value_name = "FILE")]
+    inputs: String,
+    #[arg(long, value_name = "FILE")]
+    out: String,
+    /// The test ELF's `.data` address, in hexadecimal.
+    #[arg(long, value_parser = common::hex32, value_name = "ADDR")]
+    inputs_addr: u32,
+}
 
 fn main() {
-    let code = common::read(common::arg(1, USAGE));
-    let inputs = common::read(common::arg(2, USAGE));
-    let out = common::arg(3, USAGE);
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let code = common::read(&cli.code);
+    let inputs = common::read(&cli.inputs);
+    let (out, inputs_addr) = (&cli.out, cli.inputs_addr);
     const CODE: u32 = 0x1000;
-    // Must match the test ELF's .data address.
-    let inputs_addr = common::hex(&common::arg(4, USAGE));
     const OUTPUT: u32 = 0x2_0000;
     let mut cpu = common::new_cpu();
     cpu.mem.map_zero(CODE, code.len() + 16).unwrap();
@@ -52,7 +64,7 @@ fn main() {
         .saturating_sub(OUTPUT)
         .min(capacity as u32);
     let dump = cpu.mem.dump(OUTPUT, written as usize).unwrap();
-    std::fs::write(&out, &dump).unwrap();
+    std::fs::write(out, &dump).unwrap();
     println!(
         "ran {} instructions, dumped {written} bytes (halted={})",
         run.steps, cpu.halted

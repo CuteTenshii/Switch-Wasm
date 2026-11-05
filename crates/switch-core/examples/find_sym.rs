@@ -2,19 +2,23 @@
 //! `find_sym <path.nro> <name>...`.
 mod common;
 
+use clap::Parser;
 use switch_core::nro::symbol_value;
 
-const USAGE: &str = "find_sym <path.nro> <name>...";
 /// Where `load_nro` puts an NRO's first byte.
 const BASE: u64 = 0x0800_0000;
 
+#[derive(Parser)]
+struct Cli {
+    nro: String,
+    #[arg(required = true)]
+    names: Vec<String>,
+}
+
 fn main() {
-    let data = common::read(common::arg(1, USAGE));
-    let names: Vec<String> = std::env::args().skip(2).collect();
-    if names.is_empty() {
-        common::usage(USAGE);
-    }
-    for name in names {
+    let cli = Cli::parse();
+    let data = common::read(&cli.nro);
+    for name in cli.names {
         match symbol_value(&data, &name) {
             Some(value) => println!("{name} = {:#x}", BASE + value),
             None => println!("{name} = not found"),

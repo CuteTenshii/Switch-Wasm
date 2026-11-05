@@ -3,14 +3,13 @@
 //! This half records cases; `tools/emit_difftest.mjs` runs the modules under V8.
 //!
 //! ```text
-//! cargo run --release --example emit_difftest -- <nro> [-- <outdir>]
-//! FROM_FRAME=<n> cargo run --release --example emit_difftest -- <title> <prod.keys>
+//! cargo run --release --example emit_difftest -- <nro> [--out <outdir>]
+//! cargo run --release --example emit_difftest -- <title> --keys <prod.keys> --from-frame <n>
 //! node tools/emit_difftest.mjs <outdir>
 //! ```
 mod common;
 
-const USAGE: &str = "emit_difftest <target> [prod.keys] [title.keys] [--font <ttf>]";
-
+use clap::Parser;
 use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
 use common::{Flow, Pace};
 use std::collections::{BTreeSet, HashMap};
@@ -26,19 +25,29 @@ const CANDIDATES: usize = 4000;
 /// Instructions to run before sampling, to skip the loader.
 const WARMUP: u64 = 40_000_000;
 
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Where the modules and the manifest are written.
+    #[arg(long, default_value = "target/emit-difftest", value_name = "DIR")]
+    out: String,
+    /// Run to this presented frame first, to sample a title's later code.
+    #[arg(long, value_name = "N")]
+    from_frame: Option<u64>,
+}
+
 fn main() {
-    let args = common::program_args(USAGE);
-    let out_dir = std::env::var("OUT").unwrap_or_else(|_| "target/emit-difftest".into());
-    let program = args.open_program();
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let out_dir = &cli.out;
+    let program = cli.target.open_program();
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     program.boot(&mut cpu);
 
-    // `FROM_FRAME=<n>` runs to that frame first, to sample a title's later code.
-    if let Some(frame) = std::env::var("FROM_FRAME")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
+    if let Some(frame) = cli.from_frame {
         common::run_to(&mut cpu, u64::MAX, |cpu| cpu.nv.gpu.frames >= frame);
     }
     // Sample the pc once per slice to get branch targets, not mid-block addresses.
@@ -53,7 +62,7 @@ fn main() {
         Flow::Continue
     });
 
-    std::fs::create_dir_all(&out_dir).expect("cannot create the output directory");
+    std::fs::create_dir_all(out_dir).expect("cannot create the output directory");
     let mut manifest = String::new();
     let mut cases = 0usize;
     let mut refused_flow = 0usize;

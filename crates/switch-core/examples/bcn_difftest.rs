@@ -1,17 +1,27 @@
 //! Compare the BC decoders against `bcdec.h` reference output:
-//! `bcn_difftest <vectors.bin> [blocks] [astc_vectors.bin]`.
+//! `bcn_difftest <vectors.bin> [--blocks <n>] [--astc <astc_vectors.bin>]`.
 //!
 //! BC7 must match exactly; BC1-3 within 1/255 (endpoint expansion differs).
 mod common;
 
+use clap::Parser;
 use std::env;
 use switch_core::gpu::bcn::{decode, decode_into, Codec};
 
+#[derive(Parser)]
+struct Cli {
+    vectors: String,
+    /// Blocks compared per codec.
+    #[arg(long, default_value_t = 4000)]
+    blocks: usize,
+    /// An ASTC fixture to compare too.
+    #[arg(long, value_name = "FILE")]
+    astc: Option<String>,
+}
+
 fn main() {
-    let data = common::read(common::arg(
-        1,
-        "bcn_difftest <vectors.bin> [blocks] [astc_vectors.bin]",
-    ));
+    let cli = Cli::parse();
+    let data = common::read(&cli.vectors);
     // Codec, reference channels per texel, and this decoder's channel mapping.
     struct Group {
         codec: Codec,
@@ -69,7 +79,7 @@ fn main() {
             signed_bit: true,
         },
     ];
-    let blocks = common::opt_num(2).unwrap_or(4000) as usize;
+    let blocks = cli.blocks;
 
     let mut at = 0usize;
     let mut any_out_of_tolerance = false;
@@ -173,8 +183,8 @@ fn main() {
             group.codec
         );
     }
-    if let Some(path) = common::opt_arg(3) {
-        any_out_of_tolerance |= !compare_astc(&common::read(&path));
+    if let Some(path) = &cli.astc {
+        any_out_of_tolerance |= !compare_astc(&common::read(path));
     }
     if any_out_of_tolerance {
         println!("\nsomething is outside tolerance; investigate");

@@ -693,7 +693,7 @@ fn dump_texture(texture: &Texture, ctx: &ExecCtx) -> Result<()> {
     Ok(())
 }
 
-/// `TRACE_TEX=1`: print every TIC as it is parsed.
+/// `--trace tex`: print every TIC as it is parsed.
 fn trace_textures() -> bool {
     crate::trace::enabled(crate::trace::Trace::Tex)
 }

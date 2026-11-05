@@ -1,16 +1,31 @@
 //! List which of a frame's shader programs the WGSL translator cannot take:
-//! `shader_coverage <container> <prod.keys> [title.keys] [frame]`.
+//! `shader_coverage <container> --keys <prod.keys> [--frame <n>]`.
 //!
-//! Reports the first blocker per program. `BEFORE=<n>` prints the `n` instructions
-//! before each blocker; `FRAMES=<n>` records `n` frames instead of one.
+//! Reports the first blocker per program.
 mod common;
 
+use clap::Parser;
 use std::collections::BTreeMap;
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Caps, Stage, Unsupported};
 use switch_core::gpu::shader::{uses, Program};
 
-const USAGE: &str = "shader_coverage <container> <prod.keys> [title.keys] [frame]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Presented frame to start recording after.
+    #[arg(long, default_value_t = 4)]
+    frame: u64,
+    /// Frames to record.
+    #[arg(long, default_value_t = 1)]
+    frames: u64,
+    /// Print this many instructions before each blocker.
+    #[arg(long, value_name = "N")]
+    before: Option<usize>,
+}
 
 const BOOT_BUDGET: u64 = 20_000_000_000;
 const FRAME_BUDGET: u64 = 2_000_000_000;
@@ -52,10 +67,6 @@ fn compiles(program: &Program, stage: Stage, caps: Caps) -> Result<(), Unsupport
     Ok(())
 }
 
-fn show_before() -> Option<usize> {
-    std::env::var("BEFORE").ok()?.parse().ok()
-}
-
 fn blocked_at(why: &Unsupported) -> Option<usize> {
     match *why {
         Unsupported::Op { at, .. }
@@ -69,7 +80,7 @@ fn blocked_at(why: &Unsupported) -> Option<usize> {
     }
 }
 
-fn report(label: &str, used: &[Used], caps: Caps) {
+fn report(label: &str, used: &[Used], caps: Caps, before: Option<usize>) {
     let mut blocked: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut ok_programs = 0u64;
     let mut ok_draws = 0u64;
@@ -89,7 +100,7 @@ fn report(label: &str, used: &[Used], caps: Caps) {
                 }
             }
             Err(why) => {
-                if let (Some(at), Some(before)) = (blocked_at(&why), show_before()) {
+                if let (Some(at), Some(before)) = (blocked_at(&why), before) {
                     println!(
                         "  {:?} program at {:#x} blocked at instruction {at}:",
                         entry.stage, entry.addr
@@ -155,9 +166,9 @@ fn report(label: &str, used: &[Used], caps: Caps) {
 }
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let title = args.open();
-    let want_frame = args.rest_num(0).unwrap_or(4);
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let title = cli.target.open();
+    let want_frame = cli.frame;
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
@@ -167,7 +178,7 @@ fn main() {
         return;
     };
 
-    let frames = common::env_u64("FRAMES", 1);
+    let frames = cli.frames;
     uses::record();
     let target = cpu.nv.gpu.frames + frames;
     let frame = common::run_to(&mut cpu, FRAME_BUDGET * frames, |cpu| {
@@ -210,7 +221,12 @@ fn main() {
         return;
     }
     println!();
-    report("no optional device features (a browser)", &used, Caps::NONE);
+    report(
+        "no optional device features (a browser)",
+        &used,
+        Caps::NONE,
+        cli.before,
+    );
     println!();
     report(
         "with quad operations (subgroups)",
@@ -219,6 +235,7 @@ fn main() {
             subgroups: true,
             ..Caps::NONE
         },
+        cli.before,
     );
 
     println!();

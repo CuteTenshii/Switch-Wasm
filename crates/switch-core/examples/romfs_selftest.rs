@@ -1,14 +1,27 @@
 //! Read a title's RomFS ranges in different ways and check the bytes agree:
-//! `romfs_selftest <container> <prod.keys> [title.keys] [samples]`.
-//!
-//! `SEED=<n>` picks the sample set, `WINDOW=<hex>` the bytes per sample
-//! (default 0x9000), and `INJECT=1` adds a deliberate boundary bug that the
-//! test must report.
+//! `romfs_selftest <container> --keys <prod.keys> [flags]`.
 mod common;
 
+use clap::Parser;
 use switch_core::source::ByteSource;
 
-const USAGE: &str = "romfs_selftest <container> <prod.keys> [title.keys] [samples]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    /// Ranges to compare.
+    #[arg(long, default_value_t = 200)]
+    samples: usize,
+    /// Picks the sample set.
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// Bytes per sample.
+    #[arg(long, value_parser = common::hex64, default_value = "9000", value_name = "HEX")]
+    window: u64,
+    /// Add a deliberate boundary bug that the test must report.
+    #[arg(long)]
+    inject: bool,
+}
 
 /// Usual LZ4 block size of the compression layer; only a hint for sampling.
 const BLOCK_HINT: u64 = 0x1_0000;
@@ -154,19 +167,17 @@ fn samples(
 }
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let wanted = args.rest_num(0).unwrap_or(200) as usize;
-    let seed = common::env_u64("SEED", 1);
-    let window = u64::from(common::env_hex("WINDOW").unwrap_or(0x9000));
+    let cli = Cli::parse();
+    let (wanted, seed, window) = (cli.samples, cli.seed, cli.window);
 
-    let title = args.open();
+    let title = cli.target.open();
     let (real, index) = title.romfs();
     let image_len = real.len();
     let files: Vec<(u64, u64, &str)> = index.files().collect();
-    let canary = common::env_u64("INJECT", 0) != 0;
+    let canary = cli.inject;
     let source: Box<dyn ByteSource> = if canary {
         println!(
-            "INJECT=1: a boundary bug sits in front of the reader; it must be reported \
+            "--inject: a boundary bug sits in front of the reader; it must be reported \
              below, and this run exits 0 only if it was"
         );
         Box::new(Flaky(real))
@@ -267,7 +278,7 @@ fn main() {
     }
     println!(
         "{failures} inconsistent sample(s), {} file(s) whose extent leaves the image; \
-         rerun with SEED={seed} to get the same set",
+         rerun with --seed {seed} to get the same set",
         overrunning.len()
     );
     std::process::exit(1);

@@ -181,12 +181,12 @@ impl Gpu {
         );
     }
 
-    /// The `GPU_INTERLEAVE` flag. See [`Gpu::interleave`].
+    /// The `--interleave` flag. See [`Gpu::interleave`].
     pub fn set_interleave(&mut self, interleave: bool) {
         self.interleave = interleave;
     }
 
-    /// The `GPU_WEB_LIMITS` flag. See [`Gpu::web_limits`].
+    /// The `--web-limits` flag. See [`Gpu::web_limits`].
     pub fn set_web_limits(&mut self, web_limits: bool) {
         self.web_limits = web_limits;
     }
@@ -201,29 +201,29 @@ impl Gpu {
         }
     }
 
-    /// The `GPU_DEVICE_MSAA` flag. See [`Gpu::route`].
+    /// The `--device-msaa` flag. See [`Gpu::route`].
     pub fn set_device_msaa(&mut self, device_msaa: bool) {
         self.device_msaa = device_msaa;
     }
 
-    /// The `GPU_DEFER_READBACKS` flag. See [`Gpu::defer_readbacks`].
+    /// The `--defer-readbacks` flag. See [`Gpu::defer_readbacks`].
     pub fn set_defer_readbacks(&mut self, defer_readbacks: bool) {
         self.defer_readbacks = defer_readbacks;
     }
 
-    /// The `GPU_SYNC_EVERY_PRESENT` flag. See [`Gpu::sync_every_present`].
+    /// The `--sync-every-present` flag. See [`Gpu::sync_every_present`].
     pub fn set_sync_every_present(&mut self, sync: bool) {
         self.sync_every_present = sync;
     }
 
-    /// The `GPU_TIMES` flag: record phase timings, which a browser always does.
+    /// The `--times` flag: record phase timings, which a browser always does.
     pub fn set_times(&mut self, on: bool) {
         if on != self.times.is_some() {
             self.times = on.then(Times::default);
         }
     }
 
-    /// The `GPU_ONLY` range. See [`Gpu::only`].
+    /// The `--only` range. See [`Gpu::only`].
     pub fn set_only(&mut self, only: Option<std::ops::Range<u32>>) {
         self.only = only;
     }

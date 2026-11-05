@@ -1,4 +1,4 @@
-//! Scaffolding shared by the examples: argument handling, key loading,
+//! Scaffolding shared by the examples: flag handling, key loading,
 //! booting, driving the machine, and writing a frame out.
 // Every example compiles its own copy of this module and uses only part of it.
 #![allow(dead_code)]
@@ -10,43 +10,136 @@ pub mod profile;
 /// A module's dynamic symbol table.
 pub mod symbols;
 
-use std::env;
+use clap::{Args as ClapArgs, Parser};
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Instant;
 use switch_core::cpu::Cpu;
 use switch_core::gpu::Framebuffer;
 use switch_core::keys::KeySet;
 use switch_core::source::ByteSource;
+use switch_core::trace::Trace;
 
 /// The font `pl:u` serves when no firmware fonts are registered.
 const FALLBACK_FONT: &[u8] = include_bytes!("../../../../web/font.ttf");
 
-/// Hand the core what the environment asks for, once: the `TRACE_*` channels and
-/// the dump directories. The core itself reads no environment.
-pub fn apply_env() {
-    static APPLIED: std::sync::Once = std::sync::Once::new();
-    APPLIED.call_once(|| {
-        let channels: Vec<_> = switch_core::trace::ALL
-            .iter()
-            .copied()
-            .filter(|channel| env::var(channel.name()).is_ok())
-            .collect();
-        switch_core::trace::set_mask(&channels);
-        switch_core::dump::install(Box::new(DumpDirs::from_env()));
-    });
+// The flags a tool that boots a machine takes: what a run traces and dumps, and how it is driven.
+#[derive(ClapArgs, Clone, Default)]
+pub struct Shared {
+    /// Trace channels to switch on (`svc`, `ipc`, ...).
+    #[arg(long, value_delimiter = ',', value_parser = channel)]
+    trace: Vec<Trace>,
+    /// Run the interpreter only.
+    #[arg(long)]
+    no_jit: bool,
+    /// Present as fast as the guest asks instead of pacing to 60 Hz.
+    #[arg(long)]
+    no_vsync_throttle: bool,
+    /// Write every decoded texture into this directory.
+    #[arg(long, value_name = "DIR")]
+    dump_tex: Option<String>,
+    /// Write every translated shader's WGSL into this directory.
+    #[arg(long, value_name = "DIR")]
+    dump_wgsl: Option<String>,
+    /// Write the WGSL the device was handed into this directory.
+    #[arg(long, value_name = "DIR")]
+    dump_device_wgsl: Option<String>,
+    /// Boot docked (1080p).
+    #[arg(long)]
+    docked: bool,
+    /// Register the system data archives of this firmware directory.
+    #[arg(long, value_name = "DIR")]
+    firmware: Option<String>,
+    /// An update container whose RomFS reads over the base title's.
+    #[arg(long, value_name = "NSP")]
+    update: Option<String>,
+    /// Add-on content containers to mount.
+    #[arg(long, value_delimiter = ',', value_name = "NSP")]
+    dlc: Vec<String>,
+    /// Tap buttons every interval steps, e.g. `A+DOWN@300000000`.
+    #[arg(long, value_parser = Press::parse, value_name = "BUTTONS@INTERVAL")]
+    press: Option<Press>,
+    /// Present frames without drawing them.
+    #[arg(long)]
+    no_draw: bool,
+    /// Extra guest cores, each on a host thread.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    cores: u64,
+    /// Print each frame's wall-clock cost.
+    #[arg(long)]
+    frame_times: bool,
+    /// Report the pc and call stack of the first writes into a region.
+    #[arg(long, value_parser = span, value_name = "ADDR:SIZE")]
+    trap_write: Option<(u32, u32)>,
+    /// Count every distinct pc that reads a region.
+    #[arg(long, value_parser = span, value_name = "ADDR:SIZE")]
+    trap_read: Option<(u32, u32)>,
+    /// Trap writes of zero too.
+    #[arg(long)]
+    trap_zero: bool,
+    /// Print the last N trapped writes when the run stops.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    trap_last: usize,
+    /// Report argument registers and the call stack the first few times execution reaches these addresses.
+    #[arg(long, value_delimiter = ',', value_parser = hex32, value_name = "ADDR")]
+    watch_pc: Vec<u32>,
+    /// Print every register at each `--watch-pc` hit.
+    #[arg(long)]
+    watch_regs: bool,
+    /// Hex-dump memory (`--dump` syntax) at each `--watch-pc` hit.
+    #[arg(long, value_name = "SPEC")]
+    watch_dump: Option<String>,
+    /// Print the last N `--watch-pc` hits when the run stops.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    watch_last: usize,
+    /// Hex-dump memory where the run stopped: `<base>[+<hex>][:<hex length>][,...]`, where
+    /// `<base>` is `x0`..`x30`, `sp`, `pc` or an address and a leading `*` follows the pointer
+    /// stored there.
+    #[arg(long, value_name = "SPEC")]
+    dump: Option<String>,
 }
 
-/// A machine with [`apply_env`] done and `SWITCH_NO_JIT` and `NO_VSYNC_THROTTLE` applied.
+static SHARED: OnceLock<Shared> = OnceLock::new();
+
+fn shared() -> &'static Shared {
+    SHARED.get_or_init(Shared::default)
+}
+
+/// Parse the command line, `shared_of` naming where the tool flattened [`Shared`], and hand the
+/// core what the flags ask for: the trace channels and the dump directories. The core itself
+/// reads no environment.
+pub fn parse<C: Parser>(shared_of: impl FnOnce(&C) -> &Shared) -> C {
+    let cli = C::parse();
+    let flags = shared_of(&cli).clone();
+    let mut channels = flags.trace.clone();
+    if flags.dump_wgsl.is_some() && !channels.contains(&Trace::Wgsl) {
+        channels.push(Trace::Wgsl);
+    }
+    switch_core::trace::set_mask(&channels);
+    switch_core::dump::install(Box::new(DumpDirs {
+        texture: flags.dump_tex.clone(),
+        raster_wgsl: flags.dump_wgsl.clone(),
+        device_wgsl: flags.dump_device_wgsl.clone(),
+    }));
+    SHARED.set(flags).ok();
+    cli
+}
+
+fn channel(name: &str) -> Result<Trace, String> {
+    Trace::from_name(&format!("TRACE_{}", name.to_ascii_uppercase()))
+        .ok_or_else(|| format!("no trace channel named {name:?}"))
+}
+
+/// A machine with the `--no-jit` and `--no-vsync-throttle` flags applied.
 pub fn new_cpu() -> Cpu {
-    apply_env();
     let mut cpu = Cpu::new();
-    cpu.set_jit_enabled(env::var("SWITCH_NO_JIT").is_err());
-    cpu.set_vsync_throttle(env::var("NO_VSYNC_THROTTLE").is_err());
+    cpu.set_jit_enabled(!shared().no_jit);
+    cpu.set_vsync_throttle(!shared().no_vsync_throttle);
     cpu
 }
 
-/// `DUMP_TEX=<dir>`, `TRACE_WGSL=<dir>` and `GPU_DUMP_WGSL=<dir>`: where each artefact is written.
+/// Where each dumped artefact is written.
 struct DumpDirs {
     texture: Option<String>,
     raster_wgsl: Option<String>,
@@ -54,17 +147,6 @@ struct DumpDirs {
 }
 
 impl DumpDirs {
-    fn from_env() -> DumpDirs {
-        DumpDirs {
-            texture: env::var("DUMP_TEX").ok(),
-            // `TRACE_WGSL=1` asks only for the summary lines.
-            raster_wgsl: env::var("TRACE_WGSL")
-                .ok()
-                .filter(|dir| !dir.is_empty() && dir != "1"),
-            device_wgsl: env::var("GPU_DUMP_WGSL").ok(),
-        }
-    }
-
     fn dir(&self, what: switch_core::dump::Artefact) -> Option<&str> {
         use switch_core::dump::Artefact;
         match what {
@@ -91,28 +173,6 @@ impl switch_core::dump::Sink for DumpDirs {
     }
 }
 
-/// Print a usage line and exit.
-pub fn usage(line: &str) -> ! {
-    eprintln!("usage: {line}");
-    std::process::exit(1)
-}
-
-/// Positional argument `n` (1-based), or exit with the usage line.
-pub fn arg(n: usize, line: &str) -> String {
-    match env::args().nth(n) {
-        Some(arg) => arg,
-        None => usage(line),
-    }
-}
-
-pub fn opt_arg(n: usize) -> Option<String> {
-    env::args().nth(n)
-}
-
-pub fn opt_num(n: usize) -> Option<u64> {
-    env::args().nth(n)?.parse().ok()
-}
-
 /// A hexadecimal number, `0x` optional.
 pub fn parse_hex(text: &str) -> Option<u64> {
     u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
@@ -123,15 +183,19 @@ pub fn parse_hex32(text: &str) -> Option<u32> {
     u32::try_from(parse_hex(text)?).ok()
 }
 
-/// Parse a hexadecimal address (`0x` optional), or exit.
-pub fn hex(text: &str) -> u32 {
-    match parse_hex32(text) {
-        Some(value) => value,
-        None => {
-            eprintln!("{text:?} is not a hexadecimal address");
-            std::process::exit(1)
-        }
-    }
+/// A flag value that is a hexadecimal number.
+pub fn hex64(text: &str) -> Result<u64, String> {
+    parse_hex(text).ok_or_else(|| format!("{text:?} is not a hexadecimal number"))
+}
+
+/// A flag value that is a hexadecimal guest address.
+pub fn hex32(text: &str) -> Result<u32, String> {
+    parse_hex32(text).ok_or_else(|| format!("{text:?} is not a hexadecimal address"))
+}
+
+/// A flag value that is `<addr>:<hex size>`, as `(addr, addr + size)`.
+pub fn span(text: &str) -> Result<(u32, u32), String> {
+    parse_span(text).ok_or_else(|| format!("{text:?} is not <hex addr>:<hex size>"))
 }
 
 pub fn read(path: impl AsRef<Path>) -> Vec<u8> {
@@ -173,78 +237,20 @@ pub fn keys(prod: impl AsRef<Path>, title: Option<impl AsRef<Path>>) -> KeySet {
     set
 }
 
-/// The `<container> <prod.keys> [title.keys]` arguments. Argument 3 is the
-/// title keys only when named like a keys file; the rest is [`Args::rest`].
-pub struct Args {
-    pub container: String,
-    pub prod: String,
-    pub title: Option<String>,
+// What a tool runs: an `.nro`, or a retail container and the keys to open it.
+#[derive(ClapArgs)]
+pub struct Target {
+    /// An `.nro`, or a retail container (`.nsp`, `.xci` or a program `.nca`).
+    pub target: String,
+    /// `prod.keys`; a retail container needs it.
+    #[arg(long, value_name = "FILE")]
+    keys: Option<String>,
+    /// `title.keys`.
+    #[arg(long, value_name = "FILE")]
+    title_keys: Option<String>,
+    /// A TTF/OTF to serve as the shared font instead of the built-in one.
+    #[arg(long, value_name = "TTF")]
     font: Option<String>,
-    rest: Vec<String>,
-    line: String,
-}
-
-pub fn container_args(line: &str) -> Args {
-    apply_env();
-    let mut positional = env::args().skip(1);
-    let (Some(container), Some(prod)) = (positional.next(), positional.next()) else {
-        usage(line)
-    };
-    let mut rest: Vec<String> = positional.collect();
-    let title = rest
-        .first()
-        .is_some_and(|arg| arg.to_ascii_lowercase().ends_with(".keys"))
-        .then(|| rest.remove(0));
-    Args {
-        container,
-        prod,
-        title,
-        font: None,
-        rest,
-        line: line.to_string(),
-    }
-}
-
-/// Arguments of a tool that runs a `.nro` or a retail container with its
-/// keys. `--font <ttf>` anywhere in the tail replaces the shared font.
-pub fn program_args(line: &str) -> Args {
-    apply_env();
-    let mut positional = env::args().skip(1);
-    let Some(container) = positional.next() else {
-        usage(line)
-    };
-    let mut rest: Vec<String> = positional.collect();
-    let take_named = |rest: &mut Vec<String>, suffix: &str| {
-        let at = rest
-            .iter()
-            .position(|arg| arg.to_ascii_lowercase().ends_with(suffix))?;
-        Some(rest.remove(at))
-    };
-    let font = rest.iter().position(|arg| arg == "--font").map(|at| {
-        rest.remove(at);
-        if at >= rest.len() {
-            usage(line)
-        }
-        rest.remove(at)
-    });
-    // Only a retail target needs keys.
-    let (prod, title) = match target_kind(Path::new(&container)) {
-        Kind::Nro => (String::new(), None),
-        _ => {
-            let Some(prod) = (!rest.is_empty()).then(|| rest.remove(0)) else {
-                usage(line)
-            };
-            (prod, take_named(&mut rest, ".keys"))
-        }
-    };
-    Args {
-        container,
-        prod,
-        title,
-        font,
-        rest,
-        line: line.to_string(),
-    }
 }
 
 pub struct Program {
@@ -261,7 +267,7 @@ enum Form {
 
 pub struct Booted {
     pub modules: Vec<switch_core::nso::LoadedNso>,
-    /// System data archives registered from `SWITCH_FIRMWARE`.
+    /// System data archives registered from `--firmware`.
     pub archives: usize,
     /// The save quota from the title's NACP; `None` for homebrew or without control data.
     pub quota: Option<switch_core::cpu::SaveDataQuota>,
@@ -291,9 +297,9 @@ impl Program {
     }
 }
 
-/// `DOCKED=1` boots docked (1080p), as the frontend's dock toggle does.
+/// `--docked` boots docked (1080p), as the frontend's dock toggle does.
 fn apply_docked(cpu: &mut Cpu) {
-    if env::var("DOCKED").is_ok() {
+    if shared().docked {
         cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
     }
 }
@@ -306,14 +312,22 @@ fn load_font(cpu: &mut Cpu, font: Option<&[u8]>) {
     }
 }
 
-impl Args {
+impl Target {
+    /// The keys path a retail container needs.
+    fn prod(&self) -> &str {
+        match &self.keys {
+            Some(keys) => keys,
+            None => die("a retail container needs --keys <prod.keys>"),
+        }
+    }
+
     pub fn open(&self) -> Title {
-        Title::open(&self.container, &self.prod, self.title.as_ref())
+        Title::open(&self.target, self.prod(), self.title_keys.as_ref())
     }
 
     pub fn open_program(&self) -> Program {
-        let form = match target_kind(Path::new(&self.container)) {
-            Kind::Nro => Form::Homebrew(read(&self.container)),
+        let form = match target_kind(Path::new(&self.target)) {
+            Kind::Nro => Form::Homebrew(read(&self.target)),
             _ => Form::Retail(Box::new(self.open())),
         };
         Program {
@@ -324,34 +338,11 @@ impl Args {
 
     /// The keys alone, for tools that read the container themselves.
     pub fn keys(&self) -> KeySet {
-        keys(&self.prod, self.title.as_ref())
-    }
-
-    /// Argument `n` after the triple, counting from 0.
-    pub fn rest(&self, n: usize) -> Option<&str> {
-        self.rest.get(n).map(String::as_str)
-    }
-
-    pub fn need(&self, n: usize) -> &str {
-        match self.rest.get(n) {
-            Some(arg) => arg,
-            None => usage(&self.line),
-        }
-    }
-
-    pub fn rest_num(&self, n: usize) -> Option<u64> {
-        self.rest.get(n)?.parse().ok()
+        keys(self.prod(), self.title_keys.as_ref())
     }
 }
 
-pub fn env_u64(name: &str, default: u64) -> u64 {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-/// A renderer that draws nothing, for `NO_DRAW=1`: frames still present, so
+/// A renderer that draws nothing, for `--no-draw`: frames still present, so
 /// the run times the CPU alone, as with a GPU doing the drawing.
 #[derive(Debug)]
 struct NoDraw;
@@ -410,9 +401,10 @@ const BUTTONS: [(&str, u64); 16] = [
     ("DOWN", 1 << 15),
 ];
 
-/// `PRESS=<buttons>@<interval>`: tap buttons every `interval` steps, e.g.
-/// `PRESS=A+DOWN@300000000`. The first tap waits a whole interval so it does
+/// `--press <buttons>@<interval>`: tap buttons every `interval` steps, e.g.
+/// `--press A+DOWN@300000000`. The first tap waits a whole interval so it does
 /// not land during boot.
+#[derive(Clone)]
 pub struct Press {
     buttons: u64,
     interval: u64,
@@ -420,29 +412,30 @@ pub struct Press {
 }
 
 impl Press {
-    /// Exits on an unreadable spelling rather than running without the input.
-    pub fn from_env() -> Option<Press> {
-        let raw = env::var("PRESS").ok()?;
-        let fail = |why: &str| -> ! {
-            eprintln!("PRESS={raw}: {why}; expected <buttons>@<interval>, e.g. A@500000000");
-            std::process::exit(2)
-        };
-        let (names, interval) = raw.split_once('@').unwrap_or_else(|| fail("no interval"));
+    /// The `--press` flag, if given.
+    pub fn from_flags() -> Option<Press> {
+        shared().press.clone()
+    }
+
+    fn parse(raw: &str) -> Result<Press, String> {
+        let fail =
+            |why: &str| format!("{raw}: {why}; expected <buttons>@<interval>, e.g. A@500000000");
+        let (names, interval) = raw.split_once('@').ok_or_else(|| fail("no interval"))?;
         let interval: u64 = interval
             .parse()
-            .unwrap_or_else(|_| fail("the interval is not a number"));
+            .map_err(|_| fail("the interval is not a number"))?;
         if interval <= PRESS_HOLD {
-            fail("the interval must be longer than a press");
+            return Err(fail("the interval must be longer than a press"));
         }
         let mut buttons = 0;
         for name in names.split('+') {
             let upper = name.trim().to_ascii_uppercase();
             match BUTTONS.iter().find(|(button, _)| *button == upper) {
                 Some((_, bit)) => buttons |= bit,
-                None => fail(&format!("no button named {name:?}")),
+                None => return Err(fail(&format!("no button named {name:?}"))),
             }
         }
-        Some(Press {
+        Ok(Press {
             buttons,
             interval,
             held: false,
@@ -459,16 +452,16 @@ impl Press {
     }
 }
 
-/// Swap in [`NoDraw`] when `NO_DRAW=1`.
+/// Swap in [`NoDraw`] for `--no-draw`.
 pub fn apply_no_draw(cpu: &mut Cpu) {
-    if env_u64("NO_DRAW", 0) != 0 {
+    if shared().no_draw {
         cpu.nv.gpu.set_renderer(Box::new(NoDraw));
     }
 }
 
-/// `CORES=<n>` more guest cores, each served on a host thread, for [`stop_cores`].
+/// `--cores <n>` more guest cores, each served on a host thread, for [`stop_cores`].
 pub fn start_cores(cpu: &mut Cpu) -> Vec<std::thread::JoinHandle<()>> {
-    (0..env_u64("CORES", 0))
+    (0..shared().cores)
         .map(|_| {
             let slot = cpu.add_core();
             std::thread::spawn(move || switch_core::cpu::serve(slot))
@@ -483,34 +476,10 @@ pub fn stop_cores(cpu: &mut Cpu, cores: Vec<std::thread::JoinHandle<()>>) {
     }
 }
 
-/// A hexadecimal `u32` from the environment (`0x` optional).
-pub fn env_hex(name: &str) -> Option<u32> {
-    parse_hex32(&env::var(name).ok()?)
-}
-
-/// A `lo:len` pair of hexadecimal addresses, as `(lo, lo + len)`.
-pub fn env_span(name: &str) -> Option<(u32, u32)> {
-    parse_span(&env::var(name).ok()?)
-}
-
-/// Comma-separated `lo:len` pairs; unparsable pairs are skipped.
-pub fn env_spans(name: &str) -> Vec<(u32, u32)> {
-    env::var(name)
-        .map(|raw| raw.split(',').filter_map(parse_span).collect())
-        .unwrap_or_default()
-}
-
 fn parse_span(raw: &str) -> Option<(u32, u32)> {
     let (lo, len) = raw.split_once(':')?;
     let lo = parse_hex32(lo)?;
     Some((lo, lo.saturating_add(parse_hex32(len)?)))
-}
-
-/// A comma-separated list of hexadecimal `u32`s from the environment.
-pub fn env_hex_list(name: &str) -> Vec<u32> {
-    env::var(name)
-        .map(|raw| raw.split(',').filter_map(parse_hex32).collect())
-        .unwrap_or_default()
 }
 
 /// Give the guest the fallback shared font; firmware fonts replace it.
@@ -518,15 +487,15 @@ pub fn load_fallback_font(cpu: &mut Cpu) {
     cpu.set_shared_font(FALLBACK_FONT.to_vec());
 }
 
-/// Register every system data archive in `SWITCH_FIRMWARE`, if it is set, and install
+/// Register every system data archive in the `--firmware` directory, if one is given, and install
 /// its programs as the browser's NAND does, so library applets run. Returns the
 /// number of data archives.
 pub fn register_firmware(cpu: &mut Cpu, keys: &KeySet) -> usize {
-    let Ok(dir) = env::var("SWITCH_FIRMWARE") else {
+    let Some(dir) = &shared().firmware else {
         return 0;
     };
-    let Ok(entries) = fs::read_dir(&dir) else {
-        eprintln!("SWITCH_FIRMWARE={dir} cannot be read");
+    let Ok(entries) = fs::read_dir(dir) else {
+        eprintln!("--firmware {dir} cannot be read");
         return 0;
     };
     let mut registered = 0;
@@ -613,7 +582,7 @@ pub struct Run {
     pub halted: bool,
 }
 
-/// Per-frame wall-clock cost, printed when `FRAME_TIMES=1`.
+/// Per-frame wall-clock cost, printed for `--frame-times`.
 struct FrameTimes {
     on: bool,
     last_count: u64,
@@ -624,7 +593,7 @@ struct FrameTimes {
 impl FrameTimes {
     fn new(cpu: &Cpu) -> FrameTimes {
         FrameTimes {
-            on: env::var("FRAME_TIMES").is_ok(),
+            on: shared().frame_times,
             last_count: cpu.nv.gpu.frames,
             last_at: Instant::now(),
             deltas: Vec::new(),
@@ -801,7 +770,7 @@ pub fn report(cpu: &Cpu, run: &Run) {
     );
 }
 
-/// Where one `DUMP=` entry starts: a register or an absolute address.
+/// Where one `--dump` entry starts: a register or an absolute address.
 enum DumpBase {
     Absolute(u32),
     Register(u8),
@@ -923,22 +892,13 @@ fn backtrace(cpu: &Cpu, depth: usize) -> String {
         .join(" <- ")
 }
 
-/// Debugging knobs, read from the environment once:
+/// The debugging flags of [`Shared`]: `--trap-write`, `--trap-read`, `--trap-last`, `--trap-zero`,
+/// `--watch-pc`, `--watch-last`, `--watch-dump`, `--watch-regs` and `--dump`.
 ///
-/// - `TRAP_WRITE=<addr>:<hex size>`: pc and call stack of the first writes
-///   into a region.
-/// - `TRAP_READ=<addr>:<hex size>`: every distinct pc that reads a region,
-///   counted.
-/// - `TRAP_LAST=<n>`: print the last `n` trapped writes when the run stops.
-/// - `TRAP_ZERO=1`: also trap writes of zero.
-/// - `WATCH_PC=<addr>[,...]`: argument registers and call stack the first few
-///   times execution reaches an address.
-/// - `WATCH_LAST=<n>`: print the last `n` `WATCH_PC` hits when the run stops.
-/// - `WATCH_DUMP=<spec>`: hex-dump memory (`DUMP` syntax) at each `WATCH_PC` hit.
-/// - `WATCH_REGS=1`: print every register at each `WATCH_PC` hit.
-/// - `DUMP=<base>[+<hex>][:<hex length>][,...]`: hex-dump memory where the run
-///   stopped. `<base>` is `x0`..`x30`, `sp`, `pc` or an address; a leading `*`
-///   follows the pointer stored there.
+/// - `--trap-write`: pc and call stack of the first writes into a region.
+/// - `--trap-read`: every distinct pc that reads a region, counted.
+/// - `--watch-pc`: argument registers and call stack the first few times execution reaches an
+///   address.
 pub struct Debug {
     write_trap: Option<(u32, u32)>,
     read_trap: Option<(u32, u32)>,
@@ -962,22 +922,27 @@ pub struct Debug {
 }
 
 impl Debug {
-    pub fn from_env() -> Debug {
+    pub fn from_flags() -> Debug {
+        let flags = shared();
         Debug {
-            write_trap: env_span("TRAP_WRITE"),
-            read_trap: env_span("TRAP_READ"),
-            trap_zero: env::var("TRAP_ZERO").is_ok(),
-            trap_last: env_u64("TRAP_LAST", 0) as usize,
+            write_trap: flags.trap_write,
+            read_trap: flags.trap_read,
+            trap_zero: flags.trap_zero,
+            trap_last: flags.trap_last,
             last_traps: std::collections::VecDeque::new(),
-            watch_pc: env_hex_list("WATCH_PC"),
-            watch_regs: env::var("WATCH_REGS").is_ok(),
-            watch_dumps: env::var("WATCH_DUMP")
-                .map(|spec| parse_dump_specs(&spec))
+            watch_pc: flags.watch_pc.clone(),
+            watch_regs: flags.watch_regs,
+            watch_dumps: flags
+                .watch_dump
+                .as_deref()
+                .map(parse_dump_specs)
                 .unwrap_or_default(),
-            watch_last: env_u64("WATCH_LAST", 0) as usize,
+            watch_last: flags.watch_last,
             last_watches: std::collections::VecDeque::new(),
-            dumps: env::var("DUMP")
-                .map(|spec| parse_dump_specs(&spec))
+            dumps: flags
+                .dump
+                .as_deref()
+                .map(parse_dump_specs)
                 .unwrap_or_default(),
             traps: 0,
             watch_hits: 0,
@@ -1065,7 +1030,7 @@ impl Debug {
         }
     }
 
-    /// Print the registers, call stack, and `DUMP=` regions where the run stopped.
+    /// Print the registers, call stack, and `--dump` regions where the run stopped.
     pub fn stop_state(&self, cpu: &Cpu) {
         if self.dumps.is_empty() {
             return;
@@ -1210,7 +1175,7 @@ impl Title {
         let path = container.as_ref().to_path_buf();
         let mut keys = keys(prod, title);
         let (program, nca) = open_program(&path, &mut keys);
-        // `UPDATE=<path.nsp>` boots the update's modules over this container's RomFS.
+        // `--update <path.nsp>` boots the update's modules over this container's RomFS.
         match Update::from_env(&mut keys) {
             Some(update) => {
                 let base = Some((path, program, nca));
@@ -1378,7 +1343,7 @@ impl Title {
     }
 }
 
-/// An update container, named by `UPDATE=<path.nsp>`. Its RomFS reads over
+/// An update container, named by `--update <path.nsp>`. Its RomFS reads over
 /// the base container's.
 struct Update {
     nca: switch_core::nca::Nca,
@@ -1387,10 +1352,10 @@ struct Update {
 }
 
 impl Update {
-    /// The update `UPDATE=<path.nsp>` names, if any. Its title key goes into
+    /// The update `--update <path.nsp>` names, if any. Its title key goes into
     /// `keys`.
     fn from_env(keys: &mut KeySet) -> Option<Update> {
-        let path = std::path::PathBuf::from(env::var("UPDATE").ok()?);
+        let path = std::path::PathBuf::from(shared().update.as_ref()?);
         let (program, nca) = open_program(&path, keys);
         if !nca.is_update() {
             die(&format!(
@@ -1402,11 +1367,10 @@ impl Update {
     }
 }
 
-/// Give the running title the add-on content `DLC=<a.nsp>,<b.nsp>` names,
+/// Give the running title the add-on content `--dlc <a.nsp>,<b.nsp>` names,
 /// skipping content that belongs to another title.
 pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
-    let Ok(list) = env::var("DLC") else { return };
-    for path in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+    for path in &shared().dlc {
         let path = Path::new(path);
         let src = open_source(path);
         let pfs0 = match switch_core::xci::read_container(&src) {

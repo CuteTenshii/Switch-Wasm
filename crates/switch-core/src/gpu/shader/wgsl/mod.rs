@@ -2,7 +2,7 @@
 //! program counter inside a `loop`, with an explicit reconvergence stack, so
 //! nothing is restructured. Registers are untyped `u32`s. [`translate`] emits the
 //! body against [`HOST_INTERFACE`]; [`module`] wraps it into a complete module.
-//! `TRACE_WGSL=<dir>` dumps every module a run uses, for checking with `naga`.
+//! `--dump-wgsl <dir>` dumps every module a run uses, for checking with `naga`.
 
 use super::compiled::{Compiled, NO_TARGET};
 use super::isa::{Op, Pred, TexDim};

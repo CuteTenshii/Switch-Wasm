@@ -1,9 +1,10 @@
 //! Scan-out cost measured in work (bytes read, runs, pixels), not milliseconds:
-//! `present_work [width] [height]`.
+//! `present_work [--width <n>] [--height <n>]`.
 //!
 //! The counts mirror the loop in `Gpu::present`; keep them in sync.
 mod common;
 
+use clap::Parser;
 use switch_core::gpu::surface::Layout;
 use switch_core::gpu::{Crop, DisplayBuffer, Gpu, NV_LAYOUT_BLOCK_LINEAR, NV_LAYOUT_PITCH};
 use switch_core::mem::Memory;
@@ -122,9 +123,17 @@ fn case(name: &str, width: u32, height: u32, pitch_linear: bool, crop: Crop) {
     println!("  checksum {:#x}", work.checksum);
 }
 
+#[derive(Parser)]
+struct Cli {
+    #[arg(long, default_value_t = 1280)]
+    width: u32,
+    #[arg(long, default_value_t = 720)]
+    height: u32,
+}
+
 fn main() {
-    let width = common::opt_num(1).unwrap_or(1280) as u32;
-    let height = common::opt_num(2).unwrap_or(720) as u32;
+    let cli = Cli::parse();
+    let (width, height) = (cli.width, cli.height);
 
     case(
         "block-linear, whole surface",

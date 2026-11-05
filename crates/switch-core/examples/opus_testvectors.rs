@@ -1,13 +1,13 @@
 //! Decode the official Opus test vectors and write the result out for
 //! `opus_compare`.
 //!
-//! Usage: `cargo run --release -p switch-core --example opus_testvectors -- <dir> [out dir]`
+//! Usage: `cargo run --release -p switch-core --example opus_testvectors -- <dir> [--out <dir>]`
 //!
 //! Each vector is decoded to stereo and to mono. The final range must match on
 //! every packet; the samples go to `<out dir>/testvectorNN.rs.dec` and
 //! `…NNm.rs.dec` for `opus_compare` to score.
 
-use std::env;
+use clap::Parser;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -17,13 +17,19 @@ use switch_core::opus::Decoder;
 /// Longest frame Opus can carry: 120 ms at 48 kHz.
 const MAX_FRAME: usize = 5760;
 
+#[derive(Parser)]
+struct Cli {
+    /// The vector directory.
+    dir: String,
+    /// Where decoded output goes; the vector directory by default.
+    #[arg(long, value_name = "DIR")]
+    out: Option<String>,
+}
+
 fn main() {
-    let mut args = env::args().skip(1);
-    let dir = args.next().unwrap_or_else(|| {
-        eprintln!("usage: opus_testvectors <vector directory> [output directory]");
-        std::process::exit(2);
-    });
-    let out_dir = args.next().unwrap_or_else(|| dir.clone());
+    let cli = Cli::parse();
+    let out_dir = cli.out.unwrap_or_else(|| cli.dir.clone());
+    let dir = cli.dir;
 
     let mut names: Vec<String> = fs::read_dir(Path::new(&dir))
         .expect("read vector directory")

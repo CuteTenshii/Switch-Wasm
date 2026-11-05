@@ -1,21 +1,25 @@
 //! List a title's RomFS and map byte offsets to files:
-//! `romfs_ls <container> <prod.keys> [title.keys] [offset,...]`.
-//!
-//! Offsets are relative to the RomFS image, as `TRACE_IPC` prints them.
+//! `romfs_ls <container> --keys <prod.keys> [--offsets <offset,...>]`.
 mod common;
 
+use clap::Parser;
 use switch_core::source::ByteSource;
 
-const USAGE: &str = "romfs_ls <container> <prod.keys> [title.keys] [offset,...]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    /// Hexadecimal offsets to map to files, relative to the RomFS image as the `ipc` trace prints
+    /// them.
+    #[arg(long, value_delimiter = ',', value_parser = common::hex64, value_name = "OFFSET")]
+    offsets: Vec<u64>,
+}
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let wanted: Vec<u64> = args
-        .rest(0)
-        .map(|list| list.split(',').filter_map(common::parse_hex).collect())
-        .unwrap_or_default();
+    let cli = Cli::parse();
+    let wanted = cli.offsets;
 
-    let title = args.open();
+    let title = cli.target.open();
     let (source, index) = title.romfs();
     println!("RomFS: {:#x} bytes", source.len());
 

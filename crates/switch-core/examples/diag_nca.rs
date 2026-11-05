@@ -1,23 +1,28 @@
 //! Prints the header fields `Nca::parse_source` derives for an NCA, even when
 //! the section key is missing.
 //!
-//! Usage: cargo run -p switch-core --example diag_nca -- <path.nca> <prod.keys> [title.keys]
+//! Usage: cargo run -p switch-core --example diag_nca -- <path.nca> --keys <prod.keys>
 mod common;
 
+use clap::Parser;
 use switch_core::source::{ByteSource, FileSource};
 
-const USAGE: &str = "diag_nca <path.nca> <prod.keys> [title.keys]";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+}
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let src = FileSource::open(&args.container).expect("open nca");
+    let cli = Cli::parse();
+    let src = FileSource::open(&cli.target.target).expect("open nca");
     println!(
         "file size: {} bytes ({:.1} KiB)",
         src.len(),
         src.len() as f64 / 1024.0
     );
 
-    let keys = args.keys();
+    let keys = cli.target.keys();
     println!(
         "header_key loaded: {}",
         keys.effective_header_key().is_some()

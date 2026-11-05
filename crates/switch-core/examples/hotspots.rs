@@ -1,14 +1,24 @@
 //! Profiles one steady-state frame by guest address, encoding byte and
-//! translator group: `hotspots <target> [prod.keys] [title.keys] [--font <ttf>]`.
+//! translator group: `hotspots <target> [--keys <prod.keys>] [--instructions]`.
 //!
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (keys required for
-//! retail). Add `--instructions` to list the hottest individual instructions.
+//! retail).
 mod common;
 
-const USAGE: &str = "hotspots <target> [prod.keys] [title.keys] [--font <ttf>]";
-
+use clap::Parser;
 use common::{Flow, Pace};
 use std::collections::BTreeMap;
+
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// List the hottest individual instructions.
+    #[arg(long)]
+    instructions: bool,
+}
 
 /// Bytes of guest code per row of the address histogram.
 const BUCKET: u32 = 4096;
@@ -26,8 +36,8 @@ fn group_of(insn: u32) -> &'static str {
 }
 
 fn main() {
-    let args = common::program_args(USAGE);
-    let program = args.open_program();
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let program = cli.target.open_program();
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     let booted = program.boot(&mut cpu);
@@ -37,7 +47,7 @@ fn main() {
         return;
     }
 
-    let detail = std::env::args().any(|arg| arg == "--instructions");
+    let detail = cli.instructions;
     let mut by_pc: BTreeMap<u32, u64> = BTreeMap::new();
     let mut by_page: BTreeMap<u32, u64> = BTreeMap::new();
     let mut by_top = [0u64; 256];

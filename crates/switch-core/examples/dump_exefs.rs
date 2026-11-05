@@ -1,15 +1,23 @@
 //! Dump a retail Program ExeFS as flat module images plus symbol maps, at
-//! `boot_retail_program` addresses: `dump_exefs <container> <prod.keys> [title.keys] <out_dir>`.
+//! `boot_retail_program` addresses: `dump_exefs <container> --keys <prod.keys> --out <dir>`.
 mod common;
 
+use clap::Parser;
 use std::fs;
 
-const USAGE: &str = "dump_exefs <container> <prod.keys> [title.keys] <out_dir>";
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    /// Directory the images and `symbols.txt` are written to.
+    #[arg(long, value_name = "DIR")]
+    out: String,
+}
 
 fn main() {
-    let args = common::container_args(USAGE);
-    let out_dir = args.need(0).to_string();
-    let title = args.open();
+    let cli = Cli::parse();
+    let out_dir = cli.out;
+    let title = cli.target.open();
     fs::create_dir_all(&out_dir).expect("create the output directory");
 
     for file in &title.exefs_pfs0.files {

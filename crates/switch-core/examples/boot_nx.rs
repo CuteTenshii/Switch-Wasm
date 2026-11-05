@@ -1,26 +1,38 @@
 //! Boot an NRO and print its console output: `boot_nx <path.nro>`.
-//!
-//! `SD=<dir>` copies a host directory onto the SD card; an NRO inside it is launched from
-//! its SD path, as the page's Files dialog does, so it finds the files beside it.
-//! `SHOW=<sd path>` prints that SD card file when the run ends (a homebrew's own log).
-//! `DUMP=`, `TRAP_WRITE=`, `TRAP_READ=` and `WATCH_PC=` are described in [`common::Debug`].
 mod common;
 
 use std::path::Path;
 
+use clap::Parser;
 use common::Flow;
 use switch_core::cpu::Cpu;
 
+#[derive(Parser)]
+struct Cli {
+    nro: String,
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Instructions to run.
+    #[arg(long, default_value_t = u64::MAX)]
+    steps: u64,
+    /// Copy this host directory onto the SD card; an NRO inside it is launched from its SD path,
+    /// as the page's Files dialog does, so it finds the files beside it.
+    #[arg(long, value_name = "DIR")]
+    sd: Option<String>,
+    /// Print this SD card file when the run ends (a homebrew's own log).
+    #[arg(long, value_name = "SD PATH")]
+    show: Option<String>,
+}
+
 fn main() {
-    let Some(path) = std::env::args().nth(1) else {
-        common::usage("boot_nx <path.nro>")
-    };
-    let data = common::read(&path);
+    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let data = common::read(&cli.nro);
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    let sd_path = std::env::var("SD")
-        .ok()
-        .and_then(|dir| copy_to_sd(&mut cpu, Path::new(&dir), Path::new(&path)));
+    let sd_path = cli
+        .sd
+        .as_ref()
+        .and_then(|dir| copy_to_sd(&mut cpu, Path::new(dir), Path::new(&cli.nro)));
     let loaded = match &sd_path {
         Some(at) => cpu.boot_homebrew_at(&data, at),
         None => cpu.boot_homebrew(&data),
@@ -28,18 +40,13 @@ fn main() {
     .expect("boot nro");
     println!("entry = {:#010x}", loaded.entry);
 
-    let mut debug = common::Debug::from_env();
+    let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
     let pace = debug.pace(false);
-    let run = common::drive(
-        &mut cpu,
-        pace,
-        common::env_u64("STEPS", u64::MAX),
-        |cpu, done| {
-            debug.tick(cpu, done);
-            Flow::Continue
-        },
-    );
+    let run = common::drive(&mut cpu, pace, cli.steps, |cpu, done| {
+        debug.tick(cpu, done);
+        Flow::Continue
+    });
     debug.report();
     debug.stop_state(&cpu);
     if let Some(fault) = &run.fault {
@@ -55,8 +62,8 @@ fn main() {
     }
 
     common::print_console(&cpu, 60);
-    if let Ok(show) = std::env::var("SHOW") {
-        match cpu.fs.file(&show) {
+    if let Some(show) = &cli.show {
+        match cpu.fs.file(show) {
             Some(bytes) => {
                 println!("--- {show} ({} bytes) ---", bytes.len());
                 print!("{}", String::from_utf8_lossy(bytes));

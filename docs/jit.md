@@ -121,7 +121,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 
 - Split from the Rust half because `switch-core` has no dependencies and the host has no wasm engine; the interpreter reference lives in Rust, so the comparison spans two programs. Cases are `run(state) -> i32` modules over a bare `WebAssembly.Memory` at manifest-named offsets, so the tool needs no knowledge of `Cpu`'s layout.
 - The manifest is split into lines from its bytes: a selftest manifest outgrew the longest string V8 can hold (512 MiB).
-- `examples/emit_difftest.rs` takes `FROM_FRAME=<n>` to sample a title's later code. It maps no guest memory, so a folded PLT call (which reads its GOT slot) is not reported as covered.
+- `examples/emit_difftest.rs` takes `--from-frame <n>` to sample a title's later code. It maps no guest memory, so a folded PLT call (which reads its GOT slot) is not reported as covered.
 - Guest memory uses the `crate::mem::Memory` shape: a page table of 4-byte entries per 4 KiB page, zero when unmapped (then every access hands back and `run` reports progress). Mapped pages are deliberately placed out of guest order so an access running off one page cannot find its guest neighbour behind it.
 - Each case carries the thread registers (`tpidr:`), the FPCR (`fpcr:`) and the clock origin (`clock:`) it started from. Without them every block reading `TPIDRRO_EL0` differed on a register the harness had never seeded: three of 1,122 on Just Dance 2019.
 - `NO_PC` poisons the pc before each case so a block that should write it and does not is caught. The discard slot is skipped because a `CMP` fused into its branch is emitted without the discarded register write.

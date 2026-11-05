@@ -1,14 +1,24 @@
 //! Map an address back to the symbol it falls in, using an NRO's own dynamic
-//! symbol table: `addr2sym <path.nro> <addr>`.
+//! symbol table: `addr2sym <path.nro> --addr <addr>`.
 mod common;
+
+use clap::Parser;
 
 /// Where `load_nro` puts an NRO's first byte.
 const BASE: u64 = 0x0800_0000;
 
+#[derive(Parser)]
+struct Cli {
+    nro: String,
+    /// Hexadecimal address to look up.
+    #[arg(long, value_parser = common::hex32)]
+    addr: u32,
+}
+
 fn main() {
-    const USAGE: &str = "addr2sym <path.nro> <addr>";
-    let data = common::read(common::arg(1, USAGE));
-    let target = u64::from(common::hex(&common::arg(2, USAGE)));
+    let cli = Cli::parse();
+    let data = common::read(&cli.nro);
+    let target = u64::from(cli.addr);
     let symbols = common::symbols::read(&data);
     if symbols.is_empty() {
         println!("no dynamic symbols (statically linked homebrew exports none)");

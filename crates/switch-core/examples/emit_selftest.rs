@@ -10,6 +10,8 @@
 
 mod common;
 
+use clap::Parser;
+
 use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -108,8 +110,17 @@ fn form(text: &str) -> String {
 /// Random fills per 11-bit encoding-group prefix (bits 31:21) during the sweep.
 const FILLS: usize = 256;
 
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    shared: common::Shared,
+    /// Where the modules and the manifest are written.
+    #[arg(long, default_value = "target/emit-selftest", value_name = "DIR")]
+    out: String,
+}
+
 fn main() {
-    let out_dir = std::env::var("OUT").unwrap_or_else(|_| "target/emit-selftest".into());
+    let out_dir = common::parse::<Cli>(|cli| &cli.shared).out;
     let buckets = survey();
 
     std::fs::create_dir_all(&out_dir).expect("cannot create the output directory");
