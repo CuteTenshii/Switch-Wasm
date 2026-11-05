@@ -76,15 +76,14 @@ function logLine(msg: string, level: LogLevel): void {
   const visible = shown(level);
 
   // A row the view evicted is detached, so counting into it would hide the repeat.
-  const last = backlog[backlog.length - 1];
-  if (last && last.text === msg && last.level === level && !visible) {
+  const last = backlog.at(-1);
+  if (last?.text === msg && last.level === level && !visible) {
     last.count += 1;
     return;
   }
-  if (last && last.text === msg && last.level === level && lastRow?.isConnected) {
+  if (last?.text === msg && last.level === level && lastRow) {
     last.count += 1;
     lastRow.dataset.repeat = String(last.count);
-    if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
     return;
   }
 
@@ -92,10 +91,22 @@ function logLine(msg: string, level: LogLevel): void {
   if (!visible) return;
 
   lastRow = row({ text: msg, level, count: 1 });
-  consoleEl.appendChild(lastRow);
-  while (consoleEl.childElementCount > SHOWN_MAX) consoleEl.firstElementChild!.remove();
-  if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
+  newRows.push(lastRow);
+  if (!frame) frame = requestAnimationFrame(flushRows);
   if (level === 'error') openPanel('console');
+}
+
+// Rows reach the page once per frame: a flood of lines must not lay out the console per line.
+let newRows: HTMLElement[] = [];
+let frame = 0;
+
+function flushRows(): void {
+  frame = 0;
+  consoleEl.append(...newRows.slice(-SHOWN_MAX));
+  newRows = [];
+  while (consoleEl.childElementCount > SHOWN_MAX) consoleEl.firstElementChild!.remove();
+  if (lastRow && !lastRow.isConnected) lastRow = null;
+  if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
 // `e>`, `w>`, `i>`, `l>` or `d>`, so the level survives copying and saving.
@@ -110,6 +121,7 @@ function row(entry: Entry): HTMLElement {
 }
 
 function renderConsole(): void {
+  newRows = [];
   const rows: HTMLElement[] = [];
   lastRow = null;
   for (let i = backlog.length - 1; i >= 0 && rows.length < SHOWN_MAX; i--) {
@@ -124,6 +136,7 @@ function renderConsole(): void {
 
 function clearConsole(): void {
   consoleEl.textContent = '';
+  newRows = [];
   backlog.length = 0;
   lastRow = null;
 }
