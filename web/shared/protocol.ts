@@ -1,5 +1,7 @@
 // The page/worker command contract; both TypeScript builds check against it.
 
+import type { NandEntry, StoredEntry } from './db';
+
 // Byte payloads own a plain ArrayBuffer, so they can go to ImageData, Blob or a transfer.
 export type Bytes = Uint8Array<ArrayBuffer>;
 
@@ -104,6 +106,28 @@ export interface DlcEntry {
   index: number;
 }
 
+// An installed NAND title with the size of its content.
+export interface NandTitle {
+  id: string;
+  name: string;
+  kind: number;
+  size: number;
+}
+
+// Where a stored path lives: the SD card, or one save's files.
+export type StorageVolume = { kind: 'sd' } | { kind: 'save'; id: string };
+
+export interface StorageInfo {
+  kind: 'dir' | 'file';
+  size: number;
+}
+
+// `ids` are the stored saves (`<hex save id>[@<user uid>]`); `names` map a uid to its nickname.
+export interface SaveListing {
+  ids: string[];
+  names: [string, string][];
+}
+
 export interface NspFile {
   name: string;
   size: number;
@@ -199,9 +223,10 @@ export interface Commands {
   set_operation_mode(docked: number): number;
   vibration(): number;
 
-  // `sdPath`: where on the SD card it came from, told to it as argv[0].
-  load_nro(bytes: Bytes, sdPath?: string): number;
-  load_elf(bytes: Bytes): number;
+  load_nro(file: File): number;
+  // The NRO at `path` on the SD card, which is told to it as argv[0].
+  load_sd_nro(path: string): number;
+  load_elf(file: File): number;
 
   open_nsp(file: File): number;
   open_nca(file: File): number;
@@ -213,7 +238,8 @@ export interface Commands {
   clear_dlc(): number;
   clear_update(): number;
   nand_identify(file: File): NandIdentity | null;
-  nand_launch(bytes: Bytes): number;
+  // The stored content named `name`; it is read here, not by the page.
+  nand_launch(name: string): number;
   load_nca_from_nsp(index: number): number;
   load_nca(): number;
   program_nca_index(): number;
@@ -256,15 +282,38 @@ export interface Commands {
   frame_count(): number;
   fb_snapshot(len: number): Bytes | null;
 
-  sd_write_file(path: string, bytes: Bytes): number;
-  sd_create_dir(path: string): number;
-  sd_remove(path: string): number;
   sd_read_file(path: string): Bytes | null;
-
-  save_write_file(id: string, path: string, bytes: Bytes): number;
-  save_create_dir(id: string, path: string): number;
-  save_remove(id: string, path: string): number;
   save_read_file(id: string, path: string): Bytes | null;
+
+  // The stored SD card and saves. Changes go to IndexedDB first, then to the running session.
+  storage_scan(volume: StorageVolume): Map<string, StorageInfo>;
+  storage_read(volume: StorageVolume, path: string): StoredEntry | undefined;
+  // A null entry deletes the path.
+  storage_apply(volume: StorageVolume, changes: [string, StoredEntry | null][]): void;
+  // Store `file` at `path`; its size.
+  storage_upload(volume: StorageVolume, path: string, file: File): number;
+  // Delete `path` and everything under it; `/` empties the volume.
+  storage_remove(volume: StorageVolume, path: string): void;
+  storage_rename(volume: StorageVolume, from: string, to: string): void;
+  // A store-only zip of `root` and its entry count.
+  storage_export(volume: StorageVolume, root: string): { blob: Blob; entries: number };
+  saves_list(): SaveListing;
+  // Delete the saves a profile owns; how many entries went.
+  saves_delete_user(uid: string): number;
+
+  // Profile records by uid, plus the playing one under its own key.
+  users_read(): [string, unknown][];
+  // A null value deletes the key.
+  users_store(entries: [string, unknown][]): void;
+
+  // The installed titles' index, and the same with content sizes.
+  nand_titles(): [string, NandEntry][];
+  nand_list(): NandTitle[];
+  nand_content(name: string): Blob | undefined;
+  // Store `file` under its name and index it as title `id`.
+  nand_install(file: File, id: string, kind: number): void;
+  nand_remove(id: string): void;
+  nand_erase(): void;
 
   // Install `users` with `current` playing; 0 or `switch_users_commit`'s error code.
   users_set(users: UserRecord[], current: string): number;

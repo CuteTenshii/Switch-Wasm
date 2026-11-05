@@ -150,11 +150,17 @@ The page, the worker, and the wasm bindings between them.
 - Free and total space come from the wasm side (`idb/usage.rs`), which scans IndexedDB itself: `navigator.storage.estimate()` gives the origin's free bytes, the `entries` store the SD card's used bytes, `content` the SYSTEM partition's and `saves` USER's. A scan starts on the first slice and again after a guest space query (at most every 2 s); queries answer from the last scan. Databases are only opened if `indexedDB.databases()` lists them, so the scan never creates one with the wrong version.
 - The page asks for persistent storage (`navigator.storage.persist`, main thread only) so the card is not evicted.
 
+## `web/worker/storage.ts`
+
+- The page never opens IndexedDB for the SD card, saves, profiles or NAND: it sends `storage_*`, `saves_*`, `users_*` and `nand_*` commands and this module does the reads, writes and zip. Big payloads (an upload, a NAND image, an NRO) go as a `File` or a stored name and are read here, not copied through the page.
+- A change is stored first, then mirrored into the running session if the core is loaded (`coreLoaded`), so the dialog works with no session. A command that touches the core's storage runs between slices, like any command, so a large export or install pauses emulation for its duration instead of the page.
+- Only the log's mirror (`web/main/log.ts`) still uses IndexedDB from the page.
+
 ## `web/main/files.ts`
 
 - IndexedDB is the source of truth: the dialog lists and edits the stored entries, so it works with no session. Pending guest changes are flushed before a listing; edits are then mirrored into a live session through the host entry points.
 - A folder can exist only as the prefix of deeper paths, so listings derive folders from paths, and delete and rename act on every path under the target. `Vfs::remove` is not recursive, so the session is told deepest first.
-- Exports are store-only zips (`zip.ts`): saves and SD folders are small, and it needs no dependency. No zip64, so it refuses past 4 GiB or 65535 entries.
+- Exports are store-only zips (`web/worker/zip.ts`): saves and SD folders are small, and it needs no dependency. No zip64, so it refuses past 4 GiB or 65535 entries.
 - `shell.ts` binds `.panel .tab` only; the dialog's tabs are `.files-tab` so the panel's handler does not take them.
 - Opening a file (`fileview.ts`): valid UTF-8 without NUL bytes is edited in a textarea (read-only past 4 MiB), PNG/JPEG/GIF/WebP/BMP is shown by magic number, anything else as a hex dump of its first 4 KiB. Leaving or closing with unsaved edits asks first, Escape included.
 

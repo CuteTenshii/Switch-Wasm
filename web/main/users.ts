@@ -1,7 +1,6 @@
 // User profiles and the picker the top bar opens.
 
 import type { Bytes, UserRecord } from '../shared/protocol';
-import { NAND_SAVES, NAND_USERS, nandIdb } from '../shared/db';
 import { $, el, pickedFile } from './dom';
 import { log } from './log';
 import { call, hasSession } from './rpc';
@@ -53,22 +52,12 @@ function toRecord({ uid, nickname, editedAt, picture }: Profile): UserRecord {
   return { uid, nickname, editedAt, picture };
 }
 
-function idbRequest<T>(run: (store: IDBObjectStore) => IDBRequest<T>, mode: IDBTransactionMode): Promise<T> {
-  return nandIdb().then((db) => new Promise<T>((resolve, reject) => {
-    const tx = db.transaction(NAND_USERS, mode);
-    const req = run(tx.objectStore(NAND_USERS));
-    tx.oncomplete = () => resolve(req.result);
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  }));
-}
-
 async function storeProfile(profile: Profile): Promise<void> {
-  await idbRequest((s) => s.put(profile, profile.uid), 'readwrite');
+  await call('users_store', [[profile.uid, profile]]);
 }
 
 async function storeCurrent(): Promise<void> {
-  await idbRequest((s) => s.put(current, CURRENT_KEY), 'readwrite');
+  await call('users_store', [[CURRENT_KEY, current]]);
 }
 
 function firstProfile(): Profile {
@@ -76,20 +65,11 @@ function firstProfile(): Profile {
 }
 
 async function readProfiles(): Promise<void> {
-  const db = await nandIdb();
-  const [keys, values] = await new Promise<[IDBValidKey[], unknown[]]>((resolve, reject) => {
-    const tx = db.transaction(NAND_USERS, 'readonly');
-    const store = tx.objectStore(NAND_USERS);
-    const k = store.getAllKeys();
-    const v = store.getAll();
-    tx.oncomplete = () => resolve([k.result, v.result]);
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  });
   profiles = [];
-  keys.forEach((key, i) => {
-    if (key === CURRENT_KEY) current = String(values[i]);
-    else profiles.push(values[i] as Profile);
-  });
+  for (const [key, value] of await call('users_read')) {
+    if (key === CURRENT_KEY) current = String(value);
+    else profiles.push(value as Profile);
+  }
   profiles.sort((a, b) => a.created - b.created);
   if (!profiles.length) {
     const first = firstProfile();
@@ -134,31 +114,6 @@ async function stageIfIdle(): Promise<void> {
 // Reloads the profiles if the worker stored edits the guest made through `acc`.
 export async function pullProfileEdits(): Promise<void> {
   if (hasSession() && await call('store_profile_edits')) await reloadProfiles();
-}
-
-// Deletes keys of the form "<save id>@<uid>/<path>".
-async function deleteSavesOf(uid: string): Promise<number> {
-  const db = await nandIdb();
-  return new Promise<number>((resolve, reject) => {
-    const tx = db.transaction(NAND_SAVES, 'readwrite');
-    const store = tx.objectStore(NAND_SAVES);
-    const cursor = store.openKeyCursor();
-    let removed = 0;
-    cursor.onsuccess = () => {
-      const at = cursor.result;
-      if (!at) return;
-      const key = at.key as string;
-      const cut = key.indexOf('/');
-      const id = cut < 0 ? key : key.slice(0, cut);
-      if (id.endsWith('@' + uid)) {
-        store.delete(at.key);
-        removed++;
-      }
-      at.continue();
-    };
-    tx.oncomplete = () => resolve(removed);
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  });
 }
 
 // Center-crops to the 256x256 JPEG titles expect.
@@ -411,9 +366,8 @@ async function removeProfile(profile: Profile): Promise<void> {
   pictureUrls.delete(profile.uid);
   if (current === profile.uid) current = profiles[0].uid;
   try {
-    await idbRequest((s) => s.delete(profile.uid), 'readwrite');
-    await storeCurrent();
-    const removed = await deleteSavesOf(profile.uid);
+    await call('users_store', [[profile.uid, null], [CURRENT_KEY, current]]);
+    const removed = await call('saves_delete_user', profile.uid);
     log(`Profiles: deleted ${profile.nickname}` + (removed ? ` and ${removed} saved entries` : ''));
   } catch (err) {
     log('Profiles: the deletion could not be finished (' + (err as Error).message + ')', 'error');

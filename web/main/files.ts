@@ -1,7 +1,6 @@
 // The file manager: the SD card, save data and NAND titles as stored in this browser.
 
-import type { Bytes } from '../shared/protocol';
-import { idbApply, NAND_SAVES, NAND_USERS, nandIdb, SD_STORE, sdIdb, type StoredEntry } from '../shared/db';
+import type { StorageInfo, StorageVolume } from '../shared/protocol';
 import {
   Archive, Database, Download, File, FileArchive, FilePen, FileUp, Folder, FolderPlus, FolderUp,
   MemoryStick, Package, PackagePlus, Pencil, Play, Save, Trash2, type IconNode,
@@ -11,26 +10,8 @@ import { $, el } from './dom';
 import { showView } from './fileview';
 import { fmtSize } from './format';
 import { icon } from './icons';
-import { listNandTitles, nandContent, removeNandTitle, titleLabel } from './nand';
+import { removeNandTitle, titleLabel } from './nand';
 import { call, hasSession } from './rpc';
-import { zip, type ZipEntry } from './zip';
-
-interface Info {
-  kind: 'dir' | 'file';
-  size: number;
-}
-
-// Where a stored path lives and how a running session hears about changes to it.
-interface Volume {
-  db(): Promise<IDBDatabase>;
-  store: string;
-  // Key prefix in front of the path: a save's id, nothing for the SD card.
-  prefix: string;
-  flush(): Promise<unknown>;
-  write(path: string, data: Bytes): Promise<unknown>;
-  mkdir(path: string): Promise<unknown>;
-  remove(path: string): Promise<unknown>;
-}
 
 type Place =
   | { kind: 'sd'; dir: string }
@@ -38,26 +19,10 @@ type Place =
   | { kind: 'save'; id: string; dir: string }
   | { kind: 'nand' };
 
-const sdVolume: Volume = {
-  db: sdIdb,
-  store: SD_STORE,
-  prefix: '',
-  flush: () => call('flush_storage'),
-  write: (path, data) => call('sd_write_file', path, data),
-  mkdir: (path) => call('sd_create_dir', path),
-  remove: (path) => call('sd_remove', path),
-};
+const sdVolume: StorageVolume = { kind: 'sd' };
 
-function saveVolume(id: string): Volume {
-  return {
-    db: nandIdb,
-    store: NAND_SAVES,
-    prefix: id,
-    flush: () => call('flush_storage'),
-    write: (path, data) => call('save_write_file', id, path, data),
-    mkdir: (path) => call('save_create_dir', id, path),
-    remove: (path) => call('save_remove', id, path),
-  };
+function saveVolume(id: string): StorageVolume {
+  return { kind: 'save', id };
 }
 
 const dialog = $<HTMLDialogElement>('files');
@@ -90,34 +55,10 @@ function setStatus(text: string, error = false): void {
   status.classList.toggle('is-error', error);
 }
 
-// Every stored path under the volume, with its kind and size.
-async function scan(volume: Volume): Promise<Map<string, Info>> {
-  await volume.flush();
-  const db = await volume.db();
-  const range = volume.prefix
-    ? IDBKeyRange.bound(volume.prefix + '/', volume.prefix + '/\uffff')
-    : undefined;
-  return new Promise((resolve, reject) => {
-    const out = new Map<string, Info>();
-    const tx = db.transaction(volume.store, 'readonly');
-    const req = tx.objectStore(volume.store).openCursor(range);
-    req.onsuccess = () => {
-      const cursor = req.result;
-      if (!cursor) return;
-      const value = cursor.value as StoredEntry;
-      const path = (cursor.key as string).slice(volume.prefix.length);
-      out.set(path, { kind: value.kind, size: value.data?.length ?? 0 });
-      cursor.continue();
-    };
-    tx.oncomplete = () => resolve(out);
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  });
-}
-
 // A directory's children, counting directories only implied by a deeper path.
-function children(all: Map<string, Info>, dir: string): Map<string, Info> {
+function children(all: Map<string, StorageInfo>, dir: string): Map<string, StorageInfo> {
   const prefix = dir === '/' ? '/' : dir + '/';
-  const out = new Map<string, Info>();
+  const out = new Map<string, StorageInfo>();
   for (const [path, info] of all) {
     if (!path.startsWith(prefix) || path === dir) continue;
     const rest = path.slice(prefix.length);
@@ -126,34 +67,6 @@ function children(all: Map<string, Info>, dir: string): Map<string, Info> {
     else if (!out.has(rest.slice(0, cut))) out.set(rest.slice(0, cut), { kind: 'dir', size: 0 });
   }
   return out;
-}
-
-function under(all: Map<string, Info>, path: string): string[] {
-  return [...all.keys()].filter((p) => p === path || p.startsWith(path + '/'));
-}
-
-async function readEntry(volume: Volume, path: string): Promise<StoredEntry | undefined> {
-  const db = await volume.db();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(volume.store, 'readonly');
-    const req = tx.objectStore(volume.store).get(volume.prefix + path);
-    tx.oncomplete = () => resolve(req.result as StoredEntry | undefined);
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  });
-}
-
-// Store first, then the running session; deletions go deepest first.
-async function apply(volume: Volume, changes: [string, StoredEntry | null][]): Promise<void> {
-  await idbApply(await volume.db(), volume.store,
-    changes.map(([path, value]) => [volume.prefix + path, value]));
-  if (!hasSession()) return;
-  const removals = changes.filter(([, v]) => v === null).map(([p]) => p)
-    .sort((a, b) => b.length - a.length);
-  for (const path of removals) await volume.remove(path);
-  for (const [path, value] of changes) {
-    if (value?.kind === 'dir') await volume.mkdir(path);
-    else if (value) await volume.write(path, value.data ?? new Uint8Array(0));
-  }
 }
 
 function saveBlob(name: string, blob: Blob): void {
@@ -166,30 +79,20 @@ function saveBlob(name: string, blob: Blob): void {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-async function exportZip(volume: Volume, root: string, name: string): Promise<void> {
-  const all = await scan(volume);
-  const entries: ZipEntry[] = [];
-  for (const path of under(all, root).sort()) {
-    const rel = root === '/' ? path.slice(1) : path.slice(root.length + 1);
-    if (!rel) continue;
-    const value = await readEntry(volume, path);
-    if (value?.kind === 'dir') entries.push({ name: rel + '/', data: new Uint8Array(0) });
-    else if (value) entries.push({ name: rel, data: value.data ?? new Uint8Array(0) });
-  }
-  saveBlob(name + '.zip', zip(entries));
-  setStatus('Exported ' + entries.length + ' entries to ' + name + '.zip.');
+async function exportZip(volume: StorageVolume, root: string, name: string): Promise<void> {
+  const { blob, entries } = await call('storage_export', volume, root);
+  saveBlob(name + '.zip', blob);
+  setStatus('Exported ' + entries + ' entries to ' + name + '.zip.');
 }
 
 // Upload `files` (paths relative to `dir`) one at a time, so memory holds one file.
-async function upload(volume: Volume, dir: string, files: [string, File][]): Promise<void> {
+async function upload(volume: StorageVolume, dir: string, files: [string, File][]): Promise<void> {
   let done = 0;
   let bytes = 0;
   for (const [rel, file] of files) {
     setStatus('Uploading ' + (done + 1) + ' of ' + files.length + ': ' + rel);
-    const data = new Uint8Array(await file.arrayBuffer());
-    await apply(volume, [[join(dir, rel), { kind: 'file', data }]]);
+    bytes += await call('storage_upload', volume, join(dir, rel), file);
     done++;
-    bytes += data.length;
   }
   setStatus('Uploaded ' + done + ' file(s), ' + fmtSize(bytes) + '.');
 }
@@ -221,25 +124,7 @@ async function droppedFiles(transfer: DataTransfer): Promise<[string, File][]> {
   return out;
 }
 
-async function profileNames(): Promise<Map<string, string>> {
-  const db = await nandIdb();
-  return new Promise((resolve, reject) => {
-    const names = new Map<string, string>();
-    const tx = db.transaction(NAND_USERS, 'readonly');
-    const req = tx.objectStore(NAND_USERS).openCursor();
-    req.onsuccess = () => {
-      const cursor = req.result;
-      if (!cursor) return;
-      const value = cursor.value as { uid?: string; nickname?: string };
-      if (value.uid && value.nickname) names.set(value.uid, value.nickname);
-      cursor.continue();
-    };
-    tx.oncomplete = () => resolve(names);
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  });
-}
-
-function volumeOf(at: Place): Volume | null {
+function volumeOf(at: Place): StorageVolume | null {
   if (at.kind === 'sd') return sdVolume;
   if (at.kind === 'save') return saveVolume(at.id);
   return null;
@@ -449,8 +334,8 @@ async function guarded(run: () => Promise<void>): Promise<void> {
   await render();
 }
 
-async function renderFiles(volume: Volume, dir: string, mine: number): Promise<void> {
-  const all = await scan(volume);
+async function renderFiles(volume: StorageVolume, dir: string, mine: number): Promise<void> {
+  const all = await call('storage_scan', volume);
   if (mine !== generation) return;
   const entries = [...children(all, dir)].sort(([a, x], [b, y]) =>
     x.kind === y.kind ? a.localeCompare(b) : x.kind === 'dir' ? -1 : 1);
@@ -474,16 +359,14 @@ async function renderFiles(volume: Volume, dir: string, mine: number): Promise<v
     );
     if (info.kind === 'file') {
       if (place.kind === 'sd' && name.toLowerCase().endsWith('.nro')) {
-        action(actions, 'Launch ' + name, () => void guarded(async () => {
-          const data = (await readEntry(volume, path))?.data;
-          if (!data) return;
+        action(actions, 'Launch ' + name, () => {
           dialog.close();
-          await launchFromSd(path, data);
-        }), false, Play);
+          void launchFromSd(path);
+        }, false, Play);
       }
       action(actions, 'Open ' + name, () => void openFile(volume, path, name), false, FilePen);
       action(actions, 'Download ' + name, () => void guarded(async () => {
-        const value = await readEntry(volume, path);
+        const value = await call('storage_read', volume, path);
         saveBlob(name, new Blob([value?.data ?? new Uint8Array(0)]));
       }), false, Download);
     } else {
@@ -491,17 +374,22 @@ async function renderFiles(volume: Volume, dir: string, mine: number): Promise<v
     }
     action(actions, 'Rename ' + name, () => void (async () => {
       const next = await askName(item, name, 'Rename', names);
-      if (next) await guarded(() => rename(volume, all, path, join(dir, next)));
+      if (next) {
+        await guarded(async () => {
+          await call('storage_rename', volume, path, join(dir, next));
+          setStatus('Renamed to ' + next + '.');
+        });
+      }
     })(), false, Pencil);
     action(actions, 'Delete ' + name, () => confirmIn(actions, 'Delete ' + name + '?', 'Delete', async () => {
-      await apply(volume, under(all, path).map((p) => [p, null]));
+      await call('storage_remove', volume, path);
       setStatus('Deleted ' + name + '.');
     }), true, Trash2);
   }
 }
 
-async function openFile(volume: Volume, path: string, name: string): Promise<void> {
-  const value = await readEntry(volume, path).catch((err: unknown) => {
+async function openFile(volume: StorageVolume, path: string, name: string): Promise<void> {
+  const value = await call('storage_read', volume, path).catch((err: unknown) => {
     setStatus(String((err as Error).message || err), true);
     return undefined;
   });
@@ -512,7 +400,7 @@ async function openFile(volume: Volume, path: string, name: string): Promise<voi
     name,
     data,
     save: async (next) => {
-      await apply(volume, [[path, { kind: 'file', data: next }]]);
+      await call('storage_apply', volume, [[path, { kind: 'file', data: next }]]);
       setStatus('Saved ' + name + '.');
     },
     download: () => saveBlob(name, new Blob([data])),
@@ -523,29 +411,10 @@ async function openFile(volume: Volume, path: string, name: string): Promise<voi
   renderTools();
 }
 
-async function rename(volume: Volume, all: Map<string, Info>, from: string, to: string): Promise<void> {
-  const changes: [string, StoredEntry | null][] = [];
-  for (const path of under(all, from)) {
-    const value = await readEntry(volume, path);
-    if (value) changes.push([to + path.slice(from.length), value]);
-    changes.push([path, null]);
-  }
-  await apply(volume, changes);
-  setStatus('Renamed to ' + basename(to) + '.');
-}
-
 async function renderSaves(mine: number): Promise<void> {
-  const db = await nandIdb();
-  await call('flush_storage');
-  const keys = await new Promise<string[]>((resolve, reject) => {
-    const tx = db.transaction(NAND_SAVES, 'readonly');
-    const req = tx.objectStore(NAND_SAVES).getAllKeys();
-    tx.oncomplete = () => resolve(req.result as string[]);
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  });
-  const names = await profileNames();
+  const { ids, names: nicknames } = await call('saves_list');
   if (mine !== generation) return;
-  const ids = [...new Set(keys.map((k) => k.slice(0, k.indexOf('/'))))].sort();
+  const names = new Map(nicknames);
   list.textContent = '';
   if (!ids.length) {
     message('No save data yet. A title creates its save the first time it writes one.');
@@ -559,15 +428,14 @@ async function renderSaves(mine: number): Promise<void> {
       () => go({ kind: 'save', id, dir: '/' }));
     action(actions, 'Export ' + label + ' as .zip', () => void guarded(() => exportZip(saveVolume(id), '/', id)), false, Archive);
     action(actions, 'Delete ' + label, () => confirmIn(actions, 'Delete this save?', 'Delete', async () => {
-      const volume = saveVolume(id);
-      await apply(volume, [...(await scan(volume)).keys()].map((p) => [p, null]));
+      await call('storage_remove', saveVolume(id), '/');
       setStatus('Deleted the save ' + id + '.');
     }), true, Trash2);
   }
 }
 
 async function renderNand(mine: number): Promise<void> {
-  const titles = await listNandTitles();
+  const titles = await call('nand_list');
   if (mine !== generation) return;
   list.textContent = '';
   if (!titles.length) {
@@ -580,7 +448,7 @@ async function renderNand(mine: number): Promise<void> {
     const { actions } = row(title.kind === 0 ? Package : Database, titleLabel(title.id),
       title.id + ' · ' + kind + ' · ' + fmtSize(title.size), null);
     action(actions, 'Download ' + title.name, () => void guarded(async () => {
-      const content = await nandContent(title.name);
+      const content = await call('nand_content', title.name);
       if (!content) throw new Error(title.name + ' is indexed but its content is missing.');
       saveBlob(title.name, content);
     }), false, Download);
@@ -654,7 +522,7 @@ $('btn-files-mkdir').addEventListener('click', () => {
     item.remove();
     if (name) {
       void guarded(async () => {
-        await apply(volume, [[join(dir, name), { kind: 'dir' }]]);
+        await call('storage_apply', volume, [[join(dir, name), { kind: 'dir' }]]);
         setStatus('Created ' + name + '.');
       });
     }

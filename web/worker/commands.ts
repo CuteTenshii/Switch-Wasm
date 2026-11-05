@@ -3,6 +3,7 @@
 import type {
   Bytes, CommandHandlers, GpuReport, JitStats, MemoryReport,
 } from '../shared/protocol';
+import { idbGet, SD_STORE, sdIdb, type StoredEntry } from '../shared/db';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
 import { addHostFile, openHostFile } from './hostfiles';
@@ -12,6 +13,7 @@ import {
   switch_restore_storage, switch_store_profile_edits,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
+import { nandContent, saveKey, STORAGE, uidHalves } from './storage';
 import {
   core,
   fromWasm,
@@ -24,25 +26,6 @@ import {
   withPath,
 } from './wasm';
 
-// A uid (32 hex digits in memory order) as two little-endian halves.
-export function uidHalves(hex: string): [bigint, bigint] {
-  const half = (from: number) => {
-    let value = 0n;
-    for (let i = 7; i >= 0; i--) {
-      value = (value << 8n) | BigInt(parseInt(hex.slice(from + i * 2, from + i * 2 + 2), 16));
-    }
-    return value;
-  };
-  return [half(0), half(16)];
-}
-
-// `<hex save id>[@<user uid>]`; no uid means no owning user.
-function saveKey(id: string): [bigint, bigint, bigint] {
-  const [save, user] = id.split('@');
-  const [lo, hi] = user ? uidHalves(user) : [0n, 0n];
-  return [BigInt('0x' + save), lo, hi];
-}
-
 const READ_CHUNK = 1 << 20;
 
 function describe(file: Blob): string {
@@ -54,6 +37,13 @@ function describe(file: Blob): string {
 function logLoad(what: string, result: number | bigint): void {
   if (Number(result) < 0) workerLog(`[io] ${what}: refused (${lastError()})`, 'warn');
   else workerLog(`[io] ${what}`);
+}
+
+function loadNro(bytes: Bytes, sdPath?: string): number {
+  const result = withBytes(bytes, (ptr, len) => withPath(sdPath ?? '', (pathPtr, pathLen) =>
+    Number(core.switch_load_nro(ptr, len, pathPtr, pathLen))));
+  if (result < 0) logLoad(`loaded an NRO (${fmtSize(bytes.length)})${sdPath ? ' from ' + sdPath : ''}`, result);
+  return result;
 }
 
 export const CMD: CommandHandlers = {
@@ -96,13 +86,16 @@ export const CMD: CommandHandlers = {
     return 0;
   },
 
-  load_nro(bytes, sdPath) {
-    const result = withBytes(bytes, (ptr, len) => withPath(sdPath ?? '', (pathPtr, pathLen) =>
-      Number(core.switch_load_nro(ptr, len, pathPtr, pathLen))));
-    if (Number(result) < 0) logLoad(`loaded an NRO (${fmtSize(bytes.length)})${sdPath ? ' from ' + sdPath : ''}`, result);
-    return result;
+  async load_nro(file) {
+    return loadNro(new Uint8Array(await file.arrayBuffer()));
   },
-  load_elf(bytes) {
+  async load_sd_nro(path) {
+    const entry = await idbGet<StoredEntry>(await sdIdb(), SD_STORE, path);
+    if (entry?.kind !== 'file') throw new Error(path + ' is not on the SD card.');
+    return loadNro(entry.data ?? new Uint8Array(0), path);
+  },
+  async load_elf(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
     const result =
       withBytes(bytes, (ptr, len) => Number(core.switch_load_elf(ptr, len)));
     logLoad(`loaded an ELF (${fmtSize(bytes.length)})`, result);
@@ -167,7 +160,10 @@ export const CMD: CommandHandlers = {
       return id ? { id: id.toString(16).padStart(16, '0'), kind } : null;
     });
   },
-  nand_launch(bytes) {
+  async nand_launch(name) {
+    const content = await nandContent(name);
+    if (!content) throw new Error(name + ' is indexed but its content is missing.');
+    const bytes = new Uint8Array(await content.arrayBuffer());
     const result =
       withBytes(bytes, (ptr, len) => Number(core.switch_nand_launch(ptr, len)));
     logLoad(`launched a program from the NAND (${fmtSize(bytes.length)})`, result);
@@ -324,19 +320,8 @@ export const CMD: CommandHandlers = {
     });
   },
 
-  // SD card, mirrored to IndexedDB by the main thread.
+  // SD card, mirrored to IndexedDB (`storage.ts`).
 
-  sd_write_file(path, bytes) {
-    return withPath(path, (pptr, plen) =>
-      withBytes(bytes, (dptr, dlen) =>
-        core.switch_sd_write_file(pptr, plen, dptr, dlen)));
-  },
-  sd_create_dir(path) {
-    return withPath(path, (ptr, len) => core.switch_sd_create_dir(ptr, len));
-  },
-  sd_remove(path) {
-    return withPath(path, (ptr, len) => core.switch_sd_remove(ptr, len));
-  },
   // The whole file, read in slices, or null when the path is not one.
   sd_read_file(path) {
     return withPath(path, (pptr, plen) => {
@@ -360,19 +345,6 @@ export const CMD: CommandHandlers = {
 
   // Save data: the SD card calls keyed by save.
 
-  save_write_file(id, path, bytes) {
-    return withPath(path, (pptr, plen) =>
-      withBytes(bytes, (dptr, dlen) =>
-        core.switch_save_write_file(...saveKey(id), pptr, plen, dptr, dlen)));
-  },
-  save_create_dir(id, path) {
-    return withPath(path, (ptr, len) =>
-      core.switch_save_create_dir(...saveKey(id), ptr, len));
-  },
-  save_remove(id, path) {
-    return withPath(path, (ptr, len) =>
-      core.switch_save_remove(...saveKey(id), ptr, len));
-  },
   // The whole file, read in slices, or null when the path is not one.
   save_read_file(id, path) {
     const save = saveKey(id);
@@ -414,4 +386,6 @@ export const CMD: CommandHandlers = {
     return withPath(text ?? '', (ptr, len) =>
       core.switch_keyboard_answer(ptr, len, text === null ? 0 : 1));
   },
+
+  ...STORAGE,
 };

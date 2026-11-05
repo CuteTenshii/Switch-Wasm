@@ -1,16 +1,8 @@
 // The NAND in IndexedDB: NCA content as Blobs by file name, and an index of titles by id.
 
-import {
-  idbApply,
-  idbGet,
-  idbGetAll,
-  NAND_CONTENT,
-  NAND_TITLES,
-  nandIdb,
-  type NandEntry,
-} from '../shared/db';
+import type { NandEntry } from '../shared/db';
 import { $, el } from './dom';
-import { beginLoad, failLoad } from './loading';
+import { beginLoad } from './loading';
 import { log } from './log';
 import { call, onNandProgress } from './rpc';
 import { setNote } from './shell';
@@ -46,41 +38,6 @@ const SYSTEM_TITLES: Record<string, string> = {
 const STANDALONE_TITLES = new Set([
   '0100000000001000', '0100000000001003', '0100000000001009', '010000000000100d',
 ]);
-
-// Content and index entry go in one transaction so the index never names missing content.
-function nandInstall(name: string, content: Blob, titleId: string, kind: number) {
-  return nandIdb().then((db) => new Promise<void>((resolve, reject) => {
-    const tx = db.transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
-    tx.objectStore(NAND_CONTENT).put(content, name);
-    tx.objectStore(NAND_TITLES).put({ name, kind }, titleId);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  }));
-}
-
-function nandErase() {
-  return nandIdb().then((db) => new Promise<void>((resolve, reject) => {
-    const tx = db.transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
-    tx.objectStore(NAND_CONTENT).clear();
-    tx.objectStore(NAND_TITLES).clear();
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  }));
-}
-
-// Content stored by older builds as an ArrayBuffer is rewritten as a Blob on read.
-export async function nandContent(name: string): Promise<Blob | undefined> {
-  const stored = await idbGet<Blob | ArrayBuffer>(await nandIdb(), NAND_CONTENT, name);
-  if (!stored) return undefined;
-  if (stored instanceof Blob) return stored;
-  const blob = new Blob([stored]);
-  try {
-    await idbApply(await nandIdb(), NAND_CONTENT, [[name, blob]]);
-  } catch { /* it is readable either way; the next session pays the same again */ }
-  return blob;
-}
 
 // In-memory copy of the title index, refreshed on install and erase.
 let nandTitles: [string, NandEntry][] = [];
@@ -118,7 +75,7 @@ function beginArchiveRestore(): Promise<number> {
 // Read the index now; register archives in the background.
 export async function initNand(): Promise<void> {
   try {
-    nandTitles = await idbGetAll<NandEntry>(await nandIdb(), NAND_TITLES);
+    nandTitles = await call('nand_titles');
   } catch (err) {
     log('NAND: could not be read (' + (err as Error).message + ')', 'error');
     nandTitles = [];
@@ -167,57 +124,15 @@ function nandRow(id: string, entry: NandEntry): HTMLButtonElement {
   return row;
 }
 
-async function launchInstalled(id: string, entry: NandEntry): Promise<void> {
+function launchInstalled(id: string, entry: NandEntry): Promise<void> {
   const name = titleLabel(id);
   beginLoad(name, 'reading ' + entry.name + ' from the NAND');
-  let content: Blob | undefined;
-  try {
-    content = await nandContent(entry.name);
-  } catch (err) {
-    failLoad('NAND: ' + (err as Error).message);
-    log('NAND: ' + (err as Error).message, 'error');
-    return;
-  }
-  if (!content) {
-    failLoad(entry.name + ' is indexed but its content is missing.');
-    log('NAND: ' + entry.name + ' is indexed but its content is missing.', 'error');
-    return;
-  }
-  // The loader maps the whole image, so programs are booted from bytes.
-  const bytes = new Uint8Array(await content.arrayBuffer());
-  return doLaunchNca(name, () => call('nand_launch', bytes));
-}
-
-export interface NandTitle {
-  id: string;
-  name: string;
-  kind: number;
-  size: number;
-}
-
-// The installed titles with their content sizes, for the file manager.
-export async function listNandTitles(): Promise<NandTitle[]> {
-  const out: NandTitle[] = [];
-  for (const [id, entry] of nandTitles) {
-    const content = await nandContent(entry.name).catch(() => undefined);
-    out.push({ id, name: entry.name, kind: entry.kind, size: content?.size ?? 0 });
-  }
-  return out;
+  return doLaunchNca(name, () => call('nand_launch', entry.name));
 }
 
 // Content and index entry go together; a registered archive stays until the session is replaced.
 export async function removeNandTitle(id: string): Promise<void> {
-  const entry = nandTitles.find(([titleId]) => titleId === id)?.[1];
-  if (!entry) return;
-  const db = await nandIdb();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
-    tx.objectStore(NAND_CONTENT).delete(entry.name);
-    tx.objectStore(NAND_TITLES).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-  });
+  await call('nand_remove', id);
   nandTitles = nandTitles.filter(([titleId]) => titleId !== id);
   renderNandTitles();
   updateFirmwareState();
@@ -267,14 +182,14 @@ $('firmware-ncas').addEventListener('change', async (e) => {
       const what = await call('nand_identify', f);
       if (!what || what.kind === 2) continue;
       // Store the File itself so the browser owns the bytes.
-      await nandInstall(f.name, f, what.id, what.kind);
+      await call('nand_install', f, what.id, what.kind);
       installed++;
     } catch (err) {
       log('Could not read ' + f.name + ': ' + (err as Error).message, 'error');
     }
   }
   try {
-    nandTitles = await idbGetAll<NandEntry>(await nandIdb(), NAND_TITLES);
+    nandTitles = await call('nand_titles');
   } catch { /* the panel just stays as it was */ }
   renderNandTitles();
   // Registered from the NAND so an archive counts once across repeated installs.
@@ -289,7 +204,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
 $('btn-erase-nand').addEventListener('click', async () => {
 // Already registered content stays registered until the session is replaced.
   try {
-    await nandErase();
+    await call('nand_erase');
   } catch (err) {
     log('NAND: could not be erased (' + (err as Error).message + ')', 'error');
     return;

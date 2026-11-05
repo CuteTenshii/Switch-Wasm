@@ -1,7 +1,7 @@
 // Booting from the stage: the Open buttons and file drops. Executables load
 // directly; containers go to `container.ts`. The format comes from the header.
 
-import type { Bytes, ControlInfo } from '../shared/protocol';
+import type { ControlInfo } from '../shared/protocol';
 import { bootContainer } from './container';
 import { $, pickedFile } from './dom';
 import { classify } from './filetype';
@@ -18,19 +18,18 @@ import type { RunningTitle } from './title';
 export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
   setState('loading');
   beginLoad(file.name, 'reading ' + fmtSize(file.size));
-  const data = new Uint8Array(await file.arrayBuffer());
   loadPhase(kind === 'nro' ? 'loading the NRO' : 'loading the ELF',
-    'mapping the image and seeding the guest');
-  return loadWith(file.name, () => kind === 'nro' ? call('load_nro', data) : call('load_elf', data));
+    'reading, mapping the image and seeding the guest');
+  return loadWith(file.name, () => kind === 'nro' ? call('load_nro', file) : call('load_elf', file));
 }
 
-// Launch `data`, the NRO at `path` on the SD card, in place of the running title as hbmenu does.
-export async function launchFromSd(path: string, data: Bytes): Promise<void> {
+// Launch the NRO at `path` on the SD card in place of the running title, as hbmenu does.
+export async function launchFromSd(path: string): Promise<void> {
   const name = path.slice(path.lastIndexOf('/') + 1);
   if (!(await replaceTitle(name))) return;
   setState('loading');
   loadPhase('loading the NRO', 'mapping the image and seeding the guest');
-  if (await loadWith(name, () => call('load_nro', data, path))) await run();
+  if (await loadWith(name, () => call('load_sd_nro', path))) await run();
 }
 
 // Load with `load`, which answers the entry point, then show the program as booted.
