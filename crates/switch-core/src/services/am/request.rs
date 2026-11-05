@@ -716,6 +716,21 @@ impl Cpu {
                     info[..4].copy_from_slice(&applet_id_for(self.program_id()).to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &info, &[])
                 }
+                // ReportVisibleError / ReportVisibleErrorWithErrorContext(ErrorCode): the error
+                // the applet wants shown, taken as reported.
+                Some(50) | Some(51) => {
+                    let data = self.ipc_request_data(tls);
+                    let category = self.mem.read_u32(data).unwrap_or(0);
+                    let number = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
+                    self.log(
+                        Level::Warn,
+                        &format!(
+                            "[am] the {} applet reported error {category:04}-{number:04}",
+                            applet_name(applet_id_for(self.program_id()))
+                        ),
+                    );
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 // ShouldSetGpuTimeSliceManually.
                 Some(150) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // GetMainAppletIdentityInfo / GetCallerAppletIdentityInfo.

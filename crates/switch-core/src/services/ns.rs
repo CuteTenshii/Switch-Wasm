@@ -124,6 +124,17 @@ impl Cpu {
                 Some(26) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            // `IDocumentInterface`.
+            "ns:document" => match cmd_id {
+                // GetRunningApplicationProgramId(u64 process id) -> the session's root program.
+                Some(92) => {
+                    let id = self.processes.get(&self.root).map_or(0, |p| p.program_id);
+                    self.write_ipc_response(tls, 0, &[], &id.to_le_bytes(), &[])
+                }
+                // ResolveApplicationContentPath(file system proxy type, program id): accepted.
+                Some(23) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
             // `IReadOnlyApplicationControlDataInterface`.
             "ns:read-only-control" => match cmd_id {
                 Some(0) => self.ns_application_control_data(tls),
@@ -133,6 +144,8 @@ impl Cpu {
             "ns:read-only-record" => match cmd_id {
                 // HasApplicationRecord(u64 application_id) -> false.
                 Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // IsDataCorruptedResult(Result) -> false: no result here means corrupted data.
+                Some(2) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 // ListApplicationRecord(s32 entry_offset): none, count written.
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -472,6 +485,29 @@ mod tests {
         cpu.ns_request(TLS, 9, Some(48)).unwrap();
         let free = cpu.mem.read_u64(TLS + 0x20).unwrap();
         assert!(free > 0 && free <= total, "free {free} of total {total}");
+    }
+
+    #[test]
+    fn the_web_applets_document_and_record_queries_are_answered() {
+        for (iface, command) in [
+            ("ns:document", 92u32),
+            ("ns:document", 23),
+            ("ns:read-only-record", 2),
+        ] {
+            let mut cpu = request(false, command, &[]);
+            cpu.register_service_handle(9, iface);
+            cpu.ns_request(TLS, 9, Some(command)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "{iface} {command}"
+            );
+        }
+        let mut cpu = request(false, 92, &[]);
+        cpu.register_service_handle(9, "ns:document");
+        cpu.ns_request(TLS, 9, Some(92)).unwrap();
+        let id = cpu.process().program_id;
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), id);
     }
 
     #[test]

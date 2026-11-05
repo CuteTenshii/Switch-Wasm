@@ -1052,3 +1052,21 @@ fn a_pushed_context_is_popped_back_newest_first() {
     cpu.applet_request(TLS, 9, Some(22)).unwrap();
     assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (3 << 9));
 }
+
+#[test]
+fn an_applet_reporting_a_visible_error_is_answered() {
+    for cmd in [50, 51] {
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&2010u32.to_le_bytes());
+        payload[4..].copy_from_slice(&221u32.to_le_bytes());
+        let mut cpu = request(false, cmd, &payload);
+        cpu.set_program_id(0x0100_0000_0000_100F);
+        cpu.register_service_handle(9, "am:library-applet-self-accessor");
+        cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "cmd {cmd} refused"
+        );
+    }
+}

@@ -388,9 +388,19 @@ fn caller_identity(cpu: &Cpu) -> [u8; 16] {
     let Some((caller, _)) = cpu.process().caller else {
         return home_menu_identity();
     };
-    let program = cpu.processes[&caller].program_id;
+    let caller = &cpu.processes[&caller];
+    let program = caller.program_id;
+    let homebrew = caller
+        .module_names
+        .iter()
+        .any(|(_, _, name)| name == "homebrew");
+    let applet_id = if homebrew {
+        0x01
+    } else {
+        applet_id_for(program)
+    };
     let mut info = [0u8; 16];
-    info[..4].copy_from_slice(&applet_id_for(program).to_le_bytes());
+    info[..4].copy_from_slice(&applet_id.to_le_bytes());
     info[8..].copy_from_slice(&program.to_le_bytes());
     info
 }
