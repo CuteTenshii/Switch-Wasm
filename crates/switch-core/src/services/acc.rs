@@ -568,9 +568,12 @@ impl Cpu {
             Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
             // GetNetworkServiceLicenseCacheEx (15.0.0+) -> u32 license, s64 expiry, zeroed.
             Some(143) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
-            // GetNintendoAccountUserResourceCache: no Nintendo Account is linked here. Shop skips
-            // the whole block on this result, and parses a date out of any success.
-            Some(130) => self.write_ipc_response(tls, ACCOUNT_REGISTRATION_REQUIRED, &[], &[], &[]),
+            // GetNintendoAccountUserResourceCache (130, and 136 from 19.0.0): no Nintendo Account
+            // is linked here. Shop skips the whole block on this result, and parses a date out of
+            // any success.
+            Some(130 | 136) => {
+                self.write_ipc_response(tls, ACCOUNT_REGISTRATION_REQUIRED, &[], &[], &[])
+            }
             _ => self.unimplemented_command(tls, "acc:manager", cmd_id),
         }
     }
