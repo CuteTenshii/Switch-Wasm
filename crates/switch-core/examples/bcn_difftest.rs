@@ -5,7 +5,6 @@
 mod common;
 
 use clap::Parser;
-use std::env;
 use switch_core::gpu::bcn::{decode, decode_into, Codec};
 
 #[derive(Parser)]
@@ -17,6 +16,9 @@ struct Cli {
     /// An ASTC fixture to compare too.
     #[arg(long, value_name = "FILE")]
     astc: Option<String>,
+    /// Print the first mismatching input of each codec.
+    #[arg(long)]
+    dump: bool,
 }
 
 fn main() {
@@ -128,7 +130,7 @@ fn main() {
             }
             if differs {
                 differing += 1;
-                if env::var("BCN_DUMP").is_ok() && differing == 1 {
+                if cli.dump && differing == 1 {
                     println!("  first mismatch, input {input:02x?}");
                     let first_bad = (0..16).find(|&texel| {
                         group.mapping.iter().enumerate().any(|(slot, &c)| {
