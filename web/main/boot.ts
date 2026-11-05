@@ -20,7 +20,7 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
   beginLoad(file.name, 'reading ' + fmtSize(file.size));
   loadPhase(kind === 'nro' ? 'loading the NRO' : 'loading the ELF',
     'reading, mapping the image and seeding the guest');
-  return loadWith(file.name, () => kind === 'nro' ? call('load_nro', file) : call('load_elf', file));
+  return loadWith(file.name, () => call('load_program', file));
 }
 
 // Launch the NRO at `path` on the SD card in place of the running title, as hbmenu does.
@@ -72,7 +72,7 @@ async function homebrewTitle(filename: string): Promise<RunningTitle> {
     log('No homebrew details: ' + (err as Error).message, 'debug');
     return { name: filename, publisher: '', icon: null, version: '' };
   }
-  const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
+  const icon = info.icon_size > 0 ? await call('control_icon') : null;
   return {
     name: info.name || filename,
     publisher: info.publisher || '',

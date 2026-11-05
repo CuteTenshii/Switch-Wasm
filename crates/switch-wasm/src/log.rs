@@ -6,7 +6,9 @@ use std::collections::VecDeque;
 use switch_core::cpu::Cpu;
 use switch_core::trace::Level;
 
-use crate::{session_if_live, write_into, SyncCell};
+use wasm_bindgen::prelude::wasm_bindgen;
+
+use crate::{session_if_live, SyncCell};
 
 /// A line's level as the page numbers it; 0 from [`switch_log_next`] means no line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,11 +142,8 @@ pub extern "C" fn switch_log_next() -> u32 {
     }
 }
 
-/// Copy the line [`switch_log_next`] took into `buf`. Returns its whole length in
-/// bytes, which can exceed `maxlen`, so the page can size the buffer from a first call.
-#[no_mangle]
-pub extern "C" fn switch_log_line(buf: *mut u8, maxlen: u32) -> u32 {
-    let line = &queue().current;
-    write_into(buf, maxlen, line.as_bytes());
-    line.len() as u32
+/// The line [`switch_log_next`] took.
+#[wasm_bindgen]
+pub fn switch_log_line() -> String {
+    queue().current.clone()
 }

@@ -1,6 +1,8 @@
 //! Running the guest and reading its state.
 
-use crate::{session, write_into};
+use wasm_bindgen::prelude::wasm_bindgen;
+
+use crate::session;
 
 /// Run up to `max_steps` instructions. Returns steps executed or -1 on error.
 #[no_mangle]
@@ -47,11 +49,10 @@ pub extern "C" fn switch_halted() -> i32 {
     session().cpu.halted as i32
 }
 
-/// Copy the last `fatal:u` report for this program, if it made one.
-#[no_mangle]
-pub extern "C" fn switch_guest_fatal(buf: *mut u8, maxlen: u32) -> u32 {
-    let fatal = session().cpu.guest_fatal().unwrap_or("");
-    write_into(buf, maxlen, fatal.as_bytes())
+/// The last `fatal:u` report for this program, or empty if it made none.
+#[wasm_bindgen]
+pub fn switch_guest_fatal() -> String {
+    session().cpu.guest_fatal().unwrap_or("").to_owned()
 }
 
 /// Read register `idx` (0..=31; 31 = SP).

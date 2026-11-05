@@ -4,8 +4,9 @@
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
+use wasm_bindgen::prelude::wasm_bindgen;
+
 use crate::session;
-use crate::storage::sd_path;
 
 /// Tell the page about the error applets the guest raised and the keyboard it waits on,
 /// each once. Errors are taken from the queue; the keyboard stays until answered.
@@ -49,14 +50,9 @@ pub(crate) fn announce(cpu: &mut switch_core::cpu::Cpu) {
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 static KEYBOARD_POSTED: AtomicBool = AtomicBool::new(false);
 
-/// Answer the waiting keyboard with UTF-8 text, or cancel it when `submitted` is 0.
-/// Returns 1 if a keyboard was waiting.
-#[no_mangle]
-pub extern "C" fn switch_keyboard_answer(
-    text_ptr: *const u8,
-    text_len: u32,
-    submitted: u32,
-) -> u32 {
-    let text = (submitted != 0).then(|| sd_path(text_ptr, text_len));
+/// Answer the waiting keyboard with `text`, or cancel it when there is none. Returns 1 if a
+/// keyboard was waiting.
+#[wasm_bindgen]
+pub fn switch_keyboard_answer(text: Option<String>) -> u32 {
     u32::from(session().cpu.answer_keyboard(text.as_deref()))
 }

@@ -36,6 +36,47 @@ declare module '@core/switch_wasm.js' {
   export function switch_remember_control(): Promise<void>;
   // `idb/users.rs`: stores the guest's profile edits; whether there were any.
   export function switch_store_profile_edits(): Promise<boolean>;
+  // The exports that carry bytes or text, in `crates/switch-wasm/src`. A failure's reason is
+  // also in `switch_last_error`; the ones that return a `Result` throw it.
+  export function switch_last_error(): string;
+  // `container.rs`
+  export function switch_update_version(): string;
+  export function switch_dlc_json(): string;
+  export function switch_nsp_files_json(): string;
+  export function switch_read_file(
+    index: number, offset: bigint, len: number): Uint8Array<ArrayBuffer>;
+  export function switch_parse_nca(header: Uint8Array): string;
+  export function switch_control_json(): string;
+  export function switch_control_icon(): Uint8Array<ArrayBuffer>;
+  export function switch_load_keys(prod: Uint8Array, title: Uint8Array): number;
+  // `boot.rs` and `nand.rs`: the entry address, or -1.
+  export function switch_load_program(file: Blob): Promise<number>;
+  export function switch_load_sd_nro(path: string): number;
+  export function switch_nand_launch(content: Blob): number;
+  // `{ id, kind }` as JSON, or empty when the file is no NCA.
+  export function switch_nand_identify(file: number, size: bigint): string;
+  // `log.rs`, `run.rs`, `stats.rs`
+  export function switch_log_line(): string;
+  export function switch_guest_fatal(): string;
+  export function switch_jit_stats_json(): string;
+  export function switch_gpu_report_json(): string;
+  export function switch_memory_json(): string;
+  // `input.rs`, `keyboard.rs`, `users.rs`
+  export function switch_set_touch(points: Uint32Array): void;
+  export function switch_keyboard_answer(text: string | null): number;
+  export function switch_user_stage(
+    uid: string, nickname: string, editedAt: number, picture: Uint8Array | null): void;
+  export function switch_users_commit(current: string): number;
+  // `storage.rs`: the running session's SD card and saves; a save is its id and uid halves.
+  export function switch_sd_write_file(path: string, data: Uint8Array): void;
+  export function switch_sd_create_dir(path: string): void;
+  export function switch_sd_remove(path: string): void;
+  export function switch_save_write_file(
+    saveId: bigint, userLo: bigint, userHi: bigint, path: string, data: Uint8Array): void;
+  export function switch_save_create_dir(
+    saveId: bigint, userLo: bigint, userHi: bigint, path: string): void;
+  export function switch_save_remove(
+    saveId: bigint, userLo: bigint, userHi: bigint, path: string): void;
 }
 
 // The commit the site was built from; see `vite.config.ts`.

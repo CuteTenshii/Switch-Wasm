@@ -1,21 +1,23 @@
 //! Firmware NCAs from the NAND.
 
+use switch_core::json;
 use switch_core::nca::Nca;
+use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::boot::load_and_boot_nca;
-use crate::{session, Added, HostSource};
+use crate::session;
+use crate::HostSource;
 
-/// Identify a firmware NCA from its header: writes the content type to `kind_out`
-/// (0 program, 1 data archive, 2 other) and returns the title id, or 0.
-#[no_mangle]
-pub extern "C" fn switch_nand_identify(file: u32, size: u64, kind_out: *mut u32) -> u64 {
+/// Identify a firmware NCA from its header as `{ id, kind }` JSON, where `kind` is 0 for a
+/// program, 1 for a data archive and 2 for anything else; empty when it cannot be read.
+#[wasm_bindgen]
+pub fn switch_nand_identify(file: u32, size: u64) -> String {
     let s = session();
     let src = HostSource { file, len: size };
     let nca = match Nca::parse_source(&src, Some(&s.keys)) {
         Ok(nca) => nca,
         Err(e) => {
             s.last_error = e.to_string();
-            return 0;
+            return String::new();
         }
     };
     use switch_core::nca::ContentType;
@@ -24,24 +26,31 @@ pub extern "C" fn switch_nand_identify(file: u32, size: u64, kind_out: *mut u32)
         ContentType::Data | ContentType::PublicData => 1,
         _ => 2,
     };
-    if !kind_out.is_null() {
-        unsafe { *kind_out = kind };
-    }
     s.last_error.clear();
-    nca.title_id
+    json::object(|o| {
+        o.field("id", format!("{:016x}", nca.title_id))
+            .field("kind", kind);
+    })
 }
 
-/// Boot a Program NCA from the NAND (an applet). Returns the entry address, or -1
-/// with the reason in `switch_last_error`.
-#[no_mangle]
-pub extern "C" fn switch_nand_launch(ptr: *const u8, len: u32) -> i64 {
+/// Boot a Program NCA from the NAND (an applet), read by range from the browser's copy
+/// rather than copied into linear memory. Returns the entry address, or -1 with the reason in
+/// `switch_last_error`.
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[wasm_bindgen]
+pub fn switch_nand_launch(content: &web_sys::Blob) -> f64 {
+    use crate::boot::load_and_boot_nca;
+    use crate::Added;
     let s = session();
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec();
+    let src = HostSource {
+        file: crate::add_host_file(content),
+        len: content.size() as u64,
+    };
     load_and_boot_nca(
         &s.keys,
         &mut s.cpu,
         &mut s.last_error,
-        switch_core::source::MemSource(bytes),
+        src,
         Added::default(),
-    )
+    ) as f64
 }

@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 
 use switch_core::cpu::{Cpu, TouchPoint, TOUCH_MAX};
+use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::session;
 
@@ -172,21 +173,18 @@ pub extern "C" fn switch_set_input(
     });
 }
 
-/// Feed touch contacts: `count` packed little-endian `u32` triples (`finger_id`, `x`, `y`)
-/// in 1280x720 digitizer space. `count` 0 is a lift. A new finger is kept until the guest
-/// has had a frame to see it.
-#[no_mangle]
-pub extern "C" fn switch_set_touch(ptr: *const u8, count: u32) {
-    let mut touches = Vec::new();
-    if count > 0 && !ptr.is_null() {
-        let raw = unsafe { std::slice::from_raw_parts(ptr, count as usize * 12) };
-        let word = |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
-        touches.extend((0..count as usize).map(|i| TouchPoint {
-            finger_id: word(i * 12),
-            x: word(i * 12 + 4),
-            y: word(i * 12 + 8),
-        }));
-    }
+/// Feed touch contacts: `(finger_id, x, y)` triples in 1280x720 digitizer space. No triples is
+/// a lift. A new finger is kept until the guest has had a frame to see it.
+#[wasm_bindgen]
+pub fn switch_set_touch(points: &[u32]) {
+    let touches = points
+        .chunks_exact(3)
+        .map(|point| TouchPoint {
+            finger_id: point[0],
+            x: point[1],
+            y: point[2],
+        })
+        .collect();
     let cpu = &mut session().cpu;
     LATCH.with_borrow_mut(|latch| latch.set_touch(cpu, touches));
 }

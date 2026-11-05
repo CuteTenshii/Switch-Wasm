@@ -223,10 +223,10 @@ export interface Commands {
   set_operation_mode(docked: number): number;
   vibration(): number;
 
-  load_nro(file: File): number;
+  // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
+  load_program(file: File): number;
   // The NRO at `path` on the SD card, which is told to it as argv[0].
   load_sd_nro(path: string): number;
-  load_elf(file: File): number;
 
   open_nsp(file: File): number;
   open_nca(file: File): number;
@@ -250,7 +250,7 @@ export interface Commands {
   load_control_from_nsp(): number;
   load_control_from_nca(): number;
   control_json(): string;
-  control_icon(size: number): Bytes;
+  control_icon(): Bytes;
   // Store the control data just read, so a later session's ns can describe the title.
   remember_control(): void;
   parse_nca(header: Bytes): string;
@@ -280,10 +280,6 @@ export interface Commands {
   fb_width(): number;
   fb_height(): number;
   frame_count(): number;
-  fb_snapshot(len: number): Bytes | null;
-
-  sd_read_file(path: string): Bytes | null;
-  save_read_file(id: string, path: string): Bytes | null;
 
   // The stored SD card and saves. Changes go to IndexedDB first, then to the running session.
   storage_scan(volume: StorageVolume): Map<string, StorageInfo>;

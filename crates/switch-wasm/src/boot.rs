@@ -1,12 +1,12 @@
 //! Loading and booting programs.
 
 use switch_core::cpu::Cpu;
-use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
 use switch_core::source::{ByteSource, Window};
 use switch_core::trace::Level;
+use wasm_bindgen::prelude::*;
 
-use crate::{container, nsp_file_source, session, Added, Dlc};
+use crate::{container, nsp_file_source, session, Added, Dlc, Session};
 
 /// End the running title and its applets, leaving the console ready for the next one.
 #[no_mangle]
@@ -19,24 +19,14 @@ pub extern "C" fn switch_end_title() {
     s.last_error.clear();
 }
 
-/// Load an NRO homebrew image into the CPU, told the SD card path it came from when
-/// `path_len` is not 0. Returns entry address or -1.
-#[no_mangle]
-pub extern "C" fn switch_load_nro(
-    ptr: *const u8,
-    len: u32,
-    path_ptr: *const u8,
-    path_len: u32,
-) -> i64 {
-    let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    let s = session();
+/// Load an NRO homebrew image into the CPU, told the SD card path it came from when there
+/// is one. Returns the entry address or -1.
+fn load_nro_bytes(s: &mut Session, data: &[u8], sd_path: Option<&str>) -> i64 {
     // Booting empties the output and trace buffers.
     crate::log::collect(&mut s.cpu);
-    let booted = if path_len == 0 {
-        s.cpu.boot_homebrew(data)
-    } else {
-        s.cpu
-            .boot_homebrew_at(data, &crate::storage::sd_path(path_ptr, path_len))
+    let booted = match sd_path {
+        None => s.cpu.boot_homebrew(data),
+        Some(path) => s.cpu.boot_homebrew_at(data, path),
     };
     s.control = None;
     match booted {
@@ -62,6 +52,35 @@ pub extern "C" fn switch_load_nro(
             -1
         }
     }
+}
+
+/// Load the program in `file`, an ELF or an NRO by its magic, read here. Returns the entry
+/// address or -1.
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[wasm_bindgen]
+pub async fn switch_load_program(file: web_sys::Blob) -> Result<f64, JsValue> {
+    let data = crate::blob::read_vec(&file).await?;
+    let s = session();
+    let entry = if data.starts_with(b"\x7fELF") {
+        load_elf_bytes(s, &data)
+    } else {
+        load_nro_bytes(s, &data, None)
+    };
+    Ok(entry as f64)
+}
+
+/// Load the NRO at `path` on the SD card, which is told its path. Returns the entry
+/// address or -1.
+#[wasm_bindgen]
+pub fn switch_load_sd_nro(path: &str) -> f64 {
+    let s = session();
+    let Some(size) = s.cpu.fs.size(path) else {
+        s.last_error = format!("{path} is not on the SD card");
+        return -1.0;
+    };
+    let mut data = vec![0u8; size as usize];
+    s.cpu.fs.read(path, 0, &mut data);
+    load_nro_bytes(s, &data, Some(path)) as f64
 }
 
 /// Decrypt a Program NCA's ExeFS from `nca_src`, load it and boot. Returns entry or -1.
@@ -328,13 +347,11 @@ fn mount_manual(s: &mut crate::Session, container: &crate::HostSource) {
 }
 
 /// Load an AArch64 ELF into the CPU. Returns entry address or -1.
-#[no_mangle]
-pub extern "C" fn switch_load_elf(ptr: *const u8, len: u32) -> i64 {
-    let s = session();
-    let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+fn load_elf_bytes(s: &mut Session, data: &[u8]) -> i64 {
     // An ELF carries no control data.
     s.control = None;
-    match load_elf(&s.cpu.mem, data) {
+    match switch_core::elf::load_elf(&s.cpu.mem, data) {
         Ok(elf) => {
             s.cpu.set_pc(elf.entry as u32);
             boot_entry_regs(&mut s.cpu, 0);
@@ -356,6 +373,7 @@ pub extern "C" fn switch_load_elf(ptr: *const u8, len: u32) -> i64 {
 
 /// Reset the integer registers and set the entry convention: `x0 = env`,
 /// `x1 = UINT64_MAX` for the homebrew ABI, `x0 = 0` for NSO, `x0 = 0, x1 = 1` otherwise.
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 fn boot_entry_regs(cpu: &mut Cpu, env_addr: u32) {
     for i in 0..=30u8 {
         cpu.set_reg(i, 0);

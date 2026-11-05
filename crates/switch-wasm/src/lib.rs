@@ -1,11 +1,12 @@
-//! WASM bindings for switch-core over a raw `extern "C"` ABI. Buffers cross through
-//! linear memory, the one session is a global, structured results are
-//! hand-written JSON, and errors are read back with `switch_last_error`.
+//! WASM bindings for switch-core. Scalars cross as raw `extern "C"` exports; anything with
+//! bytes or text goes through `wasm-bindgen`. The one session is a global, structured
+//! results are hand-written JSON, and a failure's reason is read back with
+//! `switch_last_error`.
 
 // Exports take pointers into linear memory that the JS caller owns for the call.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::alloc::{alloc, dealloc, Layout};
+use wasm_bindgen::prelude::wasm_bindgen;
 
 /// A `Sync` wrapper for interior mutability touched only by the worker that calls exports.
 #[repr(transparent)]
@@ -20,6 +21,8 @@ impl<T> SyncCell<T> {
     }
 }
 
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+mod blob;
 #[cfg(feature = "gpu")]
 mod gpu;
 #[cfg(target_arch = "wasm32")]
@@ -209,30 +212,6 @@ impl ByteSource for HostSource {
     }
 }
 
-/// Allocate `len` bytes of linear memory for JS. Returns null for sizes above
-/// `isize::MAX`; callers must check.
-#[no_mangle]
-pub extern "C" fn switch_alloc(len: u32) -> *mut u8 {
-    // The earliest call any host makes.
-    install_panic_hook();
-    match Layout::from_size_align(len as usize, 1) {
-        Ok(layout) => unsafe { alloc(layout) },
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-/// Free a buffer from `switch_alloc`. Null frees nothing.
-#[no_mangle]
-pub extern "C" fn switch_free(ptr: *mut u8, len: u32) {
-    if ptr.is_null() {
-        return;
-    }
-    let Ok(layout) = Layout::from_size_align(len as usize, 1) else {
-        return;
-    };
-    unsafe { dealloc(ptr, layout) }
-}
-
 /// Set up the module and build its machine, replacing any earlier one (which keeps its
 /// logged lines). Call right after instantiating.
 #[no_mangle]
@@ -296,15 +275,9 @@ fn forget_the_last_session() {
     unsafe { &mut *PANIC_MSG.get() }.fill(0);
 }
 
-/// Message bytes that fit in `maxlen` alongside a terminating NUL.
-fn nul_reserved(maxlen: u32) -> usize {
-    (maxlen as usize).saturating_sub(1)
-}
-
-/// Copy the last error message into `buf` (NUL-terminated). Returns length.
-/// Also surfaces any Rust panic captured by the panic hook.
-#[no_mangle]
-pub extern "C" fn switch_last_error(buf: *mut u8, maxlen: u32) -> u32 {
+/// The reason the last call failed, or the Rust panic that trapped it.
+#[wasm_bindgen]
+pub fn switch_last_error() -> String {
     // A captured panic takes priority and needs no session.
     // SAFETY: only the system worker calls exports; see the `SESSION` comment.
     let panicked = unsafe { &mut *PANIC_MSG.get() };
@@ -313,28 +286,11 @@ pub extern "C" fn switch_last_error(buf: *mut u8, maxlen: u32) -> u32 {
             .iter()
             .position(|&b| b == 0)
             .unwrap_or(panicked.len());
-        let n = len.min(nul_reserved(maxlen));
-        if n > 0 && !buf.is_null() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(panicked.as_ptr(), buf, n);
-                *buf.add(n) = 0;
-            }
-        }
+        let message = String::from_utf8_lossy(&panicked[..len]).into_owned();
         panicked.fill(0);
-        return n as u32;
+        return message;
     }
-    let Some(s) = session_if_live() else {
-        return 0;
-    };
-    let bytes = s.last_error.as_bytes();
-    let n = bytes.len().min(nul_reserved(maxlen));
-    if n > 0 && !buf.is_null() {
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n);
-            *buf.add(n) = 0;
-        }
-    }
-    n as u32
+    session_if_live().map_or_else(String::new, |s| s.last_error.clone())
 }
 
 /// An update container added for the title about to run. Its Program NCA holds
@@ -410,16 +366,6 @@ fn nsp_file_source(s: &mut Session, index: u32) -> Option<Window<HostSource>> {
             None
         }
     }
-}
-
-fn write_into(buf: *mut u8, maxlen: u32, data: &[u8]) -> u32 {
-    let n = data.len().min(maxlen as usize);
-    if n > 0 && !buf.is_null() {
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), buf, n);
-        }
-    }
-    n as u32
 }
 
 // Host builds only: these use `set_host_container` and a `Mutex`.

@@ -1,32 +1,26 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  Bytes, CommandHandlers, GpuReport, JitStats, MemoryReport,
+  CommandHandlers, GpuReport, JitStats, MemoryReport, NandIdentity,
 } from '../shared/protocol';
-import { idbGet, SD_STORE, sdIdb, type StoredEntry } from '../shared/db';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
 import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
 import {
-  switch_clear_screen, switch_flush_storage, switch_remember_control, switch_restore_nand,
-  switch_restore_storage, switch_store_profile_edits,
+  switch_clear_screen, switch_control_icon, switch_control_json, switch_dlc_json,
+  switch_flush_storage, switch_gpu_report_json, switch_guest_fatal, switch_jit_stats_json,
+  switch_keyboard_answer, switch_last_error, switch_load_keys, switch_load_program,
+  switch_load_sd_nro, switch_memory_json, switch_nand_identify, switch_nand_launch,
+  switch_nsp_files_json, switch_parse_nca, switch_read_file, switch_remember_control,
+  switch_restore_nand, switch_restore_storage, switch_set_touch, switch_store_profile_edits,
+  switch_update_version, switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
-import { nandContent, saveKey, STORAGE, uidHalves } from './storage';
-import {
-  core,
-  fromWasm,
-  lastError,
-  readJson,
-  readString,
-  readWholeJson,
-  withBuffer,
-  withBytes,
-  withPath,
-} from './wasm';
+import { nandContent, STORAGE } from './storage';
+import { core, parseOr } from './wasm';
 
-const READ_CHUNK = 1 << 20;
+const NOTHING = new Uint8Array(0);
 
 function describe(file: Blob): string {
   const name = file instanceof File ? `"${file.name}" ` : '';
@@ -35,15 +29,8 @@ function describe(file: Blob): string {
 
 // `result` is negative on failure.
 function logLoad(what: string, result: number | bigint): void {
-  if (Number(result) < 0) workerLog(`[io] ${what}: refused (${lastError()})`, 'warn');
+  if (Number(result) < 0) workerLog(`[io] ${what}: refused (${switch_last_error()})`, 'warn');
   else workerLog(`[io] ${what}`);
-}
-
-function loadNro(bytes: Bytes, sdPath?: string): number {
-  const result = withBytes(bytes, (ptr, len) => withPath(sdPath ?? '', (pathPtr, pathLen) =>
-    Number(core.switch_load_nro(ptr, len, pathPtr, pathLen))));
-  if (result < 0) logLoad(`loaded an NRO (${fmtSize(bytes.length)})${sdPath ? ' from ' + sdPath : ''}`, result);
-  return result;
 }
 
 export const CMD: CommandHandlers = {
@@ -72,8 +59,7 @@ export const CMD: CommandHandlers = {
     return 0;
   },
   set_touch(points) {
-    const bytes = new Uint8Array(points.buffer, points.byteOffset, points.byteLength) as Bytes;
-    withBytes(bytes, (ptr) => core.switch_set_touch(ptr, points.length / 3));
+    switch_set_touch(points);
     return 0;
   },
   // The Battery Status API is Window-only, so the main thread sends it.
@@ -86,19 +72,15 @@ export const CMD: CommandHandlers = {
     return 0;
   },
 
-  async load_nro(file) {
-    return loadNro(new Uint8Array(await file.arrayBuffer()));
+  // The core reads the file itself, so the page never holds a copy.
+  async load_program(file) {
+    const result = await switch_load_program(file);
+    if (result < 0) logLoad(`loaded ${describe(file)} as a program`, result);
+    return result;
   },
-  async load_sd_nro(path) {
-    const entry = await idbGet<StoredEntry>(await sdIdb(), SD_STORE, path);
-    if (entry?.kind !== 'file') throw new Error(path + ' is not on the SD card.');
-    return loadNro(entry.data ?? new Uint8Array(0), path);
-  },
-  async load_elf(file) {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const result =
-      withBytes(bytes, (ptr, len) => Number(core.switch_load_elf(ptr, len)));
-    logLoad(`loaded an ELF (${fmtSize(bytes.length)})`, result);
+  load_sd_nro(path) {
+    const result = switch_load_sd_nro(path);
+    if (result < 0) logLoad(`loaded the NRO at ${path}`, result);
     return result;
   },
 
@@ -124,24 +106,20 @@ export const CMD: CommandHandlers = {
     else workerLog(`[io] ${describe(file)} is not an update`);
     return title;
   },
-  update_version() {
-    return readString(256, (buf, cap) => core.switch_update_version(buf, cap));
-  },
+  update_version: switch_update_version,
   // Returns how many pieces the add-on content container holds.
   add_dlc(file) {
     const index = addHostFile(file);
     const pieces = core.switch_add_dlc(index, BigInt(file.size));
     // Zero, not a negative, is a refusal.
     if (pieces === 0) {
-      workerLog(`[io] add-on content ${describe(file)}: refused (${lastError()})`, 'warn');
+      workerLog(`[io] add-on content ${describe(file)}: refused (${switch_last_error()})`, 'warn');
     } else {
       workerLog(`[io] opened ${describe(file)} as add-on content, ${pieces} pieces`);
     }
     return pieces;
   },
-  dlc_json() {
-    return readString(8192, (buf, cap) => core.switch_dlc_json(buf, cap));
-  },
+  dlc_json: switch_dlc_json,
   clear_dlc() {
     core.switch_clear_dlc();
     return 0;
@@ -154,19 +132,15 @@ export const CMD: CommandHandlers = {
   nand_identify(file) {
     const index = addHostFile(file);
     noteRegistered('NAND files to identify', file.size);
-    return withBuffer(4, (kindPtr) => {
-      const id = core.switch_nand_identify(index, BigInt(file.size), kindPtr);
-      const kind = new DataView(core.memory.buffer).getUint32(kindPtr, true);
-      return id ? { id: id.toString(16).padStart(16, '0'), kind } : null;
-    });
+    const found = switch_nand_identify(index, BigInt(file.size));
+    return found ? JSON.parse(found) as NandIdentity : null;
   },
+  // The content stays in the browser's copy and the core reads it by range.
   async nand_launch(name) {
     const content = await nandContent(name);
     if (!content) throw new Error(name + ' is indexed but its content is missing.');
-    const bytes = new Uint8Array(await content.arrayBuffer());
-    const result =
-      withBytes(bytes, (ptr, len) => Number(core.switch_nand_launch(ptr, len)));
-    logLoad(`launched a program from the NAND (${fmtSize(bytes.length)})`, result);
+    const result = switch_nand_launch(content);
+    logLoad(`launched ${name} from the NAND`, result);
     return result;
   },
   load_nca_from_nsp(index) {
@@ -183,26 +157,18 @@ export const CMD: CommandHandlers = {
     return core.switch_program_nca_index();
   },
   load_keys(prod, title) {
-    const prodBytes = prod || new Uint8Array(0);
-    const titleBytes = title || new Uint8Array(0);
-    const result = withBytes(prodBytes, (pptr, plen) =>
-      withBytes(titleBytes, (tptr, tlen) =>
-        core.switch_load_keys(plen ? pptr : 0, plen, tlen ? tptr : 0, tlen)));
+    const prodBytes = prod ?? NOTHING;
+    const titleBytes = title ?? NOTHING;
+    const result = switch_load_keys(prodBytes, titleBytes);
     logLoad(
       `loaded keys: prod ${fmtSize(prodBytes.length)}, title ${fmtSize(titleBytes.length)}`,
       result,
     );
     return result;
   },
-  nsp_files_json() {
-    return readString(8192, (buf, cap) => core.switch_nsp_files_json(buf, cap));
-  },
+  nsp_files_json: switch_nsp_files_json,
   read_file(index, offset, len) {
-    return withBuffer(len, (buf) => {
-      const got = Number(core.switch_read_file(index, BigInt(offset), buf, len));
-      if (got < 0) return { error: lastError() };
-      return fromWasm(buf, got);
-    });
+    return switch_read_file(index, BigInt(offset), len);
   },
 
   load_control_from_nsp() {
@@ -211,24 +177,11 @@ export const CMD: CommandHandlers = {
   load_control_from_nca() {
     return core.switch_load_control_from_nca();
   },
-  control_json() {
-    // Worst case: the export truncates silently.
-    return readString(16384, (buf, cap) => core.switch_control_json(buf, cap));
-  },
-  // `size` is control_json's icon_size.
-  control_icon(size) {
-    if (!size) return new Uint8Array(0);
-    return withBuffer(size, (buf) => {
-      const n = Number(core.switch_control_icon(buf, size));
-      return n > 0 ? fromWasm(buf, n) : new Uint8Array(0);
-    });
-  },
+  control_json: switch_control_json,
+  control_icon: switch_control_icon,
   // Store the control data just read, for the next session's ns.
   remember_control: switch_remember_control,
-  parse_nca(header) {
-    return withBytes(header, (ptr, len) =>
-      readString(4096, (buf, cap) => core.switch_parse_nca(ptr, len, buf, cap)));
-  },
+  parse_nca: switch_parse_nca,
 
   run(budget) {
     return Number(core.switch_run(BigInt(budget)));
@@ -250,9 +203,7 @@ export const CMD: CommandHandlers = {
   halted() {
     return core.switch_halted();
   },
-  guest_fatal() {
-    return readString(2048, (buf, cap) => core.switch_guest_fatal(buf, cap));
-  },
+  guest_fatal: switch_guest_fatal,
   flush_log() {
     return flushLog();
   },
@@ -281,28 +232,18 @@ export const CMD: CommandHandlers = {
     const none: Omit<MemoryReport, 'wasmHeap'> = {
       backed: 0, cap: 0, regions: [], elsewhere: 0, allProcesses: 0,
     };
-    const report = readJson<Omit<MemoryReport, 'wasmHeap'>>(
-      4096,
-      (buf, cap) => core.switch_memory_json(buf, cap),
-      none,
-    );
-    return { ...report, wasmHeap };
+    return { ...parseOr(switch_memory_json(), none), wasmHeap };
   },
   jit_stats() {
-    return readWholeJson<JitStats>(
-      256,
-      (buf, cap) => core.switch_jit_stats_json(buf, cap),
+    return parseOr<JitStats>(
+      switch_jit_stats_json(),
       { enabled: false, blocks: 0, translated: 0, executed: 0, linked: 0, invalidated: 0 },
     );
   },
   gpu_report() {
-    return readWholeJson<GpuReport>(
-      2048,
-      (buf, cap) => core.switch_gpu_report_json(buf, cap),
-      {},
-    );
+    return parseOr<GpuReport>(switch_gpu_report_json(), {});
   },
-  last_error: lastError,
+  last_error: switch_last_error,
 
   fb_width() {
     return core.switch_fb_width();
@@ -313,79 +254,18 @@ export const CMD: CommandHandlers = {
   frame_count() {
     return core.switch_frame_count();
   },
-  fb_snapshot(len) {
-    return withBuffer(len, (buf) => {
-      const n = core.switch_fb_snapshot(buf, len);
-      return n > 0 ? fromWasm(buf, n) : null;
-    });
-  },
-
-  // SD card, mirrored to IndexedDB (`storage.ts`).
-
-  // The whole file, read in slices, or null when the path is not one.
-  sd_read_file(path) {
-    return withPath(path, (pptr, plen) => {
-      const size = Number(core.switch_sd_file_size(pptr, plen));
-      if (size < 0) return null;
-      const out = new Uint8Array(size);
-      const cap = Math.min(Math.max(size, 1), READ_CHUNK);
-      return withBuffer(cap, (buf) => {
-        let off = 0;
-        while (off < size) {
-          const n = Number(
-            core.switch_sd_read_file(pptr, plen, BigInt(off), buf, cap));
-          if (n <= 0) break;
-          out.set(fromWasm(buf, n), off);
-          off += n;
-        }
-        return out;
-      });
-    });
-  },
-
-  // Save data: the SD card calls keyed by save.
-
-  // The whole file, read in slices, or null when the path is not one.
-  save_read_file(id, path) {
-    const save = saveKey(id);
-    return withPath(path, (pptr, plen) => {
-      const size = Number(core.switch_save_file_size(...save, pptr, plen));
-      if (size < 0) return null;
-      const out = new Uint8Array(size);
-      const cap = Math.min(Math.max(size, 1), READ_CHUNK);
-      return withBuffer(cap, (buf) => {
-        let off = 0;
-        while (off < size) {
-          const n = Number(
-            core.switch_save_read_file(...save, pptr, plen, BigInt(off), buf, cap));
-          if (n <= 0) break;
-          out.set(fromWasm(buf, n), off);
-          off += n;
-        }
-        return out;
-      });
-    });
-  },
 
   // Users: staged one at a time, committed whole before a title starts.
 
   users_set(users, current) {
     for (const user of users) {
-      const [lo, hi] = uidHalves(user.uid);
-      withPath(user.nickname, (nptr, nlen) =>
-        withBytes(user.picture ?? new Uint8Array(0), (pptr, plen) =>
-          core.switch_user_stage(
-            lo, hi, nptr, nlen, BigInt(user.editedAt), pptr,
-            user.picture ? plen : 0)));
+      switch_user_stage(user.uid, user.nickname, user.editedAt, user.picture);
     }
-    return core.switch_users_commit(...uidHalves(current));
+    return switch_users_commit(current);
   },
   store_profile_edits: switch_store_profile_edits,
 
-  keyboard_answer(text) {
-    return withPath(text ?? '', (ptr, len) =>
-      core.switch_keyboard_answer(ptr, len, text === null ? 0 : 1));
-  },
+  keyboard_answer: switch_keyboard_answer,
 
   ...STORAGE,
 };

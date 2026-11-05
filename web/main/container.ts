@@ -395,7 +395,7 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
     return null;
   }
   if (!info.name) return null;
-  const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
+  const icon = info.icon_size > 0 ? await call('control_icon') : null;
   await call('remember_control');
   const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);

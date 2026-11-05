@@ -5,7 +5,9 @@ use switch_core::nca::Nca;
 use switch_core::nsp::Pfs0;
 use switch_core::source::{ByteSource, Window};
 
-use crate::{container, nsp_file_source, session, write_into, Dlc, HostSource, Session, Update};
+use wasm_bindgen::prelude::wasm_bindgen;
+
+use crate::{container, nsp_file_source, session, Dlc, HostSource, Session, Update};
 
 /// Open the `size`-byte container (NSP or XCI) the host has ready, read through
 /// `host_read`. Returns 0 on success, -1 on error.
@@ -125,12 +127,11 @@ pub extern "C" fn switch_add_update(file: u32, size: u64) -> u64 {
     program_id
 }
 
-/// The update's NACP display version ("1.0.1") into `buf`, or empty.
-#[no_mangle]
-pub extern "C" fn switch_update_version(buf: *mut u8, maxlen: u32) -> u32 {
+/// The update's NACP display version ("1.0.1"), or empty.
+#[wasm_bindgen]
+pub fn switch_update_version() -> String {
     let s = session();
-    let version = s
-        .update
+    s.update
         .as_ref()
         .and_then(|update| {
             let (index, _) =
@@ -140,8 +141,7 @@ pub extern "C" fn switch_update_version(buf: *mut u8, maxlen: u32) -> u32 {
             let control = switch_core::control::Control::from_source(window, &s.keys).ok()?;
             Some(control.nacp.display_version)
         })
-        .unwrap_or_default();
-    write_into(buf, maxlen, version.as_bytes())
+        .unwrap_or_default()
 }
 
 /// Register a container of add-on content. Returns how many pieces it holds, or 0
@@ -211,11 +211,9 @@ pub extern "C" fn switch_add_dlc(file: u32, size: u64) -> u32 {
 }
 
 /// The session's add-on content as JSON: content id, index and base title.
-#[no_mangle]
-pub extern "C" fn switch_dlc_json(buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session();
-    let json = dlc_json(s.dlc.iter().map(|dlc| dlc.content_id));
-    write_into(buf, maxlen, json.as_bytes())
+#[wasm_bindgen]
+pub fn switch_dlc_json() -> String {
+    dlc_json(session().dlc.iter().map(|dlc| dlc.content_id))
 }
 
 /// Each add-on content id with its base title and index.
@@ -246,12 +244,11 @@ fn is_add_on_content_id(title_id: u64) -> bool {
     (0x1000..0x1800).contains(&(title_id & 0x1FFF))
 }
 
-/// Parse the file table of the current NSP and return it as JSON.
-/// Writes up to `maxlen` bytes into `buf`; returns bytes written.
-#[no_mangle]
-pub extern "C" fn switch_nsp_files_json(buf: *mut u8, maxlen: u32) -> u32 {
+/// The current NSP's file table as JSON.
+#[wasm_bindgen]
+pub fn switch_nsp_files_json() -> String {
     let s = session();
-    let json = json::array(|a| {
+    json::array(|a| {
         for f in &s.nsp_files {
             a.object(|o| {
                 o.field("name", &f.name)
@@ -259,39 +256,39 @@ pub extern "C" fn switch_nsp_files_json(buf: *mut u8, maxlen: u32) -> u32 {
                     .field("size", f.size);
             });
         }
-    });
-    write_into(buf, maxlen, json.as_bytes())
+    })
 }
 
-/// Read a slice of NSP file `index` from `file_offset` into `buf`. Returns bytes
-/// copied or -1.
-#[no_mangle]
-pub extern "C" fn switch_read_file(index: u32, file_offset: u64, buf: *mut u8, maxlen: u32) -> i64 {
+/// Read up to `len` bytes of NSP file `index` from `file_offset`. Fails with the reason, also
+/// in `switch_last_error`.
+#[wasm_bindgen]
+pub fn switch_read_file(index: u32, file_offset: u64, len: u32) -> Result<Vec<u8>, String> {
     let s = session();
     let Some(file) = nsp_file_source(s, index) else {
-        return -1;
+        return Err(s.last_error.clone());
     };
-    if buf.is_null() || maxlen == 0 || file_offset >= file.len() {
-        return 0;
+    if len == 0 || file_offset >= file.len() {
+        return Ok(Vec::new());
     }
-    let n = (maxlen as u64).min(file.len() - file_offset) as usize;
-    // SAFETY: JS allocated `maxlen` bytes at `buf`, and `n` is no larger.
-    let out = unsafe { std::slice::from_raw_parts_mut(buf, n) };
-    match file.read_at(file_offset, out) {
-        Ok(got) => got as i64,
+    let n = u64::from(len).min(file.len() - file_offset) as usize;
+    let mut out = vec![0u8; n];
+    match file.read_at(file_offset, &mut out) {
+        Ok(got) => {
+            out.truncate(got);
+            Ok(out)
+        }
         Err(e) => {
             s.last_error = e.to_string();
-            -1
+            Err(s.last_error.clone())
         }
     }
 }
 
-/// Parse an NCA from `ptr`/`len` and return a JSON summary, decrypting with loaded keys.
-#[no_mangle]
-pub extern "C" fn switch_parse_nca(ptr: *const u8, len: u32, buf: *mut u8, maxlen: u32) -> u32 {
+/// A JSON summary of the NCA whose header is `data`, decrypting with loaded keys.
+#[wasm_bindgen]
+pub fn switch_parse_nca(data: &[u8]) -> String {
     let s = session();
-    let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    let json = match Nca::parse_with_keys(data, Some(&s.keys)) {
+    match Nca::parse_with_keys(data, Some(&s.keys)) {
         Ok(nca) => json::object(|o| {
             o.field("title_id", format!("{:016x}", nca.title_id))
                 .field("content_type", nca.content_type.name())
@@ -324,8 +321,7 @@ pub extern "C" fn switch_parse_nca(ptr: *const u8, len: u32, buf: *mut u8, maxle
         Err(e) => json::object(|o| {
             o.field("error", e.to_string());
         }),
-    };
-    write_into(buf, maxlen, json.as_bytes())
+    }
 }
 
 /// Cache control data and pass its NACP figures (save data, add-on base id) to the CPU.
@@ -396,15 +392,15 @@ pub extern "C" fn switch_load_control_from_nca() -> i32 {
     }
 }
 
-/// The cached control data as JSON, or `{}`. `icon_size` sizes `switch_control_icon`'s buffer.
-#[no_mangle]
-pub extern "C" fn switch_control_json(buf: *mut u8, maxlen: u32) -> u32 {
+/// The cached control data as JSON, or `{}`. `icon_size` is the length of `switch_control_icon`.
+#[wasm_bindgen]
+pub fn switch_control_json() -> String {
     let s = session();
     let Some(control) = &s.control else {
-        return write_into(buf, maxlen, b"{}");
+        return "{}".to_owned();
     };
     let nacp = &control.nacp;
-    let json = json::object(|o| {
+    json::object(|o| {
         o.field("title_id", format!("{:016x}", control.title_id))
             .field("name", &control.name)
             .field("publisher", &control.publisher)
@@ -448,50 +444,24 @@ pub extern "C" fn switch_control_json(buf: *mut u8, maxlen: u32) -> u32 {
         .field("bcat_storage_size", nacp.bcat_delivery_cache_storage_size)
         .field("icon_mime", control.icon_mime())
         .field("icon_size", control.icon.len());
-    });
-    write_into(buf, maxlen, json.as_bytes())
+    })
 }
 
-/// Copy the cached icon into `buf`. Returns bytes copied, or -1.
-#[no_mangle]
-pub extern "C" fn switch_control_icon(buf: *mut u8, maxlen: u32) -> i64 {
-    let s = session();
-    let Some(control) = &s.control else {
-        return -1;
-    };
-    let n = control.icon.len().min(maxlen as usize);
-    if n > 0 && !buf.is_null() {
-        unsafe {
-            std::ptr::copy_nonoverlapping(control.icon.as_ptr(), buf, n);
-        }
-    }
-    n as i64
+/// The cached icon, or empty.
+#[wasm_bindgen]
+pub fn switch_control_icon() -> Vec<u8> {
+    session()
+        .control
+        .as_ref()
+        .map_or_else(Vec::new, |control| control.icon.clone())
 }
 
-/// Load `prod.keys` / `title.keys` text files into the session. Either pointer
-/// may be NULL with length 0. Returns 0 on success, -1 on parse failure.
-#[no_mangle]
-pub extern "C" fn switch_load_keys(
-    prod_ptr: *const u8,
-    prod_len: u32,
-    title_ptr: *const u8,
-    title_len: u32,
-) -> i32 {
+/// Load `prod.keys` and `title.keys` text into the session; either may be empty. Returns 0.
+#[wasm_bindgen]
+pub fn switch_load_keys(prod: &[u8], title: &[u8]) -> i32 {
     let s = session();
-    let prod = if !prod_ptr.is_null() && prod_len > 0 {
-        unsafe { std::slice::from_raw_parts(prod_ptr, prod_len as usize) }
-    } else {
-        &[]
-    };
-    let title = if !title_ptr.is_null() && title_len > 0 {
-        unsafe { std::slice::from_raw_parts(title_ptr, title_len as usize) }
-    } else {
-        &[]
-    };
-    let prod_text = String::from_utf8_lossy(prod);
-    let title_text = String::from_utf8_lossy(title);
-    let prod_entries = switch_core::keys::parse_keys_file(&prod_text);
-    let title_entries = switch_core::keys::parse_keys_file(&title_text);
+    let prod_entries = switch_core::keys::parse_keys_file(&String::from_utf8_lossy(prod));
+    let title_entries = switch_core::keys::parse_keys_file(&String::from_utf8_lossy(title));
     let mut ks = switch_core::keys::keyset_from_prod(&prod_entries);
     ks.title_keys = switch_core::keys::keyset_from_title(&title_entries);
     s.keys = ks;

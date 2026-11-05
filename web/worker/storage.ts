@@ -15,12 +15,15 @@ import {
   type NandEntry,
   type StoredEntry,
 } from '../shared/db';
-import { switch_flush_storage } from '@core/switch_wasm.js';
-import { core, coreLoaded, withBytes, withPath } from './wasm';
+import {
+  switch_flush_storage, switch_save_create_dir, switch_save_remove, switch_save_write_file,
+  switch_sd_create_dir, switch_sd_remove, switch_sd_write_file,
+} from '@core/switch_wasm.js';
+import { coreLoaded } from './wasm';
 import { zip, type ZipEntry } from './zip';
 
 // A uid (32 hex digits in memory order) as two little-endian halves.
-export function uidHalves(hex: string): [bigint, bigint] {
+function uidHalves(hex: string): [bigint, bigint] {
   const half = (from: number) => {
     let value = 0n;
     for (let i = 7; i >= 0; i--) {
@@ -32,7 +35,7 @@ export function uidHalves(hex: string): [bigint, bigint] {
 }
 
 // `<hex save id>[@<user uid>]`; no uid means no owning user.
-export function saveKey(id: string): [bigint, bigint, bigint] {
+function saveKey(id: string): [bigint, bigint, bigint] {
   const [save, user] = id.split('@');
   const [lo, hi] = user ? uidHalves(user) : [0n, 0n];
   return [BigInt('0x' + save), lo, hi];
@@ -55,10 +58,9 @@ function placeOf(volume: StorageVolume): Place {
       db: sdIdb,
       store: SD_STORE,
       prefix: '',
-      write: (path, data) => void withPath(path, (pptr, plen) =>
-        withBytes(data, (dptr, dlen) => core.switch_sd_write_file(pptr, plen, dptr, dlen))),
-      mkdir: (path) => void withPath(path, (ptr, len) => core.switch_sd_create_dir(ptr, len)),
-      remove: (path) => void withPath(path, (ptr, len) => core.switch_sd_remove(ptr, len)),
+      write: switch_sd_write_file,
+      mkdir: switch_sd_create_dir,
+      remove: switch_sd_remove,
     };
   }
   const save = saveKey(volume.id);
@@ -66,10 +68,9 @@ function placeOf(volume: StorageVolume): Place {
     db: nandIdb,
     store: NAND_SAVES,
     prefix: volume.id,
-    write: (path, data) => void withPath(path, (pptr, plen) =>
-      withBytes(data, (dptr, dlen) => core.switch_save_write_file(...save, pptr, plen, dptr, dlen))),
-    mkdir: (path) => void withPath(path, (ptr, len) => core.switch_save_create_dir(...save, ptr, len)),
-    remove: (path) => void withPath(path, (ptr, len) => core.switch_save_remove(...save, ptr, len)),
+    write: (path, data) => switch_save_write_file(...save, path, data),
+    mkdir: (path) => switch_save_create_dir(...save, path),
+    remove: (path) => switch_save_remove(...save, path),
   };
 }
 

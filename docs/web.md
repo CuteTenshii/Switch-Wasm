@@ -4,19 +4,17 @@ The page, the worker, and the wasm bindings between them.
 
 ## `crates/switch-wasm/src/lib.rs`
 
-- Exports are `extern "C"` taking pointers JS owns for the call; marking them `unsafe fn` would not help a JS caller, hence `#![allow(clippy::not_unsafe_ptr_arg_deref)]`.
+- Scalar exports are raw `extern "C"`. Anything with bytes or text is a `wasm-bindgen` export taking `&[u8]`/`&str` and returning `String`/`Vec<u8>`, so no caller sizes a buffer and nothing truncates silently; a `Result` error is thrown to the caller. The page-facing declarations are in `web/env.d.ts`. The few raw exports that still take a pointer need `#![allow(clippy::not_unsafe_ptr_arg_deref)]`.
 - The session table uses `SyncCell` (an `UnsafeCell`), not `Mutex`: a reentrant `lock()` deadlocks and a panic while held leaves it locked. It is sound only because one worker calls exports; the core workers on the shared memory only instantiate. Host tests serialize on a `HOST` mutex because `cargo test` is multi-threaded, and a panic crossing `extern "C"` aborts the harness.
-- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing (so does `switch_alloc`), so panics are captured instead of trapping as bare `unreachable`. The panic message is cleared whenever `switch_init` builds the machine, otherwise the first error after Stop described the dead session. Log lines are not: what the dead session said still reaches the page.
+- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing, so panics are captured instead of trapping as bare `unreachable`. The panic message is cleared whenever `switch_init` builds the machine, otherwise the first error after Stop described the dead session. Log lines are not: what the dead session said still reaches the page.
 - With the `gpu` feature the host read is a wasm-bindgen import (`@host/files`, resolved by Vite) because wasm-bindgen owns the whole import object.
-- `switch_alloc` returns null rather than trapping for sizes above `isize::MAX` (2 GiB on wasm32).
-- `nul_reserved`: the terminating NUL takes a byte of the buffer, not of the message.
 - Everything the page parses is written with `switch_core::json`, which keeps keys in the order written and escapes per character: per-byte `\u00XX` escapes once turned "JUST DANCE® 2017" into "JUST DANCEÂ® 2017". The backend's report and `frames` go into one object (`Gpu::write_renderer_report`), so nothing splices JSON text.
 - Updates: the update's Program NCA carries the base title's program id (the `...800` id is only on its Meta NCA); its ExeFS replaces all modules and its RomFS is a patch over the base's. An update for a different title is refused at boot, which is where pairing is checked since the page may add the pieces in any order. Updates and DLC carry their own tickets.
 - DLC: one Data NCA with a RomFS, title id = base + 0x1000 + 11-bit index, mounted by id like system data; `aoc:u` only lists indices. Mounted after the program id and NACP override are known; content for another title is reported and skipped.
 - NRO control data is cached for display only, not via `cache_control`: homebrew runs in another title's process, so its NACP never governs saves.
 - Boot reports ExeFS hash coverage and the module list next to what loaded (a missing `sdk`/`subsdk0` looks like a missing service otherwise). The NPDM system resource size picks the address space layout and must precede the boot (`nn::init` reads it immediately); the 32/64-bit flag changes the entry ABI.
 - `switch_gpu_report_json` exists because `eprintln!` and env vars are unavailable on wasm32. The activity report is not data for the page: `activity.rs` writes its lines into the log.
-- `switch_present` (and `switch_fb_snapshot`) force opaque alpha: titles leave arbitrary alpha (Just Dance 2019 uses 0) and Chromium/macOS `putImageData` multiplies by it even with `alpha: false`.
+- `switch_present` forces opaque alpha: titles leave arbitrary alpha (Just Dance 2019 uses 0) and Chromium/macOS `putImageData` multiplies by it even with `alpha: false`.
 - The page hands its canvas to the worker once (`transferControlToOffscreen`); `screen.rs` paints each new frame on it through `web_sys` after the slice that presented it, into one reused `ImageData`. The page never reads pixels, and maps touches with the size the slice report carries.
 - SD and save host writes are not reported as changes (restores would otherwise be written straight back). Drains happen even if the JSON does not fit.
 - The device opens as the run loop starts, between slices since it is a promise. The backend installs on the session's single `Gpu`, not a channel (Asphalt 9 opens four).
@@ -50,14 +48,13 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/worker/wasm.ts`
 
-- `switch_alloc` returns an i32 that reads negative past 2 GiB; `>>> 0` is required. A refused allocation returns 0, and writing at 0 would corrupt module data.
-- `readWholeString` retries with a doubled buffer (capped at 1 MiB) and is only for idempotent reads.
+- `WasmExports` lists only the raw scalar exports; the `wasm-bindgen` ones are imported from `@core/switch_wasm.js`. `parseOr` falls back to an empty report when a JSON export answers nothing.
 
 ## `web/worker/commands.ts`
 
 - Battery and dock state are cached in the worker so a reset session inherits them; time is sampled in the worker directly.
 - Change-list buffers are sized from the pending count (0x301-byte paths) because the wasm side drains whether or not the JSON fits.
-- `switch_control_json` truncates silently, so its buffer is sized for the worst-case NACP strings.
+- `load_program` hands the core the `File`, which reads it in 8 MiB chunks straight into linear memory and tells an ELF from an NRO by its magic; no copy of the file is held in JavaScript. An SD NRO is read from the session's own SD card (`load_sd_nro`), and a NAND program is registered as a host file and read by range (`nand_launch`), so neither image is copied into the heap.
 
 ## `web/worker/hostfiles.ts`
 
