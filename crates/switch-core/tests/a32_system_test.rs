@@ -88,6 +88,26 @@ fn the_thread_pointer_comes_from_cp15_c13() {
     );
 }
 
+/// `nn::os::GetSystemTick` reads the generic timer with `MRRC`, which is not a VFP register move.
+#[test]
+fn the_generic_timer_is_read_with_mrrc() {
+    let mut cpu = cpu();
+    cpu.bootstrap();
+    cpu.set_pc_and_sp(BASE, 0x9000);
+    cpu.cycles = 1_020_000_000 * 5;
+    let code: [u32; 3] = [
+        0xEC51_0F0E, // mrrc p15, 0, r0, r1, c14   (CNTPCT)
+        0xEC53_2F1E, // mrrc p15, 1, r2, r3, c14   (CNTVCT)
+        HALT,
+    ];
+    load(&mut cpu, &code);
+    cpu.run(code.len() as u64).unwrap();
+    let count = |lo, hi| u64::from(r(&cpu, lo)) | u64::from(r(&cpu, hi)) << 32;
+    let five_seconds = 5 * 19_200_000;
+    assert!((five_seconds..five_seconds + 1000).contains(&count(0, 1)));
+    assert!((five_seconds..five_seconds + 1000).contains(&count(2, 3)));
+}
+
 /// Barriers and preload hints live in the `cond == 0xF` encoding space.
 #[test]
 fn the_barriers_and_preloads_retire() {

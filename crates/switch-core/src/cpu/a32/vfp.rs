@@ -59,6 +59,24 @@ impl Cpu {
         f64::from_bits(self.vfp_d(n))
     }
 
+    /// `MRRC p15, <opc1>, Rt, Rt2, c14`: the generic timer's `CNTPCT` and `CNTVCT`, which
+    /// `nn::os::GetSystemTick` reads.
+    fn a32_mrrc_p15(&mut self, insn: u32, load: bool) -> Result<()> {
+        let opc1 = (insn >> 4) & 0xF;
+        let crm = insn & 0xF;
+        if !load || (insn >> 21) & 0xF != 0b0010 || crm != 14 || opc1 > 1 {
+            return Err(Error::Cpu(format!(
+                "unimplemented coprocessor access {insn:#010x} (p15) at pc={:#010x}",
+                self.pc
+            )));
+        }
+        let tick = self.system_tick();
+        self.set_r32(((insn >> 12) & 0xF) as u8, tick as u32);
+        self.set_r32(((insn >> 16) & 0xF) as u8, (tick >> 32) as u32);
+        self.pc = self.pc.wrapping_add(4);
+        Ok(())
+    }
+
     /// The coprocessor load/store space: `VLDR`, `VSTR`, `VLDM`, `VSTM`, core-pair `VMOV`.
     pub(super) fn a32_coproc_load_store(&mut self, insn: u32) -> Result<()> {
         let pre = (insn >> 24) & 1 != 0;
@@ -74,6 +92,9 @@ impl Cpu {
         // Bits 24:21 (P U D W): 0010 is the core-register pair transfer, 01x0 and
         // 01x1 increment after, 10x1 decrement before; 000x, 00x1 and 11x1 are
         // unallocated.
+        if (insn >> 8) & 0xF == 15 {
+            return self.a32_mrrc_p15(insn, load);
+        }
         match (insn >> 21) & 0xF {
             0b0010 => return self.a32_vfp_core_pair(insn, load, double),
             0b0000 | 0b0001 | 0b0011 | 0b1101 | 0b1111 => {
