@@ -70,16 +70,11 @@ declare module '@core/switch_wasm.js' {
   export function switch_user_stage(
     uid: string, nickname: string, editedAt: number, picture: Uint8Array | null): void;
   export function switch_users_commit(current: string): number;
-  // `storage.rs`: the running session's SD card and saves; a save is its id and uid halves.
-  export function switch_sd_write_file(path: string, data: Uint8Array): void;
-  export function switch_sd_create_dir(path: string): void;
-  export function switch_sd_remove(path: string): void;
-  export function switch_save_write_file(
-    saveId: bigint, userLo: bigint, userHi: bigint, path: string, data: Uint8Array): void;
-  export function switch_save_create_dir(
-    saveId: bigint, userLo: bigint, userHi: bigint, path: string): void;
-  export function switch_save_remove(
-    saveId: bigint, userLo: bigint, userHi: bigint, path: string): void;
+  // `storage.rs`: the running session's files. `storage` is `sd`, or a save's id,
+  // `<16 hex digits>` or `<id>@<32 hex digits of the owner's uid>`.
+  export function switch_fs_write(storage: string, path: string, data: Uint8Array): void;
+  export function switch_fs_create_dir(storage: string, path: string): void;
+  export function switch_fs_remove(storage: string, path: string): void;
 }
 
 // The commit the site was built from; see `vite.config.ts`.

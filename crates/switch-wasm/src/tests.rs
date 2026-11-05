@@ -7,7 +7,7 @@ use crate::container::{switch_open_nsp, switch_read_file};
 use crate::debug::switch_set_trace_channels;
 use crate::input::switch_set_input;
 use crate::log::{switch_log_line, switch_log_next};
-use crate::storage::{switch_save_create_dir, switch_save_write_file, switch_sd_write_file};
+use crate::storage::{switch_fs_create_dir, switch_fs_write};
 use crate::users::{switch_user_stage, switch_users_commit};
 use switch_core::vfs::{Change, ENTRY_TYPE_DIR, ENTRY_TYPE_FILE};
 
@@ -176,7 +176,7 @@ fn change(path: &str, kind: Option<u8>, size: u64) -> Change {
 }
 
 fn put(path: &str, data: &[u8]) {
-    switch_sd_write_file(path, data);
+    switch_fs_write("sd", path, data).unwrap();
 }
 
 #[test]
@@ -190,11 +190,16 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
     // Restores are not reported as changes.
     let path = "/settings.dat";
     let body = b"saved";
-    switch_save_write_file(SAVE, USER_LO, USER_HI, path, body);
+    switch_fs_write(
+        "0100000000001000@000102030405060708090a0b0c0d0e0f",
+        path,
+        body,
+    )
+    .unwrap();
     assert_eq!(session().cpu.save_data_mut(key).pending_changes(), 0);
 
     // A save with only a directory is listed; the shared save is a separate one.
-    switch_save_create_dir(SAVE, 0, 0, "/");
+    switch_fs_create_dir("0100000000001000", "/").unwrap();
     let mut ids: Vec<String> = session()
         .cpu
         .save_keys()

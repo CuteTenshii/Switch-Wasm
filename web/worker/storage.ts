@@ -16,30 +16,10 @@ import {
   type StoredEntry,
 } from '../shared/db';
 import {
-  switch_flush_storage, switch_save_create_dir, switch_save_remove, switch_save_write_file,
-  switch_sd_create_dir, switch_sd_remove, switch_sd_write_file,
+  switch_flush_storage, switch_fs_create_dir, switch_fs_remove, switch_fs_write,
 } from '@core/switch_wasm.js';
 import { coreLoaded } from './wasm';
 import { zip, type ZipEntry } from './zip';
-
-// A uid (32 hex digits in memory order) as two little-endian halves.
-function uidHalves(hex: string): [bigint, bigint] {
-  const half = (from: number) => {
-    let value = 0n;
-    for (let i = 7; i >= 0; i--) {
-      value = (value << 8n) | BigInt(parseInt(hex.slice(from + i * 2, from + i * 2 + 2), 16));
-    }
-    return value;
-  };
-  return [half(0), half(16)];
-}
-
-// `<hex save id>[@<user uid>]`; no uid means no owning user.
-function saveKey(id: string): [bigint, bigint, bigint] {
-  const [save, user] = id.split('@');
-  const [lo, hi] = user ? uidHalves(user) : [0n, 0n];
-  return [BigInt('0x' + save), lo, hi];
-}
 
 // A volume's store, and how a change reaches the running session.
 interface Place {
@@ -53,25 +33,15 @@ interface Place {
 }
 
 function placeOf(volume: StorageVolume): Place {
-  if (volume.kind === 'sd') {
-    return {
-      db: sdIdb,
-      store: SD_STORE,
-      prefix: '',
-      write: switch_sd_write_file,
-      mkdir: switch_sd_create_dir,
-      remove: switch_sd_remove,
-    };
-  }
-  const save = saveKey(volume.id);
-  return {
-    db: nandIdb,
-    store: NAND_SAVES,
-    prefix: volume.id,
-    write: (path, data) => switch_save_write_file(...save, path, data),
-    mkdir: (path) => switch_save_create_dir(...save, path),
-    remove: (path) => switch_save_remove(...save, path),
+  const name = volume.kind === 'sd' ? 'sd' : volume.id;
+  const session = {
+    write: (path: string, data: Bytes) => switch_fs_write(name, path, data),
+    mkdir: (path: string) => switch_fs_create_dir(name, path),
+    remove: (path: string) => switch_fs_remove(name, path),
   };
+  return volume.kind === 'sd'
+    ? { db: sdIdb, store: SD_STORE, prefix: '', ...session }
+    : { db: nandIdb, store: NAND_SAVES, prefix: volume.id, ...session };
 }
 
 function committed(tx: IDBTransaction): Promise<void> {

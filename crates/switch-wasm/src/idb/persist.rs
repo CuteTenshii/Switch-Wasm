@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
-use switch_core::cpu::SaveKey;
 use switch_core::trace::Level;
 use switch_core::vfs::{Change, Vfs, ENTRY_TYPE_DIR};
 use wasm_bindgen::prelude::*;
@@ -16,6 +15,7 @@ use super::{
 };
 use crate::post::post;
 use crate::session_if_live;
+use crate::storage::parse_save_key;
 
 /// Stored entries by key; `None` deletes the key.
 type Backlog = BTreeMap<String, Option<JsValue>>;
@@ -167,21 +167,6 @@ async fn restore_saves() -> Result<usize, JsValue> {
         restored += 1;
     }
     Ok(restored)
-}
-
-/// A save's [`Display`](std::fmt::Display) form: `<16 hex digits>` or `<id>@<32 hex digits of uid>`.
-fn parse_save_key(text: &str) -> Option<SaveKey> {
-    let (id, user) = text.split_once('@').unwrap_or((text, ""));
-    let mut key = SaveKey::shared(u64::from_str_radix(id, 16).ok()?);
-    if !user.is_empty() {
-        if user.len() != 32 {
-            return None;
-        }
-        for (byte, pair) in key.user.iter_mut().zip(user.as_bytes().chunks(2)) {
-            *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-        }
-    }
-    Some(key)
 }
 
 /// Take what the guest changed and store it. Resolves once everything taken is stored, or

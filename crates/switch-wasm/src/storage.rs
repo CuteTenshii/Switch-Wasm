@@ -1,57 +1,57 @@
 //! The SD card and save data, as the page changes them while a session runs.
 
 use switch_core::cpu::SaveKey;
+use switch_core::vfs::Vfs;
 use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::session;
+use crate::{session, Session};
 
-// The emulated SD card. Paths are guest paths; `sdmc:` and extra slashes are
-// normalized away. None of these are reported as changes: this is the host's restore path.
+/// A save's [`Display`](std::fmt::Display) form: `<16 hex digits>` or `<id>@<32 hex digits of uid>`.
+pub(crate) fn parse_save_key(text: &str) -> Option<SaveKey> {
+    let (id, user) = text.split_once('@').unwrap_or((text, ""));
+    let mut key = SaveKey::shared(u64::from_str_radix(id, 16).ok()?);
+    if !user.is_empty() {
+        if user.len() != 32 {
+            return None;
+        }
+        for (byte, pair) in key.user.iter_mut().zip(user.as_bytes().chunks(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+    }
+    Some(key)
+}
 
-/// Put a file on the SD card.
+/// The files of a volume: the SD card (`sd`), or a save by its id.
+fn volume<'a>(s: &'a mut Session, volume: &str) -> Result<&'a mut Vfs, String> {
+    if volume == "sd" {
+        return Ok(&mut s.cpu.fs);
+    }
+    match parse_save_key(volume) {
+        Some(key) => Ok(s.cpu.save_data_mut(key)),
+        None => Err(format!("\"{volume}\" names no storage")),
+    }
+}
+
+// Paths are guest paths; `sdmc:` and extra slashes are normalized away. None of these are
+// reported as changes: this is the host's restore path.
+
+/// Put a file on a volume, creating its directories and, for a save, the save.
 #[wasm_bindgen]
-pub fn switch_sd_write_file(path: &str, data: &[u8]) {
-    session().cpu.fs.write_file(path, data.to_vec());
+pub fn switch_fs_write(storage: &str, path: &str, data: &[u8]) -> Result<(), String> {
+    volume(session(), storage)?.write_file(path, data.to_vec());
+    Ok(())
 }
 
 /// Create a directory and any missing parents.
 #[wasm_bindgen]
-pub fn switch_sd_create_dir(path: &str) {
-    session().cpu.fs.create_dir(path);
+pub fn switch_fs_create_dir(storage: &str, path: &str) -> Result<(), String> {
+    volume(session(), storage)?.create_dir(path);
+    Ok(())
 }
 
-/// Delete a path from the SD card.
+/// Remove one entry; a directory's contents are removed separately.
 #[wasm_bindgen]
-pub fn switch_sd_remove(path: &str) {
-    session().cpu.fs.remove(path);
-}
-
-// A save is `save_id` plus the uid as `user_lo` (first eight bytes) and `user_hi`
-// (last eight), little-endian, both zero for a save no user owns. See `SaveKey`.
-
-/// Put a file into a save, creating the save.
-#[wasm_bindgen]
-pub fn switch_save_write_file(save_id: u64, user_lo: u64, user_hi: u64, path: &str, data: &[u8]) {
-    session()
-        .cpu
-        .save_data_mut(SaveKey::from_halves(save_id, user_lo, user_hi))
-        .write_file(path, data.to_vec());
-}
-
-/// Create a directory in a save and any missing parents.
-#[wasm_bindgen]
-pub fn switch_save_create_dir(save_id: u64, user_lo: u64, user_hi: u64, path: &str) {
-    session()
-        .cpu
-        .save_data_mut(SaveKey::from_halves(save_id, user_lo, user_hi))
-        .create_dir(path);
-}
-
-/// Remove one entry from a save; a directory's contents are removed separately.
-#[wasm_bindgen]
-pub fn switch_save_remove(save_id: u64, user_lo: u64, user_hi: u64, path: &str) {
-    session()
-        .cpu
-        .save_data_mut(SaveKey::from_halves(save_id, user_lo, user_hi))
-        .remove(path);
+pub fn switch_fs_remove(storage: &str, path: &str) -> Result<(), String> {
+    volume(session(), storage)?.remove(path);
+    Ok(())
 }
