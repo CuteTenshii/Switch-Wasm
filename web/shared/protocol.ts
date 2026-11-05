@@ -252,8 +252,8 @@ export interface Commands {
   nsp_files_json(): string;
   read_file(index: number, offset: number, len: number): Bytes;
 
-  load_control_from_nsp(): number;
-  load_control_from_nca(): number;
+  // The title's NACP and icon, from the container's Control NCA or a standalone one.
+  load_control(): number;
   control_json(): string;
   control_icon(): Bytes;
   // Store the control data just read, so a later session's ns can describe the title.

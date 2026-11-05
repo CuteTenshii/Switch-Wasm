@@ -14,8 +14,7 @@ export interface WasmExports {
   switch_clear_dlc(): void;
   switch_clear_update(): void;
 
-  switch_load_control_from_nsp(): number;
-  switch_load_control_from_nca(): number;
+  switch_load_control(): number;
 
   switch_load_nca(): bigint;
   switch_load_nca_from_nsp(index: number): bigint;

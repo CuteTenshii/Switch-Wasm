@@ -335,49 +335,38 @@ fn cache_control(s: &mut Session, control: switch_core::control::Control) {
     s.control = Some(control);
 }
 
-/// Read and cache the open container's Control NCA. Returns 0, or -1 when it has
-/// none readable (including when no `prod.keys` are loaded).
+/// Read and cache the open container's Control NCA: the one in its file table, or the
+/// container itself when it was opened as a standalone NCA (which has no file table).
+/// Returns 0, or -1 when it has none readable (including when no `prod.keys` are loaded).
 #[no_mangle]
-pub extern "C" fn switch_load_control_from_nsp() -> i32 {
+pub extern "C" fn switch_load_control() -> i32 {
     let s = session();
     s.control = None;
     let Some(container) = container(s) else {
         return -1;
     };
-    let found = switch_core::control::find_control_nca(&s.nsp_files, &container, &s.keys);
-    let Some((index, nca)) = found else {
-        s.last_error =
-            "no Control NCA in this container (or its header couldn't be decrypted; load prod.keys)"
-                .into();
-        return -1;
+    let control = if s.nsp_files.is_empty() {
+        switch_core::control::Control::from_source(container, &s.keys)
+    } else {
+        let found = switch_core::control::find_control_nca(&s.nsp_files, &container, &s.keys);
+        let Some((index, nca)) = found else {
+            s.last_error =
+                "no Control NCA in this container (or its header couldn't be decrypted; load prod.keys)"
+                    .into();
+            return -1;
+        };
+        let _ = switch_core::ticket::load_bundled_title_key(
+            &mut s.keys,
+            &nca,
+            &s.nsp_files,
+            &container,
+        );
+        let Some(file) = nsp_file_source(s, index as u32) else {
+            return -1;
+        };
+        switch_core::control::Control::from_source(file, &s.keys)
     };
-    let _ =
-        switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &s.nsp_files, &container);
-    let Some(file) = nsp_file_source(s, index as u32) else {
-        return -1;
-    };
-    match switch_core::control::Control::from_source(file, &s.keys) {
-        Ok(control) => {
-            cache_control(s, control);
-            s.last_error.clear();
-            0
-        }
-        Err(e) => {
-            s.last_error = e.to_string();
-            -1
-        }
-    }
-}
-
-/// Same, for a container opened as a standalone Control NCA.
-#[no_mangle]
-pub extern "C" fn switch_load_control_from_nca() -> i32 {
-    let s = session();
-    s.control = None;
-    let Some(container) = container(s) else {
-        return -1;
-    };
-    match switch_core::control::Control::from_source(container, &s.keys) {
+    match control {
         Ok(control) => {
             cache_control(s, control);
             s.last_error.clear();

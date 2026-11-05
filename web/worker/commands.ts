@@ -173,11 +173,8 @@ export const CMD: CommandHandlers = {
     return switch_read_file(index, BigInt(offset), len);
   },
 
-  load_control_from_nsp() {
-    return core.switch_load_control_from_nsp();
-  },
-  load_control_from_nca() {
-    return core.switch_load_control_from_nca();
+  load_control() {
+    return core.switch_load_control();
   },
   control_json: switch_control_json,
   control_icon: switch_control_icon,

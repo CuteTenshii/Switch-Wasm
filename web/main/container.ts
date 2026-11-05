@@ -346,7 +346,7 @@ async function handleNspFile(file: File): Promise<void> {
   });
   $('nsp-result').appendChild(ul);
   setNote('container-badge', 'reading title details\u2026', false);
-  await showTitleCard(() => call('load_control_from_nsp'));
+  await showTitleCard(() => call('load_control'));
   setNote('container-badge', file.name, true);
 }
 
@@ -511,9 +511,9 @@ async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   const headerLen = Math.min(file.size, 0xC00);
   const header = new Uint8Array(await file.slice(0, headerLen).arrayBuffer());
   const info = await parseAndRenderNca(out, header, () => launchStandaloneNca(file));
-  if (info && info.content_type === 'Control') {
+  if (info?.content_type === 'Control') {
     setNote('container-badge', 'reading title details\u2026', false);
-    await showTitleCard(() => call('load_control_from_nca'));
+    await showTitleCard(() => call('load_control'));
     setNote('container-badge', file.name, true);
   }
   return info;
