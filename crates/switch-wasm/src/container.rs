@@ -142,17 +142,18 @@ fn display_version(
     control().map_or_else(String::new, |control| control.nacp.display_version)
 }
 
-/// Register a container of add-on content. Returns how many pieces it holds, or 0
-/// with the reason in `switch_last_error`. Pairing is checked at boot.
-#[no_mangle]
-pub extern "C" fn switch_add_dlc(file: u32, size: u64) -> u32 {
+/// Register a container of add-on content. Returns the pieces it holds as JSON, each with its
+/// content id, base title and index; none, with the reason in `switch_last_error`, if it is
+/// not add-on content. Pairing is checked at boot.
+#[wasm_bindgen]
+pub fn switch_add_dlc(file: u32, size: u64) -> String {
     let s = session();
     let src = HostSource { file, len: size };
     let files = match Pfs0::read_from(&src) {
         Ok(pfs0) => pfs0.files,
         Err(e) => {
             s.last_error = format!("add-on content has to be an NSP: {e}");
-            return 0;
+            return dlc_json([].into_iter());
         }
     };
     // A container with a Program NCA is a game or an update, not DLC.
@@ -165,10 +166,10 @@ pub extern "C" fn switch_add_dlc(file: u32, size: u64) -> u32 {
     .is_some()
     {
         s.last_error = "this container holds a program; add-on content is data only".into();
-        return 0;
+        return dlc_json([].into_iter());
     }
 
-    let mut found = 0;
+    let mut found = Vec::new();
     for f in &files {
         if !f.name.to_ascii_lowercase().ends_with(".nca") {
             continue;
@@ -198,20 +199,14 @@ pub extern "C" fn switch_add_dlc(file: u32, size: u64) -> u32 {
             src,
             nca: (f.offset, f.size),
         });
-        found += 1;
+        found.push(nca.title_id);
     }
-    if found == 0 {
+    if found.is_empty() {
         s.last_error = "no add-on content in this container".into();
     } else {
         s.last_error.clear();
     }
-    found
-}
-
-/// The session's add-on content as JSON: content id, index and base title.
-#[wasm_bindgen]
-pub fn switch_dlc_json() -> String {
-    dlc_json(session().dlc.iter().map(|dlc| dlc.content_id))
+    dlc_json(found.into_iter())
 }
 
 /// Each add-on content id with its base title and index.

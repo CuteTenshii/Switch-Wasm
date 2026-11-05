@@ -42,7 +42,8 @@ declare module '@core/switch_wasm.js' {
   // `container.rs`
   // `{ title, version }` as JSON, or empty when the file is no update.
   export function switch_add_update(file: number, size: bigint): string;
-  export function switch_dlc_json(): string;
+  // The pieces as JSON: `[{ id, title_id, index }]`, empty when the file is no add-on content.
+  export function switch_add_dlc(file: number, size: bigint): string;
   export function switch_nsp_files_json(): string;
   export function switch_read_file(
     index: number, offset: bigint, len: number): Uint8Array<ArrayBuffer>;

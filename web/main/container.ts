@@ -62,9 +62,9 @@ async function handleContainerFile(file: File): Promise<void> {
     await handleUpdateFile(file, update);
     return;
   }
-  const packs = await call('add_dlc', file).catch(() => 0);
-  if (packs > 0) {
-    await handleDlcFile(file, packs);
+  const packs = await call('add_dlc', file).catch((): DlcEntry[] => []);
+  if (packs.length > 0) {
+    handleDlcFile(file, packs);
     return;
   }
   await handleNspFile(file);
@@ -134,15 +134,12 @@ function rememberDlc(titleId: string, name: string): void {
   }
 }
 
-async function handleDlcFile(file: File, packs: number): Promise<void> {
-  const entries = JSON.parse(await call('dlc_json').catch(() => '[]')) as DlcEntry[];
-  // This container's pieces are the newest ones the session holds.
-  const mine = entries.slice(-packs);
-  const titleId = mine[0]?.title_id ?? '';
+function handleDlcFile(file: File, packs: DlcEntry[]): void {
+  const titleId = packs[0]?.title_id ?? '';
   heldDlc = heldDlc.filter((held) => held.file.name !== file.name);
-  heldDlc.push({ file, titleId, indices: mine.map((e) => e.index) });
+  heldDlc.push({ file, titleId, indices: packs.map((e) => e.index) });
   rememberDlc(titleId, file.name);
-  log(describeDlc(packs) + ' for ' + titleId + ' - '
+  log(describeDlc(packs.length) + ' for ' + titleId + ' - '
     + (titleId === openTitleId
       ? 'mounted when this title launches.'
       : 'open that game to launch it with them.'), 'info');
@@ -172,14 +169,14 @@ function describeUpdate(u: HeldUpdate | RememberedUpdate & { file?: File }): str
 // The session refuses an update for another title, so it is handed over only
 // while its title is open. Add-on content is always handed over.
 async function syncPaired(): Promise<void> {
-  if (heldUpdate && heldUpdate.titleId === openTitleId) {
+  if (heldUpdate?.titleId === openTitleId) {
     await call('add_update', heldUpdate.file).catch(() => '');
   } else {
     await call('clear_update').catch(() => 0);
   }
   await call('clear_dlc').catch(() => 0);
   for (const held of heldDlc) {
-    await call('add_dlc', held.file).catch(() => 0);
+    await call('add_dlc', held.file).catch(() => []);
   }
   showPairedNotes();
 }
@@ -267,13 +264,13 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     openPanel('files');
     return;
   }
-  const packs = await call('add_dlc', file).catch(() => 0);
-  if (packs > 0) {
-    await handleDlcFile(file, packs);
+  const packs = await call('add_dlc', file).catch((): DlcEntry[] => []);
+  if (packs.length > 0) {
+    handleDlcFile(file, packs);
     const held = heldDlc[heldDlc.length - 1];
     setState('idle');
     failLoad(held.titleId === openTitleId
-      ? describeDlc(packs) + ' added - launch ' + (heldTitle?.name || 'the game')
+      ? describeDlc(packs.length) + ' added - launch ' + (heldTitle?.name || 'the game')
       + ' to run with them.'
       : 'That is add-on content for ' + held.titleId + ', not a game. Open that title'
         + ' to launch it with them.');

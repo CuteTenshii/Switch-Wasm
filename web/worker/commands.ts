@@ -1,14 +1,15 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, GpuReport, JitStats, MemoryReport, NandIdentity, UpdateInfo,
+  CommandHandlers, DlcEntry, GpuReport, JitStats, MemoryReport, NandIdentity, UpdateInfo,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
 import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
 import {
-  switch_add_update, switch_clear_screen, switch_control_icon, switch_control_json, switch_dlc_json,
+  switch_add_dlc, switch_add_update, switch_clear_screen, switch_control_icon,
+  switch_control_json,
   switch_flush_storage, switch_gpu_report_json, switch_guest_fatal, switch_jit_stats_json,
   switch_keyboard_answer, switch_last_error, switch_load_keys, switch_load_program,
   switch_load_sd_nro, switch_memory_json, switch_nand_identify, switch_nand_launch,
@@ -109,19 +110,17 @@ export const CMD: CommandHandlers = {
     workerLog(`[io] opened ${describe(file)} as an update for ${update.title}`);
     return update;
   },
-  // Returns how many pieces the add-on content container holds.
+  // The pieces the add-on content container holds.
   add_dlc(file) {
     const index = addHostFile(file);
-    const pieces = core.switch_add_dlc(index, BigInt(file.size));
-    // Zero, not a negative, is a refusal.
-    if (pieces === 0) {
+    const pieces = JSON.parse(switch_add_dlc(index, BigInt(file.size))) as DlcEntry[];
+    if (pieces.length === 0) {
       workerLog(`[io] add-on content ${describe(file)}: refused (${switch_last_error()})`, 'warn');
     } else {
-      workerLog(`[io] opened ${describe(file)} as add-on content, ${pieces} pieces`);
+      workerLog(`[io] opened ${describe(file)} as add-on content, ${pieces.length} pieces`);
     }
     return pieces;
   },
-  dlc_json: switch_dlc_json,
   clear_dlc() {
     core.switch_clear_dlc();
     return 0;

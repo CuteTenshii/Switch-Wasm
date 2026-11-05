@@ -238,8 +238,8 @@ export interface Commands {
   open_nca(file: File): number;
   restore_nand(): number;
   add_update(file: File): UpdateInfo | null;
-  add_dlc(file: File): number;
-  dlc_json(): string;
+  // The pieces the container holds; none if it is not add-on content.
+  add_dlc(file: File): DlcEntry[];
   clear_dlc(): number;
   clear_update(): number;
   nand_identify(file: File): NandIdentity | null;

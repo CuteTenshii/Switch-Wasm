@@ -10,7 +10,6 @@ export interface WasmExports {
 
   switch_open_nsp(size: bigint): number;
   switch_open_nca(size: bigint): number;
-  switch_add_dlc(file: number, size: bigint): number;
   switch_clear_dlc(): void;
   switch_clear_update(): void;
 
