@@ -1,6 +1,6 @@
 // NSP / NCA / XCI containers: inspecting, showing the title, launching.
 
-import type { Bytes, ControlInfo, DlcEntry, NcaInfo, NspFile } from '../shared/protocol';
+import type { Bytes, ControlInfo, DlcEntry, NcaInfo, NspFile, UpdateInfo } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from './format';
@@ -57,9 +57,9 @@ async function handleContainerFile(file: File): Promise<void> {
     return;
   }
   // An update holds no game; inspecting it also names the title it patches.
-  const patches = await call('add_update', file).catch(() => '');
-  if (patches) {
-    await handleUpdateFile(file, patches);
+  const update = await call('add_update', file).catch(() => null);
+  if (update) {
+    await handleUpdateFile(file, update);
     return;
   }
   const packs = await call('add_dlc', file).catch(() => 0);
@@ -153,8 +153,7 @@ function describeDlc(packs: number): string {
   return packs === 1 ? '1 add-on content pack' : packs + ' add-on content packs';
 }
 
-async function handleUpdateFile(file: File, titleId: string): Promise<void> {
-  const version = await call('update_version').catch(() => '');
+async function handleUpdateFile(file: File, { title: titleId, version }: UpdateInfo): Promise<void> {
   heldUpdate = { file, titleId, version };
   rememberUpdate(heldUpdate);
   log('Update ' + describeUpdate(heldUpdate) + ' for ' + titleId + ' - '
@@ -258,13 +257,13 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     return;
   }
   // An update or add-on content means: pair it with the game and launch that.
-  const patches = await call('add_update', file).catch(() => '');
-  if (patches) {
-    await handleUpdateFile(file, patches);
+  const update = await call('add_update', file).catch(() => null);
+  if (update) {
+    await handleUpdateFile(file, update);
     setState('idle');
-    failLoad(patches === openTitleId
+    failLoad(update.title === openTitleId
       ? 'Update applied - launch ' + (heldTitle?.name || 'the game') + ' to run it patched.'
-      : 'That is an update for ' + patches + ', not a game. Open that title to launch it patched.');
+      : 'That is an update for ' + update.title + ', not a game. Open that title to launch it patched.');
     openPanel('files');
     return;
   }

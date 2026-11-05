@@ -1,20 +1,20 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, GpuReport, JitStats, MemoryReport, NandIdentity,
+  CommandHandlers, GpuReport, JitStats, MemoryReport, NandIdentity, UpdateInfo,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
 import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
 import {
-  switch_clear_screen, switch_control_icon, switch_control_json, switch_dlc_json,
+  switch_add_update, switch_clear_screen, switch_control_icon, switch_control_json, switch_dlc_json,
   switch_flush_storage, switch_gpu_report_json, switch_guest_fatal, switch_jit_stats_json,
   switch_keyboard_answer, switch_last_error, switch_load_keys, switch_load_program,
   switch_load_sd_nro, switch_memory_json, switch_nand_identify, switch_nand_launch,
   switch_nsp_files_json, switch_parse_nca, switch_read_file, switch_remember_control,
   switch_restore_nand, switch_restore_storage, switch_set_touch, switch_store_profile_edits,
-  switch_update_version, switch_user_stage, switch_users_commit,
+  switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { nandContent, STORAGE } from './storage';
@@ -97,16 +97,18 @@ export const CMD: CommandHandlers = {
   },
   // Register the stored firmware with the session; how many system data archives it took.
   restore_nand: switch_restore_nand,
-  // Returns the base title id the update patches, or '' if it is not an update.
+  // The base title the update patches and its version, or null if it is not an update.
   add_update(file) {
     const index = addHostFile(file);
-    const id = core.switch_add_update(index, BigInt(file.size));
-    const title = id ? id.toString(16).padStart(16, '0') : '';
-    if (title) workerLog(`[io] opened ${describe(file)} as an update for ${title}`);
-    else workerLog(`[io] ${describe(file)} is not an update`);
-    return title;
+    const found = switch_add_update(index, BigInt(file.size));
+    if (!found) {
+      workerLog(`[io] ${describe(file)} is not an update`);
+      return null;
+    }
+    const update = JSON.parse(found) as UpdateInfo;
+    workerLog(`[io] opened ${describe(file)} as an update for ${update.title}`);
+    return update;
   },
-  update_version: switch_update_version,
   // Returns how many pieces the add-on content container holds.
   add_dlc(file) {
     const index = addHostFile(file);

@@ -99,6 +99,12 @@ export interface NandIdentity {
   kind: number;
 }
 
+// An update container the core accepted: the base title it patches and its display version.
+export interface UpdateInfo {
+  title: string;
+  version: string;
+}
+
 // Add-on content from `switch_dlc_json`.
 export interface DlcEntry {
   id: string;
@@ -231,8 +237,7 @@ export interface Commands {
   open_nsp(file: File): number;
   open_nca(file: File): number;
   restore_nand(): number;
-  add_update(file: File): string;
-  update_version(): string;
+  add_update(file: File): UpdateInfo | null;
   add_dlc(file: File): number;
   dlc_json(): string;
   clear_dlc(): number;

@@ -40,7 +40,8 @@ declare module '@core/switch_wasm.js' {
   // also in `switch_last_error`; the ones that return a `Result` throw it.
   export function switch_last_error(): string;
   // `container.rs`
-  export function switch_update_version(): string;
+  // `{ title, version }` as JSON, or empty when the file is no update.
+  export function switch_add_update(file: number, size: bigint): string;
   export function switch_dlc_json(): string;
   export function switch_nsp_files_json(): string;
   export function switch_read_file(

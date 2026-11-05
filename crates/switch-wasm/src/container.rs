@@ -81,18 +81,19 @@ pub(crate) fn add_archive(s: &mut Session, src: HostSource) -> i32 {
     }
 }
 
-/// Register the host's update container for the title about to run. Returns the
-/// base program id it patches, or 0 with the reason in `switch_last_error`.
-/// Pairing is checked at boot.
-#[no_mangle]
-pub extern "C" fn switch_add_update(file: u32, size: u64) -> u64 {
+/// Register the host's update container for the title about to run. Returns `{ title,
+/// version }` as JSON, the base program id it patches and its NACP display version
+/// ("1.0.1", or empty), or nothing with the reason in `switch_last_error`. Pairing is
+/// checked at boot.
+#[wasm_bindgen]
+pub fn switch_add_update(file: u32, size: u64) -> String {
     let s = session();
     let src = HostSource { file, len: size };
     let files = match Pfs0::read_from(&src) {
         Ok(pfs0) => pfs0.files,
         Err(e) => {
             s.last_error = format!("an update has to be an NSP: {e}");
-            return 0;
+            return String::new();
         }
     };
     let Some((index, nca)) = switch_core::nca::find_nca_by_type(
@@ -104,7 +105,7 @@ pub extern "C" fn switch_add_update(file: u32, size: u64) -> u64 {
         s.last_error =
             "no Program NCA in this container (or its header couldn't be decrypted; load prod.keys)"
                 .into();
-        return 0;
+        return String::new();
     };
     // An update carries its own ticket.
     let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &files, &src);
@@ -112,36 +113,33 @@ pub extern "C" fn switch_add_update(file: u32, size: u64) -> u64 {
         s.last_error =
             "this container is a title in its own right, not an update: its RomFS is its own"
                 .into();
-        return 0;
+        return String::new();
     }
     let f = &files[index];
     let program = (f.offset, f.size);
     let program_id = nca.program_id;
-    s.update = Some(Update {
-        nca,
-        src,
-        program,
-        files,
-    });
+    let version = display_version(&files, &src, &s.keys);
+    s.update = Some(Update { nca, src, program });
     s.last_error.clear();
-    program_id
+    json::object(|o| {
+        o.field("title", format!("{program_id:016x}"))
+            .field("version", version);
+    })
 }
 
-/// The update's NACP display version ("1.0.1"), or empty.
-#[wasm_bindgen]
-pub fn switch_update_version() -> String {
-    let s = session();
-    s.update
-        .as_ref()
-        .and_then(|update| {
-            let (index, _) =
-                switch_core::control::find_control_nca(&update.files, &update.src, &s.keys)?;
-            let f = update.files.get(index)?;
-            let window = Window::new(update.src, f.offset, f.size, &f.name).ok()?;
-            let control = switch_core::control::Control::from_source(window, &s.keys).ok()?;
-            Some(control.nacp.display_version)
-        })
-        .unwrap_or_default()
+/// The NACP display version of the Control NCA among `files`, or empty.
+fn display_version(
+    files: &[switch_core::nsp::Pfs0File],
+    src: &HostSource,
+    keys: &switch_core::keys::KeySet,
+) -> String {
+    let control = || {
+        let (index, _) = switch_core::control::find_control_nca(files, src, keys)?;
+        let f = files.get(index)?;
+        let window = Window::new(*src, f.offset, f.size, &f.name).ok()?;
+        switch_core::control::Control::from_source(window, keys).ok()
+    };
+    control().map_or_else(String::new, |control| control.nacp.display_version)
 }
 
 /// Register a container of add-on content. Returns how many pieces it holds, or 0

@@ -301,8 +301,6 @@ struct Update {
     src: HostSource,
     /// Where the Program NCA sits inside the update container.
     program: (u64, u64),
-    /// Kept for the update's Control NCA.
-    files: Vec<switch_core::nsp::Pfs0File>,
 }
 
 impl Update {
