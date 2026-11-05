@@ -25,27 +25,32 @@ static LAST_START: crate::SyncCell<f64> = crate::SyncCell::new(f64::NEG_INFINITY
 pub(crate) fn refresh_if_due(wanted: bool) {
     let now = js_sys::Date::now();
     // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
-    let (in_flight, last) = unsafe { (&mut *IN_FLIGHT.get(), &mut *LAST_START.get()) };
-    let never = *last == f64::NEG_INFINITY;
-    if *in_flight || !(never || wanted && now - *last >= REFRESH_INTERVAL_MS) {
+    let (in_flight, last) = unsafe { (&mut *IN_FLIGHT.get(), *LAST_START.get()) };
+    let never = last == f64::NEG_INFINITY;
+    if *in_flight || !(never || wanted && now - last >= REFRESH_INTERVAL_MS) {
         return;
     }
     *in_flight = true;
-    *last = now;
-    spawn_local(async move {
-        let usage = measure().await;
+    spawn_local(async {
+        refresh().await;
         unsafe { *IN_FLIGHT.get() = false };
-        let Some(s) = session_if_live() else {
-            return;
-        };
-        match usage {
-            Ok(usage) => s.cpu.set_storage_usage(usage),
-            Err(err) => s.cpu.log(
-                switch_core::trace::Level::Warn,
-                &format!("[fs] could not measure storage: {err:?}"),
-            ),
-        }
     });
+}
+
+/// Measure now and hand the result to the core.
+pub(crate) async fn refresh() {
+    unsafe { *LAST_START.get() = js_sys::Date::now() };
+    let usage = measure().await;
+    let Some(s) = session_if_live() else {
+        return;
+    };
+    match usage {
+        Ok(usage) => s.cpu.set_storage_usage(usage),
+        Err(err) => s.cpu.log(
+            switch_core::trace::Level::Warn,
+            &format!("[fs] could not measure storage: {err:?}"),
+        ),
+    }
 }
 
 async fn measure() -> Result<StorageUsage, JsValue> {

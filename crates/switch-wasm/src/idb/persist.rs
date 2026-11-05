@@ -89,6 +89,7 @@ pub async fn switch_restore_storage() -> u32 {
         Err(err) => log(Level::Error, &format!("Saves: could not be read ({err:?})")),
     }
     super::controls::restore().await;
+    super::usage::refresh().await;
     0
 }
 

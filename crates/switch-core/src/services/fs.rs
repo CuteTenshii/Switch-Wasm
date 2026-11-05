@@ -6,7 +6,7 @@ use crate::trace::{Level, Trace};
 use crate::Result;
 use std::collections::VecDeque;
 
-/// Emulated SD card size and free space; `ns` reports both and callers subtract them.
+/// The SD card size and free space reported until the host measures what it stores.
 pub(crate) const SD_TOTAL_SPACE: u64 = 32 << 30;
 
 pub(crate) const SD_FREE_SPACE: u64 = 16 << 30;
@@ -16,9 +16,7 @@ const SD_CARD_SPEED_MODE: i64 = 6;
 
 const MMC_SPEED_MODE: i64 = 4;
 
-/// eMMC user area mirrors the SD card; boot partitions are the X1's 4 MiB.
-const MMC_USER_AREA_SIZE: i64 = SD_TOTAL_SPACE as i64;
-
+/// The X1's eMMC boot partitions are 4 MiB.
 const MMC_BOOT_PARTITION_SIZE: i64 = 4 << 20;
 
 const SD_CARD_DETECTION: &str = "fsp-srv-sd-detection";
@@ -752,7 +750,7 @@ impl Cpu {
             }
             // 3 = GetSdCardUserAreaSize, 4 = GetSdCardProtectedAreaSize.
             Some(3) => {
-                let size = SD_TOTAL_SPACE as i64;
+                let size = self.space_of(Mount::Sd).1 as i64;
                 self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
             }
             Some(4) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
@@ -761,7 +759,7 @@ impl Cpu {
             // 111 = GetMmcPartitionSize: 0 is user data, 1 and 2 are boot partitions.
             Some(111) => {
                 let size = match self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0) {
-                    0 => MMC_USER_AREA_SIZE,
+                    0 => self.space_of(Mount::Bis(30)).1 as i64,
                     _ => MMC_BOOT_PARTITION_SIZE,
                 };
                 self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
@@ -1766,6 +1764,28 @@ mod tests {
         write_request(&mut cpu, 202, &[]);
         cpu.fs_device_operator_request(TLS, Some(202)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
+    }
+
+    #[test]
+    fn the_device_operator_sizes_follow_what_the_host_reports() {
+        let mut cpu = request(false, 3, &[]);
+        cpu.set_storage_usage(crate::cpu::StorageUsage {
+            sd: 100,
+            system: 300,
+            user: 20,
+            free: 1000,
+        });
+        write_request(&mut cpu, 3, &[]);
+        cpu.fs_device_operator_request(TLS, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 1100, "SD user area");
+
+        write_request(&mut cpu, 111, &0u32.to_le_bytes());
+        cpu.fs_device_operator_request(TLS, Some(111)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 1020, "MMC user area");
+
+        write_request(&mut cpu, 111, &1u32.to_le_bytes());
+        cpu.fs_device_operator_request(TLS, Some(111)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 4 << 20, "MMC boot");
     }
 
     #[test]
