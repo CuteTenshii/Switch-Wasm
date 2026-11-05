@@ -13,7 +13,7 @@ import { updateReadouts, updateRam } from './runloop';
 import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence } from './sdcard';
 import { screenEl, setState, showOverlay } from './shell';
-import { endTitle, stageFont } from './session';
+import { endTitle } from './session';
 import { setRunning } from './title';
 import { endLoad, failLoad, loadPhase } from './loading';
 
@@ -44,7 +44,6 @@ async function init(): Promise<void> {
     loadPhase('restoring the SD card, saves, profiles and keys');
     // Independent of each other; the worker built the session when it loaded the core.
     await Promise.all([
-      stageFont(),
       sdRequestPersistence(),
       call('restore_storage'),
       loadProfiles().then(stageUsers),

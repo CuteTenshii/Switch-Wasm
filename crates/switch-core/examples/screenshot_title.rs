@@ -1,5 +1,5 @@
 //! Boot a program and write its Nth presented frame to a PPM:
-//! `screenshot_title <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]`.
+//! `screenshot_title <target> [prod.keys] [title.keys] <out.ppm> [frame] [--font <ttf>]`.
 //!
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
 //! Knobs beyond [`common::Debug`]: `SWITCH_FIRMWARE`, `STEPS`, `PROFILE`, `STACKS`,
@@ -12,7 +12,7 @@ use common::Flow;
 use std::env;
 
 const USAGE: &str =
-    "screenshot_title <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]";
+    "screenshot_title <target> [prod.keys] [title.keys] <out.ppm> [frame] [--font <ttf>]";
 
 /// Steps between the periodic memory checks and pokes, and the `STACKS` sample interval.
 const DEFAULT_INTERVAL: u64 = 4096;

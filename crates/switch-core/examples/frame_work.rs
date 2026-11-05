@@ -1,10 +1,10 @@
 //! Count the work one steady-state frame asks for (instructions, blocks,
 //! interpreter fallbacks, methods, draws, pixels) instead of timing it:
-//! `frame_work <target> [prod.keys] [title.keys] [frames] [font.ttf]`.
+//! `frame_work <target> [prod.keys] [title.keys] [frames] [--font <ttf>]`.
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
 mod common;
 
-const USAGE: &str = "frame_work <target> [prod.keys] [title.keys] [frames] [font.ttf]";
+const USAGE: &str = "frame_work <target> [prod.keys] [title.keys] [frames] [--font <ttf>]";
 
 use switch_core::cpu::Cpu;
 use switch_core::gpu::exec::GpuStats;

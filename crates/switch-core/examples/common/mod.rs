@@ -20,7 +20,7 @@ use switch_core::keys::KeySet;
 use switch_core::source::ByteSource;
 
 /// The font `pl:u` serves when no firmware fonts are registered.
-pub const FALLBACK_FONT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
+const FALLBACK_FONT: &[u8] = include_bytes!("../../../../web/font.ttf");
 
 /// Hand the core what the environment asks for, once: the `TRACE_*` channels and
 /// the dump directories. The core itself reads no environment.
@@ -206,7 +206,7 @@ pub fn container_args(line: &str) -> Args {
 }
 
 /// Arguments of a tool that runs a `.nro` or a retail container with its
-/// keys. A `.ttf` anywhere in the tail is the shared font.
+/// keys. `--font <ttf>` anywhere in the tail replaces the shared font.
 pub fn program_args(line: &str) -> Args {
     apply_env();
     let mut positional = env::args().skip(1);
@@ -220,7 +220,13 @@ pub fn program_args(line: &str) -> Args {
             .position(|arg| arg.to_ascii_lowercase().ends_with(suffix))?;
         Some(rest.remove(at))
     };
-    let font = take_named(&mut rest, ".ttf");
+    let font = rest.iter().position(|arg| arg == "--font").map(|at| {
+        rest.remove(at);
+        if at >= rest.len() {
+            usage(line)
+        }
+        rest.remove(at)
+    });
     // Only a retail target needs keys.
     let (prod, title) = match target_kind(Path::new(&container)) {
         Kind::Nro => (String::new(), None),
@@ -507,13 +513,9 @@ pub fn env_hex_list(name: &str) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// Give the guest the fallback shared font, warning if it is missing and no
-/// firmware fonts will replace it.
+/// Give the guest the fallback shared font; firmware fonts replace it.
 pub fn load_fallback_font(cpu: &mut Cpu) {
-    match fs::read(FALLBACK_FONT) {
-        Ok(bytes) => cpu.set_shared_font(bytes),
-        Err(e) => eprintln!("no font at {FALLBACK_FONT} ({e}): text will not render"),
-    }
+    cpu.set_shared_font(FALLBACK_FONT.to_vec());
 }
 
 /// Register every system data archive in `SWITCH_FIRMWARE`, if it is set, and install

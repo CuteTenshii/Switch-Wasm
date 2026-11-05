@@ -38,7 +38,6 @@ export interface WasmExports {
   switch_load_keys(
     prodPtr: number, prodLen: number,
     titlePtr: number, titleLen: number): number;
-  switch_load_font(ptr: number, len: number): number;
   switch_load_nro(
     ptr: number, len: number, pathPtr: number, pathLen: number): bigint;
   switch_load_elf(ptr: number, len: number): bigint;

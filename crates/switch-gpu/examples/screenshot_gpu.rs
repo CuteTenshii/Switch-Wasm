@@ -1,13 +1,14 @@
 //! `screenshot_title` with the GPU backend installed; `cmp` the two PPMs to
 //! check the backend against the software reference:
-//! `screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]`.
+//! `screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [--font <ttf>]`.
 //! `PRESS=<buttons>@<interval>` taps buttons on the way, as in `boot_nsp`.
 #[path = "../../switch-core/examples/common/mod.rs"]
 mod common;
 
 use common::Flow;
 
-const USAGE: &str = "screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [font.ttf]";
+const USAGE: &str =
+    "screenshot_gpu <target> [prod.keys] [title.keys] <out.ppm> [frame] [--font <ttf>]";
 
 fn main() {
     let args = common::program_args(USAGE);

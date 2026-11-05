@@ -1,16 +1,6 @@
-//! System settings: font, operation mode, clock and battery.
+//! System settings: operation mode, clock and battery.
 
 use crate::session;
-
-/// Set the shared system font `pl:u` serves (TTF/OTF bytes), before `plInitialize`.
-/// Returns the bytes taken.
-#[no_mangle]
-pub extern "C" fn switch_load_font(ptr: *const u8, len: u32) -> u32 {
-    let s = session();
-    let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    s.cpu.set_shared_font(data.to_vec());
-    s.cpu.shared_font_len() as u32
-}
 
 /// Dock or undock the console (0 handheld). Queues the AM messages titles react to.
 #[no_mangle]

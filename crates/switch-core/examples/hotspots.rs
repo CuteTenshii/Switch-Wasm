@@ -1,11 +1,11 @@
 //! Profiles one steady-state frame by guest address, encoding byte and
-//! translator group: `hotspots <target> [prod.keys] [title.keys] [font.ttf]`.
+//! translator group: `hotspots <target> [prod.keys] [title.keys] [--font <ttf>]`.
 //!
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (keys required for
 //! retail). Add `--instructions` to list the hottest individual instructions.
 mod common;
 
-const USAGE: &str = "hotspots <target> [prod.keys] [title.keys] [font.ttf]";
+const USAGE: &str = "hotspots <target> [prod.keys] [title.keys] [--font <ttf>]";
 
 use common::{Flow, Pace};
 use std::collections::BTreeMap;

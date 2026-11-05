@@ -2,7 +2,7 @@
 //! slice after which the two machines disagree. The interpreter is the
 //! reference.
 //!
-//! Usage: jit_bisect <target> [prod.keys] [title.keys] [max_steps] [window] [font.ttf]
+//! Usage: jit_bisect <target> [prod.keys] [title.keys] [max_steps] [window] [--font <ttf>]
 //!
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
 //! Exact only until the first thread switch: the two engines can interleave
@@ -11,7 +11,8 @@ mod common;
 
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "jit_bisect <target> [prod.keys] [title.keys] [max_steps] [window] [font.ttf]";
+const USAGE: &str =
+    "jit_bisect <target> [prod.keys] [title.keys] [max_steps] [window] [--font <ttf>]";
 
 const SLICE: u64 = 4096;
 

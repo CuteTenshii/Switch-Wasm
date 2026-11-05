@@ -1,9 +1,9 @@
 //! Lists the instructions a program runs that the block translator has no op for,
 //! weighted by one steady frame's instruction mix:
-//! `jit_coverage <target> [prod.keys] [title.keys] [font.ttf]`.
+//! `jit_coverage <target> [prod.keys] [title.keys] [--font <ttf>]`.
 mod common;
 
-const USAGE: &str = "jit_coverage <target> [prod.keys] [title.keys] [font.ttf]";
+const USAGE: &str = "jit_coverage <target> [prod.keys] [title.keys] [--font <ttf>]";
 
 use common::{Flow, Pace};
 use std::collections::HashMap;

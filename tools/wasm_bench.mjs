@@ -188,14 +188,6 @@ if (prod || titleKeys) {
   if (ok !== 0) die('could not parse the keys');
 }
 
-try {
-  const font = readFileSync(join(repoRoot, 'web/font.ttf'));
-  api.switch_load_font(handle, toWasm(font), font.length);
-} catch {
-  // Without a font a guest renders no text, which skews the frame cost.
-  console.log('no web/font.ttf: the guest will render no text, and this frame is not that frame');
-}
-
 // Slot 0 is the container however it is loaded.
 const containerIndex = addHostFile(containerPath);
 const containerSize = hostFiles[containerIndex].size;

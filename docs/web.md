@@ -76,7 +76,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/main/session.ts`
 
-- The session is the console, created and staged once per page (font, SD card, saves, controls, users, keys, archives, library applets). A title is a process in it: every launch and Stop calls `endTitle`, which has the core end the title and its applets (`Cpu::end_title`) and leaves an empty process for the next one, so nothing is restaged.
+- The session is the console, created and staged once per page (SD card, saves, controls, users, keys, archives, library applets). A title is a process in it: every launch and Stop calls `endTitle`, which has the core end the title and its applets (`Cpu::end_title`) and leaves an empty process for the next one, so nothing is restaged.
 - Before titles were processes, every boot rebuilt the session: loading into the running one left the previous title's pages mapped (hundreds of MiB for retail) until guest RAM hit the cap.
 - `endTitle` restages the users afterwards: a running title keeps the player it started with, and profile edits made meanwhile reach the next one.
 
@@ -178,7 +178,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `vite.config.ts`
 
-- `web/public` holds the social card (its URL is baked into other sites' caches by meta tags), the home screen icons and `manifest.webmanifest` (fixed URLs), the font licence (must stay beside the font) and `_headers` (cross-origin isolation in deployment). Everything else is content-hashed; `assetsInlineLimit: 0` keeps every asset a file with a hashed URL.
+- `web/public` holds the social card (its URL is baked into other sites' caches by meta tags), the home screen icons and `manifest.webmanifest` (fixed URLs), the font licence (the font itself is embedded in the wasm) and `_headers` (cross-origin isolation in deployment). Everything else is content-hashed; `assetsInlineLimit: 0` keeps every asset a file with a hashed URL.
 - `base: './'` because the site lives at tenshii.moe/Switch-Wasm/; '/' 404s only once deployed.
 - The worker must be a module on both sides: 'iife' fails in dev (the dev server serves the entry unbundled, so `import` breaks a classic worker), and dropping `type` in production only works until a chunk gains an `import`.
 - `@host/files` is a bare specifier so wasm-bindgen's glue in cargo's target dir can import `web/worker` code without a cross-directory relative path.

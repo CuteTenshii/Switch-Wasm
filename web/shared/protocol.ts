@@ -199,7 +199,6 @@ export interface Commands {
   set_operation_mode(docked: number): number;
   vibration(): number;
 
-  load_font(bytes: Bytes): number;
   // `sdPath`: where on the SD card it came from, told to it as argv[0].
   load_nro(bytes: Bytes, sdPath?: string): number;
   load_elf(bytes: Bytes): number;

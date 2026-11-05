@@ -96,11 +96,6 @@ export const CMD: CommandHandlers = {
     return 0;
   },
 
-  load_font(bytes) {
-    const result = withBytes(bytes, (ptr, len) => core.switch_load_font(ptr, len));
-    logLoad(`loaded the shared font (${fmtSize(bytes.length)})`, result);
-    return result;
-  },
   load_nro(bytes, sdPath) {
     const result = withBytes(bytes, (ptr, len) => withPath(sdPath ?? '', (pathPtr, pathLen) =>
       Number(core.switch_load_nro(ptr, len, pathPtr, pathLen))));

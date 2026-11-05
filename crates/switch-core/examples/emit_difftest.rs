@@ -9,7 +9,7 @@
 //! ```
 mod common;
 
-const USAGE: &str = "emit_difftest <target> [prod.keys] [title.keys] [font.ttf]";
+const USAGE: &str = "emit_difftest <target> [prod.keys] [title.keys] [--font <ttf>]";
 
 use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
 use common::{Flow, Pace};

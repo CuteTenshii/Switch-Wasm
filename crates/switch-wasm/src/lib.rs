@@ -247,6 +247,7 @@ pub extern "C" fn switch_init() {
     }
     let mut cpu = Cpu::new();
     cpu.bootstrap();
+    cpu.set_shared_font(include_bytes!("../../../web/font.ttf").to_vec());
     // SAFETY: only the system worker calls exports; see the `SESSION` comment.
     unsafe {
         *SESSION.get() = Some(Session {
