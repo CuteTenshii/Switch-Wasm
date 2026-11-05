@@ -2,8 +2,8 @@
 //! (`aoc`), play statistics (`pdm`), play report (`prepo`) and album (`caps`)
 //! services.
 
-use super::fs::{SD_FREE_SPACE, SD_TOTAL_SPACE};
-use crate::cpu::Cpu;
+use super::fs::BIS_SYSTEM;
+use crate::cpu::{Cpu, Mount};
 use crate::Result;
 
 /// `NsApplicationControlData`: the NACP, then up to this much icon.
@@ -12,6 +12,18 @@ const NACP_SIZE: usize = 0x4000;
 const ICON_SIZE_MAX: usize = 0x20000;
 
 impl Cpu {
+    /// `(free, total)` of the `ncm::StorageId` in the request: the built-in system and user
+    /// storages and the SD card; any other storage is empty.
+    fn storage_space(&mut self, tls: u32) -> (u64, u64) {
+        let id = self.mem.read_u8(self.ipc_request_data(tls)).unwrap_or(0);
+        match id {
+            3 => self.space_of(Mount::Bis(BIS_SYSTEM)),
+            4 => self.space_of(Mount::Bis(30)),
+            5 => self.space_of(Mount::Sd),
+            _ => (0, 0),
+        }
+    }
+
     /// Register a title's `control.nacp` and icon for `GetApplicationControlData`.
     pub fn add_application_control(&mut self, application_id: u64, nacp: &[u8], icon: &[u8]) {
         let mut data = vec![0u8; NACP_SIZE];
@@ -102,12 +114,15 @@ impl Cpu {
             "ns:content-management" => match cmd_id {
                 // CheckSdCardMountStatus: the emulated card is always mounted.
                 Some(43) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // GetTotalSpaceSize / GetFreeSpaceSize(StorageId) -> u64. The
-                // same 32 GiB card `fsp-srv` reports, half used.
+                // GetTotalSpaceSize / GetFreeSpaceSize(StorageId) -> u64, as `fsp-srv` reports them.
                 Some(47) => {
-                    self.write_ipc_response(tls, 0, &[], &SD_TOTAL_SPACE.to_le_bytes(), &[])
+                    let (_, total) = self.storage_space(tls);
+                    self.write_ipc_response(tls, 0, &[], &total.to_le_bytes(), &[])
                 }
-                Some(48) => self.write_ipc_response(tls, 0, &[], &SD_FREE_SPACE.to_le_bytes(), &[]),
+                Some(48) => {
+                    let (free, _) = self.storage_space(tls);
+                    self.write_ipc_response(tls, 0, &[], &free.to_le_bytes(), &[])
+                }
                 // CountApplicationContentMeta(u64 application_id) -> 0.
                 Some(600) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -298,13 +313,20 @@ impl Cpu {
             }
             // CheckSdCardMountStatus and storage space, as `ns:content-management`.
             Some(43) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            Some(47) => self.write_ipc_response(tls, 0, &[], &SD_TOTAL_SPACE.to_le_bytes(), &[]),
-            Some(48) => self.write_ipc_response(tls, 0, &[], &SD_FREE_SPACE.to_le_bytes(), &[]),
+            Some(47) => {
+                let (_, total) = self.storage_space(tls);
+                self.write_ipc_response(tls, 0, &[], &total.to_le_bytes(), &[])
+            }
+            Some(48) => {
+                let (free, _) = self.storage_space(tls);
+                self.write_ipc_response(tls, 0, &[], &free.to_le_bytes(), &[])
+            }
             // GetStorageSize(u8 storage_id) -> (s64 total, s64 free).
             Some(71) => {
+                let (free, total) = self.storage_space(tls);
                 let mut out = [0u8; 16];
-                out[..8].copy_from_slice(&SD_TOTAL_SPACE.to_le_bytes());
-                out[8..].copy_from_slice(&SD_FREE_SPACE.to_le_bytes());
+                out[..8].copy_from_slice(&total.to_le_bytes());
+                out[8..].copy_from_slice(&free.to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &out, &[])
             }
             // ResumeAll: no download tasks.
@@ -476,15 +498,36 @@ mod tests {
         );
 
         // Free must not exceed total.
-        let mut cpu = request(false, 47, &[]);
+        let mut cpu = request(false, 47, &[5]);
         cpu.register_service_handle(9, "ns:content-management");
         cpu.ns_request(TLS, 9, Some(47)).unwrap();
         let total = cpu.mem.read_u64(TLS + 0x20).unwrap();
-        let mut cpu = request(false, 48, &[]);
+        let mut cpu = request(false, 48, &[5]);
         cpu.register_service_handle(9, "ns:content-management");
         cpu.ns_request(TLS, 9, Some(48)).unwrap();
         let free = cpu.mem.read_u64(TLS + 0x20).unwrap();
         assert!(free > 0 && free <= total, "free {free} of total {total}");
+    }
+
+    #[test]
+    fn ns_space_follows_the_storage_id_and_what_the_host_reports() {
+        let space = |storage: u8, cmd: u32| {
+            let mut cpu = request(false, cmd, &[storage]);
+            cpu.register_service_handle(9, "ns:content-management");
+            cpu.set_storage_usage(crate::cpu::StorageUsage {
+                sd: 100,
+                system: 300,
+                user: 20,
+                free: 1000,
+            });
+            cpu.ns_request(TLS, 9, Some(cmd)).unwrap();
+            cpu.mem.read_u64(TLS + 0x20).unwrap()
+        };
+        assert_eq!(space(5, 47), 1100, "SD total");
+        assert_eq!(space(3, 47), 1300, "system total");
+        assert_eq!(space(4, 47), 1020, "user total");
+        assert_eq!(space(4, 48), 1000, "user free");
+        assert_eq!(space(2, 47), 0, "no game card");
     }
 
     #[test]
