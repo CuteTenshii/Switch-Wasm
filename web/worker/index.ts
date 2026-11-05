@@ -9,7 +9,7 @@ import { tryGpu } from './gpu';
 import { flushLog, workerLog } from './log';
 import init, { switch_attach_screen } from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
-import { core, setCore, type WasmExports } from './wasm';
+import { core, explainFailure, setCore, type WasmExports } from './wasm';
 import { startCores } from './coreworkers';
 
 // `self` is typed as the shared WorkerGlobalScope, which lacks postMessage.
@@ -49,7 +49,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
         },
         (err: unknown) => {
           flushLog();
-          reply({ id, ok: false, error: String(err) });
+          reply({ id, ok: false, error: explainFailure(err) });
         },
       );
       return;
@@ -70,7 +70,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
       reportActivity(stopped);
     }
   } catch (err) {
-    reply({ id, ok: false, error: String(err) });
+    reply({ id, ok: false, error: explainFailure(err) });
   }
 };
 

@@ -1,7 +1,7 @@
 //! WASM bindings for switch-core. Scalars cross as raw `extern "C"` exports; anything with
 //! bytes or text goes through `wasm-bindgen`. The one session is a global, structured
-//! results are hand-written JSON, and a failure's reason is read back with
-//! `switch_last_error`.
+//! results are hand-written JSON, and a failure's reason is thrown to the caller as a
+//! `Result`'s error (a trap's is the panic hook's message, `switch_panic_message`).
 
 // Exports take pointers into linear memory that the JS caller owns for the call.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -252,7 +252,7 @@ fn attach_jit() {
     jit::attach();
 }
 
-/// Capture Rust panics into a static buffer for [`switch_last_error`], since they
+/// Capture Rust panics into a static buffer for [`switch_panic_message`], since they
 /// otherwise trap silently.
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -275,31 +275,24 @@ fn forget_the_last_session() {
     unsafe { &mut *PANIC_MSG.get() }.fill(0);
 }
 
-/// The reason the last call failed, or the Rust panic that trapped it.
+/// The Rust panic that trapped the last call, if there was one; reading it forgets it.
 #[wasm_bindgen]
-pub fn switch_last_error() -> String {
-    // A captured panic takes priority and needs no session.
+pub fn switch_panic_message() -> String {
     // SAFETY: only the system worker calls exports; see the `SESSION` comment.
     let panicked = unsafe { &mut *PANIC_MSG.get() };
-    if panicked[0] != 0 {
-        let len = panicked
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(panicked.len());
-        let message = String::from_utf8_lossy(&panicked[..len]).into_owned();
-        panicked.fill(0);
-        return message;
-    }
-    session_if_live().map_or_else(String::new, |s| s.last_error.clone())
+    let len = panicked
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(panicked.len());
+    let message = String::from_utf8_lossy(&panicked[..len]).into_owned();
+    panicked.fill(0);
+    message
 }
 
-/// A load's outcome: its entry address, or the reason it failed (also in `switch_last_error`).
-fn entry(s: &Session, code: i64) -> Result<f64, String> {
-    if code < 0 {
-        Err(s.last_error.clone())
-    } else {
-        Ok(code as f64)
-    }
+/// Why the last `run`, `add_update`, `add_dlc` or `nand_identify` failed.
+#[wasm_bindgen]
+pub fn switch_last_error() -> String {
+    session_if_live().map_or_else(String::new, |s| s.last_error.clone())
 }
 
 /// An update container added for the title about to run. Its Program NCA holds
@@ -345,34 +338,19 @@ struct Added<'a> {
     dlc: &'a [Dlc],
 }
 
-/// The open container as a source, or an error recorded in the session.
-fn container(s: &mut Session) -> Option<HostSource> {
-    match s.container {
-        Some(c) => Some(c),
-        None => {
-            s.last_error = "no container is open".into();
-            None
-        }
-    }
+/// The open container as a source.
+fn container(s: &Session) -> Result<HostSource, String> {
+    s.container.ok_or_else(|| "no container is open".to_owned())
 }
 
 /// A source over NSP file `index`: the window an NCA is read through.
-fn nsp_file_source(s: &mut Session, index: u32) -> Option<Window<HostSource>> {
+fn nsp_file_source(s: &Session, index: u32) -> Result<Window<HostSource>, String> {
     let container = container(s)?;
-    let f = match s.nsp_files.get(index as usize) {
-        Some(f) => f,
-        None => {
-            s.last_error = "no such NSP file index".into();
-            return None;
-        }
-    };
-    match Window::new(container, f.offset, f.size, &f.name) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            s.last_error = e.to_string();
-            None
-        }
-    }
+    let f = s
+        .nsp_files
+        .get(index as usize)
+        .ok_or_else(|| "no such NSP file index".to_owned())?;
+    Window::new(container, f.offset, f.size, &f.name).map_err(|e| e.to_string())
 }
 
 // Host builds only: these use `set_host_container` and a `Mutex`.

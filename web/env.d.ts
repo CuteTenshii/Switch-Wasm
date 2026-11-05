@@ -36,9 +36,11 @@ declare module '@core/switch_wasm.js' {
   export function switch_remember_control(): Promise<void>;
   // `idb/users.rs`: stores the guest's profile edits; whether there were any.
   export function switch_store_profile_edits(): Promise<boolean>;
-  // The exports that carry bytes or text, in `crates/switch-wasm/src`. A failure's reason is
-  // also in `switch_last_error`; the ones that return a `Result` throw it.
+  // The exports that carry bytes or text, in `crates/switch-wasm/src`. The ones that return a
+  // `Result` throw its error.
   export function switch_last_error(): string;
+  // The panic that trapped the last call, which is then forgotten.
+  export function switch_panic_message(): string;
   // `container.rs`
   // `{ title, version }` as JSON, or empty when the file is no update.
   export function switch_add_update(file: number, size: bigint): string;

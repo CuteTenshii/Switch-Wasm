@@ -157,9 +157,9 @@ fn a_new_session_inherits_the_log_but_not_the_panic_of_the_one_before_it() {
     }
 
     assert_eq!(
-        switch_last_error(),
+        switch_panic_message(),
         "",
-        "the dead session's panic is not this session's last error"
+        "the dead session's panic is not this session's"
     );
 }
 

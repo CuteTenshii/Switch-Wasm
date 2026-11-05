@@ -8,7 +8,7 @@ import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
 import { log } from './log';
-import { call, explainFailure } from './rpc';
+import { call } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { endTitle, noteBooted } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
@@ -37,7 +37,7 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
   try {
     await load();
   } catch (err) {
-    const why = await explainFailure(err);
+    const why = (err as Error).message;
     setState('fault');
     failLoad('Load failed: ' + why);
     log('Load failed: ' + why, 'error');
@@ -97,7 +97,7 @@ async function replaceTitle(name: string): Promise<boolean> {
     await endTitle();
     return true;
   } catch (err) {
-    const why = await explainFailure(err);
+    const why = (err as Error).message;
     setState('fault');
     failLoad('The running title could not be ended: ' + why);
     log('The running title could not be ended: ' + why, 'error');

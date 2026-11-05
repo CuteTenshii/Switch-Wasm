@@ -6,7 +6,7 @@ import { CMD } from './commands';
 import { tryGpu } from './gpu';
 import { flushLog } from './log';
 import { switch_present } from '@core/switch_wasm.js';
-import { core } from './wasm';
+import { core, explainFailure } from './wasm';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -85,7 +85,7 @@ function slice(): void {
     steps = CMD.run(budget) as number;
   } catch (err) {
     running = false;
-    ctx.postMessage({ type: 'loop_failed', error: String(err) } satisfies WorkerMessage);
+    ctx.postMessage({ type: 'loop_failed', error: explainFailure(err) } satisfies WorkerMessage);
     return;
   }
   const ms = performance.now() - at;

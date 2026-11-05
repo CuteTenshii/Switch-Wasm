@@ -21,7 +21,6 @@ pub fn switch_open_nsp(size: u64) -> Result<String, String> {
     match switch_core::xci::read_container(&container) {
         Ok(pfs0) => {
             s.nsp_files = pfs0.files;
-            s.last_error.clear();
             Ok(json::array(|a| {
                 for f in &s.nsp_files {
                     a.object(|o| {
@@ -32,10 +31,7 @@ pub fn switch_open_nsp(size: u64) -> Result<String, String> {
                 }
             }))
         }
-        Err(e) => {
-            s.last_error = e.to_string();
-            Err(s.last_error.clone())
-        }
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -245,29 +241,20 @@ fn is_add_on_content_id(title_id: u64) -> bool {
     (0x1000..0x1800).contains(&(title_id & 0x1FFF))
 }
 
-/// Read up to `len` bytes of NSP file `index` from `file_offset`. Fails with the reason, also
-/// in `switch_last_error`.
+/// Read up to `len` bytes of NSP file `index` from `file_offset`; fails with the reason.
 #[wasm_bindgen]
 pub fn switch_read_file(index: u32, file_offset: u64, len: u32) -> Result<Vec<u8>, String> {
-    let s = session();
-    let Some(file) = nsp_file_source(s, index) else {
-        return Err(s.last_error.clone());
-    };
+    let file = nsp_file_source(session(), index)?;
     if len == 0 || file_offset >= file.len() {
         return Ok(Vec::new());
     }
     let n = u64::from(len).min(file.len() - file_offset) as usize;
     let mut out = vec![0u8; n];
-    match file.read_at(file_offset, &mut out) {
-        Ok(got) => {
-            out.truncate(got);
-            Ok(out)
-        }
-        Err(e) => {
-            s.last_error = e.to_string();
-            Err(s.last_error.clone())
-        }
-    }
+    let got = file
+        .read_at(file_offset, &mut out)
+        .map_err(|e| e.to_string())?;
+    out.truncate(got);
+    Ok(out)
 }
 
 /// A JSON summary of the NCA whose header is `data`, decrypting with loaded keys.
@@ -329,50 +316,26 @@ fn cache_control(s: &mut Session, control: switch_core::control::Control) {
 #[wasm_bindgen]
 pub fn switch_load_control() -> Result<(), String> {
     let s = session();
-    let loaded = load_control(s);
-    if loaded < 0 {
-        return Err(s.last_error.clone());
-    }
-    Ok(())
-}
-
-fn load_control(s: &mut Session) -> i32 {
     s.control = None;
-    let Some(container) = container(s) else {
-        return -1;
-    };
+    let container = container(s)?;
     let control = if s.nsp_files.is_empty() {
         switch_core::control::Control::from_source(container, &s.keys)
     } else {
-        let found = switch_core::control::find_control_nca(&s.nsp_files, &container, &s.keys);
-        let Some((index, nca)) = found else {
-            s.last_error =
-                "no Control NCA in this container (or its header couldn't be decrypted; load prod.keys)"
-                    .into();
-            return -1;
-        };
+        let (index, nca) =
+            switch_core::control::find_control_nca(&s.nsp_files, &container, &s.keys).ok_or(
+                "no Control NCA in this container (or its header couldn't be decrypted; load prod.keys)",
+            )?;
         let _ = switch_core::ticket::load_bundled_title_key(
             &mut s.keys,
             &nca,
             &s.nsp_files,
             &container,
         );
-        let Some(file) = nsp_file_source(s, index as u32) else {
-            return -1;
-        };
+        let file = nsp_file_source(s, index as u32)?;
         switch_core::control::Control::from_source(file, &s.keys)
     };
-    match control {
-        Ok(control) => {
-            cache_control(s, control);
-            s.last_error.clear();
-            0
-        }
-        Err(e) => {
-            s.last_error = e.to_string();
-            -1
-        }
-    }
+    cache_control(s, control.map_err(|e| e.to_string())?);
+    Ok(())
 }
 
 /// The cached control data as JSON, or `{}`. `icon_size` is the length of `switch_control_icon`.

@@ -16,7 +16,7 @@ import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log } from './log';
 import { noteRam } from './memory';
-import { call, explainFailure, onLoopEvents } from './rpc';
+import { call, onLoopEvents } from './rpc';
 import { pullProfileEdits, reloadProfiles } from './users';
 import { loaded, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
@@ -91,11 +91,10 @@ async function onFailed(error: string): Promise<void> {
   // A failure after Stop is expected; anything else is reported.
   if (aborted) return;
   setState('fault');
-  const why = await explainFailure(new Error(error));
-  log('The run loop stopped: ' + why, 'error');
+  log('The run loop stopped: ' + error, 'error');
   // Linear memory survives a trap, so the context can still be read.
   await reportPanicContext();
-  showEmulatorCrash(why);
+  showEmulatorCrash(error);
 }
 
 // Each piece is asked for separately so one failure costs only that piece.

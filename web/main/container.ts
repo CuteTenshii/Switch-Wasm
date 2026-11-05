@@ -6,7 +6,7 @@ import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { log } from './log';
-import { call, explainFailure } from './rpc';
+import { call } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { endTitle, noteBooted } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
@@ -290,7 +290,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
   try {
     index = await call('program_nca_index');
   } catch (err) {
-    const why = await explainFailure(err);
+    const why = (err as Error).message;
     setState('fault');
     failLoad(why);
     log('Nothing to boot in ' + file.name + ': ' + why, 'error');
@@ -315,7 +315,7 @@ async function handleNspFile(file: File): Promise<void> {
     openContainer = { file, kind: 'nsp' };
     setNote('container-badge', file.name, true);
   } catch (e) {
-    const why = await explainFailure(e);
+    const why = (e as Error).message;
     status.textContent = 'Could not open ' + file.name + ': ' + why;
     setNote('container-badge', 'none open', false);
     log('Could not open ' + file.name + ': ' + why, 'error');
@@ -490,7 +490,7 @@ async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   try {
     await call('open_nca', file);
   } catch (e) {
-    out.textContent = 'Could not open ' + file.name + ': ' + await explainFailure(e);
+    out.textContent = 'Could not open ' + file.name + ': ' + (e as Error).message;
     setNote('container-badge', 'none open', false);
     return null;
   }
@@ -516,7 +516,7 @@ async function parseAndRenderNca(
   try {
     info = JSON.parse(await call('parse_nca', header)) as NcaInfo;
   } catch (err) {
-    out.textContent = 'parse failed: ' + await explainFailure(err);
+    out.textContent = 'parse failed: ' + (err as Error).message;
     return null;
   }
   if (info.error) {
@@ -597,7 +597,7 @@ export async function doLaunchNca(
   try {
     await endTitle();
   } catch (err) {
-    const why = await explainFailure(err);
+    const why = (err as Error).message;
     setState('fault');
     failLoad('The running title could not be ended: ' + why);
     log('The running title could not be ended: ' + why, 'error');
@@ -607,7 +607,7 @@ export async function doLaunchNca(
   try {
     entry = await loadFn();
   } catch (err) {
-    const why = await explainFailure(err);
+    const why = (err as Error).message;
     setState('fault');
     failLoad('Launch failed: ' + why);
     log('Launch failed: ' + why, 'error');

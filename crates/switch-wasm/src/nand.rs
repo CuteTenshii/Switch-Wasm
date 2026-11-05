@@ -45,12 +45,5 @@ pub fn switch_nand_launch(content: &web_sys::Blob) -> Result<f64, String> {
         file: crate::add_host_file(content),
         len: content.size() as u64,
     };
-    let code = load_and_boot_nca(
-        &s.keys,
-        &mut s.cpu,
-        &mut s.last_error,
-        src,
-        Added::default(),
-    );
-    crate::entry(s, code)
+    load_and_boot_nca(&s.keys, &mut s.cpu, src, Added::default()).map(|entry| entry as f64)
 }

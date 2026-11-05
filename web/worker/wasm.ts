@@ -1,6 +1,8 @@
 // The wasm module and its session. The exports that carry bytes or text are the glue's own
 // (`@core/switch_wasm.js`); what is here are the raw scalar ones.
 
+import { switch_panic_message } from '@core/switch_wasm.js';
+
 export interface WasmExports {
   memory: WebAssembly.Memory;
 
@@ -56,5 +58,18 @@ export function parseOr<T>(text: string, fallback: T): T {
     return JSON.parse(text) as T;
   } catch {
     return fallback;
+  }
+}
+
+// What a thrown `err` says. A Rust panic traps as a bare `unreachable`, so the hook's message
+// goes with it.
+export function explainFailure(err: unknown): string {
+  const why = String(err);
+  try {
+    const panic = coreLoaded() ? switch_panic_message() : '';
+    return panic ? why + ' - ' + panic : why;
+  } catch {
+    // The module may be too far gone to answer.
+    return why;
   }
 }
