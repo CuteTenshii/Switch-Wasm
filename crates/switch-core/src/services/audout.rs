@@ -1,6 +1,7 @@
 //! `audout`, the plain PCM-out device, and `audctl`, the system-wide audio
 //! settings. The renderer is [`super::audren`].
 
+use super::audio::AudioSource;
 use super::power::CLOCK_RATES_HZ;
 use crate::cpu::Cpu;
 use crate::Result;
@@ -164,7 +165,6 @@ impl Cpu {
                         unplayable_buffers: 0,
                     },
                 );
-                self.audio_format = (sample_rate, channel_count);
 
                 let mut raw = Vec::with_capacity(16);
                 raw.extend_from_slice(&sample_rate.to_le_bytes());
@@ -355,7 +355,6 @@ impl Cpu {
             return self.unimplemented_command(tls, "audout:iaudioout", Some(3));
         };
         let channels = device.channel_count.max(1) as usize;
-        let format = (device.sample_rate, device.channel_count);
         let frames = (samples.len() / channels) as u64;
         device.played_frames += frames;
         device.appended_buffers += 1;
@@ -369,14 +368,14 @@ impl Cpu {
         device.free_at = starts_at.wrapping_add(Self::audio_play_cycles(frames, rate));
         device.queued.push_back((tag, device.free_at));
         let volume = device.volume;
+        let channel_count = device.channel_count;
         // A stopped device still returns its buffers but does not queue samples.
         let playing = device.started;
         if playing {
-            self.audio_format = format;
             let scaled = samples
                 .into_iter()
                 .map(move |s| ((s as f32) * volume).round().clamp(-32768.0, 32767.0) as i16);
-            self.queue_audio(scaled);
+            self.queue_audio(AudioSource::Out(handle), rate, channel_count, scaled);
         }
         // The buffer event fires on finish (see [`Cpu::audio_tick`]). Yield so the
         // caller is descheduled as it would be on hardware.

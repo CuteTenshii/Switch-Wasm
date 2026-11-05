@@ -326,13 +326,13 @@ pub struct Machine {
     pub(crate) pl_shmem_image: Vec<u8>,
     /// Each font's place in [`Cpu::pl_shmem_image`], in `PlSharedFontType` order.
     pub(crate) shared_font_regions: Vec<FontRegion>,
-    /// Bounded queue of interleaved 16-bit PCM not yet taken by the host.
-    pub(crate) audio_pcm: VecDeque<i16>,
+    /// Each source's bounded queue of stereo 16-bit PCM not yet mixed for the host.
+    pub(crate) audio_streams: BTreeMap<AudioSource, AudioStream>,
     /// Samples produced, taken and dropped; see [`Cpu::audio_activity`].
     pub(crate) audio_produced: u64,
     pub(crate) audio_taken: u64,
     pub(crate) audio_dropped: u64,
-    /// Rate and channel count of `audio_pcm`; `(0, 0)` until a device opens.
+    /// Rate and channel count of the mix; `(0, 0)` until something plays.
     pub(crate) audio_format: (u32, u32),
     /// POSIX seconds for `time:u`/`time:s`; the epoch until [`Cpu::set_unix_time`].
     pub(crate) unix_time: i64,
@@ -584,7 +584,7 @@ impl Cpu {
                 shared_font: Vec::new(),
                 pl_shmem_image: Vec::new(),
                 shared_font_regions: Vec::new(),
-                audio_pcm: VecDeque::new(),
+                audio_streams: BTreeMap::new(),
                 audio_produced: 0,
                 audio_taken: 0,
                 audio_dropped: 0,

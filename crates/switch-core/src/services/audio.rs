@@ -1,6 +1,73 @@
-//! Audio output queue and host-facing audio activity.
+//! Audio mixing and host-facing audio activity.
 
 use crate::cpu::*;
+use std::collections::VecDeque;
+
+/// The rate of [`Cpu::take_audio`]'s samples.
+pub(crate) const OUTPUT_RATE: u32 = 48_000;
+/// Interleaved channels of [`Cpu::take_audio`]'s samples.
+const OUTPUT_CHANNELS: usize = 2;
+
+/// Who produced a stream of samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AudioSource {
+    Out(u64),
+    Renderer(u64),
+}
+
+/// One source's samples, already stereo at [`OUTPUT_RATE`], waiting to be mixed.
+#[derive(Debug, Default)]
+pub(crate) struct AudioStream {
+    pcm: VecDeque<i16>,
+    /// The previous input frame and the next output's position past it, in input frames.
+    last: Option<[f32; 2]>,
+    position: f64,
+}
+
+impl AudioStream {
+    fn push(&mut self, rate: u32, channels: usize, samples: impl Iterator<Item = i16>) {
+        let samples: Vec<i16> = samples.collect();
+        let frames = samples.chunks_exact(channels).map(downmix);
+        if rate == OUTPUT_RATE {
+            self.pcm.extend(frames.flatten());
+            return;
+        }
+        let step = f64::from(rate) / f64::from(OUTPUT_RATE);
+        for next in frames {
+            let next = next.map(f32::from);
+            let Some(last) = self.last.replace(next) else {
+                continue;
+            };
+            while self.position < 1.0 {
+                let t = self.position as f32;
+                self.pcm.extend(std::array::from_fn::<_, 2, _>(|c| {
+                    (last[c] + (next[c] - last[c]) * t).round() as i16
+                }));
+                self.position += step;
+            }
+            self.position -= 1.0;
+        }
+    }
+}
+
+/// One frame of `channels` samples as stereo; 5.1 folds the centre and rears into both sides.
+fn downmix(frame: &[i16]) -> [i16; 2] {
+    let at = |c: usize| i32::from(frame[c]);
+    let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    match frame.len() {
+        1 => [frame[0]; 2],
+        0..=5 => [frame[0], frame[1]],
+        _ => {
+            let side = |front: usize, rear: usize| {
+                clamp(
+                    at(front)
+                        + ((at(2) + at(rear)) as f32 * std::f32::consts::FRAC_1_SQRT_2) as i32,
+                )
+            };
+            [side(0, 4), side(1, 5)]
+        }
+    }
+}
 
 /// What [`Cpu::audio_activity`] reports; sample counts are interleaved samples since session start.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -50,16 +117,27 @@ pub struct AudioRendererActivity {
 }
 
 impl Cpu {
-    /// `(sample_rate, channels)` of [`Cpu::take_audio`]'s samples; `(0, 0)` before a device opens.
+    /// `(sample_rate, channels)` of [`Cpu::take_audio`]'s samples; `(0, 0)` before anything plays.
     pub fn audio_format(&self) -> (u32, u32) {
         self.audio_format
     }
 
-    /// Move up to `out.len()` queued interleaved samples into `out`; returns the count.
+    /// Mix up to `out.len()` queued interleaved samples of every stream into `out`; returns the
+    /// count, which is the longest any stream had.
     pub fn take_audio(&mut self, out: &mut [i16]) -> usize {
-        let n = out.len().min(self.audio_pcm.len());
-        for slot in out.iter_mut().take(n) {
-            *slot = self.audio_pcm.pop_front().unwrap_or(0);
+        let mut mixed = vec![0i32; out.len()];
+        let mut n = 0;
+        for stream in self.audio_streams.values_mut() {
+            let taken = out.len().min(stream.pcm.len());
+            for (sum, sample) in mixed.iter_mut().zip(stream.pcm.drain(..taken)) {
+                *sum += i32::from(sample);
+            }
+            n = n.max(taken);
+        }
+        self.audio_streams
+            .retain(|_, stream| !stream.pcm.is_empty());
+        for (slot, sum) in out.iter_mut().zip(mixed).take(n) {
+            *slot = sum.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         }
         self.audio_taken += n as u64;
         n
@@ -112,22 +190,35 @@ impl Cpu {
             produced: self.audio_produced,
             taken: self.audio_taken,
             dropped: self.audio_dropped,
-            backlog: self.audio_pcm.len() as u64,
+            backlog: self
+                .audio_streams
+                .values()
+                .map(|s| s.pcm.len() as u64)
+                .sum(),
             outputs,
             renderers,
         }
     }
 
-    /// Queue interleaved PCM, dropping the oldest past [`Cpu::AUDIO_QUEUE_LIMIT`].
-    pub(crate) fn queue_audio(&mut self, samples: impl Iterator<Item = i16>) {
-        let before = self.audio_pcm.len();
-        self.audio_pcm.extend(samples);
-        self.audio_produced += (self.audio_pcm.len() - before) as u64;
-        let over = self.audio_pcm.len().saturating_sub(Self::AUDIO_QUEUE_LIMIT);
-        self.audio_pcm.drain(..over);
+    /// Queue a source's interleaved PCM to be mixed, dropping its oldest past [`Cpu::AUDIO_QUEUE_LIMIT`].
+    pub(crate) fn queue_audio(
+        &mut self,
+        source: AudioSource,
+        rate: u32,
+        channels: u32,
+        samples: impl Iterator<Item = i16>,
+    ) {
+        self.audio_format = (OUTPUT_RATE, OUTPUT_CHANNELS as u32);
+        let stream = self.audio_streams.entry(source).or_default();
+        let before = stream.pcm.len();
+        stream.push(rate.max(1), channels.max(1) as usize, samples);
+        let pushed = stream.pcm.len() - before;
+        let over = stream.pcm.len().saturating_sub(Self::AUDIO_QUEUE_LIMIT);
+        stream.pcm.drain(..over);
+        self.audio_produced += pushed as u64;
         self.audio_dropped += over as u64;
     }
 
-    /// About a second of 48 kHz stereo.
-    pub(crate) const AUDIO_QUEUE_LIMIT: usize = 48_000 * 2;
+    /// About a second of 48 kHz stereo, per stream.
+    pub(crate) const AUDIO_QUEUE_LIMIT: usize = OUTPUT_RATE as usize * OUTPUT_CHANNELS;
 }

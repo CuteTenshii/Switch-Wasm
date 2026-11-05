@@ -2,7 +2,7 @@
 
 `services/audout.rs`, `services/audren.rs`, `services/hwopus.rs` and `src/opus/`.
 
-`audout` is a *device*: the guest hands it finished PCM. `audren` is a *mixer*: the guest hands it sources and gets mixed PCM back. Homebrew mostly takes the first, retail the second. Both end in `Cpu::queue_audio`, and whichever produced samples last sets `Cpu::audio_format`.
+`audout` is a *device*: the guest hands it finished PCM. `audren` is a *mixer*: the guest hands it sources and gets mixed PCM back. Homebrew mostly takes the first, retail the second. Both end in `Cpu::queue_audio`, which converts a source's samples to stereo at 48 kHz (5.1 folds the centre and rears into both sides, other rates are linearly resampled) and queues them per source. `Cpu::take_audio` sums the sources, so concurrent streams (the home menu's 6-channel `audout` beside a stereo `audren`) play together in one fixed format.
 
 **Both play in time, on the `cycles` clock the display and thread deadlines use.** Releasing a buffer on arrival hands the guest an infinitely fast sound card, and a title schedules its video against its audio clock: releasing on arrival ran audio at 205x real time in Just Dance 2019 and its video player dropped every frame.
 
@@ -69,5 +69,5 @@
 
 ## `web/main/audio.ts`
 
-- Audio never crosses a message: the worker moves the guest's queued samples into a ring in its shared linear memory after each slice (`switch_audio_feed`), and an `AudioWorklet` (`pcm-worklet.ts`) plays straight out of it, resampling to the output rate and downmixing 5.1. The ring's address comes once at startup.
+- Audio never crosses a message: the worker moves the guest's queued samples into a ring in its shared linear memory after each slice (`switch_audio_feed`), and an `AudioWorklet` (`pcm-worklet.ts`) plays straight out of it, resampling to the output rate. The ring's address comes once at startup.
 - More than 200 ms queued is dropped from the front, so latency stays low. Below full speed the guest produces less than real time and the worklet plays silence in the gaps; it reports played time and gaps once a second for the `[audio] page:` lines.

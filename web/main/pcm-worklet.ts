@@ -25,8 +25,6 @@ const HEADER_BYTES = 12;
 // More queued than this is dropped from the front, so latency stays low.
 const MAX_QUEUED_SECONDS = 0.2;
 const REPORT_EVERY_SECONDS = 1;
-// The speaker downmix of 5.1 to stereo.
-const SURROUND = Math.SQRT1_2;
 
 class RingPlayer extends AudioWorkletProcessor {
   private readonly head: Uint32Array;
@@ -47,15 +45,8 @@ class RingPlayer extends AudioWorkletProcessor {
     this.mask = samples - 1;
   }
 
-  // One interleaved frame as stereo.
-  private frame(at: number, channels: number): [number, number] {
-    const sample = (c: number) => this.pcm[(at + c) & this.mask] / 32768;
-    if (channels === 1) return [sample(0), sample(0)];
-    if (channels < 6) return [sample(0), sample(1)];
-    return [
-      sample(0) + SURROUND * (sample(2) + sample(4)),
-      sample(1) + SURROUND * (sample(2) + sample(5)),
-    ];
+  private frame(at: number): [number, number] {
+    return [this.pcm[at & this.mask] / 32768, this.pcm[(at + 1) & this.mask] / 32768];
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
@@ -80,8 +71,8 @@ class RingPlayer extends AudioWorkletProcessor {
     for (; filled < left.length; filled++) {
       // Two frames are needed to interpolate between them.
       if (queued < 2) break;
-      const [l0, r0] = this.frame(read, channels);
-      const [l1, r1] = this.frame(read + channels, channels);
+      const [l0, r0] = this.frame(read);
+      const [l1, r1] = this.frame(read + channels);
       left[filled] = l0 + (l1 - l0) * this.phase;
       right[filled] = r0 + (r1 - r0) * this.phase;
       this.phase += step;

@@ -343,7 +343,7 @@ impl Cpu {
         self.vibration = (0.0, 0.0);
         self.error_dialogs.clear();
         self.am_terminate_result = 0;
-        self.audio_pcm.clear();
+        self.audio_streams.clear();
         self.audio_format = (0, 0);
         self.thread_log.clear();
         self.thread_log_dropped = 0;

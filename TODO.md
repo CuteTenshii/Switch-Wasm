@@ -22,7 +22,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - The worker's host file table keeps every update and DLC added during a visit, each with up to 16 MiB of chunk cache; it should drop a file the session no longer reads.
 - `npns:s` cmd 3 (Receive) is refused; qlaunch polls it constantly. Switchbrew's NPNS page does not give the empty-queue result, so find it first.
 - Once `Receive` is handled, raise the system's own alerts: low battery for the console and for each controller, controller connected and disconnected.
-- Concurrent audio streams are not mixed: `audout` (`audout.rs`) and `audren` (`audren.rs`) append to one sample queue and overwrite one `audio_format`, so the home menu's 6-channel `audout` and stereo `audren` streams play back to back in the wrong layout and the page sees the format flip every slice. Mix each stream into a fixed stereo format and rate before queueing.
 - `ssl:s` cmd 5 is stubbed and the `ssl:s` name is not routed like `ssl`.
 - Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.

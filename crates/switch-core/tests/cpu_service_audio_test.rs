@@ -1047,3 +1047,68 @@ fn hwopus_refuses_a_packet_shorter_than_its_own_header() {
     let result = cpu.mem.read_u32(tls + 0x18).unwrap();
     assert_eq!(result >> 9, 8, "not the input-too-small error: {result:#x}");
 }
+
+/// Open an `audout` device at `rate` and `channels`, start it and append `samples`.
+fn play_on_a_new_device(cpu: &mut Cpu, audout: u64, rate: u32, channels: u32, samples: &[i16]) {
+    const DESC: u32 = 0x8000;
+    const PCM: u32 = 0x8100;
+    let tls = cpu.tls_base();
+    let mut args = Vec::new();
+    args.extend_from_slice(&rate.to_le_bytes());
+    args.extend_from_slice(&channels.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes());
+    ipc_request_plain(cpu, audout, 1, &args);
+    let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    ipc_request_plain(cpu, device, 4, &[]);
+    ipc_request_plain(cpu, device, 1, &[]);
+    for (i, &s) in samples.iter().enumerate() {
+        cpu.mem.write_u16(PCM + i as u32 * 2, s as u16).unwrap();
+    }
+    let bytes = samples.len() as u64 * 2;
+    cpu.mem.write_u64(DESC, 0).unwrap();
+    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
+    cpu.mem.write_u64(DESC + 16, bytes).unwrap();
+    cpu.mem.write_u64(DESC + 24, bytes).unwrap();
+    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    ipc_request_plain_with_buffer(cpu, device, 3, DESC, 40, false, &1u64.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "append failed");
+}
+
+#[test]
+fn concurrent_devices_are_mixed_into_one_stereo_stream() {
+    const AUDOUT: u64 = 0xA000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDOUT, "audout:u");
+
+    // 5.1 folds centre and rears into both sides; stereo passes through; they sum.
+    play_on_a_new_device(&mut cpu, AUDOUT, 48_000, 6, &[1000, 2000, 400, 0, 600, 800]);
+    play_on_a_new_device(&mut cpu, AUDOUT, 48_000, 2, &[10, 20]);
+
+    assert_eq!(cpu.audio_format(), (48_000, 2));
+    let mut mixed = [0i16; 8];
+    assert_eq!(cpu.take_audio(&mut mixed), 2);
+    // 1000 + 0.7071 * (400 + 600) = 1707; 2000 + 0.7071 * (400 + 800) = 2848.
+    assert_eq!(mixed[..2], [1707 + 10, 2848 + 20]);
+    assert_eq!(cpu.audio_activity().backlog, 0);
+}
+
+#[test]
+fn a_device_at_another_rate_is_resampled_to_48_khz() {
+    const AUDOUT: u64 = 0xA000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDOUT, "audout:u");
+
+    // Mono at 24 kHz: two output frames per input frame, in both ears, interpolated between.
+    play_on_a_new_device(&mut cpu, AUDOUT, 24_000, 1, &[0, 100, 200, 300]);
+
+    let mut out = [0i16; 16];
+    let n = cpu.take_audio(&mut out);
+    assert_eq!(
+        &out[..n],
+        [0, 0, 50, 50, 100, 100, 150, 150, 200, 200, 250, 250]
+    );
+}

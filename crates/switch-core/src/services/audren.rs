@@ -1,6 +1,7 @@
 //! `audren`, the audio renderer: a mixer of guest voices, updated in full by each
 //! `RequestUpdateAudioRenderer` and rendered on the emulated clock.
 
+use super::audio::AudioSource;
 use super::power::CLOCK_RATES_HZ;
 use crate::cpu::Cpu;
 use crate::mem::Memory;
@@ -972,11 +973,15 @@ impl Cpu {
                 renderer.sample_rate
             );
         }
-        let format = (renderer.sample_rate, channels);
+        let rate = renderer.sample_rate;
         self.process_mut().audren_renderers.insert(handle, renderer);
         if !pcm.is_empty() {
-            self.audio_format = format;
-            self.queue_audio(pcm.into_iter());
+            self.queue_audio(
+                AudioSource::Renderer(handle),
+                rate,
+                channels,
+                pcm.into_iter(),
+            );
         }
     }
 
