@@ -689,21 +689,20 @@ impl Cpu {
                 if crate::trace::enabled(crate::trace::Trace::Ipc) {
                     let obj = self.ipc_domain_object_id(tls);
                     let iface = self.domain_interface(handle, obj).map(|s| s.to_string());
+                    let words: Vec<String> = (0..8)
+                        .map(|i| format!("{:08x}", self.mem.read_u32(tls + i * 4).unwrap_or(0)))
+                        .collect();
                     crate::traceln!(
-                        "[ipc] pc={:#x} h={} svc={:?} obj={} iface={:?} domain={} type={} cmd={:?}",
+                        "[ipc] pc={:#x} h={} svc={:?} obj={} iface={:?} type={} cmd={:?} {}",
                         self.pc,
                         handle,
                         svc_name,
                         obj,
                         iface,
-                        self.ipc_is_domain_request(tls),
                         self.ipc_message_type(tls),
-                        cmd_id
+                        cmd_id,
+                        words.join(" ")
                     );
-                    let words: Vec<String> = (0..8)
-                        .map(|i| format!("{:08x}", self.mem.read_u32(tls + i * 4).unwrap_or(0)))
-                        .collect();
-                    crate::traceln!("[ipc]   svc={:#x} tls={:#x} {}", imm, tls, words.join(" "));
                 }
                 // CloneCurrentObject (control 2) and its Ex form (4) reply with a new session
                 // handle as a move handle, sharing this session's interface and domain: objects

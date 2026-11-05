@@ -832,8 +832,7 @@ impl Cpu {
                 // `IStorage::Read(s64 offset, u64 size)`: no option word, unlike `IFile`.
                 let offset = self.mem.read_u64(data)?;
                 let requested = self.mem.read_u64(data.wrapping_add(8))?;
-                let trace_storage = crate::trace::enabled(Trace::Fs);
-                if trace_storage {
+                if crate::trace::enabled(Trace::Fs) {
                     crate::traceln!(
                         "[storage] read offset={offset:#x} size={requested:#x} of {size:#x}"
                     );
@@ -868,15 +867,6 @@ impl Cpu {
                     self.tally_storage_read(archive, start, u64::from(written));
                 } else {
                     self.tally_storage_read(archive, start, 0);
-                }
-                if trace_storage {
-                    let head: Vec<u8> = match self.ipc_output_buffer_addr(tls, 0) {
-                        Some(addr) => (0..16)
-                            .map(|i| self.mem.read_u8(addr.wrapping_add(i)).unwrap_or(0))
-                            .collect(),
-                        None => Vec::new(),
-                    };
-                    crate::traceln!("[storage]   -> {head:02x?}");
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }

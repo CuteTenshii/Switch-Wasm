@@ -120,14 +120,17 @@ impl Cpu {
             }
         }
         if crate::trace::enabled(crate::trace::Trace::Font) {
-            crate::traceln!("[pl] {} bytes of shared font", self.pl_shmem_image.len());
-            for (i, region) in self.shared_font_regions.iter().enumerate() {
-                crate::traceln!(
-                    "[pl]  type {i}: offset={:#x} size={:#x}",
-                    region.offset,
-                    region.size
-                );
-            }
+            let sizes: Vec<String> = self
+                .shared_font_regions
+                .iter()
+                .enumerate()
+                .map(|(i, region)| format!("{i}:{:#x}", region.size))
+                .collect();
+            crate::traceln!(
+                "[pl] shared font {} bytes: {}",
+                self.pl_shmem_image.len(),
+                sizes.join(" ")
+            );
         }
     }
 
