@@ -80,6 +80,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 ## `tools/make_font.py`
 
+- Needs `fonttools`: `pip install -r requirements.txt`.
 - `web/font.ttf` is a stand-in shared font, built by this script. The guest renders the shared font with its own FreeType, so it must be a real TTF/OTF; `pl:u` serves the firmware's fonts instead when their system data archives are registered.
 - The charset is subset to keep it small (full CJK is tens of MB).
 - Hinting is stripped (`--no-hinting`): hinted glyphs rendered collapsed horizontally under the emulator, and hinting bytecode cost about 8x more emulated instructions per frame.
