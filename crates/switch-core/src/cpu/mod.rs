@@ -246,6 +246,8 @@ pub struct Machine {
     /// Save data, by save key.
     pub(crate) saves: HashMap<SaveKey, crate::vfs::Vfs>,
     pub(crate) bis: HashMap<u32, crate::vfs::Vfs>,
+    /// What a web applet reads as its caller's Manual: the SD card's `/atmosphere/hbl_html`.
+    pub(crate) manual: crate::vfs::Vfs,
     pub(crate) storage_usage: Option<StorageUsage>,
     pub(crate) storage_usage_wanted: bool,
     /// `SetGlobalAccessLogMode`'s value; round-trips because `nnSdk` reads it at startup.
@@ -537,6 +539,7 @@ impl Cpu {
                 data_archives: IdMap::default(),
                 saves: HashMap::new(),
                 bis: HashMap::new(),
+                manual: crate::vfs::Vfs::empty(),
                 storage_usage: None,
                 storage_usage_wanted: false,
                 fs_access_log_mode: 0,

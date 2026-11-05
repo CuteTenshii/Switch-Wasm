@@ -326,6 +326,7 @@ fn mount_text(mount: Mount) -> String {
             31 => "bis SYSTEM".to_owned(),
             other => format!("bis {other}"),
         },
+        Mount::Manual => "manual".to_owned(),
         Mount::Sd => "sdmc".to_owned(),
     }
 }
@@ -533,6 +534,12 @@ impl Cpu {
             Some(1006) | Some(1014) | Some(1015) | Some(1016) => {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
+            // 7 = OpenFileSystemWithPatch(type, program id): the Manual a web applet opens.
+            Some(7) if self.open_manual(tls) => {
+                let key = self.reply_with_interface(tls, handle, "fsp-srv-fs")?;
+                self.set_mount(key, Mount::Manual);
+                Ok(())
+            }
             // `Open*` commands this console can't serve: a bare success would hand out a
             // null object, so answer "not found".
             Some(2) | Some(7) | Some(8) | Some(9) | Some(12) | Some(17) | Some(30) | Some(31) => {
@@ -555,6 +562,65 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
         }
+    }
+
+    /// Fill the Manual filesystem for a Manual request: the root title's `HtmlDocument`, or for
+    /// homebrew the SD card's `/atmosphere/hbl_html`, where Atmosphere redirects it. False if
+    /// the request is for something else or there is nothing to serve.
+    fn open_manual(&mut self, tls: u32) -> bool {
+        const HTML_DOCUMENT: u8 = 4;
+        let data = self.ipc_request_data(tls);
+        if self.mem.read_u8(data).unwrap_or(0) != HTML_DOCUMENT {
+            return false;
+        }
+        let manual = match self
+            .processes
+            .get(&self.root)
+            .and_then(|p| p.manual_romfs.as_deref())
+        {
+            Some(src) => Self::manual_from_romfs(src),
+            None => self.manual_from_hbl_html(),
+        };
+        match manual {
+            Some(manual) => {
+                self.manual = manual;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn manual_from_romfs(src: &dyn crate::source::ByteSource) -> Option<crate::vfs::Vfs> {
+        let index = crate::romfs::RomFsIndex::read(src).ok()?;
+        let mut manual = crate::vfs::Vfs::empty();
+        for (start, end, path) in index.files() {
+            manual.write_file(path, src.read_vec(start, end - start).ok()?);
+        }
+        Some(manual)
+    }
+
+    fn manual_from_hbl_html(&self) -> Option<crate::vfs::Vfs> {
+        const ROOT: &str = "/atmosphere/hbl_html";
+        if self.fs.entry_type(ROOT) != Some(crate::vfs::ENTRY_TYPE_DIR) {
+            return None;
+        }
+        let mut manual = crate::vfs::Vfs::empty();
+        let mut pending = vec![ROOT.to_owned()];
+        while let Some(dir) = pending.pop() {
+            for entry in self.fs.read_dir(&dir).unwrap_or_default() {
+                let path = format!("{dir}/{}", entry.name);
+                let target = path.strip_prefix(ROOT).unwrap_or(&path);
+                if entry.kind == crate::vfs::ENTRY_TYPE_DIR {
+                    manual.create_dir(target);
+                    pending.push(path);
+                } else {
+                    let mut bytes = vec![0; entry.size as usize];
+                    self.fs.read(&path, 0, &mut bytes);
+                    manual.write_file(target, bytes);
+                }
+            }
+        }
+        Some(manual)
     }
 
     /// Log which content a refused `Open*` asked for, assuming `nn::fs`'s layout
@@ -1183,6 +1249,74 @@ mod tests {
     }
 
     /// Commands with nothing to hand back keep their fabricated success.
+    #[test]
+    fn a_manual_is_the_sd_cards_hbl_html() {
+        let mut cpu = request(false, 7, &[]);
+        cpu.record_handle(9, "fsp-srv");
+        let mut manual = [0u8; 16];
+        manual[0] = 4;
+        write_request(&mut cpu, 7, &manual);
+        cpu.fsp_srv_request(TLS, Some(7), 9).unwrap();
+        assert_ne!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "no hbl_html yet");
+
+        cpu.fs
+            .write_file("/atmosphere/hbl_html/.htdocs/a/index.html", b"<p>".to_vec());
+        write_request(&mut cpu, 7, &manual);
+        cpu.fsp_srv_request(TLS, Some(7), 9).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "opening the manual"
+        );
+        let session = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_eq!(cpu.service_name(session), Some("fsp-srv-fs"));
+        assert_eq!(cpu.manual.file("/.htdocs/a/index.html"), Some(&b"<p>"[..]));
+    }
+
+    #[test]
+    fn a_retail_manual_is_the_titles_html_document() {
+        let mut cpu = request(false, 7, &[]);
+        cpu.record_handle(9, "fsp-srv");
+        // A RomFS image holding `/index.html`.
+        const NONE: u32 = u32::MAX;
+        let words = |words: &[u32]| {
+            words
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let dirs = words(&[0, NONE, NONE, 0, NONE, 0]);
+        let mut files = words(&[0, NONE, 0, 0, 3, 0, NONE, 10]);
+        files.extend_from_slice(b"index.html\0\0");
+        let mut image = vec![0u8; 0x50];
+        let (dir_at, file_at) = (0x50u64, 0x50 + dirs.len() as u64);
+        let data_at = file_at + files.len() as u64;
+        for (at, value) in [
+            (0x00, 0x50),
+            (0x18, dir_at),
+            (0x20, dirs.len() as u64),
+            (0x38, file_at),
+            (0x40, files.len() as u64),
+            (0x48, data_at),
+        ] {
+            image[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        image.extend_from_slice(&dirs);
+        image.extend_from_slice(&files);
+        image.extend_from_slice(b"<p>");
+        cpu.set_manual_source(Box::new(crate::source::MemSource(image)));
+        let mut manual = [0u8; 16];
+        manual[0] = 4;
+        write_request(&mut cpu, 7, &manual);
+        cpu.fsp_srv_request(TLS, Some(7), 9).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "opening the manual"
+        );
+        assert_eq!(cpu.manual.file("/index.html"), Some(&b"<p>"[..]));
+    }
+
     #[test]
     fn a_file_written_through_ifile_reads_back() {
         let key = Cpu::object_key(9, 1);

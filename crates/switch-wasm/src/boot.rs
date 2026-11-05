@@ -3,7 +3,7 @@
 use switch_core::cpu::Cpu;
 use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
-use switch_core::source::ByteSource;
+use switch_core::source::{ByteSource, Window};
 use switch_core::trace::Level;
 
 use crate::{container, nsp_file_source, session, Added, Dlc};
@@ -299,7 +299,32 @@ pub extern "C" fn switch_load_nca_from_nsp(index: u32) -> i64 {
         update: s.update.as_ref(),
         dlc: &s.dlc,
     };
-    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, nca_src, added)
+    let entry = load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, nca_src, added);
+    if entry >= 0 {
+        mount_manual(s, &container);
+    }
+    entry
+}
+
+/// Give the booted title the RomFS of its `HtmlDocument` NCA, which its web applets open.
+fn mount_manual(s: &mut crate::Session, container: &crate::HostSource) {
+    let Some((index, nca)) = switch_core::nca::find_html_document(&s.nsp_files, container, &s.keys)
+    else {
+        return;
+    };
+    let f = &s.nsp_files[index];
+    let romfs = Window::new(*container, f.offset, f.size, &f.name).and_then(|window| {
+        let section = nca
+            .romfs_section_index()
+            .ok_or_else(|| switch_core::Error::Nca("no RomFS in this Manual".into()))?;
+        nca.romfs_source(window, &s.keys, section)
+    });
+    match romfs {
+        Ok(romfs) => s.cpu.set_manual_source(Box::new(romfs)),
+        Err(e) => s
+            .cpu
+            .log(Level::Warn, &format!("the Manual is unreadable: {e}")),
+    }
 }
 
 /// Load an AArch64 ELF into the CPU. Returns entry address or -1.

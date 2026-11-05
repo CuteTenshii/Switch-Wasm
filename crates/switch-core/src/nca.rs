@@ -2,7 +2,7 @@
 //! AES-128-CTR section bodies.
 
 use crate::keys::KeySet;
-use crate::nsp::Pfs0File;
+use crate::nsp::{Pfs0, Pfs0File};
 use crate::source::{ByteSource, SliceSource, Window};
 use crate::Error;
 
@@ -829,6 +829,46 @@ pub fn find_nca_by_type<S: ByteSource>(
         let window = Window::new(src, f.offset, f.size, &f.name).ok()?;
         let nca = Nca::parse_source(&window, Some(keys)).ok()?;
         (nca.content_type == want).then_some((index, nca))
+    })
+}
+
+/// The title's `HtmlDocument` NCA, the one its CNMT lists with content type 4: the Manual
+/// a web applet opens. Titles ship a `LegalInformation` Manual (5) beside it.
+pub fn find_html_document<S: ByteSource>(
+    files: &[Pfs0File],
+    src: &S,
+    keys: &KeySet,
+) -> Option<(usize, Nca)> {
+    const HTML_DOCUMENT: u8 = 4;
+    const HEADER_SIZE: usize = 0x20;
+    const RECORD_SIZE: usize = 0x38;
+    let (index, meta) = find_nca_by_type(files, src, keys, ContentType::Meta)?;
+    let file = &files[index];
+    let window = Window::new(src, file.offset, file.size, &file.name).ok()?;
+    let image = meta
+        .read_pfs0_section(window, keys, meta.exefs_section_index()?)
+        .ok()?;
+    let pfs0 = Pfs0::parse(&image).ok()?;
+    let cnmt = pfs0.files.iter().find(|f| f.name.ends_with(".cnmt"))?;
+    let cnmt = image.get(cnmt.offset as usize..(cnmt.offset + cnmt.size) as usize)?;
+    let extended = u16::from_le_bytes(cnmt.get(0x0E..0x10)?.try_into().ok()?) as usize;
+    let count = u16::from_le_bytes(cnmt.get(0x10..0x12)?.try_into().ok()?) as usize;
+    let records = cnmt.get(HEADER_SIZE + extended..)?;
+    (0..count).find_map(|i| {
+        let record = records.get(i * RECORD_SIZE..(i + 1) * RECORD_SIZE)?;
+        if record[0x36] != HTML_DOCUMENT {
+            return None;
+        }
+        let id: String = record[0x20..0x30]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let (index, f) = files
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name.eq_ignore_ascii_case(&format!("{id}.nca")))?;
+        let window = Window::new(src, f.offset, f.size, &f.name).ok()?;
+        Some((index, Nca::parse_source(&window, Some(keys)).ok()?))
     })
 }
 

@@ -17,6 +17,8 @@ pub enum Mount {
     Save(SaveKey),
     /// A BIS partition id (28 PRODINFOF, 29 SAFE, 30 USER, 31 SYSTEM).
     Bis(u32),
+    /// The application's Manual (`html-document`), served from the SD card as Atmosphere does.
+    Manual,
 }
 
 /// Bytes the host has stored per storage, and what the origin has left to share between them.
@@ -134,6 +136,7 @@ impl Cpu {
                 .bis
                 .entry(partition)
                 .or_insert_with(crate::vfs::Vfs::empty),
+            Mount::Manual => &mut self.manual,
             Mount::Sd => &mut self.fs,
         }
     }
@@ -170,7 +173,7 @@ impl Cpu {
             Mount::Sd => usage.sd,
             Mount::Bis(super::fs::BIS_SYSTEM) => usage.system,
             Mount::Bis(30) | Mount::Save(_) => usage.user,
-            Mount::Bis(_) => 0,
+            Mount::Bis(_) | Mount::Manual => 0,
         };
         (usage.free, used.saturating_add(usage.free))
     }
@@ -192,6 +195,11 @@ impl Cpu {
                 self.process_mut().fs_mount.insert(key, mount);
             }
         }
+    }
+
+    /// The title's `HtmlDocument` RomFS, which its web applets open as its Manual.
+    pub fn set_manual_source(&mut self, src: Box<dyn crate::source::ByteSource>) {
+        self.process_mut().manual_romfs = Some(src);
     }
 
     /// Same, backed by a decrypt-on-demand [`ByteSource`](crate::source::ByteSource).

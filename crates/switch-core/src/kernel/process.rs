@@ -109,6 +109,8 @@ pub(crate) struct Process {
     /// The process's own RomFS (`OpenDataStorageByCurrentProcess`), read by range.
     /// `None` for homebrew, which reads RomFS from the SD card.
     pub(crate) romfs: Option<Box<dyn crate::source::ByteSource>>,
+    /// The title's `HtmlDocument` Manual RomFS, opened by a web applet.
+    pub(crate) manual_romfs: Option<Box<dyn crate::source::ByteSource>>,
     /// Whether the shared buffer's pages are mapped at `SHARED_BUFFER_ADDR`.
     pub(crate) shared_buffer_mapped: bool,
     /// Guest address of hid shared memory; 0 until mapped.
@@ -200,6 +202,7 @@ impl Process {
             am_applets: IdMap::default(),
             am_keyboard: None,
             romfs: None,
+            manual_romfs: None,
             shared_buffer_mapped: false,
             hid_shmem_addr: 0,
             hid_shmem_handle: None,
