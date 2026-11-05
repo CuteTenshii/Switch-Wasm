@@ -6,7 +6,7 @@ use crate::boot::switch_load_nca_from_nsp;
 use crate::container::{switch_open_nsp, switch_read_file};
 use crate::debug::switch_set_trace_channels;
 use crate::input::switch_set_input;
-use crate::log::{switch_log_line, switch_log_next};
+use crate::log::switch_log_drain;
 use crate::storage::{switch_fs_create_dir, switch_fs_write};
 use crate::users::{switch_user_stage, switch_users_commit};
 use switch_core::vfs::{Change, ENTRY_TYPE_DIR, ENTRY_TYPE_FILE};
@@ -51,14 +51,10 @@ fn the_page_turns_every_trace_channel_on_and_off() {
 
 /// Every queued log line, collecting from the session first, as `(level, text)`.
 fn take_log() -> Vec<(u32, String)> {
-    let mut lines = Vec::new();
-    loop {
-        let level = switch_log_next();
-        if level == 0 {
-            return lines;
-        }
-        lines.push((level, switch_log_line()));
-    }
+    switch_log_drain()
+        .into_iter()
+        .map(|line| (line[..1].parse().unwrap(), line[1..].to_owned()))
+        .collect()
 }
 
 #[test]

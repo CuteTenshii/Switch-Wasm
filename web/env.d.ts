@@ -63,7 +63,8 @@ declare module '@core/switch_wasm.js' {
   // `{ id, kind }` as JSON, or empty when the file is no NCA.
   export function switch_nand_identify(file: number, size: bigint): string;
   // `log.rs`, `run.rs`, `stats.rs`
-  export function switch_log_line(): string;
+  // Every queued line, each as its level digit (1 error to 5 debug) then its text.
+  export function switch_log_drain(): string[];
   export function switch_guest_fatal(): string;
   export function switch_jit_stats_json(): string;
   export function switch_gpu_report_json(): string;

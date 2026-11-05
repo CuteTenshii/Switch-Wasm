@@ -17,7 +17,6 @@ export interface WasmExports {
   switch_set_trace_channels(on: number): void;
   switch_gpu_lost(): number;
   switch_log_activity(seconds: number): void;
-  switch_log_next(): number;
   switch_set_input(
     buttons: bigint,
     stickLx: number, stickLy: number, stickRx: number, stickRy: number): void;

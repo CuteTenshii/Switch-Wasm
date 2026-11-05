@@ -10,7 +10,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::{session_if_live, SyncCell};
 
-/// A line's level as the page numbers it; 0 from [`switch_log_next`] means no line.
+/// A line's level as the page numbers it, the digit [`switch_log_drain`] puts in front of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub(crate) enum PageLevel {
@@ -35,8 +35,6 @@ impl From<Level> for PageLevel {
 
 struct Queue {
     lines: VecDeque<(PageLevel, String)>,
-    /// The line [`switch_log_next`] took last, for [`switch_log_line`].
-    current: String,
     /// The level unmarked trace lines continue, kept across collections.
     trace_level: Level,
 }
@@ -44,7 +42,6 @@ struct Queue {
 /// Global rather than per session, so lines outlive the session that wrote them.
 static QUEUE: SyncCell<Queue> = SyncCell::new(Queue {
     lines: VecDeque::new(),
-    current: String::new(),
     trace_level: Level::Debug,
 });
 
@@ -115,11 +112,11 @@ pub(crate) fn collect(cpu: &mut Cpu) {
     }
 }
 
-/// Take the next line, collecting from the session first when there is one (the
-/// diagnostics of code with no session are collected either way). Returns its level,
-/// or 0 when there is none; [`switch_log_line`] has its text.
-#[no_mangle]
-pub extern "C" fn switch_log_next() -> u32 {
+/// Take every queued line, collecting from the session first when there is one (the
+/// diagnostics of code with no session are collected either way). Each entry is its level
+/// as one digit, see [`PageLevel`], then its text.
+#[wasm_bindgen]
+pub fn switch_log_drain() -> Vec<String> {
     match session_if_live() {
         Some(s) => collect(&mut s.cpu),
         None => {
@@ -129,21 +126,9 @@ pub extern "C" fn switch_log_next() -> u32 {
             }
         }
     }
-    let q = queue();
-    match q.lines.pop_front() {
-        Some((level, line)) => {
-            q.current = line;
-            level as u32
-        }
-        None => {
-            q.current.clear();
-            0
-        }
-    }
-}
-
-/// The line [`switch_log_next`] took.
-#[wasm_bindgen]
-pub fn switch_log_line() -> String {
-    queue().current.clone()
+    queue()
+        .lines
+        .drain(..)
+        .map(|(level, line)| format!("{}{line}", level as u32))
+        .collect()
 }
