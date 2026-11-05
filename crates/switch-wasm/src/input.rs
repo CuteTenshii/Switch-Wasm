@@ -178,12 +178,10 @@ pub extern "C" fn switch_set_input(
 #[wasm_bindgen]
 pub fn switch_set_touch(points: &[u32]) {
     let touches = points
-        .chunks_exact(3)
-        .map(|point| TouchPoint {
-            finger_id: point[0],
-            x: point[1],
-            y: point[2],
-        })
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|&[finger_id, x, y]| TouchPoint { finger_id, x, y })
         .collect();
     let cpu = &mut session().cpu;
     LATCH.with_borrow_mut(|latch| latch.set_touch(cpu, touches));
