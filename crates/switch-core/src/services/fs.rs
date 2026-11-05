@@ -1087,9 +1087,16 @@ impl Cpu {
         const ENTRY_SIZE: u32 = 0x310;
         match cmd_id {
             Some(0) => {
-                let entries = self.process_mut().fs_dirs.remove(&key).unwrap_or_default();
+                let capacity = self
+                    .ipc_output_buffer(tls, 0)
+                    .map_or(0, |(_, len)| (len / ENTRY_SIZE) as usize);
+                let left = self.process_mut().fs_dirs.get_mut(&key);
+                let taken: Vec<_> = left.map_or_else(Vec::new, |left| {
+                    let n = capacity.min(left.len());
+                    left.drain(..n).collect()
+                });
                 if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
-                    for (i, entry) in entries.iter().enumerate() {
+                    for (i, entry) in taken.iter().enumerate() {
                         let base = buf.wrapping_add(i as u32 * ENTRY_SIZE);
                         let name = entry.name.as_bytes();
                         for j in 0..0x301u32 {
@@ -1100,7 +1107,7 @@ impl Cpu {
                         self.mem.write_u64(base.wrapping_add(0x308), entry.size)?;
                     }
                 }
-                let count = entries.len() as u64;
+                let count = taken.len() as u64;
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
             }
             Some(1) => {
