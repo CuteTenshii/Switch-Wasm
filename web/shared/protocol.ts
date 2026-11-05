@@ -234,8 +234,8 @@ export interface Commands {
   // The NRO at `path` on the SD card, which is told to it as argv[0].
   load_sd_nro(path: string): number;
 
-  // The container's file table, or null with the reason in `last_error`.
-  open_nsp(file: File): NspFile[] | null;
+  // The container's file table; throws the reason if it cannot be read.
+  open_nsp(file: File): NspFile[];
   open_nca(file: File): number;
   restore_nand(): number;
   add_update(file: File): UpdateInfo | null;
@@ -253,7 +253,8 @@ export interface Commands {
   read_file(index: number, offset: number, len: number): Bytes;
 
   // The title's NACP and icon, from the container's Control NCA or a standalone one.
-  load_control(): number;
+  // Throws the reason when there is none.
+  load_control(): void;
   control_json(): string;
   control_icon(): Bytes;
   // Store the control data just read, so a later session's ns can describe the title.

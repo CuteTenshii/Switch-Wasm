@@ -293,6 +293,15 @@ pub fn switch_last_error() -> String {
     session_if_live().map_or_else(String::new, |s| s.last_error.clone())
 }
 
+/// A load's outcome: its entry address, or the reason it failed (also in `switch_last_error`).
+fn entry(s: &Session, code: i64) -> Result<f64, String> {
+    if code < 0 {
+        Err(s.last_error.clone())
+    } else {
+        Ok(code as f64)
+    }
+}
+
 /// An update container added for the title about to run. Its Program NCA holds
 /// full replacement modules and a RomFS patch over the base's.
 struct Update {

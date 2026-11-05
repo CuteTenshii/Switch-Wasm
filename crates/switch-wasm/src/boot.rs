@@ -6,7 +6,7 @@ use switch_core::source::{ByteSource, Window};
 use switch_core::trace::Level;
 use wasm_bindgen::prelude::*;
 
-use crate::{container, nsp_file_source, session, Added, Dlc, Session};
+use crate::{container, entry, nsp_file_source, session, Added, Dlc, Session};
 
 /// End the running title and its applets, leaving the console ready for the next one.
 #[no_mangle]
@@ -55,32 +55,34 @@ fn load_nro_bytes(s: &mut Session, data: &[u8], sd_path: Option<&str>) -> i64 {
 }
 
 /// Load the program in `file`, an ELF or an NRO by its magic, read here. Returns the entry
-/// address or -1.
+/// address, or fails with the reason.
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 #[wasm_bindgen]
-pub async fn switch_load_program(file: web_sys::Blob) -> Result<f64, JsValue> {
-    let data = crate::blob::read_vec(&file).await?;
+pub async fn switch_load_program(file: web_sys::Blob) -> Result<f64, String> {
+    let data = crate::blob::read_vec(&file)
+        .await
+        .map_err(|e| format!("the file could not be read: {e:?}"))?;
     let s = session();
-    let entry = if data.starts_with(b"\x7fELF") {
+    let code = if data.starts_with(b"\x7fELF") {
         load_elf_bytes(s, &data)
     } else {
         load_nro_bytes(s, &data, None)
     };
-    Ok(entry as f64)
+    entry(s, code)
 }
 
 /// Load the NRO at `path` on the SD card, which is told its path. Returns the entry
-/// address or -1.
+/// address, or fails with the reason.
 #[wasm_bindgen]
-pub fn switch_load_sd_nro(path: &str) -> f64 {
+pub fn switch_load_sd_nro(path: &str) -> Result<f64, String> {
     let s = session();
     let Some(size) = s.cpu.fs.size(path) else {
-        s.last_error = format!("{path} is not on the SD card");
-        return -1.0;
+        return Err(format!("{path} is not on the SD card"));
     };
     let mut data = vec![0u8; size as usize];
     s.cpu.fs.read(path, 0, &mut data);
-    load_nro_bytes(s, &data, Some(path)) as f64
+    let code = load_nro_bytes(s, &data, Some(path));
+    entry(s, code)
 }
 
 /// Decrypt a Program NCA's ExeFS from `nca_src`, load it and boot. Returns entry or -1.
@@ -249,11 +251,16 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
     }
 }
 
-/// Boot the open container as a standalone Program NCA. Returns entry or -1;
-/// check `switch_last_error`, since 0 can be a valid entry.
-#[no_mangle]
-pub extern "C" fn switch_load_nca() -> i64 {
+/// Boot the open container as a standalone Program NCA. Returns the entry address, or fails
+/// with the reason.
+#[wasm_bindgen]
+pub fn switch_load_nca() -> Result<f64, String> {
     let s = session();
+    let code = boot_standalone_nca(s);
+    entry(s, code)
+}
+
+fn boot_standalone_nca(s: &mut Session) -> i64 {
     let Some(container) = container(s) else {
         return -1;
     };
@@ -266,9 +273,14 @@ pub extern "C" fn switch_load_nca() -> i64 {
 
 /// The index of the Program NCA in the open container, or -1 (including when no
 /// `prod.keys` are loaded). Pass it to `switch_load_nca_from_nsp`.
-#[no_mangle]
-pub extern "C" fn switch_program_nca_index() -> i32 {
+#[wasm_bindgen]
+pub fn switch_program_nca_index() -> Result<u32, String> {
     let s = session();
+    let index = find_program_nca(s);
+    u32::try_from(index).map_err(|_| s.last_error.clone())
+}
+
+fn find_program_nca(s: &mut Session) -> i32 {
     let Some(container) = container(s) else {
         return -1;
     };
@@ -292,11 +304,16 @@ pub extern "C" fn switch_program_nca_index() -> i32 {
     }
 }
 
-/// Boot NSP file `index` as a Program NCA. Returns entry or -1; check
-/// `switch_last_error`, since 0 can be a valid entry.
-#[no_mangle]
-pub extern "C" fn switch_load_nca_from_nsp(index: u32) -> i64 {
+/// Boot NSP file `index` as a Program NCA. Returns the entry address, or fails with the
+/// reason.
+#[wasm_bindgen]
+pub fn switch_load_nca_from_nsp(index: u32) -> Result<f64, String> {
     let s = session();
+    let code = boot_nsp_nca(s, index);
+    entry(s, code)
+}
+
+fn boot_nsp_nca(s: &mut Session, index: u32) -> i64 {
     let Some(container) = container(s) else {
         return -1;
     };

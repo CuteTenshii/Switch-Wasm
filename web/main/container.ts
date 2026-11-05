@@ -286,9 +286,11 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     return;
   }
   loadPhase('looking for the title\'s program');
-  const index = await call('program_nca_index');
-  if (index < 0 || !nspFiles[index]) {
-    const why = await call('last_error');
+  let index: number;
+  try {
+    index = await call('program_nca_index');
+  } catch (err) {
+    const why = await explainFailure(err);
     setState('fault');
     failLoad(why);
     log('Nothing to boot in ' + file.name + ': ' + why, 'error');
@@ -309,15 +311,7 @@ async function handleNspFile(file: File): Promise<void> {
   $('nsp-result').appendChild(status);
   log('Opening ' + file.name + ' (' + fmtSize(file.size) + ') ...');
   try {
-    const opened = await call('open_nsp', file);
-    if (!opened) {
-      const why = await call('last_error');
-      status.textContent = 'NSP error: ' + why;
-      setNote('container-badge', 'none open', false);
-      log('NSP error: ' + why, 'error');
-      return;
-    }
-    nspFiles = opened;
+    nspFiles = await call('open_nsp', file);
     openContainer = { file, kind: 'nsp' };
     setNote('container-badge', file.name, true);
   } catch (e) {
@@ -343,7 +337,7 @@ async function handleNspFile(file: File): Promise<void> {
   });
   $('nsp-result').appendChild(ul);
   setNote('container-badge', 'reading title details\u2026', false);
-  await showTitleCard(() => call('load_control'));
+  await showTitleCard();
   setNote('container-badge', file.name, true);
 }
 
@@ -378,13 +372,10 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
 
 // Title card: icon, name, publisher and NACP details from the Control NCA.
 // Needs prod.keys, since the content type is in the encrypted header.
-async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo | null> {
+async function showTitleCard(): Promise<ControlInfo | null> {
   let info: ControlInfo;
   try {
-    if (await loader() !== 0) {
-      log('No title details: ' + await call('last_error'), 'debug');
-      return null;
-    }
+    await call('load_control');
     info = JSON.parse(await call('control_json')) as ControlInfo;
   } catch (err) {
     log('No title details: ' + (err as Error).message, 'debug');
@@ -510,7 +501,7 @@ async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   const info = await parseAndRenderNca(out, header, () => launchStandaloneNca(file));
   if (info?.content_type === 'Control') {
     setNote('container-badge', 'reading title details\u2026', false);
-    await showTitleCard(() => call('load_control'));
+    await showTitleCard();
     setNote('container-badge', file.name, true);
   }
   return info;
@@ -617,13 +608,6 @@ export async function doLaunchNca(
     entry = await loadFn();
   } catch (err) {
     const why = await explainFailure(err);
-    setState('fault');
-    failLoad('Launch failed: ' + why);
-    log('Launch failed: ' + why, 'error');
-    return;
-  }
-  if (entry < 0) {
-    const why = await call('last_error');
     setState('fault');
     failLoad('Launch failed: ' + why);
     log('Launch failed: ' + why, 'error');

@@ -9,13 +9,13 @@ import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
 import {
   switch_add_dlc, switch_add_update, switch_clear_screen, switch_control_icon,
-  switch_control_json,
-  switch_flush_storage, switch_gpu_report_json, switch_guest_fatal, switch_jit_stats_json,
-  switch_keyboard_answer, switch_last_error, switch_load_keys, switch_load_program,
+  switch_control_json, switch_flush_storage, switch_gpu_report_json, switch_guest_fatal,
+  switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
+  switch_load_keys, switch_load_nca, switch_load_nca_from_nsp, switch_load_program,
   switch_load_sd_nro, switch_memory_json, switch_nand_identify, switch_nand_launch,
-  switch_open_nsp, switch_parse_nca, switch_read_file, switch_remember_control,
-  switch_restore_nand, switch_restore_storage, switch_set_touch, switch_store_profile_edits,
-  switch_user_stage, switch_users_commit,
+  switch_open_nsp, switch_parse_nca, switch_program_nca_index, switch_read_file,
+  switch_remember_control, switch_restore_nand, switch_restore_storage, switch_set_touch,
+  switch_store_profile_edits, switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { nandContent, STORAGE } from './storage';
@@ -26,12 +26,6 @@ const NOTHING = new Uint8Array(0);
 function describe(file: Blob): string {
   const name = file instanceof File ? `"${file.name}" ` : '';
   return name + '(' + fmtSize(file.size) + ')';
-}
-
-// `result` is negative on failure.
-function logLoad(what: string, result: number | bigint): void {
-  if (Number(result) < 0) workerLog(`[io] ${what}: refused (${switch_last_error()})`, 'warn');
-  else workerLog(`[io] ${what}`);
 }
 
 export const CMD: CommandHandlers = {
@@ -74,26 +68,18 @@ export const CMD: CommandHandlers = {
   },
 
   // The core reads the file itself, so the page never holds a copy.
-  async load_program(file) {
-    const result = await switch_load_program(file);
-    if (result < 0) logLoad(`loaded ${describe(file)} as a program`, result);
-    return result;
-  },
-  load_sd_nro(path) {
-    const result = switch_load_sd_nro(path);
-    if (result < 0) logLoad(`loaded the NRO at ${path}`, result);
-    return result;
-  },
+  load_program: switch_load_program,
+  load_sd_nro: switch_load_sd_nro,
 
   // The File is kept and read by range.
   open_nsp(file) {
-    const files = switch_open_nsp(openHostFile(file));
-    logLoad(`opened ${describe(file)} as the container`, files ? 0 : -1);
-    return files ? JSON.parse(files) as NspFile[] : null;
+    const files = JSON.parse(switch_open_nsp(openHostFile(file))) as NspFile[];
+    workerLog(`[io] opened ${describe(file)} as the container`);
+    return files;
   },
   open_nca(file) {
     const result = core.switch_open_nca(openHostFile(file));
-    logLoad(`opened ${describe(file)} as a standalone NCA`, result);
+    workerLog(`[io] opened ${describe(file)} as a standalone NCA`);
     return result;
   },
   // Register the stored firmware with the session; how many system data archives it took.
@@ -140,30 +126,27 @@ export const CMD: CommandHandlers = {
   async nand_launch(name) {
     const content = await nandContent(name);
     if (!content) throw new Error(name + ' is indexed but its content is missing.');
-    const result = switch_nand_launch(content);
-    logLoad(`launched ${name} from the NAND`, result);
-    return result;
+    const entry = switch_nand_launch(content);
+    workerLog(`[io] launched ${name} from the NAND`);
+    return entry;
   },
   load_nca_from_nsp(index) {
-    const result = Number(core.switch_load_nca_from_nsp(index));
-    logLoad(`booted the program in container file ${index}`, result);
-    return result;
+    const entry = switch_load_nca_from_nsp(index);
+    workerLog(`[io] booted the program in container file ${index}`);
+    return entry;
   },
   load_nca() {
-    const result = Number(core.switch_load_nca());
-    logLoad('booted the program in the standalone NCA', result);
-    return result;
+    const entry = switch_load_nca();
+    workerLog('[io] booted the program in the standalone NCA');
+    return entry;
   },
-  program_nca_index() {
-    return core.switch_program_nca_index();
-  },
+  program_nca_index: switch_program_nca_index,
   load_keys(prod, title) {
     const prodBytes = prod ?? NOTHING;
     const titleBytes = title ?? NOTHING;
     const result = switch_load_keys(prodBytes, titleBytes);
-    logLoad(
-      `loaded keys: prod ${fmtSize(prodBytes.length)}, title ${fmtSize(titleBytes.length)}`,
-      result,
+    workerLog(
+      `[io] loaded keys: prod ${fmtSize(prodBytes.length)}, title ${fmtSize(titleBytes.length)}`,
     );
     return result;
   },
@@ -171,9 +154,7 @@ export const CMD: CommandHandlers = {
     return switch_read_file(index, BigInt(offset), len);
   },
 
-  load_control() {
-    return core.switch_load_control();
-  },
+  load_control: switch_load_control,
   control_json: switch_control_json,
   control_icon: switch_control_icon,
   // Store the control data just read, for the next session's ns.

@@ -135,7 +135,7 @@ export async function explainFailure(err: unknown): Promise<string> {
   let why = err instanceof Error ? err.message : String(err);
   try {
     const captured = await call('last_error');
-    if (captured) why += ' - ' + captured;
+    if (captured && !why.includes(captured)) why += ' - ' + captured;
   } catch {
     // The module may be too far gone to answer.
   }

@@ -32,20 +32,12 @@ export async function launchFromSd(path: string): Promise<void> {
   if (await loadWith(name, () => call('load_sd_nro', path))) await run();
 }
 
-// Load with `load`, which answers the entry point, then show the program as booted.
+// Load with `load`, which throws why it cannot, then show the program as booted.
 async function loadWith(name: string, load: () => Promise<number>): Promise<boolean> {
-  let entry: number;
   try {
-    entry = await load();
+    await load();
   } catch (err) {
     const why = await explainFailure(err);
-    setState('fault');
-    failLoad('Load failed: ' + why);
-    log('Load failed: ' + why, 'error');
-    return false;
-  }
-  if (entry < 0) {
-    const why = await call('last_error');
     setState('fault');
     failLoad('Load failed: ' + why);
     log('Load failed: ' + why, 'error');

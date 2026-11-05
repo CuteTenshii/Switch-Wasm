@@ -10,10 +10,9 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use crate::{container, nsp_file_source, session, Dlc, HostSource, Session, Update};
 
 /// Open the `size`-byte container (NSP or XCI) the host has ready, read through
-/// `host_read`. Returns its file table as JSON, or nothing with the reason in
-/// `switch_last_error`.
+/// `host_read`. Returns its file table as JSON, or fails with the reason.
 #[wasm_bindgen]
-pub fn switch_open_nsp(size: u64) -> String {
+pub fn switch_open_nsp(size: u64) -> Result<String, String> {
     let s = session();
     let container = HostSource { file: 0, len: size };
     s.container = Some(container);
@@ -23,7 +22,7 @@ pub fn switch_open_nsp(size: u64) -> String {
         Ok(pfs0) => {
             s.nsp_files = pfs0.files;
             s.last_error.clear();
-            json::array(|a| {
+            Ok(json::array(|a| {
                 for f in &s.nsp_files {
                     a.object(|o| {
                         o.field("name", &f.name)
@@ -31,11 +30,11 @@ pub fn switch_open_nsp(size: u64) -> String {
                             .field("size", f.size);
                     });
                 }
-            })
+            }))
         }
         Err(e) => {
             s.last_error = e.to_string();
-            String::new()
+            Err(s.last_error.clone())
         }
     }
 }
@@ -326,10 +325,18 @@ fn cache_control(s: &mut Session, control: switch_core::control::Control) {
 
 /// Read and cache the open container's Control NCA: the one in its file table, or the
 /// container itself when it was opened as a standalone NCA (which has no file table).
-/// Returns 0, or -1 when it has none readable (including when no `prod.keys` are loaded).
-#[no_mangle]
-pub extern "C" fn switch_load_control() -> i32 {
+/// Fails with the reason when it has none readable (including when no `prod.keys` are loaded).
+#[wasm_bindgen]
+pub fn switch_load_control() -> Result<(), String> {
     let s = session();
+    let loaded = load_control(s);
+    if loaded < 0 {
+        return Err(s.last_error.clone());
+    }
+    Ok(())
+}
+
+fn load_control(s: &mut Session) -> i32 {
     s.control = None;
     let Some(container) = container(s) else {
         return -1;

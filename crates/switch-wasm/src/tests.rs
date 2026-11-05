@@ -369,7 +369,7 @@ fn a_container_is_read_through_the_host_without_being_staged() {
     let size = image.len() as u64;
     set_host_container(image);
 
-    let json = switch_open_nsp(size);
+    let json = switch_open_nsp(size).unwrap();
     assert!(json.contains(r#"{"name":"main.nca","offset":"#), "{json}");
     assert!(json.contains(r#""size":4096}"#), "{json}");
     assert!(json.contains(r#"{"name":"notes.txt""#), "{json}");
@@ -386,8 +386,7 @@ fn a_container_is_read_through_the_host_without_being_staged() {
     assert!(switch_read_file(7, 0, 32).is_err());
 
     // A non-NCA payload fails with a readable error.
-    assert_eq!(switch_load_nca_from_nsp(0), -1);
-    let text = switch_last_error();
+    let text = switch_load_nca_from_nsp(0).unwrap_err();
     assert!(text.contains("bad magic"), "{text}");
 }
 
@@ -409,7 +408,7 @@ fn a_cartridge_image_opens_as_a_container() {
     let size = image.len() as u64;
     set_host_container(image);
 
-    let json = switch_open_nsp(size);
+    let json = switch_open_nsp(size).unwrap();
     assert!(json.contains(r#"{"name":"program.nca""#), "{json}");
     assert!(json.contains(r#"{"name":"meta.cnmt.nca""#), "{json}");
     assert!(!json.contains("system.nca"), "{json}");

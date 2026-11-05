@@ -44,7 +44,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_add_update(file: number, size: bigint): string;
   // The pieces as JSON: `[{ id, title_id, index }]`, empty when the file is no add-on content.
   export function switch_add_dlc(file: number, size: bigint): string;
-  // The file table as JSON, or empty when the container cannot be read.
+  // The file table as JSON; throws the reason when the container cannot be read.
   export function switch_open_nsp(size: bigint): string;
   export function switch_read_file(
     index: number, offset: bigint, len: number): Uint8Array<ArrayBuffer>;
@@ -52,9 +52,13 @@ declare module '@core/switch_wasm.js' {
   export function switch_control_json(): string;
   export function switch_control_icon(): Uint8Array<ArrayBuffer>;
   export function switch_load_keys(prod: Uint8Array, title: Uint8Array): number;
-  // `boot.rs` and `nand.rs`: the entry address, or -1.
+  export function switch_load_control(): void;
+  // `boot.rs` and `nand.rs`: the entry address; they throw the reason when a program will not boot.
   export function switch_load_program(file: Blob): Promise<number>;
   export function switch_load_sd_nro(path: string): number;
+  export function switch_load_nca(): number;
+  export function switch_load_nca_from_nsp(index: number): number;
+  export function switch_program_nca_index(): number;
   export function switch_nand_launch(content: Blob): number;
   // `{ id, kind }` as JSON, or empty when the file is no NCA.
   export function switch_nand_identify(file: number, size: bigint): string;
