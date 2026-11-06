@@ -371,6 +371,8 @@ impl Cpu {
             }
             // GetApplicationControlData(u8 source, u64 application_id) -> u32 size.
             Some(400) => self.ns_application_control_data(tls),
+            // IsQualificationTransitionSupportedByProcessId(u64 process_id) -> bool.
+            Some(2520) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
             // 20.0.0+, unnamed: one u64 out, 0 (as in Eden).
             Some(4023) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // 20.0.0+, unnamed: no input, no output; qlaunch panics if it fails.
@@ -649,6 +651,15 @@ mod tests {
             0,
             "an unrecorded title fails"
         );
+    }
+
+    #[test]
+    fn qualification_transition_is_unsupported() {
+        let mut cpu = request(false, 2520, &0u64.to_le_bytes());
+        cpu.register_service_handle(9, "ns:app-manager");
+        cpu.ns_request(TLS, 9, Some(2520)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "supported");
     }
 
     #[test]
