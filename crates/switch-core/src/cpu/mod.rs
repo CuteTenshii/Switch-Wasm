@@ -207,6 +207,8 @@ pub struct Machine {
     pub(crate) ns_manager_events: BTreeMap<u32, u64>,
     /// `NsApplicationControlData` (NACP, then icon) by application id.
     pub(crate) application_controls: BTreeMap<u64, Vec<u8>>,
+    /// `acc` save data thumbnails by user and application id.
+    pub(crate) save_thumbnails: BTreeMap<([u8; 16], u64), Vec<u8>>,
     /// `IHOSBinderDriver::GetNativeHandle`'s event, always signalled.
     pub(crate) binder_event: Option<u64>,
     /// The system shared buffer's nvmap `(handle, id)` and the next slot to acquire.
@@ -519,6 +521,7 @@ impl Cpu {
                 application_record_event: None,
                 ns_manager_events: BTreeMap::new(),
                 application_controls: BTreeMap::new(),
+                save_thumbnails: BTreeMap::new(),
                 binder_event: None,
                 shared_buffer: None,
                 shared_buffer_slot: 0,

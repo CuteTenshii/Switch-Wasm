@@ -445,8 +445,36 @@ impl Cpu {
                 self.reply_with_interface(tls, handle, "acc:async-context")?;
                 Ok(())
             }
-            // StoreSaveDataThumbnail / ClearSaveDataThumbnail: accepted and dropped.
-            Some(110) | Some(111) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // StoreSaveDataThumbnail / ClearSaveDataThumbnail / LoadSaveDataThumbnail
+            // (AccountUid, u64 application id): the image is kept per user and title.
+            Some(cmd @ 110..=112) => {
+                let at = self.ipc_request_data(tls);
+                let uid: [u8; 16] = self.read_bytes(at, 16).try_into().unwrap_or_default();
+                let key = (uid, self.mem.read_u64(at.wrapping_add(16))?);
+                match cmd {
+                    110 => {
+                        let image = match self.ipc_send_buffer(tls, 0) {
+                            Some((addr, size)) if addr != 0 => self.read_bytes(addr, size),
+                            _ => Vec::new(),
+                        };
+                        self.save_thumbnails.insert(key, image);
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
+                    111 => {
+                        self.save_thumbnails.remove(&key);
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
+                    _ => {
+                        let image = self.save_thumbnails.get(&key).cloned().unwrap_or_default();
+                        let (addr, room) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
+                        let n = image.len().min(room as usize);
+                        if n != 0 {
+                            self.mem.write_bytes(addr, &image[..n])?;
+                        }
+                        self.write_ipc_response(tls, 0, &[], &(n as u32).to_le_bytes(), &[])
+                    }
+                }
+            }
             // IsUserAccountSwitchLocked -> true: users are switched on the page.
             Some(150) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
             // GetProfileEditor(AccountUid) -> IProfileEditor.
@@ -768,6 +796,42 @@ mod tests {
             vec![0u8; 0x30],
             "stale uids left behind"
         );
+    }
+
+    #[test]
+    fn save_data_thumbnails_are_kept_per_user_and_title() {
+        const SEND: u32 = 0x4000;
+        const RECV: u32 = 0x5000;
+        const TITLE: u64 = 0x0100_7EF0_0011_E000;
+        let mut payload = super::DEFAULT_USER_UID.to_vec();
+        payload.extend_from_slice(&TITLE.to_le_bytes());
+        let mut cpu = request(false, 110, &payload);
+        cpu.mem.map_zero(SEND, 0x2000).unwrap();
+        cpu.mem.write_bytes(SEND, &[1, 2, 3, 4]).unwrap();
+
+        let load = |cpu: &mut Cpu, payload: &[u8]| {
+            write_map_buffer_request(cpu, 112, payload, RECV, 8, false);
+            acc(cpu, "acc:su", 112);
+            (
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            )
+        };
+
+        write_map_buffer_request(&mut cpu, 110, &payload, SEND, 4, true);
+        acc(&mut cpu, "acc:su", 110);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "store");
+
+        assert_eq!(load(&mut cpu, &payload), (0, 4));
+        assert_eq!(cpu.read_bytes(RECV, 4), [1, 2, 3, 4]);
+
+        let mut other = payload.clone();
+        other[16] ^= 1;
+        assert_eq!(load(&mut cpu, &other), (0, 0), "another title");
+
+        write_request(&mut cpu, 111, &payload);
+        acc(&mut cpu, "acc:su", 111);
+        assert_eq!(load(&mut cpu, &payload), (0, 0), "cleared");
     }
 
     #[test]
