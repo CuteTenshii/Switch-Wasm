@@ -404,15 +404,9 @@ impl Cpu {
                     self.write_ipc_response(tls, 0, &[], &reason.to_le_bytes(), &[])
                 }
                 // InitializeGamePlayRecording / SetGamePlayRecordingState / SetDelayTimeToAbortOnGpuError.
-                Some(66) | Some(67) | Some(131) => {
-                    self.warn_stub(&iface, cmd_id, "accepted and not recorded");
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
+                Some(66) | Some(67) | Some(131) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // Copyright frame buffer, image and visibility.
-                Some(100) | Some(101) | Some(102) => {
-                    self.warn_stub(&iface, cmd_id, "accepted, and no capture draws it");
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
+                Some(100) | Some(101) | Some(102) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // 210 (20.0.0+, unnamed): one out event, never signalled.
                 Some(210) => {
                     let h = match self.process().application_functions_210_event {
