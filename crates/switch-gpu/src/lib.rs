@@ -688,6 +688,10 @@ impl Renderer for Gpu {
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
         }
+        // It draws nothing, which no pipeline can say.
+        if switch_core::gpu::pipeline::culls_every_triangle(engine) {
+            return Ok(());
+        }
         // See [`Gpu::software_frame`].
         if self.software_frame {
             if only_shades_vertices(engine, ctx) {

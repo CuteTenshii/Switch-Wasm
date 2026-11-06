@@ -176,15 +176,19 @@ impl Gpu {
         layer: u32,
         channels: [bool; 4],
     ) -> std::result::Result<(), String> {
-        if layer != 0 {
-            // Surfaces are held by address only, so layers are unsupported.
-            return Err(format!("a clear of layer {layer}"));
-        }
         let slot = engine.render_target_slot(target);
-        let Some(surface) = Target::color(engine, slot).map_err(|e| format!("{e:?}"))? else {
+        let Some(mut surface) = Target::color(engine, slot).map_err(|e| format!("{e:?}"))? else {
             // Nothing bound is nothing to clear, which is what the rasterizer answers too.
             return Ok(());
         };
+        if layer != 0 {
+            // Surfaces are held by address, so a layer is the surface at its own address.
+            let stride = engine
+                .render_target(slot)
+                .map_err(|e| format!("{e:?}"))?
+                .map_or(0, |rt| u64::from(rt.layer_stride) * 4);
+            surface.addr += u64::from(layer) * stride;
+        }
         let rect = self.clear_texels(engine, &surface)?;
         self.clear_on_device(
             Some((surface, engine.clear_color_value(), channels)),

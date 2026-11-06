@@ -238,7 +238,9 @@ impl Gpu {
                 if compare {
                     let (width, height) = (held.texture.width(), held.texture.height());
                     let depth32 = held.texture.format() == wgpu::TextureFormat::Depth32Float;
-                    if depth32 && (width, height) == (upload.width, upload.height) {
+                    // A 16-bit one is copied depth to depth too, into a texture of its own format.
+                    let depth16 = held.texture.format() == wgpu::TextureFormat::Depth16Unorm;
+                    if (depth32 || depth16) && (width, height) == (upload.width, upload.height) {
                         layers.push((layer, HeldLayer::Shadow(held.texture.clone())));
                         continue;
                     }
@@ -376,7 +378,38 @@ impl Gpu {
             })
             .collect();
         let texture = if compare {
-            self.shadow_texture(upload)?
+            let sixteen = |surface: &HeldLayer| {
+                matches!(surface, HeldLayer::Shadow(t)
+                    if t.format() == wgpu::TextureFormat::Depth16Unorm)
+            };
+            if held.iter().any(|(_, surface)| sixteen(surface)) {
+                // Every layer comes from the device, since there is no 16-bit staging path.
+                if held.len() != upload.layers.max(1) as usize
+                    || !held.iter().all(|(_, surface)| sixteen(surface))
+                {
+                    return Err(
+                        "samples a 16-bit depth surface held on the device beside others".into(),
+                    );
+                }
+                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("held 16-bit shadow map"),
+                    size: wgpu::Extent3d {
+                        width: upload.width.max(1),
+                        height: upload.height.max(1),
+                        depth_or_array_layers: upload.layers.max(1),
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth16Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                self.scratch.push(Scratch::Texture(texture.clone()));
+                texture
+            } else {
+                self.shadow_texture(upload)?
+            }
         } else {
             let (texture, _) = self.upload_texture(upload, view, None, &depths)?;
             self.scratch.push(Scratch::Texture(texture.clone()));

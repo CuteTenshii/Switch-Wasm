@@ -473,8 +473,11 @@ impl Pipeline {
             },
             cull: match (cull.enabled, cull.cull_front, cull.cull_back) {
                 (false, _, _) | (_, false, false) => Cull::None,
+                // Culling applies to triangles only.
+                (_, true, true) if !primitive.is_rasterized() => Cull::None,
                 (_, true, true) => {
-                    // Culling both faces draws nothing, which WebGPU can't say.
+                    // A draw that culls both faces draws nothing, which WebGPU can't say;
+                    // see [`culls_every_triangle`].
                     return Err(Unsupported::State("a draw that culls both faces".into()));
                 }
                 (_, true, false) => Cull::Front,
@@ -520,6 +523,15 @@ impl Viewport {
     pub fn depth_minus_one_to_one(&self) -> bool {
         self.depth_translate - self.depth_scale >= 0.0
     }
+}
+
+/// Whether the draw culls both faces of a triangle primitive, so it changes nothing.
+pub fn culls_every_triangle(engine: &Engine3D) -> bool {
+    let cull = engine.cull_state();
+    cull.enabled
+        && cull.cull_front
+        && cull.cull_back
+        && Primitive::from_raw(engine.last_draw.primitive).is_ok_and(Primitive::is_rasterized)
 }
 
 /// WebGPU topology, and the primitive whose indices `raster::assemble` must
@@ -779,6 +791,20 @@ fn step_mode(array: VertexArray) -> Result<StepMode, Unsupported> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn culling_both_faces_changes_nothing_only_for_triangles() {
+        let mut engine = Engine3D::new();
+        engine.regs.set(0x646, 1); // OGL_SET_CULL: enabled
+        engine.regs.set(0x648, 0x408); // OGL_SET_CULL_FACE: front and back
+        engine.last_draw.primitive = 4; // triangles
+        assert!(culls_every_triangle(&engine));
+        engine.last_draw.primitive = 1; // lines
+        assert!(!culls_every_triangle(&engine));
+        engine.regs.set(0x648, 0x405); // back only
+        engine.last_draw.primitive = 4;
+        assert!(!culls_every_triangle(&engine));
+    }
 
     /// (D3D code, GL code, factor).
     const FACTOR_PAIRS: &[(u32, u32, BlendFactor)] = &[
