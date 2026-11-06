@@ -221,9 +221,7 @@ pub fn switch_load_nca() -> Result<f64, String> {
         update: s.update.as_ref(),
         dlc: &s.dlc,
     };
-    let entry = load_and_boot_nca(&s.keys, &mut s.cpu, container, added)?;
-    s.cpu.log(Level::Info, "[io] booted the standalone NCA");
-    Ok(entry as f64)
+    load_and_boot_nca(&s.keys, &mut s.cpu, container, added).map(|entry| entry as f64)
 }
 
 /// The index of the Program NCA in the open container, or why there is none (including that
@@ -268,8 +266,6 @@ pub fn switch_load_nca_from_nsp(index: u32) -> Result<f64, String> {
         dlc: &s.dlc,
     };
     let entry = load_and_boot_nca(&s.keys, &mut s.cpu, nca_src, added)?;
-    let line = format!("[io] booted {}", s.nsp_files[index as usize].name);
-    s.cpu.log(Level::Info, &line);
     mount_manual(s, &container);
     Ok(entry as f64)
 }
