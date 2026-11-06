@@ -41,11 +41,8 @@ declare module '@core/switch_wasm.js' {
   export function switch_set_trace_channels(on: boolean): void;
   export function switch_gpu_lost(): boolean;
   export function switch_log_activity(seconds: number): void;
-  export function switch_set_input(
-    buttons: number, stickLx: number, stickLy: number, stickRx: number, stickRy: number): void;
   export function switch_set_battery(percent: number, charging: boolean): void;
   export function switch_set_operation_mode(docked: boolean): void;
-  export function switch_vibration(): number;
   export function switch_run(maxSteps: number): number;
   export function switch_pace(elapsed: number): number;
   export function switch_halted(): boolean;

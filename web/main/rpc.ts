@@ -5,6 +5,7 @@ import type {
 } from '../shared/protocol';
 import { setAudioFormat, setAudioRing } from './audio';
 import { log } from './log';
+import { setMailbox } from './mailbox';
 
 let worker: Worker | null = null;
 let ready = false;
@@ -100,6 +101,9 @@ export function initWorker(): void {
         break;
       case 'profiles_edited':
         loopEvents?.profilesEdited();
+        break;
+      case 'input_mailbox':
+        setMailbox(d.buffer, d.at);
         break;
       case 'audio_ring':
         setAudioRing(d);

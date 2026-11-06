@@ -17,9 +17,9 @@ import {
   switch_open_nca,
   switch_open_nsp, switch_parse_nca, switch_program_nca_index, switch_read_file, switch_reg_dump,
   switch_remember_control, switch_restore_nand, switch_restore_storage, switch_run,
-  switch_set_battery, switch_set_input, switch_set_jit, switch_set_operation_mode, switch_set_touch,
+  switch_set_battery, switch_set_jit, switch_set_operation_mode, switch_set_touch,
   switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
-  switch_user_stage, switch_users_commit, switch_vibration,
+  switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { nandContent, STORAGE } from './storage';
@@ -39,8 +39,6 @@ export const CMD = {
   setTrace: switch_set_trace,
   setTraceChannels: switch_set_trace_channels,
   setJit: switch_set_jit,
-  vibration: switch_vibration,
-  setInput: switch_set_input,
   setTouch: switch_set_touch,
   // The Battery Status API is Window-only, so the main thread sends it.
   setBattery: switch_set_battery,

@@ -3,6 +3,7 @@
 import { $ } from './dom';
 import { log } from './log';
 import { call, hasSession, isReady } from './rpc';
+import { writeInput } from './mailbox';
 import { pullVibration } from './rumble';
 import { screenSize } from './display';
 import { screenEl } from './shell';
@@ -203,7 +204,7 @@ function pushInput(): void {
   } else if (mask) {
     inputStatus('keyboard');
   }
-  void call('setInput', mask, slx, sly, srx, sry);
+  writeInput(mask, [slx, sly, srx, sry]);
   // Only while something is down, plus one push for the lift.
   if (touchPoints.size || touchWasDown) {
     void call('setTouch', touchTriples());

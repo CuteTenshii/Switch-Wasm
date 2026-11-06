@@ -223,11 +223,9 @@ export interface Commands {
   setTrace(on: boolean): void;
   setJit(on: boolean): void;
   setTraceChannels(on: boolean): void;
-  setInput(mask: number, slx: number, sly: number, srx: number, sry: number): void;
   setTouch(points: Uint32Array): void;
   setBattery(percent: number, charging: boolean): void;
   setOperationMode(docked: boolean): void;
-  vibration(): number;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
   loadProgram(file: File): number;
@@ -377,6 +375,8 @@ export type WorkerMessage =
   | { type: 'nand_progress'; done: number; total: number }
   // Once at startup: the ring audio is written to, in the worker's shared memory.
   | { type: 'audio_ring'; buffer: SharedArrayBuffer; at: number; samples: number }
+  // Once at startup: the controller state and rumble, in the worker's shared memory.
+  | { type: 'input_mailbox'; buffer: SharedArrayBuffer; at: number }
   // `(channels << 24) | rate` of the audio in the ring, sent when it changes; 0 before a device opens.
   | { type: 'audio_format'; format: number }
   // From `crates/switch-wasm/src/keyboard.rs`: the guest raised an error applet, or waits for text.

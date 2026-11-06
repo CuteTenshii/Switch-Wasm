@@ -1,19 +1,49 @@
 //! Controller, touch and rumble.
 
 use std::cell::RefCell;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicI32, AtomicU32};
 
 use switch_core::cpu::{Cpu, TouchPoint, TOUCH_MAX};
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::session;
 
-/// The last rumble request, packed as `(weak << 16) | strong`, each 0..=1000.
-#[wasm_bindgen]
-pub fn switch_vibration() -> u32 {
-    let s = session();
-    let (low, high) = s.cpu.vibration();
-    let scale = |v: f32| (v * 1000.0).round().clamp(0.0, 1000.0) as u32;
-    (scale(high) << 16) | scale(low)
+/// Controller state and rumble in linear memory, which the page reads and writes over the
+/// shared buffer, so no message carries them. The page writes `buttons`, `pressed` and
+/// `sticks`; the core writes `rumble`.
+#[repr(C)]
+struct Mailbox {
+    /// A `HidNpadButton` bitfield of what is down.
+    buttons: AtomicU32,
+    /// Buttons that went down since the last slice, so a tap shorter than one is kept.
+    pressed: AtomicU32,
+    /// The analog sticks, -32768..32767, positive right and up.
+    sticks: [AtomicI32; 4],
+    /// The last rumble request, packed as `(weak << 16) | strong`, each 0..=1000.
+    rumble: AtomicU32,
+}
+
+static MAILBOX: Mailbox = Mailbox {
+    buttons: AtomicU32::new(0),
+    pressed: AtomicU32::new(0),
+    sticks: [const { AtomicI32::new(0) }; 4],
+    rumble: AtomicU32::new(0),
+};
+
+/// Hand the page the mailbox over the shared memory.
+#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+pub(crate) fn announce_mailbox() {
+    use js_sys::WebAssembly;
+    use wasm_bindgen::JsCast;
+    let memory: WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
+    crate::post::post(
+        "input_mailbox",
+        &[
+            ("buffer", memory.buffer()),
+            ("at", (&MAILBOX as *const Mailbox as u32).into()),
+        ],
+    );
 }
 
 // A press is held until the guest's frame counter has advanced twice, so taps between run
@@ -97,9 +127,9 @@ impl Latch {
         self.published_touches = count;
     }
 
-    fn set_gamepad(&mut self, cpu: &mut Cpu, buttons: u64, sticks: Sticks) {
+    fn set_gamepad(&mut self, cpu: &mut Cpu, buttons: u64, tapped: u64, sticks: Sticks) {
         // Edges, not level.
-        let pressed = buttons & !self.held;
+        let pressed = (buttons & !self.held) | tapped;
         self.held = buttons;
         self.sticks = sticks;
         let flicked = deflected(&sticks);
@@ -149,26 +179,36 @@ pub(crate) fn reset() {
     LATCH.with_borrow_mut(|latch| *latch = Latch::default());
 }
 
+/// What the page does on each of its ticks: write the state, noting new presses.
+#[cfg(test)]
+pub(crate) fn page_write(buttons: u32, sticks: [i32; 4]) {
+    let newly = buttons & !MAILBOX.buttons.swap(buttons, Relaxed);
+    MAILBOX.pressed.fetch_or(newly, Relaxed);
+    for (slot, value) in MAILBOX.sticks.iter().zip(sticks) {
+        slot.store(value, Relaxed);
+    }
+}
+
+/// Take what the page wrote since the last slice, and tell it the rumble the guest asked for.
+pub(crate) fn exchange(cpu: &mut Cpu) {
+    let buttons = u64::from(MAILBOX.buttons.load(Relaxed));
+    let tapped = u64::from(MAILBOX.pressed.swap(0, Relaxed));
+    let sticks = MAILBOX.sticks.each_ref().map(|v| v.load(Relaxed));
+    LATCH.with_borrow_mut(|latch| {
+        if tapped != 0 || buttons != latch.held || sticks != latch.sticks {
+            latch.set_gamepad(cpu, buttons, tapped, sticks);
+        }
+    });
+    let (low, high) = cpu.vibration();
+    let scale = |v: f32| (v * 1000.0).round().clamp(0.0, 1000.0) as u32;
+    MAILBOX
+        .rumble
+        .store((scale(high) << 16) | scale(low), Relaxed);
+}
+
 /// Drop latched input the guest has had a frame to see.
 pub(crate) fn release_if_seen(cpu: &mut Cpu) {
     LATCH.with_borrow_mut(|latch| latch.release_if_seen(cpu));
-}
-
-/// Feed gamepad state. `buttons` is a `HidNpadButton` bitfield (A=1<<0, B=1<<1,
-/// X=1<<2, Y=1<<3, StickL=1<<4, StickR=1<<5, L=1<<6, R=1<<7, ZL=1<<8, ZR=1<<9,
-/// Plus=1<<10, Minus=1<<11, DpadLeft=1<<12, DpadUp=1<<13, DpadRight=1<<14,
-/// DpadDown=1<<15); sticks are -32768..32767, positive right and up. A press is kept
-/// until the guest has had a frame to see it.
-#[wasm_bindgen]
-pub fn switch_set_input(buttons: u32, stick_lx: i32, stick_ly: i32, stick_rx: i32, stick_ry: i32) {
-    let cpu = &mut session().cpu;
-    LATCH.with_borrow_mut(|latch| {
-        latch.set_gamepad(
-            cpu,
-            u64::from(buttons),
-            [stick_lx, stick_ly, stick_rx, stick_ry],
-        );
-    });
 }
 
 /// Feed touch contacts: `(finger_id, x, y)` triples in 1280x720 digitizer space. No triples is

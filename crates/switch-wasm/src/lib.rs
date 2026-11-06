@@ -240,7 +240,10 @@ pub fn switch_init() {
         });
     }
     #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
-    audio::announce_ring();
+    {
+        audio::announce_ring();
+        input::announce_mailbox();
+    }
 }
 
 /// Let the core run the blocks it emits, where the build can compile them.

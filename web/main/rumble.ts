@@ -1,6 +1,6 @@
 // Map guest rumble to the Gamepad API "dual-rumble" effect (Chromium only).
 
-import { call } from './rpc';
+import { readRumble } from './mailbox';
 
 // The actuator shape browsers expose; `reset` is Chromium's.
 interface DualRumbleActuator {
@@ -17,7 +17,7 @@ let lastRumble = -1;
 export async function pullVibration(pad: Gamepad | undefined): Promise<void> {
   const actuator = pad?.vibrationActuator as DualRumbleActuator | undefined;
   if (!actuator?.playEffect) return;
-  const packed = await call('vibration');
+  const packed = readRumble();
   if (packed === lastRumble) return; // re-issuing the same effect stutters it
   lastRumble = packed;
   const strong = (packed & 0xffff) / 1000;
