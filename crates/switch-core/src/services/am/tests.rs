@@ -787,7 +787,7 @@ fn the_ex_form_of_a_creation_is_the_same_creation() {
 }
 
 #[test]
-fn player_select_with_one_user_hands_back_that_user() {
+fn player_select_hands_back_the_current_user() {
     let (mut cpu, accessor) = library_applet(super::APPLET_PLAYER_SELECT);
     let uid = cpu.current_user().uid;
 
@@ -823,7 +823,7 @@ fn player_select_with_one_user_hands_back_that_user() {
 }
 
 #[test]
-fn player_select_with_several_users_is_cancelled() {
+fn player_select_with_several_users_hands_back_the_current_user() {
     let ann = crate::services::acc::UserAccount::new([1; 16], "Ann", None);
     let ben = crate::services::acc::UserAccount::new([2; 16], "Ben", None);
     let mut payload = [0u8; 8];
@@ -838,10 +838,13 @@ fn player_select_with_several_users_is_cancelled() {
     cpu.applet_request(TLS, accessor, Some(10)).unwrap();
     write_request(&mut cpu, 30, &[]);
     cpu.applet_request(TLS, accessor, Some(30)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (22 << 9));
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
     write_request(&mut cpu, 101, &[]);
     cpu.applet_request(TLS, accessor, Some(101)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (3 << 9));
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+    let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+    let data = &cpu.process().am_storages[&Cpu::object_key(storage, 0)];
+    assert_eq!(data[8..], [2; 16]);
 }
 
 #[test]

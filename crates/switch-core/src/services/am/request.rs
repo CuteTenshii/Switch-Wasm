@@ -843,27 +843,22 @@ impl Cpu {
                     let at = self.ipc_request_data(tls);
                     let id = self.mem.read_u32(at)?;
                     let mode = self.mem.read_u32(at.wrapping_add(4))?;
-                    let answer = (id == APPLET_PLAYER_SELECT && self.users.len() == 1)
+                    let answer = (id == APPLET_PLAYER_SELECT)
                         .then(|| player_select_answer(self.current_user().uid));
                     if answer.is_some() {
                         self.log(
                             Level::Info,
                             &format!(
                                 "[am] CreateLibraryApplet: playerSelect (mode {mode}); \
-                                 answered with the only user"
+                                 answered with the current user"
                             ),
                         );
                     } else if id == APPLET_SWKBD && mode == 0 {
-                        self.log(
-                            Level::Info,
-                            "[am] CreateLibraryApplet: swkbd (mode 0); the page asks for the text",
-                        );
+                        self.log(Level::Info, "[am] CreateLibraryApplet: swkbd (mode 0)");
                     } else if id == APPLET_ERROR {
                         self.log(
                             Level::Info,
-                            &format!(
-                                "[am] CreateLibraryApplet: error (mode {mode}); the page shows it"
-                            ),
+                            &format!("[am] CreateLibraryApplet: error (mode {mode})"),
                         );
                     } else if library_applet_program_id(id)
                         .is_some_and(|program| self.is_installed(program))
@@ -871,8 +866,7 @@ impl Cpu {
                         self.log(
                             Level::Info,
                             &format!(
-                                "[am] CreateLibraryApplet: {} (mode {mode}); it runs from the \
-                                 NAND once started",
+                                "[am] CreateLibraryApplet: {} (mode {mode})",
                                 applet_name(id)
                             ),
                         );
@@ -881,7 +875,7 @@ impl Cpu {
                             Level::Warn,
                             &format!(
                                 "[am] CreateLibraryApplet: {} (id {id:#x}, mode {mode}); it is not on \
-                                 the NAND, so it will report itself cancelled",
+                                 the NAND",
                                 applet_name(id)
                             ),
                         );
