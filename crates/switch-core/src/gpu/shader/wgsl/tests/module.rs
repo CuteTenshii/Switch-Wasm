@@ -121,6 +121,37 @@ fn a_layout_names_every_binding_the_text_calls_through() {
 }
 
 #[test]
+fn a_tld4s_gathers_into_texss_registers() {
+    let p = program(&[
+        (
+            Op::Tld4s {
+                dst: 4,
+                dst2: 6,
+                coords: [7, 8],
+                offset: None,
+                handle: 8,
+                component: 2,
+                f16: false,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    let translated = translate(&p).unwrap();
+    let layout = Layout::of(&translated, Stage::Fragment);
+    assert_eq!(layout.textures.len(), 1);
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(source.contains("texGather(8u, 2u"), "{source}");
+    // Four channels, two registers each side.
+    for reg in ["r4", "r5", "r6", "r7"] {
+        assert!(
+            source.contains(&format!("{reg} = ")),
+            "{reg} unwritten: {source}"
+        );
+    }
+}
+
+#[test]
 fn a_swizzled_texture_is_rearranged_where_it_is_sampled() {
     // Descriptor swizzles are applied.
     let p = program(&[

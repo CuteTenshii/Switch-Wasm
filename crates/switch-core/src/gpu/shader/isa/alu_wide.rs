@@ -539,6 +539,10 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
     if insn & 0xfff8_0000_0000_0000 == 0xdf48_0000_0000_0000 {
         return decode_txq(insn);
     }
+    // tld4s: the gather with `texs`'s layout, 0xdf00 with bit 54 clear (`txq`'s is set).
+    if insn >> 56 == 0xdf && field(insn, 54, 1) == 0 {
+        return decode_tld4s(insn);
+    }
     // tld4: the gather, `110010` at the top and `111` at [51, 54).
     if insn >> 58 == 0b11_0010 && field(insn, 51, 3) == 0b111 {
         return decode_tld4(insn);

@@ -1033,6 +1033,7 @@ impl Invocation {
             | Op::Tex { .. }
             | Op::Txq { .. }
             | Op::Tld4 { .. }
+            | Op::Tld4s { .. }
             | Op::Suld { .. }
             | Op::Sust { .. } => unreachable!("control flow is dispatched in execute"),
         }

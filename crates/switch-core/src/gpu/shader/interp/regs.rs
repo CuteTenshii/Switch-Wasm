@@ -186,6 +186,11 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Txq { lod, .. } => vec![lod],
+        Op::Tld4s { coords, offset, .. } => {
+            let mut v = coords.to_vec();
+            v.extend(offset);
+            v
+        }
         Op::Tld4 {
             coords,
             layer,

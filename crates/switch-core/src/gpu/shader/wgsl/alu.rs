@@ -145,6 +145,21 @@ impl Emitter<'_> {
                 component,
             )?,
 
+            Op::Tld4s {
+                coords,
+                offset: None,
+                handle,
+                component,
+                ..
+            } => self.gather_texture(
+                at,
+                TextureSlot::Bound(handle),
+                TexDim::T2d,
+                [coords[0], coords[1], coords[1]],
+                None,
+                component,
+            )?,
+
             // `shfl` maps onto `quadSwapX`/`Y`/`Diagonal`, mirroring `interp::shuffle_source`.
             Op::Shfl {
                 dst,
@@ -337,7 +352,7 @@ impl Emitter<'_> {
             | Op::Exit
             | Op::Kil => unreachable!("control flow is emitted by emit_instruction"),
             // `tex.aoffi` with a non-constant offset is the rasterizer's.
-            Op::Tld4 { .. } => return Err(Unsupported::Op { at, op }),
+            Op::Tld4 { .. } | Op::Tld4s { .. } => return Err(Unsupported::Op { at, op }),
         }
         Ok(())
     }

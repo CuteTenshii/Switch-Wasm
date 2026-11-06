@@ -231,6 +231,31 @@ pub(super) fn decode_tld4(insn: u64) -> Op {
     }
 }
 
+/// `tld4s`: the gather with `texs`'s layout. With `.AOFFI` the second coordinate follows
+/// the first and the offset takes the other register.
+pub(super) fn decode_tld4s(insn: u64) -> Op {
+    let un = Op::Unimplemented { raw: insn };
+    let (dst, dst2) = (reg(insn, 0, 8), reg(insn, 28, 8));
+    // A shadow gather has no compare in the sampler paths.
+    if (dst == RZ && dst2 == RZ) || field(insn, 50, 1) != 0 {
+        return un;
+    }
+    let (a, b) = (reg(insn, 8, 8), reg(insn, 20, 8));
+    let (coords, offset) = match field(insn, 51, 1) {
+        0 => ([a, b], None),
+        _ => ([a, a.wrapping_add(1)], Some(b)),
+    };
+    Op::Tld4s {
+        dst,
+        dst2,
+        coords,
+        offset,
+        handle: field(insn, 36, 13) as u16,
+        component: field(insn, 52, 2) as u8,
+        f16: field(insn, 55, 1) != 0,
+    }
+}
+
 /// What one of a `texs`'s destination registers ends up holding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexsStore {

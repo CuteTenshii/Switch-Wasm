@@ -120,11 +120,7 @@ impl Emitter<'_> {
             "texGather({}u, {component}u, {u}, {v}, {layer})",
             slot.key()
         ));
-        for (reg, store, _) in self.program.texs_writes(at).to_vec() {
-            if let TexsStore::Float(channel) = store {
-                self.set_f(reg, &format!("{texels}.{}", COMPONENT[channel]));
-            }
-        }
+        self.store_channels(at, &texels);
         Ok(())
     }
 
@@ -172,6 +168,12 @@ impl Emitter<'_> {
                 "texSample({key}u, {code}u, {u}, {v}, {layer}, {w})"
             )),
         };
+        self.store_channels(at, &color);
+        Ok(())
+    }
+
+    /// Land `color`'s channels where the instruction at `at` writes them.
+    fn store_channels(&mut self, at: usize, color: &str) {
         // Stored now rather than at first use like the interpreter; equivalent
         // unless the destination is overwritten before being read.
         let writes = self.program.texs_writes(at).to_vec();
@@ -197,6 +199,5 @@ impl Emitter<'_> {
                 }
             }
         }
-        Ok(())
     }
 }

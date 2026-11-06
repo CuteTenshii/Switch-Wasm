@@ -535,6 +535,9 @@ impl Invocation {
                 Op::Tld4 { .. } => {
                     self.run_tld4(program, pc, op, env, pending)?;
                 }
+                Op::Tld4s { .. } => {
+                    self.run_tld4s(program, pc, op, env, pending)?;
+                }
                 Op::Suld {
                     coords,
                     handle,
@@ -587,6 +590,7 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
                 f16,
                 ..
             } => isa::texs_destinations(dst, dst2, mask, f16),
+            Op::Tld4s { dst, dst2, f16, .. } => isa::texs_destinations(dst, dst2, [true; 4], f16),
             // `tex` channels land in consecutive registers from `dst`, one per mask bit.
             Op::Tex { dst, mask, .. } | Op::Txq { dst, mask, .. } | Op::Tld4 { dst, mask, .. } => {
                 consecutive_destinations(dst, mask)
@@ -663,6 +667,10 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
             f16,
             ..
         } => isa::texs_destinations(dst, dst2, mask, f16)
+            .into_iter()
+            .map(|(reg, _)| reg)
+            .collect(),
+        Op::Tld4s { dst, dst2, f16, .. } => isa::texs_destinations(dst, dst2, [true; 4], f16)
             .into_iter()
             .map(|(reg, _)| reg)
             .collect(),

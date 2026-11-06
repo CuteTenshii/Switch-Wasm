@@ -279,6 +279,44 @@ impl Invocation {
         Ok(())
     }
 
+    /// `tld4s`: `tld4`'s gather of a 2D image, landing as a `texs` does.
+    pub(super) fn run_tld4s(
+        &mut self,
+        program: &Compiled,
+        pc: usize,
+        op: Op,
+        env: &Env,
+        pending: &mut Vec<(usize, u8, u32)>,
+    ) -> ShaderResult<()> {
+        let Op::Tld4s {
+            coords,
+            offset,
+            handle,
+            component,
+            ..
+        } = op
+        else {
+            unreachable!("run_tld4s called with {op:?}");
+        };
+        let handle = env
+            .consts
+            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
+        let mut u = self.reg_f32(coords[0]);
+        let mut v = self.reg_f32(coords[1]);
+        if let Some(reg) = offset {
+            let packed = self.reg(reg);
+            let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
+            let (du, dv) = env.textures.texel_step(handle)?;
+            u += axis(0) as f32 * du;
+            v += axis(4) as f32 * dv;
+        }
+        let texels = env
+            .textures
+            .gather(handle, u, v, 0, usize::from(component))?;
+        self.land_texture(program, pc, texels, pending);
+        Ok(())
+    }
+
     /// A surface instruction's handle: from its register if bindless, else the texture bank.
     pub(super) fn surface_handle(
         &self,

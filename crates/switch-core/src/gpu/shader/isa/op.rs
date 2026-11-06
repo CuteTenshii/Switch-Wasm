@@ -592,6 +592,19 @@ pub enum Op {
         mask: [bool; 4],
     },
 
+    /// `tld4s dst, dst2, coords.., handle, component`: a 2D gather with `texs`'s register
+    /// layout, all four channels landing as `texs` lands them.
+    Tld4s {
+        dst: u8,
+        dst2: u8,
+        coords: [u8; 2],
+        /// `.AOFFI`'s register, as in [`Op::Tex`].
+        offset: Option<u8>,
+        handle: u16,
+        component: u8,
+        f16: bool,
+    },
+
     // ---- warp ----
     /// `shfl.<mode> p, dst, src, index, mask`.
     Shfl {

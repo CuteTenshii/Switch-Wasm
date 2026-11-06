@@ -131,7 +131,12 @@ pub fn only_shades_vertices(engine: &Engine3D, ctx: &ExecCtx) -> Result<bool> {
     let samples = program.insns.iter().any(|insn| {
         matches!(
             insn.op,
-            Op::Texs { .. } | Op::Tex { .. } | Op::Txq { .. } | Op::Tld4 { .. } | Op::Suld { .. }
+            Op::Texs { .. }
+                | Op::Tex { .. }
+                | Op::Txq { .. }
+                | Op::Tld4 { .. }
+                | Op::Tld4s { .. }
+                | Op::Suld { .. }
         )
     });
     Ok(stores_globally(&program) && !samples)

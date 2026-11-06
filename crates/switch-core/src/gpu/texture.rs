@@ -494,6 +494,8 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x21, FLOAT) => 0xE0, // B10G11R11         -> B10G11R11Float
         // `ZF32` sampled as a colour is exactly an `R32` texel.
         (0x2F, FLOAT) => 0xE5, // ZF32              -> R32Float
+        // `Z16` sampled as a colour is an unsigned-normalized `R16` texel.
+        (0x3A, UNORM) => 0xEE, // Z16               -> R16Unorm
         (other, UNORM) => {
             return Err(Error::Gpu(format!(
                 "texture: unsupported TIC COMPONENTS_SIZES {other:#x}"
@@ -1116,6 +1118,15 @@ mod tests {
         assert_eq!(
             texel_kind_for(0x2f, FLOAT).unwrap(),
             texel_kind_for(0x0f, FLOAT).unwrap(),
+        );
+    }
+
+    #[test]
+    fn a_16_bit_depth_surface_samples_as_one_normalized_channel() {
+        const UNORM: u32 = 2;
+        assert_eq!(
+            texel_kind_for(0x3a, UNORM).unwrap(),
+            texel_kind_for(0x1b, UNORM).unwrap(),
         );
     }
 

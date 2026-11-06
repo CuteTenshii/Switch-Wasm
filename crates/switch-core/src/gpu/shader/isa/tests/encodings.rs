@@ -430,6 +430,46 @@ fn decodes_a_txq_and_a_tld4() {
 }
 
 #[test]
+fn decodes_a_tld4s_into_texss_registers() {
+    // Mario Kart 8 Deluxe's movie shader: the red gather of a bound texture.
+    assert_eq!(
+        decode(0xdf020080c0a7010e).op,
+        Op::Tld4s {
+            dst: 14,
+            dst2: 12,
+            coords: [1, 10],
+            offset: None,
+            handle: 8,
+            component: 0,
+            f16: false,
+        }
+    );
+    // `.AOFFI` takes the second coordinate from the next register and the offset from the other.
+    let aoffi = 0xdf020080c0a7010eu64 | 1 << 51;
+    assert!(matches!(
+        decode(aoffi).op,
+        Op::Tld4s {
+            coords: [1, 2],
+            offset: Some(10),
+            ..
+        }
+    ));
+    let green_f16 = 0xdf020080c0a7010eu64 | 1 << 52 | 1 << 55;
+    assert!(matches!(
+        decode(green_f16).op,
+        Op::Tld4s {
+            component: 1,
+            f16: true,
+            ..
+        }
+    ));
+    // A shadow gather is not decoded, and `txq` keeps its own encoding.
+    let shadow = 0xdf020080c0a7010eu64 | 1 << 50;
+    assert!(matches!(decode(shadow).op, Op::Unimplemented { .. }));
+    assert!(matches!(decode(0xdf48008180470800).op, Op::Txq { .. }));
+}
+
+#[test]
 fn decodes_a_bindless_tex() {
     // Tomodachi Life's `tex.b`.
     assert_eq!(
