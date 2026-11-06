@@ -11,7 +11,10 @@ const started: Worker[] = [];
 // Start the core workers on this worker's module and shared memory.
 export function startCores(module: WebAssembly.Module, memory: WebAssembly.Memory): void {
   for (let i = 0; i < CORE_WORKERS; i++) {
-    const worker = new Worker(new URL('./core.ts', import.meta.url), { type: 'module' });
+    const worker = new Worker(new URL('./core.ts', import.meta.url), {
+      type: 'module',
+      name: `Guest core ${i + 1}`,
+    });
     worker.onmessage = (e: MessageEvent<CoreStarted>) => {
       if (!e.data.started) {
         workerLog(`[core] core worker ${i + 1} did not start: ${e.data.error}`, 'error');

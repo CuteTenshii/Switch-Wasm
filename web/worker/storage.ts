@@ -24,7 +24,7 @@ import type { ZipReply } from './zipper';
 
 // The zip of `entries`, built in a worker of its own that takes their bytes.
 function zipOffThread(entries: ZipEntry[]): Promise<Blob> {
-  const worker = new Worker(new URL('./zipper.ts', import.meta.url), { type: 'module' });
+  const worker = new Worker(new URL('./zipper.ts', import.meta.url), { type: 'module', name: 'Zip export' });
   return new Promise((resolve, reject) => {
     worker.onmessage = (e: MessageEvent<ZipReply>) => {
       worker.terminate();

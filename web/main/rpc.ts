@@ -72,7 +72,10 @@ export function call<K extends keyof Commands>(
 
 // `{ type: 'module' }` must match Vite's `worker.format: 'es'`.
 export function initWorker(): void {
-  worker = new Worker(new URL('../worker/index.ts', import.meta.url), { type: 'module' });
+  worker = new Worker(new URL('../worker/index.ts', import.meta.url), {
+    type: 'module',
+    name: 'Emulator',
+  });
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
     const d = e.data;
     if (!('type' in d)) {
