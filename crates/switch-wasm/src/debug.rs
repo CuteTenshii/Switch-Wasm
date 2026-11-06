@@ -2,7 +2,7 @@
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::log::{collect, push, PageLevel};
+use crate::log::collect;
 use crate::session;
 
 /// Enable/disable the block translator; the browser has no `SWITCH_NO_JIT`.
@@ -22,20 +22,21 @@ pub fn switch_set_trace(enabled: bool) {
     }
 }
 
-/// Log a full register snapshot.
+/// A full register snapshot. Traces queued so far reach the log first.
 #[wasm_bindgen]
-pub fn switch_log_regs() {
+pub fn switch_reg_dump() -> String {
     let s = session();
     collect(&mut s.cpu);
-    push(PageLevel::Log, &s.cpu.reg_dump());
+    s.cpu.reg_dump()
 }
 
-/// Log one line per guest thread: state, what it is blocked on, and where it stopped.
+/// One line per guest thread: state, what it is blocked on, and where it stopped. Traces
+/// queued so far reach the log first.
 #[wasm_bindgen]
-pub fn switch_log_threads() {
+pub fn switch_thread_dump() -> String {
     let s = session();
     collect(&mut s.cpu);
-    push(PageLevel::Log, &s.cpu.thread_dump());
+    s.cpu.thread_dump()
 }
 
 /// Turn every diagnostic channel on or off.

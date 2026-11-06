@@ -160,10 +160,14 @@ pub(crate) fn release_if_seen(cpu: &mut Cpu) {
 /// DpadDown=1<<15); sticks are -32768..32767, positive right and up. A press is kept
 /// until the guest has had a frame to see it.
 #[wasm_bindgen]
-pub fn switch_set_input(buttons: u64, stick_lx: i32, stick_ly: i32, stick_rx: i32, stick_ry: i32) {
+pub fn switch_set_input(buttons: u32, stick_lx: i32, stick_ly: i32, stick_rx: i32, stick_ry: i32) {
     let cpu = &mut session().cpu;
     LATCH.with_borrow_mut(|latch| {
-        latch.set_gamepad(cpu, buttons, [stick_lx, stick_ly, stick_rx, stick_ry]);
+        latch.set_gamepad(
+            cpu,
+            u64::from(buttons),
+            [stick_lx, stick_ly, stick_rx, stick_ry],
+        );
     });
 }
 

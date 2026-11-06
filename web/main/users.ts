@@ -27,7 +27,7 @@ const PICTURE_COLORS = [
 function pictureColor(uid: string): string {
   let spread = 0;
   for (let i = 0; i < uid.length; i += 2) {
-    spread = (Math.imul(spread, 31) + parseInt(uid.slice(i, i + 2), 16)) >>> 0;
+    spread = (Math.imul(spread, 31) + Number.parseInt(uid.slice(i, i + 2), 16)) >>> 0;
   }
   return PICTURE_COLORS[spread % PICTURE_COLORS.length];
 }

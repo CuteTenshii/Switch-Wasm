@@ -218,15 +218,15 @@ export interface ErrorDialog {
 
 export interface Commands {
   // End the running title and its applets; the console stays.
-  endTitle(): number;
+  endTitle(): void;
 
-  setTrace(on: boolean): number;
-  setJit(on: boolean): number;
+  setTrace(on: boolean): void;
+  setJit(on: boolean): void;
   setTraceChannels(on: boolean): void;
-  setInput(mask: number, slx: number, sly: number, srx: number, sry: number): number;
-  setTouch(points: Uint32Array): number;
-  setBattery(percent: number, charging: boolean): number;
-  setOperationMode(docked: boolean): number;
+  setInput(mask: number, slx: number, sly: number, srx: number, sry: number): void;
+  setTouch(points: Uint32Array): void;
+  setBattery(percent: number, charging: boolean): void;
+  setOperationMode(docked: boolean): void;
   vibration(): number;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
@@ -241,8 +241,8 @@ export interface Commands {
   addUpdate(file: File): UpdateInfo | null;
   // The pieces the container holds; none if it is not add-on content.
   addDlc(file: File): DlcEntry[];
-  clearDlc(): number;
-  clearUpdate(): number;
+  clearDlc(): void;
+  clearUpdate(): void;
   nandIdentify(file: File): NandIdentity | null;
   // The stored content named `name`; it is read here, not by the page.
   nandLaunch(name: string): number;
@@ -263,18 +263,18 @@ export interface Commands {
 
   run(budget: number): number;
   // The worker runs slices itself until paused, halted or faulted, reporting each.
-  startLoop(tracing: boolean): number;
-  pauseLoop(): number;
+  startLoop(tracing: boolean): void;
+  pauseLoop(): void;
   // The SD card and saves: the worker loads them from IndexedDB and writes changes back itself.
   restoreStorage(): number;
   flushStorage(): number;
-  clearScreen(): number;
+  clearScreen(): void;
   halted(): boolean;
   guestFatal(): string;
   // Passes the core's queued lines on now; how many there were.
   flushLog(): number;
-  logRegs(): number;
-  logThreads(): number;
+  regDump(): string;
+  threadDump(): string;
   getSteps(): number;
   getReg(i: number): string;
   ram(): RamUsage;

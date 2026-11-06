@@ -175,7 +175,7 @@ const failures = [];
 for (const line of manifest.slice(first)) {
   const f = line.trim().split(/\s+/);
   if (f[0] === 'code') {
-    code = Uint8Array.from(f[1].match(/../g) ?? [], (b) => parseInt(b, 16));
+    code = Uint8Array.from(f[1].match(/../g) ?? [], (b) => Number.parseInt(b, 16));
     continue;
   }
   const [name, pc, ops, mode, nzcvBefore, nzcvAfter] = f;
@@ -187,7 +187,7 @@ for (const line of manifest.slice(first)) {
   // `offset:hex` per run of bytes it changed in the window.
   // `fpsr:before:after`, when the harness tracks it.
   const fpsrToken = f.slice(bang + 1).find((t) => t.startsWith('fpsr:'));
-  const [fpsrBefore, fpsrAfter] = fpsrToken ? fpsrToken.slice(5).split(':').map((h) => parseInt(h, 16)) : [];
+  const [fpsrBefore, fpsrAfter] = fpsrToken ? fpsrToken.slice(5).split(':').map((h) => Number.parseInt(h, 16)) : [];
   // `excl:addr:armed:value0:value1:addr:armed:value0:value1`, the monitor before and after.
   const exclToken = f.slice(bang + 1).find((t) => t.startsWith('excl:'));
   const excl = exclToken ? exclToken.slice(5).split(':').map((h) => BigInt('0x' + h)) : null;
@@ -202,7 +202,7 @@ for (const line of manifest.slice(first)) {
   }));
   const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('fpcr:') && !t.startsWith('excl:') && !t.startsWith('tpidr:') && !t.startsWith('clock:') && t !== 'specials' && t !== 'doubles').map((run) => {
     const [at, hex] = run.split(':');
-    return [Number(at), Uint8Array.from(hex.match(/../g), (b) => parseInt(b, 16))];
+    return [Number(at), Uint8Array.from(hex.match(/../g), (b) => Number.parseInt(b, 16))];
   });
   if (before.length !== SLOTS || after.length !== SLOTS) {
     console.error(`${name}: manifest says ${SLOTS} slots but carries ${before.length}/${after.length}`);
@@ -218,7 +218,7 @@ for (const line of manifest.slice(first)) {
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
   if (fpsrToken) view.setUint32(need('fpsr_at'), fpsrBefore, true);
   const fpcrToken = f.slice(bang + 1).find((t) => t.startsWith('fpcr:'));
-  if (fpcrToken) view.setUint32(need('fpcr_at'), parseInt(fpcrToken.slice(5), 16), true);
+  if (fpcrToken) view.setUint32(need('fpcr_at'), Number.parseInt(fpcrToken.slice(5), 16), true);
   if (clockToken) view.setBigUint64(need('origin_at'), BigInt('0x' + clockToken.slice(6)), true);
   if (tpidrToken) {
     const [tpidr, tpidrRw] = tpidrToken.slice(6).split(':').map((h) => BigInt('0x' + h));

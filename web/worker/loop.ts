@@ -75,8 +75,7 @@ function slice(): void {
   if (!tracing) {
     const credit = Math.min(at - lastPace, MAX_CREDIT_MS);
     lastPace = at;
-    const elapsed = BigInt(Math.round(credit * CYCLES_PER_MS));
-    const aheadMs = Number(switch_pace(elapsed)) / CYCLES_PER_MS;
+    const aheadMs = switch_pace(Math.round(credit * CYCLES_PER_MS)) / CYCLES_PER_MS;
     if (aheadMs >= MIN_WAIT_MS && !pauseRequested) {
       setTimeout(slice, Math.min(aheadMs, MAX_WAIT_MS));
       return;

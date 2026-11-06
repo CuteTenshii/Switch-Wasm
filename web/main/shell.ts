@@ -102,7 +102,7 @@ function setPanelWidth(px: number, persist: boolean): void {
   if (persist) localStorage.setItem(PANEL_W_KEY, String(panelWidth));
 }
 
-const storedPanelWidth = parseInt(localStorage.getItem(PANEL_W_KEY) || '', 10);
+const storedPanelWidth = Number.parseInt(localStorage.getItem(PANEL_W_KEY) || '', 10);
 if (Number.isFinite(storedPanelWidth)) setPanelWidth(storedPanelWidth, false);
 
 let gripPointer = -1;

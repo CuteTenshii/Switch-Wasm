@@ -100,8 +100,8 @@ async function onFailed(error: string): Promise<void> {
 // Each piece is asked for separately so one failure costs only that piece.
 async function reportPanicContext(): Promise<void> {
   const parts = [
-    ['registers', () => call('logRegs')],
-    ['threads', () => call('logThreads')],
+    ['registers', async () => log(await call('regDump'))],
+    ['threads', async () => log(await call('threadDump'))],
     ['trace', () => call('flushLog')],
   ] as const;
   for (const [what, ask] of parts) {

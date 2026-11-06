@@ -9,16 +9,15 @@ import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
 import {
   switch_add_dlc, switch_add_update, switch_clear_dlc, switch_clear_screen, switch_clear_update,
-  switch_control_icon, switch_control_json, switch_end_title,
-  switch_flush_storage, switch_get_reg, switch_get_steps,
-  switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
+  switch_control_icon, switch_control_json, switch_end_title, switch_flush_storage, switch_get_reg,
+  switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
   switch_load_keys, switch_load_nca, switch_load_nca_from_nsp, switch_load_program,
-  switch_load_sd_nro, switch_log_regs, switch_log_threads, switch_memory_json, switch_nand_identify,
-  switch_nand_launch, switch_open_nca, switch_open_nsp, switch_parse_nca, switch_program_nca_index,
-  switch_read_file, switch_remember_control, switch_restore_nand, switch_restore_storage,
-  switch_run, switch_set_battery, switch_set_input, switch_set_jit, switch_set_operation_mode,
-  switch_set_touch, switch_set_trace, switch_set_trace_channels, switch_store_profile_edits,
+  switch_load_sd_nro, switch_memory_json, switch_nand_identify, switch_nand_launch, switch_open_nca,
+  switch_open_nsp, switch_parse_nca, switch_program_nca_index, switch_read_file, switch_reg_dump,
+  switch_remember_control, switch_restore_nand, switch_restore_storage, switch_run,
+  switch_set_battery, switch_set_input, switch_set_jit, switch_set_operation_mode, switch_set_touch,
+  switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
   switch_user_stage, switch_users_commit, switch_vibration,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
@@ -36,38 +35,17 @@ export const CMD = {
   endTitle() {
     stopLoop();
     switch_end_title();
-    return 0;
   },
 
-  setTrace(on) {
-    switch_set_trace(on);
-    return 0;
-  },
-  setTraceChannels(on) {
-    switch_set_trace_channels(on);
-  },
-  setJit(on) {
-    switch_set_jit(on);
-    return 0;
-  },
+  setTrace: switch_set_trace,
+  setTraceChannels: switch_set_trace_channels,
+  setJit: switch_set_jit,
   vibration: switch_vibration,
-  setInput(mask, slx, sly, srx, sry) {
-    switch_set_input(BigInt(mask), slx, sly, srx, sry);
-    return 0;
-  },
-  setTouch(points) {
-    switch_set_touch(points);
-    return 0;
-  },
+  setInput: switch_set_input,
+  setTouch: switch_set_touch,
   // The Battery Status API is Window-only, so the main thread sends it.
-  setBattery(percent, charging) {
-    switch_set_battery(percent, charging);
-    return 0;
-  },
-  setOperationMode(next) {
-    switch_set_operation_mode(next);
-    return 0;
-  },
+  setBattery: switch_set_battery,
+  setOperationMode: switch_set_operation_mode,
 
   // The core reads the file itself, so the page never holds a copy.
   loadProgram: switch_load_program,
@@ -102,14 +80,8 @@ export const CMD = {
     }
     return pieces;
   },
-  clearDlc() {
-    switch_clear_dlc();
-    return 0;
-  },
-  clearUpdate() {
-    switch_clear_update();
-    return 0;
-  },
+  clearDlc: switch_clear_dlc,
+  clearUpdate: switch_clear_update,
   // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; null if unreadable.
   nandIdentify(file) {
     const index = addHostFile(file);
@@ -149,36 +121,19 @@ export const CMD = {
   parseNca: switch_parse_nca,
 
   run(budget) {
-    return Number(switch_run(BigInt(budget)));
+    return switch_run(budget);
   },
-  startLoop(tracing) {
-    startLoop(tracing);
-    return 0;
-  },
-  pauseLoop() {
-    pauseLoop();
-    return 0;
-  },
+  startLoop,
+  pauseLoop,
   restoreStorage: switch_restore_storage,
   flushStorage: switch_flush_storage,
-  clearScreen() {
-    switch_clear_screen();
-    return 0;
-  },
+  clearScreen: switch_clear_screen,
   halted: switch_halted,
   guestFatal: switch_guest_fatal,
   flushLog: flushLog,
-  logRegs() {
-    switch_log_regs();
-    return 0;
-  },
-  logThreads() {
-    switch_log_threads();
-    return 0;
-  },
-  getSteps() {
-    return Number(switch_get_steps());
-  },
+  regDump: switch_reg_dump,
+  threadDump: switch_thread_dump,
+  getSteps: switch_get_steps,
   getReg(i) {
     return '0x' + switch_get_reg(i).toString(16).padStart(16, '0');
   },

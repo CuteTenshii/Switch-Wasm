@@ -243,10 +243,10 @@ $('btn-dumptrace').addEventListener('click', async () => {
 
 $('btn-dumpregs').addEventListener('click', async () => {
   openPanel('console');
-  await call('logRegs');
+  log(await call('regDump'));
 });
 
 const regIdx = $<HTMLInputElement>('reg-idx');
 $('btn-readreg').addEventListener('click', async () => {
-  $('reg-val').textContent = await call('getReg', parseInt(regIdx.value, 10));
+  $('reg-val').textContent = await call('getReg', Number.parseInt(regIdx.value, 10));
 });
