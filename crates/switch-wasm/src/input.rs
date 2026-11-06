@@ -8,8 +8,8 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use crate::session;
 
 /// The last rumble request, packed as `(weak << 16) | strong`, each 0..=1000.
-#[no_mangle]
-pub extern "C" fn switch_vibration() -> u32 {
+#[wasm_bindgen]
+pub fn switch_vibration() -> u32 {
     let s = session();
     let (low, high) = s.cpu.vibration();
     let scale = |v: f32| (v * 1000.0).round().clamp(0.0, 1000.0) as u32;
@@ -159,14 +159,8 @@ pub(crate) fn release_if_seen(cpu: &mut Cpu) {
 /// Plus=1<<10, Minus=1<<11, DpadLeft=1<<12, DpadUp=1<<13, DpadRight=1<<14,
 /// DpadDown=1<<15); sticks are -32768..32767, positive right and up. A press is kept
 /// until the guest has had a frame to see it.
-#[no_mangle]
-pub extern "C" fn switch_set_input(
-    buttons: u64,
-    stick_lx: i32,
-    stick_ly: i32,
-    stick_rx: i32,
-    stick_ry: i32,
-) {
+#[wasm_bindgen]
+pub fn switch_set_input(buttons: u64, stick_lx: i32, stick_ly: i32, stick_rx: i32, stick_ry: i32) {
     let cpu = &mut session().cpu;
     LATCH.with_borrow_mut(|latch| {
         latch.set_gamepad(cpu, buttons, [stick_lx, stick_ly, stick_rx, stick_ry]);

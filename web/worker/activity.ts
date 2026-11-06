@@ -4,7 +4,7 @@
 import { fmtSize } from '../shared/format';
 import { takeHostIo, type HostIo } from './hostfiles';
 import { flushLog, workerLog } from './log';
-import { core } from './wasm';
+import { switch_log_activity } from '@core/switch_wasm.js';
 
 const REPORT_EVERY_MS = 1000;
 
@@ -28,7 +28,7 @@ export function reportActivity(now = false): void {
   if (!now && reportedAt && elapsed < REPORT_EVERY_MS) return;
   try {
     logRegistered();
-    core.switch_log_activity(reportedAt ? elapsed / 1000 : 0);
+    switch_log_activity(reportedAt ? elapsed / 1000 : 0);
     flushLog();
     logHostFiles(takeHostIo());
     reportedAt = at;

@@ -1,8 +1,8 @@
 // Installing the WebGPU backend between run slices, and replacing a lost device.
 
-import { switch_gpu_open, switch_gpu_report_json } from '@core/switch_wasm.js';
+import { switch_gpu_lost, switch_gpu_open, switch_gpu_report_json } from '@core/switch_wasm.js';
 import { workerLog } from './log';
-import { core, parseOr } from './wasm';
+import { parseOr } from './wasm';
 
 // GPU install state. Installed as the loop starts, between slices: opening a device
 // needs promises a slice cannot await.
@@ -26,7 +26,7 @@ let gpuReopens = 0;
 
 // Cheaper than parsing the JSON report after every slice.
 function gpuLost(): boolean {
-  return core.switch_gpu_lost() !== 0;
+  return switch_gpu_lost();
 }
 
 export function tryGpu(): void {

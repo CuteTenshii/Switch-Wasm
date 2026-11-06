@@ -4,7 +4,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `crates/switch-wasm/src/lib.rs`
 
-- Scalar exports are raw `extern "C"`. Anything with bytes or text is a `wasm-bindgen` export taking `&[u8]`/`&str` and returning `String`/`Vec<u8>`, so no caller sizes a buffer and nothing truncates silently; a `Result` error is thrown to the caller. The page-facing declarations are in `web/env.d.ts`. The few raw exports that still take a pointer need `#![allow(clippy::not_unsafe_ptr_arg_deref)]`.
+- Every export is a `wasm-bindgen` export. Bytes and text take `&[u8]`/`&str` and return `String`/`Vec<u8>`, so no caller sizes a buffer and nothing truncates silently; flags are `bool`; a `Result` error is thrown to the caller. The page-facing declarations are in `web/env.d.ts`.
 - The session table uses `SyncCell` (an `UnsafeCell`), not `Mutex`: a reentrant `lock()` deadlocks and a panic while held leaves it locked. It is sound only because one worker calls exports; the core workers on the shared memory only instantiate. Host tests serialize on a `HOST` mutex because `cargo test` is multi-threaded, and a panic crossing `extern "C"` aborts the harness.
 - The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing, so panics are captured instead of trapping as bare `unreachable`. The panic message is cleared whenever `switch_init` builds the machine, otherwise the first error after Stop described the dead session. Log lines are not: what the dead session said still reaches the page.
 - With the `gpu` feature the host read is a wasm-bindgen import (`@host/files`, resolved by Vite) because wasm-bindgen owns the whole import object.
@@ -48,7 +48,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/worker/wasm.ts`
 
-- `WasmExports` lists only the raw scalar exports; the `wasm-bindgen` ones are imported from `@core/switch_wasm.js`. `parseOr` falls back to an empty report when a JSON export answers nothing.
+- `WasmExports` is only the module's `memory`; every function is imported from `@core/switch_wasm.js`. `parseOr` falls back to an empty report when a JSON export answers nothing.
 
 ## `web/worker/commands.ts`
 

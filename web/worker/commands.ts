@@ -8,14 +8,18 @@ import { noteRegistered } from './activity';
 import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog, workerLog } from './log';
 import {
-  switch_add_dlc, switch_add_update, switch_clear_screen, switch_control_icon,
-  switch_control_json, switch_flush_storage, switch_gpu_report_json, switch_guest_fatal,
+  switch_add_dlc, switch_add_update, switch_clear_dlc, switch_clear_screen, switch_clear_update,
+  switch_control_icon, switch_control_json, switch_end_title,
+  switch_flush_storage, switch_get_reg, switch_get_steps,
+  switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
   switch_load_keys, switch_load_nca, switch_load_nca_from_nsp, switch_load_program,
-  switch_load_sd_nro, switch_memory_json, switch_nand_identify, switch_nand_launch,
-  switch_open_nsp, switch_parse_nca, switch_program_nca_index, switch_read_file,
-  switch_remember_control, switch_restore_nand, switch_restore_storage, switch_set_touch,
-  switch_store_profile_edits, switch_user_stage, switch_users_commit,
+  switch_load_sd_nro, switch_log_regs, switch_log_threads, switch_memory_json, switch_nand_identify,
+  switch_nand_launch, switch_open_nca, switch_open_nsp, switch_parse_nca, switch_program_nca_index,
+  switch_read_file, switch_remember_control, switch_restore_nand, switch_restore_storage,
+  switch_run, switch_set_battery, switch_set_input, switch_set_jit, switch_set_operation_mode,
+  switch_set_touch, switch_set_trace, switch_set_trace_channels, switch_store_profile_edits,
+  switch_user_stage, switch_users_commit, switch_vibration,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { nandContent, STORAGE } from './storage';
@@ -28,29 +32,27 @@ function describe(file: Blob): string {
   return name + '(' + fmtSize(file.size) + ')';
 }
 
-export const CMD: CommandHandlers = {
+export const CMD = {
   endTitle() {
     stopLoop();
-    core.switch_end_title();
+    switch_end_title();
     return 0;
   },
 
   setTrace(on) {
-    core.switch_set_trace(on ? 1 : 0);
+    switch_set_trace(on);
     return 0;
   },
   setTraceChannels(on) {
-    core.switch_set_trace_channels(on ? 1 : 0);
+    switch_set_trace_channels(on);
   },
   setJit(on) {
-    core.switch_set_jit(on ? 1 : 0);
+    switch_set_jit(on);
     return 0;
   },
-  vibration() {
-    return core.switch_vibration();
-  },
+  vibration: switch_vibration,
   setInput(mask, slx, sly, srx, sry) {
-    core.switch_set_input(BigInt(mask), slx, sly, srx, sry);
+    switch_set_input(BigInt(mask), slx, sly, srx, sry);
     return 0;
   },
   setTouch(points) {
@@ -59,11 +61,11 @@ export const CMD: CommandHandlers = {
   },
   // The Battery Status API is Window-only, so the main thread sends it.
   setBattery(percent, charging) {
-    core.switch_set_battery(percent, charging ? 1 : 0);
+    switch_set_battery(percent, charging);
     return 0;
   },
   setOperationMode(next) {
-    core.switch_set_operation_mode(next ? 1 : 0);
+    switch_set_operation_mode(next);
     return 0;
   },
 
@@ -76,7 +78,7 @@ export const CMD: CommandHandlers = {
     return JSON.parse(switch_open_nsp(openHostFile(file))) as NspFile[];
   },
   openNca(file) {
-    const result = core.switch_open_nca(openHostFile(file));
+    const result = switch_open_nca(openHostFile(file));
     workerLog(`[io] opened ${describe(file)} as a standalone NCA`);
     return result;
   },
@@ -101,11 +103,11 @@ export const CMD: CommandHandlers = {
     return pieces;
   },
   clearDlc() {
-    core.switch_clear_dlc();
+    switch_clear_dlc();
     return 0;
   },
   clearUpdate() {
-    core.switch_clear_update();
+    switch_clear_update();
     return 0;
   },
   // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; null if unreadable.
@@ -147,7 +149,7 @@ export const CMD: CommandHandlers = {
   parseNca: switch_parse_nca,
 
   run(budget) {
-    return Number(core.switch_run(BigInt(budget)));
+    return Number(switch_run(BigInt(budget)));
   },
   startLoop(tracing) {
     startLoop(tracing);
@@ -163,28 +165,26 @@ export const CMD: CommandHandlers = {
     switch_clear_screen();
     return 0;
   },
-  halted() {
-    return core.switch_halted();
-  },
+  halted: switch_halted,
   guestFatal: switch_guest_fatal,
   flushLog: flushLog,
   logRegs() {
-    core.switch_log_regs();
+    switch_log_regs();
     return 0;
   },
   logThreads() {
-    core.switch_log_threads();
+    switch_log_threads();
     return 0;
   },
   getSteps() {
-    return Number(core.switch_get_steps());
+    return Number(switch_get_steps());
   },
   getReg(i) {
-    return '0x' + core.switch_get_reg(i).toString(16).padStart(16, '0');
+    return '0x' + switch_get_reg(i).toString(16).padStart(16, '0');
   },
   ram() {
     return {
-      guest: Number(core.switch_guest_ram()),
+      guest: Number(switch_guest_ram()),
       wasm: core.memory.buffer.byteLength,
     };
   },
@@ -206,16 +206,6 @@ export const CMD: CommandHandlers = {
   },
   lastError: switch_last_error,
 
-  fbWidth() {
-    return core.switch_fb_width();
-  },
-  fbHeight() {
-    return core.switch_fb_height();
-  },
-  frameCount() {
-    return core.switch_frame_count();
-  },
-
   // Users: staged one at a time, committed whole before a title starts.
 
   usersSet(users, current) {
@@ -229,4 +219,4 @@ export const CMD: CommandHandlers = {
   keyboardAnswer: switch_keyboard_answer,
 
   ...STORAGE,
-};
+} satisfies CommandHandlers;

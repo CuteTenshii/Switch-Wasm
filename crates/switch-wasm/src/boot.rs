@@ -9,8 +9,8 @@ use wasm_bindgen::prelude::*;
 use crate::{container, nsp_file_source, session, Added, Dlc, Session};
 
 /// End the running title and its applets, leaving the console ready for the next one.
-#[no_mangle]
-pub extern "C" fn switch_end_title() {
+#[wasm_bindgen]
+pub fn switch_end_title() {
     let s = session();
     s.cpu.end_title();
     crate::audio::drop_queued();

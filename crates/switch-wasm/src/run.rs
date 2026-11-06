@@ -5,8 +5,8 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use crate::session;
 
 /// Run up to `max_steps` instructions. Returns steps executed or -1 on error.
-#[no_mangle]
-pub extern "C" fn switch_run(max_steps: u64) -> i64 {
+#[wasm_bindgen]
+pub fn switch_run(max_steps: u64) -> i64 {
     let s = session();
     // The page's clock and time zone, read here rather than handed in before every slice.
     #[cfg(all(target_arch = "wasm32", feature = "jit"))]
@@ -38,15 +38,15 @@ pub extern "C" fn switch_run(max_steps: u64) -> i64 {
 
 /// Tie the guest clock to real time: `elapsed` cycles have passed since the last call.
 /// Returns how many cycles the clock is ahead, to wait out before the next slice.
-#[no_mangle]
-pub extern "C" fn switch_pace(elapsed: u64) -> u64 {
+#[wasm_bindgen]
+pub fn switch_pace(elapsed: u64) -> u64 {
     session().cpu.pace_to_real_time(elapsed)
 }
 
 /// True if the machine halted via SVC #0.
-#[no_mangle]
-pub extern "C" fn switch_halted() -> i32 {
-    session().cpu.halted as i32
+#[wasm_bindgen]
+pub fn switch_halted() -> bool {
+    session().cpu.halted
 }
 
 /// The last `fatal:u` report for this program, or empty if it made none.
@@ -56,19 +56,19 @@ pub fn switch_guest_fatal() -> String {
 }
 
 /// Read register `idx` (0..=31; 31 = SP).
-#[no_mangle]
-pub extern "C" fn switch_get_reg(idx: u32) -> u64 {
+#[wasm_bindgen]
+pub fn switch_get_reg(idx: u32) -> u64 {
     session().cpu.read_x(idx as u8)
 }
 
 /// Instructions actually retired.
-#[no_mangle]
-pub extern "C" fn switch_get_steps() -> u64 {
+#[wasm_bindgen]
+pub fn switch_get_steps() -> u64 {
     session().cpu.steps
 }
 
 /// The title's guest RAM backed by host storage, in bytes, even while an applet runs.
-#[no_mangle]
-pub extern "C" fn switch_guest_ram() -> u64 {
+#[wasm_bindgen]
+pub fn switch_guest_ram() -> u64 {
     session().cpu.title_backed()
 }

@@ -40,10 +40,9 @@ pub fn switch_gpu_report_json() -> String {
 }
 
 /// Whether the GPU backend has lost its device. Cheap; polled every slice.
-#[no_mangle]
-pub extern "C" fn switch_gpu_lost() -> u32 {
-    let s = session();
-    u32::from(s.cpu.nv.gpu.renderer_lost())
+#[wasm_bindgen]
+pub fn switch_gpu_lost() -> bool {
+    session().cpu.nv.gpu.renderer_lost()
 }
 
 /// The title's backed guest memory by region, as JSON. The page adds the heap size itself.

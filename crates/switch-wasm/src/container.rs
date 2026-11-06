@@ -36,8 +36,8 @@ pub fn switch_open_nsp(size: u64) -> Result<String, String> {
 }
 
 /// Open the host's container as a single standalone `.nca`. Returns 0.
-#[no_mangle]
-pub extern "C" fn switch_open_nca(size: u64) -> i32 {
+#[wasm_bindgen]
+pub fn switch_open_nca(size: u64) -> i32 {
     let s = session();
     s.container = Some(HostSource { file: 0, len: size });
     s.nsp_files = Vec::new();
@@ -226,13 +226,13 @@ fn dlc_json(content_ids: impl Iterator<Item = u64>) -> String {
     })
 }
 
-#[no_mangle]
-pub extern "C" fn switch_clear_dlc() {
+#[wasm_bindgen]
+pub fn switch_clear_dlc() {
     session().dlc.clear();
 }
 
-#[no_mangle]
-pub extern "C" fn switch_clear_update() {
+#[wasm_bindgen]
+pub fn switch_clear_update() {
     session().update = None;
 }
 

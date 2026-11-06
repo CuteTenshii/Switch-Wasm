@@ -27,6 +27,36 @@ declare module '@core/switch_wasm.js' {
   export function switch_attach_screen(canvas: OffscreenCanvas): void;
   export function switch_present(): boolean;
   export function switch_clear_screen(): void;
+  // The scalar exports. Each `u64` is a bigint, each `u32` and `i32` a number, each `bool` a boolean.
+  export function switch_init(): void;
+  export function switch_add_core(): number;
+  // Blocks the calling core worker until the session stops the core.
+  export function switch_serve_core(slot: number): void;
+  export function switch_end_title(): void;
+  export function switch_open_nca(size: bigint): number;
+  export function switch_clear_dlc(): void;
+  export function switch_clear_update(): void;
+  export function switch_set_trace(enabled: boolean): void;
+  export function switch_set_jit(enabled: boolean): void;
+  export function switch_set_trace_channels(on: boolean): void;
+  export function switch_gpu_lost(): boolean;
+  export function switch_log_activity(seconds: number): void;
+  export function switch_set_input(
+    buttons: bigint, stickLx: number, stickLy: number, stickRx: number, stickRy: number): void;
+  export function switch_set_battery(percent: number, charging: boolean): void;
+  export function switch_set_operation_mode(docked: boolean): void;
+  export function switch_vibration(): number;
+  export function switch_run(maxSteps: bigint): bigint;
+  export function switch_pace(elapsed: bigint): bigint;
+  export function switch_halted(): boolean;
+  export function switch_log_regs(): void;
+  export function switch_log_threads(): void;
+  export function switch_get_reg(idx: number): bigint;
+  export function switch_get_steps(): bigint;
+  export function switch_guest_ram(): bigint;
+  // `[width, height]`.
+  export function switch_fb_size(): Uint32Array;
+  export function switch_frame_count(): number;
   // `crates/switch-wasm/src/idb/persist.rs`: the SD card and saves, to and from IndexedDB.
   export function switch_restore_storage(): Promise<number>;
   export function switch_flush_storage(): Promise<number>;

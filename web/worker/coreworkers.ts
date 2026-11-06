@@ -2,7 +2,7 @@
 
 import type { CoreMessage, CoreStarted } from './core';
 import { workerLog } from './log';
-import { core } from './wasm';
+import { switch_add_core } from '@core/switch_wasm.js';
 
 const CORE_WORKERS = 2;
 
@@ -18,7 +18,7 @@ export function startCores(module: WebAssembly.Module, memory: WebAssembly.Memor
         return;
       }
       started.push(worker);
-      worker.postMessage({ slot: core.switch_add_core() } satisfies CoreMessage);
+      worker.postMessage({ slot: switch_add_core() } satisfies CoreMessage);
       if (started.length === CORE_WORKERS) {
         workerLog(`[core] ${CORE_WORKERS} core workers started on shared memory`);
       }

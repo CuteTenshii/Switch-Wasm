@@ -1,43 +1,45 @@
 //! Debugging levers and traces.
 
+use wasm_bindgen::prelude::wasm_bindgen;
+
 use crate::log::{collect, push, PageLevel};
 use crate::session;
 
 /// Enable/disable the block translator; the browser has no `SWITCH_NO_JIT`.
-#[no_mangle]
-pub extern "C" fn switch_set_jit(enabled: u32) {
-    session().cpu.set_jit_enabled(enabled != 0);
+#[wasm_bindgen]
+pub fn switch_set_jit(enabled: bool) {
+    session().cpu.set_jit_enabled(enabled);
 }
 
 /// Enable/disable the per-instruction disassembly trace.
-#[no_mangle]
-pub extern "C" fn switch_set_trace(enabled: u32) {
+#[wasm_bindgen]
+pub fn switch_set_trace(enabled: bool) {
     let s = session();
-    s.cpu.trace_enabled = enabled != 0;
-    if enabled == 0 {
+    s.cpu.trace_enabled = enabled;
+    if !enabled {
         // What was traced before it was turned off still reaches the log.
         collect(&mut s.cpu);
     }
 }
 
 /// Log a full register snapshot.
-#[no_mangle]
-pub extern "C" fn switch_log_regs() {
+#[wasm_bindgen]
+pub fn switch_log_regs() {
     let s = session();
     collect(&mut s.cpu);
     push(PageLevel::Log, &s.cpu.reg_dump());
 }
 
 /// Log one line per guest thread: state, what it is blocked on, and where it stopped.
-#[no_mangle]
-pub extern "C" fn switch_log_threads() {
+#[wasm_bindgen]
+pub fn switch_log_threads() {
     let s = session();
     collect(&mut s.cpu);
     push(PageLevel::Log, &s.cpu.thread_dump());
 }
 
-/// Turn every diagnostic channel on (nonzero) or off.
-#[no_mangle]
-pub extern "C" fn switch_set_trace_channels(on: u32) {
-    switch_core::trace::set_all(on != 0);
+/// Turn every diagnostic channel on or off.
+#[wasm_bindgen]
+pub fn switch_set_trace_channels(on: bool) {
+    switch_core::trace::set_all(on);
 }

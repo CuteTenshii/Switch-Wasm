@@ -45,7 +45,7 @@ export function traceEnabled(): boolean {
 }
 
 traceCb.addEventListener('change', () => {
-  void call('setTrace', traceCb.checked ? 1 : 0);
+  void call('setTrace', traceCb.checked);
   setNote('trace-badge', traceCb.checked ? 'on' : 'off', traceCb.checked);
   if (traceCb.checked) log('Tracing enabled - run slices are capped for readability. The trace shows at the Trace log level.');
 });
@@ -53,7 +53,7 @@ traceCb.addEventListener('change', () => {
 const jitCb = $<HTMLInputElement>('jit-cb');
 
 jitCb.addEventListener('change', () => {
-  void call('setJit', jitCb.checked ? 1 : 0);
+  void call('setJit', jitCb.checked);
   setNote('jit-badge', jitCb.checked ? 'on' : 'off', jitCb.checked);
   if (!jitCb.checked) log('Block translation disabled - running the plain interpreter.');
 });

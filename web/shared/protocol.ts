@@ -220,13 +220,13 @@ export interface Commands {
   // End the running title and its applets; the console stays.
   endTitle(): number;
 
-  setTrace(on: number): number;
-  setJit(on: number): number;
+  setTrace(on: boolean): number;
+  setJit(on: boolean): number;
   setTraceChannels(on: boolean): void;
   setInput(mask: number, slx: number, sly: number, srx: number, sry: number): number;
   setTouch(points: Uint32Array): number;
-  setBattery(percent: number, charging: number): number;
-  setOperationMode(docked: number): number;
+  setBattery(percent: number, charging: boolean): number;
+  setOperationMode(docked: boolean): number;
   vibration(): number;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
@@ -269,7 +269,7 @@ export interface Commands {
   restoreStorage(): number;
   flushStorage(): number;
   clearScreen(): number;
-  halted(): number;
+  halted(): boolean;
   guestFatal(): string;
   // Passes the core's queued lines on now; how many there were.
   flushLog(): number;
@@ -282,10 +282,6 @@ export interface Commands {
   jitStats(): JitStats;
   gpuReport(): GpuReport;
   lastError(): string;
-
-  fbWidth(): number;
-  fbHeight(): number;
-  frameCount(): number;
 
   // The stored SD card and saves. Changes go to IndexedDB first, then to the running session.
   storageScan(volume: StorageVolume): Map<string, StorageInfo>;

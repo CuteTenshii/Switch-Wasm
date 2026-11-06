@@ -5,8 +5,10 @@ import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
 import { flushLog } from './log';
-import { switch_present } from '@core/switch_wasm.js';
-import { core, explainFailure } from './wasm';
+import {
+  switch_fb_size, switch_frame_count, switch_halted, switch_pace, switch_present,
+} from '@core/switch_wasm.js';
+import { explainFailure } from './wasm';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -74,7 +76,7 @@ function slice(): void {
     const credit = Math.min(at - lastPace, MAX_CREDIT_MS);
     lastPace = at;
     const elapsed = BigInt(Math.round(credit * CYCLES_PER_MS));
-    const aheadMs = Number(core.switch_pace(elapsed)) / CYCLES_PER_MS;
+    const aheadMs = Number(switch_pace(elapsed)) / CYCLES_PER_MS;
     if (aheadMs >= MIN_WAIT_MS && !pauseRequested) {
       setTimeout(slice, Math.min(aheadMs, MAX_WAIT_MS));
       return;
@@ -82,7 +84,7 @@ function slice(): void {
   }
   let steps: number;
   try {
-    steps = CMD.run(budget) as number;
+    steps = CMD.run(budget);
   } catch (err) {
     running = false;
     ctx.postMessage({ type: 'loop_failed', error: explainFailure(err) } satisfies WorkerMessage);
@@ -90,7 +92,7 @@ function slice(): void {
   }
   const ms = performance.now() - at;
   // A slice also ends short when the clock idles past real time.
-  const done = steps < 0 || core.switch_halted() !== 0;
+  const done = steps < 0 || switch_halted();
   const stopped = done || pauseRequested;
   tryGpu();
   reportActivity(done);
@@ -98,15 +100,16 @@ function slice(): void {
   flushLog();
   const paintMs = paint();
 
+  const [width, height] = switch_fb_size();
   const report: SliceReport = {
     ended: done,
     steps,
     budget,
     ms,
     stopped,
-    frame: core.switch_frame_count(),
-    width: core.switch_fb_width(),
-    height: core.switch_fb_height(),
+    frame: switch_frame_count(),
+    width,
+    height,
     paintMs,
     housekeeping: stopped || ++tick % HOUSEKEEPING_EVERY === 0 ? housekeeping() : null,
   };
@@ -131,7 +134,7 @@ export function paint(): number | null {
 
 function housekeeping(): Housekeeping {
   return {
-    steps: CMD.getSteps() as number,
-    ram: CMD.ram() as Housekeeping['ram'],
+    steps: CMD.getSteps(),
+    ram: CMD.ram(),
   };
 }

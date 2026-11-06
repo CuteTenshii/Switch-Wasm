@@ -40,11 +40,11 @@ fn a_panic_message_is_cut_between_characters_not_through_one() {
 #[test]
 fn the_page_turns_every_trace_channel_on_and_off() {
     let _host = HOST.lock().unwrap_or_else(|e| e.into_inner());
-    switch_set_trace_channels(1);
+    switch_set_trace_channels(true);
     let all_on = switch_core::trace::ALL
         .iter()
         .all(|&channel| switch_core::trace::enabled(channel));
-    switch_set_trace_channels(0);
+    switch_set_trace_channels(false);
     assert!(all_on);
     assert_eq!(switch_core::trace::mask(), 0);
 }

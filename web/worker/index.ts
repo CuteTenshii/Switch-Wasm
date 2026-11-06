@@ -1,13 +1,13 @@
 // Worker host: owns the wasm instance and session, answering `{ id, cmd, args }`
 // RPCs from the main thread.
 
-import type { CallRequest, WorkerMessage } from '../shared/protocol';
+import type { CallRequest, CommandHandlers, WorkerMessage } from '../shared/protocol';
 import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { paint } from './loop';
 import { tryGpu } from './gpu';
 import { flushLog, workerLog } from './log';
-import init, { switch_attach_screen } from '@core/switch_wasm.js';
+import init, { switch_attach_screen, switch_init } from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { core, explainFailure, setCore, type WasmExports } from './wasm';
 import { startCores } from './coreworkers';
@@ -37,7 +37,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
   }
   const { id, cmd, args } = e.data;
   try {
-    const handler = CMD[cmd] as ((...a: unknown[]) => unknown) | undefined;
+    const handler = (CMD as CommandHandlers)[cmd] as ((...a: unknown[]) => unknown) | undefined;
     if (!handler) throw new Error('unknown command ' + cmd);
     const result = handler(...args);
     // IndexedDB work answers when it is done.
@@ -80,7 +80,7 @@ void (async () => {
     const module = await WebAssembly.compileStreaming(fetch(wasmUrl));
     setCore(await init({ module_or_path: module }) as unknown as WasmExports);
     // Install the panic hook before anything else can panic.
-    core.switch_init();
+    switch_init();
     startCores(module, core.memory);
     reply({ type: 'ready' });
   } catch (err) {

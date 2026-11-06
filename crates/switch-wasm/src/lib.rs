@@ -1,10 +1,7 @@
-//! WASM bindings for switch-core. Scalars cross as raw `extern "C"` exports; anything with
-//! bytes or text goes through `wasm-bindgen`. The one session is a global, structured
-//! results are hand-written JSON, and a failure's reason is thrown to the caller as a
-//! `Result`'s error (a trap's is the panic hook's message, `switch_panic_message`).
-
-// Exports take pointers into linear memory that the JS caller owns for the call.
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+//! WASM bindings for switch-core. Every export goes through `wasm-bindgen`. The one session is
+//! a global, structured results are hand-written JSON, and a failure's reason is thrown to
+//! the caller as a `Result`'s error (a trap's is the panic hook's message,
+//! `switch_panic_message`).
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -214,8 +211,8 @@ impl ByteSource for HostSource {
 
 /// Set up the module and build its machine, replacing any earlier one (which keeps its
 /// logged lines). Call right after instantiating.
-#[no_mangle]
-pub extern "C" fn switch_init() {
+#[wasm_bindgen]
+pub fn switch_init() {
     install_panic_hook();
     attach_jit();
     forget_the_last_session();
