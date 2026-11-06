@@ -1883,3 +1883,44 @@ fn a_draw_beside_a_depth_surface_larger_only_one_way_agrees() {
     assert_eq!(got.0, want.0, "colour");
     assert_eq!(got.1, want.1, "depth");
 }
+
+/// An `RGBA32_UINT` target takes the fragment shader's register words as they are, on both renderers.
+#[test]
+fn an_integer_target_takes_the_shader_words_on_both_renderers() {
+    let Some(mut gpu) = device() else { return };
+    let colour = [1.0f32, 2.0, 3.0, 4.0];
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::new();
+        // 4x8 texels of sixteen bytes, which fit before the shaders.
+        h.engine.regs.set(0x202, 4 * 16);
+        h.engine.regs.set(0x204, 0xC2);
+        h.engine.regs.set(0x300, 4 << 16);
+        h.engine.regs.set(0x301, 8 << 16);
+        h.triangle(colour);
+        match gpu {
+            Some(gpu) => {
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => h.draw_with(&mut Software).expect("the draw"),
+        }
+        let base = h.base;
+        let ctx = h.ctx();
+        (0..4 * 8 * 4)
+            .map(|word| ctx.read_u32(base + word * 4).unwrap())
+            .collect::<Vec<u32>>()
+    };
+    let want = build(None);
+    let before = gpu.fallbacks;
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, before,
+        "the draw did not run on the device: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want);
+    // The top-left texel is the colour's own words, not integers made of them.
+    assert_eq!(got[..4], colour.map(f32::to_bits));
+}

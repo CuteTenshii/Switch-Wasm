@@ -99,6 +99,10 @@ impl Gpu {
         let mut fs_layout = Layout::of(&fs, Stage::Fragment);
         // A depth-only pass has no colour output.
         fs_layout.targets = u32::from(color.is_some());
+        // An integer target takes raw words.
+        if color.is_some_and(|target| target.format.is_uint()) {
+            fs_layout.uint_targets = vec![0];
+        }
         // Both stages must name the same varyings; missing ones read as zero.
         let mut varyings = vs_layout.varyings.clone();
         varyings.extend(fs_layout.varyings.iter().copied());
@@ -215,6 +219,16 @@ impl Gpu {
                     .find(|t| t.stage == stage && t.slot == binding.slot)
                 {
                     binding.swizzle = upload.swizzle;
+                    binding.uint = upload.format.is_uint();
+                    if binding.uint {
+                        // Read texel by texel, with the raw words as they are.
+                        if upload.swizzle != wgsl::IDENTITY_SWIZZLE || binding.compare {
+                            return Err(
+                                "an integer image sampled through a swizzle or a comparison".into(),
+                            );
+                        }
+                        continue;
+                    }
                     binding.fold = self.fold(upload, binding)?;
                 }
             }

@@ -89,9 +89,10 @@ pub fn module(
         out.push_str(&format!(
             "@group({}) @binding({binding}) var tex{index}: {};\n",
             layout.group,
-            match texture.fold {
-                Some(_) => folded_texture_type(texture.dim, texture.compare)?,
-                None => texture_type(texture.dim, texture.compare)?,
+            match (texture.uint, texture.fold) {
+                (true, _) => uint_texture_type(texture.dim, texture.compare)?,
+                (false, Some(_)) => folded_texture_type(texture.dim, texture.compare)?,
+                (false, None) => texture_type(texture.dim, texture.compare)?,
             }
         ));
         out.push_str(&format!(
@@ -150,6 +151,12 @@ pub fn module(
     // An unbound bank reads zero.
     out.push_str("    default: { return 0u; }\n  }\n}\n\n");
 
+    // Neither reads an integer image here.
+    if layout.textures.iter().any(|texture| texture.uint)
+        && (!layout.texture_offsets.is_empty() || translated.source.contains("texGather("))
+    {
+        return Err(Unsupported::IntegerTexture);
+    }
     // `dim` is unused here but part of `HOST_INTERFACE`.
     out.push_str(
         "fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {\n\
@@ -157,6 +164,13 @@ pub fn module(
     );
     for (index, texture) in layout.textures.iter().enumerate() {
         if texture.compare {
+            continue;
+        }
+        if texture.uint {
+            let (key, load) = (texture.slot.key(), uint_load(index, texture.dim)?);
+            out.push_str(&format!(
+                "    case {key}u: {{ {load} return bitcast<vec4<f32>>(texel); }}\n"
+            ));
             continue;
         }
         let coords = match texture.dim {
@@ -216,6 +230,9 @@ pub fn module(
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
+        if texture.uint {
+            continue;
+        }
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, false) => "vec2<f32>(u, v), 0.0",
             (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer, 0.0",
@@ -281,6 +298,9 @@ pub fn module(
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
+        if texture.uint {
+            continue;
+        }
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, false) => "vec2<f32>(u, v)",
             (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer",
@@ -318,6 +338,21 @@ pub fn module(
         Stage::Fragment => fragment_entry(translated, layout),
     });
     Ok(out)
+}
+
+/// Statements binding `texel`, the raw words of the integer image's texel under `(u, v)`:
+/// no filtering, the nearest texel, clamped to the edge.
+fn uint_load(index: usize, dim: TexDim) -> Result<String, Unsupported> {
+    let layer = match dim {
+        TexDim::T2d => "",
+        TexDim::T2dArray => ", i32(layer)",
+        dim => return Err(Unsupported::TextureDimension { dim }),
+    };
+    Ok(format!(
+        "let size = vec2<i32>(textureDimensions(tex{index})); \
+         let at = clamp(vec2<i32>(floor(vec2<f32>(u, v) * vec2<f32>(size))), vec2<i32>(0), size - vec2<i32>(1)); \
+         let texel = textureLoad(tex{index}, at{layer}, 0);"
+    ))
 }
 
 /// `return` a sample rearranged by a descriptor swizzle.
@@ -373,6 +408,15 @@ fn folded_coords(fold: Fold, dy: i32) -> String {
 fn folded_texture_type(dim: TexDim, compare: bool) -> Result<&'static str, Unsupported> {
     match (dim, compare) {
         (TexDim::T2d | TexDim::T2dArray, false) => Ok("texture_2d_array<f32>"),
+        (dim, _) => Err(Unsupported::TextureDimension { dim }),
+    }
+}
+
+/// The WGSL type of an integer image's binding: only plain 2D ones are read.
+fn uint_texture_type(dim: TexDim, compare: bool) -> Result<&'static str, Unsupported> {
+    match (dim, compare) {
+        (TexDim::T2d, false) => Ok("texture_2d<u32>"),
+        (TexDim::T2dArray, false) => Ok("texture_2d_array<u32>"),
         (dim, _) => Err(Unsupported::TextureDimension { dim }),
     }
 }
@@ -504,18 +548,28 @@ fn vertex_entry(layout: &Layout) -> String {
 
 fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
     let colour = |target: u32| -> String {
+        let uint = layout.uint_targets.contains(&target);
         let components: Vec<String> = (0..4)
             .map(|c| {
                 let reg = (target * 4 + c) as u8;
-                if translated.registers.contains(&reg) {
-                    format!("bitcast<f32>(r{reg})")
-                } else {
+                match (translated.registers.contains(&reg), uint) {
+                    (true, true) => format!("r{reg}"),
+                    (true, false) => format!("bitcast<f32>(r{reg})"),
                     // An unwritten channel is zero.
-                    "0.0".to_string()
+                    (false, true) => "0u".to_string(),
+                    (false, false) => "0.0".to_string(),
                 }
             })
             .collect();
-        format!("vec4<f32>({})", components.join(", "))
+        let vec = if uint { "vec4<u32>" } else { "vec4<f32>" };
+        format!("{vec}({})", components.join(", "))
+    };
+    let output_type = |target: u32| {
+        if layout.uint_targets.contains(&target) {
+            "vec4<u32>"
+        } else {
+            "vec4<f32>"
+        }
     };
 
     let mut out = String::new();
@@ -535,14 +589,15 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         out.push_str("struct FragmentOutput {\n");
         for target in 0..targets {
             out.push_str(&format!(
-                "  @location({target}) target{target}: vec4<f32>,\n"
+                "  @location({target}) target{target}: {},\n",
+                output_type(target)
             ));
         }
         out.push_str("}\n\n");
     }
     let returns = match targets {
         0 => String::new(),
-        1 => " -> @location(0) vec4<f32>".to_string(),
+        1 => format!(" -> @location(0) {}", output_type(0)),
         _ => " -> FragmentOutput".to_string(),
     };
     out.push_str(&format!(

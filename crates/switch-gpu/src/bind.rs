@@ -64,7 +64,9 @@ impl Gpu {
                 .find(|b| b.slot == upload.slot)
                 .ok_or("a texture the module never declared")?;
             let compare = declared_texture.compare;
-            if !compare {
+            let uint = declared_texture.uint;
+            // An integer image is read texel by texel, which needs no filter.
+            if !compare && !uint {
                 let (format, _) = sampled_texture_format(self.features(), upload.format)
                     .map_err(|e| format!("{e:?}"))?;
                 if !can_filter(format, self.features()) {
@@ -93,6 +95,8 @@ impl Gpu {
                 ty: wgpu::BindingType::Texture {
                     sample_type: if compare {
                         wgpu::TextureSampleType::Depth
+                    } else if uint {
+                        wgpu::TextureSampleType::Uint
                     } else {
                         wgpu::TextureSampleType::Float { filterable: true }
                     },

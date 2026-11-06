@@ -30,6 +30,10 @@ impl Gpu {
         if rect.x1 <= rect.x0 || rect.y1 <= rect.y0 {
             return Ok(());
         }
+        // The rectangle pass writes floats.
+        if !whole && color.is_some_and(|(target, _, _)| target.format.is_uint()) {
+            return Err("a partial clear of an integer target".into());
+        }
 
         let mut views = Vec::new();
         for (target, blank) in [color.map(|(t, _, _)| t), depth.map(|(t, _)| t)]
@@ -120,6 +124,17 @@ impl Gpu {
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: match (whole, color) {
+                                // An integer target's clear value is its raw words.
+                                (true, Some((target, [r, g, b, a], _)))
+                                    if target.format.is_uint() =>
+                                {
+                                    wgpu::LoadOp::Clear(wgpu::Color {
+                                        r: f64::from(r.to_bits()),
+                                        g: f64::from(g.to_bits()),
+                                        b: f64::from(b.to_bits()),
+                                        a: f64::from(a.to_bits()),
+                                    })
+                                }
                                 (true, Some((_, [r, g, b, a], _))) => {
                                     wgpu::LoadOp::Clear(wgpu::Color {
                                         r: f64::from(r),

@@ -768,7 +768,8 @@ fn encode_channel(channel: Channel, numeric: Numeric, value: f32) -> u128 {
             let scaled = (value.clamp(-1.0, 1.0) * (mask >> 1) as f32).round() as i64;
             scaled as u64 & mask
         }
-        Numeric::Uint => (f64::from(value)).clamp(0.0, mask as f64) as u64,
+        // An integer target takes the register's own bits, saturated to the channel.
+        Numeric::Uint => u64::from(value.to_bits()).min(mask),
         Numeric::Sint => {
             let max = (mask >> 1) as f64;
             (f64::from(value)).clamp(-max - 1.0, max) as i64 as u64 & mask
@@ -795,7 +796,8 @@ fn decode_channel(channel: Channel, numeric: Numeric, raw: u128) -> f32 {
         Numeric::Unorm => bits as f32 / mask as f32,
         // The most negative value clamps to -1.0.
         Numeric::Snorm => (signed() as f32 / (mask >> 1) as f32).max(-1.0),
-        Numeric::Uint => bits as f32,
+        // The integer, as the register that reads it holds it.
+        Numeric::Uint => f32::from_bits(bits as u32),
         Numeric::Sint => signed() as f32,
         Numeric::Float => match channel.bits {
             32 => f32::from_bits(bits as u32),
@@ -1484,13 +1486,17 @@ mod tests {
         assert_eq!(format.encode([-2.0, 0.0, 0.0, 0.0]).unwrap() & 0xFF, 0x81);
     }
 
-    /// An integer target holds the value, not a fraction of its range.
+    /// An integer target holds the value, not a fraction of its range. A signed one is given a
+    /// number; an unsigned one the register's own bits, as the hardware writes it.
     #[test]
     fn an_integer_target_stores_the_value_it_is_given() {
         let format = ColorFormat::from_raw(0xD9).unwrap(); // A8B8G8R8_UINT
-        let stored = format.encode([255.0, 300.0, -5.0, 1.0]).unwrap();
+        let words = [255, 300, 0, 1].map(f32::from_bits);
+        let stored = format.encode(words).unwrap();
+        // Saturated to the channel, not wrapped.
         assert_eq!(stored, 255 | (255 << 8) | (1 << 24));
-        assert_eq!(format.decode(stored).unwrap(), [255.0, 255.0, 0.0, 1.0]);
+        let back = format.decode(stored).unwrap().map(f32::to_bits);
+        assert_eq!(back, [255, 255, 0, 1]);
 
         let signed = ColorFormat::from_raw(0xD8).unwrap(); // A8B8G8R8_SINT
         let stored = signed.encode([-128.0, 127.0, -200.0, 0.0]).unwrap();
@@ -1523,7 +1529,9 @@ mod tests {
         for raw in NAMED {
             let format = ColorFormat::from_raw(raw).unwrap();
             let packing = format.packing().unwrap();
-            let colour = if packing.numeric.is_integer() {
+            let colour = if packing.numeric == Numeric::Uint {
+                [3, 1, 2, 1].map(f32::from_bits)
+            } else if packing.numeric.is_integer() {
                 [3.0, 1.0, 2.0, 1.0]
             } else {
                 [0.25, 0.5, 0.75, 1.0]

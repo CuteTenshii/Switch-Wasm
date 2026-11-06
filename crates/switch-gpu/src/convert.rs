@@ -272,6 +272,7 @@ pub(crate) fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
         Format::Rgba16Snorm => T::Rgba16Snorm,
         Format::Rgba16Float => T::Rgba16Float,
         Format::Rgba32Float => T::Rgba32Float,
+        Format::Rgba32Uint => T::Rgba32Uint,
         Format::Depth16Unorm => T::Depth16Unorm,
         Format::Depth24Plus => T::Depth24Plus,
         Format::Depth24PlusStencil8 => T::Depth24PlusStencil8,

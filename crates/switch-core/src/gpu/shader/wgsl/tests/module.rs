@@ -109,6 +109,7 @@ fn a_layout_names_every_binding_the_text_calls_through() {
             compare: false,
             swizzle: IDENTITY_SWIZZLE,
             fold: None,
+            uint: false,
         }]
     );
     let source = module(&translated, Stage::Fragment, &layout).unwrap();
@@ -149,6 +150,65 @@ fn a_tld4s_gathers_into_texss_registers() {
             "{reg} unwritten: {source}"
         );
     }
+}
+
+#[test]
+fn an_integer_image_is_read_by_texel_and_an_integer_target_takes_raw_words() {
+    let p = program(&[
+        (
+            Op::Texs {
+                dst: 0,
+                dst2: 2,
+                coords: [4, 5, RZ],
+                dref: None,
+                handle: 8,
+                dim: TexDim::T2d,
+                mask: [true, true, true, true],
+                f16: false,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    let translated = translate(&p).unwrap();
+    let mut layout = Layout::of(&translated, Stage::Fragment);
+    layout.textures[0].uint = true;
+    layout.uint_targets = vec![0];
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(source.contains("var tex0: texture_2d<u32>"), "{source}");
+    assert!(
+        source.contains("textureLoad(tex0, at, 0)"),
+        "an integer image is not filtered: {source}"
+    );
+    assert!(source.contains("-> @location(0) vec4<u32>"), "{source}");
+    assert!(
+        source.contains("return vec4<u32>(r0, r1, r2, r3);"),
+        "{source}"
+    );
+
+    // A gather reads a float image's footprint, which an integer image has no filter for.
+    let gather = program(&[
+        (
+            Op::Tld4s {
+                dst: 0,
+                dst2: 2,
+                coords: [4, 5],
+                offset: None,
+                handle: 8,
+                component: 0,
+                f16: false,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    let translated = translate(&gather).unwrap();
+    let mut layout = Layout::of(&translated, Stage::Fragment);
+    layout.textures[0].uint = true;
+    assert!(matches!(
+        module(&translated, Stage::Fragment, &layout),
+        Err(Unsupported::IntegerTexture)
+    ));
 }
 
 #[test]

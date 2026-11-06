@@ -117,6 +117,85 @@ fn the_quad_swap_a_browser_gets_is_wgsl_naga_accepts() {
     assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
 }
 
+/// Mario Kart 8 Deluxe's `tld4s`, and an integer image read into an integer target, are valid WGSL.
+#[test]
+fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
+    use super::{wgpu, wgsl, Compiled, Layout, Stage};
+    use switch_core::gpu::shader::isa::{self, Instruction, Pred};
+    use switch_core::gpu::shader::{Op, Program};
+
+    let Some(gpu) = device() else { return };
+    let mut program = Program::default();
+    let ops = [0xdf020080c0a7010e].map(|word| isa::decode(word).op);
+    for (index, op) in ops.into_iter().chain([Op::Exit]).enumerate() {
+        assert!(!matches!(op, Op::Unimplemented { .. }), "{op:?}");
+        program.insns.push(Instruction {
+            pred: Pred::ALWAYS,
+            op,
+        });
+        program.offsets.push(index as u32 * 8);
+    }
+    let translated = wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE)
+        .expect("a tld4s translates");
+    for uint in [false, true] {
+        let mut layout = Layout::of(&translated, Stage::Fragment);
+        if uint {
+            // A gather has no integer form here.
+            layout.textures[0].uint = true;
+            assert!(wgsl::module(&translated, Stage::Fragment, &layout).is_err());
+            continue;
+        }
+        let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+        let _ = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("tld4s"),
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+    }
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+    assert!(
+        rejected.is_none(),
+        "naga rejected the tld4s module: {rejected:?}"
+    );
+
+    // A `texs` of an integer image, written to an integer target.
+    let mut program = Program::default();
+    let texs = Op::Texs {
+        dst: 0,
+        dst2: 2,
+        coords: [4, 5, isa::RZ],
+        dref: None,
+        handle: 8,
+        dim: isa::TexDim::T2d,
+        mask: [true; 4],
+        f16: false,
+    };
+    for (index, op) in [texs, Op::Exit].into_iter().enumerate() {
+        program.insns.push(Instruction {
+            pred: Pred::ALWAYS,
+            op,
+        });
+        program.offsets.push(index as u32 * 8);
+    }
+    let translated =
+        wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE).expect("a texs translates");
+    let mut layout = Layout::of(&translated, Stage::Fragment);
+    layout.textures[0].uint = true;
+    layout.uint_targets = vec![0];
+    let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+    let _ = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("integer texs"),
+            source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+        });
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+    assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+}
+
 /// Tomodachi Life's cube-array `tex` forms and its `vmnmx` translate to valid WGSL.
 #[test]
 fn tomodachi_lifes_cube_array_and_video_min_are_wgsl_naga_accepts() {

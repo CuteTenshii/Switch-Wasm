@@ -30,6 +30,8 @@ pub struct Layout {
     pub globals: Vec<(u8, u16)>,
     /// Colour targets written, from `r0` in fours. Zero is a depth-only pass.
     pub targets: u32,
+    /// Targets whose format is integer, written as raw words; filled from the draw.
+    pub uint_targets: Vec<u32>,
     /// This module's bind group; each stage needs its own.
     pub group: u32,
     /// Whether the vertex entry negates `position.y`: when the guest's viewport
@@ -77,6 +79,8 @@ pub struct TextureBinding {
     pub compare: bool,
     /// Set by the backend for an image taller than the device allows.
     pub fold: Option<Fold>,
+    /// An integer image, read a texel at a time as raw words; filled from the TIC.
+    pub uint: bool,
 }
 
 /// A 2D image taller than the device allows, bound as array layers of overlapping
@@ -174,11 +178,13 @@ impl Layout {
                     compare,
                     swizzle: IDENTITY_SWIZZLE,
                     fold: None,
+                    uint: false,
                 })
                 .collect(),
             texture_offsets: translated.texture_offsets.clone(),
             globals: translated.globals.clone(),
             targets: 1,
+            uint_targets: Vec::new(),
             group: 0,
             // Both from the draw's viewport.
             flip_y: false,

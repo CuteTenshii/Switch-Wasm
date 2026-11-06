@@ -56,6 +56,7 @@ fn blocker(why: Unsupported) -> String {
         Unsupported::IndirectBranch { .. } => "brx with an unread jump table".into(),
         Unsupported::UntracedHandle { .. } => "bindless handle not from a constant bank".into(),
         Unsupported::SharedHandleKey { .. } => "two bindless handles keyed alike".into(),
+        Unsupported::IntegerTexture => "gather or offset sample of an integer image".into(),
     }
 }
 
@@ -76,7 +77,7 @@ fn blocked_at(why: &Unsupported) -> Option<usize> {
         | Unsupported::DepthCompare { at }
         | Unsupported::UntracedHandle { at }
         | Unsupported::SharedHandleKey { at } => Some(at),
-        Unsupported::TextureDimension { .. } => None,
+        Unsupported::TextureDimension { .. } | Unsupported::IntegerTexture => None,
     }
 }
 

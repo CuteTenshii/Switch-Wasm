@@ -47,6 +47,8 @@ pub enum Unsupported {
     UntracedHandle { at: usize },
     /// Two bindless handles of one program that the sampling hooks would key alike.
     SharedHandleKey { at: usize },
+    /// An integer image read by a gather or an offset sample, which only float images have here.
+    IntegerTexture,
 }
 
 impl fmt::Display for Unsupported {
@@ -54,6 +56,9 @@ impl fmt::Display for Unsupported {
         match self {
             Unsupported::Op { at, op } => {
                 write!(f, "instruction {at}: no WGSL form for {op:?}")
+            }
+            Unsupported::IntegerTexture => {
+                write!(f, "a gather or offset sample of an integer image")
             }
             Unsupported::Quad { at } => {
                 write!(
