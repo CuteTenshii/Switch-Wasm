@@ -1067,6 +1067,8 @@ impl Cpu {
                     }
                     // RequestForAppletToGetForeground.
                     Some(150) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    // SetOutOfFocusApplicationSuspendingEnabled / PresetLibraryAppletGpuTimeSliceZero.
+                    Some(50) | Some(60) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     // 20.0.0+, unnamed: a 32-byte input, no output; qlaunch aborts if it fails.
                     Some(90) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     // GetIndirectLayerConsumerHandle.
