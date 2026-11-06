@@ -73,9 +73,7 @@ export const CMD: CommandHandlers = {
 
   // The File is kept and read by range.
   open_nsp(file) {
-    const files = JSON.parse(switch_open_nsp(openHostFile(file))) as NspFile[];
-    workerLog(`[io] opened ${describe(file)} as the container`);
-    return files;
+    return JSON.parse(switch_open_nsp(openHostFile(file))) as NspFile[];
   },
   open_nca(file) {
     const result = core.switch_open_nca(openHostFile(file));
@@ -88,10 +86,7 @@ export const CMD: CommandHandlers = {
   add_update(file) {
     const index = addHostFile(file);
     const found = switch_add_update(index, BigInt(file.size));
-    if (!found) {
-      workerLog(`[io] ${describe(file)} is not an update`);
-      return null;
-    }
+    if (!found) return null;
     const update = JSON.parse(found) as UpdateInfo;
     workerLog(`[io] opened ${describe(file)} as an update for ${update.title}`);
     return update;
@@ -100,9 +95,7 @@ export const CMD: CommandHandlers = {
   add_dlc(file) {
     const index = addHostFile(file);
     const pieces = JSON.parse(switch_add_dlc(index, BigInt(file.size))) as DlcEntry[];
-    if (pieces.length === 0) {
-      workerLog(`[io] add-on content ${describe(file)}: refused (${switch_last_error()})`, 'warn');
-    } else {
+    if (pieces.length > 0) {
       workerLog(`[io] opened ${describe(file)} as add-on content, ${pieces.length} pieces`);
     }
     return pieces;
@@ -130,16 +123,8 @@ export const CMD: CommandHandlers = {
     workerLog(`[io] launched ${name} from the NAND`);
     return entry;
   },
-  load_nca_from_nsp(index) {
-    const entry = switch_load_nca_from_nsp(index);
-    workerLog(`[io] booted the program in container file ${index}`);
-    return entry;
-  },
-  load_nca() {
-    const entry = switch_load_nca();
-    workerLog('[io] booted the program in the standalone NCA');
-    return entry;
-  },
+  load_nca_from_nsp: switch_load_nca_from_nsp,
+  load_nca: switch_load_nca,
   program_nca_index: switch_program_nca_index,
   load_keys(prod, title) {
     const prodBytes = prod ?? NOTHING;
@@ -182,9 +167,7 @@ export const CMD: CommandHandlers = {
     return core.switch_halted();
   },
   guest_fatal: switch_guest_fatal,
-  flush_log() {
-    return flushLog();
-  },
+  flush_log: flushLog,
   log_regs() {
     core.switch_log_regs();
     return 0;

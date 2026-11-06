@@ -322,7 +322,6 @@ async function handleNspFile(file: File): Promise<void> {
     return;
   }
   status.remove();
-  log('Parsed ' + nspFiles.length + ' file(s). Click an .nca to inspect it.', 'info');
 
   const ul = el('ul', 'nsp-list');
   nspFiles.forEach((f, index) => {
@@ -386,7 +385,6 @@ async function showTitleCard(): Promise<ControlInfo | null> {
   await call('remember_control');
   const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);
-  log('Title: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'info');
   openTitleId = info.title_id;
   await syncPaired();
   return info;
