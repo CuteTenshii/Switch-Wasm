@@ -15,13 +15,12 @@ export function hasKeys(): boolean {
   return Boolean(prodKeysText || titleKeysText);
 }
 
-export async function stageKeys(): Promise<number | undefined> {
+export async function stageKeys(): Promise<void> {
   if (!isReady()) return;
   const prod = prodKeysText ? new TextEncoder().encode(prodKeysText) : null;
   const title = titleKeysText ? new TextEncoder().encode(titleKeysText) : null;
-  const rc = await call('loadKeys', prod, title);
+  await call('loadKeys', prod, title);
   updateKeysState();
-  return rc;
 }
 
 export function updateKeysState(): void {

@@ -402,17 +402,20 @@ pub fn switch_control_icon() -> Vec<u8> {
         .map_or_else(Vec::new, |control| control.icon.clone())
 }
 
-/// Load `prod.keys` and `title.keys` text into the session; either may be empty. Returns 0.
+/// Replace the session's keys with the `prod.keys` and `title.keys` text given; either may
+/// be absent.
 #[wasm_bindgen]
-pub fn switch_load_keys(prod: &[u8], title: &[u8]) -> i32 {
+pub fn switch_load_keys(prod: Option<Vec<u8>>, title: Option<Vec<u8>>) {
     let s = session();
-    let prod_entries = switch_core::keys::parse_keys_file(&String::from_utf8_lossy(prod));
-    let title_entries = switch_core::keys::parse_keys_file(&String::from_utf8_lossy(title));
+    let parse = |text: Option<Vec<u8>>| {
+        switch_core::keys::parse_keys_file(&String::from_utf8_lossy(&text.unwrap_or_default()))
+    };
+    let prod_entries = parse(prod);
+    let title_entries = parse(title);
     let mut ks = switch_core::keys::keyset_from_prod(&prod_entries);
     ks.title_keys = switch_core::keys::keyset_from_title(&title_entries);
     s.keys = ks;
     s.last_error.clear();
-    0
 }
 
 #[cfg(test)]

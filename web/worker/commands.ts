@@ -24,8 +24,6 @@ import { pauseLoop, startLoop, stopLoop } from './loop';
 import { nandContent, STORAGE } from './storage';
 import { core, parseOr } from './wasm';
 
-const NOTHING = new Uint8Array(0);
-
 function describe(file: Blob): string {
   const name = file instanceof File ? `"${file.name}" ` : '';
   return name + '(' + fmtSize(file.size) + ')';
@@ -100,15 +98,7 @@ export const CMD = {
   loadNcaFromNsp: switch_load_nca_from_nsp,
   loadNca: switch_load_nca,
   programNcaIndex: switch_program_nca_index,
-  loadKeys(prod, title) {
-    const prodBytes = prod ?? NOTHING;
-    const titleBytes = title ?? NOTHING;
-    const result = switch_load_keys(prodBytes, titleBytes);
-    workerLog(
-      `[io] loaded keys: prod ${fmtSize(prodBytes.length)}, title ${fmtSize(titleBytes.length)}`,
-    );
-    return result;
-  },
+  loadKeys: switch_load_keys,
   readFile(index, offset, len) {
     return switch_read_file(index, BigInt(offset), len);
   },

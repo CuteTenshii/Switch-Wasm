@@ -249,7 +249,7 @@ export interface Commands {
   loadNcaFromNsp(index: number): number;
   loadNca(): number;
   programNcaIndex(): number;
-  loadKeys(prod: Bytes | null, title: Bytes | null): number;
+  loadKeys(prod: Bytes | null, title: Bytes | null): void;
   readFile(index: number, offset: number, len: number): Bytes;
 
   // The title's NACP and icon, from the container's Control NCA or a standalone one.
