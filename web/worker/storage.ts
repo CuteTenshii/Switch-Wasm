@@ -19,7 +19,25 @@ import {
   switch_flush_storage, switch_fs_create_dir, switch_fs_remove, switch_fs_write,
 } from '@core/switch_wasm.js';
 import { coreLoaded } from './wasm';
-import { zip, type ZipEntry } from './zip';
+import type { ZipEntry } from './zip';
+import type { ZipReply } from './zipper';
+
+// The zip of `entries`, built in a worker of its own that takes their bytes.
+function zipOffThread(entries: ZipEntry[]): Promise<Blob> {
+  const worker = new Worker(new URL('./zipper.ts', import.meta.url), { type: 'module' });
+  return new Promise((resolve, reject) => {
+    worker.onmessage = (e: MessageEvent<ZipReply>) => {
+      worker.terminate();
+      if ('error' in e.data) reject(new Error(e.data.error));
+      else resolve(e.data.blob);
+    };
+    worker.onerror = (e) => {
+      worker.terminate();
+      reject(new Error(e.message));
+    };
+    worker.postMessage(entries, [...new Set(entries.map((entry) => entry.data.buffer))]);
+  });
+}
 
 // A volume's store, and how a change reaches the running session.
 interface Place {
@@ -154,7 +172,7 @@ export const STORAGE = {
       if (value?.kind === 'dir') entries.push({ name: rel + '/', data: new Uint8Array(0) });
       else if (value) entries.push({ name: rel, data: value.data ?? new Uint8Array(0) });
     }
-    return { blob: zip(entries), entries: entries.length };
+    return { blob: await zipOffThread(entries), entries: entries.length };
   },
 
   async savesList() {
