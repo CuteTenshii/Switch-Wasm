@@ -33,11 +33,9 @@ fn main() {
         .sd
         .as_ref()
         .and_then(|dir| copy_to_sd(&mut cpu, Path::new(dir), Path::new(&cli.nro)));
-    let loaded = match &sd_path {
-        Some(at) => cpu.boot_homebrew_at(&data, at),
-        None => cpu.boot_homebrew(&data),
-    }
-    .expect("boot nro");
+    let loaded = cpu
+        .boot_homebrew(&data, sd_path.as_deref())
+        .expect("boot nro");
     println!("entry = {:#010x}", loaded.entry);
 
     let mut debug = common::Debug::from_flags();

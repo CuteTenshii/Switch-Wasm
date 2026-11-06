@@ -28,7 +28,7 @@ fn main() {
     let data = common::read(&cli.nro);
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    cpu.boot_homebrew(&data).expect("boot");
+    cpu.boot_homebrew(&data, None).expect("boot");
 
     let mut hot: HashMap<u32, u64> = HashMap::new();
     let run = common::drive(&mut cpu, Pace::Instructions, cli.steps, |cpu, steps| {

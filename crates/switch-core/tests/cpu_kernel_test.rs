@@ -1185,14 +1185,14 @@ fn argv0(cpu: &Cpu) -> String {
 fn homebrew_launched_from_the_sd_card_is_told_its_own_path() {
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.boot_homebrew_at(&homebrew_nro(), "/switch/demo/demo.nro")
+    cpu.boot_homebrew(&homebrew_nro(), Some("/switch/demo/demo.nro"))
         .unwrap();
     assert_eq!(argv0(&cpu), "sdmc:/switch/demo/demo.nro");
 
     // Opened from the host, it is copied to the usual place and told that.
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.boot_homebrew(&homebrew_nro()).unwrap();
+    cpu.boot_homebrew(&homebrew_nro(), None).unwrap();
     assert_eq!(argv0(&cpu), switch_core::nro::HOMEBREW_NRO_PATH);
 }
 

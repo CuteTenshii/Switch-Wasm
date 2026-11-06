@@ -87,7 +87,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_load_control(): void;
   // `boot.rs` and `nand.rs`: the entry address; they throw the reason when a program will not boot.
   export function switch_load_program(file: Blob): Promise<number>;
-  export function switch_load_sd_nro(path: string): number;
+  export function switch_load_sd(path: string): number;
   export function switch_load_nca(): number;
   export function switch_load_nca_from_nsp(index: number): number;
   export function switch_program_nca_index(): number;

@@ -13,7 +13,7 @@ import {
   switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
   switch_load_keys, switch_load_nca, switch_load_nca_from_nsp, switch_load_program,
-  switch_load_sd_nro, switch_memory_json, switch_nand_identify, switch_nand_launch, switch_open_nca,
+  switch_load_sd, switch_memory_json, switch_nand_identify, switch_nand_launch, switch_open_nca,
   switch_open_nsp, switch_parse_nca, switch_program_nca_index, switch_read_file, switch_reg_dump,
   switch_remember_control, switch_restore_nand, switch_restore_storage, switch_run,
   switch_set_battery, switch_set_input, switch_set_jit, switch_set_operation_mode, switch_set_touch,
@@ -47,7 +47,7 @@ export const CMD = {
 
   // The core reads the file itself, so the page never holds a copy.
   loadProgram: switch_load_program,
-  loadSdNro: switch_load_sd_nro,
+  loadSd: switch_load_sd,
 
   // The File is kept and read by range.
   openNsp(file) {

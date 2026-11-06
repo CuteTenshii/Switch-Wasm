@@ -2,6 +2,7 @@
 
 use switch_core::cpu::Cpu;
 use switch_core::nca::Nca;
+use switch_core::nro::LoadedNro;
 use switch_core::source::{ByteSource, Window};
 use switch_core::trace::Level;
 use wasm_bindgen::prelude::*;
@@ -19,15 +20,12 @@ pub fn switch_end_title() {
     s.last_error.clear();
 }
 
-/// Load an NRO homebrew image into the CPU, told the SD card path it came from when there
-/// is one. Returns the entry address.
-fn load_nro_bytes(s: &mut Session, data: &[u8], sd_path: Option<&str>) -> Result<u64, String> {
-    // Booting empties the output and trace buffers.
-    crate::log::collect(&mut s.cpu);
-    let booted = match sd_path {
-        None => s.cpu.boot_homebrew(data),
-        Some(path) => s.cpu.boot_homebrew_at(data, path),
-    };
+/// Finish loading the NRO `data`, which `booted` the CPU.
+fn load_nro_bytes(
+    s: &mut Session,
+    data: &[u8],
+    booted: switch_core::Result<LoadedNro>,
+) -> Result<u64, String> {
     s.control = None;
     let loaded = booted.map_err(|e| e.to_string())?;
     // Cached for display only: homebrew runs in another title's process.
@@ -54,26 +52,29 @@ pub async fn switch_load_program(file: web_sys::Blob) -> Result<f64, String> {
     let data = crate::blob::read_vec(&file)
         .await
         .map_err(|e| format!("the file could not be read: {e:?}"))?;
-    let s = session();
-    let entry = if data.starts_with(b"\x7fELF") {
-        load_elf_bytes(s, &data)
-    } else {
-        load_nro_bytes(s, &data, None)
-    };
-    entry.map(|entry| entry as f64)
+    load_image(session(), &data, None).map(|entry| entry as f64)
 }
 
-/// Load the NRO at `path` on the SD card, which is told its path. Returns the entry
-/// address, or fails with the reason.
+/// Load `data`, an ELF or an NRO by its magic, from `sd_path` on the SD card if it came from there.
+fn load_image(s: &mut Session, data: &[u8], sd_path: Option<&str>) -> Result<u64, String> {
+    if data.starts_with(b"\x7fELF") {
+        return load_elf_bytes(s, data);
+    }
+    crate::log::collect(&mut s.cpu);
+    let booted = s.cpu.boot_homebrew(data, sd_path);
+    load_nro_bytes(s, data, booted)
+}
+
+/// Load the ELF or NRO at `path` on the SD card.
 #[wasm_bindgen]
-pub fn switch_load_sd_nro(path: &str) -> Result<f64, String> {
+pub fn switch_load_sd(path: &str) -> Result<f64, String> {
     let s = session();
     let Some(size) = s.cpu.fs.size(path) else {
         return Err(format!("{path} is not on the SD card"));
     };
     let mut data = vec![0u8; size as usize];
     s.cpu.fs.read(path, 0, &mut data);
-    load_nro_bytes(s, &data, Some(path)).map(|entry| entry as f64)
+    load_image(s, &data, Some(path)).map(|entry| entry as f64)
 }
 
 /// Decrypt a Program NCA's ExeFS from `nca_src`, load it and boot. Returns the entry address.
@@ -165,7 +166,6 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
         }
     }
 
-    // Booting empties the output and trace buffers.
     crate::log::collect(cpu);
     let loaded = cpu.boot_program(&program).map_err(|e| e.to_string())?;
     // After the modules, so its lines follow the boot's.
@@ -292,31 +292,15 @@ fn mount_manual(s: &mut crate::Session, container: &crate::HostSource) {
 }
 
 /// Load an AArch64 ELF into the CPU. Returns the entry address.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 fn load_elf_bytes(s: &mut Session, data: &[u8]) -> Result<u64, String> {
     // An ELF carries no control data.
     s.control = None;
-    let elf = switch_core::elf::load_elf(&s.cpu.mem, data).map_err(|e| e.to_string())?;
-    s.cpu.set_pc(elf.entry as u32);
-    boot_entry_regs(&mut s.cpu, 0);
+    let elf = s.cpu.boot_elf(data).map_err(|e| e.to_string())?;
     s.cpu.log(
         Level::Info,
         &format!("Loaded an ELF, entry {:#010x}", elf.entry),
     );
     crate::log::collect(&mut s.cpu);
     s.cpu.halted = false;
-    Ok(elf.entry as u64)
-}
-
-/// Reset the integer registers and set the entry convention: `x0 = env`,
-/// `x1 = UINT64_MAX` for the homebrew ABI, `x0 = 0` for NSO, `x0 = 0, x1 = 1` otherwise.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
-fn boot_entry_regs(cpu: &mut Cpu, env_addr: u32) {
-    for i in 0..=30u8 {
-        cpu.set_reg(i, 0);
-    }
-    cpu.set_reg(0, env_addr as u64);
-    cpu.set_reg(1, if env_addr != 0 { u64::MAX } else { 1 });
-    // LR to the exit trampoline, so a returning `main` exits.
-    cpu.set_reg(30, switch_core::cpu::SELF_RETURN_TRAMPOLINE as u64);
+    Ok(elf.entry)
 }

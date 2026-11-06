@@ -54,7 +54,7 @@ The page, the worker, and the wasm bindings between them.
 
 - Battery and dock state are cached in the worker so a reset session inherits them; time is sampled in the worker directly.
 - Change-list buffers are sized from the pending count (0x301-byte paths) because the wasm side drains whether or not the JSON fits.
-- `loadProgram` hands the core the `File`, which reads it in 8 MiB chunks straight into linear memory and tells an ELF from an NRO by its magic; no copy of the file is held in JavaScript. An SD NRO is read from the session's own SD card (`loadSdNro`), and a NAND program is registered as a host file and read by range (`nandLaunch`), so neither image is copied into the heap.
+- `loadProgram` hands the core the `File`, which reads it in 8 MiB chunks straight into linear memory and tells an ELF from an NRO by its magic; no copy of the file is held in JavaScript. An SD NRO is read from the session's own SD card (`loadSd`), and a NAND program is registered as a host file and read by range (`nandLaunch`), so neither image is copied into the heap.
 
 ## `web/worker/hostfiles.ts`
 

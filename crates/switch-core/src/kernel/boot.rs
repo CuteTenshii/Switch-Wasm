@@ -35,23 +35,21 @@ impl Cpu {
             .ok(); // b .
     }
 
-    /// Boot a homebrew NRO as HBL does: enter its crt0 with the environment block, which
-    /// leaves the heap, `ThreadVars` and the `.init_array` to `__libnx_init`.
-    pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
-        // Expose the NRO at argv[0] on the SD card for `romfsMountSelf`.
-        self.fs
-            .write_file(crate::nro::HOMEBREW_NRO_PATH, data.to_vec());
-        self.boot_nro(data, crate::nro::HOMEBREW_NRO_PATH)
-    }
-
-    /// Boot `data`, the NRO at `path` on the SD card, telling it `sdmc:<path>` as
-    /// `argv[0]` as hbmenu does, so it finds the files beside it.
-    pub fn boot_homebrew_at(&mut self, data: &[u8], path: &str) -> Result<crate::nro::LoadedNro> {
-        let path = path.strip_prefix("sdmc:").unwrap_or(path);
-        self.boot_nro(data, &format!("sdmc:{path}"))
-    }
-
-    fn boot_nro(&mut self, data: &[u8], argv0: &str) -> Result<crate::nro::LoadedNro> {
+    /// Boot a homebrew NRO as HBL does, entering its crt0 with the environment block. `at` is
+    /// the SD card path it came from, passed as `argv[0]` so it finds the files beside it.
+    pub fn boot_homebrew(
+        &mut self,
+        data: &[u8],
+        at: Option<&str>,
+    ) -> Result<crate::nro::LoadedNro> {
+        let argv0 = match at {
+            Some(path) => format!("sdmc:{}", path.strip_prefix("sdmc:").unwrap_or(path)),
+            None => {
+                self.fs
+                    .write_file(crate::nro::HOMEBREW_NRO_PATH, data.to_vec());
+                crate::nro::HOMEBREW_NRO_PATH.to_owned()
+            }
+        };
         self.mem.clear_modules();
         self.process_mut().module_names.clear();
         let loaded = crate::nro::load_nro(&self.mem, data)?;
@@ -62,22 +60,34 @@ impl Cpu {
             .wrapping_add(loaded.bss_size);
         self.record_module_name(loaded.base, end, "homebrew");
         if loaded.env_addr != 0 {
-            crate::nro::write_argv0(&self.mem, argv0);
+            crate::nro::write_argv0(&self.mem, &argv0);
         }
         self.out.clear();
         self.trace.clear();
         self.halted = false;
         self.process_mut().guest_fatal = None;
         self.trace_enabled = false;
+        self.set_entry_regs(loaded.env_addr);
+        self.set_pc(loaded.entry);
+        Ok(loaded)
+    }
+
+    /// Load an AArch64 ELF and point the CPU at its entry.
+    pub fn boot_elf(&mut self, data: &[u8]) -> Result<crate::elf::LoadedElf> {
+        let elf = crate::elf::load_elf(&self.mem, data)?;
+        self.set_pc(elf.entry as u32);
+        self.set_entry_regs(0);
+        Ok(elf)
+    }
+
+    /// Reset the registers to the entry convention: `x1 = UINT64_MAX` with an env block, else 1.
+    fn set_entry_regs(&mut self, env_addr: u32) {
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }
-        self.set_reg(0, loaded.env_addr as u64);
-        self.set_reg(1, if loaded.env_addr != 0 { u64::MAX } else { 1 });
+        self.set_reg(0, env_addr as u64);
+        self.set_reg(1, if env_addr != 0 { u64::MAX } else { 1 });
         self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
-
-        self.set_pc(loaded.entry);
-        Ok(loaded)
     }
 
     /// Boot a retail title's modules (`rtld`, `main`, `subsdk*`, `sdk`, in that order)

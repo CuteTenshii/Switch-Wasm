@@ -285,7 +285,7 @@ impl Program {
             Form::Homebrew(image) => {
                 apply_docked(cpu);
                 load_font(cpu, self.font.as_deref());
-                cpu.boot_homebrew(image)
+                cpu.boot_homebrew(image, None)
                     .unwrap_or_else(|e| die(&format!("booting the NRO: {e:?}")));
                 Booted {
                     modules: Vec::new(),

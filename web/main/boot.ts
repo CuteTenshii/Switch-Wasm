@@ -29,7 +29,7 @@ export async function launchFromSd(path: string): Promise<void> {
   if (!(await replaceTitle(name))) return;
   setState('loading');
   loadPhase('loading the NRO', 'mapping the image and seeding the guest');
-  if (await loadWith(name, () => call('loadSdNro', path))) await run();
+  if (await loadWith(name, () => call('loadSd', path))) await run();
 }
 
 // Load with `load`, which throws why it cannot, then show the program as booted.

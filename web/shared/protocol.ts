@@ -232,7 +232,7 @@ export interface Commands {
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
   loadProgram(file: File): number;
   // The NRO at `path` on the SD card, which is told to it as argv[0].
-  loadSdNro(path: string): number;
+  loadSd(path: string): number;
 
   // The container's file table; throws the reason if it cannot be read.
   openNsp(file: File): NspFile[];
