@@ -274,10 +274,7 @@ impl Cpu {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // SetCpuBoostMode: no clock governor to move.
-                Some(66) => {
-                    self.warn_stub(&iface, cmd_id, "accepted; there is no clock to move");
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
+                Some(66) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled.
                 Some(900) => {
                     self.warn_stub(&iface, cmd_id, "the exit-request latch is not recorded");
