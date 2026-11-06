@@ -405,19 +405,19 @@ fn application_functions_210_hands_out_one_event_and_keeps_handing_out_that_one(
 
 #[test]
 fn a_stubbed_answer_names_itself_once_and_still_succeeds() {
-    let mut cpu = request(false, 66, &[]);
-    cpu.register_service_handle(9, "am:application-functions");
-    cpu.applet_request(TLS, 9, Some(66)).unwrap();
+    let mut cpu = request(false, 230, &[0; 4]);
+    cpu.register_service_handle(9, "am:self-controller");
+    cpu.applet_request(TLS, 9, Some(230)).unwrap();
     assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
     let trace = String::from_utf8_lossy(&cpu.trace).into_owned();
     assert!(
-        trace.contains("[ipc] stub: am:application-functions cmd=Some(66)"),
+        trace.contains("[ipc] stub: am:self-controller cmd=Some(230)"),
         "the stub went unreported: {trace:?}"
     );
 
     // Once per (interface, command).
-    marshal(&mut cpu, false, 66, &[]);
-    cpu.applet_request(TLS, 9, Some(66)).unwrap();
+    marshal(&mut cpu, false, 230, &[0; 4]);
+    cpu.applet_request(TLS, 9, Some(230)).unwrap();
     let repeated = String::from_utf8_lossy(&cpu.trace)
         .matches("[ipc] stub:")
         .count();
