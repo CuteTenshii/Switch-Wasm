@@ -41,7 +41,7 @@ function show(request: KeyboardRequest): void {
 async function answer(text: string | null): Promise<void> {
   shown = null;
   dialogEl.close();
-  if (!(await call('keyboard_answer', text))) {
+  if (!(await call('keyboardAnswer', text))) {
     log('The keyboard was no longer waiting; the text was not sent.', 'warn');
   }
 }

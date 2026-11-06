@@ -20,7 +20,7 @@ export function titleBooted(): boolean {
 // End the running title; the console, with its storage, keys and system data, stays.
 export async function endTitle(): Promise<void> {
   abortRun();
-  await call('end_title');
+  await call('endTitle');
   booted = false;
   resetMemoryHistory();
   // A running title keeps the player it started with; the next one gets the current list.

@@ -61,7 +61,7 @@ function beginArchiveRestore(): Promise<number> {
     restoreProgress = null;
     updateFirmwareState();
     try {
-      archiveCount = await call('restore_nand');
+      archiveCount = await call('restoreNand');
       return archiveCount;
     } finally {
       registering = false;
@@ -75,7 +75,7 @@ function beginArchiveRestore(): Promise<number> {
 // Read the index now; register archives in the background.
 export async function initNand(): Promise<void> {
   try {
-    nandTitles = await call('nand_titles');
+    nandTitles = await call('nandTitles');
   } catch (err) {
     log('NAND: could not be read (' + (err as Error).message + ')', 'error');
     nandTitles = [];
@@ -127,12 +127,12 @@ function nandRow(id: string, entry: NandEntry): HTMLButtonElement {
 function launchInstalled(id: string, entry: NandEntry): Promise<void> {
   const name = titleLabel(id);
   beginLoad(name, 'reading ' + entry.name + ' from the NAND');
-  return doLaunchNca(name, () => call('nand_launch', entry.name));
+  return doLaunchNca(name, () => call('nandLaunch', entry.name));
 }
 
 // Content and index entry go together; a registered archive stays until the session is replaced.
 export async function removeNandTitle(id: string): Promise<void> {
-  await call('nand_remove', id);
+  await call('nandRemove', id);
   nandTitles = nandTitles.filter(([titleId]) => titleId !== id);
   renderNandTitles();
   updateFirmwareState();
@@ -179,17 +179,17 @@ $('firmware-ncas').addEventListener('change', async (e) => {
     setNote('nand-badge', (index + 1) + '/' + files.length, false);
     try {
       // Identify from the header without reading the file.
-      const what = await call('nand_identify', f);
+      const what = await call('nandIdentify', f);
       if (!what || what.kind === 2) continue;
       // Store the File itself so the browser owns the bytes.
-      await call('nand_install', f, what.id, what.kind);
+      await call('nandInstall', f, what.id, what.kind);
       installed++;
     } catch (err) {
       log('Could not read ' + f.name + ': ' + (err as Error).message, 'error');
     }
   }
   try {
-    nandTitles = await call('nand_titles');
+    nandTitles = await call('nandTitles');
   } catch { /* the panel just stays as it was */ }
   renderNandTitles();
   // Registered from the NAND so an archive counts once across repeated installs.
@@ -204,7 +204,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
 $('btn-erase-nand').addEventListener('click', async () => {
 // Already registered content stays registered until the session is replaced.
   try {
-    await call('nand_erase');
+    await call('nandErase');
   } catch (err) {
     log('NAND: could not be erased (' + (err as Error).message + ')', 'error');
     return;

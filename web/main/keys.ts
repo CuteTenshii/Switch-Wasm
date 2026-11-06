@@ -19,7 +19,7 @@ export async function stageKeys(): Promise<number | undefined> {
   if (!isReady()) return;
   const prod = prodKeysText ? new TextEncoder().encode(prodKeysText) : null;
   const title = titleKeysText ? new TextEncoder().encode(titleKeysText) : null;
-  const rc = await call('load_keys', prod, title);
+  const rc = await call('loadKeys', prod, title);
   updateKeysState();
   return rc;
 }

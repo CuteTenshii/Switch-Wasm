@@ -131,7 +131,7 @@ export function paint(): number | null {
 
 function housekeeping(): Housekeeping {
   return {
-    steps: CMD.get_steps() as number,
+    steps: CMD.getSteps() as number,
     ram: CMD.ram() as Housekeeping['ram'],
   };
 }

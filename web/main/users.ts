@@ -53,11 +53,11 @@ function toRecord({ uid, nickname, editedAt, picture }: Profile): UserRecord {
 }
 
 async function storeProfile(profile: Profile): Promise<void> {
-  await call('users_store', [[profile.uid, profile]]);
+  await call('usersStore', [[profile.uid, profile]]);
 }
 
 async function storeCurrent(): Promise<void> {
-  await call('users_store', [[CURRENT_KEY, current]]);
+  await call('usersStore', [[CURRENT_KEY, current]]);
 }
 
 function firstProfile(): Profile {
@@ -66,7 +66,7 @@ function firstProfile(): Profile {
 
 async function readProfiles(): Promise<void> {
   profiles = [];
-  for (const [key, value] of await call('users_read')) {
+  for (const [key, value] of await call('usersRead')) {
     if (key === CURRENT_KEY) current = String(value);
     else profiles.push(value as Profile);
   }
@@ -102,7 +102,7 @@ export async function reloadProfiles(): Promise<void> {
 
 export async function stageUsers(): Promise<void> {
   if (!hasSession()) return;
-  const refused = await call('users_set', profiles.map(toRecord), current);
+  const refused = await call('usersSet', profiles.map(toRecord), current);
   if (refused) log(`Profiles: the core refused the list (code ${refused}).`, 'error');
 }
 
@@ -113,7 +113,7 @@ async function stageIfIdle(): Promise<void> {
 
 // Reloads the profiles if the worker stored edits the guest made through `acc`.
 export async function pullProfileEdits(): Promise<void> {
-  if (hasSession() && await call('store_profile_edits')) await reloadProfiles();
+  if (hasSession() && await call('storeProfileEdits')) await reloadProfiles();
 }
 
 // Center-crops to the 256x256 JPEG titles expect.
@@ -366,8 +366,8 @@ async function removeProfile(profile: Profile): Promise<void> {
   pictureUrls.delete(profile.uid);
   if (current === profile.uid) current = profiles[0].uid;
   try {
-    await call('users_store', [[profile.uid, null], [CURRENT_KEY, current]]);
-    const removed = await call('saves_delete_user', profile.uid);
+    await call('usersStore', [[profile.uid, null], [CURRENT_KEY, current]]);
+    const removed = await call('savesDeleteUser', profile.uid);
     log(`Profiles: deleted ${profile.nickname}` + (removed ? ` and ${removed} saved entries` : ''));
   } catch (err) {
     log('Profiles: the deletion could not be finished (' + (err as Error).message + ')', 'error');

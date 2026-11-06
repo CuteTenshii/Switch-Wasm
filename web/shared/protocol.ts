@@ -218,112 +218,112 @@ export interface ErrorDialog {
 
 export interface Commands {
   // End the running title and its applets; the console stays.
-  end_title(): number;
+  endTitle(): number;
 
-  set_trace(on: number): number;
-  set_jit(on: number): number;
-  set_trace_channels(on: boolean): void;
-  set_input(mask: number, slx: number, sly: number, srx: number, sry: number): number;
-  set_touch(points: Uint32Array): number;
-  set_battery(percent: number, charging: number): number;
-  set_operation_mode(docked: number): number;
+  setTrace(on: number): number;
+  setJit(on: number): number;
+  setTraceChannels(on: boolean): void;
+  setInput(mask: number, slx: number, sly: number, srx: number, sry: number): number;
+  setTouch(points: Uint32Array): number;
+  setBattery(percent: number, charging: number): number;
+  setOperationMode(docked: number): number;
   vibration(): number;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
-  load_program(file: File): number;
+  loadProgram(file: File): number;
   // The NRO at `path` on the SD card, which is told to it as argv[0].
-  load_sd_nro(path: string): number;
+  loadSdNro(path: string): number;
 
   // The container's file table; throws the reason if it cannot be read.
-  open_nsp(file: File): NspFile[];
-  open_nca(file: File): number;
-  restore_nand(): number;
-  add_update(file: File): UpdateInfo | null;
+  openNsp(file: File): NspFile[];
+  openNca(file: File): number;
+  restoreNand(): number;
+  addUpdate(file: File): UpdateInfo | null;
   // The pieces the container holds; none if it is not add-on content.
-  add_dlc(file: File): DlcEntry[];
-  clear_dlc(): number;
-  clear_update(): number;
-  nand_identify(file: File): NandIdentity | null;
+  addDlc(file: File): DlcEntry[];
+  clearDlc(): number;
+  clearUpdate(): number;
+  nandIdentify(file: File): NandIdentity | null;
   // The stored content named `name`; it is read here, not by the page.
-  nand_launch(name: string): number;
-  load_nca_from_nsp(index: number): number;
-  load_nca(): number;
-  program_nca_index(): number;
-  load_keys(prod: Bytes | null, title: Bytes | null): number;
-  read_file(index: number, offset: number, len: number): Bytes;
+  nandLaunch(name: string): number;
+  loadNcaFromNsp(index: number): number;
+  loadNca(): number;
+  programNcaIndex(): number;
+  loadKeys(prod: Bytes | null, title: Bytes | null): number;
+  readFile(index: number, offset: number, len: number): Bytes;
 
   // The title's NACP and icon, from the container's Control NCA or a standalone one.
   // Throws the reason when there is none.
-  load_control(): void;
-  control_json(): string;
-  control_icon(): Bytes;
+  loadControl(): void;
+  controlJson(): string;
+  controlIcon(): Bytes;
   // Store the control data just read, so a later session's ns can describe the title.
-  remember_control(): void;
-  parse_nca(header: Bytes): string;
+  rememberControl(): void;
+  parseNca(header: Bytes): string;
 
   run(budget: number): number;
   // The worker runs slices itself until paused, halted or faulted, reporting each.
-  start_loop(tracing: boolean): number;
-  pause_loop(): number;
+  startLoop(tracing: boolean): number;
+  pauseLoop(): number;
   // The SD card and saves: the worker loads them from IndexedDB and writes changes back itself.
-  restore_storage(): number;
-  flush_storage(): number;
-  clear_screen(): number;
+  restoreStorage(): number;
+  flushStorage(): number;
+  clearScreen(): number;
   halted(): number;
-  guest_fatal(): string;
+  guestFatal(): string;
   // Passes the core's queued lines on now; how many there were.
-  flush_log(): number;
-  log_regs(): number;
-  log_threads(): number;
-  get_steps(): number;
-  get_reg(i: number): string;
+  flushLog(): number;
+  logRegs(): number;
+  logThreads(): number;
+  getSteps(): number;
+  getReg(i: number): string;
   ram(): RamUsage;
   memory(): MemoryReport;
-  jit_stats(): JitStats;
-  gpu_report(): GpuReport;
-  last_error(): string;
+  jitStats(): JitStats;
+  gpuReport(): GpuReport;
+  lastError(): string;
 
-  fb_width(): number;
-  fb_height(): number;
-  frame_count(): number;
+  fbWidth(): number;
+  fbHeight(): number;
+  frameCount(): number;
 
   // The stored SD card and saves. Changes go to IndexedDB first, then to the running session.
-  storage_scan(volume: StorageVolume): Map<string, StorageInfo>;
-  storage_read(volume: StorageVolume, path: string): StoredEntry | undefined;
+  storageScan(volume: StorageVolume): Map<string, StorageInfo>;
+  storageRead(volume: StorageVolume, path: string): StoredEntry | undefined;
   // A null entry deletes the path.
-  storage_apply(volume: StorageVolume, changes: [string, StoredEntry | null][]): void;
+  storageApply(volume: StorageVolume, changes: [string, StoredEntry | null][]): void;
   // Store `file` at `path`; its size.
-  storage_upload(volume: StorageVolume, path: string, file: File): number;
+  storageUpload(volume: StorageVolume, path: string, file: File): number;
   // Delete `path` and everything under it; `/` empties the volume.
-  storage_remove(volume: StorageVolume, path: string): void;
-  storage_rename(volume: StorageVolume, from: string, to: string): void;
+  storageRemove(volume: StorageVolume, path: string): void;
+  storageRename(volume: StorageVolume, from: string, to: string): void;
   // A store-only zip of `root` and its entry count.
-  storage_export(volume: StorageVolume, root: string): { blob: Blob; entries: number };
-  saves_list(): SaveListing;
+  storageExport(volume: StorageVolume, root: string): { blob: Blob; entries: number };
+  savesList(): SaveListing;
   // Delete the saves a profile owns; how many entries went.
-  saves_delete_user(uid: string): number;
+  savesDeleteUser(uid: string): number;
 
   // Profile records by uid, plus the playing one under its own key.
-  users_read(): [string, unknown][];
+  usersRead(): [string, unknown][];
   // A null value deletes the key.
-  users_store(entries: [string, unknown][]): void;
+  usersStore(entries: [string, unknown][]): void;
 
   // The installed titles' index, and the same with content sizes.
-  nand_titles(): [string, NandEntry][];
-  nand_list(): NandTitle[];
-  nand_content(name: string): Blob | undefined;
+  nandTitles(): [string, NandEntry][];
+  nandList(): NandTitle[];
+  nandContent(name: string): Blob | undefined;
   // Store `file` under its name and index it as title `id`.
-  nand_install(file: File, id: string, kind: number): void;
-  nand_remove(id: string): void;
-  nand_erase(): void;
+  nandInstall(file: File, id: string, kind: number): void;
+  nandRemove(id: string): void;
+  nandErase(): void;
 
   // Install `users` with `current` playing; 0 or `switch_users_commit`'s error code.
-  users_set(users: UserRecord[], current: string): number;
+  usersSet(users: UserRecord[], current: string): number;
   // Stores any profile edits the guest made; whether there were any.
-  store_profile_edits(): boolean;
+  storeProfileEdits(): boolean;
 
   // Send the typed text, or null to cancel; 1 if a keyboard was waiting.
-  keyboard_answer(text: string | null): number;
+  keyboardAnswer(text: string | null): number;
 }
 
 export type CommandName = keyof Commands;

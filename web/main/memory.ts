@@ -177,7 +177,7 @@ function showRegions(report: MemoryReport): void {
 }
 
 async function showHeap(report: MemoryReport): Promise<void> {
-  const gpu: GpuReport = hasSession() ? await call('gpu_report') : {};
+  const gpu: GpuReport = hasSession() ? await call('gpuReport') : {};
   const textures = gpu.backend ? gpu.textureCacheBytes ?? 0 : 0;
   const share = (report.wasmHeap * 100) / WASM_LIMIT;
   setNote('heap-debug-badge', `${share.toFixed(0)}% of 4 GiB`, false);

@@ -203,10 +203,10 @@ function pushInput(): void {
   } else if (mask) {
     inputStatus('keyboard');
   }
-  void call('set_input', mask, slx, sly, srx, sry);
+  void call('setInput', mask, slx, sly, srx, sry);
   // Only while something is down, plus one push for the lift.
   if (touchPoints.size || touchWasDown) {
-    void call('set_touch', touchTriples());
+    void call('setTouch', touchTriples());
     touchWasDown = touchPoints.size > 0;
   }
   if (touchPoints.size) inputStatus('touch');

@@ -119,22 +119,22 @@ async function nandTitles(): Promise<[string, NandEntry][]> {
 }
 
 export const STORAGE = {
-  storage_scan: scan,
-  async storage_read(volume, path) {
+  storageScan: scan,
+  async storageRead(volume, path) {
     return readEntry(placeOf(volume), path);
   },
-  async storage_apply(volume, changes) {
+  async storageApply(volume, changes) {
     await apply(placeOf(volume), changes);
   },
-  async storage_upload(volume, path, file) {
+  async storageUpload(volume, path, file) {
     const data = new Uint8Array(await file.arrayBuffer());
     await apply(placeOf(volume), [[path, { kind: 'file', data }]]);
     return data.length;
   },
-  async storage_remove(volume, path) {
+  async storageRemove(volume, path) {
     await apply(placeOf(volume), under(await scan(volume), path).map((p) => [p, null]));
   },
-  async storage_rename(volume, from, to) {
+  async storageRename(volume, from, to) {
     const place = placeOf(volume);
     const changes: [string, StoredEntry | null][] = [];
     for (const path of under(await scan(volume), from)) {
@@ -144,7 +144,7 @@ export const STORAGE = {
     }
     await apply(place, changes);
   },
-  async storage_export(volume, root) {
+  async storageExport(volume, root) {
     const place = placeOf(volume);
     const entries: ZipEntry[] = [];
     for (const path of under(await scan(volume), root).sort()) {
@@ -157,7 +157,7 @@ export const STORAGE = {
     return { blob: zip(entries), entries: entries.length };
   },
 
-  async saves_list() {
+  async savesList() {
     await flush();
     const db = await nandIdb();
     const ids = await new Promise<string[]>((resolve, reject) => {
@@ -174,7 +174,7 @@ export const STORAGE = {
     return { ids, names: [...names] };
   },
   // Deletes keys of the form "<save id>@<uid>/<path>".
-  async saves_delete_user(uid) {
+  async savesDeleteUser(uid) {
     const db = await nandIdb();
     const tx = db.transaction(NAND_SAVES, 'readwrite');
     const store = tx.objectStore(NAND_SAVES);
@@ -196,15 +196,15 @@ export const STORAGE = {
     return removed;
   },
 
-  async users_read() {
+  async usersRead() {
     return idbGetAll<unknown>(await nandIdb(), NAND_USERS);
   },
-  async users_store(entries) {
+  async usersStore(entries) {
     await idbApply(await nandIdb(), NAND_USERS, entries);
   },
 
-  nand_titles: nandTitles,
-  async nand_list() {
+  nandTitles: nandTitles,
+  async nandList() {
     const out: NandTitle[] = [];
     for (const [id, entry] of await nandTitles()) {
       const content = await nandContent(entry.name).catch(() => undefined);
@@ -212,16 +212,16 @@ export const STORAGE = {
     }
     return out;
   },
-  nand_content: nandContent,
+  nandContent: nandContent,
   // Content and index entry go in one transaction so the index never names missing content.
-  async nand_install(file, id, kind) {
+  async nandInstall(file, id, kind) {
     const tx = (await nandIdb()).transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
     tx.objectStore(NAND_CONTENT).put(file, file.name);
     tx.objectStore(NAND_TITLES).put({ name: file.name, kind }, id);
     await committed(tx);
   },
   // Content and index entry go together; a registered archive stays until the session is replaced.
-  async nand_remove(id) {
+  async nandRemove(id) {
     const db = await nandIdb();
     const entry = await idbGet<NandEntry>(db, NAND_TITLES, id);
     if (!entry) return;
@@ -230,7 +230,7 @@ export const STORAGE = {
     tx.objectStore(NAND_TITLES).delete(id);
     await committed(tx);
   },
-  async nand_erase() {
+  async nandErase() {
     const tx = (await nandIdb()).transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
     tx.objectStore(NAND_CONTENT).clear();
     tx.objectStore(NAND_TITLES).clear();

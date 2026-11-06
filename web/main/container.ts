@@ -57,12 +57,12 @@ async function handleContainerFile(file: File): Promise<void> {
     return;
   }
   // An update holds no game; inspecting it also names the title it patches.
-  const update = await call('add_update', file).catch(() => null);
+  const update = await call('addUpdate', file).catch(() => null);
   if (update) {
     await handleUpdateFile(file, update);
     return;
   }
-  const packs = await call('add_dlc', file).catch((): DlcEntry[] => []);
+  const packs = await call('addDlc', file).catch((): DlcEntry[] => []);
   if (packs.length > 0) {
     handleDlcFile(file, packs);
     return;
@@ -170,13 +170,13 @@ function describeUpdate(u: HeldUpdate | RememberedUpdate & { file?: File }): str
 // while its title is open. Add-on content is always handed over.
 async function syncPaired(): Promise<void> {
   if (heldUpdate?.titleId === openTitleId) {
-    await call('add_update', heldUpdate.file).catch(() => '');
+    await call('addUpdate', heldUpdate.file).catch(() => '');
   } else {
-    await call('clear_update').catch(() => 0);
+    await call('clearUpdate').catch(() => 0);
   }
-  await call('clear_dlc').catch(() => 0);
+  await call('clearDlc').catch(() => 0);
   for (const held of heldDlc) {
-    await call('add_dlc', held.file).catch(() => []);
+    await call('addDlc', held.file).catch(() => []);
   }
   showPairedNotes();
 }
@@ -254,7 +254,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     return;
   }
   // An update or add-on content means: pair it with the game and launch that.
-  const update = await call('add_update', file).catch(() => null);
+  const update = await call('addUpdate', file).catch(() => null);
   if (update) {
     await handleUpdateFile(file, update);
     setState('idle');
@@ -264,7 +264,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     openPanel('files');
     return;
   }
-  const packs = await call('add_dlc', file).catch((): DlcEntry[] => []);
+  const packs = await call('addDlc', file).catch((): DlcEntry[] => []);
   if (packs.length > 0) {
     handleDlcFile(file, packs);
     const held = heldDlc[heldDlc.length - 1];
@@ -288,7 +288,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
   loadPhase('looking for the title\'s program');
   let index: number;
   try {
-    index = await call('program_nca_index');
+    index = await call('programNcaIndex');
   } catch (err) {
     const why = (err as Error).message;
     setState('fault');
@@ -311,7 +311,7 @@ async function handleNspFile(file: File): Promise<void> {
   $('nsp-result').appendChild(status);
   log('Opening ' + file.name + ' (' + fmtSize(file.size) + ') ...');
   try {
-    nspFiles = await call('open_nsp', file);
+    nspFiles = await call('openNsp', file);
     openContainer = { file, kind: 'nsp' };
     setNote('container-badge', file.name, true);
   } catch (e) {
@@ -374,15 +374,15 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
 async function showTitleCard(): Promise<ControlInfo | null> {
   let info: ControlInfo;
   try {
-    await call('load_control');
-    info = JSON.parse(await call('control_json')) as ControlInfo;
+    await call('loadControl');
+    info = JSON.parse(await call('controlJson')) as ControlInfo;
   } catch (err) {
     log('No title details: ' + (err as Error).message, 'debug');
     return null;
   }
   if (!info.name) return null;
-  const icon = info.icon_size > 0 ? await call('control_icon') : null;
-  await call('remember_control');
+  const icon = info.icon_size > 0 ? await call('controlIcon') : null;
+  await call('rememberControl');
   const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);
   openTitleId = info.title_id;
@@ -471,7 +471,7 @@ async function inspectNca(f: NspFile, index: number): Promise<void> {
   const headerLen = Math.min(f.size, 0xC00);
   let header: Bytes;
   try {
-    header = await call('read_file', index, 0, headerLen);
+    header = await call('readFile', index, 0, headerLen);
   } catch (err) {
     out.textContent = 'read failed: ' + (err as Error).message;
     return;
@@ -486,7 +486,7 @@ async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   const out = el('div', 'nca-info nca-inspect', 'Parsing ' + file.name + ' ...');
   $('nsp-result').appendChild(out);
   try {
-    await call('open_nca', file);
+    await call('openNca', file);
   } catch (e) {
     out.textContent = 'Could not open ' + file.name + ': ' + (e as Error).message;
     setNote('container-badge', 'none open', false);
@@ -512,7 +512,7 @@ async function parseAndRenderNca(
 ): Promise<NcaInfo | null> {
   let info: NcaInfo;
   try {
-    info = JSON.parse(await call('parse_nca', header)) as NcaInfo;
+    info = JSON.parse(await call('parseNca', header)) as NcaInfo;
   } catch (err) {
     out.textContent = 'parse failed: ' + (err as Error).message;
     return null;
@@ -560,13 +560,13 @@ function launchNca(f: NspFile, index: number): Promise<void> {
     .filter((held) => held.titleId === openTitleId)
     .reduce((n, held) => n + held.indices.length, 0);
   if (packs) notes.push(describeDlc(packs) + ' mounted.');
-  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index), identity,
+  return doLaunchNca(f.name, () => call('loadNcaFromNsp', index), identity,
     notes.join(' '));
 }
 
 // Same as `launchNca`, for a standalone .nca that is already the open container.
 function launchStandaloneNca(file: File): Promise<void> {
-  return doLaunchNca(file.name, () => call('load_nca'), heldTitle);
+  return doLaunchNca(file.name, () => call('loadNca'), heldTitle);
 }
 
 // The log's first line: title, publisher, id, version and file.

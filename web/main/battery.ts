@@ -15,7 +15,7 @@ export function watchBattery(): void {
   void Promise.all([nav.getBattery(), whenReady()]).then(([battery]) => {
     const push = () => {
       if (!hasSession()) return;
-      void call('set_battery', Math.round(battery.level * 100), battery.charging ? 1 : 0);
+      void call('setBattery', Math.round(battery.level * 100), battery.charging ? 1 : 0);
     };
     push();
     battery.addEventListener('levelchange', push);

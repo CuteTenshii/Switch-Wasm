@@ -41,7 +41,7 @@ function nothingLoaded(): boolean {
 // Start the worker's loop, or ask it to pause after the slice in flight.
 export async function run(): Promise<void> {
   if (running) {
-    await call('pause_loop');
+    await call('pauseLoop');
     return;
   }
   if (nothingLoaded()) return;
@@ -51,7 +51,7 @@ export async function run(): Promise<void> {
   setRunButton(true);
   setState('running');
   holdWakeLock();
-  await call('start_loop', traceEnabled());
+  await call('startLoop', traceEnabled());
 }
 
 function loopEnded(): void {
@@ -100,9 +100,9 @@ async function onFailed(error: string): Promise<void> {
 // Each piece is asked for separately so one failure costs only that piece.
 async function reportPanicContext(): Promise<void> {
   const parts = [
-    ['registers', () => call('log_regs')],
-    ['threads', () => call('log_threads')],
-    ['trace', () => call('flush_log')],
+    ['registers', () => call('logRegs')],
+    ['threads', () => call('logThreads')],
+    ['trace', () => call('flushLog')],
   ] as const;
   for (const [what, ask] of parts) {
     try {
@@ -126,7 +126,7 @@ $('btn-run').addEventListener('click', run);
 
 $('btn-step').addEventListener('click', async () => {
   if (running) {
-    await call('pause_loop');
+    await call('pauseLoop');
     return;
   }
   if (nothingLoaded()) return;
@@ -135,13 +135,13 @@ $('btn-step').addEventListener('click', async () => {
 
 async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   endLoad();
-  const err = await call('last_error');
+  const err = await call('lastError');
   if (steps < 0) {
     setState('fault');
     log('Fault: ' + err, 'error');
     showGuestCrash(err || 'The guest returned a fault without a message.');
   } else if (await call('halted')) {
-    const fatal = await call('guest_fatal');
+    const fatal = await call('guestFatal');
     if (fatal) {
       setState('fault');
       showGuestCrash(fatal);
@@ -154,14 +154,14 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     log('Stopped unexpectedly.', 'error');
     showGuestCrash('The guest stopped unexpectedly.');
   }
-  await Promise.all([call('flush_storage'), pullProfileEdits(), updateReadouts()]);
+  await Promise.all([call('flushStorage'), pullProfileEdits(), updateReadouts()]);
 }
 
 let countedInstructions = 0;
 let countedAt = 0;
 
 export async function updateReadouts(): Promise<void> {
-  showReadouts(await call('get_steps'), await call('ram'));
+  showReadouts(await call('getSteps'), await call('ram'));
 }
 
 // Instructions retired, not the clock, which jumps while threads idle.

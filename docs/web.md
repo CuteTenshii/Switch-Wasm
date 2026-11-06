@@ -54,7 +54,7 @@ The page, the worker, and the wasm bindings between them.
 
 - Battery and dock state are cached in the worker so a reset session inherits them; time is sampled in the worker directly.
 - Change-list buffers are sized from the pending count (0x301-byte paths) because the wasm side drains whether or not the JSON fits.
-- `load_program` hands the core the `File`, which reads it in 8 MiB chunks straight into linear memory and tells an ELF from an NRO by its magic; no copy of the file is held in JavaScript. An SD NRO is read from the session's own SD card (`load_sd_nro`), and a NAND program is registered as a host file and read by range (`nand_launch`), so neither image is copied into the heap.
+- `loadProgram` hands the core the `File`, which reads it in 8 MiB chunks straight into linear memory and tells an ELF from an NRO by its magic; no copy of the file is held in JavaScript. An SD NRO is read from the session's own SD card (`loadSdNro`), and a NAND program is registered as a host file and read by range (`nandLaunch`), so neither image is copied into the heap.
 
 ## `web/worker/hostfiles.ts`
 
@@ -143,7 +143,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `crates/switch-wasm/src/idb/persist.rs`
 
-- The wasm side owns the SD card's and saves' persistence and talks to IndexedDB itself (`idb/mod.rs`, via web-sys): `switch_restore_storage` loads them into the core when a session starts and `switch_flush_storage` (called by `switch_run` through `persist::tick`, at most every 100 ms, and by the page's `flush_storage`) stores guest-changed paths, so no file crosses JavaScript. It creates the databases with the same versions and stores as `web/shared/db.ts`; keep both in step. Restores go through host entry points (not recorded as changes) so restoring does not queue a full write-back. Drained changes cannot be returned to the core, so IndexedDB failures (quota) stay in a per-path backlog until the next flush. Flushes run one after another, so one that resolves has stored its changes.
+- The wasm side owns the SD card's and saves' persistence and talks to IndexedDB itself (`idb/mod.rs`, via web-sys): `switch_restore_storage` loads them into the core when a session starts and `switch_flush_storage` (called by `switch_run` through `persist::tick`, at most every 100 ms, and by the page's `flushStorage`) stores guest-changed paths, so no file crosses JavaScript. It creates the databases with the same versions and stores as `web/shared/db.ts`; keep both in step. Restores go through host entry points (not recorded as changes) so restoring does not queue a full write-back. Drained changes cannot be returned to the core, so IndexedDB failures (quota) stay in a per-path backlog until the next flush. Flushes run one after another, so one that resolves has stored its changes.
 - Free and total space come from the wasm side (`idb/usage.rs`), which scans IndexedDB itself: `navigator.storage.estimate()` gives the origin's free bytes, the `entries` store the SD card's used bytes, `content` the SYSTEM partition's and `saves` USER's. A scan starts on the first slice and again after a guest space query (at most every 2 s); queries answer from the last scan. Databases are only opened if `indexedDB.databases()` lists them, so the scan never creates one with the wrong version.
 - The page asks for persistent storage (`navigator.storage.persist`, main thread only) so the card is not evicted.
 

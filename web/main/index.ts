@@ -32,7 +32,7 @@ if (ios) {
 }
 
 // Diagnostic channels record only at trace log level.
-onLogLevel((level) => void call('set_trace_channels', level === 'trace'));
+onLogLevel((level) => void call('setTraceChannels', level === 'trace'));
 
 // The loading screen is up from first paint (see index.html); this names each step.
 async function init(): Promise<void> {
@@ -45,10 +45,10 @@ async function init(): Promise<void> {
     // Independent of each other; the worker built the session when it loaded the core.
     await Promise.all([
       sdRequestPersistence(),
-      call('restore_storage'),
+      call('restoreStorage'),
       loadProfiles().then(stageUsers),
       offerPreviousLog(),
-      call('set_trace_channels', logLevel() === 'trace'),
+      call('setTraceChannels', logLevel() === 'trace'),
       hasKeys() ? stageKeys() : undefined,
     ]);
     updateKeysState();
@@ -79,7 +79,7 @@ $('btn-stop').addEventListener('click', async () => {
     log('Stop failed: ' + (err as Error).message, 'error');
     return;
   }
-  await call('clear_screen');
+  await call('clearScreen');
   await updateReadouts();
 });
 

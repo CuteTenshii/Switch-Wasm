@@ -29,61 +29,61 @@ function describe(file: Blob): string {
 }
 
 export const CMD: CommandHandlers = {
-  end_title() {
+  endTitle() {
     stopLoop();
     core.switch_end_title();
     return 0;
   },
 
-  set_trace(on) {
+  setTrace(on) {
     core.switch_set_trace(on ? 1 : 0);
     return 0;
   },
-  set_trace_channels(on) {
+  setTraceChannels(on) {
     core.switch_set_trace_channels(on ? 1 : 0);
   },
-  set_jit(on) {
+  setJit(on) {
     core.switch_set_jit(on ? 1 : 0);
     return 0;
   },
   vibration() {
     return core.switch_vibration();
   },
-  set_input(mask, slx, sly, srx, sry) {
+  setInput(mask, slx, sly, srx, sry) {
     core.switch_set_input(BigInt(mask), slx, sly, srx, sry);
     return 0;
   },
-  set_touch(points) {
+  setTouch(points) {
     switch_set_touch(points);
     return 0;
   },
   // The Battery Status API is Window-only, so the main thread sends it.
-  set_battery(percent, charging) {
+  setBattery(percent, charging) {
     core.switch_set_battery(percent, charging ? 1 : 0);
     return 0;
   },
-  set_operation_mode(next) {
+  setOperationMode(next) {
     core.switch_set_operation_mode(next ? 1 : 0);
     return 0;
   },
 
   // The core reads the file itself, so the page never holds a copy.
-  load_program: switch_load_program,
-  load_sd_nro: switch_load_sd_nro,
+  loadProgram: switch_load_program,
+  loadSdNro: switch_load_sd_nro,
 
   // The File is kept and read by range.
-  open_nsp(file) {
+  openNsp(file) {
     return JSON.parse(switch_open_nsp(openHostFile(file))) as NspFile[];
   },
-  open_nca(file) {
+  openNca(file) {
     const result = core.switch_open_nca(openHostFile(file));
     workerLog(`[io] opened ${describe(file)} as a standalone NCA`);
     return result;
   },
   // Register the stored firmware with the session; how many system data archives it took.
-  restore_nand: switch_restore_nand,
+  restoreNand: switch_restore_nand,
   // The base title the update patches and its version, or null if it is not an update.
-  add_update(file) {
+  addUpdate(file) {
     const index = addHostFile(file);
     const found = switch_add_update(index, BigInt(file.size));
     if (!found) return null;
@@ -92,7 +92,7 @@ export const CMD: CommandHandlers = {
     return update;
   },
   // The pieces the add-on content container holds.
-  add_dlc(file) {
+  addDlc(file) {
     const index = addHostFile(file);
     const pieces = JSON.parse(switch_add_dlc(index, BigInt(file.size))) as DlcEntry[];
     if (pieces.length > 0) {
@@ -100,33 +100,33 @@ export const CMD: CommandHandlers = {
     }
     return pieces;
   },
-  clear_dlc() {
+  clearDlc() {
     core.switch_clear_dlc();
     return 0;
   },
-  clear_update() {
+  clearUpdate() {
     core.switch_clear_update();
     return 0;
   },
   // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; null if unreadable.
-  nand_identify(file) {
+  nandIdentify(file) {
     const index = addHostFile(file);
     noteRegistered('NAND files to identify', file.size);
     const found = switch_nand_identify(index, BigInt(file.size));
     return found ? JSON.parse(found) as NandIdentity : null;
   },
   // The content stays in the browser's copy and the core reads it by range.
-  async nand_launch(name) {
+  async nandLaunch(name) {
     const content = await nandContent(name);
     if (!content) throw new Error(name + ' is indexed but its content is missing.');
     const entry = switch_nand_launch(content);
     workerLog(`[io] launched ${name} from the NAND`);
     return entry;
   },
-  load_nca_from_nsp: switch_load_nca_from_nsp,
-  load_nca: switch_load_nca,
-  program_nca_index: switch_program_nca_index,
-  load_keys(prod, title) {
+  loadNcaFromNsp: switch_load_nca_from_nsp,
+  loadNca: switch_load_nca,
+  programNcaIndex: switch_program_nca_index,
+  loadKeys(prod, title) {
     const prodBytes = prod ?? NOTHING;
     const titleBytes = title ?? NOTHING;
     const result = switch_load_keys(prodBytes, titleBytes);
@@ -135,51 +135,51 @@ export const CMD: CommandHandlers = {
     );
     return result;
   },
-  read_file(index, offset, len) {
+  readFile(index, offset, len) {
     return switch_read_file(index, BigInt(offset), len);
   },
 
-  load_control: switch_load_control,
-  control_json: switch_control_json,
-  control_icon: switch_control_icon,
+  loadControl: switch_load_control,
+  controlJson: switch_control_json,
+  controlIcon: switch_control_icon,
   // Store the control data just read, for the next session's ns.
-  remember_control: switch_remember_control,
-  parse_nca: switch_parse_nca,
+  rememberControl: switch_remember_control,
+  parseNca: switch_parse_nca,
 
   run(budget) {
     return Number(core.switch_run(BigInt(budget)));
   },
-  start_loop(tracing) {
+  startLoop(tracing) {
     startLoop(tracing);
     return 0;
   },
-  pause_loop() {
+  pauseLoop() {
     pauseLoop();
     return 0;
   },
-  restore_storage: switch_restore_storage,
-  flush_storage: switch_flush_storage,
-  clear_screen() {
+  restoreStorage: switch_restore_storage,
+  flushStorage: switch_flush_storage,
+  clearScreen() {
     switch_clear_screen();
     return 0;
   },
   halted() {
     return core.switch_halted();
   },
-  guest_fatal: switch_guest_fatal,
-  flush_log: flushLog,
-  log_regs() {
+  guestFatal: switch_guest_fatal,
+  flushLog: flushLog,
+  logRegs() {
     core.switch_log_regs();
     return 0;
   },
-  log_threads() {
+  logThreads() {
     core.switch_log_threads();
     return 0;
   },
-  get_steps() {
+  getSteps() {
     return Number(core.switch_get_steps());
   },
-  get_reg(i) {
+  getReg(i) {
     return '0x' + core.switch_get_reg(i).toString(16).padStart(16, '0');
   },
   ram() {
@@ -195,38 +195,38 @@ export const CMD: CommandHandlers = {
     };
     return { ...parseOr(switch_memory_json(), none), wasmHeap };
   },
-  jit_stats() {
+  jitStats() {
     return parseOr<JitStats>(
       switch_jit_stats_json(),
       { enabled: false, blocks: 0, translated: 0, executed: 0, linked: 0, invalidated: 0 },
     );
   },
-  gpu_report() {
+  gpuReport() {
     return parseOr<GpuReport>(switch_gpu_report_json(), {});
   },
-  last_error: switch_last_error,
+  lastError: switch_last_error,
 
-  fb_width() {
+  fbWidth() {
     return core.switch_fb_width();
   },
-  fb_height() {
+  fbHeight() {
     return core.switch_fb_height();
   },
-  frame_count() {
+  frameCount() {
     return core.switch_frame_count();
   },
 
   // Users: staged one at a time, committed whole before a title starts.
 
-  users_set(users, current) {
+  usersSet(users, current) {
     for (const user of users) {
       switch_user_stage(user.uid, user.nickname, user.editedAt, user.picture);
     }
     return switch_users_commit(current);
   },
-  store_profile_edits: switch_store_profile_edits,
+  storeProfileEdits: switch_store_profile_edits,
 
-  keyboard_answer: switch_keyboard_answer,
+  keyboardAnswer: switch_keyboard_answer,
 
   ...STORAGE,
 };

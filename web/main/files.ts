@@ -80,7 +80,7 @@ function saveBlob(name: string, blob: Blob): void {
 }
 
 async function exportZip(volume: StorageVolume, root: string, name: string): Promise<void> {
-  const { blob, entries } = await call('storage_export', volume, root);
+  const { blob, entries } = await call('storageExport', volume, root);
   saveBlob(name + '.zip', blob);
   setStatus('Exported ' + entries + ' entries to ' + name + '.zip.');
 }
@@ -91,7 +91,7 @@ async function upload(volume: StorageVolume, dir: string, files: [string, File][
   let bytes = 0;
   for (const [rel, file] of files) {
     setStatus('Uploading ' + (done + 1) + ' of ' + files.length + ': ' + rel);
-    bytes += await call('storage_upload', volume, join(dir, rel), file);
+    bytes += await call('storageUpload', volume, join(dir, rel), file);
     done++;
   }
   setStatus('Uploaded ' + done + ' file(s), ' + fmtSize(bytes) + '.');
@@ -335,7 +335,7 @@ async function guarded(run: () => Promise<void>): Promise<void> {
 }
 
 async function renderFiles(volume: StorageVolume, dir: string, mine: number): Promise<void> {
-  const all = await call('storage_scan', volume);
+  const all = await call('storageScan', volume);
   if (mine !== generation) return;
   const entries = [...children(all, dir)].sort(([a, x], [b, y]) =>
     x.kind === y.kind ? a.localeCompare(b) : x.kind === 'dir' ? -1 : 1);
@@ -366,7 +366,7 @@ async function renderFiles(volume: StorageVolume, dir: string, mine: number): Pr
       }
       action(actions, 'Open ' + name, () => void openFile(volume, path, name), false, FilePen);
       action(actions, 'Download ' + name, () => void guarded(async () => {
-        const value = await call('storage_read', volume, path);
+        const value = await call('storageRead', volume, path);
         saveBlob(name, new Blob([value?.data ?? new Uint8Array(0)]));
       }), false, Download);
     } else {
@@ -376,20 +376,20 @@ async function renderFiles(volume: StorageVolume, dir: string, mine: number): Pr
       const next = await askName(item, name, 'Rename', names);
       if (next) {
         await guarded(async () => {
-          await call('storage_rename', volume, path, join(dir, next));
+          await call('storageRename', volume, path, join(dir, next));
           setStatus('Renamed to ' + next + '.');
         });
       }
     })(), false, Pencil);
     action(actions, 'Delete ' + name, () => confirmIn(actions, 'Delete ' + name + '?', 'Delete', async () => {
-      await call('storage_remove', volume, path);
+      await call('storageRemove', volume, path);
       setStatus('Deleted ' + name + '.');
     }), true, Trash2);
   }
 }
 
 async function openFile(volume: StorageVolume, path: string, name: string): Promise<void> {
-  const value = await call('storage_read', volume, path).catch((err: unknown) => {
+  const value = await call('storageRead', volume, path).catch((err: unknown) => {
     setStatus(String((err as Error).message || err), true);
     return undefined;
   });
@@ -400,7 +400,7 @@ async function openFile(volume: StorageVolume, path: string, name: string): Prom
     name,
     data,
     save: async (next) => {
-      await call('storage_apply', volume, [[path, { kind: 'file', data: next }]]);
+      await call('storageApply', volume, [[path, { kind: 'file', data: next }]]);
       setStatus('Saved ' + name + '.');
     },
     download: () => saveBlob(name, new Blob([data])),
@@ -412,7 +412,7 @@ async function openFile(volume: StorageVolume, path: string, name: string): Prom
 }
 
 async function renderSaves(mine: number): Promise<void> {
-  const { ids, names: nicknames } = await call('saves_list');
+  const { ids, names: nicknames } = await call('savesList');
   if (mine !== generation) return;
   const names = new Map(nicknames);
   list.textContent = '';
@@ -428,14 +428,14 @@ async function renderSaves(mine: number): Promise<void> {
       () => go({ kind: 'save', id, dir: '/' }));
     action(actions, 'Export ' + label + ' as .zip', () => void guarded(() => exportZip(saveVolume(id), '/', id)), false, Archive);
     action(actions, 'Delete ' + label, () => confirmIn(actions, 'Delete this save?', 'Delete', async () => {
-      await call('storage_remove', saveVolume(id), '/');
+      await call('storageRemove', saveVolume(id), '/');
       setStatus('Deleted the save ' + id + '.');
     }), true, Trash2);
   }
 }
 
 async function renderNand(mine: number): Promise<void> {
-  const titles = await call('nand_list');
+  const titles = await call('nandList');
   if (mine !== generation) return;
   list.textContent = '';
   if (!titles.length) {
@@ -448,7 +448,7 @@ async function renderNand(mine: number): Promise<void> {
     const { actions } = row(title.kind === 0 ? Package : Database, titleLabel(title.id),
       title.id + ' · ' + kind + ' · ' + fmtSize(title.size), null);
     action(actions, 'Download ' + title.name, () => void guarded(async () => {
-      const content = await call('nand_content', title.name);
+      const content = await call('nandContent', title.name);
       if (!content) throw new Error(title.name + ' is indexed but its content is missing.');
       saveBlob(title.name, content);
     }), false, Download);
@@ -522,7 +522,7 @@ $('btn-files-mkdir').addEventListener('click', () => {
     item.remove();
     if (name) {
       void guarded(async () => {
-        await call('storage_apply', volume, [[join(dir, name), { kind: 'dir' }]]);
+        await call('storageApply', volume, [[join(dir, name), { kind: 'dir' }]]);
         setStatus('Created ' + name + '.');
       });
     }

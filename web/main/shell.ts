@@ -43,7 +43,7 @@ export function showOverlay(show: boolean): void {
 
 // Uncover the canvas and blank it; the worker paints it.
 export function showScreen(): void {
-  void call('clear_screen');
+  void call('clearScreen');
   showOverlay(false);
 }
 

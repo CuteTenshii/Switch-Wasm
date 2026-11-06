@@ -45,7 +45,7 @@ export function traceEnabled(): boolean {
 }
 
 traceCb.addEventListener('change', () => {
-  void call('set_trace', traceCb.checked ? 1 : 0);
+  void call('setTrace', traceCb.checked ? 1 : 0);
   setNote('trace-badge', traceCb.checked ? 'on' : 'off', traceCb.checked);
   if (traceCb.checked) log('Tracing enabled - run slices are capped for readability. The trace shows at the Trace log level.');
 });
@@ -53,7 +53,7 @@ traceCb.addEventListener('change', () => {
 const jitCb = $<HTMLInputElement>('jit-cb');
 
 jitCb.addEventListener('change', () => {
-  void call('set_jit', jitCb.checked ? 1 : 0);
+  void call('setJit', jitCb.checked ? 1 : 0);
   setNote('jit-badge', jitCb.checked ? 'on' : 'off', jitCb.checked);
   if (!jitCb.checked) log('Block translation disabled - running the plain interpreter.');
 });
@@ -61,7 +61,7 @@ jitCb.addEventListener('change', () => {
 const jitSection = $('jit-debug-section');
 
 async function updateJitDebug(): Promise<void> {
-  const s = await call('jit_stats');
+  const s = await call('jitStats');
   const ofEntries = (part: number) =>
     fmtCount(part) + (s.executed ? ` (${((100 * part) / s.executed).toFixed(1)}%)` : '');
   $('jit-blocks').textContent = fmtCount(s.blocks);
@@ -141,7 +141,7 @@ function showList(block: string, list: string, items: string[]): void {
 }
 
 async function updateRenderDebug(): Promise<void> {
-  const g = await call('gpu_report');
+  const g = await call('gpuReport');
   const info = g.backend ? await queryAdapter() : null;
   const { badge, status, on, detail } = renderState(g, info?.isFallbackAdapter ?? false);
   setNote('render-debug-badge', badge, on);
@@ -238,15 +238,15 @@ updateDisplayDebug();
 
 $('btn-dumptrace').addEventListener('click', async () => {
   openPanel('console');
-  if (!await call('flush_log')) log('(no trace)');
+  if (!await call('flushLog')) log('(no trace)');
 });
 
 $('btn-dumpregs').addEventListener('click', async () => {
   openPanel('console');
-  await call('log_regs');
+  await call('logRegs');
 });
 
 const regIdx = $<HTMLInputElement>('reg-idx');
 $('btn-readreg').addEventListener('click', async () => {
-  $('reg-val').textContent = await call('get_reg', parseInt(regIdx.value, 10));
+  $('reg-val').textContent = await call('getReg', parseInt(regIdx.value, 10));
 });

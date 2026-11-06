@@ -20,7 +20,7 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
   beginLoad(file.name, 'reading ' + fmtSize(file.size));
   loadPhase(kind === 'nro' ? 'loading the NRO' : 'loading the ELF',
     'reading, mapping the image and seeding the guest');
-  return loadWith(file.name, () => call('load_program', file));
+  return loadWith(file.name, () => call('loadProgram', file));
 }
 
 // Launch the NRO at `path` on the SD card in place of the running title, as hbmenu does.
@@ -29,7 +29,7 @@ export async function launchFromSd(path: string): Promise<void> {
   if (!(await replaceTitle(name))) return;
   setState('loading');
   loadPhase('loading the NRO', 'mapping the image and seeding the guest');
-  if (await loadWith(name, () => call('load_sd_nro', path))) await run();
+  if (await loadWith(name, () => call('loadSdNro', path))) await run();
 }
 
 // Load with `load`, which throws why it cannot, then show the program as booted.
@@ -59,12 +59,12 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
 async function homebrewTitle(filename: string): Promise<RunningTitle> {
   let info: ControlInfo;
   try {
-    info = JSON.parse(await call('control_json')) as ControlInfo;
+    info = JSON.parse(await call('controlJson')) as ControlInfo;
   } catch (err) {
     log('No homebrew details: ' + (err as Error).message, 'debug');
     return { name: filename, publisher: '', icon: null, version: '' };
   }
-  const icon = info.icon_size > 0 ? await call('control_icon') : null;
+  const icon = info.icon_size > 0 ? await call('controlIcon') : null;
   return {
     name: info.name || filename,
     publisher: info.publisher || '',
