@@ -133,21 +133,29 @@ $('btn-step').addEventListener('click', async () => {
   await finishRun(await call('run', 1), true);
 });
 
+// Runs the homebrew a program that exited asked to run next, as hbmenu does.
+let launchNext: (path: string) => void = () => {};
+
+export function onChainLoad(launch: (path: string) => void): void {
+  launchNext = launch;
+}
+
 async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   endLoad();
-  const err = await call('lastError');
   if (steps < 0) {
+    const err = await call('lastError');
     setState('fault');
     log('Fault: ' + err, 'error');
     showGuestCrash(err || 'The guest returned a fault without a message.');
   } else if (await call('halted')) {
-    const fatal = await call('guestFatal');
+    const [fatal, next] = await Promise.all([call('guestFatal'), call('nextLoad')]);
     if (fatal) {
       setState('fault');
       showGuestCrash(fatal);
     } else {
       setState('halted');
       log('Halted (ExitProcess)', 'info');
+      if (next) launchNext(next);
     }
   } else if (!stepped) {
     setState('fault');
@@ -161,7 +169,8 @@ let countedInstructions = 0;
 let countedAt = 0;
 
 export async function updateReadouts(): Promise<void> {
-  showReadouts(await call('getSteps'), await call('ram'));
+  const [steps, ram] = await Promise.all([call('getSteps'), call('ram')]);
+  showReadouts(steps, ram);
 }
 
 // Instructions retired, not the clock, which jumps while threads idle.

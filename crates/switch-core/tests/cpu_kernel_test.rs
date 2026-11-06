@@ -1197,6 +1197,25 @@ fn homebrew_launched_from_the_sd_card_is_told_its_own_path() {
 }
 
 #[test]
+fn homebrew_names_the_program_it_asks_to_run_next() {
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.boot_homebrew(&homebrew_nro(), None).unwrap();
+    assert_eq!(cpu.next_load_path(), None);
+
+    cpu.mem
+        .write_bytes(
+            switch_core::nro::NEXT_LOAD_PATH_ADDR,
+            b"sdmc:/switch/demo.nro\0",
+        )
+        .unwrap();
+    assert_eq!(
+        cpu.next_load_path().as_deref(),
+        Some("sdmc:/switch/demo.nro")
+    );
+}
+
+#[test]
 fn a_notification_only_break_returns_and_a_real_one_ends_the_process() {
     let run = |reason: u64| {
         let mut cpu = cpu_at(0x1000);

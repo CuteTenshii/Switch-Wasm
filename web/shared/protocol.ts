@@ -233,6 +233,8 @@ export interface Commands {
   loadProgram(file: File): number;
   // The NRO at `path` on the SD card, which is told to it as argv[0].
   loadSd(path: string): number;
+  // The SD path the exited homebrew asked to run next, or empty.
+  nextLoad(): string;
 
   // The container's file table; throws the reason if it cannot be read.
   openNsp(file: File): NspFile[];

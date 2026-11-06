@@ -72,6 +72,17 @@ impl Cpu {
         Ok(loaded)
     }
 
+    /// The path a homebrew that exited asked to run next, as hbmenu does through `envSetNextLoad`.
+    pub fn next_load_path(&self) -> Option<String> {
+        let mut buf = [0u8; crate::nro::NEXT_LOAD_BUFFER_SIZE];
+        self.mem
+            .read_into(crate::nro::NEXT_LOAD_PATH_ADDR, &mut buf)
+            .ok()?;
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let path = std::str::from_utf8(&buf[..len]).ok()?;
+        (!path.is_empty()).then(|| path.to_owned())
+    }
+
     /// Load an AArch64 ELF and point the CPU at its entry.
     pub fn boot_elf(&mut self, data: &[u8]) -> Result<crate::elf::LoadedElf> {
         let elf = crate::elf::load_elf(&self.mem, data)?;

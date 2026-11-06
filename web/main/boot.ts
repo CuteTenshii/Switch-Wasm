@@ -9,7 +9,7 @@ import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
 import { log } from './log';
 import { call } from './rpc';
-import { run, updateReadouts } from './runloop';
+import { onChainLoad, run, updateReadouts } from './runloop';
 import { endTitle, noteBooted } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
 import { runningIconUrl, setRunning } from './title';
@@ -31,6 +31,8 @@ export async function launchFromSd(path: string): Promise<void> {
   loadPhase('loading the NRO', 'mapping the image and seeding the guest');
   if (await loadWith(name, () => call('loadSd', path))) await run();
 }
+
+onChainLoad((path) => void launchFromSd(path));
 
 // Load with `load`, which throws why it cannot, then show the program as booted.
 async function loadWith(name: string, load: () => Promise<number>): Promise<boolean> {

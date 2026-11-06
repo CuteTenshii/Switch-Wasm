@@ -65,6 +65,12 @@ fn load_image(s: &mut Session, data: &[u8], sd_path: Option<&str>) -> Result<u64
     load_nro_bytes(s, data, booted)
 }
 
+/// The path the exited homebrew asked to run next, or empty.
+#[wasm_bindgen]
+pub fn switch_next_load() -> String {
+    session().cpu.next_load_path().unwrap_or_default()
+}
+
 /// Load the ELF or NRO at `path` on the SD card.
 #[wasm_bindgen]
 pub fn switch_load_sd(path: &str) -> Result<f64, String> {
