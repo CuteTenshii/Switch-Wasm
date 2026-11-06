@@ -21,6 +21,9 @@ struct Cli {
     /// Start recording only once this pc is first hit.
     #[arg(long, value_parser = common::hex32, value_name = "PC")]
     ring_from: Option<u32>,
+    /// Run this many steps at full speed before recording; the ring covers what follows.
+    #[arg(long, value_name = "N")]
+    ring_from_step: Option<u64>,
     /// Skip pcs below this.
     #[arg(long, value_parser = common::hex32, default_value = "0", value_name = "PC")]
     ring_min: u32,
@@ -59,6 +62,7 @@ fn main() {
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     title.boot(&mut cpu);
+    common::apply_no_draw(&mut cpu);
 
     let ring_from = cli.ring_from;
     let mut recording = ring_from.is_none();
@@ -71,6 +75,14 @@ fn main() {
     let marks: std::collections::HashMap<u32, String> = cli.mark.iter().cloned().collect();
     let mark_dump = cli.mark_dump;
     let mut done = 0u64;
+    if let Some(from) = cli.ring_from_step {
+        let run = common::run_to(&mut cpu, from.min(budget), |_| false);
+        done = run.steps;
+        if let Some(fault) = run.fault {
+            println!("FAULT before --ring-from-step, step {done}: {fault}");
+            return;
+        }
+    }
     while !cpu.halted && done < budget {
         let pc = cpu.get_pc();
         if let Some(name) = marks.get(&pc) {
