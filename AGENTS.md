@@ -80,6 +80,12 @@ cargo clippy --workspace --all-targets -- -D warnings
   `rust-src`, because the core's memory is shared between workers and stable's
   prebuilt std has no wasm atomics. Host builds, tests and clippy stay on
   stable. The `Makefile` prints the `rustup` command when that nightly is missing.
+- `ring`, under `rustls`, compiles C for wasm32, so the build needs a `clang` that targets it. On
+  macOS, Apple's `ar` writes an empty archive for wasm objects and the wasm link fails on
+  `ring_core_*` symbols. Put Homebrew LLVM's tools in your user-level `~/.cargo/config.toml`:
+  `[env]` with `CC_wasm32_unknown_unknown = "/opt/homebrew/opt/llvm/bin/clang"` and
+  `AR_wasm32_unknown_unknown = "/opt/homebrew/opt/llvm/bin/llvm-ar"`. The repo does not set
+  them, and Linux needs nothing.
 - `make assets` builds the release WebAssembly and then the Vite site in
   `dist`.
 - There are two cargo profiles, `dev` and `release`. Host examples that run a
