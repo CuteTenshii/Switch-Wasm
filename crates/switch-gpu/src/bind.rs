@@ -27,8 +27,10 @@ fn pack_banks<'a>(banks: impl Iterator<Item = &'a ConstantUpload>) -> Vec<u8> {
         words[at + 1] = (bank.bytes.len() / 4) as u32;
         words.extend(
             bank.bytes
-                .chunks_exact(4)
-                .map(|w| u32::from_le_bytes(w.try_into().expect("four bytes"))),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|w| u32::from_le_bytes(*w)),
         );
     }
     words.iter().flat_map(|w| w.to_le_bytes()).collect()

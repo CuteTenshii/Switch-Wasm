@@ -468,12 +468,16 @@ impl Gpu {
                 }
             },
             Readback::Global { addr, original } => {
-                let words = mapped.chunks_exact(4).zip(original.chunks_exact(4));
+                let words = mapped
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(original.as_chunks::<4>().0);
                 (0u64..)
                     .zip(words)
                     .filter(|(_, (now, was))| now != was)
                     .try_for_each(|(word, (now, _))| {
-                        let value = u32::from_le_bytes(now.try_into().expect("four bytes"));
+                        let value = u32::from_le_bytes(*now);
                         ctx.write_u32(addr + word * 4, value)
                     })
             }
