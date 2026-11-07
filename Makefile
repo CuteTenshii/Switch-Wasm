@@ -18,6 +18,7 @@ test:
 	cargo test -p switch-core
 	cargo test -p switch-wasm
 	cargo test -p switch-relay-proto
+	cargo test -p switch-relay
 	# wgpu device tests share the host adapter; parallel creation can crash software Vulkan.
 	cargo test -p switch-gpu -- --test-threads=1
 
