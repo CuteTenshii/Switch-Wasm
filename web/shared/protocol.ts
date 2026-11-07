@@ -233,6 +233,8 @@ export interface Commands {
   disconnectNetwork(): void;
   // The guest's connections, newest first: `[{id, host, port, proto, state, sent, received}]`.
   netConnections(): string;
+  // The relay socket's state and the frames that crossed it: `{socket, out, in}`.
+  netStatus(): string;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
   loadProgram(file: File): number;

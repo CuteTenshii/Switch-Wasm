@@ -26,6 +26,7 @@ const urlInput = $<HTMLInputElement>('net-url');
 const badge = $('net-badge');
 const note = $('net-note');
 const table = $<HTMLElement>('net-table');
+const link = $('net-link');
 const rows = $('net-rows');
 let state: NetState = 'off';
 
@@ -76,6 +77,8 @@ function showConnections(list: Connection[]): void {
 
 async function refresh(): Promise<void> {
   showConnections(JSON.parse(await call('netConnections')) as Connection[]);
+  const status = JSON.parse(await call('netStatus')) as { socket: string; out: number; in: number };
+  link.textContent = `Socket ${status.socket}, ${status.out} frames out, ${status.in} in.`;
 }
 
 onNetState((next) => {

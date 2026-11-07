@@ -37,6 +37,9 @@ struct State {
     /// The page asked for a network: set from `switch_net_connect` until `switch_net_disconnect`.
     enabled: bool,
     link: Option<Link>,
+    /// Frames written to and read from the socket since the page asked for a network.
+    frames_out: u32,
+    frames_in: u32,
 }
 
 thread_local! {
@@ -90,6 +93,8 @@ pub fn switch_net_connect(url: &str) -> Result<(), JsValue> {
             close(&old.socket);
         }
         state.enabled = true;
+        state.frames_out = 0;
+        state.frames_in = 0;
         state.link = Some(Link {
             socket,
             inbox,
@@ -98,6 +103,27 @@ pub fn switch_net_connect(url: &str) -> Result<(), JsValue> {
         });
     });
     Ok(())
+}
+
+/// The socket's state and how many frames have crossed it, as
+/// `{"socket":"none|connecting|open|closing|closed","out":n,"in":n}`.
+#[wasm_bindgen]
+pub fn switch_net_status_json() -> String {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let socket = match state.link.as_ref().map(|link| link.socket.ready_state()) {
+            None => "none",
+            Some(WebSocket::CONNECTING) => "connecting",
+            Some(WebSocket::OPEN) => "open",
+            Some(WebSocket::CLOSING) => "closing",
+            Some(_) => "closed",
+        };
+        switch_core::json::object(|o| {
+            o.field("socket", socket)
+                .field("out", state.frames_out)
+                .field("in", state.frames_in);
+        })
+    })
 }
 
 /// The guest's connections as JSON, newest first; see `Client::report`.
@@ -124,6 +150,14 @@ pub fn switch_net_disconnect() {
     post("net_state", &[("state", "off".into())]);
 }
 
+/// A view of this module's memory is over a `SharedArrayBuffer`, which `WebSocket.send` refuses,
+/// so the frame goes in a plain array first.
+fn send(socket: &WebSocket, frame: &[u8]) -> bool {
+    let array = Uint8Array::new_with_length(frame.len() as u32);
+    array.copy_from(frame);
+    socket.send_with_array_buffer_view(&array).is_ok()
+}
+
 fn close(socket: &WebSocket) {
     socket.set_onmessage(None);
     socket.set_onopen(None);
@@ -140,13 +174,20 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
             return;
         }
         cpu.set_network(true);
-        let State { client, link, .. } = &mut *state;
+        let State {
+            client,
+            link,
+            frames_out,
+            frames_in,
+            ..
+        } = &mut *state;
 
         let mut events = Vec::new();
         let mut gone = false;
         let mut broken = false;
         if let Some(link) = link.as_mut() {
             let frames: Vec<_> = link.inbox.borrow_mut().frames.drain(..).collect();
+            *frames_in += frames.len() as u32;
             for raw in frames {
                 match client.incoming(&raw) {
                     Ok(event) => events.extend(event),
@@ -165,7 +206,9 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
                 let frames = client.outgoing(commands);
                 if link.socket.ready_state() == WebSocket::OPEN {
                     for frame in link.pending.drain(..).chain(frames) {
-                        let _ = link.socket.send_with_u8_array(&frame);
+                        if send(&link.socket, &frame) {
+                            *frames_out += 1;
+                        }
                     }
                     client.sent();
                 } else {
