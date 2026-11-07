@@ -24,7 +24,6 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - Once `Receive` is handled, raise the system's own alerts: low battery for the console and for each controller, controller connected and disconnected.
 - Whether browsers let an `https://` page open `ws://127.0.0.1` (Chrome and Firefox are expected to; Safari is not known to) has not been tried on the deployed site.
 - The relay socket, its frames and TLS run on the emulator's thread, once per slice: a handshake or a big download costs guest time, and every answer from the relay waits for the next slice. A network worker could own the WebSocket and `rustls` and share the command and event queue with `net::exchange` through a mutex.
-- `ring` compiles C for wasm32, so CI's `build` job needs a `clang` that targets it; the job has not run with `rustls` yet.
 - `ssl` and `ssl:s` refuse the commands switchbrew does not describe: `GetCertificateByIndex` (10), `GetTrustedCertificateCount` (11) and `VerifySignature` (103) are names only, and `DebugIoctl` (4) is an error on retail with no code given. A guest that sends one gets a refusal in the log.
 - Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.

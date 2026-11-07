@@ -93,6 +93,10 @@ jobs:
           key: wasm32-unknown-unknown-nightly
           cache-bin: "false"
 
+      # `ring` compiles C for wasm32
+      - name: Install clang
+        run: apt-get update && apt-get install -y --no-install-recommends clang
+
       - name: Install matching wasm-bindgen CLI
         shell: bash
         run: |
