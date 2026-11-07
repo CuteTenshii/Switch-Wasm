@@ -94,15 +94,28 @@ pub async fn run(
     done: UnboundedSender<StreamId>,
 ) {
     let id = open.id;
+    let target = match &open.peer {
+        Peer::Address([a, b, c, d]) => format!("{a}.{b}.{c}.{d}:{}", open.port),
+        Peer::Name(name) => format!("{name}:{}", open.port),
+    };
+    let proto = if open.proto == Proto::Udp {
+        "udp"
+    } else {
+        "tcp"
+    };
+    eprintln!("#{id} {proto} {target}");
     match connect(&open, &policy).await {
         Err(reason) => {
+            eprintln!("#{id} failed: {reason:?}");
             let _ = out.send(ServerFrame::Failed { stream: id, reason });
         }
         Ok(Connection::Tcp(socket)) => {
+            eprintln!("#{id} open");
             let _ = out.send(ServerFrame::Connected { stream: id });
             pump_tcp(id, socket, credit, out, commands).await;
         }
         Ok(Connection::Udp(socket)) => {
+            eprintln!("#{id} open");
             let _ = out.send(ServerFrame::Connected { stream: id });
             pump_udp(id, socket, credit, out, commands).await;
         }

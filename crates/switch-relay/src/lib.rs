@@ -51,7 +51,9 @@ async fn handle(socket: TcpStream, policy: Arc<Policy>) {
         return;
     };
     let origin = origin.lock().unwrap().take();
+    let from = origin.as_deref().unwrap_or("no origin");
     if !policy.origin_allowed(origin.as_deref()).await {
+        eprintln!("refused {from}");
         let refusal = Message::Close(Some(CloseFrame {
             code: CloseCode::Policy,
             reason: "".into(),
@@ -59,5 +61,7 @@ async fn handle(socket: TcpStream, policy: Arc<Policy>) {
         let _ = socket.send(refusal).await;
         return;
     }
+    eprintln!("page {from} connected");
     session::run(socket, policy).await;
+    eprintln!("page {from} left");
 }
