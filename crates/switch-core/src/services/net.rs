@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 
+use super::netbridge::{NetCommand, NetEvent, NetFailure, StreamId};
 use crate::cpu::Cpu;
 use crate::Result;
 
@@ -81,6 +82,24 @@ pub(crate) struct BsdSocket {
     pub rx: VecDeque<u8>,
     /// The peer closed or shut down writing: reads return end-of-file, unlike `peer: None`.
     pub peer_closed: bool,
+    /// The connection the host carries, for a socket connected outside this console.
+    pub stream: Option<Stream>,
+}
+
+/// A connection the host carries: where it stands and the peer's `sockaddr`.
+#[derive(Debug, Clone)]
+pub(crate) struct Stream {
+    id: StreamId,
+    state: StreamState,
+    address: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamState {
+    Connecting,
+    Open,
+    /// The errno `SO_ERROR` reports once.
+    Failed(i32),
 }
 
 impl BsdSocket {
@@ -95,17 +114,32 @@ impl BsdSocket {
             peer: None,
             rx: VecDeque::new(),
             peer_closed: false,
+            stream: None,
         }
     }
 
     /// Readable: has bytes, a pending connection, or a closed peer (EOF).
     fn readable(&self) -> bool {
-        !self.rx.is_empty() || !self.incoming.is_empty() || self.peer_closed
+        !self.rx.is_empty()
+            || !self.incoming.is_empty()
+            || self.peer_closed
+            || self
+                .stream_state()
+                .is_some_and(|s| matches!(s, StreamState::Failed(_)))
+    }
+
+    fn stream_state(&self) -> Option<StreamState> {
+        self.stream.as_ref().map(|stream| stream.state)
     }
 
     /// Writable: a live connection or any datagram socket; nothing here has a send buffer.
     fn writable(&self) -> bool {
-        self.kind == BSD_SOCK_DGRAM || (self.peer.is_some() && !self.peer_closed)
+        self.kind == BSD_SOCK_DGRAM
+            || (self.peer.is_some() && !self.peer_closed)
+            || matches!(
+                self.stream_state(),
+                Some(StreamState::Open | StreamState::Failed(_))
+            )
     }
 }
 
@@ -128,6 +162,14 @@ const BSD_EPIPE: i32 = 32;
 
 const BSD_ENETUNREACH: i32 = 51;
 
+const BSD_ETIMEDOUT: i32 = 60;
+
+const BSD_EHOSTUNREACH: i32 = 65;
+
+const BSD_EINPROGRESS: i32 = 36;
+
+const BSD_EALREADY: i32 = 37;
+
 const BSD_EISCONN: i32 = 56;
 
 const BSD_ENOTCONN: i32 = 57;
@@ -142,6 +184,90 @@ const BSD_AF_INET: u8 = 2;
 
 /// `sizeof(sockaddr_in)`, also its `sin_len`.
 const BSD_SOCKADDR_IN_LEN: usize = 16;
+
+/// `EAI_SERVICE`.
+const SFDNSRES_EAI_SERVICE: i32 = 9;
+
+/// `AI_NUMERICHOST`, `SOCK_STREAM`, `IPPROTO_TCP` and `IPPROTO_UDP` in FreeBSD's numbering.
+const AI_NUMERICHOST: u32 = 0x4;
+const SOCK_STREAM: u32 = 1;
+const IPPROTO_TCP: u32 = 6;
+const IPPROTO_UDP: u32 = 17;
+
+/// First word of every serialized `addrinfo`.
+const ADDRINFO_MAGIC: u32 = 0xBEEF_CAFE;
+
+/// The fields of a serialized `addrinfo` that `getaddrinfo`'s hints carry.
+struct AddrInfoHints {
+    flags: u32,
+    family: u32,
+    socktype: u32,
+}
+
+impl AddrInfoHints {
+    /// All zero, which asks for anything, when there are no hints or they are malformed.
+    fn parse(raw: &[u8]) -> AddrInfoHints {
+        let word = |index: usize| {
+            raw.get(index * 4..index * 4 + 4)
+                .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        if word(0) != ADDRINFO_MAGIC {
+            return AddrInfoHints {
+                flags: 0,
+                family: 0,
+                socktype: 0,
+            };
+        }
+        AddrInfoHints {
+            flags: word(1),
+            family: word(2),
+            socktype: word(3),
+        }
+    }
+}
+
+/// A numeric port, or one of the few service names a title passes; `None` for any other.
+fn service_port(service: &str) -> Option<u16> {
+    match service {
+        "" => Some(0),
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => service.parse().ok(),
+    }
+}
+
+/// A DNS name the host could resolve: dot-separated labels of letters, digits, `-` and `_`.
+fn is_hostname(name: &str) -> bool {
+    let name = name.strip_suffix('.').unwrap_or(name);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+/// Append one `addrinfo` entry to the `sfdnsres` wire format: big-endian words, then a
+/// `sockaddr_in` of family (16 bits), port, address and 8 zero bytes, then an empty canonical name.
+fn serialize_addrinfo(out: &mut Vec<u8>, socktype: u32, protocol: u32, ip: [u8; 4], port: u16) {
+    for word in [
+        ADDRINFO_MAGIC,
+        0,
+        u32::from(BSD_AF_INET),
+        socktype,
+        protocol,
+        BSD_SOCKADDR_IN_LEN as u32,
+    ] {
+        out.extend_from_slice(&word.to_be_bytes());
+    }
+    out.extend_from_slice(&u16::from(BSD_AF_INET).to_be_bytes());
+    out.extend_from_slice(&port.to_be_bytes());
+    out.extend_from_slice(&ip);
+    out.extend_from_slice(&[0; 8]);
+    out.push(0);
+}
 
 /// Start of the ephemeral port range for `bind` to port 0.
 pub(crate) const BSD_FIRST_EPHEMERAL_PORT: u16 = 49152;
@@ -188,6 +314,11 @@ const BSD_F_GETFL: u32 = 3;
 const BSD_F_SETFL: u32 = 4;
 
 const BSD_O_NONBLOCK: u32 = 0x0004;
+
+/// `SOL_SOCKET` and `SO_ERROR`.
+const BSD_SOL_SOCKET: u32 = 0xFFFF;
+
+const BSD_SO_ERROR: u32 = 0x1007;
 
 impl Cpu {
     /// `ssl`: contexts and options are real objects; connections never connect.
@@ -405,6 +536,8 @@ impl Cpu {
             Some(2) | Some(3) | Some(10) | Some(11) => {
                 self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND)
             }
+            // GetAddrInfoRequest and its WithOptions form, once the host carries traffic.
+            Some(6) | Some(12) if self.net.enabled => self.sfdnsres_addrinfo(tls),
             // GetAddrInfoRequest / GetNameInfoRequest and WithOptions forms (`gai` error).
             Some(6) | Some(7) | Some(12) | Some(13) => {
                 self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME)
@@ -457,6 +590,60 @@ impl Cpu {
             Some(15) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             _ => self.unimplemented_command(tls, "nsd", cmd_id),
         }
+    }
+
+    /// `GetAddrInfoRequest` with a network: a literal address answers as itself, a name as
+    /// its synthetic address, which `bsd` maps back to the name when the guest connects.
+    fn sfdnsres_addrinfo(&mut self, tls: u32) -> Result<()> {
+        let read = |cpu: &Cpu, index: u32| {
+            cpu.ipc_input_buffer(tls, index)
+                .map(|(addr, size)| cpu.read_bytes(addr, size))
+                .unwrap_or_default()
+        };
+        let text = |bytes: Vec<u8>| {
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
+        };
+        let host = text(read(self, 0));
+        let service = text(read(self, 1));
+        let hints = AddrInfoHints::parse(&read(self, 2));
+
+        let Some(port) = service_port(&service) else {
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_SERVICE);
+        };
+        if hints.family != 0 && hints.family != u32::from(BSD_AF_INET) {
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME);
+        }
+        let literal = host
+            .parse::<std::net::Ipv4Addr>()
+            .ok()
+            .map(|ip| ip.octets());
+        let address = match literal {
+            Some(address) => Some(address),
+            None if hints.flags & AI_NUMERICHOST != 0 || !is_hostname(&host) => None,
+            None => self.net.synthesize(&host),
+        };
+        let Some(address) = address else {
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME);
+        };
+
+        let mut serialized = Vec::new();
+        for (socktype, protocol) in [(SOCK_STREAM, IPPROTO_TCP), (BSD_SOCK_DGRAM, IPPROTO_UDP)] {
+            if hints.socktype == 0 || hints.socktype == socktype {
+                serialize_addrinfo(&mut serialized, socktype, protocol, address, port);
+            }
+        }
+        serialized.extend_from_slice(&0u32.to_be_bytes());
+        let fits = self
+            .ipc_output_buffer(tls, 0)
+            .is_some_and(|(_, size)| serialized.len() <= size as usize);
+        if !fits {
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME);
+        }
+        self.write_output_buffer(tls, 0, &serialized);
+        let mut results = [0u8; 12];
+        results[8..].copy_from_slice(&(serialized.len() as u32).to_le_bytes());
+        self.write_ipc_response(tls, 0, &[], &results, &[])
     }
 
     /// A failed lookup. `SfdnsresRequestResults` is { return value, errno, bytes
@@ -611,7 +798,10 @@ impl Cpu {
                 let fd = word(self, 0) as i32;
                 match self.process().bsd_sockets.get(&fd) {
                     None => return self.bsd_reply(tls, -1, BSD_EBADF),
-                    Some(socket) if socket.peer.is_none() => {
+                    Some(socket)
+                        if socket.peer.is_none()
+                            && socket.stream_state() != Some(StreamState::Open) =>
+                    {
                         return self.bsd_reply(tls, -1, BSD_ENOTCONN)
                     }
                     Some(_) => {}
@@ -638,12 +828,15 @@ impl Cpu {
                 if !self.process().bsd_sockets.contains_key(&fd) {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
                 }
-                let value = self
-                    .process()
-                    .bsd_socket_options
-                    .get(&(fd, level, option))
-                    .copied()
-                    .unwrap_or(0);
+                let value = if (level, option) == (BSD_SOL_SOCKET, BSD_SO_ERROR) {
+                    self.bsd_take_stream_error(fd)
+                } else {
+                    self.process()
+                        .bsd_socket_options
+                        .get(&(fd, level, option))
+                        .copied()
+                        .unwrap_or(0)
+                };
                 let mut written = 0;
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                     if size >= 4 {
@@ -817,6 +1010,14 @@ impl Cpu {
 
     /// The peer's address, for `GetPeerName`, `Accept` and `RecvFrom`.
     fn bsd_peer_address(&self, fd: i32) -> Vec<u8> {
+        if let Some(stream) = self
+            .process()
+            .bsd_sockets
+            .get(&fd)
+            .and_then(|socket| socket.stream.as_ref())
+        {
+            return stream.address.clone();
+        }
         let peer = self
             .process()
             .bsd_sockets
@@ -906,7 +1107,12 @@ impl Cpu {
         let target = sockaddr_in(address).filter(|&(ip, port)| is_local_ip(ip) && port != 0);
         let listener = target.and_then(|(_, port)| self.bsd_listener_on(port));
         let Some(listener) = listener else {
-            return self.bsd_reply(tls, -1, BSD_ECONNREFUSED);
+            return match sockaddr_in(address) {
+                Some((ip, port)) if self.net.enabled && port != 0 => {
+                    self.bsd_connect_outside(tls, fd, ip, port, address)
+                }
+                _ => self.bsd_reply(tls, -1, BSD_ECONNREFUSED),
+            };
         };
 
         // The accepted end answers on the listener's address.
@@ -941,11 +1147,85 @@ impl Cpu {
         self.bsd_reply(tls, 0, 0)
     }
 
+    /// `connect` to a peer outside this console: the host does the connecting, so the call
+    /// is always in progress. The socket turns writable once it opens, or readable and writable
+    /// with the error `SO_ERROR` reports if it fails.
+    fn bsd_connect_outside(
+        &mut self,
+        tls: u32,
+        fd: i32,
+        ip: [u8; 4],
+        port: u16,
+        address: &[u8],
+    ) -> Result<()> {
+        let state = self
+            .process()
+            .bsd_sockets
+            .get(&fd)
+            .and_then(|socket| socket.stream_state());
+        match state {
+            Some(StreamState::Connecting) => return self.bsd_reply(tls, -1, BSD_EALREADY),
+            Some(StreamState::Open) => return self.bsd_reply(tls, -1, BSD_EISCONN),
+            Some(StreamState::Failed(errno)) => {
+                self.bsd_clear_stream(fd);
+                return self.bsd_reply(tls, -1, errno);
+            }
+            None => {}
+        }
+        let id = self.net.open_stream();
+        let peer = self.net.peer_for(ip);
+        self.net.outbox.push(NetCommand::Connect {
+            stream: id,
+            udp: false,
+            peer,
+            port,
+        });
+        let unbound = self
+            .process()
+            .bsd_sockets
+            .get(&fd)
+            .is_some_and(|socket| socket.bound.is_empty());
+        let local = unbound.then(|| sockaddr_in_bytes(NIFM_LOCAL_IP, self.bsd_assign_port()));
+        if let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) {
+            if let Some(local) = local {
+                socket.bound = local;
+            }
+            socket.stream = Some(Stream {
+                id,
+                state: StreamState::Connecting,
+                address: address.to_vec(),
+            });
+        }
+        self.bsd_reply(tls, -1, BSD_EINPROGRESS)
+    }
+
+    /// `SO_ERROR`: the failure of a connect, reported once; zero otherwise.
+    fn bsd_take_stream_error(&mut self, fd: i32) -> u32 {
+        let state = self
+            .process()
+            .bsd_sockets
+            .get(&fd)
+            .and_then(|socket| socket.stream_state());
+        let Some(StreamState::Failed(errno)) = state else {
+            return 0;
+        };
+        self.bsd_clear_stream(fd);
+        errno as u32
+    }
+
+    /// Forget a stream that failed once its error has been reported.
+    fn bsd_clear_stream(&mut self, fd: i32) {
+        if let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) {
+            socket.stream = None;
+        }
+    }
+
     /// `Send`/`SendTo`/`Write`: everything goes into the peer's queue at once.
     fn bsd_send(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
         let peer = match self.process().bsd_sockets.get(&fd) {
             None => return self.bsd_reply(tls, -1, BSD_EBADF),
             Some(socket) if socket.peer_closed => return self.bsd_reply(tls, -1, BSD_EPIPE),
+            Some(socket) if socket.stream.is_some() => return self.bsd_send_outside(tls, fd),
             Some(socket) => match socket.peer {
                 Some(peer) => peer,
                 None => return self.bsd_send_datagram(tls, fd, destination),
@@ -959,6 +1239,25 @@ impl Cpu {
         if let Some(peer) = self.process_mut().bsd_sockets.get_mut(&peer) {
             peer.rx.extend(bytes);
         }
+        self.bsd_reply(tls, sent, 0)
+    }
+
+    /// `Send` on a host-carried stream: queued for the host once it is open.
+    fn bsd_send_outside(&mut self, tls: u32, fd: i32) -> Result<()> {
+        let Some(socket) = self.process().bsd_sockets.get(&fd) else {
+            return self.bsd_reply(tls, -1, BSD_EBADF);
+        };
+        let (Some(StreamState::Open), Some(stream)) = (socket.stream_state(), &socket.stream)
+        else {
+            return self.bsd_reply(tls, -1, BSD_ENOTCONN);
+        };
+        let stream = stream.id;
+        let data = match self.ipc_input_buffer(tls, 0) {
+            Some((addr, size)) => self.read_bytes(addr, size),
+            None => Vec::new(),
+        };
+        let sent = data.len() as i32;
+        self.net.outbox.push(NetCommand::Send { stream, data });
         self.bsd_reply(tls, sent, 0)
     }
 
@@ -1006,7 +1305,8 @@ impl Cpu {
             Some(socket)
                 if socket.kind != BSD_SOCK_DGRAM
                     && socket.peer.is_none()
-                    && !socket.peer_closed =>
+                    && !socket.peer_closed
+                    && socket.stream_state() != Some(StreamState::Open) =>
             {
                 return Ok((-1, BSD_ENOTCONN));
             }
@@ -1086,6 +1386,7 @@ impl Cpu {
     fn bsd_poll_revents(&self, fd: i32, events: u16) -> u16 {
         const POLLIN: u16 = 0x0001;
         const POLLOUT: u16 = 0x0004;
+        const POLLERR: u16 = 0x0008;
         const POLLHUP: u16 = 0x0010;
         let Some(socket) = self.process().bsd_sockets.get(&fd) else {
             return 0;
@@ -1100,11 +1401,24 @@ impl Cpu {
         if socket.peer_closed && socket.rx.is_empty() {
             revents |= POLLHUP;
         }
+        if matches!(socket.stream_state(), Some(StreamState::Failed(_))) {
+            revents |= POLLERR;
+        }
         revents
     }
 
     /// Tell `fd`'s peer nothing more is coming. The link is kept for `GetPeerName`.
     fn bsd_orphan_peer(&mut self, fd: i32) {
+        if let Some(stream) = self
+            .process()
+            .bsd_sockets
+            .get(&fd)
+            .and_then(|socket| socket.stream.as_ref())
+            .filter(|stream| stream.state == StreamState::Open)
+        {
+            let stream = stream.id;
+            self.net.outbox.push(NetCommand::ShutdownWrite { stream });
+        }
         let Some(peer) = self
             .process()
             .bsd_sockets
@@ -1126,6 +1440,15 @@ impl Cpu {
         self.process_mut()
             .bsd_socket_options
             .retain(|&(owner, _, _), _| owner != fd);
+        if let Some(stream) = socket
+            .stream
+            .as_ref()
+            .filter(|s| !matches!(s.state, StreamState::Failed(_)))
+        {
+            self.net
+                .outbox
+                .push(NetCommand::Close { stream: stream.id });
+        }
         if let Some(peer) = socket
             .peer
             .and_then(|peer| self.process_mut().bsd_sockets.get_mut(&peer))
@@ -1134,6 +1457,53 @@ impl Cpu {
         }
         for pending in socket.incoming {
             self.bsd_close(pending);
+        }
+    }
+
+    /// Let guests reach the outside through the host, or back to an empty network.
+    pub fn set_network(&mut self, enabled: bool) {
+        self.net.enabled = enabled;
+    }
+
+    /// What the guest asked the host to do since the last call.
+    pub fn take_net_commands(&mut self) -> Vec<NetCommand> {
+        std::mem::take(&mut self.net.outbox)
+    }
+
+    /// Apply what the host reports about its streams; one for a socket since closed is dropped.
+    pub fn deliver_net_events(&mut self, events: impl IntoIterator<Item = NetEvent>) {
+        for event in events {
+            let id = match &event {
+                NetEvent::Connected { stream }
+                | NetEvent::Failed { stream, .. }
+                | NetEvent::Data { stream, .. }
+                | NetEvent::Closed { stream } => *stream,
+            };
+            let socket = self
+                .machine
+                .processes
+                .values_mut()
+                .flat_map(|process| process.bsd_sockets.values_mut())
+                .find(|socket| socket.stream.as_ref().is_some_and(|s| s.id == id));
+            let Some(socket) = socket else {
+                continue;
+            };
+            let Some(stream) = socket.stream.as_mut() else {
+                continue;
+            };
+            match event {
+                NetEvent::Connected { .. } => stream.state = StreamState::Open,
+                NetEvent::Failed { reason, .. } => {
+                    stream.state = StreamState::Failed(match reason {
+                        NetFailure::Refused => BSD_ECONNREFUSED,
+                        NetFailure::Unreachable => BSD_ENETUNREACH,
+                        NetFailure::TimedOut => BSD_ETIMEDOUT,
+                        NetFailure::NotFound => BSD_EHOSTUNREACH,
+                    });
+                }
+                NetEvent::Data { data, .. } => socket.rx.extend(data),
+                NetEvent::Closed { .. } => socket.peer_closed = true,
+            }
         }
     }
 
@@ -1260,6 +1630,7 @@ impl Cpu {
 mod tests {
     use crate::cpu::Cpu;
     use crate::kernel::ipc::testing::*;
+    use crate::services::netbridge::{NetCommand, NetEvent, NetFailure, Peer};
 
     #[test]
     fn nsd_resolves_the_environment_placeholder() {
@@ -1405,6 +1776,290 @@ mod tests {
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
         cpu.sfdnsres_request(TLS, Some(5)).unwrap();
         assert_eq!(cpu.read_string(BUFFER, 0x40), "Name or service not known");
+    }
+
+    const LOOKUP_HOST: u32 = 0x5000;
+    const LOOKUP_PORT: u32 = 0x5100;
+    const LOOKUP_HINTS: u32 = 0x5200;
+    const LOOKUP_OUT: u32 = 0x5800;
+
+    /// `getaddrinfo(host, port, hints)` with the network on; the reply words and the output.
+    fn lookup(host: &str, port: &str, socktype: Option<u32>) -> ((i32, u32), Vec<u8>) {
+        let mut cpu = Cpu::new();
+        cpu.net.enabled = true;
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.map_zero(LOOKUP_HOST, 0x2000).unwrap();
+        place(&mut cpu, LOOKUP_HOST, format!("{host}\0").as_bytes());
+        place(&mut cpu, LOOKUP_PORT, format!("{port}\0").as_bytes());
+        let mut hints = Vec::new();
+        if let Some(socktype) = socktype {
+            for word in [super::ADDRINFO_MAGIC, 0, 0, socktype, 0, 0] {
+                hints.extend_from_slice(&word.to_be_bytes());
+            }
+        }
+        place(&mut cpu, LOOKUP_HINTS, &hints);
+        let send = [
+            (LOOKUP_HOST, 0x100),
+            (LOOKUP_PORT, 0x100),
+            (LOOKUP_HINTS, 0x400),
+        ];
+        write_buffer_request(&mut cpu, 6, &[0; 16], &send, &[(LOOKUP_OUT, 0x1000)]);
+        cpu.sfdnsres_request(TLS, Some(6)).unwrap();
+        let ret = cpu.mem.read_u32(TLS + 0x20).unwrap() as i32;
+        let len = cpu.mem.read_u32(TLS + 0x28).unwrap();
+        ((ret, len), cpu.read_bytes(LOOKUP_OUT, len))
+    }
+
+    /// The `(socktype, protocol, address, port)` of each entry in a serialized chain.
+    fn entries(chain: &[u8]) -> Vec<(u32, u32, [u8; 4], u16)> {
+        let word = |at: usize| u32::from_be_bytes(chain[at..at + 4].try_into().unwrap());
+        let mut at = 0;
+        let mut found = Vec::new();
+        while word(at) != 0 {
+            assert_eq!(word(at), super::ADDRINFO_MAGIC);
+            assert_eq!(word(at + 8), 2, "AF_INET");
+            assert_eq!(word(at + 20), 16, "ai_addrlen");
+            let addr = at + 24;
+            assert_eq!(u16::from_be_bytes([chain[addr], chain[addr + 1]]), 2);
+            let port = u16::from_be_bytes([chain[addr + 2], chain[addr + 3]]);
+            let ip = chain[addr + 4..addr + 8].try_into().unwrap();
+            found.push((word(at + 12), word(at + 16), ip, port));
+            assert_eq!(chain[addr + 16], 0, "empty canonical name");
+            at = addr + 17;
+        }
+        assert_eq!(at + 4, chain.len(), "the list ends with its sentinel");
+        found
+    }
+
+    #[test]
+    fn sfdnsres_answers_a_name_with_the_same_synthetic_address_each_time() {
+        let ((ret, _), chain) = lookup("Example.com", "443", None);
+        assert_eq!(ret, 0);
+        let found = entries(&chain);
+        assert_eq!(found.len(), 2, "stream and datagram");
+        assert_eq!((found[0].0, found[0].1, found[0].3), (1, 6, 443));
+        assert_eq!((found[1].0, found[1].1, found[1].3), (2, 17, 443));
+        assert_eq!(found[0].2[..2], [198, 18]);
+        assert_eq!(found[0].2, found[1].2);
+        let (_, again) = lookup("example.com", "443", None);
+        assert_eq!(entries(&again)[0].2, found[0].2);
+    }
+
+    #[test]
+    fn sfdnsres_honours_the_hinted_socket_type_and_literal_addresses() {
+        let (_, chain) = lookup("1.2.3.4", "http", Some(1));
+        assert_eq!(entries(&chain), vec![(1, 6, [1, 2, 3, 4], 80)]);
+        let (_, chain) = lookup("1.2.3.4", "", Some(2));
+        assert_eq!(entries(&chain), vec![(2, 17, [1, 2, 3, 4], 0)]);
+    }
+
+    #[test]
+    fn sfdnsres_refuses_what_is_not_a_name_or_a_service() {
+        assert_eq!(lookup("", "80", None).0 .0, super::SFDNSRES_EAI_NONAME);
+        assert_eq!(
+            lookup("bad name", "80", None).0 .0,
+            super::SFDNSRES_EAI_NONAME
+        );
+        assert_eq!(lookup("a..b", "80", None).0 .0, super::SFDNSRES_EAI_NONAME);
+        assert_eq!(
+            lookup("example.com", "gopher", None).0 .0,
+            super::SFDNSRES_EAI_SERVICE
+        );
+    }
+
+    /// `connect(fd, ip:port)`.
+    fn connect_to(cpu: &mut Cpu, fd: i32, ip: [u8; 4], port: u16) -> (i32, i32) {
+        let mut address = loopback_sockaddr(port);
+        address[4..8].copy_from_slice(&ip);
+        place(cpu, SCRATCH, &address);
+        write_map_buffer_request(cpu, 14, &fd.to_le_bytes(), SCRATCH, 16, true);
+        cpu.bsd_request(TLS, 9, Some(14)).unwrap();
+        bsd_result(cpu)
+    }
+
+    /// `getsockopt(fd, SOL_SOCKET, SO_ERROR)`.
+    fn so_error(cpu: &mut Cpu, fd: i32) -> u32 {
+        const AT: u32 = SCRATCH + 0x100;
+        let mut payload = [0u8; 12];
+        payload[..4].copy_from_slice(&fd.to_le_bytes());
+        payload[4..8].copy_from_slice(&super::BSD_SOL_SOCKET.to_le_bytes());
+        payload[8..].copy_from_slice(&super::BSD_SO_ERROR.to_le_bytes());
+        write_map_buffer_request(cpu, 17, &payload, AT, 4, false);
+        cpu.bsd_request(TLS, 9, Some(17)).unwrap();
+        cpu.mem.read_u32(AT).unwrap()
+    }
+
+    fn bsd_command(cpu: &mut Cpu, command: u32, words: &[u32]) -> (i32, i32) {
+        let payload: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        write_request(cpu, command, &payload);
+        cpu.bsd_request(TLS, 9, Some(command)).unwrap();
+        bsd_result(cpu)
+    }
+
+    /// A socket on a console whose guest may reach the outside, and the synthetic address
+    /// `sfdnsres` would have given `name`.
+    fn networked_socket(name: &str) -> (Cpu, i32, [u8; 4]) {
+        let (mut cpu, fd) = bsd_socket(1);
+        cpu.mem.map_zero(SCRATCH, 0x400).unwrap();
+        cpu.set_network(true);
+        let address = cpu.net.synthesize(name).unwrap();
+        (cpu, fd, address)
+    }
+
+    const POLLIN: u16 = 1;
+    const POLLOUT: u16 = 4;
+
+    #[test]
+    fn bsd_connect_to_a_name_is_in_progress_until_the_host_opens_it() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        assert_eq!(
+            connect_to(&mut cpu, fd, address, 443),
+            (-1, super::BSD_EINPROGRESS)
+        );
+        assert_eq!(
+            cpu.take_net_commands(),
+            vec![NetCommand::Connect {
+                stream: 1,
+                udp: false,
+                peer: Peer::Name("example.com".into()),
+                port: 443,
+            }]
+        );
+        assert_eq!(
+            connect_to(&mut cpu, fd, address, 443),
+            (-1, super::BSD_EALREADY)
+        );
+        assert_eq!(cpu.bsd_poll_revents(fd, POLLOUT), 0, "not writable yet");
+        assert_eq!(send_on(&mut cpu, fd, b"early"), (-1, super::BSD_ENOTCONN));
+
+        cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
+        assert_eq!(cpu.bsd_poll_revents(fd, POLLOUT), POLLOUT);
+        assert_eq!(
+            connect_to(&mut cpu, fd, address, 443),
+            (-1, super::BSD_EISCONN)
+        );
+        assert_eq!(so_error(&mut cpu, fd), 0);
+    }
+
+    #[test]
+    fn bsd_carries_bytes_both_ways_and_ends_when_the_host_does() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.take_net_commands();
+        cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
+
+        assert_eq!(send_on(&mut cpu, fd, b"GET /"), (5, 0));
+        assert_eq!(
+            cpu.take_net_commands(),
+            vec![NetCommand::Send {
+                stream: 1,
+                data: b"GET /".to_vec()
+            }]
+        );
+
+        assert_eq!(recv_on(&mut cpu, fd, 16).0, (-1, super::BSD_EAGAIN));
+        assert_eq!(cpu.bsd_poll_revents(fd, POLLIN), 0);
+        cpu.deliver_net_events([NetEvent::Data {
+            stream: 1,
+            data: b"200 OK".to_vec(),
+        }]);
+        assert_eq!(cpu.bsd_poll_revents(fd, POLLIN), POLLIN);
+        assert_eq!(recv_on(&mut cpu, fd, 16), ((6, 0), b"200 OK".to_vec()));
+
+        cpu.deliver_net_events([NetEvent::Closed { stream: 1 }]);
+        assert_eq!(recv_on(&mut cpu, fd, 16).0, (0, 0), "end of file");
+        assert_eq!(send_on(&mut cpu, fd, b"more"), (-1, super::BSD_EPIPE));
+    }
+
+    #[test]
+    fn bsd_reports_a_failed_connect_once_through_so_error() {
+        let (mut cpu, fd, address) = networked_socket("nowhere.example");
+        connect_to(&mut cpu, fd, address, 443);
+        cpu.deliver_net_events([NetEvent::Failed {
+            stream: 1,
+            reason: NetFailure::Refused,
+        }]);
+        assert_eq!(
+            cpu.bsd_poll_revents(fd, POLLIN | POLLOUT),
+            POLLIN | POLLOUT | 0x0008
+        );
+        assert_eq!(so_error(&mut cpu, fd), super::BSD_ECONNREFUSED as u32);
+        assert_eq!(so_error(&mut cpu, fd), 0, "reported once");
+
+        // A second connect starts a new stream.
+        cpu.take_net_commands();
+        assert_eq!(
+            connect_to(&mut cpu, fd, address, 443),
+            (-1, super::BSD_EINPROGRESS)
+        );
+        assert_eq!(cpu.take_net_commands().len(), 1);
+    }
+
+    #[test]
+    fn bsd_connect_after_a_failure_returns_the_error_itself() {
+        let (mut cpu, fd, address) = networked_socket("nowhere.example");
+        connect_to(&mut cpu, fd, address, 443);
+        cpu.deliver_net_events([NetEvent::Failed {
+            stream: 1,
+            reason: NetFailure::TimedOut,
+        }]);
+        assert_eq!(
+            connect_to(&mut cpu, fd, address, 443),
+            (-1, super::BSD_ETIMEDOUT)
+        );
+    }
+
+    #[test]
+    fn bsd_tells_the_host_when_the_guest_stops_sending_or_closes() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
+        cpu.take_net_commands();
+
+        assert_eq!(bsd_command(&mut cpu, 22, &[fd as u32, 1]), (0, 0));
+        assert_eq!(
+            cpu.take_net_commands(),
+            vec![NetCommand::ShutdownWrite { stream: 1 }]
+        );
+        assert_eq!(bsd_command(&mut cpu, 26, &[fd as u32]), (0, 0));
+        assert_eq!(
+            cpu.take_net_commands(),
+            vec![NetCommand::Close { stream: 1 }]
+        );
+
+        // Events for the closed socket go nowhere.
+        cpu.deliver_net_events([NetEvent::Data {
+            stream: 1,
+            data: vec![1],
+        }]);
+    }
+
+    #[test]
+    fn bsd_peer_name_of_a_stream_is_what_the_guest_connected_to() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        connect_to(&mut cpu, fd, address, 443);
+        assert_eq!(
+            bsd_command(&mut cpu, 15, &[fd as u32]),
+            (-1, super::BSD_ENOTCONN)
+        );
+        cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
+        write_map_buffer_request(&mut cpu, 15, &fd.to_le_bytes(), SCRATCH + 0x200, 16, false);
+        cpu.bsd_request(TLS, 9, Some(15)).unwrap();
+        assert_eq!(bsd_result(&cpu), (0, 0));
+        let raw = cpu.read_bytes(SCRATCH + 0x200, 16);
+        assert_eq!(super::sockaddr_in(&raw), Some((address, 443)));
+    }
+
+    #[test]
+    fn bsd_stays_an_empty_network_until_enabled() {
+        let (mut cpu, fd) = bsd_socket(1);
+        cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+        let address = cpu.net.synthesize("example.com").unwrap();
+        assert_eq!(
+            connect_to(&mut cpu, fd, address, 443),
+            (-1, super::BSD_ECONNREFUSED)
+        );
+        assert!(cpu.take_net_commands().is_empty());
     }
 
     #[test]

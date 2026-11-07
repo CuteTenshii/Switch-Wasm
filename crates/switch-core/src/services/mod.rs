@@ -15,6 +15,7 @@ pub(crate) mod ldr;
 pub(crate) mod log;
 pub(crate) mod mii;
 pub(crate) mod net;
+pub mod netbridge;
 pub(crate) mod ns;
 pub(crate) mod nv;
 pub(crate) mod online;

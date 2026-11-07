@@ -356,6 +356,8 @@ pub struct Machine {
     pub(crate) rng_state: u64,
     /// Next ephemeral port, from the bottom of IANA's range.
     pub(crate) next_bsd_port: u16,
+    /// The host link `bsd` and `sfdnsres` reach the outside through; see [`netbridge`].
+    pub(crate) net: netbridge::NetBridge,
     /// `ApmPerformanceConfiguration` for Normal and Boost.
     pub(crate) apm_configuration: [u32; 2],
     /// Battery level for `psm`, 0-100; full until [`Cpu::set_battery`].
@@ -603,6 +605,7 @@ impl Cpu {
                 mm_requests: IdMap::default(),
                 rng_state: 0,
                 next_bsd_port: net::BSD_FIRST_EPHEMERAL_PORT,
+                net: netbridge::NetBridge::default(),
                 battery_percent: 100,
                 battery_charging: true,
                 fs: crate::vfs::Vfs::new(),
