@@ -3,6 +3,9 @@
 // Serves `dist` (run `make assets` first) with WebGPU enabled and a fresh profile.
 // `--firmware` installs a directory's NCAs to the NAND first, so library applets run.
 // `--nand` launches the title of that name from the NAND tab, in place of a container.
+// `--port=N` serves on that port, so a relay can be told the page's origin; any free one by default.
+// `--relay=ws://…` turns the Network tab on through that relay before the title starts, and
+// reports the tab's socket and connections at the end.
 // `--docked` starts the console docked; `--dock-at=N` toggles it that long after the title starts.
 // `--dump-wgsl` writes every shader the worker hands the browser into a directory.
 // `--stream` prints console lines matching a regular expression as they appear; `--stream=.` is all.
@@ -13,7 +16,8 @@
 // a device frame is compared against.
 // `--trace-from` switches the console to trace once a line contains the text: trace from
 // the start floods the log long before the moment worth reading.
-// `--headed` opens a window, whose browser gets the machine's GPU instead of a software adapter.
+// A window opens by default, whose browser gets the machine's GPU instead of a software adapter;
+// `--headless` runs without one, on a software adapter.
 // `--jit-stats` records the cumulative block stats with every sample.
 // `--press` taps keyboard keys, as `web/main/input.ts` maps them (z is A, x is B, the arrows
 // are the d-pad), that long after the title starts and again every `every` seconds. A tap
@@ -25,7 +29,8 @@ import { preview } from 'vite';
 import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
-  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headed] [--docked] [--dock-at=N]
+  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headless] [--docked] [--dock-at=N]
+  [--relay=ws://127.0.0.1:18787] [--port=N]
   [--dump-wgsl=dir] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...]`;
@@ -51,9 +56,11 @@ const seconds = Number(flag('seconds') ?? 60);
 const screenshotEvery = Number(flag('screenshot-every') ?? 0);
 const jitStats = hasFlag('jit-stats');
 const noWebGpu = hasFlag('no-webgpu');
-const headed = hasFlag('headed');
+const headed = !hasFlag('headless');
 const docked = hasFlag('docked');
 const dockAt = flag('dock-at');
+const relay = flag('relay');
+const port = Number(flag('port') ?? 0);
 const dumpWgsl = pathFlag('dump-wgsl');
 const stream = flag('stream');
 const traceSpec = /^(.+)@(\d+):(\d+)$/.exec(flag('trace') ?? '');
@@ -68,7 +75,7 @@ const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
 const server = await preview({
   configFile: join(repoRoot, 'vite.config.ts'),
   logLevel: 'error',
-  preview: { host: '127.0.0.1', port: 0, strictPort: false, open: false },
+  preview: { host: '127.0.0.1', port, strictPort: port !== 0, open: false },
 });
 const address = server.httpServer.address();
 const url = `http://127.0.0.1:${address.port}/`;
@@ -183,6 +190,16 @@ try {
       progress = now;
     }
     say(`installed the firmware in ${firmware} (${ncas.length} NCAs)`);
+  }
+  if (relay) {
+    await page.locator('#btn-panel').click();
+    await page.locator('.tab[data-tab=network]').click();
+    await page.locator('#net-url').fill(relay);
+    await page.locator('#btn-net').click();
+    const badge = page.locator('#net-badge');
+    await badge.filter({ hasText: /^(on|no relay)$/ }).waitFor({ timeout: 15_000 });
+    say(`network: ${await badge.innerText()} through ${relay}`);
+    await page.locator('#btn-panel').click();
   }
   const before = await page.evaluate(() => document.getElementById('console').childElementCount);
   if (docked) await page.locator('#btn-dock').evaluate((button) => button.click());
@@ -313,6 +330,18 @@ try {
     say(`saved the screen to ${screenshot}`);
   }
 
+  let network = '(not asked for)';
+  if (relay && !crashed) {
+    if (!(await page.locator('body.panel-open').count())) await page.locator('#btn-panel').click();
+    await page.locator('.tab[data-tab=network]').click();
+    // The tab refreshes once a second while it shows, so what it says now is up to a second old.
+    await page.waitForTimeout(1500);
+    const socket = await page.locator('#net-link').innerText();
+    const rows = (await page.locator('#net-rows tr').allInnerTexts()).map((row) => row.replace(/\t/g, '  '));
+    network = [socket, ...rows].join('\n');
+    say(`network:\n${network}`);
+  }
+
   let pageConsole = '(the page crashed, and its console went with it)';
   let rendering = '(not read)';
   if (!crashed) {
@@ -333,7 +362,7 @@ try {
   }
   const consoleSection = `=== the page's console ===\n${pageConsole}`;
   if (out) {
-    writeFileSync(out, `${lines.join('\n')}\n=== rendering ===\n${rendering}\n${consoleSection}\n`);
+    writeFileSync(out, `${lines.join('\n')}\n=== rendering ===\n${rendering}\n=== network ===\n${network}\n${consoleSection}\n`);
     console.log(`wrote ${out}`);
   } else {
     console.log(consoleSection);

@@ -108,7 +108,6 @@ function reportTop(path, renderer, gpu) {
 
 const forwarded = args.filter((a) => !OWN_FLAGS.some((name) => a.startsWith(`--${name}=`)));
 if (!forwarded.some((a) => a.startsWith('--seconds='))) forwarded.push('--seconds=1500');
-if (!forwarded.includes('--headed')) forwarded.push('--headed');
 const boot = spawn(process.execPath, [join(repoRoot, 'tools/browser_boot.mjs'), ...forwarded,
   '--browser-arg=--no-sandbox',
   '--browser-arg=--js-flags=--perf-basic-prof --no-logfile-per-isolate --logfile=/dev/null',
