@@ -352,4 +352,31 @@ mod tests {
             ThreadState::WaitMutex(MUTEX)
         );
     }
+
+    /// A thread queued for a mutex returns from the condvar wait holding it, so
+    /// the no-deadline wake-up must not release it while another thread owns it.
+    #[test]
+    fn waking_all_waiters_leaves_a_queued_thread_off_a_held_mutex() {
+        const MUTEX: u32 = 0x6100;
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+        cpu.ensure_main_thread();
+        let queued = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY, 0);
+        assert!(cpu.start_thread(queued));
+        let owner = 0x1234;
+        cpu.mem.write_u32(MUTEX, owner).unwrap();
+        cpu.process_mut().threads[1].state = ThreadState::WaitMutex(MUTEX);
+        cpu.wake_all_waiters();
+        assert_eq!(
+            cpu.process().threads[1].state,
+            ThreadState::WaitMutex(MUTEX)
+        );
+
+        cpu.mem.write_u32(MUTEX, 0).unwrap();
+        cpu.wake_all_waiters();
+        assert_eq!(cpu.process().threads[1].state, ThreadState::Runnable);
+        let handle = cpu.process().threads[1].handle as u32;
+        assert_eq!(cpu.mem.read_u32(MUTEX).unwrap(), handle);
+    }
 }

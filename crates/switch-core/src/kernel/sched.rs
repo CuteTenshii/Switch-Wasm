@@ -207,16 +207,19 @@ impl Cpu {
             }
         }
         self.expire_timed_waits();
+        if !self.machine.cores.is_empty() {
+            self.service_cores();
+        }
         self.settled()
     }
 
-    fn wake_all_waiters(&mut self) {
+    pub(crate) fn wake_all_waiters(&mut self) {
         for index in 0..self.process().threads.len() {
             match self.process().threads[index].state {
-                ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
-                ThreadState::WaitMutex(_)
-                | ThreadState::WaitAddress { .. }
-                | ThreadState::WaitEvent { .. } => {
+                ThreadState::WaitKey { mutex, .. } | ThreadState::WaitMutex(mutex) => {
+                    self.wake_condvar_waiter(index, mutex)
+                }
+                ThreadState::WaitAddress { .. } | ThreadState::WaitEvent { .. } => {
                     self.process_mut().threads[index].state = ThreadState::Runnable;
                 }
                 _ => {}
