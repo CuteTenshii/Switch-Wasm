@@ -12,7 +12,7 @@ pub fn random_uid() -> [u8; 16] {
         // A `RandomState` carries keys the process picked at random.
         let keys = std::collections::hash_map::RandomState::new();
         let mut uid = [0u8; 16];
-        for (half, tag) in uid.chunks_exact_mut(8).zip(0u64..) {
+        for (half, tag) in uid.as_chunks_mut::<8>().0.iter_mut().zip(0u64..) {
             let mut hasher = keys.build_hasher();
             hasher.write_u64(tag);
             half.copy_from_slice(&hasher.finish().to_le_bytes());
