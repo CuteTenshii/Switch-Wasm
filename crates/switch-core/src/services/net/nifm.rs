@@ -1,10 +1,14 @@
 //! `nifm`: a Wi-Fi link that is up, with internet, on one saved network.
 
 use crate::cpu::Cpu;
+use crate::uuid::{self, Uuid};
 use crate::Result;
 
 /// The console's address, as reported by `nifm` and for unbound sockets.
 pub(super) const NIFM_LOCAL_IP: [u8; 4] = [192, 168, 1, 100];
+
+/// The network's mask, a /24.
+const NIFM_SUBNET_MASK: [u8; 4] = [255, 255, 255, 0];
 
 const NIFM_GATEWAY: [u8; 4] = [192, 168, 1, 1];
 
@@ -14,8 +18,9 @@ const NIFM_DNS: [[u8; 4]; 2] = [NIFM_GATEWAY, [1, 1, 1, 1]];
 /// The one saved network, which is also the one the console is joined to: its name is its SSID.
 const WIFI_NAME: &str = "switch-wasm";
 
-/// The profile's `Uuid`, fixed so every question about it gets the same answer.
-const WIFI_PROFILE_ID: [u8; 16] = *b"switch-wasm-wifi";
+/// The profile's id, fixed so every question about it gets the same answer.
+const WIFI_PROFILE_ID: Uuid = uuid::parse("531e8558-b186-4424-ad40-1d1d21006036");
+const _: () = assert!(uuid::is_valid(&WIFI_PROFILE_ID));
 
 /// `NetworkProfileType::User` (a bit), `NetworkInterfaceType::Ieee80211`, `Authentication::Wpa2Psk`
 /// and `Encryption::Aes`.
@@ -33,7 +38,7 @@ fn ip_setting() -> Vec<u8> {
     let mut raw = vec![0u8; 0xC2];
     raw[0] = 1; // is_automatic: the router hands the address out
     raw[1..5].copy_from_slice(&NIFM_LOCAL_IP);
-    raw[5..9].copy_from_slice(&[255, 255, 255, 0]);
+    raw[5..9].copy_from_slice(&NIFM_SUBNET_MASK);
     raw[9..13].copy_from_slice(&NIFM_GATEWAY);
     raw[0xD] = 1;
     raw[0xE..0x12].copy_from_slice(&NIFM_DNS[0]);
@@ -260,6 +265,7 @@ impl Cpu {
 
 #[cfg(test)]
 mod tests {
+    use super::WIFI_PROFILE_ID;
     use crate::cpu::Cpu;
     use crate::kernel::ipc::testing::*;
 
@@ -378,7 +384,7 @@ mod tests {
         assert_eq!(profile[0x16], 0, "no proxy");
         assert_eq!(u16::from_le_bytes([profile[0xC0], profile[0xC1]]), 1500);
         // Who it is, and what kind of network.
-        assert_eq!(&profile[0xC2..0xD2], b"switch-wasm-wifi");
+        assert_eq!(profile[0xC2..0xD2], WIFI_PROFILE_ID);
         assert_eq!(&profile[0xD2..0xD2 + 11], b"switch-wasm");
         assert_eq!(profile[0xDD], 0, "a NUL-terminated name");
         assert_eq!(
@@ -399,7 +405,7 @@ mod tests {
         let mut cpu = console();
         let listed = ask(&mut cpu, 7, &[1, 0, 0, 0], 0x75 * 4);
         assert_eq!(reply_word(&cpu), 1, "one saved network");
-        assert_eq!(&listed[..0x10], b"switch-wasm-wifi");
+        assert_eq!(listed[..0x10], WIFI_PROFILE_ID);
         assert_eq!(&listed[0x10..0x1B], b"switch-wasm");
         assert_eq!(listed[0x50..0x52], [1, 1], "user, Wi-Fi");
         assert_eq!(
@@ -416,7 +422,7 @@ mod tests {
         assert_eq!(reply_word(&cpu), 0);
 
         let current = ask(&mut cpu, 5, &[], 0x17C);
-        let by_id = ask(&mut cpu, 8, b"switch-wasm-wifi", 0x17C);
+        let by_id = ask(&mut cpu, 8, &WIFI_PROFILE_ID, 0x17C);
         assert_eq!(by_id, current);
     }
 

@@ -2,6 +2,7 @@
 //! host-set Unix time (`Cpu::set_unix_time`) and `cycles`.
 
 use crate::cpu::Cpu;
+use crate::uuid::{self, Uuid};
 use crate::Result;
 
 /// `time`'s shared memory: a steady time point, the local and network clock contexts,
@@ -15,7 +16,8 @@ const AUTOMATIC_CORRECTION_AT: u32 = 0xC8;
 const CONTINUOUS_ADJUSTMENT_AT: u32 = 0xD0;
 
 /// The steady clock's source id; a context naming another one is from a past boot.
-const CLOCK_SOURCE: [u8; 16] = *b"switch-wasm.time";
+const CLOCK_SOURCE: Uuid = uuid::parse("2c14f919-ede2-4ab3-94d3-dec441af3396");
+const _: () = assert!(uuid::is_valid(&CLOCK_SOURCE));
 
 /// `SteadyClockTimePoint`: a steady-clock value and the clock's source id.
 fn steady_time_point(value: i64) -> [u8; 0x18] {

@@ -192,10 +192,7 @@ fn default_mii_char_info(index: u32) -> Option<[u8; MII_CHAR_INFO_LEN]> {
 fn mii_create_id(tag: &[u8; MII_CREATE_ID_LEN], sequence: u32) -> [u8; MII_CREATE_ID_LEN] {
     let mut id = *tag;
     id[MII_CREATE_ID_LEN - 1] = sequence as u8;
-    // RFC 4122 version 4 and variant fields.
-    id[6] = (id[6] & 0x0F) | 0x40;
-    id[8] = (id[8] & 0x3F) | 0x80;
-    id
+    crate::uuid::v4(id)
 }
 
 /// Built-in Mii for the `sequence`th `BuildRandom` of `gender`, walking the matches.

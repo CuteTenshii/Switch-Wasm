@@ -86,6 +86,7 @@ pub mod source;
 pub mod sparse;
 pub mod ticket;
 pub mod trace;
+pub mod uuid;
 pub mod vfs;
 pub mod xci;
 

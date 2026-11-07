@@ -498,8 +498,9 @@ impl Cpu {
         let mut id = [0u8; ERPT_ID_SIZE];
         id[..8].copy_from_slice(&self.next_random_u64().to_le_bytes());
         id[8..ERPT_UUID_SIZE].copy_from_slice(&self.next_random_u64().to_le_bytes());
-        id[6] = (id[6] & 0x0f) | 0x40;
-        id[8] = (id[8] & 0x3f) | 0x80;
+        let mut random = [0u8; ERPT_UUID_SIZE];
+        random.copy_from_slice(&id[..ERPT_UUID_SIZE]);
+        id[..ERPT_UUID_SIZE].copy_from_slice(&crate::uuid::v4(random));
         id
     }
 

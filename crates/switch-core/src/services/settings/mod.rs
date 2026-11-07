@@ -5,6 +5,7 @@
 
 use crate::cpu::Cpu;
 use crate::trace::Level;
+use crate::uuid::{self, Uuid};
 use crate::Result;
 
 mod lbl;
@@ -230,9 +231,8 @@ const DEVICE_NICK_NAME: &[u8] = b"switch-wasm";
 pub(crate) const DEVICE_TIME_ZONE: &[u8] = b"UTC";
 
 /// The `Uuid` Miis made on this console are stamped with; fixed so they stay this console's.
-const MII_AUTHOR_ID: [u8; 0x10] = [
-    0x73, 0x77, 0x69, 0x74, 0x63, 0x68, 0x2d, 0x77, 0x61, 0x73, 0x6d, 0x00, 0x00, 0x00, 0x00, 0x01,
-];
+const MII_AUTHOR_ID: Uuid = uuid::parse("355ec506-7513-402f-bbdf-609a8d16759d");
+const _: () = assert!(uuid::is_valid(&MII_AUTHOR_ID));
 
 /// `HomeMenuScheme` ARGB colours (main, back, sub, bezel, extra), taken from
 /// Eden's stub rather than hardware.
