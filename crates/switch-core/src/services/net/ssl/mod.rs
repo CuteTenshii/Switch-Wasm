@@ -3,6 +3,7 @@
 mod connection;
 
 pub(crate) use connection::SslConnection;
+use connection::RESULT_INTERNAL_LOGIC;
 
 use crate::cpu::Cpu;
 use crate::Result;
@@ -87,15 +88,16 @@ impl Cpu {
                 .to_string()
         } else {
             match self.service_name(handle) {
-                Some("ssl") | None => "ssl:service".to_string(),
+                Some("ssl" | "ssl:s") | None => "ssl:service".to_string(),
                 Some(name) => name.to_string(),
             }
         };
         let data = self.ipc_request_data(tls);
         match iface.as_str() {
             "ssl:service" => match cmd_id {
-                // CreateContext(SslVersion, pid placeholder) -> ISslContext.
-                Some(0) => {
+                // CreateContext(SslVersion, pid placeholder) -> ISslContext, and `ssl:s`'s
+                // CreateContextForSystem, which takes the same.
+                Some(0) | Some(100) => {
                     self.process_mut().ssl_contexts += 1;
                     self.reply_with_interface(tls, handle, "ssl:context")?;
                     Ok(())
@@ -123,6 +125,50 @@ impl Cpu {
                     let count = self.ssl_write_certificates(tls, &ids)?;
                     self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
                 }
+                // SetDebugOption(DebugOptionType = 0, buffer): its first byte is kept.
+                Some(7) => {
+                    let given = self
+                        .ipc_input_buffer(tls, 0)
+                        .filter(|&(addr, size)| addr != 0 && size != 0);
+                    match given {
+                        Some((addr, _)) if self.mem.read_u32(data)? == 0 => {
+                            self.process_mut().ssl_debug_option = self.mem.read_u8(addr)?;
+                            self.write_ipc_response(tls, 0, &[], &[], &[])
+                        }
+                        _ => self.write_ipc_response(tls, RESULT_INTERNAL_LOGIC, &[], &[], &[]),
+                    }
+                }
+                // GetDebugOption(DebugOptionType = 0, out buffer): the byte that was kept.
+                Some(8) => {
+                    let room = self
+                        .ipc_output_buffer(tls, 0)
+                        .is_some_and(|(addr, size)| addr != 0 && size != 0);
+                    if !room || self.mem.read_u32(data)? != 0 {
+                        return self.write_ipc_response(tls, RESULT_INTERNAL_LOGIC, &[], &[], &[]);
+                    }
+                    let kept = self.process().ssl_debug_option;
+                    self.write_output_buffer(tls, 0, &[kept]);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // ClearTls12FallbackFlag: there is no fallback to clear.
+                Some(9) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // SetThreadCoreMask(u64): at least one core, all of them the process's.
+                Some(101) => {
+                    let mask = self.mem.read_u64(data)?;
+                    if mask == 0 || mask & !self.process().process_core_mask != 0 {
+                        return self.write_ipc_response(tls, RESULT_INTERNAL_LOGIC, &[], &[], &[]);
+                    }
+                    self.process_mut().ssl_thread_core_mask = Some(mask);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetThreadCoreMask: the mask set, or every core the process has.
+                Some(102) => {
+                    let mask = self
+                        .process()
+                        .ssl_thread_core_mask
+                        .unwrap_or(self.process().process_core_mask);
+                    self.write_ipc_response(tls, 0, &[], &mask.to_le_bytes(), &[])
+                }
                 // FlushSessionCache.
                 Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -147,8 +193,9 @@ impl Cpu {
                         .unwrap_or(0);
                     self.write_ipc_response(tls, 0, &[], &value.to_le_bytes(), &[])
                 }
-                // CreateConnection -> ISslConnection.
-                Some(2) => {
+                // CreateConnection -> ISslConnection, and `ssl:s`'s CreateConnectionEx (which
+                // allows 10 at once, not 8; nothing here limits them).
+                Some(2) | Some(100) => {
                     let key = self.reply_with_interface(tls, handle, "ssl:connection")?;
                     self.process_mut()
                         .ssl_connections

@@ -488,3 +488,108 @@ fn create_connection_makes_an_object_the_context_counts() {
     cpu.ssl_request(TLS, 9, Some(3)).unwrap();
     assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1);
 }
+
+#[test]
+fn the_system_service_answers_as_ssl_does_and_adds_its_own_creators() {
+    let mut cpu = request(false, 5, &[0; 4]);
+    cpu.register_service_handle(9, "ssl:s");
+    // SetInterfaceVersion, the command that went unanswered.
+    cpu.ssl_request(TLS, 9, Some(5)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+
+    // CreateContextForSystem opens a context, and CreateConnectionEx on one a connection.
+    write_request(&mut cpu, 100, &[0; 16]);
+    cpu.ssl_request(TLS, 9, Some(100)).unwrap();
+    assert_eq!(cpu.process().ssl_contexts, 1);
+    cpu.register_service_handle(10, "ssl:context");
+    write_request(&mut cpu, 100, &[]);
+    cpu.ssl_request(TLS, 10, Some(100)).unwrap();
+    assert_eq!(cpu.process().ssl_connections.len(), 1);
+}
+
+/// A command to `ssl:s` (session 9) with the given buffers; the result and the reply words.
+fn service(
+    cmd: u32,
+    payload: &[u8],
+    send: &[(u32, u32)],
+    recv: &[(u32, u32)],
+    cpu: &mut Cpu,
+) -> (u32, u64) {
+    write_buffer_request(cpu, cmd, payload, send, recv);
+    cpu.ssl_request(TLS, 9, Some(cmd)).unwrap();
+    (
+        cpu.mem.read_u32(TLS + 0x18).unwrap(),
+        cpu.mem.read_u64(TLS + 0x20).unwrap(),
+    )
+}
+
+fn system_service() -> Cpu {
+    let mut cpu = request(false, 5, &[]);
+    cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+    cpu.register_service_handle(9, "ssl:s");
+    cpu
+}
+
+#[test]
+fn the_debug_option_byte_is_kept_and_read_back() {
+    let mut cpu = system_service();
+    cpu.mem.write_u8(BUFFER, 0x5A).unwrap();
+    assert_eq!(
+        service(7, &0u32.to_le_bytes(), &[(BUFFER, 1)], &[], &mut cpu).0,
+        0
+    );
+    cpu.mem.write_u8(BUFFER + 0x10, 0).unwrap();
+    assert_eq!(
+        service(8, &0u32.to_le_bytes(), &[], &[(BUFFER + 0x10, 1)], &mut cpu).0,
+        0
+    );
+    assert_eq!(cpu.mem.read_u8(BUFFER + 0x10).unwrap(), 0x5A);
+
+    // Only option 0 exists, and the buffer must be there.
+    assert_eq!(
+        service(7, &1u32.to_le_bytes(), &[(BUFFER, 1)], &[], &mut cpu).0,
+        RESULT_INTERNAL_LOGIC
+    );
+    assert_eq!(
+        service(7, &0u32.to_le_bytes(), &[(0, 0)], &[], &mut cpu).0,
+        RESULT_INTERNAL_LOGIC
+    );
+    assert_eq!(
+        service(8, &1u32.to_le_bytes(), &[], &[(BUFFER + 0x10, 1)], &mut cpu).0,
+        RESULT_INTERNAL_LOGIC
+    );
+    assert_eq!(
+        cpu.process().ssl_debug_option,
+        0x5A,
+        "a refused call changes nothing"
+    );
+}
+
+#[test]
+fn clearing_the_tls_12_fallback_flag_succeeds() {
+    let mut cpu = system_service();
+    assert_eq!(service(9, &[], &[], &[], &mut cpu).0, 0);
+}
+
+#[test]
+fn the_thread_core_mask_starts_as_the_process_cores_and_takes_only_those() {
+    let mut cpu = system_service();
+    cpu.set_process_core_mask(0b0111);
+    assert_eq!(service(102, &[], &[], &[], &mut cpu), (0, 0b0111));
+
+    assert_eq!(
+        service(101, &0b0100u64.to_le_bytes(), &[], &[], &mut cpu).0,
+        0
+    );
+    assert_eq!(service(102, &[], &[], &[], &mut cpu), (0, 0b0100));
+
+    for refused in [0u64, 0b1000, 0b1100] {
+        let (result, _) = service(101, &refused.to_le_bytes(), &[], &[], &mut cpu);
+        assert_eq!(result, RESULT_INTERNAL_LOGIC, "{refused:#b}");
+    }
+    assert_eq!(
+        service(102, &[], &[], &[], &mut cpu).1,
+        0b0100,
+        "a refused mask changes nothing"
+    );
+}

@@ -122,6 +122,9 @@ pub(crate) struct Process {
     /// `ssl` state: interface revision, context count, and per-context options.
     pub(crate) ssl_interface_version: u32,
     pub(crate) ssl_contexts: u32,
+    /// The byte `SetDebugOption` keeps, and the core mask `SetThreadCoreMask` set, if it has.
+    pub(crate) ssl_debug_option: u8,
+    pub(crate) ssl_thread_core_mask: Option<u64>,
     pub(crate) ssl_options: HashMap<(u64, u32), u32>,
     /// Open `ISslConnection`s, by object key.
     pub(crate) ssl_connections: HashMap<u64, net::SslConnection>,
@@ -213,6 +216,8 @@ impl Process {
             time_shmem_handle: None,
             ssl_interface_version: 0,
             ssl_contexts: 0,
+            ssl_debug_option: 0,
+            ssl_thread_core_mask: None,
             ssl_options: HashMap::new(),
             ssl_connections: HashMap::new(),
             erpt_readers: IdMap::default(),

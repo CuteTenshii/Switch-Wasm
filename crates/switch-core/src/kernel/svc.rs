@@ -868,7 +868,7 @@ impl Cpu {
                         }
                         "nifm:request" => self.nifm_request_object_request(tls, handle, cmd_id)?,
                         // ssl and its contexts.
-                        "ssl" | "ssl:service" | "ssl:context" => {
+                        "ssl" | "ssl:s" | "ssl:service" | "ssl:context" => {
                             self.ssl_request(tls, handle, cmd_id)?
                         }
                         // hid, IAppletResource and IActiveVibrationDeviceList.

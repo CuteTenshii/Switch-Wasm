@@ -10,11 +10,11 @@ use crate::services::netbridge::{NetCommand, NetEvent, StreamId, TlsFailure};
 use crate::trace::Level;
 
 /// A `Result` of module 123, the SSL service's.
-const fn result(description: u32) -> u32 {
+pub(super) const fn result(description: u32) -> u32 {
     123 | (description << 9)
 }
 
-const RESULT_INTERNAL_LOGIC: u32 = result(13);
+pub(super) const RESULT_INTERNAL_LOGIC: u32 = result(13);
 const RESULT_INVALID_SOCKET: u32 = result(116);
 const RESULT_WOULD_BLOCK: u32 = result(204);
 const RESULT_IO_TIMEOUT: u32 = result(205);
