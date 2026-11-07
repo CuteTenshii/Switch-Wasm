@@ -449,6 +449,8 @@ impl Gpu {
             .get_mapped_range()
             .map_err(|e| Error::Gpu(format!("mapping the readback: {e}")))?;
         let outcome = match &pending.what {
+            // The guest unmapped the surface while its readback was in flight.
+            Readback::Surface { target, .. } if ctx.vmm.translate(target.addr).is_none() => Ok(()),
             // Colour writes straight from the padded mapping; depth repacks.
             Readback::Surface {
                 target,

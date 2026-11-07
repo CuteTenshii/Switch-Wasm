@@ -83,6 +83,10 @@ impl Cpu {
             match self.machine.nv.gpu.frames_landed(pid, &mem) {
                 Ok(landed) if landed >= generation => {
                     self.pending_present.pop_front();
+                    // The guest freed the buffer while its frame was in flight.
+                    if self.machine.nv.gpu.nvmap.by_id(buffer.nvmap_id).is_none() {
+                        continue;
+                    }
                     if let Err(e) = self.machine.nv.gpu.present(pid, &mem, &buffer) {
                         self.log(
                             Level::Error,
