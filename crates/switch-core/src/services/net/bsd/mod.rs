@@ -166,6 +166,13 @@ fn is_local_ip(ip: [u8; 4]) -> bool {
     ip == BSD_LOOPBACK_IP || ip == BSD_ANY_IP || ip == NIFM_LOCAL_IP
 }
 
+/// Whether a datagram to `ip` has somewhere to go outside the console: not multicast (224/4),
+/// broadcast or the reserved class E, which no host carries and a guest probing for mDNS or
+/// SSDP would otherwise cost a stream each time.
+fn is_carried(ip: [u8; 4]) -> bool {
+    !is_local_ip(ip) && ip[0] < 224
+}
+
 /// `FIONBIO` as FreeBSD and Linux number it, `F_GETFL`/`F_SETFL`, and `O_NONBLOCK`, which
 /// is Linux's: a guest's `fcntl` stored 0x800.
 const BSD_FIONBIO: u32 = 0x8004_667E;
@@ -727,7 +734,7 @@ impl Cpu {
             .and_then(|address| sockaddr_in(&address));
         if datagram && self.net.enabled {
             if let Some((ip, port)) = given.or(default_peer) {
-                if !is_local_ip(ip) && port != 0 {
+                if is_carried(ip) && port != 0 {
                     return self.bsd_send_outside_datagram(tls, fd, ip, port);
                 }
             }

@@ -54,7 +54,7 @@ impl Cpu {
     /// that is the host's to carry; anything else is refused as it always was.
     pub(super) fn bsd_connect_datagram(&mut self, tls: u32, fd: i32, address: &[u8]) -> Result<()> {
         let Some((ip, port)) = sockaddr_in(address)
-            .filter(|&(ip, port)| self.net.enabled && !is_local_ip(ip) && port != 0)
+            .filter(|&(ip, port)| self.net.enabled && is_carried(ip) && port != 0)
         else {
             return self.bsd_reply(tls, -1, BSD_ECONNREFUSED);
         };
@@ -478,6 +478,30 @@ mod tests {
         let (mut cpu, fd, _) = udp_socket("a.example");
         assert_eq!(sendto(&mut cpu, fd, b"hi", [127, 0, 0, 1], 9), (2, 0));
         assert!(cpu.take_net_commands().is_empty());
+    }
+
+    #[test]
+    fn multicast_and_broadcast_are_taken_and_dropped_without_a_host_stream() {
+        let (mut cpu, fd, _) = udp_socket("a.example");
+        for ip in [
+            [224, 0, 0, 251],
+            [239, 255, 255, 250],
+            [255, 255, 255, 255],
+            [240, 0, 0, 1],
+        ] {
+            assert_eq!(sendto(&mut cpu, fd, b"hi", ip, 5353), (2, 0), "{ip:?}");
+        }
+        assert!(cpu.take_net_commands().is_empty());
+        // The last unicast address below the multicast range is still carried.
+        assert_eq!(
+            sendto(&mut cpu, fd, b"hi", [223, 255, 255, 255], 53),
+            (2, 0)
+        );
+        assert_eq!(
+            cpu.take_net_commands().len(),
+            2,
+            "a stream and its datagram"
+        );
     }
 
     #[test]
