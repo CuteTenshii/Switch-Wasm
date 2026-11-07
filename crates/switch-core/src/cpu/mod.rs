@@ -128,6 +128,9 @@ pub struct Cpu {
     pub(crate) pending_yield: bool,
     /// A park deadline applied at the same point as [`Cpu::pending_yield`].
     pub(crate) pending_sleep: Option<u64>,
+    /// Set by a service that cannot answer yet, in place of a reply: the call is run again once
+    /// this deadline has passed. See [`Cpu::retry_after`].
+    pub(crate) pending_retry: Option<u64>,
     /// `steps` when the running thread was last scheduled.
     pub(crate) switched_in_at: u64,
     /// The process this core runs.
@@ -502,6 +505,7 @@ impl Cpu {
             vsync_throttle: true,
             pending_yield: false,
             pending_sleep: None,
+            pending_retry: None,
             switched_in_at: 0,
             pid: ROOT_PID,
             core: 0,

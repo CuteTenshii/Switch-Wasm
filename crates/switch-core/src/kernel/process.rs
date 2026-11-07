@@ -321,6 +321,7 @@ impl Cpu {
         self.process_ending = None;
         self.pending_yield = false;
         self.pending_sleep = None;
+        self.pending_retry = None;
         self.halted = false;
         self.forget_title_state();
     }

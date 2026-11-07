@@ -471,3 +471,10 @@ pub(super) fn bsd_get_sock_name_reports_the_address_nifm_does() {
     assert_eq!(cpu.mem.read_u8(BUFFER + 1).unwrap(), 2, "AF_INET");
     assert_eq!(cpu.read_bytes(BUFFER + 4, 4), super::NIFM_LOCAL_IP.to_vec());
 }
+
+pub(super) fn bsd_command(cpu: &mut Cpu, command: u32, words: &[u32]) -> (i32, i32) {
+    let payload: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    write_request(cpu, command, &payload);
+    cpu.bsd_request(TLS, 9, Some(command)).unwrap();
+    bsd_result(cpu)
+}

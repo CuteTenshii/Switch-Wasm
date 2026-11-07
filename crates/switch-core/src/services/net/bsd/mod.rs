@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 
+use self::datagram::Datagram;
 use self::stream::{Stream, StreamState};
 use super::nifm::NIFM_LOCAL_IP;
 use crate::cpu::Cpu;
@@ -11,9 +12,13 @@ use crate::trace::Level;
 use crate::Result;
 
 /// One open `bsd:u` socket. It can only connect to sockets of this process.
+mod datagram;
 mod stream;
 #[cfg(test)]
 mod tests;
+
+/// What a receive answers: the result, the errno, and where a datagram came from.
+type Recv = (i32, i32, Option<Vec<u8>>);
 
 #[derive(Debug, Clone)]
 pub(crate) struct BsdSocket {
@@ -33,6 +38,8 @@ pub(crate) struct BsdSocket {
     pub peer_closed: bool,
     /// The connection the host carries, for a socket connected outside this console.
     pub stream: Option<Stream>,
+    /// What a datagram socket exchanges with the host.
+    pub datagram: Datagram,
 }
 
 impl BsdSocket {
@@ -48,12 +55,14 @@ impl BsdSocket {
             rx: VecDeque::new(),
             peer_closed: false,
             stream: None,
+            datagram: Datagram::default(),
         }
     }
 
     /// Readable: has bytes, a pending connection, or a closed peer (EOF).
     fn readable(&self) -> bool {
         !self.rx.is_empty()
+            || !self.datagram.received.is_empty()
             || !self.incoming.is_empty()
             || self.peer_closed
             || self
@@ -87,6 +96,8 @@ const BSD_EAGAIN: i32 = 11;
 const BSD_EPIPE: i32 = 32;
 
 const BSD_ENETUNREACH: i32 = 101;
+
+const BSD_ENOBUFS: i32 = 105;
 
 const BSD_ETIMEDOUT: i32 = 110;
 
@@ -148,14 +159,17 @@ fn is_local_ip(ip: [u8; 4]) -> bool {
     ip == BSD_LOOPBACK_IP || ip == BSD_ANY_IP || ip == NIFM_LOCAL_IP
 }
 
-/// `FIONBIO`, `F_GETFL`/`F_SETFL`, and FreeBSD's `O_NONBLOCK`.
+/// `FIONBIO` as FreeBSD and Linux number it, `F_GETFL`/`F_SETFL`, and `O_NONBLOCK`, which
+/// is Linux's: a guest's `fcntl` stored 0x800.
 const BSD_FIONBIO: u32 = 0x8004_667E;
+
+const BSD_FIONBIO_LINUX: u32 = 0x5421;
 
 const BSD_F_GETFL: u32 = 3;
 
 const BSD_F_SETFL: u32 = 4;
 
-const BSD_O_NONBLOCK: u32 = 0x0004;
+const BSD_O_NONBLOCK: u32 = 0x0800;
 
 /// `SOL_SOCKET` and `SO_ERROR`.
 const BSD_SOL_SOCKET: u32 = 0xFFFF;
@@ -309,6 +323,7 @@ impl Cpu {
                     None => return self.bsd_reply(tls, -1, BSD_EBADF),
                     Some(socket)
                         if socket.peer.is_none()
+                            && socket.datagram.default_peer.is_none()
                             && socket.stream_state() != Some(StreamState::Open) =>
                     {
                         return self.bsd_reply(tls, -1, BSD_ENOTCONN)
@@ -375,7 +390,7 @@ impl Cpu {
                 };
                 match self.process_mut().bsd_sockets.get_mut(&fd) {
                     None => self.bsd_reply(tls, -1, BSD_EBADF),
-                    Some(socket) if request == BSD_FIONBIO => {
+                    Some(socket) if request == BSD_FIONBIO || request == BSD_FIONBIO_LINUX => {
                         if nonblocking {
                             socket.flags |= BSD_O_NONBLOCK;
                         } else {
@@ -527,6 +542,14 @@ impl Cpu {
         {
             return stream.address.clone();
         }
+        if let Some(address) = self
+            .process()
+            .bsd_sockets
+            .get(&fd)
+            .and_then(|socket| socket.datagram.default_address())
+        {
+            return address;
+        }
         let peer = self
             .process()
             .bsd_sockets
@@ -609,7 +632,7 @@ impl Cpu {
             None => return self.bsd_reply(tls, -1, BSD_EBADF),
             Some(socket) if socket.peer.is_some() => return self.bsd_reply(tls, -1, BSD_EISCONN),
             Some(socket) if socket.kind == BSD_SOCK_DGRAM => {
-                return self.bsd_reply(tls, -1, BSD_ECONNREFUSED)
+                return self.bsd_connect_datagram(tls, fd, address)
             }
             Some(socket) => (socket.domain, socket.kind),
         };
@@ -678,17 +701,25 @@ impl Cpu {
         self.bsd_reply(tls, sent, 0)
     }
 
-    /// `SendTo` from a datagram socket with no peer: the link takes it and drops it.
+    /// `SendTo` from a datagram socket with no peer: to an address outside the console it goes to
+    /// the host, and anywhere else the link takes it and drops it.
     fn bsd_send_datagram(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
-        let datagram = self
-            .process()
-            .bsd_sockets
-            .get(&fd)
-            .is_some_and(|socket| socket.kind == BSD_SOCK_DGRAM);
-        let addressed = destination
+        let (datagram, default_peer) = match self.process().bsd_sockets.get(&fd) {
+            Some(socket) => (socket.kind == BSD_SOCK_DGRAM, socket.datagram.default_peer),
+            None => (false, None),
+        };
+        let given = destination
             .and_then(|index| self.ipc_input_buffer(tls, index))
             .map(|(addr, size)| self.read_bytes(addr, size.min(0x80)))
-            .is_some_and(|address| sockaddr_in(&address).is_some());
+            .and_then(|address| sockaddr_in(&address));
+        if datagram && self.net.enabled {
+            if let Some((ip, port)) = given.or(default_peer) {
+                if !is_local_ip(ip) && port != 0 {
+                    return self.bsd_send_outside_datagram(tls, fd, ip, port);
+                }
+            }
+        }
+        let addressed = given.is_some();
         if !datagram || !addressed {
             return self.bsd_unconnected(tls, fd);
         }
@@ -700,24 +731,27 @@ impl Cpu {
 
     /// `Recv`/`RecvFrom`/`Read`, with the sender's address when `address_buffer` names one.
     fn bsd_receive(&mut self, tls: u32, fd: i32, address_buffer: Option<u32>) -> Result<()> {
-        let (ret, errno) = self.bsd_receive_bytes(tls, fd)?;
+        let (ret, errno, source) = self.bsd_receive_bytes(tls, fd)?;
         let Some(index) = address_buffer else {
             return self.bsd_reply(tls, ret, errno);
         };
-        let address = if ret >= 0 {
-            self.bsd_peer_address(fd)
-        } else {
-            Vec::new()
+        let address = match source {
+            Some(source) => source,
+            None if ret >= 0 => self.bsd_peer_address(fd),
+            None => Vec::new(),
         };
         let written = self.bsd_write_address(tls, index, &address)?;
         self.bsd_reply_len(tls, ret, errno, written)
     }
 
-    /// Drain the peer's bytes into the caller's buffer. An empty live queue is
-    /// `EAGAIN` plus a yield.
-    fn bsd_receive_bytes(&mut self, tls: u32, fd: i32) -> Result<(i32, i32)> {
+    /// Drain the peer's bytes into the caller's buffer, or one datagram with its source. An
+    /// empty live queue is `EAGAIN` plus a yield.
+    fn bsd_receive_bytes(&mut self, tls: u32, fd: i32) -> Result<Recv> {
+        if let Some(received) = self.bsd_receive_datagram(tls, fd)? {
+            return Ok(received);
+        }
         match self.process().bsd_sockets.get(&fd) {
-            None => return Ok((-1, BSD_EBADF)),
+            None => return Ok((-1, BSD_EBADF, None)),
             // A stream socket needs a connection; a datagram socket just has an empty queue.
             Some(socket)
                 if socket.kind != BSD_SOCK_DGRAM
@@ -725,24 +759,24 @@ impl Cpu {
                     && !socket.peer_closed
                     && socket.stream_state() != Some(StreamState::Open) =>
             {
-                return Ok((-1, BSD_ENOTCONN));
+                return Ok((-1, BSD_ENOTCONN, None));
             }
             Some(_) => {}
         }
         let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
-            return Ok((-1, BSD_EINVAL));
+            return Ok((-1, BSD_EINVAL, None));
         };
         let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) else {
-            return Ok((-1, BSD_EBADF));
+            return Ok((-1, BSD_EBADF, None));
         };
         let take = size.min(socket.rx.len() as u32) as usize;
         if take == 0 {
             // End-of-file: a read of zero bytes.
             if socket.peer_closed {
-                return Ok((0, 0));
+                return Ok((0, 0, None));
             }
             self.pending_yield = true;
-            return Ok((-1, BSD_EAGAIN));
+            return Ok((-1, BSD_EAGAIN, None));
         }
         let bytes: Vec<u8> = socket.rx.drain(..take).collect();
         let stream = socket.stream.as_ref().map(|stream| stream.id);
@@ -753,7 +787,7 @@ impl Cpu {
             let bytes = take as u32;
             self.net.outbox.push(NetCommand::Consumed { stream, bytes });
         }
-        Ok((take as i32, 0))
+        Ok((take as i32, 0, None))
     }
 
     /// The error for a send with no destination.
@@ -862,6 +896,11 @@ impl Cpu {
         self.process_mut()
             .bsd_socket_options
             .retain(|&(owner, _, _), _| owner != fd);
+        for peering in &socket.datagram.peerings {
+            self.net
+                .outbox
+                .push(NetCommand::Close { stream: peering.id });
+        }
         if let Some(stream) = socket
             .stream
             .as_ref()

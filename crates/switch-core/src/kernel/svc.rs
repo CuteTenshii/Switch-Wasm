@@ -1123,6 +1123,13 @@ impl Cpu {
                         let _ = self.mem.write_u32(tls.wrapping_add(start + 0x10), data);
                     }
                 }
+                // A service that could not answer wrote no reply, so the request is still in the
+                // buffer: rewind onto the `svc` and run the call again after the wait.
+                if let Some(until) = std::mem::take(&mut self.pending_retry) {
+                    self.pc = self.pc.wrapping_sub(4);
+                    self.sleep_until(until);
+                    return Ok(());
+                }
                 self.write_zr(0, RESULT_OK);
                 // Yield after X0 is written: `yield_thread` swaps register files.
                 if std::mem::take(&mut self.pending_yield) {

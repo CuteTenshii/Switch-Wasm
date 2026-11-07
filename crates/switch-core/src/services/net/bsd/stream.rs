@@ -9,6 +9,8 @@ pub(crate) struct Stream {
     pub(super) id: StreamId,
     pub(super) state: StreamState,
     pub(super) address: Vec<u8>,
+    /// A blocking `connect` is waiting on this stream: its next run reports how it ended.
+    pub(super) deferred: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,9 +22,10 @@ pub(super) enum StreamState {
 }
 
 impl Cpu {
-    /// `connect` to a peer outside this console: the host does the connecting, so the call
-    /// is always in progress. The socket turns writable once it opens, or readable and writable
-    /// with the error `SO_ERROR` reports if it fails.
+    /// `connect` to a peer outside this console: the host does the connecting. A non-blocking
+    /// socket gets `EINPROGRESS`, turns writable once it opens, or readable and writable with
+    /// the error `SO_ERROR` reports if it fails. A blocking one waits: the call is run again
+    /// until the host has answered, and that run reports the outcome.
     pub(super) fn bsd_connect_outside(
         &mut self,
         tls: u32,
@@ -31,13 +34,24 @@ impl Cpu {
         port: u16,
         address: &[u8],
     ) -> Result<()> {
-        let state = self
-            .process()
-            .bsd_sockets
-            .get(&fd)
-            .and_then(|socket| socket.stream_state());
+        let (state, waiting, blocking) = match self.process().bsd_sockets.get(&fd) {
+            Some(socket) => (
+                socket.stream_state(),
+                socket.stream.as_ref().is_some_and(|stream| stream.deferred),
+                socket.flags & BSD_O_NONBLOCK == 0,
+            ),
+            None => return self.bsd_reply(tls, -1, BSD_EBADF),
+        };
         match state {
+            Some(StreamState::Connecting) if waiting => {
+                self.retry_after(BSD_WAIT_SLICE_NS);
+                return Ok(());
+            }
             Some(StreamState::Connecting) => return self.bsd_reply(tls, -1, BSD_EALREADY),
+            Some(StreamState::Open) if waiting => {
+                self.bsd_settle_connect(fd);
+                return self.bsd_reply(tls, 0, 0);
+            }
             Some(StreamState::Open) => return self.bsd_reply(tls, -1, BSD_EISCONN),
             Some(StreamState::Failed(errno)) => {
                 self.bsd_clear_stream(fd);
@@ -72,9 +86,26 @@ impl Cpu {
                 id,
                 state: StreamState::Connecting,
                 address: address.to_vec(),
+                deferred: blocking,
             });
         }
+        if blocking {
+            self.retry_after(BSD_WAIT_SLICE_NS);
+            return Ok(());
+        }
         self.bsd_reply(tls, -1, BSD_EINPROGRESS)
+    }
+
+    /// The blocking `connect` that was waiting on `fd` has its answer.
+    fn bsd_settle_connect(&mut self, fd: i32) {
+        if let Some(stream) = self
+            .process_mut()
+            .bsd_sockets
+            .get_mut(&fd)
+            .and_then(|socket| socket.stream.as_mut())
+        {
+            stream.deferred = false;
+        }
     }
 
     /// `SO_ERROR`: the failure of a connect, reported once; zero otherwise.
@@ -136,6 +167,9 @@ impl Cpu {
                 | NetEvent::Data { stream, .. }
                 | NetEvent::Closed { stream } => *stream,
             };
+            if self.bsd_datagram_event(id, &event) {
+                continue;
+            }
             let socket = self
                 .machine
                 .processes
@@ -194,21 +228,26 @@ mod tests {
         cpu.mem.read_u32(AT).unwrap()
     }
 
-    fn bsd_command(cpu: &mut Cpu, command: u32, words: &[u32]) -> (i32, i32) {
-        let payload: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        write_request(cpu, command, &payload);
-        cpu.bsd_request(TLS, 9, Some(command)).unwrap();
-        bsd_result(cpu)
-    }
-
     /// A socket on a console whose guest may reach the outside, and the synthetic address
     /// `sfdnsres` would have given `name`.
     fn networked_socket(name: &str) -> (Cpu, i32, [u8; 4]) {
+        let (mut cpu, fd, address) = blocking_socket(name);
+        cpu.process_mut().bsd_sockets.get_mut(&fd).unwrap().flags |= BSD_O_NONBLOCK;
+        (cpu, fd, address)
+    }
+
+    /// The same, left blocking, as a socket is until the guest says otherwise.
+    fn blocking_socket(name: &str) -> (Cpu, i32, [u8; 4]) {
         let (mut cpu, fd) = bsd_socket(1);
         cpu.mem.map_zero(SCRATCH, 0x400).unwrap();
         cpu.set_network(true);
         let address = cpu.net.synthesize(name).unwrap();
         (cpu, fd, address)
+    }
+
+    /// Run the `connect` already in the buffer again, as the kernel does after a wait.
+    fn rerun_connect(cpu: &mut Cpu) {
+        cpu.bsd_request(TLS, 9, Some(14)).unwrap();
     }
 
     const POLLIN: u16 = 1;
@@ -374,5 +413,88 @@ mod tests {
             (-1, super::BSD_ECONNREFUSED)
         );
         assert!(cpu.take_net_commands().is_empty());
+    }
+
+    #[test]
+    fn a_blocking_connect_gives_no_reply_until_the_host_has_answered() {
+        let (mut cpu, fd, address) = blocking_socket("example.com");
+        connect_to(&mut cpu, fd, address, 443);
+        assert!(cpu.pending_retry.take().is_some(), "the call waits");
+        assert_eq!(cpu.take_net_commands().len(), 1, "one connect asked for");
+
+        // Still waiting: the request was left alone, so running it again is the same call.
+        rerun_connect(&mut cpu);
+        assert!(cpu.pending_retry.take().is_some());
+        assert!(
+            cpu.take_net_commands().is_empty(),
+            "and it does not ask again"
+        );
+
+        cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
+        rerun_connect(&mut cpu);
+        assert!(cpu.pending_retry.is_none());
+        assert_eq!(bsd_result(&cpu), (0, 0), "the connect succeeded");
+        assert_eq!(
+            connect_to(&mut cpu, fd, address, 443),
+            (-1, BSD_EISCONN),
+            "a second connect is a second connect"
+        );
+    }
+
+    #[test]
+    fn a_blocking_connect_that_fails_returns_the_error() {
+        let (mut cpu, fd, address) = blocking_socket("example.com");
+        connect_to(&mut cpu, fd, address, 443);
+        cpu.pending_retry = None;
+        cpu.deliver_net_events([NetEvent::Failed {
+            stream: 1,
+            reason: NetFailure::Refused,
+        }]);
+        rerun_connect(&mut cpu);
+        assert!(cpu.pending_retry.is_none());
+        assert_eq!(bsd_result(&cpu), (-1, BSD_ECONNREFUSED));
+        assert_eq!(
+            so_error(&mut cpu, fd),
+            0,
+            "the error was reported by the connect"
+        );
+    }
+
+    #[test]
+    fn a_non_blocking_connect_never_waits() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        assert_eq!(
+            connect_to(&mut cpu, fd, address, 443),
+            (-1, BSD_EINPROGRESS)
+        );
+        assert!(cpu.pending_retry.is_none());
+    }
+
+    /// Through the kernel: an unanswered call rewinds onto its `svc` and X0 is left alone, so
+    /// the guest never sees a result until the call has one.
+    #[test]
+    fn the_kernel_runs_a_waiting_connect_again_and_answers_it_once() {
+        const AFTER_SVC: u32 = 0x0800_0004;
+        let (mut cpu, fd, address) = blocking_socket("example.com");
+        cpu.tpidr = u64::from(TLS);
+        let mut remote = loopback_sockaddr(443);
+        remote[4..8].copy_from_slice(&address);
+        place(&mut cpu, SCRATCH, &remote);
+        write_map_buffer_request(&mut cpu, 14, &fd.to_le_bytes(), SCRATCH, 16, true);
+        let issue = |cpu: &mut Cpu| {
+            cpu.pc = AFTER_SVC;
+            cpu.write_zr(0, 9);
+            cpu.horizon_syscall(0x21).unwrap();
+        };
+
+        issue(&mut cpu);
+        assert_eq!(cpu.pc, AFTER_SVC - 4, "back on the svc");
+        assert_eq!(cpu.read_zr(0), 9, "no result yet");
+
+        cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
+        issue(&mut cpu);
+        assert_eq!(cpu.pc, AFTER_SVC, "the svc completed");
+        assert_eq!(cpu.read_zr(0), 0, "RESULT_OK");
+        assert_eq!(bsd_result(&cpu), (0, 0));
     }
 }

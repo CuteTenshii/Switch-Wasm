@@ -107,6 +107,14 @@ impl Cpu {
         }
     }
 
+    /// Leave the request in the caller's buffer, unanswered, and have the call run again after
+    /// `wait_ns` of guest time: how a blocking service call waits for the host. The handler must
+    /// decide before it writes a reply, which would overwrite the request, and must give the
+    /// same answer on the second run as the first would have once the host has answered.
+    pub(crate) fn retry_after(&mut self, wait_ns: i64) {
+        self.pending_retry = self.wait_deadline(wait_ns.max(1));
+    }
+
     pub(crate) fn sleep_until(&mut self, deadline: u64) {
         self.ensure_main_thread();
         self.machine.process_mut(self.pid).threads[self.current_thread].state =
