@@ -743,8 +743,13 @@ impl Cpu {
             return Ok((-1, BSD_EAGAIN));
         }
         let bytes: Vec<u8> = socket.rx.drain(..take).collect();
+        let stream = socket.stream.as_ref().map(|stream| stream.id);
         for (offset, &byte) in bytes.iter().enumerate() {
             self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
+        }
+        if let Some(stream) = stream {
+            let bytes = take as u32;
+            self.net.outbox.push(NetCommand::Consumed { stream, bytes });
         }
         Ok((take as i32, 0))
     }

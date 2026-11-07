@@ -33,6 +33,11 @@ pub enum NetCommand {
     Close {
         stream: StreamId,
     },
+    /// The guest read this many bytes the host delivered, so the host may send that many more.
+    Consumed {
+        stream: StreamId,
+        bytes: u32,
+    },
 }
 
 /// Why a connection did not open.

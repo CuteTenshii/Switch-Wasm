@@ -265,6 +265,14 @@ mod tests {
         }]);
         assert_eq!(cpu.bsd_poll_revents(fd, POLLIN), POLLIN);
         assert_eq!(recv_on(&mut cpu, fd, 16), ((6, 0), b"200 OK".to_vec()));
+        assert_eq!(
+            cpu.take_net_commands(),
+            vec![NetCommand::Consumed {
+                stream: 1,
+                bytes: 6
+            }],
+            "what the guest read is handed back to the host"
+        );
 
         cpu.deliver_net_events([NetEvent::Closed { stream: 1 }]);
         assert_eq!(recv_on(&mut cpu, fd, 16).0, (0, 0), "end of file");
