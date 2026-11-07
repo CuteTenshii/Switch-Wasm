@@ -857,7 +857,7 @@ impl Cpu {
                                     self.nifm_general_service_request(tls, handle, cmd_id)?
                                 }
                                 Some("nifm:request") => {
-                                    self.nifm_request_object_request(tls, cmd_id)?
+                                    self.nifm_request_object_request(tls, handle, cmd_id)?
                                 }
                                 _ => self.nifm_request(tls, cmd_id, handle)?,
                             }
@@ -866,7 +866,7 @@ impl Cpu {
                         "nifm:general-service" => {
                             self.nifm_general_service_request(tls, handle, cmd_id)?
                         }
-                        "nifm:request" => self.nifm_request_object_request(tls, cmd_id)?,
+                        "nifm:request" => self.nifm_request_object_request(tls, handle, cmd_id)?,
                         // ssl and its contexts.
                         "ssl" | "ssl:service" | "ssl:context" => {
                             self.ssl_request(tls, handle, cmd_id)?

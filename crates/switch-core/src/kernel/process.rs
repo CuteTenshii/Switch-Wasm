@@ -134,6 +134,8 @@ pub(crate) struct Process {
     pub(crate) audio_outs: IdMap<u64, audout::AudioOut>,
     /// Open `IHardwareOpusDecoder`s; the guest work buffer is unused.
     pub(crate) opus_decoders: IdMap<u64, hwopus::HwOpus>,
+    /// Each `nifm` request: the events it handed out and whether it was submitted, by object key.
+    pub(crate) nifm_requests: IdMap<u64, net::NifmRequest>,
     /// The user each `IProfile`/`IProfileEditor` object was opened for.
     pub(crate) acc_profiles: IdMap<u64, [u8; 16]>,
     /// Program id for `pm:info`; defaults to the Album applet's, as hbmenu homebrew runs as.
@@ -218,6 +220,7 @@ impl Process {
             audren_renderers: IdMap::default(),
             audio_outs: IdMap::default(),
             opus_decoders: IdMap::default(),
+            nifm_requests: IdMap::default(),
             acc_profiles: IdMap::default(),
             program_id: crate::kernel::ipc::DEFAULT_PROGRAM_ID,
             bsd_sockets: HashMap::new(),

@@ -8,4 +8,5 @@ mod nifm;
 mod ssl;
 
 pub(crate) use bsd::{BsdSocket, BSD_FIRST_EPHEMERAL_PORT};
+pub(crate) use nifm::NifmRequest;
 pub(crate) use ssl::{SslCertificate, SslConnection};
