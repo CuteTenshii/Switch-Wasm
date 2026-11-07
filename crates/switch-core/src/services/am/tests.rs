@@ -361,7 +361,7 @@ fn the_preselected_user_is_handed_over_once_and_then_it_is_gone() {
         0xC794_97CA
     );
     assert_eq!(data[4], 1, "layout version");
-    assert_eq!(&data[8..0x18], &crate::services::acc::DEFAULT_USER_UID[..]);
+    assert_eq!(&data[8..0x18], &crate::services::acc::default_uid()[..]);
 
     marshal(&mut cpu, false, 1, &kind);
     cpu.applet_request(TLS, 9, Some(1)).unwrap();
@@ -428,7 +428,7 @@ fn a_stubbed_answer_names_itself_once_and_still_succeeds() {
 fn get_save_data_size_reports_the_quota_the_title_was_actually_allotted() {
     let mut payload = [0u8; 0x18];
     payload[0] = 1; // SaveDataType::Account
-    payload[8..].copy_from_slice(&crate::services::acc::DEFAULT_USER_UID);
+    payload[8..].copy_from_slice(&crate::services::acc::default_uid());
 
     // Tomodachi Life's NACP figures.
     const SAVE: i64 = 56_623_104;
@@ -453,7 +453,7 @@ fn extending_a_save_grants_it_and_the_size_read_back_is_the_extended_one() {
     const JOURNAL: i64 = 0x0100_0000;
     let mut payload = [0u8; 0x28];
     payload[0] = 1; // SaveDataType::Account
-    payload[8..0x18].copy_from_slice(&crate::services::acc::DEFAULT_USER_UID);
+    payload[8..0x18].copy_from_slice(&crate::services::acc::default_uid());
     payload[0x18..0x20].copy_from_slice(&SIZE.to_le_bytes());
     payload[0x20..].copy_from_slice(&JOURNAL.to_le_bytes());
 
@@ -636,12 +636,11 @@ fn every_applet_title_id_maps_to_the_id_switchbrew_gives_it() {
         super::applet_interface_version(0x0100_0000_0000_1013),
         0x1_0000
     );
-    let arg = &super::applet_launch_storages(
-        0x0100_0000_0000_1013,
-        crate::services::acc::DEFAULT_USER_UID,
-    )[0];
+    let arg =
+        &super::applet_launch_storages(0x0100_0000_0000_1013, crate::services::acc::default_uid())
+            [0];
     assert_eq!(arg.len(), 0x10A8);
-    assert_eq!(arg[8..24], crate::services::acc::DEFAULT_USER_UID);
+    assert_eq!(arg[8..24], crate::services::acc::default_uid());
 }
 
 #[test]
@@ -666,8 +665,7 @@ fn an_applet_that_pushes_its_result_and_exits_stops_the_process() {
 #[test]
 fn the_controller_applet_launched_alone_is_opened_as_the_home_menu_would() {
     const CONTROLLER: u64 = 0x0100_0000_0000_1003;
-    let storages =
-        super::applet_launch_storages(CONTROLLER, crate::services::acc::DEFAULT_USER_UID);
+    let storages = super::applet_launch_storages(CONTROLLER, crate::services::acc::default_uid());
     let private = &storages[0];
     assert_eq!(
         u32::from_le_bytes(private[..4].try_into().unwrap()),

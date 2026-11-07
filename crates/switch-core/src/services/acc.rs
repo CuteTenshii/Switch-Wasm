@@ -5,8 +5,31 @@
 use crate::cpu::Cpu;
 use crate::Result;
 
-/// Uid of the default user; any nonzero value works.
-pub const DEFAULT_USER_UID: [u8; 16] = *b"switch-wasm user";
+/// A new user's uid: 128 random bits, never all zero, which titles read as "nobody".
+pub fn random_uid() -> [u8; 16] {
+    use std::hash::{BuildHasher, Hasher};
+    loop {
+        // A `RandomState` carries keys the process picked at random.
+        let keys = std::collections::hash_map::RandomState::new();
+        let mut uid = [0u8; 16];
+        for (half, tag) in uid.chunks_exact_mut(8).zip(0u64..) {
+            let mut hasher = keys.build_hasher();
+            hasher.write_u64(tag);
+            half.copy_from_slice(&hasher.finish().to_le_bytes());
+        }
+        if uid != [0; 16] {
+            return uid;
+        }
+    }
+}
+
+/// The uid of the console's first user, made the first time any console is and the same for
+/// every console in the process: two consoles run in lockstep must not differ in who plays.
+/// A page replaces that user with its own profiles, whose uids it makes when they are created.
+pub(crate) fn default_uid() -> [u8; 16] {
+    static UID: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    *UID.get_or_init(random_uid)
+}
 
 pub const MAX_USERS: usize = 8;
 
@@ -748,6 +771,43 @@ fn profile_base(user: &UserAccount) -> [u8; PROFILE_BASE_LEN] {
 mod tests {
     use crate::kernel::ipc::testing::*;
 
+    #[test]
+    fn a_generated_uid_is_never_nobody_and_never_repeats() {
+        let uids: Vec<_> = (0..64).map(|_| super::random_uid()).collect();
+        assert!(uids.iter().all(|uid| *uid != [0; 16]));
+        for (index, uid) in uids.iter().enumerate() {
+            assert!(!uids[..index].contains(uid), "{uid:?} was made twice");
+        }
+        // Both halves vary, so it is 128 bits and not 64 repeated.
+        assert!(uids.iter().any(|uid| uid[..8] != uid[8..]));
+    }
+
+    #[test]
+    fn every_console_in_a_process_starts_with_the_same_generated_user() {
+        let (first, second) = (Cpu::new(), Cpu::new());
+        assert_eq!(first.current_user().uid, second.current_user().uid);
+        assert_eq!(first.current_user().uid, super::default_uid());
+        assert_ne!(super::default_uid(), [0; 16]);
+        assert_ne!(
+            super::default_uid(),
+            super::random_uid(),
+            "a new user is not the default"
+        );
+    }
+
+    #[test]
+    fn a_profile_image_id_changes_with_the_picture_and_only_then() {
+        let user =
+            |picture: Option<Vec<u8>>| super::UserAccount::new(super::default_uid(), "A", picture);
+        let plain = user(None).image_id();
+        assert_ne!(plain, user(Some(vec![1, 2, 3])).image_id());
+        assert_eq!(
+            plain,
+            user(None).image_id(),
+            "the same picture, the same id"
+        );
+    }
+
     type HuffmanTable = (u8, Vec<(u8, u16, u8)>);
     use crate::cpu::Cpu;
 
@@ -766,7 +826,7 @@ mod tests {
         let mut cpu = request(false, 4, &[]);
         acc(&mut cpu, "acc:u0", 4);
         let uid = cpu.read_bytes(TLS + 0x20, 16);
-        assert_eq!(uid, super::DEFAULT_USER_UID.to_vec());
+        assert_eq!(uid, super::default_uid().to_vec());
 
         // TrySelectUserWithoutInteraction (51, and 52 from 19.0.0) hands back the same one.
         for command in [51, 52] {
@@ -774,7 +834,7 @@ mod tests {
             acc(&mut cpu, "acc:su", command);
             assert_eq!(
                 cpu.read_bytes(TLS + 0x20, 16),
-                super::DEFAULT_USER_UID.to_vec()
+                super::default_uid().to_vec()
             );
         }
     }
@@ -790,7 +850,7 @@ mod tests {
         }
         acc(&mut cpu, "acc:u0", 2);
 
-        assert_eq!(cpu.read_bytes(BUFFER, 16), super::DEFAULT_USER_UID.to_vec());
+        assert_eq!(cpu.read_bytes(BUFFER, 16), super::default_uid().to_vec());
         assert_eq!(
             cpu.read_bytes(BUFFER + 16, 0x30),
             vec![0u8; 0x30],
@@ -803,7 +863,7 @@ mod tests {
         const SEND: u32 = 0x4000;
         const RECV: u32 = 0x5000;
         const TITLE: u64 = 0x0100_7EF0_0011_E000;
-        let mut payload = super::DEFAULT_USER_UID.to_vec();
+        let mut payload = super::default_uid().to_vec();
         payload.extend_from_slice(&TITLE.to_le_bytes());
         let mut cpu = request(false, 110, &payload);
         cpu.mem.map_zero(SEND, 0x2000).unwrap();
@@ -836,7 +896,7 @@ mod tests {
 
     #[test]
     fn the_administrator_is_registered_and_not_linked() {
-        let mut cpu = request(false, 250, &super::DEFAULT_USER_UID);
+        let mut cpu = request(false, 250, &super::default_uid());
         acc(&mut cpu, "acc:su", 250);
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
         let administrator = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
@@ -855,7 +915,7 @@ mod tests {
 
     #[test]
     fn acc_knows_only_its_own_uid() {
-        let mut cpu = request(false, 1, &super::DEFAULT_USER_UID);
+        let mut cpu = request(false, 1, &super::default_uid());
         acc(&mut cpu, "acc:u0", 1);
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1);
 
@@ -893,7 +953,7 @@ mod tests {
         );
         assert_eq!(
             cpu.read_bytes(TLS + 0x20, 16),
-            super::DEFAULT_USER_UID.to_vec()
+            super::default_uid().to_vec()
         );
         assert_eq!(cpu.mem.read_u64(TLS + 0x30).unwrap(), 0);
         assert_eq!(cpu.read_string(TLS + 0x38, 0x20), "Player");
@@ -902,7 +962,7 @@ mod tests {
     #[test]
     fn acc_profile_editor_stores_a_nickname_that_reads_back() {
         let mut store = [0u8; super::PROFILE_BASE_LEN];
-        store[..16].copy_from_slice(&super::DEFAULT_USER_UID);
+        store[..16].copy_from_slice(&super::default_uid());
         store[0x18..0x18 + 5].copy_from_slice(b"Yuuto");
         let mut cpu = request(false, 100, &store);
         cpu.set_unix_time(1_700_000_000);
@@ -939,7 +999,7 @@ mod tests {
         cpu.register_service_handle(9, "acc:u0");
         cpu.acc_request(TLS, 9, Some(141)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
-        assert_eq!(cpu.read_bytes(BUFFER, 16), super::DEFAULT_USER_UID.to_vec());
+        assert_eq!(cpu.read_bytes(BUFFER, 16), super::default_uid().to_vec());
         assert_eq!(
             cpu.read_bytes(BUFFER + 16, 0x30),
             vec![0u8; 0x30],
@@ -951,7 +1011,7 @@ mod tests {
     fn acc_the_same_command_id_means_different_things_on_u0_and_u1() {
         // 101 differs per service; tell them apart by what the returned session answers.
         for (service, iface) in [("acc:u0", "acc:manager"), ("acc:u1", "acc:notifier")] {
-            let mut cpu = request(false, 101, &super::DEFAULT_USER_UID);
+            let mut cpu = request(false, 101, &super::default_uid());
             acc(&mut cpu, service, 101);
             let session = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
             assert_eq!(cpu.service_name(session), Some(iface), "{service} cmd 101");
@@ -990,7 +1050,7 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), advertised);
         assert_eq!(
             cpu.read_bytes(BUFFER, advertised),
-            super::profile_image(super::DEFAULT_USER_UID)
+            super::profile_image(super::default_uid())
         );
 
         // GetLargeImageSize and LoadLargeImage [18.0.0+] answer for the same icon.
@@ -1008,7 +1068,7 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), advertised);
         assert_eq!(
             cpu.read_bytes(BUFFER, advertised),
-            super::profile_image(super::DEFAULT_USER_UID)
+            super::profile_image(super::default_uid())
         );
     }
 
@@ -1027,7 +1087,7 @@ mod tests {
         assert_ne!(ids[0], vec![0u8; 0x10], "zero means there is no icon");
         assert_ne!(
             ids[0],
-            super::DEFAULT_USER_UID.to_vec(),
+            super::default_uid().to_vec(),
             "the icon, not the user"
         );
     }
@@ -1129,7 +1189,7 @@ mod tests {
         );
         assert_ne!(
             super::profile_image(BEN),
-            super::profile_image(super::DEFAULT_USER_UID),
+            super::profile_image(ANN),
             "two users drawn alike"
         );
 
@@ -1197,7 +1257,7 @@ mod tests {
     /// every block must be the same colour and the scan must end at EOI.
     #[test]
     fn the_profile_icon_is_a_jpeg_that_decodes_to_one_colour() {
-        let jpeg = super::profile_image(super::DEFAULT_USER_UID);
+        let jpeg = super::profile_image(super::default_uid());
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "SOI");
         assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9], "EOI");
 
@@ -1339,7 +1399,7 @@ mod tests {
 
                 // Dequantize and undo the level shift; a lone DC's IDCT is DC/8.
                 let value = *pred * i32::from(quant[0]) / 8 + 128;
-                let (red, green, blue) = super::picture_color(super::DEFAULT_USER_UID);
+                let (red, green, blue) = super::picture_color(super::default_uid());
                 let (red, green, blue) = (f32::from(red), f32::from(green), f32::from(blue));
                 let expected = match component {
                     0 => 0.299 * red + 0.587 * green + 0.114 * blue,

@@ -50,8 +50,8 @@ pub use jit::{
     Layout, Refused, HOT, LEFT,
 };
 
-pub use crate::services::acc::{UserAccount, UsersRefused, MAX_USERS, NICKNAME_LEN};
-pub(crate) use crate::services::acc::{DEFAULT_NICKNAME, DEFAULT_USER_UID};
+pub(crate) use crate::services::acc::{default_uid, DEFAULT_NICKNAME};
+pub use crate::services::acc::{random_uid, UserAccount, UsersRefused, MAX_USERS, NICKNAME_LEN};
 pub use crate::services::am::{ErrorDialog, KeyboardRequest};
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
@@ -601,7 +601,7 @@ impl Cpu {
                 unix_time: 0,
                 utc_offset: 0,
                 time_shmem: crate::mem::SharedPages::new(crate::services::time::SHARED_MEMORY_SIZE),
-                users: vec![UserAccount::new(DEFAULT_USER_UID, DEFAULT_NICKNAME, None)],
+                users: vec![UserAccount::new(default_uid(), DEFAULT_NICKNAME, None)],
                 current_user: 0,
                 profiles_edited: false,
                 apm_configuration: power::APM_DEFAULT_CONFIGURATION,
