@@ -319,6 +319,8 @@ pub struct Machine {
     /// Touch LIFO sampling number, separate from npad's.
     pub(crate) touch_sample_counter: u64,
     /// Touch slots filled at the last publish, so stale ones are cleared.
+    /// The host's motion sensor and the pose integrated from it.
+    pub(crate) motion: crate::services::input::Motion,
     pub(crate) touch_published: usize,
     /// Contacts down at the last publish; see [`Cpu::set_touch_state`].
     pub(crate) touch_down: Vec<TouchPoint>,
@@ -588,6 +590,7 @@ impl Cpu {
                 pl_shmem_image: Vec::new(),
                 shared_font_regions: Vec::new(),
                 audio_streams: BTreeMap::new(),
+                motion: Default::default(),
                 audio_produced: 0,
                 audio_taken: 0,
                 audio_dropped: 0,

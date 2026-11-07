@@ -477,6 +477,46 @@ mod tests {
     }
 
     #[test]
+    fn the_motion_sensor_is_published_in_the_handheld_six_axis_lifo() {
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u32 = 0x3000_0000;
+
+        let mut cpu = Cpu::new();
+        map_hid(&mut cpu, SHMEM);
+        cpu.cycles = crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES + 1;
+        cpu.set_motion_state([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], true);
+        cpu.hid_tick();
+
+        let lifo = SHMEM
+            + h::NPAD
+            + h::HANDHELD_SLOT * h::ENTRY_SIZE
+            + h::SIX_AXIS_FULL_KEY_LIFO
+            + h::SIX_AXIS_HANDHELD * h::SIX_AXIS_LIFO_SIZE;
+        assert_eq!(cpu.mem.read_u64(lifo + h::LIFO_COUNT).unwrap(), 1);
+        let state = lifo + h::LIFO_STORAGE + h::SIX_AXIS_STATE;
+        let float =
+            |at: u32| f32::from_bits(cpu.mem.read_u32(state + h::SIX_AXIS_FLOATS + at).unwrap());
+        assert_eq!(float(8), -1.0, "acceleration z");
+        assert_eq!(float(20), 1.0, "angular velocity z");
+        assert!(
+            (float(32) - 1.0 / 200.0).abs() < 1e-6,
+            "one tick of rotation about z"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(state + h::SIX_AXIS_ATTRIBUTES).unwrap(),
+            h::SIX_AXIS_ATTR_CONNECTED
+        );
+        // A turn about z leaves the z axis where it was and tips x toward y.
+        assert_eq!(float(68), 1.0, "orientation zz");
+        assert!(float(36) > 0.99 && float(40) > 0.0, "orientation x row");
+
+        cpu.set_motion_state([0.0; 3], [0.0; 3], false);
+        cpu.cycles += crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES;
+        cpu.hid_tick();
+        assert_eq!(cpu.mem.read_u32(state + h::SIX_AXIS_ATTRIBUTES).unwrap(), 0);
+    }
+
+    #[test]
     fn the_pad_is_published_in_a_style_the_title_actually_asked_for() {
         // A title that supports Joy-Con pairs but not Pro Controllers must find a style it asked for.
         use crate::cpu::hid_shmem as h;

@@ -159,7 +159,7 @@ for (const [id, glyph] of [
 const moreMenu = $('more-menu');
 const narrowBar = window.matchMedia('(width <= 900px)');
 // Each with a marker where it sits in the bar, to go back to.
-const moreItems = ['btn-profile', 'btn-dock', 'btn-fullscreen', 'btn-step'].map((id) => {
+const moreItems = ['btn-profile', 'btn-motion', 'btn-dock', 'btn-fullscreen', 'btn-step'].map((id) => {
   const item = $(id);
   const home = document.createComment(id);
   item.before(home);

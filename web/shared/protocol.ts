@@ -226,6 +226,9 @@ export interface Commands {
   setTouch(points: Uint32Array): void;
   setBattery(percent: number, charging: boolean): void;
   setOperationMode(docked: boolean): void;
+  // Open the first WebHID controller the page was granted; its name, or empty for none.
+  attachMotion(): string;
+  detachMotion(): void;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
   loadProgram(file: File): number;
@@ -382,6 +385,8 @@ export type WorkerMessage =
   // From `crates/switch-wasm/src/keyboard.rs`: the guest raised an error applet, or waits for text.
   | ({ type: 'error_dialog' } & ErrorDialog)
   | ({ type: 'keyboard' } & KeyboardRequest)
+  // The motion controller the worker streams from changed; null once it is gone.
+  | { type: 'motion'; device: string | null }
   // The guest's profile edits are stored; the page reloads them.
   | { type: 'profiles_edited' }
   | { id: number; ok: true; result: unknown }

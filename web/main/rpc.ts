@@ -28,6 +28,12 @@ let loopEvents: {
 
 let nandProgress: ((done: number, total: number) => void) | null = null;
 
+let motionChanged: ((device: string | null) => void) | null = null;
+
+export function onMotionChanged(handler: NonNullable<typeof motionChanged>): void {
+  motionChanged = handler;
+}
+
 export function onNandProgress(handler: NonNullable<typeof nandProgress>): void {
   nandProgress = handler;
 }
@@ -107,6 +113,9 @@ export function initWorker(): void {
         break;
       case 'input_mailbox':
         setMailbox(d.buffer, d.at);
+        break;
+      case 'motion':
+        motionChanged?.(d.device);
         break;
       case 'audio_ring':
         setAudioRing(d);

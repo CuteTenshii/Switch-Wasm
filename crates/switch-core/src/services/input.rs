@@ -121,6 +121,103 @@ pub(crate) mod hid_shmem {
     pub const TOUCH_DIAMETER_X: u32 = 0x18;
     pub const TOUCH_DIAMETER_Y: u32 = 0x1C;
     pub const TOUCH_ROTATION_ANGLE: u32 = 0x20;
+
+    /// The six `HidNpadSixAxisSensorLifo`s follow `SYSTEM_EXT_LIFO`: full key, handheld, joy
+    /// dual left and right, joy left, joy right.
+    pub const SIX_AXIS_FULL_KEY_LIFO: u32 = 0x1758;
+    pub const SIX_AXIS_LIFO_SIZE: u32 = 0x708;
+    pub const SIX_AXIS_HANDHELD: u32 = 1;
+    pub const SIX_AXIS_JOY_DUAL_LEFT: u32 = 2;
+    pub const SIX_AXIS_JOY_DUAL_RIGHT: u32 = 3;
+    pub const SIX_AXIS_JOY_LEFT: u32 = 4;
+    pub const SIX_AXIS_JOY_RIGHT: u32 = 5;
+
+    /// `HidSixAxisSensorState` fields; the storage entry holds a sampling number, then it.
+    pub const SIX_AXIS_STATE: u32 = 0x08;
+    pub const SIX_AXIS_DELTA_TIME: u32 = 0x00;
+    pub const SIX_AXIS_SAMPLING_NUMBER: u32 = 0x08;
+    /// Eighteen `f32`s: acceleration, angular velocity, rotation, then the 3x3 orientation.
+    pub const SIX_AXIS_FLOATS: u32 = 0x10;
+    pub const SIX_AXIS_ATTRIBUTES: u32 = 0x58;
+    pub const SIX_AXIS_ATTR_CONNECTED: u32 = 1 << 0;
+}
+
+/// The host's motion sensor: accelerometer in G, gyroscope in revolutions per second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motion {
+    pub accel: [f32; 3],
+    pub gyro: [f32; 3],
+    pub connected: bool,
+    /// Gyro integrated since the sensor connected, in revolutions.
+    rotation: [f32; 3],
+    /// The sensor's axes as unit rows, in the frame it connected in.
+    orientation: [[f32; 3]; 3],
+    sample: u64,
+    /// A connected state has been published, so a disconnect needs one more.
+    published: bool,
+}
+
+const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+impl Default for Motion {
+    fn default() -> Self {
+        Self {
+            accel: [0.0; 3],
+            gyro: [0.0; 3],
+            connected: false,
+            rotation: [0.0; 3],
+            orientation: IDENTITY,
+            sample: 0,
+            published: false,
+        }
+    }
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn normalized(v: [f32; 3]) -> [f32; 3] {
+    let len = dot(v, v).sqrt();
+    if len == 0.0 {
+        return v;
+    }
+    v.map(|c| c / len)
+}
+
+impl Motion {
+    /// Turn the axes by the gyro over `seconds`, keeping them orthonormal.
+    fn integrate(&mut self, seconds: f32) {
+        if !self.connected {
+            *self = Self {
+                published: self.published,
+                ..Self::default()
+            };
+            return;
+        }
+        for (rot, rate) in self.rotation.iter_mut().zip(self.gyro) {
+            *rot += rate * seconds;
+        }
+        let [x, y, z] = self.orientation;
+        let turn = std::f32::consts::TAU * seconds;
+        let spin = [0, 1, 2]
+            .map(|i| turn * (self.gyro[0] * x[i] + self.gyro[1] * y[i] + self.gyro[2] * z[i]));
+        let step = |e: [f32; 3]| {
+            let c = cross(spin, e);
+            [e[0] + c[0], e[1] + c[1], e[2] + c[2]]
+        };
+        let x = normalized(step(x));
+        let z = normalized(cross(x, step(y)));
+        self.orientation = [x, cross(z, x), z];
+    }
 }
 
 /// Styles the pad can be published as, best first. A style the title does not
@@ -209,6 +306,9 @@ pub const TOUCH_SCREEN_HEIGHT: u32 = 720;
 
 pub const TOUCH_MAX: usize = 16;
 
+/// The time between six-axis samples, in nanoseconds.
+const SIX_AXIS_DELTA_NS: u64 = 5_000_000;
+
 /// Contact size reported for every touch; only checked to be non-zero.
 const TOUCH_DIAMETER: u32 = 10;
 
@@ -248,6 +348,76 @@ impl Cpu {
         self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
     }
 
+    /// Take the host's motion sensor reading; it is published on the next `hid` sample.
+    pub fn set_motion_state(&mut self, accel: [f32; 3], gyro: [f32; 3], connected: bool) {
+        self.motion.accel = accel;
+        self.motion.gyro = gyro;
+        self.motion.connected = connected;
+    }
+
+    /// Publish the sensor into the six-axis LIFOs of the style the title can use.
+    fn write_six_axis(&mut self) {
+        use hid_shmem as h;
+        if !self.hid_mapped || !(self.motion.connected || self.motion.published) {
+            return;
+        }
+        let period = HID_SAMPLE_PERIOD_CYCLES as f32 / 1_020_000_000.0;
+        self.motion.integrate(period);
+        self.motion.published = self.motion.connected;
+        self.motion.sample = self.motion.sample.wrapping_add(1);
+        let (slot, presentation) = self.active_npad();
+        let lifos: &[u32] = match presentation.style {
+            _ if slot == h::HANDHELD_SLOT => &[h::SIX_AXIS_HANDHELD],
+            h::STYLE_FULL_KEY => &[0],
+            h::STYLE_JOY_DUAL => &[h::SIX_AXIS_JOY_DUAL_LEFT, h::SIX_AXIS_JOY_DUAL_RIGHT],
+            h::STYLE_JOY_LEFT => &[h::SIX_AXIS_JOY_LEFT],
+            _ => &[h::SIX_AXIS_JOY_RIGHT],
+        };
+        let base = h::NPAD + slot * h::ENTRY_SIZE + h::SIX_AXIS_FULL_KEY_LIFO;
+        for index in lifos {
+            self.write_six_axis_lifo(base + index * h::SIX_AXIS_LIFO_SIZE);
+        }
+    }
+
+    fn write_six_axis_lifo(&mut self, lifo: u32) {
+        use hid_shmem as h;
+        let m = self.motion;
+        let _ = self
+            .hid_shmem
+            .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
+        let _ = self.hid_shmem.write_u64(lifo + h::LIFO_TAIL, 0);
+        let _ = self.hid_shmem.write_u64(lifo + h::LIFO_COUNT, 1);
+        let entry = lifo + h::LIFO_STORAGE;
+        let _ = self
+            .hid_shmem
+            .write_u64(entry + h::STORAGE_SAMPLING_NUMBER, m.sample << 1);
+        let state = entry + h::SIX_AXIS_STATE;
+        let _ = self
+            .hid_shmem
+            .write_u64(state + h::SIX_AXIS_DELTA_TIME, SIX_AXIS_DELTA_NS);
+        let _ = self
+            .hid_shmem
+            .write_u64(state + h::SIX_AXIS_SAMPLING_NUMBER, m.sample);
+        let floats = m
+            .accel
+            .iter()
+            .chain(&m.gyro)
+            .chain(&m.rotation)
+            .chain(m.orientation.iter().flatten());
+        for (i, value) in floats.enumerate() {
+            let at = state + h::SIX_AXIS_FLOATS + 4 * i as u32;
+            let _ = self.hid_shmem.write_u32(at, value.to_bits());
+        }
+        let attributes = if m.connected {
+            h::SIX_AXIS_ATTR_CONNECTED
+        } else {
+            0
+        };
+        let _ = self
+            .hid_shmem
+            .write_u32(state + h::SIX_AXIS_ATTRIBUTES, attributes);
+    }
+
     /// Publish a fresh `hid` sample when the 200 Hz timer comes round.
     pub(crate) fn hid_tick(&mut self) {
         if !self.hid_mapped
@@ -260,6 +430,7 @@ impl Cpu {
         self.set_gamepad_state(buttons, lx, ly, rx, ry);
         let touches = std::mem::take(&mut self.last_touches);
         self.set_touch_state(&touches);
+        self.write_six_axis();
     }
 
     /// `HidNpadButton_StickL*`/`StickR*` bits derived from stick deflection.

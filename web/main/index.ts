@@ -21,6 +21,7 @@ import { endLoad, failLoad, loadPhase } from './loading';
 import './boot';
 import './dock';
 import './files';
+import './hid';
 import './input';
 
 // iOS greys out every file whose extension it has no type for, which is all of ours.

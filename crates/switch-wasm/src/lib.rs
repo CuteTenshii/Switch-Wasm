@@ -43,6 +43,7 @@ mod idb;
 mod input;
 mod keyboard;
 mod log;
+mod motion;
 mod nand;
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 mod post;
