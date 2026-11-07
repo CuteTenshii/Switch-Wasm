@@ -891,6 +891,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "switch-relay"
+version = "0.1.0"
+
+[[package]]
 name = "switch-wasm"
 version = "0.1.0"
 dependencies = [
