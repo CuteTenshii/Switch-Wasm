@@ -5,8 +5,8 @@ mod cpu;
 use cpu::*;
 
 #[test]
-fn ssl_keeps_context_state_and_refuses_connections() {
-    // ssl contexts and their options are real; connections are not (no sockets).
+fn ssl_keeps_context_state_and_creates_connections() {
+    // ssl contexts keep their options, and CreateConnection hands out a connection.
     const SSL: u64 = 0x9000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -39,10 +39,10 @@ fn ssl_keeps_context_state_and_refuses_connections() {
     ipc_request_with_payload(&mut cpu, SSL, context, 1, &7u32.to_le_bytes());
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0);
 
-    // CreateConnection is refused rather than returning a connection that cannot connect.
-    const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
     ipc_request(&mut cpu, SSL, 4, Some(context), 2);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    let connection = cpu.mem.read_u32(tls + 0x30).unwrap();
+    assert_ne!(connection, context);
 }
 
 #[test]
@@ -372,7 +372,7 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
     );
     ipc_request_plain(&mut cpu, general, 18, &[]); // GetInternetConnectionStatus
     assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1, "not a Wi-Fi link");
-    assert_eq!(cpu.mem.read_u8(tls + 0x22).unwrap(), 2, "not connected");
+    assert_eq!(cpu.mem.read_u8(tls + 0x22).unwrap(), 4, "not connected");
 
     // IsWirelessCommunicationEnabled: off reads as Airplane Mode in the home menu.
     ipc_request_plain(&mut cpu, general, 17, &[]);
@@ -385,16 +385,12 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
         "the flag did not stick"
     );
 
-    // A request on an up link is accepted immediately, its events already fired.
+    // A request is free until submitted, then accepted, and Submit signals its events again.
     ipc_request_plain(&mut cpu, general, 4, &[]); // CreateRequest
     let request = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(request, 0, "no IRequest");
     ipc_request_plain(&mut cpu, request, 0, &[]); // GetRequestState
-    assert_eq!(
-        cpu.mem.read_u32(tls + 0x20).unwrap(),
-        3,
-        "the request was not accepted"
-    );
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "not free");
 
     ipc_request_plain(&mut cpu, request, 2, &[]); // GetSystemEventReadableHandles
                                                   // { send_pid:1, num_copy:4, num_move:4 }: two copy handles.
@@ -404,16 +400,29 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
     assert_ne!(state, 0);
     assert_ne!(done, 0);
     assert_ne!(state, done);
+    for event in [state, done] {
+        assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0);
+        assert_ne!(
+            wait_sync(&mut cpu, &[event], 0).0,
+            0,
+            "the event is auto-clear"
+        );
+    }
+
+    ipc_request_plain(&mut cpu, request, 4, &[]); // Submit
+    ipc_request_plain(&mut cpu, request, 0, &[]);
     assert_eq!(
-        wait_sync(&mut cpu, &[state], 0).0,
-        0,
-        "the state never settled"
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        3,
+        "the request was not accepted"
     );
-    assert_eq!(
-        wait_sync(&mut cpu, &[done], 0).0,
-        0,
-        "the request never finished"
-    );
+    for event in [state, done] {
+        assert_eq!(
+            wait_sync(&mut cpu, &[event], 0).0,
+            0,
+            "Submit did not signal"
+        );
+    }
 }
 
 #[test]
