@@ -77,7 +77,9 @@ fn is_hostname(name: &str) -> bool {
 }
 
 /// Append one `addrinfo` entry to the `sfdnsres` wire format: big-endian words, then a
-/// `sockaddr_in` of family (16 bits), port, address and 8 zero bytes, then an empty canonical name.
+/// `sockaddr_in` of family (16 bits), port, address and 8 zero bytes, then an empty canonical
+/// name. The `sockaddr_in` is in host (little-endian) order, not the network order the words
+/// around it use: a guest reading it back showed a big-endian one with both swapped.
 fn serialize_addrinfo(out: &mut Vec<u8>, socktype: u32, protocol: u32, ip: [u8; 4], port: u16) {
     for word in [
         ADDRINFO_MAGIC,
@@ -89,9 +91,9 @@ fn serialize_addrinfo(out: &mut Vec<u8>, socktype: u32, protocol: u32, ip: [u8; 
     ] {
         out.extend_from_slice(&word.to_be_bytes());
     }
-    out.extend_from_slice(&u16::from(BSD_AF_INET).to_be_bytes());
-    out.extend_from_slice(&port.to_be_bytes());
-    out.extend_from_slice(&ip);
+    out.extend_from_slice(&u16::from(BSD_AF_INET).to_le_bytes());
+    out.extend_from_slice(&port.to_le_bytes());
+    out.extend_from_slice(&u32::from_be_bytes(ip).to_le_bytes());
     out.extend_from_slice(&[0; 8]);
     out.push(0);
 }
@@ -327,9 +329,10 @@ mod tests {
             assert_eq!(word(at + 8), 2, "AF_INET");
             assert_eq!(word(at + 20), 16, "ai_addrlen");
             let addr = at + 24;
-            assert_eq!(u16::from_be_bytes([chain[addr], chain[addr + 1]]), 2);
-            let port = u16::from_be_bytes([chain[addr + 2], chain[addr + 3]]);
-            let ip = chain[addr + 4..addr + 8].try_into().unwrap();
+            assert_eq!(u16::from_le_bytes([chain[addr], chain[addr + 1]]), 2);
+            let port = u16::from_le_bytes([chain[addr + 2], chain[addr + 3]]);
+            let ip =
+                u32::from_le_bytes(chain[addr + 4..addr + 8].try_into().unwrap()).to_be_bytes();
             found.push((word(at + 12), word(at + 16), ip, port));
             assert_eq!(chain[addr + 16], 0, "empty canonical name");
             at = addr + 17;

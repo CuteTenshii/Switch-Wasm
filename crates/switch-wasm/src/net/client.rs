@@ -17,6 +17,8 @@ const HISTORY: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
+    /// Asked for, but the frame is not on the socket yet.
+    Waiting,
     Connecting,
     Open,
     /// The relay said the peer is done; the guest still has to close its end.
@@ -28,11 +30,15 @@ enum State {
 
 impl State {
     fn live(self) -> bool {
-        matches!(self, State::Connecting | State::Open | State::Ended)
+        matches!(
+            self,
+            State::Waiting | State::Connecting | State::Open | State::Ended
+        )
     }
 
     fn label(self) -> &'static str {
         match self {
+            State::Waiting => "waiting",
             State::Connecting => "connecting",
             State::Open => "open",
             State::Ended => "ended",
@@ -88,7 +94,7 @@ impl Client {
                             },
                             port,
                             udp,
-                            state: State::Connecting,
+                            state: State::Waiting,
                             sent: 0,
                             received: 0,
                         },
@@ -118,9 +124,7 @@ impl Client {
                     frames.push(ClientFrame::ShutdownWrite { stream }.encode());
                 }
                 NetCommand::Close { stream } => {
-                    if let Some(connection) = self.connections.get_mut(&stream) {
-                        connection.state = State::Closed;
-                    }
+                    self.set_state(stream, State::Closed);
                     credit.retain(|&(held, _)| held != stream);
                     frames.push(ClientFrame::Close { stream }.encode());
                 }
@@ -186,7 +190,7 @@ impl Client {
         let mut events = Vec::new();
         for (&stream, connection) in &mut self.connections {
             match connection.state {
-                State::Connecting => {
+                State::Waiting | State::Connecting => {
                     connection.state = State::Failed(NetFailure::Unreachable);
                     events.push(NetEvent::Failed {
                         stream,
@@ -221,9 +225,24 @@ impl Client {
         })
     }
 
+    /// The frames given out by `outgoing` are on the socket.
+    pub fn sent(&mut self) {
+        for connection in self.connections.values_mut() {
+            if connection.state == State::Waiting {
+                connection.state = State::Connecting;
+            }
+        }
+    }
+
+    /// Move a live connection on. A finished one keeps how it ended, except that a guest which
+    /// gave up before the answer still gets to learn why it failed.
     fn set_state(&mut self, stream: StreamId, state: State) {
         if let Some(connection) = self.connections.get_mut(&stream) {
-            connection.state = state;
+            let late_failure =
+                connection.state == State::Closed && matches!(state, State::Failed(_));
+            if connection.state.live() || late_failure {
+                connection.state = state;
+            }
         }
     }
 
@@ -529,5 +548,56 @@ mod tests {
             !report.contains(r#""id":2,"#),
             "the oldest finished one is gone"
         );
+    }
+
+    #[test]
+    fn a_connection_keeps_how_it_ended() {
+        let mut client = Client::default();
+        client.outgoing(vec![connect(1), connect(2)]);
+        client_event(
+            &mut client,
+            ServerFrame::Failed {
+                stream: 1,
+                reason: Failure::Refused,
+            },
+        );
+        client.outgoing(vec![
+            NetCommand::Close { stream: 1 },
+            NetCommand::Close { stream: 2 },
+        ]);
+        // A late success for a stream the guest already closed changes nothing.
+        client_event(&mut client, ServerFrame::Connected { stream: 2 });
+        let report = client.report();
+        assert!(report
+            .contains(r#""id":1,"host":"example.com","port":443,"proto":"tcp","state":"refused""#));
+        assert!(report
+            .contains(r#""id":2,"host":"example.com","port":443,"proto":"tcp","state":"closed""#));
+    }
+
+    #[test]
+    fn a_connection_waits_until_its_frame_is_on_the_socket() {
+        let mut client = Client::default();
+        client.outgoing(vec![connect(1)]);
+        assert!(client.report().contains(r#""state":"waiting""#));
+        client.sent();
+        assert!(client.report().contains(r#""state":"connecting""#));
+        // Losing the link before then fails it all the same.
+        client.outgoing(vec![connect(2)]);
+        assert_eq!(client.lost().len(), 2);
+    }
+
+    #[test]
+    fn a_guest_that_gave_up_still_learns_why_it_failed() {
+        let mut client = Client::default();
+        client.outgoing(vec![connect(1)]);
+        client.outgoing(vec![NetCommand::Close { stream: 1 }]);
+        client_event(
+            &mut client,
+            ServerFrame::Failed {
+                stream: 1,
+                reason: Failure::Denied,
+            },
+        );
+        assert!(client.report().contains(r#""state":"unreachable""#));
     }
 }

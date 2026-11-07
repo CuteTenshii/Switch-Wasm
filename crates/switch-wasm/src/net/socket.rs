@@ -167,6 +167,7 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
                     for frame in link.pending.drain(..).chain(frames) {
                         let _ = link.socket.send_with_u8_array(&frame);
                     }
+                    client.sent();
                 } else {
                     link.pending.extend(frames);
                 }
