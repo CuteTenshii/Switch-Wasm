@@ -891,7 +891,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "switch-relay"
+name = "switch-relay-proto"
 version = "0.1.0"
 
 [[package]]

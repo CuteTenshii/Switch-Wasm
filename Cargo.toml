@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/switch-core", "crates/switch-gpu", "crates/switch-relay", "crates/switch-wasm"]
+members = ["crates/switch-core", "crates/switch-gpu", "crates/switch-relay-proto", "crates/switch-wasm"]
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,11 @@
+[package]
+name = "switch-relay-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Frame format between the emulator page and the relay, see docs/relay.md"
+license = "MIT"
+
+[dependencies]
+
+[lints]
+workspace = true
