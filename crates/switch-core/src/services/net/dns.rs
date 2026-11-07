@@ -2,6 +2,7 @@
 
 use super::bsd::{BSD_AF_INET, BSD_SOCKADDR_IN_LEN, BSD_SOCK_DGRAM};
 use crate::cpu::Cpu;
+use crate::trace::Level;
 use crate::Result;
 
 /// `sfdnsres` failures: the definitive ones, not try-again, in FreeBSD's positive numbering.
@@ -77,9 +78,11 @@ fn is_hostname(name: &str) -> bool {
 }
 
 /// Append one `addrinfo` entry to the `sfdnsres` wire format: big-endian words, then a
-/// `sockaddr_in` of family (16 bits), port, address and 8 zero bytes, then an empty canonical
-/// name. The `sockaddr_in` is in host (little-endian) order, not the network order the words
-/// around it use: a guest reading it back showed a big-endian one with both swapped.
+/// `sockaddr_in` and an empty canonical name. libnx copies that `sockaddr_in` into a FreeBSD
+/// one, `{ u8 len, u8 family, u16 port, u32 address, 8 zero bytes }`, then byte-swaps the port
+/// and address ("Nintendo just byteswaps everything recursively"), so those two go on the wire
+/// little-endian. The family is a byte at offset 1, not a 16-bit word: written as one, a guest
+/// connected with family 0.
 fn serialize_addrinfo(out: &mut Vec<u8>, socktype: u32, protocol: u32, ip: [u8; 4], port: u16) {
     for word in [
         ADDRINFO_MAGIC,
@@ -91,7 +94,7 @@ fn serialize_addrinfo(out: &mut Vec<u8>, socktype: u32, protocol: u32, ip: [u8; 
     ] {
         out.extend_from_slice(&word.to_be_bytes());
     }
-    out.extend_from_slice(&u16::from(BSD_AF_INET).to_le_bytes());
+    out.extend_from_slice(&[BSD_SOCKADDR_IN_LEN as u8, BSD_AF_INET]);
     out.extend_from_slice(&port.to_le_bytes());
     out.extend_from_slice(&u32::from_be_bytes(ip).to_le_bytes());
     out.extend_from_slice(&[0; 8]);
@@ -182,10 +185,19 @@ impl Cpu {
         let service = text(read(self, 1));
         let hints = AddrInfoHints::parse(&read(self, 2));
 
+        let asked = format!(
+            "{host}:{service} (family {}, type {})",
+            hints.family, hints.socktype
+        );
         let Some(port) = service_port(&service) else {
+            self.log(
+                Level::Info,
+                &format!("[net] getaddrinfo {asked}: unknown service"),
+            );
             return self.sfdnsres_failure(tls, SFDNSRES_EAI_SERVICE);
         };
         if hints.family != 0 && hints.family != u32::from(BSD_AF_INET) {
+            self.log(Level::Info, &format!("[net] getaddrinfo {asked}: not IPv4"));
             return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME);
         }
         let literal = host
@@ -198,8 +210,17 @@ impl Cpu {
             None => self.net.synthesize(&host),
         };
         let Some(address) = address else {
+            self.log(
+                Level::Info,
+                &format!("[net] getaddrinfo {asked}: not a name"),
+            );
             return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME);
         };
+        let [a, b, c, d] = address;
+        self.log(
+            Level::Info,
+            &format!("[net] getaddrinfo {asked} -> {a}.{b}.{c}.{d}"),
+        );
 
         let mut serialized = Vec::new();
         for (socktype, protocol) in [(SOCK_STREAM, IPPROTO_TCP), (BSD_SOCK_DGRAM, IPPROTO_UDP)] {
@@ -329,7 +350,7 @@ mod tests {
             assert_eq!(word(at + 8), 2, "AF_INET");
             assert_eq!(word(at + 20), 16, "ai_addrlen");
             let addr = at + 24;
-            assert_eq!(u16::from_le_bytes([chain[addr], chain[addr + 1]]), 2);
+            assert_eq!(chain[addr..addr + 2], [16, 2], "sin_len and sin_family");
             let port = u16::from_le_bytes([chain[addr + 2], chain[addr + 3]]);
             let ip =
                 u32::from_le_bytes(chain[addr + 4..addr + 8].try_into().unwrap()).to_be_bytes();

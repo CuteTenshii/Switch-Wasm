@@ -7,6 +7,7 @@ use self::stream::{Stream, StreamState};
 use super::nifm::NIFM_LOCAL_IP;
 use crate::cpu::Cpu;
 use crate::services::netbridge::{NetCommand, NetEvent, NetFailure, StreamId};
+use crate::trace::Level;
 use crate::Result;
 
 /// One open `bsd:u` socket. It can only connect to sockets of this process.
@@ -75,30 +76,31 @@ impl BsdSocket {
     }
 }
 
-/// `bsd` errnos in FreeBSD's numbering (`EAGAIN` is 35).
+/// `bsd` errnos in Linux's numbering (`EAGAIN` is 11): libnx converts them to newlib's with a table
+/// indexed that way ("Nintendo actually used the Linux errno definitions for their FreeBSD build").
 const BSD_EBADF: i32 = 9;
 
 const BSD_EINVAL: i32 = 22;
 
-const BSD_EAGAIN: i32 = 35;
+const BSD_EAGAIN: i32 = 11;
 
 const BSD_EPIPE: i32 = 32;
 
-const BSD_ENETUNREACH: i32 = 51;
+const BSD_ENETUNREACH: i32 = 101;
 
-const BSD_ETIMEDOUT: i32 = 60;
+const BSD_ETIMEDOUT: i32 = 110;
 
-const BSD_EHOSTUNREACH: i32 = 65;
+const BSD_EHOSTUNREACH: i32 = 113;
 
-const BSD_EINPROGRESS: i32 = 36;
+const BSD_EINPROGRESS: i32 = 115;
 
-const BSD_EALREADY: i32 = 37;
+const BSD_EALREADY: i32 = 114;
 
-const BSD_EISCONN: i32 = 56;
+const BSD_EISCONN: i32 = 106;
 
-const BSD_ENOTCONN: i32 = 57;
+const BSD_ENOTCONN: i32 = 107;
 
-const BSD_ECONNREFUSED: i32 = 61;
+const BSD_ECONNREFUSED: i32 = 111;
 
 /// `SOCK_DGRAM`.
 pub(super) const BSD_SOCK_DGRAM: u32 = 2;
@@ -162,7 +164,7 @@ const BSD_SO_ERROR: u32 = 0x1007;
 
 impl Cpu {
     /// `bsd:u`/`bsd:s`, the socket service. The only peer is this console: loopback
-    /// connections work, everything else is refused immediately. Errnos are FreeBSD's.
+    /// connections work, everything else is refused immediately. Errnos are Linux's.
     pub(crate) fn bsd_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
@@ -865,6 +867,13 @@ impl Cpu {
             .as_ref()
             .filter(|s| !matches!(s.state, StreamState::Failed(_)))
         {
+            self.log(
+                Level::Info,
+                &format!(
+                    "[net] close fd {fd} stream {} while {:?}",
+                    stream.id, stream.state
+                ),
+            );
             self.net
                 .outbox
                 .push(NetCommand::Close { stream: stream.id });

@@ -1,6 +1,7 @@
 //! Stream sockets the host carries, and the events it answers with.
 
 use super::*;
+use crate::trace::Level;
 
 /// A connection the host carries: where it stands and the peer's `sockaddr`.
 #[derive(Debug, Clone)]
@@ -46,6 +47,11 @@ impl Cpu {
         }
         let id = self.net.open_stream();
         let peer = self.net.peer_for(ip);
+        let flags = self.process().bsd_sockets.get(&fd).map_or(0, |s| s.flags);
+        self.log(
+            Level::Info,
+            &format!("[net] connect fd {fd} to {peer:?}:{port} as stream {id} (flags {flags:#x})"),
+        );
         self.net.outbox.push(NetCommand::Connect {
             stream: id,
             udp: false,
