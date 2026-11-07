@@ -1,0 +1,18 @@
+[package]
+name = "switch-relay"
+version = "0.1.0"
+edition = "2021"
+description = "WebSocket relay that carries the emulator's TCP and UDP traffic, see docs/relay.md"
+license = "MIT"
+
+[dependencies]
+futures-util = "0.3.34"
+switch-relay-proto = { path = "../switch-relay-proto" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "io-std", "signal"] }
+tokio-tungstenite = "0.30.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.30"

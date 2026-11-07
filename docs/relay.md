@@ -62,14 +62,14 @@ Client to relay needs no window: the guest writes at its own pace, and the WebSo
 
 ## Relay policy
 
-The relay is a proxy to anywhere its host can reach, so the defaults are closed.
+The relay is a proxy to anywhere its host can reach, and any web page can open a WebSocket to a loopback port, so the defaults are closed and need no configuration.
 
-- It listens on loopback unless told otherwise.
-- It refuses private, loopback, link-local and multicast destinations (`FAILED`, reason 4) unless an option allows a range. This is checked on the resolved address, not the name.
-- An optional token is given as `?token=...` on the WebSocket URL (a browser WebSocket cannot set headers). A wrong or missing token closes the WebSocket with 1008 before `HELLO`.
-- An optional allowlist of hosts or ports; anything else is reason 4.
-- Limits: `max_streams` per WebSocket (`CONNECT` over it is reason 4), and a cap on `window` the relay will honour.
-- `DATA` it sends is at most 16 KiB per frame.
+- It listens on `127.0.0.1:18787`. The page connects there by default.
+- It trusts pages by `Origin`, which a browser always sends and a page cannot forge. `http://localhost:8000` and `https://tenshii.moe` are trusted. Any other origin is asked about on the relay's terminal, once per run; with no terminal it is refused. A client with no `Origin` is not a browser and is refused.
+- An untrusted origin gets a WebSocket close with code 1008 before `HELLO`.
+- It refuses private, loopback, link-local, carrier-grade NAT, multicast and reserved destinations (`FAILED`, reason 4). This is checked on the resolved address, not the name.
+- `--port`, `--allow-origin` and `--allow-private` exist for the rare case that needs them.
+- Limits: 256 streams per WebSocket (a `CONNECT` over it is reason 4), a `window` capped at 1 MiB, and at most 16 KiB of `DATA` per frame.
 
 ## Not covered
 
