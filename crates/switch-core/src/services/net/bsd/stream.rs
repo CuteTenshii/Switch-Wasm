@@ -165,9 +165,11 @@ impl Cpu {
                 NetEvent::Connected { stream }
                 | NetEvent::Failed { stream, .. }
                 | NetEvent::Data { stream, .. }
-                | NetEvent::Closed { stream } => *stream,
+                | NetEvent::Closed { stream }
+                | NetEvent::TlsEstablished { stream, .. }
+                | NetEvent::TlsFailed { stream, .. } => *stream,
             };
-            if self.bsd_datagram_event(id, &event) {
+            if self.ssl_event(id, &event) || self.bsd_datagram_event(id, &event) {
                 continue;
             }
             let socket = self
@@ -194,6 +196,7 @@ impl Cpu {
                 }
                 NetEvent::Data { data, .. } => socket.rx.extend(data),
                 NetEvent::Closed { .. } => socket.peer_closed = true,
+                NetEvent::TlsEstablished { .. } | NetEvent::TlsFailed { .. } => {}
             }
         }
     }

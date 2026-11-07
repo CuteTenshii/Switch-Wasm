@@ -6,6 +6,7 @@ description = "WASM bindings exposing switch-core to the browser"
 license = "MIT"
 
 [dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 switch-core = { path = "../switch-core" }
 switch-relay-proto = { path = "../switch-relay-proto" }
 
@@ -23,6 +24,16 @@ jit = ["dep:js-sys"]
 # Used directly so it can grow memory in larger steps (see `src/heap.rs`).
 [target.'cfg(target_arch = "wasm32")'.dependencies.dlmalloc]
 version = "0.2"
+
+# rustls's ring needs random bytes, which a browser gives through `crypto.getRandomValues`.
+[target.'cfg(target_arch = "wasm32")'.dependencies.ring]
+version = "0.17"
+features = ["wasm32_unknown_unknown_js"]
+
+# ...and the current time to check certificate dates, from `Date.now`.
+[target.'cfg(target_arch = "wasm32")'.dependencies.rustls-pki-types]
+version = "1"
+features = ["web"]
 
 [dependencies.switch-gpu]
 path = "../switch-gpu"

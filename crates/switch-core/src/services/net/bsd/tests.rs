@@ -3,7 +3,7 @@ use crate::cpu::Cpu;
 use crate::kernel::ipc::testing::*;
 
 /// Read a `bsd` command's `{ s32 ret, s32 errno }` reply.
-pub(super) fn bsd_result(cpu: &Cpu) -> (i32, i32) {
+pub(in crate::services::net) fn bsd_result(cpu: &Cpu) -> (i32, i32) {
     (
         cpu.mem.read_u32(TLS + 0x20).unwrap() as i32,
         cpu.mem.read_u32(TLS + 0x24).unwrap() as i32,
@@ -11,19 +11,19 @@ pub(super) fn bsd_result(cpu: &Cpu) -> (i32, i32) {
 }
 
 /// The third reply word: bytes of the output buffer filled.
-pub(super) fn bsd_result_len(cpu: &Cpu) -> u32 {
+pub(in crate::services::net) fn bsd_result_len(cpu: &Cpu) -> u32 {
     cpu.mem.read_u32(TLS + 0x28).unwrap()
 }
 
 /// Open a socket of `kind` on a fresh `bsd:u` session.
-pub(super) fn bsd_socket(kind: u32) -> (Cpu, i32) {
+pub(in crate::services::net) fn bsd_socket(kind: u32) -> (Cpu, i32) {
     let mut cpu = request(false, 2, &[]);
     cpu.register_service_handle(9, "bsd:u");
     let fd = open_socket(&mut cpu, kind);
     (cpu, fd)
 }
 
-pub(super) fn open_socket(cpu: &mut Cpu, kind: u32) -> i32 {
+pub(in crate::services::net) fn open_socket(cpu: &mut Cpu, kind: u32) -> i32 {
     let mut payload = [0u8; 12];
     payload[..4].copy_from_slice(&2u32.to_le_bytes()); // AF_INET
     payload[4..8].copy_from_slice(&kind.to_le_bytes());
@@ -34,10 +34,10 @@ pub(super) fn open_socket(cpu: &mut Cpu, kind: u32) -> i32 {
     fd
 }
 
-pub(super) const SCRATCH: u32 = 0x4000;
+pub(in crate::services::net) const SCRATCH: u32 = 0x4000;
 
 /// `127.0.0.1:port` with `sin_len` left at zero, as a memsetting guest writes it.
-pub(super) fn loopback_sockaddr(port: u16) -> [u8; 16] {
+pub(in crate::services::net) fn loopback_sockaddr(port: u16) -> [u8; 16] {
     let mut raw = [0u8; 16];
     raw[1] = 2; // AF_INET
     raw[2..4].copy_from_slice(&port.to_be_bytes());
@@ -45,7 +45,7 @@ pub(super) fn loopback_sockaddr(port: u16) -> [u8; 16] {
     raw
 }
 
-pub(super) fn place(cpu: &mut Cpu, at: u32, bytes: &[u8]) {
+pub(in crate::services::net) fn place(cpu: &mut Cpu, at: u32, bytes: &[u8]) {
     for (offset, &byte) in bytes.iter().enumerate() {
         cpu.mem.write_u8(at + offset as u32, byte).unwrap();
     }
@@ -53,7 +53,7 @@ pub(super) fn place(cpu: &mut Cpu, at: u32, bytes: &[u8]) {
 
 /// asio's `socket_select_interrupter` setup: bind to an ephemeral loopback port,
 /// connect to the port `getsockname` reports, accept.
-pub(super) fn connected_pair(cpu: &mut Cpu, listener: i32) -> (i32, i32) {
+pub(in crate::services::net) fn connected_pair(cpu: &mut Cpu, listener: i32) -> (i32, i32) {
     place(cpu, SCRATCH, &loopback_sockaddr(0));
     write_map_buffer_request(cpu, 13, &listener.to_le_bytes(), SCRATCH, 16, true);
     cpu.bsd_request(TLS, 9, Some(13)).unwrap();
@@ -80,7 +80,7 @@ pub(super) fn connected_pair(cpu: &mut Cpu, listener: i32) -> (i32, i32) {
     (client, server)
 }
 
-pub(super) fn send_on(cpu: &mut Cpu, fd: i32, bytes: &[u8]) -> (i32, i32) {
+pub(in crate::services::net) fn send_on(cpu: &mut Cpu, fd: i32, bytes: &[u8]) -> (i32, i32) {
     const AT: u32 = SCRATCH + 0x40;
     place(cpu, AT, bytes);
     write_map_buffer_request(cpu, 10, &fd.to_le_bytes(), AT, bytes.len() as u32, true);
@@ -88,7 +88,7 @@ pub(super) fn send_on(cpu: &mut Cpu, fd: i32, bytes: &[u8]) -> (i32, i32) {
     bsd_result(cpu)
 }
 
-pub(super) fn recv_on(cpu: &mut Cpu, fd: i32, len: u32) -> ((i32, i32), Vec<u8>) {
+pub(in crate::services::net) fn recv_on(cpu: &mut Cpu, fd: i32, len: u32) -> ((i32, i32), Vec<u8>) {
     const AT: u32 = SCRATCH + 0x80;
     place(cpu, AT, &vec![0u8; len as usize]);
     write_map_buffer_request(cpu, 8, &fd.to_le_bytes(), AT, len, false);
@@ -103,7 +103,7 @@ pub(super) fn recv_on(cpu: &mut Cpu, fd: i32, len: u32) -> ((i32, i32), Vec<u8>)
 }
 
 #[test]
-pub(super) fn bsd_hands_out_descriptors_and_takes_them_back() {
+pub(in crate::services::net) fn bsd_hands_out_descriptors_and_takes_them_back() {
     let (mut cpu, fd) = bsd_socket(1);
     assert!(
         fd >= 3,
@@ -120,7 +120,7 @@ pub(super) fn bsd_hands_out_descriptors_and_takes_them_back() {
 }
 
 #[test]
-pub(super) fn bsd_fails_where_there_is_no_peer_rather_than_pretending() {
+pub(in crate::services::net) fn bsd_fails_where_there_is_no_peer_rather_than_pretending() {
     let (mut cpu, fd) = bsd_socket(1);
     write_request(&mut cpu, 14, &fd.to_le_bytes());
     cpu.bsd_request(TLS, 9, Some(14)).unwrap();
@@ -152,7 +152,7 @@ pub(super) fn bsd_fails_where_there_is_no_peer_rather_than_pretending() {
 }
 
 #[test]
-pub(super) fn bsd_sends_an_addressed_datagram_the_link_would_carry() {
+pub(in crate::services::net) fn bsd_sends_an_addressed_datagram_the_link_would_carry() {
     // RakNet's `BindShared` sends a test datagram to its own address and fails startup
     // if it does not go out.
     let (mut cpu, fd) = bsd_socket(super::BSD_SOCK_DGRAM);
@@ -222,7 +222,7 @@ pub(super) fn bsd_sends_an_addressed_datagram_the_link_would_carry() {
 }
 
 #[test]
-pub(super) fn bsd_socket_options_and_flags_read_back() {
+pub(in crate::services::net) fn bsd_socket_options_and_flags_read_back() {
     const BUFFER: u32 = 0x4000;
     let (mut cpu, fd) = bsd_socket(1);
     cpu.mem.map_zero(BUFFER, 0x100).unwrap();
@@ -257,7 +257,7 @@ pub(super) fn bsd_socket_options_and_flags_read_back() {
 }
 
 #[test]
-pub(super) fn a_poll_with_a_timeout_gives_up_the_cpu() {
+pub(in crate::services::net) fn a_poll_with_a_timeout_gives_up_the_cpu() {
     // A poll that waits must yield, or a polling loop starves every other thread.
     let (mut cpu, _fd) = bsd_socket(1);
     let mut payload = [0u8; 8];
@@ -289,7 +289,8 @@ pub(super) fn a_poll_with_a_timeout_gives_up_the_cpu() {
 }
 
 #[test]
-pub(super) fn bsd_bind_assigns_a_port_and_get_sock_name_reports_a_usable_address() {
+pub(in crate::services::net) fn bsd_bind_assigns_a_port_and_get_sock_name_reports_a_usable_address()
+{
     // asio binds to port 0 and connects to what `getsockname` reports, so the reply
     // must carry a real port and `sin_len`.
     let (mut cpu, fd) = bsd_socket(1);
@@ -334,7 +335,7 @@ pub(super) fn bsd_bind_assigns_a_port_and_get_sock_name_reports_a_usable_address
 }
 
 #[test]
-pub(super) fn bsd_builds_the_socket_pair_asio_wakes_its_own_select_with() {
+pub(in crate::services::net) fn bsd_builds_the_socket_pair_asio_wakes_its_own_select_with() {
     // asio's `socket_select_interrupter::open_descriptors`, then an interrupt.
     let (mut cpu, listener) = bsd_socket(1);
     cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
@@ -362,7 +363,7 @@ pub(super) fn bsd_builds_the_socket_pair_asio_wakes_its_own_select_with() {
 }
 
 #[test]
-pub(super) fn bsd_select_names_the_descriptor_that_has_a_byte() {
+pub(in crate::services::net) fn bsd_select_names_the_descriptor_that_has_a_byte() {
     const SET: u32 = 0x80;
     const SETS: u32 = 0x6000;
     let (mut cpu, listener) = bsd_socket(1);
@@ -408,7 +409,7 @@ pub(super) fn bsd_select_names_the_descriptor_that_has_a_byte() {
 }
 
 #[test]
-pub(super) fn a_peer_that_closed_is_end_of_file_and_not_a_connection() {
+pub(in crate::services::net) fn a_peer_that_closed_is_end_of_file_and_not_a_connection() {
     let (mut cpu, listener) = bsd_socket(1);
     cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
     let (client, server) = connected_pair(&mut cpu, listener);
@@ -425,7 +426,7 @@ pub(super) fn a_peer_that_closed_is_end_of_file_and_not_a_connection() {
 }
 
 #[test]
-pub(super) fn bsd_connects_to_this_console_and_refuses_everywhere_else() {
+pub(in crate::services::net) fn bsd_connects_to_this_console_and_refuses_everywhere_else() {
     let (mut cpu, fd) = bsd_socket(1);
     cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
 
@@ -459,7 +460,7 @@ pub(super) fn bsd_connects_to_this_console_and_refuses_everywhere_else() {
 }
 
 #[test]
-pub(super) fn bsd_get_sock_name_reports_the_address_nifm_does() {
+pub(in crate::services::net) fn bsd_get_sock_name_reports_the_address_nifm_does() {
     const BUFFER: u32 = 0x4000;
     let (mut cpu, fd) = bsd_socket(1);
     cpu.mem.map_zero(BUFFER, 0x100).unwrap();
@@ -472,7 +473,11 @@ pub(super) fn bsd_get_sock_name_reports_the_address_nifm_does() {
     assert_eq!(cpu.read_bytes(BUFFER + 4, 4), super::NIFM_LOCAL_IP.to_vec());
 }
 
-pub(super) fn bsd_command(cpu: &mut Cpu, command: u32, words: &[u32]) -> (i32, i32) {
+pub(in crate::services::net) fn bsd_command(
+    cpu: &mut Cpu,
+    command: u32,
+    words: &[u32],
+) -> (i32, i32) {
     let payload: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     write_request(cpu, command, &payload);
     cpu.bsd_request(TLS, 9, Some(command)).unwrap();

@@ -183,6 +183,8 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
         } = &mut *state;
 
         let mut events = Vec::new();
+        // What answering the relay needs sent back to it, such as a handshake's next message.
+        let mut replies = Vec::new();
         let mut gone = false;
         let mut broken = false;
         if let Some(link) = link.as_mut() {
@@ -190,7 +192,10 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
             *frames_in += frames.len() as u32;
             for raw in frames {
                 match client.incoming(&raw) {
-                    Ok(event) => events.extend(event),
+                    Ok(pump) => {
+                        events.extend(pump.events);
+                        replies.extend(pump.frames);
+                    }
                     Err(_) => {
                         broken = true;
                         break;
@@ -203,7 +208,9 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
         let commands = cpu.take_net_commands();
         match link.as_mut() {
             Some(link) if !gone => {
-                let frames = client.outgoing(commands);
+                let pump = client.outgoing(commands);
+                events.extend(pump.events);
+                let frames: Vec<_> = replies.into_iter().chain(pump.frames).collect();
                 if link.socket.ready_state() == WebSocket::OPEN {
                     for frame in link.pending.drain(..).chain(frames) {
                         if send(&link.socket, &frame) {

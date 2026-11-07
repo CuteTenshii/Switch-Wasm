@@ -123,6 +123,8 @@ pub(crate) struct Process {
     pub(crate) ssl_interface_version: u32,
     pub(crate) ssl_contexts: u32,
     pub(crate) ssl_options: HashMap<(u64, u32), u32>,
+    /// Open `ISslConnection`s, by object key.
+    pub(crate) ssl_connections: HashMap<u64, net::SslConnection>,
     pub(crate) erpt_readers: IdMap<u64, erpt::ErrorReportReader>,
     /// Guest address of pl's shared memory; 0 until mapped.
     pub(crate) pl_shmem_addr: u32,
@@ -210,6 +212,7 @@ impl Process {
             ssl_interface_version: 0,
             ssl_contexts: 0,
             ssl_options: HashMap::new(),
+            ssl_connections: HashMap::new(),
             erpt_readers: IdMap::default(),
             pl_shmem_addr: 0,
             audren_renderers: IdMap::default(),

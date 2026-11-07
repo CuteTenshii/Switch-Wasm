@@ -15,7 +15,7 @@ use crate::Result;
 mod datagram;
 mod stream;
 #[cfg(test)]
-mod tests;
+pub(in crate::services::net) mod tests;
 
 /// What a receive answers: the result, the errno, and where a datagram came from.
 type Recv = (i32, i32, Option<Vec<u8>>);
@@ -57,6 +57,13 @@ impl BsdSocket {
             stream: None,
             datagram: Datagram::default(),
         }
+    }
+
+    /// The host stream this socket's connection runs on, and whether it has opened.
+    pub(crate) fn host_stream(&self) -> Option<(StreamId, bool)> {
+        self.stream
+            .as_ref()
+            .map(|stream| (stream.id, stream.state == StreamState::Open))
     }
 
     /// Readable: has bytes, a pending connection, or a closed peer (EOF).
@@ -471,19 +478,25 @@ impl Cpu {
             // DuplicateSocket(fd): copies local state (family, address, flags), not the connection.
             Some(27) => {
                 let fd = word(self, 0) as i32;
-                let Some(socket) = self.process().bsd_sockets.get(&fd) else {
-                    return self.bsd_reply(tls, -1, BSD_EBADF);
-                };
-                let mut copy = BsdSocket::new(socket.domain, socket.kind);
-                copy.bound = socket.bound.clone();
-                copy.flags = socket.flags;
-                copy.listening = socket.listening;
-                let duplicate = self.alloc_bsd_fd();
-                self.process_mut().bsd_sockets.insert(duplicate, copy);
-                self.bsd_reply(tls, duplicate, 0)
+                match self.bsd_duplicate(fd) {
+                    Some(duplicate) => self.bsd_reply(tls, duplicate, 0),
+                    None => self.bsd_reply(tls, -1, BSD_EBADF),
+                }
             }
             _ => self.unimplemented_command(tls, "bsd:u", cmd_id),
         }
+    }
+
+    /// A new descriptor with `fd`'s family, address and flags, and none of its connection.
+    pub(crate) fn bsd_duplicate(&mut self, fd: i32) -> Option<i32> {
+        let socket = self.process().bsd_sockets.get(&fd)?;
+        let mut copy = BsdSocket::new(socket.domain, socket.kind);
+        copy.bound = socket.bound.clone();
+        copy.flags = socket.flags;
+        copy.listening = socket.listening;
+        let duplicate = self.alloc_bsd_fd();
+        self.process_mut().bsd_sockets.insert(duplicate, copy);
+        Some(duplicate)
     }
 
     /// Reply `{ s32 ret, s32 errno }`: `ret` is -1 on failure, `errno` 0 on success.

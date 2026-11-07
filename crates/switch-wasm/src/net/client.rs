@@ -1,8 +1,11 @@
 //! The page's end of the relay protocol, apart from the socket: what the guest asked for
 //! becomes frames, and what the relay sent becomes events for the core.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
+use super::tls::{self, TlsStream};
+use rustls::RootCertStore;
 use switch_core::json;
 use switch_core::services::netbridge::{NetCommand, NetEvent, NetFailure, Peer, StreamId};
 use switch_relay_proto::{
@@ -66,16 +69,48 @@ pub(crate) enum Refused {
     Version(u8),
 }
 
+/// What one step of the client makes: frames for the relay and events for the core.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Pump {
+    pub frames: Vec<Vec<u8>>,
+    pub events: Vec<NetEvent>,
+}
+
+impl Pump {
+    fn data(&mut self, stream: StreamId, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            self.frames.push(
+                ClientFrame::Data {
+                    stream,
+                    data: bytes,
+                }
+                .encode(),
+            );
+        }
+    }
+
+    fn credit(&mut self, stream: StreamId, bytes: u32) {
+        if bytes > 0 {
+            self.frames
+                .push(ClientFrame::Credit { stream, bytes }.encode());
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Client {
     connections: BTreeMap<StreamId, Connection>,
+    /// The streams the guest runs TLS on, which this side encrypts and decrypts.
+    tls: HashMap<StreamId, TlsStream>,
+    /// The roots the core sent with its first TLS request.
+    roots: Option<Arc<RootCertStore>>,
 }
 
 impl Client {
-    /// The frames for what the guest asked since the last call. What it read is handed
-    /// back as one `CREDIT` per stream.
-    pub fn outgoing(&mut self, commands: Vec<NetCommand>) -> Vec<Vec<u8>> {
-        let mut frames = Vec::new();
+    /// What the guest asked since the last call. What it read is handed back as one `CREDIT`
+    /// per stream; on a TLS stream the credit is for the ciphertext that plaintext came from.
+    pub fn outgoing(&mut self, commands: Vec<NetCommand>) -> Pump {
+        let mut pump = Pump::default();
         let mut credit: Vec<(StreamId, u32)> = Vec::new();
         for command in commands {
             match command {
@@ -100,7 +135,7 @@ impl Client {
                         },
                     );
                     self.forget_old();
-                    frames.push(
+                    pump.frames.push(
                         ClientFrame::Connect {
                             stream,
                             proto: if udp { Proto::Udp } else { Proto::Tcp },
@@ -118,20 +153,61 @@ impl Client {
                     if let Some(connection) = self.connections.get_mut(&stream) {
                         connection.sent += data.len() as u64;
                     }
-                    frames.push(ClientFrame::Data { stream, data }.encode());
+                    match self.tls.get_mut(&stream) {
+                        Some(tls) => {
+                            let encrypted = tls.write(&data);
+                            pump.data(stream, encrypted);
+                        }
+                        None => pump.data(stream, data),
+                    }
                 }
                 NetCommand::ShutdownWrite { stream } => {
-                    frames.push(ClientFrame::ShutdownWrite { stream }.encode());
+                    if let Some(tls) = self.tls.get_mut(&stream) {
+                        let alert = tls.close_notify();
+                        pump.data(stream, alert);
+                    }
+                    pump.frames
+                        .push(ClientFrame::ShutdownWrite { stream }.encode());
                 }
                 NetCommand::Close { stream } => {
                     self.set_state(stream, State::Closed);
+                    self.tls.remove(&stream);
                     credit.retain(|&(held, _)| held != stream);
-                    frames.push(ClientFrame::Close { stream }.encode());
+                    pump.frames.push(ClientFrame::Close { stream }.encode());
                 }
                 NetCommand::Consumed { stream, bytes } => {
+                    let bytes = match self.tls.get_mut(&stream) {
+                        Some(tls) => tls.consumed(bytes),
+                        None => bytes,
+                    };
                     match credit.iter_mut().find(|(held, _)| *held == stream) {
                         Some((_, total)) => *total = total.saturating_add(bytes),
                         None => credit.push((stream, bytes)),
+                    }
+                }
+                NetCommand::StartTls {
+                    stream,
+                    server_name,
+                    verify,
+                    alpn,
+                    roots,
+                } => {
+                    if let Some(der) = roots {
+                        self.roots = Some(tls::roots(&der));
+                    }
+                    let roots = self.roots.clone().unwrap_or_else(|| tls::roots(&[]));
+                    match TlsStream::new(&server_name, verify, alpn, &roots) {
+                        Ok((tls, hello)) => {
+                            self.tls.insert(stream, tls);
+                            pump.data(stream, hello);
+                        }
+                        Err(reason) => pump.events.push(NetEvent::TlsFailed { stream, reason }),
+                    }
+                }
+                NetCommand::TlsClose { stream } => {
+                    if let Some(tls) = self.tls.get_mut(&stream) {
+                        let alert = tls.close_notify();
+                        pump.data(stream, alert);
                     }
                 }
             }
@@ -142,24 +218,24 @@ impl Client {
                 .get(&stream)
                 .is_some_and(|c| c.state.live())
             {
-                frames.push(ClientFrame::Credit { stream, bytes }.encode());
+                pump.credit(stream, bytes);
             }
         }
-        frames
+        pump
     }
 
-    /// The event for a frame the relay sent, if it carries one. A frame that cannot be
-    /// understood ends the link.
-    pub fn incoming(&mut self, raw: &[u8]) -> Result<Option<NetEvent>, Refused> {
+    /// What a frame the relay sent comes to. A frame that cannot be understood ends the link.
+    pub fn incoming(&mut self, raw: &[u8]) -> Result<Pump, Refused> {
         let frame = ServerFrame::decode(raw).map_err(Refused::Undecodable)?;
-        Ok(match frame {
+        let mut pump = Pump::default();
+        match frame {
             ServerFrame::Hello { version, .. } if version != VERSION => {
                 return Err(Refused::Version(version))
             }
-            ServerFrame::Hello { .. } => None,
+            ServerFrame::Hello { .. } => {}
             ServerFrame::Connected { stream } => {
                 self.set_state(stream, State::Open);
-                Some(NetEvent::Connected { stream })
+                pump.events.push(NetEvent::Connected { stream });
             }
             ServerFrame::Failed { stream, reason } => {
                 let reason = match reason {
@@ -170,23 +246,63 @@ impl Client {
                     Failure::Unreachable | Failure::Denied => NetFailure::Unreachable,
                 };
                 self.set_state(stream, State::Failed(reason));
-                Some(NetEvent::Failed { stream, reason })
+                self.tls.remove(&stream);
+                pump.events.push(NetEvent::Failed { stream, reason });
             }
-            ServerFrame::Data { stream, data } => {
-                if let Some(connection) = self.connections.get_mut(&stream) {
-                    connection.received += data.len() as u64;
+            ServerFrame::Data { stream, data } => match self.tls.get_mut(&stream) {
+                Some(tls) => {
+                    let fed = tls.feed(&data);
+                    let established = tls.is_established();
+                    pump.data(stream, fed.outgoing);
+                    pump.credit(stream, fed.credit);
+                    if let Some(found) = fed.established {
+                        pump.events.push(NetEvent::TlsEstablished {
+                            stream,
+                            protocol: found.protocol,
+                            cipher: found.cipher,
+                            alpn: found.alpn,
+                            chain: found.chain,
+                        });
+                    }
+                    if let Some(reason) = fed.failure {
+                        // Once the guest has its connection a break is the end of it.
+                        pump.events.push(if established {
+                            NetEvent::Closed { stream }
+                        } else {
+                            NetEvent::TlsFailed { stream, reason }
+                        });
+                    }
+                    if !fed.plaintext.is_empty() {
+                        if let Some(connection) = self.connections.get_mut(&stream) {
+                            connection.received += fed.plaintext.len() as u64;
+                        }
+                        pump.events.push(NetEvent::Data {
+                            stream,
+                            data: fed.plaintext,
+                        });
+                    }
+                    if fed.closed {
+                        pump.events.push(NetEvent::Closed { stream });
+                    }
                 }
-                Some(NetEvent::Data { stream, data })
-            }
+                None => {
+                    if let Some(connection) = self.connections.get_mut(&stream) {
+                        connection.received += data.len() as u64;
+                    }
+                    pump.events.push(NetEvent::Data { stream, data });
+                }
+            },
             ServerFrame::Closed { stream } => {
                 self.set_state(stream, State::Ended);
-                Some(NetEvent::Closed { stream })
+                pump.events.push(NetEvent::Closed { stream });
             }
-        })
+        }
+        Ok(pump)
     }
 
     /// The link is gone: every stream the guest still has ends.
     pub fn lost(&mut self) -> Vec<NetEvent> {
+        self.tls.clear();
         let mut events = Vec::new();
         for (&stream, connection) in &mut self.connections {
             match connection.state {
@@ -290,8 +406,8 @@ mod tests {
         }
     }
 
-    fn decoded(frames: Vec<Vec<u8>>) -> Vec<ClientFrame> {
-        frames
+    fn decoded(pump: Pump) -> Vec<ClientFrame> {
+        pump.frames
             .iter()
             .map(|raw| ClientFrame::decode(raw).unwrap())
             .collect()
@@ -427,7 +543,12 @@ mod tests {
     }
 
     fn client_event(client: &mut Client, frame: ServerFrame) -> Option<NetEvent> {
-        client.incoming(&frame.encode()).unwrap()
+        client
+            .incoming(&frame.encode())
+            .unwrap()
+            .events
+            .into_iter()
+            .next()
     }
 
     #[test]
@@ -437,7 +558,7 @@ mod tests {
             version: VERSION,
             max_streams: 8,
         };
-        assert_eq!(client.incoming(&hello.encode()), Ok(None));
+        assert_eq!(client.incoming(&hello.encode()), Ok(Pump::default()));
         let foreign = ServerFrame::Hello {
             version: VERSION + 1,
             max_streams: 8,
@@ -599,5 +720,165 @@ mod tests {
             },
         );
         assert!(client.report().contains(r#""state":"unreachable""#));
+    }
+
+    /// The ciphertext the client put in `Data` frames for `stream`, and the credit it granted.
+    fn wire(pump: &Pump, stream: StreamId) -> (Vec<u8>, u32) {
+        let (mut bytes, mut credit) = (Vec::new(), 0);
+        for raw in &pump.frames {
+            match ClientFrame::decode(raw).unwrap() {
+                ClientFrame::Data { stream: s, data } if s == stream => bytes.extend(data),
+                ClientFrame::Credit { stream: s, bytes } if s == stream => credit += bytes,
+                _ => {}
+            }
+        }
+        (bytes, credit)
+    }
+
+    fn start_tls(name: &str, verify: u32, roots: Vec<Vec<u8>>) -> NetCommand {
+        NetCommand::StartTls {
+            stream: 1,
+            server_name: name.into(),
+            verify,
+            alpn: Vec::new(),
+            roots: Some(Arc::new(roots)),
+        }
+    }
+
+    /// Run a handshake between the client and a server through relay frames; every event.
+    fn open_tls(
+        client: &mut Client,
+        server: &mut rustls::ServerConnection,
+        start: NetCommand,
+    ) -> Vec<NetEvent> {
+        let mut pump = client.outgoing(vec![start]);
+        let mut events = std::mem::take(&mut pump.events);
+        for _ in 0..8 {
+            let reply = super::super::tls::harness::serve(server, &wire(&pump, 1).0);
+            if reply.is_empty() {
+                break;
+            }
+            pump = client
+                .incoming(
+                    &ServerFrame::Data {
+                        stream: 1,
+                        data: reply,
+                    }
+                    .encode(),
+                )
+                .unwrap();
+            events.append(&mut pump.events);
+        }
+        events
+    }
+
+    #[test]
+    fn a_stream_that_starts_tls_is_encrypted_on_the_way_to_the_relay() {
+        use super::super::tls::harness;
+        let mut client = Client::default();
+        client.outgoing(vec![connect(1)]);
+        client_event(&mut client, ServerFrame::Connected { stream: 1 });
+        let mut server = harness::server(harness::SERVER, &[]);
+        let events = open_tls(
+            &mut client,
+            &mut server,
+            start_tls("localhost", 7, vec![harness::ca_der()]),
+        );
+        let [NetEvent::TlsEstablished {
+            protocol, chain, ..
+        }] = &events[..]
+        else {
+            panic!("one TlsEstablished, got {events:?}");
+        };
+        assert_eq!((protocol.as_str(), chain.len()), ("TLSv1.3", 1));
+
+        // What the guest sends is encrypted for the relay; the server reads it.
+        let sent = client.outgoing(vec![NetCommand::Send {
+            stream: 1,
+            data: b"GET /".to_vec(),
+        }]);
+        let (ciphertext, _) = wire(&sent, 1);
+        assert!(!ciphertext.windows(5).any(|w| w == b"GET /"));
+        harness::serve(&mut server, &ciphertext);
+
+        // What comes back is decrypted for the core, and reading it credits the ciphertext.
+        std::io::Write::write_all(&mut server.writer(), b"200 OK").unwrap();
+        let mut reply = Vec::new();
+        while server.wants_write() {
+            server.write_tls(&mut reply).unwrap();
+        }
+        let got = client
+            .incoming(
+                &ServerFrame::Data {
+                    stream: 1,
+                    data: reply.clone(),
+                }
+                .encode(),
+            )
+            .unwrap();
+        assert_eq!(
+            got.events,
+            vec![NetEvent::Data {
+                stream: 1,
+                data: b"200 OK".to_vec()
+            }]
+        );
+        assert!(client.report().contains(r#""sent":5,"received":6"#));
+        let read = client.outgoing(vec![NetCommand::Consumed {
+            stream: 1,
+            bytes: 6,
+        }]);
+        assert_eq!(wire(&read, 1).1, reply.len() as u32);
+    }
+
+    #[test]
+    fn a_handshake_that_fails_tells_the_core_why_and_a_bad_name_fails_at_once() {
+        use super::super::tls::harness;
+        let mut client = Client::default();
+        let mut server = harness::server(harness::SERVER, &[]);
+        let events = open_tls(
+            &mut client,
+            &mut server,
+            start_tls("localhost", 3, Vec::new()),
+        );
+        assert_eq!(
+            events,
+            vec![NetEvent::TlsFailed {
+                stream: 1,
+                reason: switch_core::services::netbridge::TlsFailure::UnknownCa
+            }]
+        );
+
+        let pump = client.outgoing(vec![start_tls("not a host name", 0, Vec::new())]);
+        assert_eq!(
+            pump.events,
+            vec![NetEvent::TlsFailed {
+                stream: 1,
+                reason: switch_core::services::netbridge::TlsFailure::Handshake
+            }]
+        );
+        assert!(pump.frames.is_empty());
+    }
+
+    #[test]
+    fn the_relay_closing_the_connection_still_ends_a_tls_stream() {
+        use super::super::tls::harness;
+        let mut client = Client::default();
+        client.outgoing(vec![connect(1)]);
+        client_event(&mut client, ServerFrame::Connected { stream: 1 });
+        let mut server = harness::server(harness::SERVER, &[]);
+        open_tls(
+            &mut client,
+            &mut server,
+            start_tls("localhost", 7, vec![harness::ca_der()]),
+        );
+        assert_eq!(
+            client_event(&mut client, ServerFrame::Closed { stream: 1 }),
+            Some(NetEvent::Closed { stream: 1 })
+        );
+        assert!(client.report().contains(r#""state":"ended""#));
+        // And what the guest closes goes: the TLS state with it, a plain Close to the relay.
+        let pump = client.outgoing(vec![NetCommand::Close { stream: 1 }]);
+        assert_eq!(decoded(pump), vec![ClientFrame::Close { stream: 1 }]);
     }
 }

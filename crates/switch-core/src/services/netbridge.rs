@@ -4,6 +4,7 @@
 //! and `bsd` keeps its empty network.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub type StreamId = u32;
 
@@ -38,6 +39,34 @@ pub enum NetCommand {
         stream: StreamId,
         bytes: u32,
     },
+    /// Run TLS over this stream from now on: what is sent afterwards is plaintext for the host
+    /// to encrypt, and what arrives is plaintext it decrypted. `verify` is the guest's
+    /// `VerifyOption` bitmask, `roots` the DER certificates to trust (sent with the first
+    /// request only, the host keeps them) and `alpn` the protocols to offer.
+    StartTls {
+        stream: StreamId,
+        server_name: String,
+        verify: u32,
+        alpn: Vec<Vec<u8>>,
+        roots: Option<Arc<Vec<Vec<u8>>>>,
+    },
+    /// Send a TLS close_notify.
+    TlsClose {
+        stream: StreamId,
+    },
+}
+
+/// Why a handshake failed, as far as the guest tells apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsFailure {
+    /// The connection went away.
+    Reset,
+    UnknownCa,
+    Expired,
+    NotValidForName,
+    BadCertificate,
+    ProtocolVersion,
+    Handshake,
 }
 
 /// Why a connection did not open.
@@ -65,6 +94,18 @@ pub enum NetEvent {
     Closed {
         stream: StreamId,
     },
+    /// The handshake finished: what was negotiated, and the server's certificates, DER, leaf first.
+    TlsEstablished {
+        stream: StreamId,
+        protocol: String,
+        cipher: String,
+        alpn: Option<Vec<u8>>,
+        chain: Vec<Vec<u8>>,
+    },
+    TlsFailed {
+        stream: StreamId,
+        reason: TlsFailure,
+    },
 }
 
 /// First synthetic address, in the range RFC 2544 reserves for benchmarking: nothing real
@@ -81,6 +122,8 @@ pub(crate) struct NetBridge {
     by_name: HashMap<String, usize>,
     next_stream: StreamId,
     pub outbox: Vec<NetCommand>,
+    /// The host has the trusted roots already.
+    pub roots_sent: bool,
 }
 
 impl NetBridge {

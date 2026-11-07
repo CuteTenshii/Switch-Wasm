@@ -5,6 +5,7 @@
 mod client;
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 mod socket;
+mod tls;
 
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 pub(crate) use socket::exchange;

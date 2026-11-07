@@ -193,7 +193,9 @@ impl Cpu {
             NetEvent::Failed { .. } | NetEvent::Closed { .. } => {
                 socket.datagram.peerings.remove(index);
             }
-            NetEvent::Connected { .. } => {}
+            NetEvent::Connected { .. }
+            | NetEvent::TlsEstablished { .. }
+            | NetEvent::TlsFailed { .. } => {}
         }
         true
     }

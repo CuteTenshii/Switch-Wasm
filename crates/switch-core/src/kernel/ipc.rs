@@ -569,6 +569,7 @@ impl Cpu {
         self.process_mut()
             .opus_decoders
             .retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.ssl_forget_session(session);
     }
 
     pub(crate) fn service_name(&self, handle: u64) -> Option<&str> {

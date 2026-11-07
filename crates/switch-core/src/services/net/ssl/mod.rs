@@ -1,4 +1,8 @@
-//! `ssl`: contexts and options are real objects; connections never connect.
+//! `ssl`: contexts and options are real objects; a connection is TLS carried by the host.
+
+mod connection;
+
+pub(crate) use connection::SslConnection;
 
 use crate::cpu::Cpu;
 use crate::Result;
@@ -143,8 +147,19 @@ impl Cpu {
                         .unwrap_or(0);
                     self.write_ipc_response(tls, 0, &[], &value.to_le_bytes(), &[])
                 }
-                // GetConnectionCount: none.
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                // CreateConnection -> ISslConnection.
+                Some(2) => {
+                    let key = self.reply_with_interface(tls, handle, "ssl:connection")?;
+                    self.process_mut()
+                        .ssl_connections
+                        .insert(key, SslConnection::default());
+                    Ok(())
+                }
+                // GetConnectionCount.
+                Some(3) => {
+                    let count = self.process().ssl_connections.len() as u32;
+                    self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
+                }
                 // ImportServerPki / ImportClientPki(format, certificates) -> u64 id. Accepted, not kept.
                 Some(4) | Some(5) => {
                     let id = self.ssl_next_pki_id;
@@ -155,6 +170,10 @@ impl Cpu {
                 Some(6) | Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            "ssl:connection" => {
+                let key = self.ipc_object_key(tls, handle);
+                self.ssl_connection_request(tls, key, cmd_id)
+            }
             _ => self.unimplemented_command(tls, &iface, cmd_id),
         }
     }
