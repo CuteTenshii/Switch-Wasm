@@ -2,7 +2,7 @@
 
 use crate::builtin::LOAD_DEPTH_WGSL;
 use crate::convert::{depth_texture_format, device_attachment_format};
-use crate::readback::{Held, Pending, MAP_FAILED, MAP_READY, MAP_WAITING};
+use crate::readback::{Held, Pending, Readback, MAP_FAILED, MAP_READY, MAP_WAITING};
 use crate::resources::guest_pages;
 use crate::{Gpu, Space, COPY_ALIGNMENT, MAX_FRAMES_IN_FLIGHT};
 use switch_core::gpu::exec::ExecCtx;
@@ -47,6 +47,9 @@ impl Gpu {
         }
         for pending in space.pending {
             pending.staging.destroy();
+        }
+        for held in space.globals.into_values() {
+            held.buffer.destroy();
         }
         for (key, made) in space.gpu_textures {
             let bytes = space.texture_cache.get(&key).map_or(0, |b| b.len() as u64);
@@ -394,11 +397,48 @@ impl Gpu {
         });
         Pending {
             staging,
-            target: *target,
+            what: Readback::Surface {
+                target: *target,
+                row_bytes,
+                padded,
+            },
             generation: self.space.asked,
-            row_bytes,
-            padded,
             state,
+        }
+    }
+
+    /// Ask for the buffers atomics wrote back, without waiting; [`Gpu::flush`] collects them.
+    fn ask_for_globals(&mut self) {
+        for (addr, held) in std::mem::take(&mut self.space.globals) {
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("readback"),
+                size: held.original.len() as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("readback"),
+                });
+            encoder.copy_buffer_to_buffer(&held.buffer, 0, &staging, 0, held.original.len() as u64);
+            self.queue.submit([encoder.finish()]);
+            held.buffer.destroy();
+            let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(MAP_WAITING));
+            let sink = state.clone();
+            staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                let done = if r.is_ok() { MAP_READY } else { MAP_FAILED };
+                sink.store(done, std::sync::atomic::Ordering::Release);
+            });
+            self.space.pending.push(Pending {
+                staging,
+                what: Readback::Global {
+                    addr,
+                    original: held.original,
+                },
+                generation: self.space.asked,
+                state,
+            });
         }
     }
 
@@ -408,17 +448,32 @@ impl Gpu {
         let mapped = slice
             .get_mapped_range()
             .map_err(|e| Error::Gpu(format!("mapping the readback: {e}")))?;
-        let target = &pending.target;
-        // Colour writes straight from the padded mapping; depth repacks.
-        let outcome = match target.depth_kind() {
-            None => target.write_strided(ctx, &mapped, pending.padded),
-            Some(_) => {
-                let mut rows = Vec::with_capacity((pending.row_bytes * target.rows) as usize);
-                for y in 0..target.rows {
-                    let at = (y * pending.padded) as usize;
-                    rows.extend_from_slice(&mapped[at..at + pending.row_bytes as usize]);
+        let outcome = match &pending.what {
+            // Colour writes straight from the padded mapping; depth repacks.
+            Readback::Surface {
+                target,
+                row_bytes,
+                padded,
+            } => match target.depth_kind() {
+                None => target.write_strided(ctx, &mapped, *padded),
+                Some(_) => {
+                    let mut rows = Vec::with_capacity((row_bytes * target.rows) as usize);
+                    for y in 0..target.rows {
+                        let at = (y * padded) as usize;
+                        rows.extend_from_slice(&mapped[at..at + *row_bytes as usize]);
+                    }
+                    Self::land_depth(target, &rows, ctx)
                 }
-                Self::land_depth(target, &rows, ctx)
+            },
+            Readback::Global { addr, original } => {
+                let words = mapped.chunks_exact(4).zip(original.chunks_exact(4));
+                (0u64..)
+                    .zip(words)
+                    .filter(|(_, (now, was))| now != was)
+                    .try_for_each(|(word, (now, _))| {
+                        let value = u32::from_le_bytes(now.try_into().expect("four bytes"));
+                        ctx.write_u32(addr + word * 4, value)
+                    })
             }
         };
         drop(mapped);
@@ -472,7 +527,7 @@ impl Gpu {
             .space
             .pending
             .iter()
-            .map(|pending| surface_span(&pending.target))
+            .filter_map(|pending| pending.target().map(surface_span))
             .collect();
         for held in self.space.held.values_mut() {
             let span = surface_span(&held.target);
@@ -496,6 +551,7 @@ impl Gpu {
             if let Some(addr) = scanout {
                 self.flush_one(addr);
             }
+            self.ask_for_globals();
         });
     }
 
@@ -511,6 +567,7 @@ impl Gpu {
             for addr in addresses {
                 self.flush_one(addr);
             }
+            self.ask_for_globals();
         });
     }
 
@@ -582,11 +639,12 @@ impl Gpu {
                         .then_some(target.addr)
                 })
         });
-        let owed = if everything {
-            !self.space.held.is_empty()
-        } else {
-            shown.is_some()
-        };
+        let owed = !self.space.globals.is_empty()
+            || if everything {
+                !self.space.held.is_empty()
+            } else {
+                shown.is_some()
+            };
         if owed || !self.space.evicted.is_empty() {
             let mut asks: Vec<u64> = self.space.pending.iter().map(|p| p.generation).collect();
             asks.dedup();
@@ -624,6 +682,7 @@ impl Gpu {
         // Nothing held, owed or in flight: nothing to do (and no poll).
         if self.space.held.is_empty()
             && self.space.evicted.is_empty()
+            && self.space.globals.is_empty()
             && self.space.pending.is_empty()
         {
             return Ok(Flush::Done);

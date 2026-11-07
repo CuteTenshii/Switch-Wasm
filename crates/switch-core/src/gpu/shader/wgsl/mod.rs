@@ -25,7 +25,10 @@ mod tests;
 mod texture;
 
 use emitter::Emitter;
-pub use layout::{Coverage, Fold, Layout, Stage, TextureBinding, GLOBAL_BINDING, IDENTITY_SWIZZLE};
+pub use layout::{
+    Coverage, Fold, Global, Layout, Stage, TextureBinding, CONSTANTS_BINDING, CONSTANT_BANKS,
+    GLOBAL_BINDING, IDENTITY_SWIZZLE,
+};
 pub use module::module;
 
 /// Why a program could not be translated; the caller falls back to the rasterizer.
@@ -49,6 +52,8 @@ pub enum Unsupported {
     SharedHandleKey { at: usize },
     /// An integer image read by a gather or an offset sample, which only float images have here.
     IntegerTexture,
+    /// A vertex shader's atomic, which WebGPU keeps out of the vertex stage.
+    VertexWrite,
 }
 
 impl fmt::Display for Unsupported {
@@ -56,6 +61,9 @@ impl fmt::Display for Unsupported {
         match self {
             Unsupported::Op { at, op } => {
                 write!(f, "instruction {at}: no WGSL form for {op:?}")
+            }
+            Unsupported::VertexWrite => {
+                write!(f, "a vertex shader writing global memory")
             }
             Unsupported::IntegerTexture => {
                 write!(f, "a gather or offset sample of an integer image")
@@ -107,6 +115,7 @@ fn attrIn(offset: u32) -> f32 { return 0.0; }
 fn attrOut(offset: u32, value: f32) { }
 fn cbRead(bank: u32, offset: u32) -> u32 { return 0u; }
 fn gRead(slot: u32, offset: u32) -> u32 { return 0u; }
+fn gAtom(op: u32, slot: u32, offset: u32, value: u32) -> u32 { return 0u; }
 fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
@@ -164,8 +173,8 @@ pub struct Translation {
     /// Whether that uses the device's quad operations rather than [`QUAD_SWAP`].
     pub subgroups: bool,
     pub subgroup_enable: bool,
-    /// `(bank, offset)` of each 64-bit `ldg` descriptor, in binding order.
-    pub globals: Vec<(u8, u16)>,
+    /// Each 64-bit `ldg` or atomic descriptor, in binding order.
+    pub globals: Vec<Global>,
 }
 
 /// Translate into a WGSL function `run`, returning whether it hit `kil`.

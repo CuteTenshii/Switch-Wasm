@@ -61,6 +61,7 @@
 ### `crates/switch-gpu/src/readback.rs`
 
 - Readback is copy to staging, map, read: three steps that cannot happen in one call on the web. The map callback runs from the event loop, so state is an atomic polled by the next slice. Each ask for a frame's surfaces is a generation, at most two in flight, landed in order; a present waits on its generation.
+- Memory shaders write with atomics is held on the device per descriptor address (`Space::globals`, uploaded whole up to 8 MiB) and asked back at every flush and present. Only the words that differ from the upload land, so a guest write elsewhere in the buffer in between survives. Written buffers are sub-allocations of one pool and may overlap; a later draw that only reads over one refuses until the flush, and so does the rasterizer's draw, which flushes first. A guest read of the memory before the next present sees the old words, as it does for held surfaces.
 - Depth row bytes are the device format's: `Z24S8` is 4 bytes in memory and 4 bytes of `f32` on the device; `ZF32_X24S8` is 8 and 4.
 - A companion surface is resolved back into the held surface before the readback, so guest memory only sees the expanded form; its grid is stored because the register file has moved on by flush time.
 

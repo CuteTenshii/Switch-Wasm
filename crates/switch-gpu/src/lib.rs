@@ -70,14 +70,18 @@ use switch_core::Result;
 #[cfg(test)]
 use builtin::grid_bytes;
 use builtin::ResampleKey;
-use readback::{Held, Pending, Scratch};
+use readback::{Held, HeldGlobal, Pending, Scratch};
 use stats::{DeviceErrors, Times, UploadBytes};
 
-/// The memory a `ldg` reads, resolved from its descriptor.
+/// The memory a `ldg` or atomic reaches, resolved from its descriptor.
 struct GlobalUpload {
     stage: ShaderStage,
     slot: u32,
     bytes: Vec<u8>,
+    /// The buffer held on the device when the shader writes it, which `bytes` then lacks.
+    held: Option<wgpu::Buffer>,
+    /// Whether this shader writes it.
+    writes: bool,
 }
 
 /// Upper bound on one `ldg` buffer, since the program does not say how far it reads.
@@ -106,6 +110,8 @@ enum Red {
     Unorm16,
     Float16,
     Float32,
+    /// An `S8D24` word's stencil byte as float bits, which is the red the rasterizer compares.
+    StencilBits,
 }
 
 /// `copyTextureToBuffer` wants each row of the destination aligned.
@@ -361,6 +367,8 @@ struct Space {
     evicted: Vec<Held>,
     /// Readbacks asked for and not yet collected, oldest first.
     pending: Vec<Pending>,
+    /// Memory atomics wrote on the device, by guest address, owed to guest memory at the next flush.
+    globals: std::collections::HashMap<u64, HeldGlobal>,
     /// Guest memory has to catch up with every surface at the next present: something
     /// other than a device surface is about to depend on it. See [`Gpu::submit_frame_inner`].
     sync_all: bool,

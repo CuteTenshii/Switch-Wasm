@@ -194,6 +194,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             b: Operand::Reg(3),
             bneg: false,
             shift: 2,
+            cout: false,
         },
         Op::Iset {
             dst: 1,
@@ -316,6 +317,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             a: 2,
             b: Operand::Imm(0x0810),
             signed: false,
+            brev: false,
         },
     ]
 }
@@ -462,7 +464,14 @@ fn a_global_load_through_a_descriptor_binds_the_memory_it_names() {
         (Op::Exit, ALWAYS),
     ]);
     let translated = translate(&p).unwrap();
-    assert_eq!(translated.globals, vec![(0, 0x110)]);
+    assert_eq!(
+        translated.globals,
+        vec![Global {
+            bank: 0,
+            offset: 0x110,
+            written: false
+        }]
+    );
     assert!(
         translated.source.contains("gRead(0u,"),
         "{}",

@@ -357,11 +357,11 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         };
         Compiled::with_constants(&fs_decoded, &consts)
     };
-    // Shaders with warp shuffles run in 2x2 quads.
+    // Shaders with warp shuffles or votes run in 2x2 quads.
     let mut quad: Option<Box<[Invocation; QUAD]>> = fs_program
         .ops()
         .iter()
-        .any(|op| matches!(op, Op::Shfl { .. } | Op::Fswzadd { .. }))
+        .any(|op| matches!(op, Op::Shfl { .. } | Op::Vote { .. } | Op::Fswzadd { .. }))
         .then(|| Box::new(std::array::from_fn(|_| Invocation::new())));
 
     // `--trace pipeline`: this draw's fixed-function state, or why it is

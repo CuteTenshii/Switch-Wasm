@@ -243,7 +243,7 @@ impl Gpu {
                 .space
                 .pending
                 .iter()
-                .any(|pending| overlaps(&pending.target))
+                .any(|pending| pending.target().is_some_and(overlaps))
     }
 
     /// Clear the depth surface, on the device.

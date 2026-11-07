@@ -97,6 +97,24 @@ impl Gpu {
 
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
         let mut fs_layout = Layout::of(&fs, Stage::Fragment);
+        let storage_limit = self.device.limits().max_storage_buffers_per_shader_stage as usize;
+        let limits = self.device.limits();
+        for (stage, layout) in [("vertex", &vs_layout), ("fragment", &fs_layout)] {
+            if layout.textures.len() > limits.max_sampled_textures_per_shader_stage as usize
+                || layout.textures.len() > limits.max_samplers_per_shader_stage as usize
+            {
+                return Err(format!(
+                    "{} textures in the {stage} stage, past the device's limit",
+                    layout.textures.len()
+                ));
+            }
+            let buffers = usize::from(!layout.const_banks.is_empty()) + layout.globals.len();
+            if buffers > storage_limit {
+                return Err(format!(
+                    "{buffers} storage buffers in the {stage} stage, past the device's {storage_limit}"
+                ));
+            }
+        }
         // A depth-only pass has no colour output.
         fs_layout.targets = u32::from(color.is_some());
         // An integer target takes raw words.
@@ -267,6 +285,15 @@ impl Gpu {
 
         let mut globals = self.global_uploads(&vs_layout, ShaderStage::VertexB, &uploads, ctx)?;
         globals.extend(self.global_uploads(&fs_layout, ShaderStage::Fragment, &uploads, ctx)?);
+        // One buffer cannot be written and read in the same draw.
+        for (i, a) in globals.iter().enumerate() {
+            for b in &globals[i + 1..] {
+                let both = a.held.as_ref().zip(b.held.as_ref());
+                if both.is_some_and(|(x, y)| x == y) && (a.writes || b.writes) {
+                    return Err("a buffer a draw both writes and reads".into());
+                }
+            }
+        }
 
         if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {
             // Trace what the draw renders into.
@@ -338,7 +365,7 @@ impl Gpu {
                             .space
                             .pending
                             .iter()
-                            .any(|p| p.target.addr == t.key.addr) =>
+                            .any(|p| p.target().is_some_and(|s| s.addr == t.key.addr)) =>
                         {
                             " (being read back)".to_string()
                         }

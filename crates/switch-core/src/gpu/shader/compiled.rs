@@ -478,6 +478,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             b,
             bneg,
             shift,
+            cout,
         } => Op::Iscadd {
             dst,
             a,
@@ -485,6 +486,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             b: f(b),
             bneg,
             shift,
+            cout,
         },
         Op::Lea {
             dst,
@@ -660,11 +662,18 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             wrap,
             hi_out,
         },
-        Op::Bfe { dst, a, b, signed } => Op::Bfe {
+        Op::Bfe {
+            dst,
+            a,
+            b,
+            signed,
+            brev,
+        } => Op::Bfe {
             dst,
             a,
             b: f(b),
             signed,
+            brev,
         },
         Op::Popc { dst, b, inv } => Op::Popc { dst, b: f(b), inv },
         Op::Flo {

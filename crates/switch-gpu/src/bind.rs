@@ -2,7 +2,8 @@
 
 use crate::builtin::PACKED_DEPTH_WGSL;
 use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
-use crate::readback::Scratch;
+use crate::held::spans_overlap;
+use crate::readback::{HeldGlobal, Scratch};
 use crate::{
     same_rows, GlobalUpload, Gpu, HeldLayer, Prepared, Red, Resource, SamplerKey, MAX_GLOBAL,
     TEXTURE_BINDING,
@@ -14,7 +15,24 @@ use switch_core::gpu::surface::{
     block_linear_volume_offset, Layout as SurfaceLayout, GOB_HEIGHT, GOB_WIDTH,
 };
 use switch_core::gpu::upload::TextureKey;
-use switch_core::gpu::upload::Uploads;
+use switch_core::gpu::upload::{ConstantUpload, Uploads};
+
+/// A stage's banks as the table `cbRead` indexes, then the banks themselves, whole words.
+fn pack_banks<'a>(banks: impl Iterator<Item = &'a ConstantUpload>) -> Vec<u8> {
+    let table = wgsl::CONSTANT_BANKS as usize * 2;
+    let mut words = vec![0u32; table];
+    for bank in banks.filter(|b| b.bank < wgsl::CONSTANT_BANKS) {
+        let at = bank.bank as usize * 2;
+        words[at] = words.len() as u32;
+        words[at + 1] = (bank.bytes.len() / 4) as u32;
+        words.extend(
+            bank.bytes
+                .chunks_exact(4)
+                .map(|w| u32::from_le_bytes(w.try_into().expect("four bytes"))),
+        );
+    }
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
 
 impl Gpu {
     /// One stage's bindings: constant banks, and textures with their samplers.
@@ -32,11 +50,17 @@ impl Gpu {
         };
         let mut entries = Vec::new();
         let mut resources: Vec<Resource> = Vec::new();
+        // Only its own stage reads a stage's buffers, and each stage has a storage buffer limit.
+        let own = if stage == ShaderStage::VertexB {
+            wgpu::ShaderStages::VERTEX
+        } else {
+            wgpu::ShaderStages::FRAGMENT
+        };
 
-        for upload in p.uploads.constants.iter().filter(|c| c.stage == stage) {
+        if p.uploads.constants.iter().any(|c| c.stage == stage) {
             entries.push(wgpu::BindGroupLayoutEntry {
-                binding: upload.bank,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                binding: wgsl::CONSTANTS_BINDING,
+                visibility: own,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
@@ -44,9 +68,10 @@ impl Gpu {
                 },
                 count: None,
             });
+            let packed = pack_banks(p.uploads.constants.iter().filter(|c| c.stage == stage));
             resources.push(Resource::Buffer(
-                upload.bank,
-                self.buffer("constants", &upload.bytes, wgpu::BufferUsages::STORAGE),
+                wgsl::CONSTANTS_BINDING,
+                self.buffer("constants", &packed, wgpu::BufferUsages::STORAGE),
             ));
         }
 
@@ -91,7 +116,7 @@ impl Gpu {
             let binding = TEXTURE_BINDING + 2 * index as u32;
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                visibility: own,
                 ty: wgpu::BindingType::Texture {
                     sample_type: if compare {
                         wgpu::TextureSampleType::Depth
@@ -107,7 +132,7 @@ impl Gpu {
             });
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: binding + 1,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                visibility: own,
                 ty: wgpu::BindingType::Sampler(if compare {
                     wgpu::SamplerBindingType::Comparison
                 } else {
@@ -143,20 +168,24 @@ impl Gpu {
 
         for global in p.globals.iter().filter(|g| g.stage == stage) {
             let binding = wgsl::GLOBAL_BINDING + global.slot;
+            let written = global.writes;
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                visibility: own,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    ty: wgpu::BufferBindingType::Storage {
+                        read_only: !written,
+                    },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
                 count: None,
             });
-            resources.push(Resource::Buffer(
-                binding,
-                self.buffer("global", &global.bytes, wgpu::BufferUsages::STORAGE),
-            ));
+            let buffer = match &global.held {
+                Some(held) => held.clone(),
+                None => self.buffer("global", &global.bytes, wgpu::BufferUsages::STORAGE),
+            };
+            resources.push(Resource::Buffer(binding, buffer));
         }
 
         let layout = match self.group_layouts.get(&entries) {
@@ -839,16 +868,18 @@ impl Gpu {
         Ok((texture, bytes.len()))
     }
 
-    /// The buffers a stage's `ldg`s read, one per descriptor traced back to a constant bank.
+    /// The buffers a stage's `ldg`s and atomics reach, one per descriptor traced back to a
+    /// constant bank. A written one stays on the device until the next flush.
     pub(super) fn global_uploads(
-        &self,
+        &mut self,
         layout: &Layout,
         stage: ShaderStage,
         uploads: &Uploads,
         ctx: &ExecCtx,
     ) -> std::result::Result<Vec<GlobalUpload>, String> {
         let mut out = Vec::new();
-        for (slot, &(bank, offset)) in layout.globals.iter().enumerate() {
+        for (slot, global) in layout.globals.iter().enumerate() {
+            let (bank, offset) = (global.bank, global.offset);
             let held = uploads
                 .constants
                 .iter()
@@ -879,21 +910,100 @@ impl Gpu {
                     );
                 }
             }
+            // A null descriptor is a buffer the draw never reaches, as an unbound one is.
+            if address == 0 && !global.written {
+                out.push(GlobalUpload {
+                    stage,
+                    slot: slot as u32,
+                    bytes: Vec::new(),
+                    held: None,
+                    writes: false,
+                });
+                continue;
+            }
             let mapping = ctx.vmm.mapping_at(address).ok_or_else(|| {
                 format!("a `ldg` descriptor naming {address:#x}, which is unmapped")
             })?;
             let len = (mapping.gpu_va + mapping.size - address).min(MAX_GLOBAL) as usize;
+            // Atomics work on whole words.
+            let len = if global.written { len & !3 } else { len };
+            let span = address..address + len as u64;
+            // What a device draw wrote is read from where it is, until the flush puts it back.
+            if let Some(held) = self.space.globals.get(&address) {
+                if held.original.len() != len & !3 {
+                    return Err(format!(
+                        "a buffer at {address:#x} used at two lengths before a flush"
+                    ));
+                }
+                out.push(GlobalUpload {
+                    stage,
+                    slot: slot as u32,
+                    bytes: Vec::new(),
+                    held: Some(held.buffer.clone()),
+                    writes: global.written,
+                });
+                continue;
+            }
+            // Written buffers are sub-allocations of one pool, so their spans overlap by
+            // construction; a read of memory a device draw wrote waits for the flush.
+            let reads_written = !global.written
+                && self
+                    .space
+                    .globals
+                    .iter()
+                    .any(|(&at, g)| spans_overlap(&(at..at + g.original.len() as u64), &span));
+            if reads_written {
+                let held: Vec<String> = self
+                    .space
+                    .globals
+                    .iter()
+                    .map(|(at, g)| format!("{at:#x}+{:#x}", g.original.len()))
+                    .collect();
+                return Err(format!(
+                    "a read of {address:#x}+{len:#x} over memory written on the device and not \
+                     yet put back (held: {})",
+                    held.join(", ")
+                ));
+            }
             let mut bytes = vec![0u8; len];
             ctx.vmm
                 .read_into(ctx.mem, address, &mut bytes)
                 .map_err(|e| format!("{e:?}"))?;
+            let held = global.written.then(|| {
+                let buffer = self.hold_global(address, &bytes);
+                bytes.clear();
+                buffer
+            });
             out.push(GlobalUpload {
                 stage,
                 slot: slot as u32,
                 bytes,
+                held,
+                writes: global.written,
             });
         }
         Ok(out)
+    }
+
+    /// Put guest memory on the device for atomics to work on, owed back at the next flush.
+    fn hold_global(&mut self, address: u64, bytes: &[u8]) -> wgpu::Buffer {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("written global"),
+            size: bytes.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, bytes);
+        self.space.globals.insert(
+            address,
+            HeldGlobal {
+                buffer: buffer.clone(),
+                original: bytes.to_vec(),
+            },
+        );
+        buffer
     }
 
     /// A sampled depth image, drawn through [`Gpu::load_depth`] since it cannot be copied in.
@@ -971,6 +1081,7 @@ impl Gpu {
             Format::Bgra8Unorm => (4, 2, Red::Unorm8),
             Format::Rgba16Float => (8, 0, Red::Float16),
             Format::Rgba32Float => (8 * 2, 0, Red::Float32),
+            Format::R32Uint => (4, 0, Red::StencilBits),
             other => return Err(format!("a shadow map stored as {other:?}")),
         };
         let mut out = Vec::with_capacity(upload.bytes.len() / unit * 4);
@@ -983,6 +1094,7 @@ impl Gpu {
                     switch_core::gpu::surface::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))
                 }
                 Red::Float32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                Red::StencilBits => f32::from_bits(u32::from(b[0])),
             };
             out.extend_from_slice(&value.to_le_bytes());
         }

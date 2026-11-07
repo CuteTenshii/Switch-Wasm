@@ -2,8 +2,17 @@
 
 use super::Translation;
 use crate::gpu::pipeline::{AttributeBase, Packed1010102};
-use crate::gpu::shader::isa::TexDim;
+use crate::gpu::shader::isa::{AtomOp, TexDim};
 use crate::gpu::texture::{SwizzleSource, TextureSlot};
+
+/// A buffer a shader reaches through a 64-bit constant-bank descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Global {
+    pub bank: u8,
+    pub offset: u16,
+    /// Whether an atomic writes it, which makes it a read-write binding.
+    pub written: bool,
+}
 
 /// Which pipeline stage a module is built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +36,7 @@ pub struct Layout {
     pub textures: Vec<TextureBinding>,
     /// See [`Translation::texture_offsets`].
     pub texture_offsets: Vec<(i32, i32)>,
-    pub globals: Vec<(u8, u16)>,
+    pub globals: Vec<Global>,
     /// Colour targets written, from `r0` in fours. Zero is a depth-only pass.
     pub targets: u32,
     /// Targets whose format is integer, written as raw words; filled from the draw.
@@ -150,6 +159,24 @@ pub(super) const VERTEX_ID: usize = 0x2fc;
 pub(super) const TEXTURE_BINDING: u32 = 32;
 
 pub const GLOBAL_BINDING: u32 = 96;
+
+/// All of a stage's constant banks are one buffer: a table of `(first word, word count)` per
+/// bank, then the banks, so a stage costs one storage binding however many banks it reads.
+pub const CONSTANTS_BINDING: u32 = 0;
+
+/// Banks the table has entries for.
+pub const CONSTANT_BANKS: u32 = 18;
+
+/// The atomics `gAtom` runs, by the code it is passed; all on unsigned words.
+pub(super) const ATOMS: [(AtomOp, &str); 7] = [
+    (AtomOp::Add, "atomicAdd"),
+    (AtomOp::Min, "atomicMin"),
+    (AtomOp::Max, "atomicMax"),
+    (AtomOp::And, "atomicAnd"),
+    (AtomOp::Or, "atomicOr"),
+    (AtomOp::Xor, "atomicXor"),
+    (AtomOp::Exch, "atomicExchange"),
+];
 
 impl Layout {
     /// Read a program's interface off its translation.

@@ -261,6 +261,39 @@ fn lea_computes_the_same_words_on_both_renderers() {
     assert_eq!(h.texel(1, 1), 0xffff_ffff, "every lea matched");
 }
 
+/// Put `words` in guest memory and name them in the fragment stage's bank 0 at `c0[0x110]`.
+fn bind_global(h: &mut Harness, words: &[u32]) {
+    let constants = h.base + 0x1500;
+    let buffer = h.base + 0x1a00;
+    for (word, &value) in words.iter().enumerate() {
+        h.vmm
+            .write_u32(&h.mem, buffer + word as u64 * 4, value)
+            .unwrap();
+    }
+    h.vmm
+        .write_u32(&h.mem, constants + 0x110, buffer as u32)
+        .unwrap();
+    h.vmm
+        .write_u32(&h.mem, constants + 0x114, (buffer >> 32) as u32)
+        .unwrap();
+    let mut ctx = switch_core::gpu::exec::ExecCtx {
+        mem: &h.mem,
+        vmm: &h.vmm,
+        as_id: h.as_id,
+        host1x: &mut h.host1x,
+        stats: &mut h.stats,
+        trace: false,
+    };
+    for (method, arg) in [
+        (0x8E0, 0x200),
+        (0x8E1, (constants >> 32) as u32),
+        (0x8E2, constants as u32),
+        (0x900 + 4 * 8 + 4, 1),
+    ] {
+        h.engine.write(method, arg, true, &mut ctx).unwrap();
+    }
+}
+
 /// A `ldg` through a constant-bank descriptor reads the address the add made, even
 /// when the shader rewrites the register the offset came from before loading.
 /// Echoes of Wisdom's controller applet builds its glyph quads this way, and the
@@ -328,36 +361,11 @@ fn a_global_load_reads_where_the_address_points_after_its_offset_register_change
     };
     let set_up = |h: &mut Harness| {
         h.triangle([0.0; 4]);
-        let constants = h.base + 0x1500;
-        let buffer = h.base + 0x1a00;
         // Every word but the two the offsets name reads as one half.
-        for word in 0..16u64 {
-            let value = if word == 4 || word == 5 { ONE } else { HALF };
-            h.vmm.write_u32(&h.mem, buffer + word * 4, value).unwrap();
-        }
-        h.vmm
-            .write_u32(&h.mem, constants + 0x110, buffer as u32)
-            .unwrap();
-        h.vmm
-            .write_u32(&h.mem, constants + 0x114, (buffer >> 32) as u32)
-            .unwrap();
-        // The fragment stage's bank 0.
-        let mut ctx = switch_core::gpu::exec::ExecCtx {
-            mem: &h.mem,
-            vmm: &h.vmm,
-            as_id: h.as_id,
-            host1x: &mut h.host1x,
-            stats: &mut h.stats,
-            trace: false,
-        };
-        for (method, arg) in [
-            (0x8E0, 0x200),
-            (0x8E1, (constants >> 32) as u32),
-            (0x8E2, constants as u32),
-            (0x900 + 4 * 8 + 4, 1),
-        ] {
-            h.engine.write(method, arg, true, &mut ctx).unwrap();
-        }
+        let words: Vec<u32> = (0..16)
+            .map(|word| if word == 4 || word == 5 { ONE } else { HALF })
+            .collect();
+        bind_global(h, &words);
     };
     agrees_shading(
         move || Harness::with_fragment_shader(shader()),
@@ -368,6 +376,102 @@ fn a_global_load_reads_where_the_address_points_after_its_offset_register_change
     set_up(&mut h);
     h.draw_with(&mut Software).expect("the draw");
     assert_eq!(h.texel(1, 1), 0xff00_ffff, "both loads read one");
+}
+
+/// `red` on a descriptor's buffer lands in guest memory as the rasterizer leaves it: one
+/// add per covered fragment, and an or of a bit. Echoes of Wisdom's visibility pass marks
+/// a buffer this way, and the device refused every draw of it.
+#[test]
+fn a_global_reduction_leaves_the_same_words_in_guest_memory_on_both_renderers() {
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    const RZ: u64 = 0xff;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    let iadd_c0 = |dst: u64, a: u64, word: u64, cin: u64, cout: u64| {
+        0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | a << 8 | dst
+    };
+    // red.<op>.u32 [addr + offset], src with the operation in bits 23..26.
+    let red = |op: u64, offset: u64, addr: u64, src: u64| {
+        0xebf8u64 << 48 | offset << 28 | op << 23 | PT | addr << 8 | src
+    };
+    // iscadd.cc dst, a, c0[word * 4], shift: the scaled index added to the descriptor.
+    let iscadd_c0 = |dst: u64, a: u64, word: u64, shift: u64| {
+        0x4c18u64 << 48 | 1 << 47 | shift << 39 | word << 20 | PT | a << 8 | dst
+    };
+    assert!(matches!(
+        switch_core::gpu::shader::isa::decode(iscadd_c0(10, 7, 0x110 / 4, 2)).op,
+        switch_core::gpu::shader::Op::Iscadd {
+            cout: true,
+            shift: 2,
+            ..
+        }
+    ));
+    let words = [
+        mov32i(7, 1),
+        iscadd_c0(10, 7, 0x110 / 4, 2),
+        iadd_c0(11, RZ, 0x114 / 4, 1, 0),
+        mov32i(2, 1),
+        mov32i(3, 4),
+        red(0, 0, 10, 2),
+        red(6, 4, 10, 3),
+        mov32i(0, 0),
+        mov32i(1, 0),
+        mov32i(2, 0),
+        mov32i(3, 0x3f80_0000),
+        0xe300_0000_0007_000f, // exit
+    ];
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| {
+        h.triangle([0.0; 4]);
+        bind_global(h, &[100, 1, 3]);
+    };
+    let words_after = |h: &Harness| -> Vec<u32> {
+        (0..3u64)
+            .map(|word| h.vmm.read_u32(&h.mem, h.base + 0x1a00 + word * 4).unwrap())
+            .collect()
+    };
+    let mut want = Harness::with_fragment_shader(shader());
+    set_up(&mut want);
+    want.draw_with(&mut Software).expect("the draw");
+    let covered = words_after(&want)[1] - 1;
+    assert!(covered > 0, "the triangle covers fragments");
+    assert_eq!(words_after(&want)[0], 100, "a word left alone");
+    assert_eq!(words_after(&want)[2], 7, "the or");
+
+    let Some(mut gpu) = device() else { return };
+    let mut got = Harness::with_fragment_shader(shader());
+    set_up(&mut got);
+    let before = gpu.fallbacks;
+    got.draw_with(&mut gpu).expect("the draw");
+    assert_eq!(
+        gpu.fallbacks, before,
+        "the draw did not run on the device: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(
+        words_after(&got),
+        [100, 1, 3],
+        "nothing lands before the flush"
+    );
+    // A second draw before the flush works on the words the first left on the device.
+    got.draw_with(&mut gpu).expect("the second draw");
+    assert_eq!(gpu.fallbacks, before, "the second draw fell back");
+    got.flush_with(&mut gpu);
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    let twice = words_after(&got);
+    assert_eq!(twice[1] - 1, 2 * covered, "both draws counted");
+    assert_eq!(twice[2], 7);
 }
 
 /// A shader reading its quad neighbour's register reads the same on both renderers,
@@ -387,6 +491,169 @@ fn a_shuffling_fragment_shader_reads_the_same_neighbour_the_rasterizer_reads() {
             },
         );
     }
+}
+
+/// A `vote` counts the quad's four lanes on both renderers, ballot bits in lane order.
+#[test]
+fn a_quad_vote_gives_the_same_verdicts_and_ballot_on_both_renderers() {
+    use switch_core::gpu::shader::isa::{self, ICmp, VoteMode};
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    const RZ: u64 = 0xff;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    // `@guard mov32i`.
+    let mov32i_if = |guard: u64, dst: u64, imm: u32| {
+        0x0100_0000_0000_0000 | (u64::from(imm) << 20) | guard << 16 | dst
+    };
+    // isetp.<cmp>.u32 p<p0>, pt, r<a>, r<b>
+    let isetp = |p0: u64, cmp: u64, a: u64, b: u64| {
+        0x5b60u64 << 48 | cmp << 49 | 7 << 39 | b << 20 | PT | a << 8 | p0 << 3 | 7
+    };
+    // vote.<mode> r<dst>, p<pred>, p0
+    let vote = |mode: u64, pred: u64, dst: u64| (0x50d8u64 | mode) << 48 | pred << 45 | dst;
+    const LT: u64 = 1;
+    const EQ: u64 = 2;
+    assert!(matches!(
+        isa::decode(isetp(0, LT, 0, 5)).op,
+        Op::Isetp {
+            cmp: ICmp::Lt,
+            p0: 0,
+            ..
+        }
+    ));
+    assert!(matches!(
+        isa::decode(isetp(3, EQ, 4, 6)).op,
+        Op::Isetp {
+            cmp: ICmp::Eq,
+            p0: 3,
+            ..
+        }
+    ));
+    assert!(matches!(
+        isa::decode(vote(1, 1, 4)).op,
+        Op::Vote {
+            mode: VoteMode::Any,
+            pred: 1,
+            dst: 4,
+            ..
+        }
+    ));
+    const ONE: u32 = 0x3f80_0000;
+    // `vColor.r`, a ramp across the target, as `derivative_fragment_shader` reads it.
+    let words = [
+        0xe003ff87_cff7ff00u64,
+        0x5080_0000_0047_0003,
+        0xe043ff88_0037ff00,
+        mov32i(5, 0x3f00_0000),
+        isetp(0, LT, 0, 5),
+        vote(1, 1, 4),
+        vote(0, 2, RZ),
+        mov32i(6, 5),
+        isetp(3, EQ, 4, 6),
+        mov32i(0, 0),
+        mov32i(1, 0),
+        mov32i(2, 0),
+        mov32i(3, ONE),
+        mov32i_if(1, 0, ONE),
+        mov32i_if(2, 1, ONE),
+        mov32i_if(3, 2, ONE),
+        0xe300_0000_0007_000f, // exit
+    ];
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| {
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+    };
+    for web_limits in [false, true] {
+        agrees_shading(
+            || Harness::with_fragment_shader(shader()),
+            move |gpu| gpu.set_web_limits(web_limits),
+            set_up,
+        );
+    }
+    let mut h = Harness::with_fragment_shader(shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    let seen: std::collections::BTreeSet<u32> = h.target().into_iter().collect();
+    assert!(
+        seen.len() >= 3,
+        "quads that agree and quads that split both occur: {seen:x?}"
+    );
+}
+
+/// `bfe.brev` reverses the source before extracting, the same on both renderers.
+/// Echoes of Wisdom's shaders use it, and the decoder refused it.
+#[test]
+fn a_reversing_bit_field_extract_gives_the_same_word_on_both_renderers() {
+    use switch_core::gpu::shader::isa;
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    const ONE: u32 = 0x3f80_0000;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    let mov32i_if = |guard: u64, dst: u64, imm: u32| {
+        0x0100_0000_0000_0000 | (u64::from(imm) << 20) | guard << 16 | dst
+    };
+    // bfe.brev r<dst>, r<a>, 32 << 8 (the whole word from bit 0)
+    let bfe_brev = |dst: u64, a: u64| 0x3800u64 << 48 | 1 << 40 | 0x2000 << 20 | PT | a << 8 | dst;
+    let isetp_eq = |p0: u64, a: u64, b: u64| {
+        0x5b60u64 << 48 | 2 << 49 | 7 << 39 | b << 20 | PT | a << 8 | p0 << 3 | 7
+    };
+    assert!(matches!(
+        isa::decode(bfe_brev(5, 4)).op,
+        Op::Bfe {
+            dst: 5,
+            a: 4,
+            brev: true,
+            signed: false,
+            ..
+        }
+    ));
+    let words = [
+        mov32i(4, 1),
+        mov32i(6, 0x8000_0000),
+        bfe_brev(5, 4),
+        isetp_eq(0, 5, 6),
+        mov32i(0, 0),
+        mov32i(1, 0),
+        mov32i(2, 0),
+        mov32i(3, ONE),
+        mov32i_if(0, 0, ONE),
+        0xe300_0000_0007_000f, // exit
+    ];
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| h.triangle([0.0; 4]);
+    agrees_shading(
+        move || Harness::with_fragment_shader(shader()),
+        |_| {},
+        set_up,
+    );
+    let mut h = Harness::with_fragment_shader(shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    assert_eq!(h.texel(1, 1), 0xff00_00ff, "bit 0 became bit 31");
 }
 
 /// A `tld4` gathers the same four texels in the same order on both renderers.

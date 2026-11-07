@@ -238,6 +238,8 @@ pub enum Op {
         b: Operand,
         bneg: bool,
         shift: u8,
+        /// `.cc`: the carry out of the add, which `iadd.x` reads.
+        cout: bool,
     },
     /// `lea`: `b + (a << shift)`. With `hi`, `b` plus the low word of the 64-bit
     /// `hi:a` shifted right by `32 - shift`; `neg` negates the shifted value's source.
@@ -363,6 +365,8 @@ pub enum Op {
         a: u8,
         b: Operand,
         signed: bool,
+        /// `.brev`: the source's bits are reversed before the extract.
+        brev: bool,
     },
     Popc {
         dst: u8,

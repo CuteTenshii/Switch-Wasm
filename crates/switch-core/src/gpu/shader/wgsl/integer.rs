@@ -61,13 +61,20 @@ impl Emitter<'_> {
                 b,
                 bneg,
                 shift,
+                cout,
             } => {
                 let x = self.r(a);
                 let x = self.ineg(aneg, x);
                 let y = self.operand(b);
                 let y = self.ineg(bneg, y);
                 let shift = u32::from(shift) & 31;
-                self.set_r(dst, &format!("(({x}) << {shift}u) + ({y})"));
+                let scaled = self.bind(&format!("({x}) << {shift}u"));
+                let sum = self.bind(&format!("{scaled} + ({y})"));
+                self.set_r(dst, &sum);
+                if cout {
+                    self.uses_carry = true;
+                    self.line(&format!("carry = {sum} < {scaled};"));
+                }
             }
             Op::Lea {
                 dst,
@@ -375,9 +382,16 @@ impl Emitter<'_> {
                     &format!("shf({low}, {high}, {count}, {left}, {hi_out})"),
                 );
             }
-            Op::Bfe { dst, a, b, signed } => {
+            Op::Bfe {
+                dst,
+                a,
+                b,
+                signed,
+                brev,
+            } => {
                 self.need("bfe");
                 let x = self.r(a);
+                let x = if brev { format!("reverseBits({x})") } else { x };
                 let desc = self.operand(b);
                 let desc = self.bind(&desc);
                 self.set_r(

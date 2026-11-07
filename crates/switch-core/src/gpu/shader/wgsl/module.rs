@@ -1,9 +1,9 @@
 //! Wrapping a translation into a complete module with its entry points.
 
 use super::layout::{
-    attribute_scalar, unpack_1010102, Coverage, Fold, Layout, Stage, ATTRIBUTE_WORDS, GENERIC_BASE,
-    GENERIC_STRIDE, GLOBAL_BINDING, IDENTITY_SWIZZLE, INSTANCE_ID, POSITION, TEXTURE_BINDING,
-    VERTEX_ID,
+    attribute_scalar, unpack_1010102, Coverage, Fold, Layout, Stage, ATOMS, ATTRIBUTE_WORDS,
+    CONSTANTS_BINDING, CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE, GLOBAL_BINDING,
+    IDENTITY_SWIZZLE, INSTANCE_ID, POSITION, TEXTURE_BINDING, VERTEX_ID,
 };
 use super::{Translation, Unsupported};
 use crate::gpu::pipeline::AttributeBase;
@@ -59,6 +59,9 @@ pub fn module(
             return Err(Unsupported::Quad { at });
         }
     }
+    if stage == Stage::Vertex && layout.globals.iter().any(|g| g.written) {
+        return Err(Unsupported::VertexWrite);
+    }
     // Directives first, then the lane index.
     if translated.quad_swap.is_some() {
         if translated.subgroups {
@@ -78,9 +81,9 @@ pub fn module(
         out.push_str(QUAD_SWAP);
         out.push_str("\n\n");
     }
-    for bank in &layout.const_banks {
+    if !layout.const_banks.is_empty() {
         out.push_str(&format!(
-            "@group({}) @binding({bank}) var<storage, read> cb{bank}: array<u32>;\n",
+            "@group({}) @binding({CONSTANTS_BINDING}) var<storage, read> cbs: array<u32>;\n",
             layout.group
         ));
     }
@@ -106,9 +109,14 @@ pub fn module(
             }
         ));
     }
-    for slot in 0..layout.globals.len() {
+    for (slot, global) in layout.globals.iter().enumerate() {
+        let (access, word) = if global.written {
+            ("read_write", "atomic<u32>")
+        } else {
+            ("read", "u32")
+        };
         out.push_str(&format!(
-            "@group({}) @binding({}) var<storage, read> g{slot}: array<u32>;\n",
+            "@group({}) @binding({}) var<storage, {access}> g{slot}: array<{word}>;\n",
             layout.group,
             GLOBAL_BINDING + slot as u32
         ));
@@ -118,13 +126,35 @@ pub fn module(
     }
     if !layout.globals.is_empty() {
         out.push_str("fn gRead(slot: u32, offset: u32) -> u32 {\n  switch (slot) {\n");
-        for slot in 0..layout.globals.len() {
-            out.push_str(&format!(
-                "    case {slot}u: {{ return g{slot}[offset >> 2u]; }}\n"
-            ));
+        for (slot, global) in layout.globals.iter().enumerate() {
+            let word = format!("g{slot}[offset >> 2u]");
+            let read = if global.written {
+                format!("atomicLoad(&{word})")
+            } else {
+                word
+            };
+            out.push_str(&format!("    case {slot}u: {{ return {read}; }}\n"));
         }
         // Out of range reads zero.
         out.push_str("    default: { return 0u; }\n  }\n}\n\n");
+    }
+    if layout.globals.iter().any(|g| g.written) {
+        out.push_str(
+            "fn gAtom(op: u32, slot: u32, offset: u32, value: u32) -> u32 {\n  let word = offset >> 2u;\n  switch (slot) {\n",
+        );
+        for (slot, _) in layout.globals.iter().enumerate().filter(|(_, g)| g.written) {
+            out.push_str(&format!(
+                "    case {slot}u: {{\n      if (word < arrayLength(&g{slot})) {{\n        switch (op) {{\n"
+            ));
+            for (code, (_, function)) in ATOMS.iter().enumerate() {
+                out.push_str(&format!(
+                    "          case {code}u: {{ return {function}(&g{slot}[word], value); }}\n"
+                ));
+            }
+            out.push_str("          default: { }\n        }\n      }\n    }\n");
+        }
+        // Out of range, or no such slot, changes nothing and reads zero.
+        out.push_str("    default: { }\n  }\n  return 0u;\n}\n\n");
     }
 
     // `a[]` in and out are separate so they do not alias.
@@ -142,14 +172,18 @@ pub fn module(
         "fn attrOut(offset: u32, value: f32) {{ attr_out[(offset >> 2u) & {mask}u] = value; }}\n\n"
     ));
 
-    out.push_str("fn cbRead(bank: u32, offset: u32) -> u32 {\n  switch (bank) {\n");
-    for bank in &layout.const_banks {
+    // An unbound bank, or a read past the end of one, is zero.
+    if layout.const_banks.is_empty() {
+        out.push_str("fn cbRead(bank: u32, offset: u32) -> u32 { return 0u; }\n\n");
+    } else {
         out.push_str(&format!(
-            "    case {bank}u: {{ return cb{bank}[offset >> 2u]; }}\n"
+            "fn cbRead(bank: u32, offset: u32) -> u32 {{\n  \
+             if (bank >= {CONSTANT_BANKS}u) {{ return 0u; }}\n  \
+             let word = offset >> 2u;\n  \
+             if (word >= cbs[bank * 2u + 1u]) {{ return 0u; }}\n  \
+             return cbs[cbs[bank * 2u] + word];\n}}\n\n"
         ));
     }
-    // An unbound bank reads zero.
-    out.push_str("    default: { return 0u; }\n  }\n}\n\n");
 
     // Neither reads an integer image here.
     if layout.textures.iter().any(|texture| texture.uint)

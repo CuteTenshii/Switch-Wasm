@@ -63,7 +63,7 @@ impl Gpu {
                 .space
                 .pending
                 .iter()
-                .all(|pending| clear(&pending.target))
+                .all(|pending| pending.target().is_none_or(clear))
     }
 
     /// Run `blit` on the device if its source is, or can be held there as the plain colour

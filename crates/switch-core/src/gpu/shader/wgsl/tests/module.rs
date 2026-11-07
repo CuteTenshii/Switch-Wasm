@@ -3,6 +3,7 @@
 use super::super::layout::{GENERIC_BASE, GENERIC_STRIDE};
 use super::*;
 use crate::gpu::pipeline::AttributeBase;
+use crate::gpu::shader::isa::{AtomOp, AtomSpace, AtomType};
 use crate::gpu::texture::{SwizzleSource, TextureSlot};
 
 /// The smallest vertex/fragment pair with an interface.
@@ -113,8 +114,7 @@ fn a_layout_names_every_binding_the_text_calls_through() {
         }]
     );
     let source = module(&translated, Stage::Fragment, &layout).unwrap();
-    assert!(source.contains("var<storage, read> cb1:"), "{source}");
-    assert!(source.contains("var<storage, read> cb5:"), "{source}");
+    assert!(source.contains("var<storage, read> cbs:"), "{source}");
     assert!(
         source.contains("case 420u: { return textureSampleLevel(tex0, smp0"),
         "{source}"
@@ -883,7 +883,14 @@ fn a_global_load_through_a_descriptor_loaded_whole_reads_that_descriptor() {
         (ldg, ALWAYS),
         (Op::Exit, ALWAYS),
     ]);
-    assert_eq!(translate(&through_ldc).unwrap().globals, vec![(1, 0x40)]);
+    assert_eq!(
+        translate(&through_ldc).unwrap().globals,
+        vec![Global {
+            bank: 1,
+            offset: 0x40,
+            written: false
+        }]
+    );
 
     let mov = |dst, offset| Op::Mov {
         dst,
@@ -895,7 +902,14 @@ fn a_global_load_through_a_descriptor_loaded_whole_reads_that_descriptor() {
         (ldg, ALWAYS),
         (Op::Exit, ALWAYS),
     ]);
-    assert_eq!(translate(&through_movs).unwrap().globals, vec![(1, 0x40)]);
+    assert_eq!(
+        translate(&through_movs).unwrap().globals,
+        vec![Global {
+            bank: 1,
+            offset: 0x40,
+            written: false
+        }]
+    );
 
     let mismatched = program(&[
         (mov(0, 0x40), ALWAYS),
@@ -904,6 +918,64 @@ fn a_global_load_through_a_descriptor_loaded_whole_reads_that_descriptor() {
         (Op::Exit, ALWAYS),
     ]);
     assert!(translate(&mismatched).is_err());
+}
+
+#[test]
+fn an_atomic_on_a_descriptor_makes_its_buffer_read_write_and_only_for_fragments() {
+    let atom = |ty, space| Op::Atom {
+        dst: RZ,
+        addr: 0,
+        offset: 4,
+        src: 2,
+        op: AtomOp::Or,
+        ty,
+        space,
+    };
+    let load = Op::Ldc {
+        dst: 0,
+        bank: 1,
+        offset: 0x40,
+        idx: RZ,
+        size: MemSize::B64,
+    };
+    let translated = translate(&program(&[
+        (load, ALWAYS),
+        (atom(AtomType::U32, AtomSpace::Global), ALWAYS),
+        (Op::Exit, ALWAYS),
+    ]))
+    .unwrap();
+    assert_eq!(
+        translated.globals,
+        vec![Global {
+            bank: 1,
+            offset: 0x40,
+            written: true
+        }]
+    );
+    let layout = Layout::of(&translated, Stage::Fragment);
+    let fragment = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(fragment.contains("var<storage, read_write> g0: array<atomic<u32>>"));
+    assert!(fragment.contains("atomicOr(&g0[word], value)"));
+    assert_eq!(
+        module(&translated, Stage::Vertex, &layout).unwrap_err(),
+        Unsupported::VertexWrite
+    );
+
+    for (ty, space) in [
+        (AtomType::S32, AtomSpace::Global),
+        (AtomType::U64, AtomSpace::Global),
+        (AtomType::U32, AtomSpace::Shared),
+    ] {
+        let refused = translate(&program(&[
+            (load, ALWAYS),
+            (atom(ty, space), ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]));
+        assert!(
+            matches!(refused, Err(Unsupported::Op { at: 1, .. })),
+            "{ty:?} {space:?}"
+        );
+    }
 }
 
 /// Nintendo Switch Sports: a size-only texture query and an RZ-cleared offset.

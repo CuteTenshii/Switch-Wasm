@@ -1,5 +1,6 @@
 //! The emitter state and the operand and modifier builders it shares.
 
+use super::layout::Global;
 use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::isa::{
     BoolOp, FCmp, FMod, FRound, HMerge, HSwizzle, ICmp, LogicOp, MemSize, Op, Operand, Pred,
@@ -28,7 +29,7 @@ pub(super) struct Emitter<'a> {
     pub(super) centroid_loads: BTreeSet<usize>,
     pub(super) banks: BTreeSet<u8>,
     pub(super) textures: Vec<(TextureSlot, TexDim, bool)>,
-    pub(super) globals: Vec<(u8, u16)>,
+    pub(super) globals: Vec<Global>,
     /// Counter naming `let` bindings.
     temps: usize,
     /// Each instruction's possible predecessors, for tracing a register's value.
@@ -63,6 +64,27 @@ impl<'a> Emitter<'a> {
             queried: Vec::new(),
             texture_offsets: Vec::new(),
         }
+    }
+
+    /// The binding slot of a descriptor, made on first use and read-write once anything writes it.
+    pub(super) fn global_slot(&mut self, bank: u8, offset: u16, written: bool) -> usize {
+        let slot = match self
+            .globals
+            .iter()
+            .position(|g| g.bank == bank && g.offset == offset)
+        {
+            Some(slot) => slot,
+            None => {
+                self.globals.push(Global {
+                    bank,
+                    offset,
+                    written: false,
+                });
+                self.globals.len() - 1
+            }
+        };
+        self.globals[slot].written |= written;
+        slot
     }
 
     /// The constant-bank descriptor a `ldg` address was built from, plus a register offset:
@@ -124,6 +146,15 @@ impl<'a> Emitter<'a> {
         for i in (0..at).rev() {
             match self.program.op(i) {
                 Op::Iadd {
+                    dst,
+                    b: Operand::Const { bank, offset },
+                    aneg: false,
+                    bneg: false,
+                    cout: true,
+                    ..
+                } if dst == addr && lo.is_none() => lo = Some((bank, offset)),
+                // The scaled form, `iscadd.cc r0, r1, c0[0x510], 2`.
+                Op::Iscadd {
                     dst,
                     b: Operand::Const { bank, offset },
                     aneg: false,

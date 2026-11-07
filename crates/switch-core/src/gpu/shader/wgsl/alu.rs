@@ -1,9 +1,11 @@
 //! Translation of everything that is not control flow or texturing.
 
 use super::emitter::Emitter;
-use super::layout::generic_slot;
+use super::layout::{generic_slot, ATOMS};
 use super::Unsupported;
-use crate::gpu::shader::isa::{MemSize, Op, Operand, ShflMode, TexDim};
+use crate::gpu::shader::isa::{
+    AtomSpace, AtomType, MemSize, Op, Operand, ShflMode, TexDim, VoteMode, RZ,
+};
 use crate::gpu::texture::TextureSlot;
 
 impl Emitter<'_> {
@@ -61,11 +63,54 @@ impl Emitter<'_> {
                 self.set_f(dst, &value);
             }
 
-            Op::Fcmp { .. } | Op::Rro { .. } | Op::Fadd { .. } | Op::Fmul { .. } | Op::Ffma { .. } | Op::Fmnmx { .. } | Op::Mufu { .. } | Op::Hadd2 { .. } | Op::Hmul2 { .. } | Op::Hfma2 { .. } | Op::Hset2 { .. } | Op::Hsetp2 { .. } | Op::Fsetp { .. } | Op::Fset { .. } => self.emit_float(op)?,
+            Op::Fcmp { .. }
+            | Op::Rro { .. }
+            | Op::Fadd { .. }
+            | Op::Fmul { .. }
+            | Op::Ffma { .. }
+            | Op::Fmnmx { .. }
+            | Op::Mufu { .. }
+            | Op::Hadd2 { .. }
+            | Op::Hmul2 { .. }
+            | Op::Hfma2 { .. }
+            | Op::Hset2 { .. }
+            | Op::Hsetp2 { .. }
+            | Op::Fsetp { .. }
+            | Op::Fset { .. } => self.emit_float(op)?,
 
-            Op::Iadd { .. } | Op::Iadd3 { .. } | Op::Iscadd { .. } | Op::Lea { .. } | Op::Vmnmx { .. } | Op::Imnmx { .. } | Op::Imul { .. } | Op::Xmad { .. } | Op::Isetp { .. } | Op::Iset { .. } | Op::Icmp { .. } | Op::Bfi { .. } | Op::R2p { .. } | Op::Lop { .. } | Op::Lop3 { .. } | Op::Shl { .. } | Op::Shr { .. } | Op::Shf { .. } | Op::Bfe { .. } | Op::Popc { .. } | Op::Flo { .. } | Op::Sel { .. } => self.emit_integer(op)?,
+            Op::Iadd { .. }
+            | Op::Iadd3 { .. }
+            | Op::Iscadd { .. }
+            | Op::Lea { .. }
+            | Op::Vmnmx { .. }
+            | Op::Imnmx { .. }
+            | Op::Imul { .. }
+            | Op::Xmad { .. }
+            | Op::Isetp { .. }
+            | Op::Iset { .. }
+            | Op::Icmp { .. }
+            | Op::Bfi { .. }
+            | Op::R2p { .. }
+            | Op::Lop { .. }
+            | Op::Lop3 { .. }
+            | Op::Shl { .. }
+            | Op::Shr { .. }
+            | Op::Shf { .. }
+            | Op::Bfe { .. }
+            | Op::Popc { .. }
+            | Op::Flo { .. }
+            | Op::Sel { .. } => self.emit_integer(op)?,
 
-            Op::I2f { .. } | Op::F2i { .. } | Op::F2f { .. } | Op::I2i { .. } | Op::Mov { .. } | Op::Mov32i { .. } | Op::S2r { .. } | Op::Psetp { .. } | Op::Pset { .. } | Op::Csetp { .. } => self.emit_conversion(at, op)?,
+            Op::I2f { .. }
+            | Op::F2i { .. }
+            | Op::F2f { .. }
+            | Op::I2i { .. }
+            | Op::Mov { .. }
+            | Op::Mov32i { .. }
+            | Op::S2r { .. }
+            | Op::Psetp { .. }
+            | Op::Pset { .. }
+            | Op::Csetp { .. } => self.emit_conversion(at, op)?,
 
             // ---- memory ----
             Op::Ldc {
@@ -234,6 +279,33 @@ impl Emitter<'_> {
                 self.set_f(dst, &format!("{ka} * {x} + {kb} * {y}"));
             }
 
+            // The warp is the quad, as in the rasterizer: lane `n` is bit `n` of the ballot.
+            Op::Vote {
+                dst,
+                pred,
+                src,
+                mode,
+            } => {
+                self.quad.get_or_insert(at);
+                self.quad_swap.get_or_insert(at);
+                let holds = self.holds(src);
+                let here = self.bind(&format!("select(0u, 1u, {holds})"));
+                let x = self.bind(&format!("quadSwapX({here})"));
+                let y = self.bind(&format!("quadSwapY({here})"));
+                let d = self.bind(&format!("quadSwapDiagonal({here})"));
+                let lane = self.bind("(quadLane() & 3u)");
+                let ballot = self.bind(&format!(
+                    "(({here} << {lane}) | ({x} << ({lane} ^ 1u)) | ({y} << ({lane} ^ 2u)) | ({d} << ({lane} ^ 3u)))"
+                ));
+                let verdict = match mode {
+                    VoteMode::All => format!("{ballot} == 15u"),
+                    VoteMode::Any => format!("{ballot} != 0u"),
+                    VoteMode::Eq => format!("{ballot} == 0u || {ballot} == 15u"),
+                };
+                self.set_r(dst, &ballot);
+                self.set_p(pred, &format!("({verdict})"));
+            }
+
             Op::Nop | Op::Inert => {}
 
             // `ldg` from a constant bank descriptor binds a buffer; other global
@@ -247,13 +319,7 @@ impl Emitter<'_> {
                 let Some((bank, descriptor)) = self.global_base(at, addr) else {
                     return Err(Unsupported::Op { at, op });
                 };
-                let slot = match self.globals.iter().position(|g| *g == (bank, descriptor)) {
-                    Some(slot) => slot,
-                    None => {
-                        self.globals.push((bank, descriptor));
-                        self.globals.len() - 1
-                    }
-                };
+                let slot = self.global_slot(bank, descriptor, false);
                 // The address register still holds descriptor plus offset, whatever
                 // happened to the register the offset was added from.
                 let address = self.r(addr);
@@ -268,6 +334,37 @@ impl Emitter<'_> {
                         dst.wrapping_add(word),
                         &format!("gRead({slot}u, {base} + {byte}u)"),
                     );
+                }
+            }
+
+            // An unsigned atomic on a descriptor's buffer; the old value lands in `dst`.
+            Op::Atom {
+                dst,
+                addr,
+                offset,
+                src,
+                op: atom,
+                ty: AtomType::U32,
+                space: AtomSpace::Global,
+            } => {
+                let code = ATOMS.iter().position(|&(known, _)| known == atom);
+                let (Some(code), Some((bank, descriptor))) = (code, self.global_base(at, addr))
+                else {
+                    return Err(Unsupported::Op { at, op });
+                };
+                let slot = self.global_slot(bank, descriptor, true);
+                let address = self.r(addr);
+                let start = self.operand(Operand::Const {
+                    bank,
+                    offset: descriptor,
+                });
+                let base = self.bind(&format!("({address} - {start} + {}u)", offset as u32));
+                let value = self.r(src);
+                let call = format!("gAtom({code}u, {slot}u, {base}, {value})");
+                if dst == RZ {
+                    self.line(&format!("_ = {call};"));
+                } else {
+                    self.set_r(dst, &call);
                 }
             }
 
@@ -334,8 +431,6 @@ impl Emitter<'_> {
             | Op::Sts { .. }
             | Op::Atom { .. }
             | Op::Bar { .. }
-            // A ballot needs the warp, which is only a quad here.
-            | Op::Vote { .. }
             | Op::Suld { .. }
             | Op::Sust { .. }
             | Op::Unimplemented { .. } => return Err(Unsupported::Op { at, op }),

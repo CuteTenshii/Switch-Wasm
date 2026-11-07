@@ -11,15 +11,35 @@ use crate::Shape;
 #[derive(Debug)]
 pub(crate) struct Pending {
     pub(crate) staging: wgpu::Buffer,
-    pub(crate) target: Target,
+    pub(crate) what: Readback,
     /// The ask it was made in; see `Space::asked`.
     pub(crate) generation: u64,
-    /// Bytes per row on the device; for depth this is the device format's, not the guest's.
-    pub(crate) row_bytes: u32,
-    /// `row_bytes` rounded up to the 256 bytes `copyTextureToBuffer` wants.
-    pub(crate) padded: u32,
     /// [`MAP_WAITING`] until the map callback runs, then [`MAP_READY`] or [`MAP_FAILED`].
     pub(crate) state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+/// What a readback brings back.
+#[derive(Debug)]
+pub(crate) enum Readback {
+    Surface {
+        target: Target,
+        /// Bytes per row on the device; for depth this is the device format's, not the guest's.
+        row_bytes: u32,
+        /// `row_bytes` rounded up to the 256 bytes `copyTextureToBuffer` wants.
+        padded: u32,
+    },
+    /// A buffer shaders wrote through, put back as the words that changed since `original`.
+    Global { addr: u64, original: Vec<u8> },
+}
+
+impl Pending {
+    /// The surface this brings back, if it is one.
+    pub(crate) fn target(&self) -> Option<&Target> {
+        match &self.what {
+            Readback::Surface { target, .. } => Some(target),
+            Readback::Global { .. } => None,
+        }
+    }
 }
 
 pub(crate) const MAP_WAITING: u8 = 0;
@@ -33,6 +53,14 @@ pub(crate) const MAP_FAILED: u8 = 2;
 pub(crate) enum Scratch {
     Buffer(wgpu::Buffer),
     Texture(wgpu::Texture),
+}
+
+/// Guest memory shaders write through atomics, held on the device until the next flush.
+#[derive(Debug)]
+pub(crate) struct HeldGlobal {
+    pub(crate) buffer: wgpu::Buffer,
+    /// The guest's bytes when it was uploaded; only what differs goes back.
+    pub(crate) original: Vec<u8>,
 }
 
 /// A render target held on the device, and its guest memory origin.

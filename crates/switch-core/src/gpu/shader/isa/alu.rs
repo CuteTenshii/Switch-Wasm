@@ -118,6 +118,7 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                 b,
                 bneg: field(insn, 48, 1) != 0,
                 shift: field(insn, 39, 5) as u8,
+                cout: field(insn, 47, 1) != 0,
             }
         }
         // imnmx, signed 48, pred at 39.
@@ -214,14 +215,12 @@ pub(super) fn decode_alu(insn: u64) -> Op {
         // bfe, signed 48, brev 40.
         0x00 => {
             let Some(b) = rhs_int else { return un };
-            if field(insn, 40, 1) != 0 {
-                return un;
-            }
             Op::Bfe {
                 dst: reg(insn, 0, 8),
                 a: reg(insn, 8, 8),
                 b,
                 signed: field(insn, 48, 1) != 0,
+                brev: field(insn, 40, 1) != 0,
             }
         }
         // popc, inv 40.

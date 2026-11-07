@@ -415,6 +415,7 @@ mod tests {
                 b: Operand::Reg(b),
                 bneg: false,
                 shift,
+                cout: false,
             },
         )
     }

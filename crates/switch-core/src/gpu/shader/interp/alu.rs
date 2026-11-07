@@ -368,10 +368,15 @@ impl Invocation {
                 b,
                 bneg,
                 shift,
+                cout,
             } => {
                 let x = ineg_if(self.reg(a), aneg).wrapping_shl(shift as u32);
                 let y = ineg_if(self.operand(b, env)?, bneg);
-                self.set_reg(dst, x.wrapping_add(y));
+                let sum = u64::from(x) + u64::from(y);
+                self.set_reg(dst, sum as u32);
+                if cout {
+                    self.carry = sum > u64::from(u32::MAX);
+                }
             }
             Op::Lea {
                 dst,
@@ -663,11 +668,22 @@ impl Invocation {
                     },
                 );
             }
-            Op::Bfe { dst, a, b, signed } => {
+            Op::Bfe {
+                dst,
+                a,
+                b,
+                signed,
+                brev,
+            } => {
                 let desc = self.operand(b, env)?;
                 let start = desc & 0xff;
                 let width = (desc >> 8) & 0xff;
-                self.set_reg(dst, bitfield_extract(self.reg(a), start, width, signed));
+                let source = if brev {
+                    self.reg(a).reverse_bits()
+                } else {
+                    self.reg(a)
+                };
+                self.set_reg(dst, bitfield_extract(source, start, width, signed));
             }
             Op::Popc { dst, b, inv } => {
                 let v = inv_if(self.operand(b, env)?, inv);
