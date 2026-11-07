@@ -33,7 +33,7 @@ impl Credit {
     }
 
     pub fn add(&self, bytes: u32) {
-        let _ = self.bytes.fetch_update(Relaxed, Relaxed, |held| {
+        let _ = self.bytes.try_update(Relaxed, Relaxed, |held| {
             Some(held.saturating_add(bytes).min(MAX_WINDOW))
         });
         self.notify.notify_one();
@@ -57,7 +57,7 @@ impl Credit {
     /// Spend `bytes` only if all of them are covered.
     fn try_spend(&self, bytes: usize) -> bool {
         self.bytes
-            .fetch_update(Relaxed, Relaxed, |held| held.checked_sub(bytes as u32))
+            .try_update(Relaxed, Relaxed, |held| held.checked_sub(bytes as u32))
             .is_ok()
     }
 }
