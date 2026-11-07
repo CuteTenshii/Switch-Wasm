@@ -12,9 +12,9 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 - **`fatal:u`** carries the `Result` that stopped a process. Each process keeps its report (`Cpu::guest_fatal` reads the running one's) after the diagnostic is drained, so the browser can treat the booted title's later `ExitProcess` as a crash rather than a clean halt. A library applet process that reports and then exits still ends as an exit, so its caller gets a result.
 - **`erpt`** journals *context*, one record per category (`ErrorInfo`, `GpuCrashInfo`, ...), replaced on resubmission rather than appended; `CreateReport` writes the journal out whole. Nothing persists and nothing uploads. `IManager`'s event fires when a report is created.
 - **`ssl`** - contexts and options are real; **`CreateConnection` deliberately reports unimplemented** rather than handing back a connection that can never connect.
-- **`bsd`** models a link that is up and a network where nothing answers: loopback within the process works, anything needing an outside peer fails at once with a definite FreeBSD errno. Datagram sockets are the exception; see `net.rs` below.
+- **`bsd`** models a link that is up and a network where nothing answers: loopback within the process works, anything needing an outside peer fails at once with a definite FreeBSD errno. Datagram sockets are the exception; see `net/` below.
 - **`ns`** reports a console with nothing installed: `ListApplicationRecord` (app manager cmd 0, read-only record cmd 3) answers zero records with the count written, and `HasApplicationRecord` is `false`.
-- **`sfdnsres`** - every lookup fails definitively; see `net.rs` below.
+- **`sfdnsres`** - every lookup fails definitively; see `net/` below.
 - **`nsd`** - `Resolve`/`ResolveEx` replace `%` with the production environment `lp1` and succeed; other commands are refused.
 - **`usb:ds`/`usb:hs`** - no cable attached and nothing plugged in; see `usb.rs` below.
 - **`pctl`** reports the console unrestricted. Watch the direction: `Confirm*`/`Check*Permission` reply with a bare `Result` where success *is* permitted, `IsRestriction*` is `false`, `IsFreeCommunicationAvailable`/`IsStereoVisionPermitted` are `true`.
@@ -144,7 +144,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 - `fatal:u` commands carry the guest's `Result`, its only account of why it stopped; it is reported, and the call succeeds (no error screen policy).
 - `lm` is where `nnSdk`'s `NN_LOG` output goes (not `svcOutputDebugString`). `Log` reads its packet from the map-alias send buffer. The prefix goes on a message's head packet and the newline on its tail.
 
-### `crates/switch-core/src/services/net.rs`
+### `crates/switch-core/src/services/net/`
 
 - Model: an empty network, a state a real console reaches and every caller handles. `sfdnsres` resolves nothing; `nifm` reports a Wi-Fi link that is up with internet; `ssl` builds contexts that never handshake; `bsd` connections to anything but this process are refused immediately (`ECONNREFUSED`, not a timeout, since a frame loop has no other thread to run while blocked).
 - **With the network on** (`Cpu::set_network`), the host carries what leaves the console; see `netbridge.rs`. Off is the default and everything above holds. `sfdnsres` `GetAddrInfo` answers a literal address as itself and a name with a stable synthetic address in `198.18.0.0/15`; `bsd` maps it back to the name on `connect`, so DNS happens at the host and a name that does not exist fails at connect, not at lookup. The serialized `addrinfo` is switchbrew's (big-endian words, a 16-byte `sockaddr_in` with a 16-bit family, an empty canonical name); the `sockaddr_in` layout inside it is from memory of other emulators, not checked against a guest.
