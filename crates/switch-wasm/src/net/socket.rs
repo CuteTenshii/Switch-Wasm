@@ -27,8 +27,6 @@ struct Link {
     inbox: Rc<RefCell<Inbox>>,
     /// Frames for a socket that has not opened yet.
     pending: Vec<Vec<u8>>,
-    /// The page has been told the socket opened.
-    announced: bool,
     /// Kept alive for as long as the socket can call them.
     _callbacks: [Closure<dyn FnMut(JsValue)>; 3],
 }
@@ -67,16 +65,23 @@ pub fn switch_net_connect(url: &str) -> Result<(), JsValue> {
             }
         })
     };
-    let ended = |inbox: &Rc<RefCell<Inbox>>| {
+    let on_open = Closure::<dyn FnMut(JsValue)>::new(|_: JsValue| {
+        post("net_state", &[("state", "open".into())]);
+    });
+    // A failed connect closes too, so this is the one place a lost link is noticed.
+    let on_close = {
         let inbox = inbox.clone();
-        Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| inbox.borrow_mut().ended = true)
+        Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
+            inbox.borrow_mut().ended = true;
+            post("net_state", &[("state", "unreachable".into())]);
+        })
     };
-    let (on_error, on_close) = (ended(&inbox), ended(&inbox));
-    socket.set_onmessage(Some(
-        on_message.as_ref().unchecked_ref::<js_sys::Function>(),
-    ));
-    socket.set_onerror(Some(on_error.as_ref().unchecked_ref::<js_sys::Function>()));
-    socket.set_onclose(Some(on_close.as_ref().unchecked_ref::<js_sys::Function>()));
+    let callback = |closure: &Closure<dyn FnMut(JsValue)>| -> js_sys::Function {
+        closure.as_ref().unchecked_ref::<js_sys::Function>().clone()
+    };
+    socket.set_onmessage(Some(&callback(&on_message)));
+    socket.set_onopen(Some(&callback(&on_open)));
+    socket.set_onclose(Some(&callback(&on_close)));
 
     post("net_state", &[("state", "connecting".into())]);
     STATE.with(|state| {
@@ -89,11 +94,16 @@ pub fn switch_net_connect(url: &str) -> Result<(), JsValue> {
             socket,
             inbox,
             pending: Vec::new(),
-            announced: false,
-            _callbacks: [on_message, on_error, on_close],
+            _callbacks: [on_message, on_open, on_close],
         });
     });
     Ok(())
+}
+
+/// The guest's connections as JSON, newest first; see `Client::report`.
+#[wasm_bindgen]
+pub fn switch_net_connections_json() -> String {
+    STATE.with(|state| state.borrow().client.report())
 }
 
 /// Close the link and take the network away from the guest.
@@ -116,7 +126,7 @@ pub fn switch_net_disconnect() {
 
 fn close(socket: &WebSocket) {
     socket.set_onmessage(None);
-    socket.set_onerror(None);
+    socket.set_onopen(None);
     socket.set_onclose(None);
     let _ = socket.close();
 }
@@ -134,18 +144,19 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
 
         let mut events = Vec::new();
         let mut gone = false;
+        let mut broken = false;
         if let Some(link) = link.as_mut() {
             let frames: Vec<_> = link.inbox.borrow_mut().frames.drain(..).collect();
             for raw in frames {
                 match client.incoming(&raw) {
                     Ok(event) => events.extend(event),
                     Err(_) => {
-                        gone = true;
+                        broken = true;
                         break;
                     }
                 }
             }
-            gone |= link.inbox.borrow().ended;
+            gone = broken || link.inbox.borrow().ended;
         }
 
         let commands = cpu.take_net_commands();
@@ -153,9 +164,6 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
             Some(link) if !gone => {
                 let frames = client.outgoing(commands);
                 if link.socket.ready_state() == WebSocket::OPEN {
-                    if !std::mem::replace(&mut link.announced, true) {
-                        post("net_state", &[("state", "open".into())]);
-                    }
                     for frame in link.pending.drain(..).chain(frames) {
                         let _ = link.socket.send_with_u8_array(&frame);
                     }
@@ -171,7 +179,10 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
                 close(&link.socket);
             }
             events.extend(client.lost());
-            post("net_state", &[("state", "unreachable".into())]);
+            // A closed socket has already said so; one that spoke nonsense has not.
+            if broken {
+                post("net_state", &[("state", "unreachable".into())]);
+            }
         }
         cpu.deliver_net_events(events);
     });
