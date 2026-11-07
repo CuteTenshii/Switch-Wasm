@@ -216,6 +216,8 @@ export interface ErrorDialog {
   message: string;
 }
 
+export type NetState = 'off' | 'connecting' | 'open' | 'unreachable';
+
 export interface Commands {
   // End the running title and its applets; the console stays.
   endTitle(): void;
@@ -226,6 +228,11 @@ export interface Commands {
   setTouch(points: Uint32Array): void;
   setBattery(percent: number, charging: boolean): void;
   setOperationMode(docked: boolean): void;
+  // Give the guest a network through the relay at `url`, or take it away.
+  connectNetwork(url: string): void;
+  disconnectNetwork(): void;
+  // The guest's connections, newest first: `[{id, host, port, proto, state, sent, received}]`.
+  netConnections(): string;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
   loadProgram(file: File): number;
@@ -384,5 +391,7 @@ export type WorkerMessage =
   | ({ type: 'keyboard' } & KeyboardRequest)
   // The guest's profile edits are stored; the page reloads them.
   | { type: 'profiles_edited' }
+  // The link to the relay changed: `unreachable` is a socket that failed or closed.
+  | { type: 'net_state'; state: NetState }
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: string };

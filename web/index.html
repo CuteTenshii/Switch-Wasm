@@ -259,6 +259,7 @@
       <button class="tab" data-tab="debug" role="tab" aria-selected="false">Debug</button>
       <button class="tab" data-tab="files" role="tab" aria-selected="false">Files</button>
       <button class="tab" data-tab="nand" role="tab" aria-selected="false">NAND</button>
+      <button class="tab" data-tab="network" role="tab" aria-selected="false">Network</button>
     </div>
     <button class="icon-btn" id="btn-panel-close" title="Close panel" aria-label="Close panel">
     </button>
@@ -559,6 +560,40 @@
           </span>
         </div>
         <p class="muted tiny" id="firmware-state">no system data archives</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="tabpanel" data-panel="network">
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Internet</span>
+        <span class="section-note" id="net-badge">off</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">The console reaches the Internet through <code>switch-relay</code>, run
+          on this computer. With this off it sees a network that never answers.</p>
+        <div class="panel-tools">
+          <label class="field" for="net-url"><span class="field-label">Relay</span><input id="net-url"
+            type="text" class="addr" spellcheck="false" autocomplete="off"></label>
+          <button id="btn-net" class="btn small" aria-pressed="false">Turn on</button>
+        </div>
+        <p class="muted tiny" id="net-note" hidden></p>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Connections</span>
+        <span class="section-note" id="net-count">0</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="net-empty">None yet.</p>
+        <table class="debug-timings net-table" id="net-table" hidden>
+          <thead><tr><th scope="col">Host</th><th scope="col">State</th>
+            <th scope="col">Out</th><th scope="col">In</th></tr></thead>
+          <tbody id="net-rows"></tbody>
+        </table>
       </div>
     </details>
   </section>

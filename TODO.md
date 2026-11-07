@@ -22,6 +22,9 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 - The worker's host file table keeps every update and DLC added during a visit, each with up to 16 MiB of chunk cache; it should drop a file the session no longer reads.
 - `npns:s` cmd 3 (Receive) is refused; qlaunch polls it constantly. Switchbrew's NPNS page does not give the empty-queue result, so find it first.
 - Once `Receive` is handled, raise the system's own alerts: low battery for the console and for each controller, controller connected and disconnected.
+- Internet through the relay (`docs/relay.md`): `ssl:context` `CreateConnection` is unimplemented, so a guest that does HTTPS through the `ssl` service gets nothing; it needs a TLS stack in the emulator (`rustls` in wasm) over the guest's cert store. Homebrew that does its own TLS over `bsd` is not affected.
+- `bsd` datagram sockets do not reach the relay: the relay speaks UDP, but the core still fakes `sendto` and has no receive path. A blocking `connect` outside the console returns `EINPROGRESS` rather than waiting, which needs a deferred IPC reply in the kernel.
+- Whether browsers let an `https://` page open `ws://127.0.0.1` (Chrome and Firefox are expected to; Safari is not known to) has not been tried on the deployed site.
 - `ssl:s` cmd 5 is stubbed and the `ssl:s` name is not routed like `ssl`.
 - Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.

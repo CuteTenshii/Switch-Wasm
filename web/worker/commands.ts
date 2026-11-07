@@ -13,7 +13,8 @@ import {
   switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
   switch_load_keys, switch_load_nca, switch_load_nca_from_nsp, switch_load_program,
-  switch_load_sd, switch_memory_json, switch_nand_identify, switch_nand_launch, switch_next_load,
+  switch_load_sd, switch_memory_json, switch_nand_identify, switch_nand_launch, switch_net_connect,
+  switch_net_connections_json, switch_net_disconnect, switch_next_load,
   switch_open_nca,
   switch_open_nsp, switch_parse_nca, switch_program_nca_index, switch_read_file, switch_reg_dump,
   switch_remember_control, switch_restore_nand, switch_restore_storage, switch_run,
@@ -43,6 +44,9 @@ export const CMD = {
   // The Battery Status API is Window-only, so the main thread sends it.
   setBattery: switch_set_battery,
   setOperationMode: switch_set_operation_mode,
+  connectNetwork: switch_net_connect,
+  disconnectNetwork: switch_net_disconnect,
+  netConnections: switch_net_connections_json,
 
   // The core reads the file itself, so the page never holds a copy.
   loadProgram: switch_load_program,

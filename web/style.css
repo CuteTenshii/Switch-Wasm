@@ -997,6 +997,27 @@ body.resizing {
   font: inherit;
   font-size: var(--text-xs);
 }
+.addr {
+  width: 15em;
+  max-width: 100%;
+  background: var(--chrome-hi);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+.addr:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.net-table th:first-child,
+.net-table td:first-child {
+  width: 46%;
+  overflow-wrap: anywhere;
+}
 .num:focus {
   outline: none;
   border-color: var(--accent);

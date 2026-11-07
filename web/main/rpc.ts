@@ -1,7 +1,7 @@
 // Promise-based RPC to the emulator worker over postMessage.
 
 import type {
-  CallRequest, Commands, ErrorDialog, KeyboardRequest, SliceReport, WorkerMessage,
+  CallRequest, Commands, ErrorDialog, KeyboardRequest, NetState, SliceReport, WorkerMessage,
 } from '../shared/protocol';
 import { setAudioFormat, setAudioRing } from './audio';
 import { log } from './log';
@@ -25,6 +25,12 @@ let loopEvents: {
   errorDialog: (dialog: ErrorDialog) => void;
   profilesEdited: () => void;
 } | null = null;
+
+let netState: ((state: NetState) => void) | null = null;
+
+export function onNetState(handler: NonNullable<typeof netState>): void {
+  netState = handler;
+}
 
 let nandProgress: ((done: number, total: number) => void) | null = null;
 
@@ -113,6 +119,9 @@ export function initWorker(): void {
         break;
       case 'audio_format':
         setAudioFormat(d.format);
+        break;
+      case 'net_state':
+        netState?.(d.state);
         break;
       case 'nand_progress':
         nandProgress?.(d.done, d.total);

@@ -20,6 +20,7 @@ import { endLoad, failLoad, loadPhase } from './loading';
 // Imported for their side effects: each binds its own part of the page.
 import './boot';
 import './dock';
+import './network';
 import './files';
 import './input';
 

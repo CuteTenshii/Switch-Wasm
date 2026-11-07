@@ -4,6 +4,10 @@ How the browser reaches the Internet when the guest opens a TCP or UDP connectio
 
 Nothing here is needed to play. With no relay URL set the network stays empty.
 
+## Using it
+
+Run `switch-relay` (no arguments), open the Network tab, and turn it on. The tab shows the relay's state and the guest's connections: host, port, state and bytes each way. The address defaults to `ws://127.0.0.1:18787` and is remembered.
+
 ## Transport
 
 - One WebSocket, binary messages only. One message is one frame; there is no framing inside a message.
