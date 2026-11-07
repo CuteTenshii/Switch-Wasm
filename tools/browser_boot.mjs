@@ -3,7 +3,7 @@
 // Serves `dist` (run `make assets` first) with WebGPU enabled and a fresh profile.
 // `--firmware` installs a directory's NCAs to the NAND first, so library applets run.
 // `--nand` launches the title of that name from the NAND tab, in place of a container.
-// `--docked` starts the console docked.
+// `--docked` starts the console docked; `--dock-at=N` toggles it that long after the title starts.
 // `--dump-wgsl` writes every shader the worker hands the browser into a directory.
 // `--stream` prints console lines matching a regular expression as they appear; `--stream=.` is all.
 // `--trace=file@seconds:length` records a Chromium trace of the GPU process from that long after the
@@ -25,7 +25,7 @@ import { preview } from 'vite';
 import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
-  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headed] [--docked]
+  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headed] [--docked] [--dock-at=N]
   [--dump-wgsl=dir] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...]`;
@@ -53,6 +53,7 @@ const jitStats = hasFlag('jit-stats');
 const noWebGpu = hasFlag('no-webgpu');
 const headed = hasFlag('headed');
 const docked = hasFlag('docked');
+const dockAt = flag('dock-at');
 const dumpWgsl = pathFlag('dump-wgsl');
 const stream = flag('stream');
 const traceSpec = /^(.+)@(\d+):(\d+)$/.exec(flag('trace') ?? '');
@@ -243,6 +244,12 @@ try {
       if (!every) return;
     }
   };
+  const docking = dockAt === undefined
+    ? null
+    : repeat(Number(dockAt), 0, () => {
+        say(`${elapsed()}s: toggled the dock`);
+        return page.locator('#btn-dock').evaluate((button) => button.click());
+      });
   const tapping = presses.map(({ key, next, every }) => repeat(next, every, () => tap(key)));
   const shooting = screenshot && screenshotEvery
     ? repeat(screenshotEvery, screenshotEvery, (at) =>
@@ -300,7 +307,7 @@ try {
     }
   }
 
-  await Promise.allSettled([...tapping, shooting, tracing]);
+  await Promise.allSettled([...tapping, docking, shooting, tracing]);
   if (screenshot && !crashed) {
     await page.locator('#screen').screenshot({ path: screenshot });
     say(`saved the screen to ${screenshot}`);
