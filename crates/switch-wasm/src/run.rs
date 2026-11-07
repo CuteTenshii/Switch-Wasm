@@ -9,6 +9,7 @@ use crate::session;
 pub fn switch_run(max_steps: f64) -> f64 {
     let s = session();
     crate::input::exchange(&mut s.cpu);
+    crate::net::exchange(&mut s.cpu);
     // The page's clock and time zone, read here rather than handed in before every slice.
     #[cfg(all(target_arch = "wasm32", feature = "jit"))]
     {

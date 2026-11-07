@@ -44,6 +44,7 @@ mod input;
 mod keyboard;
 mod log;
 mod nand;
+mod net;
 #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
 mod post;
 mod run;
