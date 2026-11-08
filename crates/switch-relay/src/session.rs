@@ -8,6 +8,7 @@ use switch_relay_proto::{ClientFrame, ServerFrame, StreamId, VERSION};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::task::JoinHandle;
+use tokio::time::{interval_at, sleep_until, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
@@ -15,6 +16,7 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::policy::Policy;
 use crate::stream::{self, Command, Credit, Open};
+use crate::Timeouts;
 
 /// Most streams one WebSocket may have open.
 pub const MAX_STREAMS: u16 = 256;
@@ -36,7 +38,20 @@ fn close(code: CloseCode) -> Message {
     }))
 }
 
-pub async fn run(socket: WebSocketStream<TcpStream>, policy: Arc<Policy>) {
+/// Why a session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// The page closed, broke the protocol, or the connection failed.
+    Left,
+    /// The page sent nothing for longer than the timeouts allow.
+    Silent,
+}
+
+pub async fn run(
+    socket: WebSocketStream<TcpStream>,
+    policy: Arc<Policy>,
+    timeouts: Timeouts,
+) -> End {
     let (mut sink, mut source) = socket.split();
     let (out, mut outgoing) = unbounded_channel::<Message>();
     let writer = tokio::spawn(async move {
@@ -66,9 +81,14 @@ pub async fn run(socket: WebSocketStream<TcpStream>, policy: Arc<Policy>) {
     let (done, mut finished) = unbounded_channel::<StreamId>();
     let mut streams: HashMap<StreamId, Handle> = HashMap::new();
     let mut ending = CloseCode::Normal;
+    let mut end = End::Left;
+    let mut ping = interval_at(Instant::now() + timeouts.ping_every, timeouts.ping_every);
+    ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut heard = Instant::now();
     loop {
         tokio::select! {
             message = source.next() => {
+                heard = Instant::now();
                 let frame = match message {
                     None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                     Some(Ok(Message::Binary(raw))) => ClientFrame::decode(&raw),
@@ -130,6 +150,13 @@ pub async fn run(socket: WebSocketStream<TcpStream>, policy: Arc<Policy>) {
             Some(id) = finished.recv() => {
                 streams.remove(&id);
             }
+            _ = ping.tick() => {
+                let _ = out.send(Message::Ping(Default::default()));
+            }
+            () = sleep_until(heard + timeouts.silence) => {
+                end = End::Silent;
+                break;
+            }
         }
     }
     for handle in streams.values() {
@@ -140,5 +167,11 @@ pub async fn run(socket: WebSocketStream<TcpStream>, policy: Arc<Policy>) {
     }
     drop(out);
     forward.abort();
-    let _ = writer.await;
+    if end == End::Silent {
+        // A page that stopped reading can hold the writer in a send forever.
+        writer.abort();
+    } else {
+        let _ = writer.await;
+    }
+    end
 }

@@ -6,6 +6,7 @@ mod session;
 mod stream;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_hdr_async;
@@ -17,10 +18,31 @@ use tokio_tungstenite::tungstenite::Message;
 use futures_util::SinkExt;
 use policy::Policy;
 
+/// How long the relay waits on a page before it gives up on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    /// How long a connection may take to finish the WebSocket upgrade.
+    pub handshake: Duration,
+    /// How often the relay pings the page.
+    pub ping_every: Duration,
+    /// How long the page may send nothing, not even a pong, before the relay drops it.
+    pub silence: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Timeouts {
+        Timeouts {
+            handshake: Duration::from_secs(10),
+            ping_every: Duration::from_secs(15),
+            silence: Duration::from_secs(45),
+        }
+    }
+}
+
 /// Accept pages until the listener fails.
-pub async fn serve(listener: TcpListener, policy: Arc<Policy>) {
+pub async fn serve(listener: TcpListener, policy: Arc<Policy>, timeouts: Timeouts) {
     while let Ok((socket, _)) = listener.accept().await {
-        tokio::spawn(handle(socket, policy.clone()));
+        tokio::spawn(handle(socket, policy.clone(), timeouts));
     }
 }
 
@@ -40,14 +62,13 @@ fn remember_origin(
 }
 
 #[allow(clippy::result_large_err)]
-async fn handle(socket: TcpStream, policy: Arc<Policy>) {
+async fn handle(socket: TcpStream, policy: Arc<Policy>, timeouts: Timeouts) {
     let origin = Arc::new(Mutex::new(None::<String>));
     let seen = origin.clone();
-    let accepted = accept_hdr_async(socket, move |request: &Request, response| {
+    let upgrade = accept_hdr_async(socket, move |request: &Request, response| {
         remember_origin(&seen, request, response)
-    })
-    .await;
-    let Ok(mut socket) = accepted else {
+    });
+    let Ok(Ok(mut socket)) = tokio::time::timeout(timeouts.handshake, upgrade).await else {
         return;
     };
     let origin = origin.lock().unwrap().take();
@@ -62,6 +83,8 @@ async fn handle(socket: TcpStream, policy: Arc<Policy>) {
         return;
     }
     eprintln!("page {from} connected");
-    session::run(socket, policy).await;
-    eprintln!("page {from} left");
+    match session::run(socket, policy, timeouts).await {
+        session::End::Left => eprintln!("page {from} left"),
+        session::End::Silent => eprintln!("page {from} stopped answering, dropped it"),
+    }
 }

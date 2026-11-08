@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use switch_relay::policy::{Policy, Unknown};
+use switch_relay::Timeouts;
 use switch_relay_proto::{ClientFrame, Failure, Peer, Proto, ServerFrame, VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -20,12 +21,23 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// A relay trusting the emulator's origin, and the address to reach it at.
 async fn relay(allow_private: bool) -> String {
+    relay_with(allow_private, Timeouts::default()).await
+}
+
+async fn relay_with(allow_private: bool, timeouts: Timeouts) -> String {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let policy = Policy::new(Vec::new(), Unknown::Deny, allow_private);
-    tokio::spawn(switch_relay::serve(listener, Arc::new(policy)));
+    tokio::spawn(switch_relay::serve(listener, Arc::new(policy), timeouts));
     url
 }
+
+/// Pings fast enough that a test sees several and gives up on silence well within a second.
+const BRISK: Timeouts = Timeouts {
+    handshake: Duration::from_millis(100),
+    ping_every: Duration::from_millis(50),
+    silence: Duration::from_millis(200),
+};
 
 async fn connect(url: &str, origin: Option<&str>) -> Socket {
     let mut request = url.into_client_request().unwrap();
@@ -56,16 +68,20 @@ async fn send(socket: &mut Socket, frame: ClientFrame) {
         .unwrap();
 }
 
+/// The next relay frame. Pings are answered by the socket as it reads, and skipped.
 async fn next(socket: &mut Socket) -> ServerFrame {
-    let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .expect("the relay answers")
-        .expect("the socket stays open")
-        .unwrap();
-    let Message::Binary(raw) = message else {
-        panic!("a binary frame, got {message:?}");
-    };
-    ServerFrame::decode(&raw).unwrap()
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("the relay answers")
+            .expect("the socket stays open")
+            .unwrap();
+        match message {
+            Message::Binary(raw) => return ServerFrame::decode(&raw).unwrap(),
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("a binary frame, got {other:?}"),
+        }
+    }
 }
 
 /// Nothing arrives for a short while.
@@ -388,4 +404,98 @@ async fn a_malformed_frame_or_a_reused_stream_id_closes_the_socket() {
     let mut socket = page(&url).await;
     socket.send(Message::text("hello")).await.unwrap();
     assert_eq!(closed_with(&mut socket).await, CloseCode::Unsupported);
+}
+
+/// Keep reading for `span`, answering pings, and count them. Nothing else may arrive.
+async fn pings_during(socket: &mut Socket, span: Duration) -> usize {
+    let until = tokio::time::Instant::now() + span;
+    let mut pings = 0;
+    while let Ok(message) = tokio::time::timeout_at(until, socket.next()).await {
+        match message {
+            Some(Ok(Message::Ping(_))) => pings += 1,
+            other => panic!("only pings, got {other:?}"),
+        }
+    }
+    pings
+}
+
+#[tokio::test]
+async fn a_page_that_answers_pings_stays_connected_however_quiet_it_is() {
+    let (url, port) = (relay_with(true, BRISK).await, echo().await);
+    let mut socket = page(&url).await;
+    send(&mut socket, tcp(1, port, 100)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+
+    let pings = pings_during(&mut socket, BRISK.silence * 3).await;
+    assert!(pings >= 5, "pinged {pings} times");
+
+    send(
+        &mut socket,
+        ClientFrame::Data {
+            stream: 1,
+            data: b"still here".to_vec(),
+        },
+    )
+    .await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Data {
+            stream: 1,
+            data: b"still here".to_vec()
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_page_that_stops_answering_is_dropped_with_its_streams() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let peer_closed = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0u8; 64];
+        while socket.read(&mut buffer).await.is_ok_and(|read| read > 0) {}
+    });
+    let mut socket = page(&relay_with(true, BRISK).await).await;
+    send(&mut socket, tcp(1, port, 100)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+
+    // Not polling the socket is what leaves the relay's pings unanswered.
+    tokio::time::timeout(Duration::from_secs(5), peer_closed)
+        .await
+        .expect("the relay closes the guest's connection")
+        .unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("the relay hangs up")
+        {
+            Some(Ok(Message::Ping(_))) => continue,
+            None | Some(Err(_)) => break,
+            other => panic!("dropped without a close frame, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_connection_that_never_finishes_the_upgrade_is_closed() {
+    let url = relay_with(true, BRISK).await;
+    let address = url.trim_start_matches("ws://");
+    for sent in [&b""[..], b"GET / HTTP/1.1\r\nHost: relay\r\n"] {
+        let mut socket = TcpStream::connect(address).await.unwrap();
+        socket.write_all(sent).await.unwrap();
+        let mut buffer = [0u8; 64];
+        let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buffer))
+            .await
+            .expect("the relay hangs up");
+        assert!(
+            read.is_err() || read.is_ok_and(|read| read == 0),
+            "{sent:?}"
+        );
+    }
 }

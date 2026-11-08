@@ -64,6 +64,14 @@ A browser WebSocket cannot slow a sender down, so the relay must not send more t
 
 Client to relay needs no window: the guest writes at its own pace, and the WebSocket's own buffering is enough.
 
+## Keepalive
+
+A connection that has not finished the WebSocket upgrade within 10 seconds is closed. The question about an unknown origin comes after the upgrade, so this does not limit how long it waits for an answer.
+
+The relay sends a WebSocket Ping every 15 seconds. A page that sends nothing for 45 seconds, not even the Pong a browser returns on its own, is gone: the relay drops the WebSocket without a close frame and closes every stream it held.
+
+A quiet stream on a page that still answers is left open, however long it stays quiet. The guest may hold a connection on purpose, and a page that answers is still there to close it.
+
 ## Relay policy
 
 The relay is a proxy to anywhere its host can reach, and any web page can open a WebSocket to a loopback port, so the defaults are closed and need no configuration.

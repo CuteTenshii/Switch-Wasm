@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use switch_relay::policy::{Policy, Unknown, TRUSTED_ORIGINS};
+use switch_relay::Timeouts;
 use tokio::net::TcpListener;
 
 const DEFAULT_PORT: u16 = 18787;
@@ -58,6 +59,7 @@ async fn main() -> ExitCode {
     switch_relay::serve(
         listener,
         Arc::new(Policy::new(origins, unknown, allow_private)),
+        Timeouts::default(),
     )
     .await;
     ExitCode::SUCCESS
