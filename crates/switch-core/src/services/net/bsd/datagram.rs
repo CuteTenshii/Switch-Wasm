@@ -334,6 +334,7 @@ mod tests {
             ],
             "the host is told what was read"
         );
+        set_nonblocking(&mut cpu, fd);
         assert_eq!(
             recvfrom(&mut cpu, fd, 64).0,
             (-1, BSD_EAGAIN),
@@ -502,6 +503,24 @@ mod tests {
             2,
             "a stream and its datagram"
         );
+    }
+
+    #[test]
+    fn a_blocking_recvfrom_waits_for_the_reply() {
+        let (mut cpu, fd, a) = udp_socket("a.example");
+        sendto(&mut cpu, fd, b"q", a, 53);
+        cpu.take_net_commands();
+        recvfrom(&mut cpu, fd, 64);
+        assert!(cpu.pending_retry.take().is_some(), "nothing yet");
+
+        cpu.deliver_net_events([NetEvent::Data {
+            stream: 1,
+            data: b"answer".to_vec(),
+        }]);
+        let (result, bytes, source) = recvfrom(&mut cpu, fd, 64);
+        assert_eq!((result, bytes.as_slice()), ((6, 0), &b"answer"[..]));
+        assert_eq!(super::super::sockaddr_in(&source), Some((a, 53)));
+        assert!(cpu.pending_retry.is_none());
     }
 
     #[test]

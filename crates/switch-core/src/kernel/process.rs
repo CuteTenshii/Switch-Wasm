@@ -145,7 +145,8 @@ pub(crate) struct Process {
     pub(crate) program_id: u64,
     /// Open `bsd` sockets and their options.
     pub(crate) bsd_sockets: HashMap<i32, net::BsdSocket>,
-    pub(crate) bsd_socket_options: HashMap<(i32, u32, u32), u32>,
+    /// What `SetSockOpt` was given, as given: some options are a `timeval`, not a word.
+    pub(crate) bsd_socket_options: HashMap<(i32, u32, u32), Vec<u8>>,
     /// Next descriptor; starts at 3, past the standard streams.
     pub(crate) next_bsd_fd: i32,
     /// Guest threads; index 0 is main. The running thread's slot is stale while it runs.

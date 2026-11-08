@@ -36,6 +36,11 @@ pub(in crate::services::net) fn open_socket(cpu: &mut Cpu, kind: u32) -> i32 {
 
 pub(in crate::services::net) const SCRATCH: u32 = 0x4000;
 
+/// What `fcntl(F_SETFL, O_NONBLOCK)` leaves behind.
+pub(in crate::services::net) fn set_nonblocking(cpu: &mut Cpu, fd: i32) {
+    cpu.process_mut().bsd_sockets.get_mut(&fd).unwrap().flags |= super::BSD_O_NONBLOCK;
+}
+
 /// `127.0.0.1:port` with `sin_len` left at zero, as a memsetting guest writes it.
 pub(in crate::services::net) fn loopback_sockaddr(port: u16) -> [u8; 16] {
     let mut raw = [0u8; 16];
@@ -137,8 +142,9 @@ pub(in crate::services::net) fn bsd_fails_where_there_is_no_peer_rather_than_pre
     cpu.bsd_request(TLS, 9, Some(11)).unwrap();
     assert_eq!(bsd_result(&cpu), (-1, super::BSD_ENETUNREACH));
 
-    // Accept before listen is an error; after listen it is EAGAIN.
+    // Accept before listen is an error; after listen, with nothing to accept, it is EAGAIN.
     let (mut cpu, fd) = bsd_socket(1);
+    set_nonblocking(&mut cpu, fd);
     write_request(&mut cpu, 12, &fd.to_le_bytes());
     cpu.bsd_request(TLS, 9, Some(12)).unwrap();
     assert_eq!(bsd_result(&cpu), (-1, super::BSD_EINVAL));
@@ -190,6 +196,7 @@ pub(in crate::services::net) fn bsd_sends_an_addressed_datagram_the_link_would_c
     assert_eq!(send_to(&mut cpu, fd, &broadcast), (4, 0), "broadcast");
 
     // Nothing arrives: EAGAIN and a yield, not `ENETUNREACH`.
+    set_nonblocking(&mut cpu, fd);
     cpu.pending_yield = false;
     let (result, bytes) = recv_on(&mut cpu, fd, 4);
     assert_eq!(result, (-1, super::BSD_EAGAIN), "nothing yet");
@@ -341,6 +348,9 @@ pub(in crate::services::net) fn bsd_builds_the_socket_pair_asio_wakes_its_own_se
     cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
     let (client, server) = connected_pair(&mut cpu, listener);
     assert_ne!(client, server);
+    // `open_descriptors` makes both ends non-blocking.
+    set_nonblocking(&mut cpu, client);
+    set_nonblocking(&mut cpu, server);
 
     // `interrupt()` writes one byte...
     assert_eq!(send_on(&mut cpu, client, &[0x7f]), (1, 0), "send");
@@ -482,4 +492,146 @@ pub(in crate::services::net) fn bsd_command(
     write_request(cpu, command, &payload);
     cpu.bsd_request(TLS, 9, Some(command)).unwrap();
     bsd_result(cpu)
+}
+
+/// `setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, timeval)`, the `timeval` as the guest laid it out.
+fn set_receive_timeout(cpu: &mut Cpu, fd: i32, timeval: &[u8]) {
+    const AT: u32 = SCRATCH + 0x180;
+    place(cpu, AT, timeval);
+    let mut payload = [0u8; 12];
+    payload[..4].copy_from_slice(&fd.to_le_bytes());
+    payload[4..8].copy_from_slice(&super::BSD_SOL_SOCKET.to_le_bytes());
+    payload[8..].copy_from_slice(&super::BSD_SO_RCVTIMEO.to_le_bytes());
+    write_map_buffer_request(cpu, 21, &payload, AT, timeval.len() as u32, true);
+    cpu.bsd_request(TLS, 9, Some(21)).unwrap();
+    assert_eq!(bsd_result(cpu), (0, 0), "setsockopt");
+}
+
+/// A 64-bit guest's `timeval`.
+fn timeval(seconds: i64, micros: i64) -> Vec<u8> {
+    [seconds.to_le_bytes(), micros.to_le_bytes()].concat()
+}
+
+/// A connected pair of loopback stream sockets, both left blocking.
+fn blocking_pair() -> (Cpu, i32, i32) {
+    let (mut cpu, listener) = bsd_socket(1);
+    cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+    let (client, server) = connected_pair(&mut cpu, listener);
+    (cpu, client, server)
+}
+
+#[test]
+pub(in crate::services::net) fn a_blocking_read_waits_for_bytes_and_then_answers() {
+    let (mut cpu, client, server) = blocking_pair();
+    recv_on(&mut cpu, server, 0x20);
+    assert!(cpu.pending_retry.take().is_some(), "the call waits");
+    recv_on(&mut cpu, server, 0x20);
+    assert!(cpu.pending_retry.take().is_some(), "and keeps waiting");
+
+    send_on(&mut cpu, client, b"hi");
+    assert_eq!(recv_on(&mut cpu, server, 0x20), ((2, 0), b"hi".to_vec()));
+    assert!(cpu.pending_retry.is_none());
+}
+
+#[test]
+pub(in crate::services::net) fn a_blocking_read_ends_when_the_peer_closes() {
+    let (mut cpu, client, server) = blocking_pair();
+    recv_on(&mut cpu, server, 0x20);
+    assert!(cpu.pending_retry.take().is_some());
+    assert_eq!(bsd_command(&mut cpu, 26, &[client as u32]), (0, 0), "close");
+    assert_eq!(recv_on(&mut cpu, server, 0x20).0, (0, 0), "end of file");
+    assert!(cpu.pending_retry.is_none());
+}
+
+#[test]
+pub(in crate::services::net) fn a_blocking_read_gives_up_after_so_rcvtimeo() {
+    let (mut cpu, _client, server) = blocking_pair();
+    set_receive_timeout(&mut cpu, server, &timeval(0, 5_000));
+    let deadline = cpu.wait_deadline(5_000_000).unwrap();
+
+    recv_on(&mut cpu, server, 0x20);
+    assert!(
+        cpu.pending_retry.take().is_some(),
+        "waits within the timeout"
+    );
+    cpu.cycles = deadline - 1;
+    recv_on(&mut cpu, server, 0x20);
+    assert!(
+        cpu.pending_retry.take().is_some(),
+        "the deadline is the first run's"
+    );
+
+    cpu.cycles = deadline;
+    assert_eq!(recv_on(&mut cpu, server, 0x20).0, (-1, super::BSD_EAGAIN));
+    assert!(cpu.pending_retry.is_none());
+
+    // The next read is a new call with a timeout of its own.
+    recv_on(&mut cpu, server, 0x20);
+    assert!(cpu.pending_retry.take().is_some());
+}
+
+#[test]
+pub(in crate::services::net) fn so_rcvtimeo_reads_back_whole_and_parses_either_layout() {
+    let (mut cpu, fd) = bsd_socket(1);
+    cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+    let mut value = timeval(2, 500_000);
+    set_receive_timeout(&mut cpu, fd, &value);
+    assert_eq!(cpu.bsd_receive_timeout(fd), Some(2_500_000_000));
+
+    const OUT: u32 = SCRATCH + 0x100;
+    let mut payload = [0u8; 12];
+    payload[..4].copy_from_slice(&fd.to_le_bytes());
+    payload[4..8].copy_from_slice(&super::BSD_SOL_SOCKET.to_le_bytes());
+    payload[8..].copy_from_slice(&super::BSD_SO_RCVTIMEO.to_le_bytes());
+    write_map_buffer_request(&mut cpu, 17, &payload, OUT, 16, false);
+    cpu.bsd_request(TLS, 9, Some(17)).unwrap();
+    assert_eq!(bsd_result(&cpu), (0, 0));
+    assert_eq!(bsd_result_len(&cpu), 16);
+    assert_eq!(cpu.read_bytes(OUT, 16), value);
+
+    // A 32-bit FreeBSD guest's `tv_usec` is a 32-bit long; what pads it is not part of it.
+    value[12..].copy_from_slice(&[0xAA; 4]);
+    set_receive_timeout(&mut cpu, fd, &value);
+    assert_eq!(cpu.bsd_receive_timeout(fd), Some(2_500_000_000));
+
+    let short = [3i32.to_le_bytes(), 0i32.to_le_bytes()].concat();
+    set_receive_timeout(&mut cpu, fd, &short);
+    assert_eq!(cpu.bsd_receive_timeout(fd), Some(3_000_000_000));
+
+    set_receive_timeout(&mut cpu, fd, &timeval(0, 0));
+    assert_eq!(cpu.bsd_receive_timeout(fd), None, "zero waits forever");
+}
+
+#[test]
+pub(in crate::services::net) fn a_blocking_accept_waits_for_a_connection() {
+    let (mut cpu, listener) = bsd_socket(1);
+    cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+    place(&mut cpu, SCRATCH, &loopback_sockaddr(0));
+    write_map_buffer_request(&mut cpu, 13, &listener.to_le_bytes(), SCRATCH, 16, true);
+    cpu.bsd_request(TLS, 9, Some(13)).unwrap();
+    assert_eq!(
+        bsd_command(&mut cpu, 18, &[listener as u32]),
+        (0, 0),
+        "listen"
+    );
+
+    write_request(&mut cpu, 12, &listener.to_le_bytes());
+    cpu.bsd_request(TLS, 9, Some(12)).unwrap();
+    assert!(cpu.pending_retry.take().is_some(), "nothing to accept yet");
+
+    let port = super::sockaddr_in(&cpu.process().bsd_sockets[&listener].bound)
+        .unwrap()
+        .1;
+    let client = open_socket(&mut cpu, 1);
+    place(&mut cpu, SCRATCH, &loopback_sockaddr(port));
+    write_map_buffer_request(&mut cpu, 14, &client.to_le_bytes(), SCRATCH, 16, true);
+    cpu.bsd_request(TLS, 9, Some(14)).unwrap();
+    assert_eq!(bsd_result(&cpu), (0, 0), "connect");
+
+    write_request(&mut cpu, 12, &listener.to_le_bytes());
+    cpu.bsd_request(TLS, 9, Some(12)).unwrap();
+    assert!(cpu.pending_retry.is_none());
+    let (accepted, errno) = bsd_result(&cpu);
+    assert_eq!(errno, 0);
+    assert!(accepted > client);
 }
