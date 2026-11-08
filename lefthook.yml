@@ -34,7 +34,7 @@ pre-push:
   piped: true
   jobs:
     - name: tests
-      run: make test
+      run: cargo test --workspace
       fail_text: "Host tests failed."
 
     - name: unit

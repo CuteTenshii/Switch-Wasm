@@ -44,7 +44,7 @@ other assets must be imported so Vite can hash and rewrite their URLs.
 
 ```sh
 bun install
-make test
+cargo test --workspace
 make wasm
 make assets
 bun run typecheck
@@ -75,7 +75,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   so run `make assets` first. The browser is Playwright's
   (`bunx playwright install chromium`, once per machine); a window opens by
   default and gets the machine's GPU, and `--headless` runs without one.
-- `make all` runs the Rust tests and builds the browser site.
+- `make all` builds the browser site, the same as `make assets`.
 - `make wasm` builds `switch-wasm` with the WebGPU feature in cargo's dev
   profile and runs `wasm-bindgen`. The installed CLI version must match
   `Cargo.lock`. `make wasm-release` is the same in the release profile, the

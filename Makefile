@@ -1,4 +1,4 @@
-.PHONY: all test wasm wasm-release assets clean
+.PHONY: all wasm wasm-release assets clean
 
 TARGET := wasm32-unknown-unknown
 DIST   := dist
@@ -11,16 +11,7 @@ NIGHTLY_CARGO := $(shell rustup which --toolchain $(NIGHTLY) cargo 2>/dev/null)
 NIGHTLY_RUSTC := $(shell rustup which --toolchain $(NIGHTLY) rustc 2>/dev/null)
 NIGHTLY_HINT  := rustup toolchain install $(NIGHTLY) --profile minimal --component rust-src --target $(TARGET)
 
-all: test assets
-
-# Host test suite.
-test:
-	cargo test -p switch-core
-	cargo test -p switch-wasm
-	cargo test -p switch-relay-proto
-	cargo test -p switch-relay
-	# wgpu device tests share the host adapter; parallel creation can crash software Vulkan.
-	cargo test -p switch-gpu -- --test-threads=1
+all: assets
 
 # The bindings crate with the WebGPU backend: `wasm` is the dev build `bun run dev`
 # serves, `wasm-release` the shipped fat-LTO one. `wasm-bindgen` must match Cargo.lock.
