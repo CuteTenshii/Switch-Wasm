@@ -94,9 +94,20 @@ pub(in crate::services::net) fn send_on(cpu: &mut Cpu, fd: i32, bytes: &[u8]) ->
 }
 
 pub(in crate::services::net) fn recv_on(cpu: &mut Cpu, fd: i32, len: u32) -> ((i32, i32), Vec<u8>) {
+    recv_with(cpu, fd, len, 0)
+}
+
+/// `recv(fd, buffer of len bytes, flags)`.
+pub(in crate::services::net) fn recv_with(
+    cpu: &mut Cpu,
+    fd: i32,
+    len: u32,
+    flags: u32,
+) -> ((i32, i32), Vec<u8>) {
     const AT: u32 = SCRATCH + 0x80;
     place(cpu, AT, &vec![0u8; len as usize]);
-    write_map_buffer_request(cpu, 8, &fd.to_le_bytes(), AT, len, false);
+    let payload = [fd.to_le_bytes(), flags.to_le_bytes()].concat();
+    write_map_buffer_request(cpu, 8, &payload, AT, len, false);
     cpu.bsd_request(TLS, 9, Some(8)).unwrap();
     let result = bsd_result(cpu);
     let read = if result.0 > 0 {
@@ -634,4 +645,105 @@ pub(in crate::services::net) fn a_blocking_accept_waits_for_a_connection() {
     let (accepted, errno) = bsd_result(&cpu);
     assert_eq!(errno, 0);
     assert!(accepted > client);
+}
+
+/// `ioctl(fd, FIONREAD)`: the result and the count.
+fn bytes_waiting(cpu: &mut Cpu, fd: i32) -> ((i32, i32), u32) {
+    const OUT: u32 = SCRATCH + 0x1c0;
+    let payload: Vec<u8> = [fd as u32, super::BSD_FIONREAD, 1]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    place(cpu, OUT, &[0xFF; 4]);
+    write_map_buffer_request(cpu, 19, &payload, OUT, 4, false);
+    cpu.bsd_request(TLS, 9, Some(19)).unwrap();
+    (bsd_result(cpu), cpu.mem.read_u32(OUT).unwrap())
+}
+
+#[test]
+pub(in crate::services::net) fn msg_peek_reads_without_taking() {
+    let (mut cpu, client, server) = blocking_pair();
+    send_on(&mut cpu, client, b"abc");
+    assert_eq!(
+        recv_with(&mut cpu, server, 2, super::BSD_MSG_PEEK),
+        ((2, 0), b"ab".to_vec())
+    );
+    assert_eq!(recv_on(&mut cpu, server, 0x20), ((3, 0), b"abc".to_vec()));
+}
+
+#[test]
+pub(in crate::services::net) fn msg_dontwait_makes_one_read_non_blocking() {
+    let (mut cpu, _client, server) = blocking_pair();
+    cpu.pending_yield = false;
+    let (result, _) = recv_with(&mut cpu, server, 0x20, super::BSD_MSG_DONTWAIT);
+    assert_eq!(result, (-1, super::BSD_EAGAIN));
+    assert!(cpu.pending_retry.is_none(), "no wait");
+    assert!(cpu.pending_yield);
+
+    recv_on(&mut cpu, server, 0x20);
+    assert!(
+        cpu.pending_retry.is_some(),
+        "the socket itself still blocks"
+    );
+}
+
+#[test]
+pub(in crate::services::net) fn msg_waitall_waits_for_the_whole_buffer_or_the_end() {
+    let (mut cpu, client, server) = blocking_pair();
+    let wait_all = super::BSD_MSG_WAITALL;
+    send_on(&mut cpu, client, b"ab");
+    recv_with(&mut cpu, server, 4, wait_all);
+    assert!(cpu.pending_retry.take().is_some(), "two of four bytes");
+    send_on(&mut cpu, client, b"cd");
+    assert_eq!(
+        recv_with(&mut cpu, server, 4, wait_all),
+        ((4, 0), b"abcd".to_vec())
+    );
+    assert!(cpu.pending_retry.is_none());
+
+    send_on(&mut cpu, client, b"x");
+    recv_with(&mut cpu, server, 4, wait_all);
+    assert!(cpu.pending_retry.take().is_some());
+    bsd_command(&mut cpu, 26, &[client as u32]);
+    assert_eq!(
+        recv_with(&mut cpu, server, 4, wait_all),
+        ((1, 0), b"x".to_vec()),
+        "what there was when the peer closed"
+    );
+}
+
+#[test]
+pub(in crate::services::net) fn msg_waitall_gives_what_there_is_when_the_wait_times_out() {
+    let (mut cpu, client, server) = blocking_pair();
+    set_receive_timeout(&mut cpu, server, &timeval(0, 1_000));
+    let deadline = cpu.wait_deadline(1_000_000).unwrap();
+    send_on(&mut cpu, client, b"ab");
+    recv_with(&mut cpu, server, 4, super::BSD_MSG_WAITALL);
+    assert!(cpu.pending_retry.take().is_some());
+    cpu.cycles = deadline;
+    assert_eq!(
+        recv_with(&mut cpu, server, 4, super::BSD_MSG_WAITALL),
+        ((2, 0), b"ab".to_vec())
+    );
+}
+
+#[test]
+pub(in crate::services::net) fn msg_oob_finds_no_urgent_data() {
+    let (mut cpu, client, server) = blocking_pair();
+    send_on(&mut cpu, client, b"a");
+    assert_eq!(
+        recv_with(&mut cpu, server, 4, super::BSD_MSG_OOB).0,
+        (-1, super::BSD_EINVAL)
+    );
+}
+
+#[test]
+pub(in crate::services::net) fn fionread_counts_what_is_queued() {
+    let (mut cpu, client, server) = blocking_pair();
+    assert_eq!(bytes_waiting(&mut cpu, server), ((0, 0), 0));
+    send_on(&mut cpu, client, b"hello");
+    assert_eq!(bytes_waiting(&mut cpu, server), ((0, 0), 5));
+    recv_on(&mut cpu, server, 2);
+    assert_eq!(bytes_waiting(&mut cpu, server), ((0, 0), 3));
+    assert_eq!(bytes_waiting(&mut cpu, 999).0, (-1, super::BSD_EBADF));
 }

@@ -196,6 +196,18 @@ const BSD_SO_RCVTIMEO: u32 = 0x1006;
 
 const BSD_SO_ERROR: u32 = 0x1007;
 
+/// `recv` flags, FreeBSD's: libnx passes the guest's through unchanged.
+const BSD_MSG_OOB: u32 = 0x01;
+
+const BSD_MSG_PEEK: u32 = 0x02;
+
+const BSD_MSG_WAITALL: u32 = 0x40;
+
+const BSD_MSG_DONTWAIT: u32 = 0x80;
+
+/// `FIONREAD`, `_IOR('f', 127, int)`: bytes waiting to be read.
+const BSD_FIONREAD: u32 = 0x4004_667F;
+
 /// Most bytes of an option kept: a 64-bit `timeval`.
 const BSD_MAX_OPTION: u32 = 16;
 
@@ -278,14 +290,18 @@ impl Cpu {
                 self.bsd_reply(tls, ready as i32, 0)
             }
             // Recv(fd, flags) / Read(fd).
-            Some(8) | Some(25) => {
+            Some(8) => {
+                let (fd, flags) = (word(self, 0) as i32, word(self, 1));
+                self.bsd_receive(tls, fd, flags, None)
+            }
+            Some(25) => {
                 let fd = word(self, 0) as i32;
-                self.bsd_receive(tls, fd, None)
+                self.bsd_receive(tls, fd, 0, None)
             }
             // RecvFrom(fd, flags), with the sender's address in the second buffer.
             Some(9) => {
-                let fd = word(self, 0) as i32;
-                self.bsd_receive(tls, fd, Some(1))
+                let (fd, flags) = (word(self, 0) as i32, word(self, 1));
+                self.bsd_receive(tls, fd, flags, Some(1))
             }
             // Send(fd, flags) / SendTo(fd, flags, sockaddr) / Write(fd). See [`Cpu::bsd_send`].
             Some(10) | Some(24) => {
@@ -308,7 +324,7 @@ impl Cpu {
                     Some(socket) => socket.incoming.pop_front(),
                 };
                 let Some(accepted) = accepted else {
-                    if self.bsd_waits(fd, None) {
+                    if self.bsd_waits(fd, None, false) {
                         return Ok(());
                     }
                     return self.bsd_reply(tls, -1, BSD_EAGAIN);
@@ -410,7 +426,23 @@ impl Cpu {
                     }
                 }
             }
-            // Ioctl(fd, request, ...): only FIONBIO, folded into the `fcntl` flags word.
+            // Ioctl(fd, request, bufcount): FIONBIO, folded into the `fcntl` flags word, and
+            // FIONREAD, into the first output buffer.
+            Some(19) if word(self, 1) == BSD_FIONREAD => {
+                let fd = word(self, 0) as i32;
+                let Some(socket) = self.process().bsd_sockets.get(&fd) else {
+                    return self.bsd_reply(tls, -1, BSD_EBADF);
+                };
+                let queued = socket.rx.len() + socket.datagram.queued_bytes();
+                let queued = u32::try_from(queued).unwrap_or(u32::MAX);
+                match self.ipc_output_buffer(tls, 0) {
+                    Some((addr, size)) if size >= 4 => {
+                        self.mem.write_u32(addr, queued)?;
+                        self.bsd_reply(tls, 0, 0)
+                    }
+                    _ => self.bsd_reply(tls, -1, BSD_EINVAL),
+                }
+            }
             Some(19) => {
                 let (fd, request) = (word(self, 0) as i32, word(self, 1));
                 let nonblocking = match self.ipc_input_buffer(tls, 0) {
@@ -767,8 +799,14 @@ impl Cpu {
     }
 
     /// `Recv`/`RecvFrom`/`Read`, with the sender's address when `address_buffer` names one.
-    fn bsd_receive(&mut self, tls: u32, fd: i32, address_buffer: Option<u32>) -> Result<()> {
-        let Some((ret, errno, source)) = self.bsd_receive_bytes(tls, fd)? else {
+    fn bsd_receive(
+        &mut self,
+        tls: u32,
+        fd: i32,
+        flags: u32,
+        address_buffer: Option<u32>,
+    ) -> Result<()> {
+        let Some((ret, errno, source)) = self.bsd_receive_bytes(tls, fd, flags)? else {
             return Ok(());
         };
         self.bsd_end_wait(fd);
@@ -786,12 +824,19 @@ impl Cpu {
 
     /// Drain the peer's bytes into the caller's buffer, or one datagram with its source. An
     /// empty live queue waits on a blocking socket (`None`, and no reply) and is `EAGAIN` plus a
-    /// yield on a non-blocking one or once the wait has timed out.
-    fn bsd_receive_bytes(&mut self, tls: u32, fd: i32) -> Result<Option<Recv>> {
-        if let Some(received) = self.bsd_receive_datagram(tls, fd)? {
+    /// yield on a non-blocking one, under `MSG_DONTWAIT`, or once the wait has timed out.
+    /// `MSG_PEEK` leaves what it read queued; `MSG_WAITALL` on a stream socket waits for the
+    /// whole buffer, and returns what there is when the peer closes or the wait times out.
+    fn bsd_receive_bytes(&mut self, tls: u32, fd: i32, flags: u32) -> Result<Option<Recv>> {
+        let failed = |errno| Ok(Some((-1, errno, None)));
+        // There is never urgent data to read.
+        if flags & BSD_MSG_OOB != 0 {
+            return failed(BSD_EINVAL);
+        }
+        let peek = flags & BSD_MSG_PEEK != 0;
+        if let Some(received) = self.bsd_receive_datagram(tls, fd, peek)? {
             return Ok(Some(received));
         }
-        let failed = |errno| Ok(Some((-1, errno, None)));
         match self.process().bsd_sockets.get(&fd) {
             None => return failed(BSD_EBADF),
             // A stream socket needs a connection; a datagram socket just has an empty queue.
@@ -812,25 +857,33 @@ impl Cpu {
             return failed(BSD_EBADF);
         };
         let (queued, closed) = (socket.rx.len(), socket.peer_closed);
-        if queued == 0 && !closed {
+        let wait_all = flags & BSD_MSG_WAITALL != 0 && !peek && socket.kind != BSD_SOCK_DGRAM;
+        let short = queued == 0 || (wait_all && queued < size as usize);
+        if short && !closed {
             let timeout = self.bsd_receive_timeout(fd);
-            if self.bsd_waits(fd, timeout) {
+            if self.bsd_waits(fd, timeout, flags & BSD_MSG_DONTWAIT != 0) {
                 return Ok(None);
             }
-            self.pending_yield = true;
-            return failed(BSD_EAGAIN);
+            if queued == 0 {
+                self.pending_yield = true;
+                return failed(BSD_EAGAIN);
+            }
         }
         // With nothing queued, the peer has closed: end-of-file is a read of zero bytes.
         let take = (size as usize).min(queued);
         let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) else {
             return failed(BSD_EBADF);
         };
-        let bytes: Vec<u8> = socket.rx.drain(..take).collect();
+        let bytes: Vec<u8> = if peek {
+            socket.rx.iter().take(take).copied().collect()
+        } else {
+            socket.rx.drain(..take).collect()
+        };
         let stream = socket.stream.as_ref().map(|stream| stream.id);
         for (offset, &byte) in bytes.iter().enumerate() {
             self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
         }
-        if let Some(stream) = stream.filter(|_| take > 0) {
+        if let Some(stream) = stream.filter(|_| !peek && take > 0) {
             let bytes = take as u32;
             self.net.outbox.push(NetCommand::Consumed { stream, bytes });
         }
@@ -839,9 +892,12 @@ impl Cpu {
 
     /// Whether a call that found nothing on `fd` waits for it. A blocking socket does: the
     /// call writes no reply and is run again, until there is something or `timeout_ns` of guest
-    /// time has passed (never, for `None`). A non-blocking one, or a wait that has timed out,
-    /// does not, and the call answers `EAGAIN`.
-    fn bsd_waits(&mut self, fd: i32, timeout_ns: Option<i64>) -> bool {
+    /// time has passed (never, for `None`). A non-blocking one, a call told not to wait, or a
+    /// wait that has timed out does not, and the call answers with what it has.
+    fn bsd_waits(&mut self, fd: i32, timeout_ns: Option<i64>, dont_wait: bool) -> bool {
+        if dont_wait {
+            return false;
+        }
         let fresh = timeout_ns
             .and_then(|ns| self.wait_deadline(ns))
             .unwrap_or(u64::MAX);

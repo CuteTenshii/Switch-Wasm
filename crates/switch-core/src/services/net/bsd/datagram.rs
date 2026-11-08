@@ -42,6 +42,11 @@ pub(crate) struct Datagram {
 }
 
 impl Datagram {
+    /// Every byte of every datagram waiting, which is what FreeBSD's `FIONREAD` counts.
+    pub(super) fn queued_bytes(&self) -> usize {
+        self.received.iter().map(|r| r.payload.len()).sum()
+    }
+
     /// The address a connected socket reports as its peer's.
     pub(super) fn default_address(&self) -> Option<Vec<u8>> {
         self.default_peer
@@ -125,8 +130,14 @@ impl Cpu {
     }
 
     /// `recv`/`recvfrom` on a datagram socket with one queued: one datagram, cut to the
-    /// caller's buffer, and where it came from. `None` when there is nothing to hand over.
-    pub(super) fn bsd_receive_datagram(&mut self, tls: u32, fd: i32) -> Result<Option<Recv>> {
+    /// caller's buffer, and where it came from; `peek` leaves it queued. `None` when there is
+    /// nothing to hand over.
+    pub(super) fn bsd_receive_datagram(
+        &mut self,
+        tls: u32,
+        fd: i32,
+        peek: bool,
+    ) -> Result<Option<Recv>> {
         let has = self
             .process()
             .bsd_sockets
@@ -138,12 +149,15 @@ impl Cpu {
         let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
             return Ok(Some((-1, BSD_EINVAL, None)));
         };
-        let Some(received) = self
-            .process_mut()
-            .bsd_sockets
-            .get_mut(&fd)
-            .and_then(|socket| socket.datagram.received.pop_front())
-        else {
+        let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) else {
+            return Ok(None);
+        };
+        let queue = &mut socket.datagram.received;
+        let Some(received) = (if peek {
+            queue.front().cloned()
+        } else {
+            queue.pop_front()
+        }) else {
             return Ok(None);
         };
         let take = (size as usize).min(received.payload.len());
@@ -151,10 +165,12 @@ impl Cpu {
             self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
         }
         // The whole datagram was read as far as the host's window goes, however much fitted.
-        self.net.outbox.push(NetCommand::Consumed {
-            stream: received.stream,
-            bytes: received.payload.len() as u32,
-        });
+        if !peek {
+            self.net.outbox.push(NetCommand::Consumed {
+                stream: received.stream,
+                bytes: received.payload.len() as u32,
+            });
+        }
         Ok(Some((take as i32, 0, Some(received.source))))
     }
 
@@ -242,9 +258,18 @@ mod tests {
 
     /// `recvfrom(fd, buffer of room bytes)`: the result, the bytes, and the source address.
     fn recvfrom(cpu: &mut Cpu, fd: i32, room: u32) -> ((i32, i32), Vec<u8>, Vec<u8>) {
+        recvfrom_with(cpu, fd, room, 0)
+    }
+
+    fn recvfrom_with(
+        cpu: &mut Cpu,
+        fd: i32,
+        room: u32,
+        flags: u32,
+    ) -> ((i32, i32), Vec<u8>, Vec<u8>) {
         place(cpu, INTO, &vec![0u8; room as usize]);
         place(cpu, SOURCE, &[0u8; 16]);
-        let payload = [fd.to_le_bytes(), 0u32.to_le_bytes()].concat();
+        let payload = [fd.to_le_bytes(), flags.to_le_bytes()].concat();
         write_buffer_request(cpu, 9, &payload, &[], &[(INTO, room), (SOURCE, 16)]);
         cpu.bsd_request(TLS, 9, Some(9)).unwrap();
         let result = bsd_result(cpu);
@@ -503,6 +528,33 @@ mod tests {
             2,
             "a stream and its datagram"
         );
+    }
+
+    #[test]
+    fn a_peek_leaves_the_datagram_and_its_credit_and_fionread_counts_them_all() {
+        let (mut cpu, fd, a) = udp_socket("a.example");
+        sendto(&mut cpu, fd, b"q", a, 53);
+        cpu.take_net_commands();
+        cpu.deliver_net_events([
+            NetEvent::Data {
+                stream: 1,
+                data: b"first".to_vec(),
+            },
+            NetEvent::Data {
+                stream: 1,
+                data: b"second".to_vec(),
+            },
+        ]);
+        assert_eq!(cpu.process().bsd_sockets[&fd].datagram.queued_bytes(), 11);
+
+        let (result, bytes, source) = recvfrom_with(&mut cpu, fd, 64, BSD_MSG_PEEK);
+        assert_eq!((result, bytes.as_slice()), ((5, 0), &b"first"[..]));
+        assert_eq!(super::super::sockaddr_in(&source), Some((a, 53)));
+        assert!(cpu.take_net_commands().is_empty(), "nothing was taken");
+
+        let (result, bytes, _) = recvfrom(&mut cpu, fd, 64);
+        assert_eq!((result, bytes.as_slice()), ((5, 0), &b"first"[..]));
+        assert_eq!(cpu.take_net_commands().len(), 1, "now it was");
     }
 
     #[test]

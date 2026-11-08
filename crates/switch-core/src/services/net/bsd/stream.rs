@@ -312,6 +312,14 @@ mod tests {
             data: b"200 OK".to_vec(),
         }]);
         assert_eq!(cpu.bsd_poll_revents(fd, POLLIN), POLLIN);
+        assert_eq!(
+            recv_with(&mut cpu, fd, 16, BSD_MSG_PEEK),
+            ((6, 0), b"200 OK".to_vec())
+        );
+        assert!(
+            cpu.take_net_commands().is_empty(),
+            "a peek hands nothing back"
+        );
         assert_eq!(recv_on(&mut cpu, fd, 16), ((6, 0), b"200 OK".to_vec()));
         assert_eq!(
             cpu.take_net_commands(),
