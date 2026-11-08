@@ -265,7 +265,6 @@
   <footer class="statusbar">
     <span class="item" id="instructions-item" hidden title="Guest instructions executed, and how many a second while running">Instructions <b id="instructions">0</b></span>
     <span class="item" id="ram-item" title="Guest RAM the emulated console has touched (wasm heap in brackets)">RAM <b id="ram">-</b></span>
-    <span class="item" id="res-item" hidden>Res <b id="res">-</b></span>
     <span class="item" id="input-item">Input <b id="input-state">none</b></span>
     <span class="spacer"></span>
     <span class="item readout" id="fps" title="Frames presented per second">- fps</span>
@@ -418,11 +417,12 @@
     <details class="section" id="display-debug-section" data-debug-section="graphics" open hidden>
       <summary class="section-head">
         <span class="section-title">Display</span>
-        <info-tip text="Worker-side timing of each run slice and of painting its newest frame on the canvas. Guest frames presented between paints are counted as skipped."></info-tip>
+        <info-tip text="The size of the newest frame the title presented, and worker-side timing of each run slice and of painting that frame on the canvas. Guest frames presented between paints are counted as skipped."></info-tip>
       </summary>
       <div class="section-body">
         <div id="display-debug-data" hidden>
           <dl class="debug-totals">
+            <div><dt>Frame size</dt><dd id="display-frame-size">-</dd></div>
             <div><dt>Guest frames</dt><dd id="display-guest-frames">0</dd></div>
             <div><dt>Canvas updates</dt><dd id="display-canvas-updates">0</dd></div>
             <div><dt>Frames skipped</dt><dd id="display-skipped-frames">0</dd></div>

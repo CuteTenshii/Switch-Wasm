@@ -5,6 +5,7 @@ import type { GpuReport } from '../shared/protocol';
 import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
+import { screenSize } from './display';
 import { $, el } from './dom';
 import './elements/info-tip';
 import { fmtCount } from '../shared/format';
@@ -216,6 +217,8 @@ function updateDisplayDebug(): void {
   $('display-debug-data').hidden = !sampled;
   $<HTMLButtonElement>('btn-reset-display-debug').disabled = !sampled;
   if (!sampled) return;
+  const { width, height } = screenSize();
+  $('display-frame-size').textContent = width ? `${width}×${height}` : '-';
   $('display-guest-frames').textContent = String(metrics.guestFrames);
   $('display-canvas-updates').textContent = String(metrics.canvasUpdates);
   $('display-skipped-frames').textContent = String(metrics.skippedFrames);

@@ -15,8 +15,8 @@ export const overlayEl = $('overlay');
 export const dropveilEl = $('dropveil');
 
 const runEl = $<HTMLButtonElement>('btn-run');
-// Readouts that mean nothing without a program.
-const programItems = ['instructions-item', 'res-item'].map((id) => $(id));
+// A readout that means nothing without a program.
+const instructionsItem = $('instructions-item');
 const stepEl = $<HTMLButtonElement>('btn-step');
 const stopEl = $<HTMLButtonElement>('btn-stop');
 
@@ -33,7 +33,7 @@ export function loaded(): boolean {
 export function setState(text: EmuState): void {
   state = text;
   document.body.dataset.state = text;
-  for (const item of programItems) item.hidden = !loaded();
+  instructionsItem.hidden = !loaded();
   // Hidden with nothing to act on, and disabled so a stray click or Enter can't reach them either.
   for (const button of [runEl, stepEl, stopEl]) {
     button.hidden = !loaded();

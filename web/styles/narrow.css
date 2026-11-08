@@ -38,7 +38,7 @@
   }
   .running-name { max-width: 14ch; }
   .topbar { gap: 8px; }
-  #instructions-item, #res-item, #input-item { display: none; }
+  #instructions-item, #input-item { display: none; }
   .profile-button-name { display: none; }
   .profile-button { padding: 3px 4px; }
 
