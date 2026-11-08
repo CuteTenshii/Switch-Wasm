@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { crc32, deflateSync } from 'node:zlib';
-import { expect, openPage, test } from './page';
+import { expect, openPage, reloadPage, rowNamed, test } from './page';
 
 // A PNG whose column `x` is `rgb(x)`.
 function png(width: number, height: number, rgb: (x: number) => [number, number, number]): Buffer {
@@ -26,11 +26,7 @@ function png(width: number, height: number, rgb: (x: number) => [number, number,
   ]);
 }
 
-// The row of the profile named exactly `name` (`hasText` is a substring match).
-const row = (page: Page, name: string) =>
-  page.locator('.profile-row').filter({
-    has: page.locator('.profile-name').getByText(name, { exact: true }),
-  });
+const row = (page: Page, name: string) => rowNamed(page, '.profile-row', '.profile-name', name);
 
 async function addProfile(page: Page, name: string): Promise<void> {
   // Typed key by key, so game keyboard controls must not swallow the letters.
@@ -39,10 +35,14 @@ async function addProfile(page: Page, name: string): Promise<void> {
   await expect(row(page, name)).toBeVisible();
 }
 
-test.beforeEach(async ({ page }) => {
-  await openPage(page);
+async function openProfiles(page: Page): Promise<void> {
   await page.locator('#btn-profile').click();
   await expect(page.locator('#profiles')).toBeVisible();
+}
+
+test.beforeEach(async ({ page }) => {
+  await openPage(page);
+  await openProfiles(page);
 });
 
 test('a new console has one profile, playing', async ({ page }) => {
@@ -62,10 +62,9 @@ test('profiles can be added, chosen and renamed, and survive a reload', async ({
   await page.locator('.profile-rename input').press('Enter');
   await expect(row(page, 'Sam')).toBeVisible();
 
-  await page.reload();
-  await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
+  await reloadPage(page);
   await expect(page.locator('#btn-profile')).toContainText('Jessie Axe');
-  await page.locator('#btn-profile').click();
+  await openProfiles(page);
   await expect(page.locator('.profile-name')).toHaveText(['Sam', 'Jessie Axe']);
 });
 

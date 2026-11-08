@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { Page } from '@playwright/test';
-import { expect, openPage, test } from './page';
+import { expect, openPage, openPanel, reloadPage, test } from './page';
 
 // A relay's first frame: HELLO, version 1, 64 streams.
 const HELLO = Buffer.from([0x80, 0, 0, 0, 0, 1, 0x40, 0]);
@@ -27,15 +26,13 @@ async function relayStub(): Promise<{ server: Server; url: string }> {
   return { server, url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }
 
-async function openTab(page: Page): Promise<void> {
+test.beforeEach(async ({ page }) => {
   await openPage(page);
-  await page.locator('#btn-panel').click();
-  await page.locator('.tab[data-tab="network"]').click();
+  await openPanel(page, 'Network');
   await expect(page.locator('#net-badge')).toHaveText('off');
-}
+});
 
 test('turning the network on with no relay running says so, and it can be retried', async ({ page }) => {
-  await openTab(page);
   // A port nothing listens on.
   await page.locator('#net-url').fill('ws://127.0.0.1:1');
   await page.locator('#btn-net').click();
@@ -46,7 +43,6 @@ test('turning the network on with no relay running says so, and it can be retrie
 });
 
 test('an address that is not a WebSocket one is refused before anything connects', async ({ page }) => {
-  await openTab(page);
   await page.locator('#net-url').fill('http://127.0.0.1:18787');
   await page.locator('#btn-net').click();
   await expect(page.locator('#net-note')).toContainText('ws://');
@@ -55,7 +51,6 @@ test('an address that is not a WebSocket one is refused before anything connects
 
 test('a relay that answers turns the network on, and turning it off puts it back', async ({ page }) => {
   const { server, url } = await relayStub();
-  await openTab(page);
   await page.locator('#net-url').fill(url);
   await page.locator('#btn-net').click();
   await expect(page.locator('#net-badge')).toHaveText('on');
@@ -71,13 +66,10 @@ test('a relay that answers turns the network on, and turning it off puts it back
 });
 
 test('the relay address is remembered', async ({ page }) => {
-  await openTab(page);
   await page.locator('#net-url').fill('ws://127.0.0.1:1');
   await page.locator('#btn-net').click();
   await expect(page.locator('#net-badge')).toHaveText('no relay');
-  await page.reload();
-  await openPage(page);
-  await page.locator('#btn-panel').click();
-  await page.locator('.tab[data-tab="network"]').click();
+  await reloadPage(page);
+  await openPanel(page, 'Network');
   await expect(page.locator('#net-url')).toHaveValue('ws://127.0.0.1:1');
 });

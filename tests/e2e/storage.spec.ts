@@ -1,15 +1,11 @@
 import type { Page } from '@playwright/test';
-import { expect, openPage, test } from './page';
+import { expect, openPage, openPanel, reloadPage, rowNamed, test } from './page';
 
-// The row whose name is exactly `name` (folders carry a trailing slash).
-const row = (page: Page, name: string) =>
-  page.locator('.files-row').filter({
-    has: page.locator('.files-name').getByText(name, { exact: true }),
-  });
+// Folders carry a trailing slash.
+const row = (page: Page, name: string) => rowNamed(page, '.files-row', '.files-name', name);
 
 async function openStorage(page: Page): Promise<void> {
-  await page.locator('#btn-panel').click();
-  await page.locator('.panel .tab[data-tab="files"]').click();
+  await openPanel(page, 'Files');
   await page.locator('#btn-files').click();
   await expect(page.locator('#files')).toBeVisible();
 }
@@ -51,8 +47,7 @@ test('folders and files can be made, renamed, downloaded and deleted, and surviv
   await row(page, 'conf.lua').getByRole('button', { name: 'Download' }).click();
   expect((await download).suggestedFilename()).toBe('conf.lua');
 
-  await page.reload();
-  await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
+  await reloadPage(page);
   await openStorage(page);
   await row(page, 'game/').locator('.files-main').click();
   await expect(row(page, 'conf.lua')).toBeVisible();
