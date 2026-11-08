@@ -9,10 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::accept_hdr_async_with_config;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use futures_util::SinkExt;
@@ -39,11 +40,31 @@ impl Default for Timeouts {
     }
 }
 
-/// Accept pages until the listener fails.
+/// Pause after a failed accept, which is usually the process out of descriptors: retrying at
+/// once would spin until one is freed.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Accept pages for as long as the relay runs.
 pub async fn serve(listener: TcpListener, policy: Arc<Policy>, timeouts: Timeouts) {
-    while let Ok((socket, _)) = listener.accept().await {
-        tokio::spawn(handle(socket, policy.clone(), timeouts));
+    loop {
+        match listener.accept().await {
+            Ok((socket, _)) => {
+                tokio::spawn(handle(socket, policy.clone(), timeouts));
+            }
+            Err(error) => {
+                eprintln!("cannot accept a page: {error}");
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
+            }
+        }
     }
+}
+
+/// The largest message a page may send: a full `DATA` frame and its header.
+fn websocket_config() -> WebSocketConfig {
+    let largest = switch_relay_proto::MAX_DATA + 0x200;
+    WebSocketConfig::default()
+        .max_message_size(Some(largest))
+        .max_frame_size(Some(largest))
 }
 
 /// Note the page's `Origin` and accept the upgrade; whether it may stay is decided after.
@@ -65,9 +86,11 @@ fn remember_origin(
 async fn handle(socket: TcpStream, policy: Arc<Policy>, timeouts: Timeouts) {
     let origin = Arc::new(Mutex::new(None::<String>));
     let seen = origin.clone();
-    let upgrade = accept_hdr_async(socket, move |request: &Request, response| {
-        remember_origin(&seen, request, response)
-    });
+    let upgrade = accept_hdr_async_with_config(
+        socket,
+        move |request: &Request, response| remember_origin(&seen, request, response),
+        Some(websocket_config()),
+    );
     let Ok(Ok(mut socket)) = tokio::time::timeout(timeouts.handshake, upgrade).await else {
         return;
     };

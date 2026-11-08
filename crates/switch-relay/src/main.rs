@@ -1,5 +1,5 @@
 use std::io::IsTerminal;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -49,6 +49,14 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Where `localhost` means IPv6 first; a host without IPv6 does without it.
+    let listener_v6 = match TcpListener::bind((Ipv6Addr::LOCALHOST, port)).await {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            eprintln!("not listening on [::1]:{port}: {error}");
+            None
+        }
+    };
     let unknown = if std::io::stdin().is_terminal() {
         Unknown::Ask
     } else {
@@ -56,12 +64,15 @@ async fn main() -> ExitCode {
     };
     eprintln!("switch-relay listening on ws://127.0.0.1:{port}");
     eprintln!("trusted: {}", TRUSTED_ORIGINS.join(", "));
-    switch_relay::serve(
-        listener,
-        Arc::new(Policy::new(origins, unknown, allow_private)),
-        Timeouts::default(),
-    )
-    .await;
+    let policy = Arc::new(Policy::new(origins, unknown, allow_private));
+    if let Some(listener) = listener_v6 {
+        tokio::spawn(switch_relay::serve(
+            listener,
+            policy.clone(),
+            Timeouts::default(),
+        ));
+    }
+    switch_relay::serve(listener, policy, Timeouts::default()).await;
     ExitCode::SUCCESS
 }
 

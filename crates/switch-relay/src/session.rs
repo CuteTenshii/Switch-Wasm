@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
-use switch_relay_proto::{ClientFrame, ServerFrame, StreamId, VERSION};
+use switch_relay_proto::{ClientFrame, ServerFrame, StreamId, MAX_DATA, VERSION};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -126,6 +126,10 @@ pub async fn run(
                         streams.insert(stream, Handle { commands, credit, task });
                     }
                     ClientFrame::Data { stream, data } => {
+                        if data.len() > MAX_DATA {
+                            ending = CloseCode::Protocol;
+                            break;
+                        }
                         if let Some(handle) = streams.get(&stream) {
                             let _ = handle.commands.send(Command::Data(data));
                         }

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tokio::sync::Mutex;
 
@@ -61,9 +61,13 @@ impl Policy {
         answer
     }
 
-    /// Whether the relay may connect to a resolved address.
-    pub fn address_allowed(&self, address: Ipv4Addr) -> bool {
-        self.allow_private || is_public(address)
+    /// Whether the relay may reach a resolved address.
+    pub fn address_allowed(&self, address: impl Into<IpAddr>) -> bool {
+        self.allow_private
+            || match address.into() {
+                IpAddr::V4(address) => is_public(address),
+                IpAddr::V6(address) => is_public_v6(address),
+            }
     }
 }
 
@@ -98,6 +102,42 @@ fn is_public(address: Ipv4Addr) -> bool {
         || (a == 198 && (18..20).contains(&b))
         // Reserved, 240.0.0.0/4.
         || a >= 240)
+}
+
+/// The IPv6 counterpart of [`is_public`]. An address that carries an IPv4 one (mapped, NAT64,
+/// 6to4) is judged by that address, since that is where the packets end up.
+fn is_public_v6(address: Ipv6Addr) -> bool {
+    if let Some(v4) = address.to_ipv4_mapped() {
+        return is_public(v4);
+    }
+    let segments = address.segments();
+    let octets = address.octets();
+    let embedded =
+        |at: usize| Ipv4Addr::new(octets[at], octets[at + 1], octets[at + 2], octets[at + 3]);
+    match segments {
+        // NAT64's well-known prefix, 64:ff9b::/96.
+        [0x64, 0xff9b, 0, 0, 0, 0, _, _] => return is_public(embedded(12)),
+        // 6to4, 2002::/16, with the IPv4 address in the next 32 bits.
+        [0x2002, ..] => return is_public(embedded(2)),
+        _ => {}
+    }
+    !(address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        // IPv4-compatible, ::/96, deprecated.
+        || segments[..6] == [0; 6]
+        // Discard-only, 100::/64.
+        || segments[..4] == [0x100, 0, 0, 0]
+        // Unique local, fc00::/7.
+        || (segments[0] & 0xfe00) == 0xfc00
+        // Link-local, fe80::/10, and the deprecated site-local, fec0::/10.
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] & 0xffc0) == 0xfec0
+        // IETF protocol assignments, 2001::/23, except Teredo (2001::/32), which is routed.
+        || (segments[0] == 0x2001 && segments[1] < 0x200 && segments[1] != 0)
+        // Documentation, 2001:db8::/32 and 3fff::/20.
+        || (segments[0] == 0x2001 && segments[1] == 0xdb8)
+        || (segments[0] & 0xfff0) == 0x3ff0)
 }
 
 #[cfg(test)]
@@ -143,7 +183,10 @@ mod tests {
             [93, 184, 216, 34],
             [172, 32, 0, 1],
         ] {
-            assert!(policy.address_allowed(allowed.into()), "{allowed:?}");
+            assert!(
+                policy.address_allowed(Ipv4Addr::from(allowed)),
+                "{allowed:?}"
+            );
         }
         for refused in [
             [127, 0, 0, 1],
@@ -162,13 +205,53 @@ mod tests {
             [240, 0, 0, 1],
             [255, 255, 255, 255],
         ] {
-            assert!(!policy.address_allowed(refused.into()), "{refused:?}");
+            assert!(
+                !policy.address_allowed(Ipv4Addr::from(refused)),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_routable_ipv6_addresses_are_allowed() {
+        let policy = closed();
+        for allowed in [
+            "2606:4700:4700::1111",
+            "2a00:1450:4001:82a::200e",
+            "2001:0:4136:e378::1",
+            "64:ff9b::808:808",
+            "2002:0808:0808::1",
+            "::ffff:8.8.8.8",
+        ] {
+            let address: Ipv6Addr = allowed.parse().unwrap();
+            assert!(policy.address_allowed(address), "{allowed}");
+        }
+        for refused in [
+            "::",
+            "::1",
+            "fe80::1",
+            "fec0::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "ff02::1",
+            "2001:db8::1",
+            "3fff::1",
+            "100::1",
+            "2001:2::1",
+            "::ffff:127.0.0.1",
+            "::ffff:192.168.1.1",
+            "64:ff9b::a00:1",
+            "2002:c0a8:0101::1",
+            "::127.0.0.1",
+        ] {
+            let address: Ipv6Addr = refused.parse().unwrap();
+            assert!(!policy.address_allowed(address), "{refused}");
         }
     }
 
     #[test]
     fn private_addresses_can_be_allowed_on_request() {
         let policy = Policy::new(Vec::new(), Unknown::Deny, true);
-        assert!(policy.address_allowed([127, 0, 0, 1].into()));
+        assert!(policy.address_allowed(Ipv4Addr::LOCALHOST));
     }
 }

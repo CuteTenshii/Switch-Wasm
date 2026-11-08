@@ -9,8 +9,8 @@ use rustls::RootCertStore;
 use switch_core::json;
 use switch_core::services::netbridge::{NetCommand, NetEvent, NetFailure, Peer, StreamId};
 use switch_relay_proto::{
-    ClientFrame, DecodeError, Failure, Peer as WirePeer, Proto, ServerFrame, OLDEST_VERSION,
-    VERSION,
+    ClientFrame, DecodeError, Failure, Peer as WirePeer, Proto, ServerFrame, MAX_DATA,
+    OLDEST_VERSION, VERSION,
 };
 
 /// Bytes the relay may send on a stream before the guest has read any.
@@ -80,12 +80,13 @@ pub(crate) struct Pump {
 }
 
 impl Pump {
+    /// A stream's bytes, in frames no larger than the relay takes.
     fn data(&mut self, stream: StreamId, bytes: Vec<u8>) {
-        if !bytes.is_empty() {
+        for chunk in bytes.chunks(MAX_DATA) {
             self.frames.push(
                 ClientFrame::Data {
                     stream,
-                    data: bytes,
+                    data: chunk.to_vec(),
                 }
                 .encode(),
             );
@@ -153,6 +154,11 @@ impl Client {
                     );
                 }
                 NetCommand::Send { stream, data } => {
+                    let udp = self.connections.get(&stream).is_some_and(|c| c.udp);
+                    // A datagram cannot be split, and the relay takes no larger frame.
+                    if udp && data.len() > MAX_DATA {
+                        continue;
+                    }
                     if let Some(connection) = self.connections.get_mut(&stream) {
                         connection.sent += data.len() as u64;
                     }
@@ -484,6 +490,27 @@ mod tests {
             },
         ]));
         assert_eq!(frames, vec![ClientFrame::Close { stream: 1 }]);
+    }
+
+    #[test]
+    fn a_long_send_goes_in_frames_the_relay_takes() {
+        let mut client = Client::default();
+        client.outgoing(vec![connect(1)]);
+        let data: Vec<u8> = (0..40_000u32).map(|i| i as u8).collect();
+        let frames = decoded(client.outgoing(vec![NetCommand::Send {
+            stream: 1,
+            data: data.clone(),
+        }]));
+        let mut joined = Vec::new();
+        for frame in &frames {
+            let ClientFrame::Data { stream: 1, data } = frame else {
+                panic!("data, got {frame:?}");
+            };
+            assert!(data.len() <= MAX_DATA);
+            joined.extend_from_slice(data);
+        }
+        assert_eq!(frames.len(), 3);
+        assert_eq!(joined, data);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! A relay on a loopback port, driven over a real WebSocket against local servers.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -513,4 +513,120 @@ async fn a_connection_that_never_finishes_the_upgrade_is_closed() {
             "{sent:?}"
         );
     }
+}
+
+/// An echo server like [`echo`], listening only on `[::1]`.
+async fn echo_v6() -> u16 {
+    let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 1024];
+                while let Ok(read) = socket.read(&mut buffer).await {
+                    if read == 0 || socket.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn a_name_reaches_its_ipv6_address_when_the_ipv4_one_refuses() {
+    let (url, port) = (relay(true).await, echo_v6().await);
+    let mut socket = page(&url).await;
+    send(
+        &mut socket,
+        ClientFrame::Connect {
+            stream: 1,
+            proto: Proto::Tcp,
+            port,
+            window: 100,
+            peer: Peer::Name("localhost".into()),
+        },
+    )
+    .await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+    send(
+        &mut socket,
+        ClientFrame::Data {
+            stream: 1,
+            data: b"v6".to_vec(),
+        },
+    )
+    .await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Data {
+            stream: 1,
+            data: b"v6".to_vec()
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_name_falls_back_to_ipv4_when_ipv6_refuses() {
+    let (url, port) = (relay(true).await, echo().await);
+    let mut socket = page(&url).await;
+    send(
+        &mut socket,
+        ClientFrame::Connect {
+            stream: 1,
+            proto: Proto::Tcp,
+            port,
+            window: 100,
+            peer: Peer::Name("localhost".into()),
+        },
+    )
+    .await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+}
+
+#[tokio::test]
+async fn ipv6_loopback_is_denied_unless_allowed() {
+    let port = echo_v6().await;
+    let mut socket = page(&relay(false).await).await;
+    send(
+        &mut socket,
+        ClientFrame::Connect {
+            stream: 1,
+            proto: Proto::Tcp,
+            port,
+            window: 0,
+            peer: Peer::Name("::1".into()),
+        },
+    )
+    .await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Failed {
+            stream: 1,
+            reason: Failure::Denied
+        }
+    );
+}
+
+#[tokio::test]
+async fn data_larger_than_a_frame_may_carry_closes_the_socket() {
+    let (url, port) = (relay(true).await, echo().await);
+    let mut socket = page(&url).await;
+    send(&mut socket, tcp(1, port, 0)).await;
+    send(
+        &mut socket,
+        ClientFrame::Data {
+            stream: 1,
+            data: vec![0; switch_relay_proto::MAX_DATA + 1],
+        },
+    )
+    .await;
+    assert_eq!(closed_with(&mut socket).await, CloseCode::Protocol);
 }
