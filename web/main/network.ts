@@ -18,7 +18,7 @@ interface Connection {
   id: number;
   host: string;
   port: number;
-  proto: 'tcp' | 'udp';
+  proto: 'tcp' | 'udp' | 'listen';
   state: string;
   sent: number;
   received: number;
@@ -59,6 +59,16 @@ function render(): void {
   urlInput.disabled = on();
 }
 
+/** A UDP socket or a listener has no single peer, only the port it asked for (0 is any). */
+function describe(c: Connection): string {
+  const port = c.port === 0 ? 'any port' : `port ${c.port}`;
+  switch (c.proto) {
+    case 'tcp': return `${c.host}:${c.port}`;
+    case 'udp': return `UDP on ${port}`;
+    case 'listen': return `Listening on ${port}`;
+  }
+}
+
 function showConnections(list: Connection[]): void {
   $('net-count').textContent = String(list.length);
   $('net-empty').hidden = list.length > 0;
@@ -67,7 +77,7 @@ function showConnections(list: Connection[]): void {
     const row = document.createElement('tr');
     // Names come from the guest, so they are text, never markup.
     for (const text of [
-      `${c.host}:${c.port}${c.proto === 'udp' ? ' (udp)' : ''}`, c.state, fmtSize(c.sent),
+      describe(c), c.state, fmtSize(c.sent),
       fmtSize(c.received),
     ]) {
       const cell = document.createElement('td');

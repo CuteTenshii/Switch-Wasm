@@ -59,9 +59,9 @@ pub async fn serve(listener: TcpListener, policy: Arc<Policy>, timeouts: Timeout
     }
 }
 
-/// The largest message a page may send: a full `DATA` frame and its header.
+/// The largest message a page may send: a full datagram and its header.
 fn websocket_config() -> WebSocketConfig {
-    let largest = switch_relay_proto::MAX_DATA + 0x200;
+    let largest = switch_relay_proto::MAX_FRAME;
     WebSocketConfig::default()
         .max_message_size(Some(largest))
         .max_frame_size(Some(largest))

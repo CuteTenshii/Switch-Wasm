@@ -1,4 +1,5 @@
 use crate::cpu::Cpu;
+use crate::services::netbridge::{NetCommand, NetEvent, NetFailure, Source};
 
 use crate::kernel::ipc::testing::*;
 
@@ -206,7 +207,9 @@ pub(in crate::services::net) fn bsd_sends_an_addressed_datagram_the_link_would_c
     broadcast[4..8].copy_from_slice(&[255, 255, 255, 255]);
     assert_eq!(send_to(&mut cpu, fd, &broadcast), (4, 0), "broadcast");
 
-    // Nothing arrives: EAGAIN and a yield, not `ENETUNREACH`.
+    // The datagram to itself arrives, as on a console; then nothing does: EAGAIN and a yield,
+    // not `ENETUNREACH`.
+    assert_eq!(recv_on(&mut cpu, fd, 4), ((4, 0), vec![1, 2, 3, 4]));
     set_nonblocking(&mut cpu, fd);
     cpu.pending_yield = false;
     let (result, bytes) = recv_on(&mut cpu, fd, 4);
@@ -772,5 +775,206 @@ pub(in crate::services::net) fn open_and_sysctl_find_nothing_and_the_registratio
         cpu.unimplemented_ipc.is_empty(),
         "{:?}",
         cpu.unimplemented_ipc
+    );
+}
+
+/// `setsockopt(fd, SOL_SOCKET, option, value)`.
+fn set_option(cpu: &mut Cpu, fd: i32, option: u32, value: &[u8]) {
+    const AT: u32 = SCRATCH + 0x1e0;
+    place(cpu, AT, value);
+    let payload: Vec<u8> = [fd as u32, super::BSD_SOL_SOCKET, option]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    write_map_buffer_request(cpu, 21, &payload, AT, value.len() as u32, true);
+    cpu.bsd_request(TLS, 9, Some(21)).unwrap();
+    assert_eq!(bsd_result(cpu), (0, 0), "setsockopt");
+}
+
+/// `bind(fd, ip:port)`.
+fn bind_to(cpu: &mut Cpu, fd: i32, ip: [u8; 4], port: u16) -> (i32, i32) {
+    let mut address = loopback_sockaddr(port);
+    address[4..8].copy_from_slice(&ip);
+    place(cpu, SCRATCH, &address);
+    write_map_buffer_request(cpu, 13, &fd.to_le_bytes(), SCRATCH, 16, true);
+    cpu.bsd_request(TLS, 9, Some(13)).unwrap();
+    bsd_result(cpu)
+}
+
+#[test]
+pub(in crate::services::net) fn a_port_held_by_a_socket_of_the_same_kind_is_in_use() {
+    let (mut cpu, first) = bsd_socket(1);
+    cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+    assert_eq!(bind_to(&mut cpu, first, [0, 0, 0, 0], 8080), (0, 0));
+    let second = open_socket(&mut cpu, 1);
+    assert_eq!(
+        bind_to(&mut cpu, second, [127, 0, 0, 1], 8080),
+        (-1, super::BSD_EADDRINUSE),
+        "the wildcard covers loopback"
+    );
+    assert_eq!(bind_to(&mut cpu, second, [0, 0, 0, 0], 8081), (0, 0));
+
+    let datagram = open_socket(&mut cpu, 2);
+    assert_eq!(
+        bind_to(&mut cpu, datagram, [0, 0, 0, 0], 8080),
+        (0, 0),
+        "UDP and TCP ports are apart"
+    );
+
+    let third = open_socket(&mut cpu, 1);
+    let fourth = open_socket(&mut cpu, 1);
+    set_option(
+        &mut cpu,
+        third,
+        super::BSD_SO_REUSEADDR,
+        &1u32.to_le_bytes(),
+    );
+    set_option(
+        &mut cpu,
+        fourth,
+        super::BSD_SO_REUSEADDR,
+        &1u32.to_le_bytes(),
+    );
+    assert_eq!(bind_to(&mut cpu, third, [0, 0, 0, 0], 9000), (0, 0));
+    assert_eq!(
+        bind_to(&mut cpu, fourth, [0, 0, 0, 0], 9000),
+        (0, 0),
+        "both asked to share"
+    );
+}
+
+#[test]
+pub(in crate::services::net) fn shut_rd_drops_what_is_queued_and_reads_end_of_file() {
+    let (mut cpu, client, server) = blocking_pair();
+    send_on(&mut cpu, client, b"before");
+    assert_eq!(bsd_command(&mut cpu, 22, &[server as u32, 0]), (0, 0));
+    assert_eq!(recv_on(&mut cpu, server, 16).0, (0, 0));
+    send_on(&mut cpu, client, b"after");
+    assert_eq!(
+        recv_on(&mut cpu, server, 16).0,
+        (0, 0),
+        "and what comes later"
+    );
+    assert_eq!(send_on(&mut cpu, server, b"x"), (1, 0), "it may still send");
+    assert_eq!(bsd_command(&mut cpu, 22, &[server as u32, 1]), (0, 0));
+    assert_eq!(send_on(&mut cpu, server, b"x"), (-1, super::BSD_EPIPE));
+    assert_eq!(
+        bsd_command(&mut cpu, 22, &[server as u32, 3]),
+        (-1, super::BSD_EINVAL)
+    );
+}
+
+#[test]
+pub(in crate::services::net) fn a_listener_outside_loopback_takes_connections_the_host_accepts() {
+    let (mut cpu, listener) = bsd_socket(1);
+    cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+    cpu.set_network(true);
+    bind_to(&mut cpu, listener, [0, 0, 0, 0], 8080);
+    assert_eq!(bsd_command(&mut cpu, 18, &[listener as u32, 8]), (0, 0));
+    assert_eq!(
+        cpu.take_net_commands(),
+        vec![NetCommand::Listen {
+            stream: 1,
+            port: 8080
+        }]
+    );
+
+    let incoming = 0x8000_0000;
+    cpu.deliver_net_events([
+        NetEvent::Connected { stream: 1 },
+        NetEvent::Incoming {
+            listener: 1,
+            stream: incoming,
+            source: Source::V4([203, 0, 113, 9]),
+            port: 50000,
+        },
+        NetEvent::Data {
+            stream: incoming,
+            data: b"hello".to_vec(),
+        },
+    ]);
+    place(&mut cpu, SCRATCH, &[0u8; 16]);
+    write_map_buffer_request(&mut cpu, 12, &listener.to_le_bytes(), SCRATCH, 16, false);
+    cpu.bsd_request(TLS, 9, Some(12)).unwrap();
+    let (accepted, errno) = bsd_result(&cpu);
+    assert_eq!(errno, 0);
+    assert_eq!(
+        super::sockaddr_in(&cpu.read_bytes(SCRATCH, 16)),
+        Some(([203, 0, 113, 9], 50000))
+    );
+    assert_eq!(recv_on(&mut cpu, accepted, 16), ((5, 0), b"hello".to_vec()));
+    assert_eq!(send_on(&mut cpu, accepted, b"hi"), (2, 0));
+    assert!(cpu.take_net_commands().contains(&NetCommand::Send {
+        stream: incoming,
+        data: b"hi".to_vec()
+    }));
+
+    // Closing the listener closes its host listener.
+    assert_eq!(bsd_command(&mut cpu, 26, &[listener as u32]), (0, 0));
+    assert_eq!(
+        cpu.take_net_commands(),
+        vec![NetCommand::Close { stream: 1 }]
+    );
+    // A connection for a listener that is gone is closed.
+    cpu.deliver_net_events([NetEvent::Incoming {
+        listener: 1,
+        stream: incoming + 1,
+        source: Source::V4([203, 0, 113, 9]),
+        port: 50001,
+    }]);
+    assert_eq!(
+        cpu.take_net_commands(),
+        vec![NetCommand::Close {
+            stream: incoming + 1
+        }]
+    );
+}
+
+#[test]
+pub(in crate::services::net) fn a_listener_the_host_refuses_still_listens_on_this_console() {
+    let (mut cpu, listener) = bsd_socket(1);
+    cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+    cpu.set_network(true);
+    bind_to(&mut cpu, listener, [0, 0, 0, 0], 8080);
+    bsd_command(&mut cpu, 18, &[listener as u32, 8]);
+    cpu.deliver_net_events([NetEvent::Failed {
+        stream: 1,
+        reason: NetFailure::Denied,
+    }]);
+    assert_eq!(cpu.process().bsd_sockets[&listener].host_listener, None);
+    let client = open_socket(&mut cpu, 1);
+    place(&mut cpu, SCRATCH, &loopback_sockaddr(8080));
+    write_map_buffer_request(&mut cpu, 14, &client.to_le_bytes(), SCRATCH, 16, true);
+    cpu.bsd_request(TLS, 9, Some(14)).unwrap();
+    assert_eq!(bsd_result(&cpu), (0, 0), "loopback connects still work");
+}
+
+#[test]
+pub(in crate::services::net) fn each_blocked_thread_keeps_its_own_deadline() {
+    let (mut cpu, _client, server) = blocking_pair();
+    set_receive_timeout(&mut cpu, server, &timeval(0, 5_000));
+    let first_deadline = cpu.wait_deadline(5_000_000).unwrap();
+    recv_on(&mut cpu, server, 8);
+    assert!(cpu.pending_retry.take().is_some(), "thread 0 waits");
+
+    cpu.current_thread = 1;
+    cpu.cycles = first_deadline - 10;
+    recv_on(&mut cpu, server, 8);
+    assert!(
+        cpu.pending_retry.take().is_some(),
+        "thread 1 waits from now"
+    );
+
+    cpu.cycles = first_deadline;
+    recv_on(&mut cpu, server, 8);
+    assert!(
+        cpu.pending_retry.take().is_some(),
+        "thread 1's deadline is later"
+    );
+    cpu.current_thread = 0;
+    assert_eq!(
+        recv_on(&mut cpu, server, 8).0,
+        (-1, super::BSD_EAGAIN),
+        "thread 0's has passed"
     );
 }

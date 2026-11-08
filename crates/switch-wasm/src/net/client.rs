@@ -2,14 +2,15 @@
 //! becomes frames, and what the relay sent becomes events for the core.
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use super::tls::{self, TlsStream};
 use rustls::RootCertStore;
 use switch_core::json;
-use switch_core::services::netbridge::{NetCommand, NetEvent, NetFailure, Peer, StreamId};
+use switch_core::services::netbridge::{NetCommand, NetEvent, NetFailure, Peer, Source, StreamId};
 use switch_relay_proto::{
-    ClientFrame, DecodeError, Failure, Peer as WirePeer, Proto, ServerFrame, MAX_DATA,
+    ClientFrame, DecodeError, Failure, Peer as WirePeer, ServerFrame, MAX_DATA, MAX_DATAGRAM,
     OLDEST_VERSION, VERSION,
 };
 
@@ -29,6 +30,8 @@ enum State {
     Ended,
     /// The guest closed it, or the link went.
     Closed,
+    /// The relay said the connection was reset.
+    Reset,
     Failed(NetFailure),
 }
 
@@ -47,18 +50,30 @@ impl State {
             State::Open => "open",
             State::Ended => "ended",
             State::Closed => "closed",
+            State::Reset => "reset",
             State::Failed(NetFailure::Refused) => "refused",
             State::Failed(NetFailure::Unreachable) => "unreachable",
             State::Failed(NetFailure::TimedOut) => "timed out",
             State::Failed(NetFailure::NotFound) => "not found",
+            State::Failed(NetFailure::InUse) => "port in use",
+            State::Failed(NetFailure::Denied) => "denied",
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Tcp,
+    Udp,
+    Listen,
+}
+
 struct Connection {
+    /// The peer, or for a UDP socket or a listener, `*`.
     host: String,
+    /// The peer's port, or the local one a UDP socket or listener asked for.
     port: u16,
-    udp: bool,
+    kind: Kind,
     state: State,
     sent: u64,
     received: u64,
@@ -101,6 +116,30 @@ impl Pump {
     }
 }
 
+fn wire_peer(peer: Peer) -> WirePeer {
+    match peer {
+        Peer::Address(ip) => WirePeer::Address(ip),
+        Peer::Name(name) => WirePeer::Name(name),
+    }
+}
+
+fn source_of(peer: WirePeer) -> Source {
+    match peer {
+        WirePeer::Address(ip) => Source::V4(ip),
+        WirePeer::Address6(ip) => Source::V6(ip),
+        WirePeer::Name(name) => Source::Name(name),
+    }
+}
+
+/// How the page lists a peer.
+fn host_of(peer: &WirePeer) -> String {
+    match peer {
+        WirePeer::Address(ip) => Ipv4Addr::from(*ip).to_string(),
+        WirePeer::Address6(ip) => Ipv6Addr::from(*ip).to_string(),
+        WirePeer::Name(name) => name.clone(),
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Client {
     connections: BTreeMap<StreamId, Connection>,
@@ -118,47 +157,59 @@ impl Client {
         let mut credit: Vec<(StreamId, u32)> = Vec::new();
         for command in commands {
             match command {
-                NetCommand::Connect {
-                    stream,
-                    udp,
-                    peer,
-                    port,
-                } => {
-                    self.connections.insert(
-                        stream,
-                        Connection {
-                            host: match &peer {
-                                Peer::Address([a, b, c, d]) => format!("{a}.{b}.{c}.{d}"),
-                                Peer::Name(name) => name.clone(),
-                            },
-                            port,
-                            udp,
-                            state: State::Waiting,
-                            sent: 0,
-                            received: 0,
-                        },
-                    );
-                    self.forget_old();
+                NetCommand::Connect { stream, peer, port } => {
+                    let peer = wire_peer(peer);
+                    self.track(stream, host_of(&peer), port, Kind::Tcp, State::Waiting);
                     pump.frames.push(
                         ClientFrame::Connect {
                             stream,
-                            proto: if udp { Proto::Udp } else { Proto::Tcp },
                             port,
                             window: WINDOW,
-                            peer: match peer {
-                                Peer::Address(ip) => WirePeer::Address(ip),
-                                Peer::Name(name) => WirePeer::Name(name),
-                            },
+                            peer,
                         }
                         .encode(),
                     );
                 }
-                NetCommand::Send { stream, data } => {
-                    let udp = self.connections.get(&stream).is_some_and(|c| c.udp);
-                    // A datagram cannot be split, and the relay takes no larger frame.
-                    if udp && data.len() > MAX_DATA {
+                NetCommand::OpenUdp { stream, port } => {
+                    self.track(stream, "*".into(), port, Kind::Udp, State::Waiting);
+                    let frame = ClientFrame::UdpOpen {
+                        stream,
+                        port,
+                        window: WINDOW,
+                    };
+                    pump.frames.push(frame.encode());
+                }
+                NetCommand::Listen { stream, port } => {
+                    self.track(stream, "*".into(), port, Kind::Listen, State::Waiting);
+                    let frame = ClientFrame::Listen {
+                        stream,
+                        port,
+                        window: WINDOW,
+                    };
+                    pump.frames.push(frame.encode());
+                }
+                NetCommand::SendTo {
+                    stream,
+                    peer,
+                    port,
+                    data,
+                } => {
+                    // The core keeps datagrams to what UDP carries; nothing larger fits a frame.
+                    if data.len() > MAX_DATAGRAM {
                         continue;
                     }
+                    if let Some(connection) = self.connections.get_mut(&stream) {
+                        connection.sent += data.len() as u64;
+                    }
+                    let frame = ClientFrame::SendTo {
+                        stream,
+                        port,
+                        peer: wire_peer(peer),
+                        data,
+                    };
+                    pump.frames.push(frame.encode());
+                }
+                NetCommand::Send { stream, data } => {
                     if let Some(connection) = self.connections.get_mut(&stream) {
                         connection.sent += data.len() as u64;
                     }
@@ -254,8 +305,9 @@ impl Client {
                     Failure::Refused => NetFailure::Refused,
                     Failure::TimedOut => NetFailure::TimedOut,
                     Failure::NotFound => NetFailure::NotFound,
-                    // A destination the policy keeps out of reach has no route, from here.
-                    Failure::Unreachable | Failure::Denied => NetFailure::Unreachable,
+                    Failure::Unreachable => NetFailure::Unreachable,
+                    Failure::Denied => NetFailure::Denied,
+                    Failure::InUse => NetFailure::InUse,
                 };
                 self.set_state(stream, State::Failed(reason));
                 self.tls.remove(&stream);
@@ -308,11 +360,51 @@ impl Client {
                 self.set_state(stream, State::Ended);
                 pump.events.push(NetEvent::Closed { stream });
             }
+            ServerFrame::Reset { stream } => {
+                self.set_state(stream, State::Reset);
+                self.tls.remove(&stream);
+                pump.events.push(NetEvent::Reset { stream });
+            }
+            // The host acknowledges ciphertext, which a TLS stream's window does not count.
+            ServerFrame::Sent { stream, bytes } if !self.tls.contains_key(&stream) => {
+                pump.events.push(NetEvent::Sent { stream, bytes });
+            }
+            ServerFrame::Sent { .. } => {}
+            ServerFrame::ReceivedFrom {
+                stream,
+                port,
+                peer,
+                data,
+            } => {
+                if let Some(connection) = self.connections.get_mut(&stream) {
+                    connection.received += data.len() as u64;
+                }
+                pump.events.push(NetEvent::Datagram {
+                    stream,
+                    source: source_of(peer),
+                    port,
+                    data,
+                });
+            }
+            ServerFrame::Incoming {
+                stream,
+                listener,
+                port,
+                peer,
+            } => {
+                self.track(stream, host_of(&peer), port, Kind::Tcp, State::Open);
+                pump.events.push(NetEvent::Incoming {
+                    listener,
+                    stream,
+                    source: source_of(peer),
+                    port,
+                });
+            }
         }
         Ok(pump)
     }
 
-    /// The link is gone: every stream the guest still has ends.
+    /// The link is gone: what was opening fails, and what was open is reset.
     pub fn lost(&mut self) -> Vec<NetEvent> {
         self.tls.clear();
         let mut events = Vec::new();
@@ -325,26 +417,31 @@ impl Client {
                         reason: NetFailure::Unreachable,
                     });
                 }
-                State::Open => {
-                    connection.state = State::Closed;
-                    events.push(NetEvent::Closed { stream });
+                State::Open | State::Ended => {
+                    connection.state = State::Reset;
+                    events.push(NetEvent::Reset { stream });
                 }
-                State::Ended => connection.state = State::Closed,
-                State::Closed | State::Failed(_) => {}
+                State::Closed | State::Reset | State::Failed(_) => {}
             }
         }
         events
     }
 
-    /// The connections, newest first, as `[{id, host, port, proto, state, sent, received}]`.
+    /// The connections, newest first, as `[{id, host, port, proto, state, sent, received}]`;
+    /// `proto` is `tcp`, `udp` or `listen`.
     pub fn report(&self) -> String {
         json::array(|a| {
             for (&id, c) in self.connections.iter().rev() {
+                let proto = match c.kind {
+                    Kind::Tcp => "tcp",
+                    Kind::Udp => "udp",
+                    Kind::Listen => "listen",
+                };
                 a.object(|o| {
                     o.field("id", id)
                         .field("host", c.host.as_str())
                         .field("port", u32::from(c.port))
-                        .field("proto", if c.udp { "udp" } else { "tcp" })
+                        .field("proto", proto)
                         .field("state", c.state.label())
                         .field("sent", c.sent)
                         .field("received", c.received);
@@ -360,6 +457,21 @@ impl Client {
                 connection.state = State::Connecting;
             }
         }
+    }
+
+    fn track(&mut self, stream: StreamId, host: String, port: u16, kind: Kind, state: State) {
+        self.connections.insert(
+            stream,
+            Connection {
+                host,
+                port,
+                kind,
+                state,
+                sent: 0,
+                received: 0,
+            },
+        );
+        self.forget_old();
     }
 
     /// Move a live connection on. A finished one keeps how it ended, except that a guest which
@@ -389,13 +501,15 @@ impl Client {
         }
     }
 
-    /// The answers for commands given while there is no link: connects fail, the rest
-    /// are for streams that never existed.
+    /// The answers for commands given while there is no link: what would open something fails,
+    /// the rest are for streams that never existed.
     pub fn refuse(commands: Vec<NetCommand>) -> Vec<NetEvent> {
         commands
             .into_iter()
             .filter_map(|command| match command {
-                NetCommand::Connect { stream, .. } => Some(NetEvent::Failed {
+                NetCommand::Connect { stream, .. }
+                | NetCommand::OpenUdp { stream, .. }
+                | NetCommand::Listen { stream, .. } => Some(NetEvent::Failed {
                     stream,
                     reason: NetFailure::Unreachable,
                 }),
@@ -412,7 +526,6 @@ mod tests {
     fn connect(stream: StreamId) -> NetCommand {
         NetCommand::Connect {
             stream,
-            udp: false,
             peer: Peer::Name("example.com".into()),
             port: 443,
         }
@@ -433,7 +546,6 @@ mod tests {
             frames,
             vec![ClientFrame::Connect {
                 stream: 1,
-                proto: Proto::Tcp,
                 port: 443,
                 window: WINDOW,
                 peer: WirePeer::Name("example.com".into()),
@@ -560,7 +672,7 @@ mod tests {
             }),
             Some(NetEvent::Failed {
                 stream: 2,
-                reason: NetFailure::Unreachable
+                reason: NetFailure::Denied
             })
         );
         assert_eq!(
@@ -622,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn losing_the_link_fails_what_was_connecting_and_closes_what_was_open() {
+    fn losing_the_link_fails_what_was_connecting_and_resets_what_was_open() {
         let mut client = Client::default();
         client.outgoing(vec![connect(1), connect(2), connect(3)]);
         client_event(&mut client, ServerFrame::Connected { stream: 2 });
@@ -635,7 +747,9 @@ mod tests {
                     stream: 1,
                     reason: NetFailure::Unreachable
                 },
-                NetEvent::Closed { stream: 2 },
+                NetEvent::Reset { stream: 2 },
+                // The peer had finished, but the guest could still have been sending.
+                NetEvent::Reset { stream: 3 },
             ]
         );
         assert!(client.lost().is_empty(), "each stream ends once");
@@ -665,11 +779,9 @@ mod tests {
         let mut client = Client::default();
         client.outgoing(vec![
             connect(1),
-            NetCommand::Connect {
+            NetCommand::OpenUdp {
                 stream: 2,
-                udp: true,
-                peer: Peer::Address([1, 1, 1, 1]),
-                port: 53,
+                port: 19132,
             },
         ]);
         client_event(&mut client, ServerFrame::Connected { stream: 1 });
@@ -688,13 +800,13 @@ mod tests {
             &mut client,
             ServerFrame::Failed {
                 stream: 2,
-                reason: Failure::Refused,
+                reason: Failure::InUse,
             },
         );
         assert_eq!(
             client.report(),
             concat!(
-                r#"[{"id":2,"host":"1.1.1.1","port":53,"proto":"udp","state":"refused","sent":0,"received":0},"#,
+                r#"[{"id":2,"host":"*","port":19132,"proto":"udp","state":"port in use","sent":0,"received":0},"#,
                 r#"{"id":1,"host":"example.com","port":443,"proto":"tcp","state":"open","sent":5,"received":7}]"#
             )
         );
@@ -767,7 +879,144 @@ mod tests {
                 reason: Failure::Denied,
             },
         );
-        assert!(client.report().contains(r#""state":"unreachable""#));
+        assert!(client.report().contains(r#""state":"denied""#));
+    }
+
+    #[test]
+    fn udp_sockets_and_listeners_become_their_frames() {
+        let mut client = Client::default();
+        let frames = decoded(client.outgoing(vec![
+            NetCommand::OpenUdp {
+                stream: 1,
+                port: 19132,
+            },
+            NetCommand::SendTo {
+                stream: 1,
+                peer: Peer::Name("stun.example".into()),
+                port: 3478,
+                data: b"bind".to_vec(),
+            },
+            NetCommand::SendTo {
+                stream: 1,
+                peer: Peer::Address([9, 9, 9, 9]),
+                port: 53,
+                data: vec![0; MAX_DATAGRAM + 1],
+            },
+            NetCommand::Listen {
+                stream: 2,
+                port: 8080,
+            },
+        ]));
+        assert_eq!(
+            frames,
+            vec![
+                ClientFrame::UdpOpen {
+                    stream: 1,
+                    port: 19132,
+                    window: WINDOW
+                },
+                ClientFrame::SendTo {
+                    stream: 1,
+                    port: 3478,
+                    peer: WirePeer::Name("stun.example".into()),
+                    data: b"bind".to_vec()
+                },
+                ClientFrame::Listen {
+                    stream: 2,
+                    port: 8080,
+                    window: WINDOW
+                },
+            ],
+            "a datagram larger than UDP carries is not sent"
+        );
+        assert_eq!(
+            Client::refuse(vec![NetCommand::OpenUdp { stream: 3, port: 0 }]),
+            vec![NetEvent::Failed {
+                stream: 3,
+                reason: NetFailure::Unreachable
+            }]
+        );
+    }
+
+    #[test]
+    fn datagrams_resets_acknowledgements_and_connections_become_events() {
+        let mut client = Client::default();
+        client.outgoing(vec![connect(1)]);
+        let mut v6 = [0u8; 16];
+        v6[15] = 1;
+        assert_eq!(
+            client_event(
+                &mut client,
+                ServerFrame::ReceivedFrom {
+                    stream: 4,
+                    port: 3478,
+                    peer: WirePeer::Address6(v6),
+                    data: b"hi".to_vec(),
+                }
+            ),
+            Some(NetEvent::Datagram {
+                stream: 4,
+                source: Source::V6(v6),
+                port: 3478,
+                data: b"hi".to_vec()
+            })
+        );
+        assert_eq!(
+            client_event(
+                &mut client,
+                ServerFrame::ReceivedFrom {
+                    stream: 4,
+                    port: 53,
+                    peer: WirePeer::Name("dns.example".into()),
+                    data: Vec::new(),
+                }
+            ),
+            Some(NetEvent::Datagram {
+                stream: 4,
+                source: Source::Name("dns.example".into()),
+                port: 53,
+                data: Vec::new()
+            })
+        );
+        assert_eq!(
+            client_event(
+                &mut client,
+                ServerFrame::Sent {
+                    stream: 1,
+                    bytes: 9
+                }
+            ),
+            Some(NetEvent::Sent {
+                stream: 1,
+                bytes: 9
+            })
+        );
+        assert_eq!(
+            client_event(&mut client, ServerFrame::Reset { stream: 1 }),
+            Some(NetEvent::Reset { stream: 1 })
+        );
+        assert!(client.report().contains(r#""state":"reset""#));
+        let incoming = switch_relay_proto::RELAY_STREAMS;
+        assert_eq!(
+            client_event(
+                &mut client,
+                ServerFrame::Incoming {
+                    stream: incoming,
+                    listener: 2,
+                    port: 50000,
+                    peer: WirePeer::Address([203, 0, 113, 9]),
+                }
+            ),
+            Some(NetEvent::Incoming {
+                listener: 2,
+                stream: incoming,
+                source: Source::V4([203, 0, 113, 9]),
+                port: 50000
+            })
+        );
+        assert!(client
+            .report()
+            .contains(r#""host":"203.0.113.9","port":50000,"proto":"tcp","state":"open""#));
     }
 
     /// The ciphertext the client put in `Data` frames for `stream`, and the credit it granted.

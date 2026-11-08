@@ -15,12 +15,39 @@ pub enum Peer {
     Address([u8; 4]),
 }
 
+/// Where something came from: an address as the host saw it, or the name the guest sent to,
+/// for a reply from a host it reached by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    V4([u8; 4]),
+    V6([u8; 16]),
+    Name(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetCommand {
+    /// A TCP connection.
     Connect {
         stream: StreamId,
-        udp: bool,
         peer: Peer,
+        port: u16,
+    },
+    /// A UDP socket on the host for one guest socket; `port` is the guest's, which the host keeps
+    /// when it can.
+    OpenUdp {
+        stream: StreamId,
+        port: u16,
+    },
+    /// One datagram from a UDP socket.
+    SendTo {
+        stream: StreamId,
+        peer: Peer,
+        port: u16,
+        data: Vec<u8>,
+    },
+    /// Accept TCP connections on the host's `port`, as the guest's listener on it.
+    Listen {
+        stream: StreamId,
         port: u16,
     },
     Send {
@@ -69,13 +96,17 @@ pub enum TlsFailure {
     Handshake,
 }
 
-/// Why a connection did not open.
+/// Why a connection, socket or listener did not open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetFailure {
     Refused,
     Unreachable,
     TimedOut,
     NotFound,
+    /// Something else holds the port.
+    InUse,
+    /// The host does not let guests have it.
+    Denied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,8 +122,32 @@ pub enum NetEvent {
         stream: StreamId,
         data: Vec<u8>,
     },
+    /// The peer finished sending; the guest may still send.
     Closed {
         stream: StreamId,
+    },
+    /// The connection was reset or broke: nothing more either way.
+    Reset {
+        stream: StreamId,
+    },
+    /// The host has delivered this many more of the bytes the guest sent.
+    Sent {
+        stream: StreamId,
+        bytes: u32,
+    },
+    /// A datagram a UDP socket received.
+    Datagram {
+        stream: StreamId,
+        source: Source,
+        port: u16,
+        data: Vec<u8>,
+    },
+    /// A connection to a listener, carried from now on as `stream`.
+    Incoming {
+        listener: StreamId,
+        stream: StreamId,
+        source: Source,
+        port: u16,
     },
     /// The handshake finished: what was negotiated, and the server's certificates, DER, leaf first.
     TlsEstablished {
@@ -163,6 +218,17 @@ impl NetBridge {
             .map_or(Peer::Address(address), |name| Peer::Name(name.to_owned()))
     }
 
+    /// The IPv4 address the guest sees for `source`: itself; for a name, the synthetic address
+    /// the guest sent to; for an IPv6 address, the synthetic address of its text, which the
+    /// host resolves back to it. `None` once the table is full.
+    pub fn address_for(&mut self, source: &Source) -> Option<[u8; 4]> {
+        match source {
+            Source::V4(address) => Some(*address),
+            Source::V6(address) => self.synthesize(&std::net::Ipv6Addr::from(*address).to_string()),
+            Source::Name(name) => self.synthesize(name),
+        }
+    }
+
     pub fn open_stream(&mut self) -> StreamId {
         self.next_stream = self.next_stream.wrapping_add(1);
         self.next_stream
@@ -204,6 +270,28 @@ mod tests {
         let address = bridge.synthesize("host299.test").unwrap();
         assert_eq!(address, [198, 18, 1, 43]);
         assert_eq!(bridge.name_of(address), Some("host299.test"));
+    }
+
+    #[test]
+    fn an_ipv6_source_stands_as_a_synthetic_address_that_names_it() {
+        let mut bridge = NetBridge::default();
+        let mut v6 = [0u8; 16];
+        v6[..4].copy_from_slice(&[0x26, 0x06, 0x47, 0x00]);
+        v6[15] = 1;
+        let address = bridge.address_for(&Source::V6(v6)).unwrap();
+        assert_eq!(address[..2], [198, 18]);
+        assert_eq!(bridge.peer_for(address), Peer::Name("2606:4700::1".into()));
+        assert_eq!(bridge.address_for(&Source::V6(v6)), Some(address), "stable");
+        assert_eq!(
+            bridge.address_for(&Source::V4([8, 8, 8, 8])),
+            Some([8, 8, 8, 8])
+        );
+        let named = bridge.synthesize("dns.example").unwrap();
+        assert_eq!(
+            bridge.address_for(&Source::Name("dns.example".into())),
+            Some(named),
+            "a reply from a named host comes from where the guest sent"
+        );
     }
 
     #[test]

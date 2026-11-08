@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use switch_relay::policy::{Policy, Unknown};
 use switch_relay::Timeouts;
-use switch_relay_proto::{ClientFrame, Failure, Peer, Proto, ServerFrame, VERSION};
+use switch_relay_proto::{ClientFrame, Failure, Peer, ServerFrame, VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -25,9 +25,18 @@ async fn relay(allow_private: bool) -> String {
 }
 
 async fn relay_with(allow_private: bool, timeouts: Timeouts) -> String {
+    relay_full(allow_private, false, timeouts).await
+}
+
+/// A relay that also takes inbound traffic for its guests.
+async fn inbound_relay() -> String {
+    relay_full(true, true, Timeouts::default()).await
+}
+
+async fn relay_full(allow_private: bool, allow_inbound: bool, timeouts: Timeouts) -> String {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
-    let policy = Policy::new(Vec::new(), Unknown::Deny, allow_private);
+    let policy = Policy::new(Vec::new(), Unknown::Deny, allow_private, allow_inbound);
     tokio::spawn(switch_relay::serve(listener, Arc::new(policy), timeouts));
     url
 }
@@ -68,8 +77,18 @@ async fn send(socket: &mut Socket, frame: ClientFrame) {
         .unwrap();
 }
 
-/// The next relay frame. Pings, which the socket answers as it reads, and `ALIVE` are skipped.
+/// The next relay frame. Pings, which the socket answers as it reads, `ALIVE` and `SENT` are
+/// skipped; [`next_raw`] keeps `SENT`.
 async fn next(socket: &mut Socket) -> ServerFrame {
+    loop {
+        match next_raw(socket).await {
+            ServerFrame::Sent { .. } => continue,
+            frame => return frame,
+        }
+    }
+}
+
+async fn next_raw(socket: &mut Socket) -> ServerFrame {
     loop {
         let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
             .await
@@ -96,7 +115,6 @@ async fn quiet(socket: &mut Socket) {
 fn tcp(stream: u32, port: u16, window: u32) -> ClientFrame {
     ClientFrame::Connect {
         stream,
-        proto: Proto::Tcp,
         port,
         window,
         peer: Peer::Address([127, 0, 0, 1]),
@@ -231,7 +249,6 @@ async fn loopback_is_denied_unless_allowed() {
         &mut socket,
         ClientFrame::Connect {
             stream: 2,
-            proto: Proto::Tcp,
             port,
             window: 0,
             peer: Peer::Name("localhost".into()),
@@ -254,7 +271,6 @@ async fn a_name_that_does_not_resolve_is_not_found() {
         &mut socket,
         ClientFrame::Connect {
             stream: 1,
-            proto: Proto::Tcp,
             port: 80,
             window: 0,
             peer: Peer::Name("nothing.invalid".into()),
@@ -270,48 +286,125 @@ async fn a_name_that_does_not_resolve_is_not_found() {
     );
 }
 
-#[tokio::test]
-async fn udp_datagrams_keep_their_boundaries() {
+/// A UDP server on loopback that answers each datagram from a second socket on another port as
+/// well as its own, and the port of the first.
+async fn udp_echo() -> (u16, u16) {
     let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let port = server.local_addr().unwrap().port();
+    let other = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let (port, other_port) = (
+        server.local_addr().unwrap().port(),
+        other.local_addr().unwrap().port(),
+    );
     tokio::spawn(async move {
         let mut buffer = [0u8; 64];
         while let Ok((read, from)) = server.recv_from(&mut buffer).await {
             let _ = server.send_to(&buffer[..read], from).await;
+            let _ = other.send_to(&buffer[..read], from).await;
         }
     });
-    let mut socket = page(&relay(true).await).await;
+    (port, other_port)
+}
+
+async fn udp_open(socket: &mut Socket, stream: u32) {
     send(
-        &mut socket,
-        ClientFrame::Connect {
-            stream: 1,
-            proto: Proto::Udp,
-            port,
-            window: 1000,
-            peer: Peer::Address([127, 0, 0, 1]),
+        socket,
+        ClientFrame::UdpOpen {
+            stream,
+            port: 0,
+            window: 1 << 16,
         },
     )
     .await;
-    assert_eq!(
-        next(&mut socket).await,
-        ServerFrame::Connected { stream: 1 }
-    );
+    assert_eq!(next(socket).await, ServerFrame::Connected { stream });
+}
+
+fn send_to(stream: u32, port: u16, data: &[u8]) -> ClientFrame {
+    ClientFrame::SendTo {
+        stream,
+        port,
+        peer: Peer::Address([127, 0, 0, 1]),
+        data: data.to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn udp_datagrams_keep_their_boundaries_and_replies_come_from_any_port() {
+    let (port, other_port) = udp_echo().await;
+    let mut socket = page(&relay(true).await).await;
+    udp_open(&mut socket, 1).await;
     for datagram in [&b"one"[..], b"second", b"3"] {
+        send(&mut socket, send_to(1, port, datagram)).await;
+        let mut ports = Vec::new();
+        for _ in 0..2 {
+            let ServerFrame::ReceivedFrom {
+                stream: 1,
+                port,
+                peer: Peer::Address([127, 0, 0, 1]),
+                data,
+            } = next(&mut socket).await
+            else {
+                panic!("a datagram");
+            };
+            assert_eq!(data, datagram);
+            ports.push(port);
+        }
+        ports.sort_unstable();
+        let mut expected = vec![port, other_port];
+        expected.sort_unstable();
+        assert_eq!(ports, expected);
+    }
+}
+
+#[tokio::test]
+async fn one_udp_socket_sends_from_one_port_to_every_destination() {
+    let first = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let second = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let mut socket = page(&relay(true).await).await;
+    udp_open(&mut socket, 1).await;
+    send(
+        &mut socket,
+        send_to(1, first.local_addr().unwrap().port(), b"a"),
+    )
+    .await;
+    send(
+        &mut socket,
+        send_to(1, second.local_addr().unwrap().port(), b"b"),
+    )
+    .await;
+    let mut buffer = [0u8; 8];
+    let (_, from_first) = first.recv_from(&mut buffer).await.unwrap();
+    let (_, from_second) = second.recv_from(&mut buffer).await.unwrap();
+    assert_eq!(from_first.port(), from_second.port());
+}
+
+#[tokio::test]
+async fn a_udp_socket_hears_only_hosts_it_sent_to_unless_inbound_is_allowed() {
+    for (url, heard) in [(relay(true).await, false), (inbound_relay().await, true)] {
+        let mut socket = page(&url).await;
+        udp_open(&mut socket, 1).await;
+        // Learn the relay's port from a datagram to a host that then says nothing back.
+        let silent = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         send(
             &mut socket,
-            ClientFrame::Data {
-                stream: 1,
-                data: datagram.to_vec(),
-            },
+            send_to(1, silent.local_addr().unwrap().port(), b"x"),
         )
         .await;
-        assert_eq!(
-            next(&mut socket).await,
-            ServerFrame::Data {
-                stream: 1,
-                data: datagram.to_vec()
-            }
-        );
+        let mut buffer = [0u8; 8];
+        let (_, relay_side) = silent.recv_from(&mut buffer).await.unwrap();
+
+        // A stranger: on IPv6 loopback, which this socket never sent to.
+        let stranger = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap();
+        let to = std::net::SocketAddr::from((Ipv6Addr::LOCALHOST, relay_side.port()));
+        stranger.send_to(b"hello", to).await.unwrap();
+        if heard {
+            let ServerFrame::ReceivedFrom { peer, data, .. } = next(&mut socket).await else {
+                panic!("the stranger's datagram");
+            };
+            assert_eq!(peer, Peer::Address6(Ipv6Addr::LOCALHOST.octets()));
+            assert_eq!(data, b"hello");
+        } else {
+            quiet(&mut socket).await;
+        }
     }
 }
 
@@ -542,7 +635,6 @@ async fn a_name_reaches_its_ipv6_address_when_the_ipv4_one_refuses() {
         &mut socket,
         ClientFrame::Connect {
             stream: 1,
-            proto: Proto::Tcp,
             port,
             window: 100,
             peer: Peer::Name("localhost".into()),
@@ -571,27 +663,6 @@ async fn a_name_reaches_its_ipv6_address_when_the_ipv4_one_refuses() {
 }
 
 #[tokio::test]
-async fn a_name_falls_back_to_ipv4_when_ipv6_refuses() {
-    let (url, port) = (relay(true).await, echo().await);
-    let mut socket = page(&url).await;
-    send(
-        &mut socket,
-        ClientFrame::Connect {
-            stream: 1,
-            proto: Proto::Tcp,
-            port,
-            window: 100,
-            peer: Peer::Name("localhost".into()),
-        },
-    )
-    .await;
-    assert_eq!(
-        next(&mut socket).await,
-        ServerFrame::Connected { stream: 1 }
-    );
-}
-
-#[tokio::test]
 async fn ipv6_loopback_is_denied_unless_allowed() {
     let port = echo_v6().await;
     let mut socket = page(&relay(false).await).await;
@@ -599,7 +670,6 @@ async fn ipv6_loopback_is_denied_unless_allowed() {
         &mut socket,
         ClientFrame::Connect {
             stream: 1,
-            proto: Proto::Tcp,
             port,
             window: 0,
             peer: Peer::Name("::1".into()),
@@ -629,4 +699,223 @@ async fn data_larger_than_a_frame_may_carry_closes_the_socket() {
     )
     .await;
     assert_eq!(closed_with(&mut socket).await, CloseCode::Protocol);
+}
+
+#[tokio::test]
+async fn a_name_falls_back_to_ipv4_when_ipv6_refuses() {
+    let (url, port) = (relay(true).await, echo().await);
+    let mut socket = page(&url).await;
+    send(
+        &mut socket,
+        ClientFrame::Connect {
+            stream: 1,
+            port,
+            window: 100,
+            peer: Peer::Name("localhost".into()),
+        },
+    )
+    .await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+}
+
+/// A server that takes one connection and hands it to the test.
+async fn one_connection() -> (u16, tokio::sync::oneshot::Receiver<TcpStream>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (give, take) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let _ = give.send(socket);
+    });
+    (port, take)
+}
+
+#[tokio::test]
+async fn written_bytes_are_acknowledged() {
+    let (url, port) = (relay(true).await, echo().await);
+    let mut socket = page(&url).await;
+    send(&mut socket, tcp(1, port, 0)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+    send(
+        &mut socket,
+        ClientFrame::Data {
+            stream: 1,
+            data: vec![7; 300],
+        },
+    )
+    .await;
+    assert_eq!(
+        next_raw(&mut socket).await,
+        ServerFrame::Sent {
+            stream: 1,
+            bytes: 300
+        }
+    );
+}
+
+#[tokio::test]
+async fn the_guest_may_send_after_the_peer_finishes() {
+    let (port, accepted) = one_connection().await;
+    let mut socket = page(&relay(true).await).await;
+    send(&mut socket, tcp(1, port, 100)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+    let mut peer = accepted.await.unwrap();
+    peer.shutdown().await.unwrap();
+    assert_eq!(next(&mut socket).await, ServerFrame::Closed { stream: 1 });
+
+    send(
+        &mut socket,
+        ClientFrame::Data {
+            stream: 1,
+            data: b"still".to_vec(),
+        },
+    )
+    .await;
+    let mut buffer = [0u8; 8];
+    let read = peer.read(&mut buffer).await.unwrap();
+    assert_eq!(&buffer[..read], b"still");
+}
+
+#[tokio::test]
+async fn a_peer_that_resets_is_a_reset_not_an_end() {
+    let (port, accepted) = one_connection().await;
+    let mut socket = page(&relay(true).await).await;
+    send(&mut socket, tcp(1, port, 100)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+    let peer = accepted.await.unwrap();
+    // Closing with a zero linger sends RST instead of FIN.
+    peer.set_zero_linger().unwrap();
+    drop(peer);
+    assert_eq!(next(&mut socket).await, ServerFrame::Reset { stream: 1 });
+    quiet(&mut socket).await;
+}
+
+#[tokio::test]
+async fn listening_needs_inbound_and_then_announces_each_connection() {
+    let mut socket = page(&relay(true).await).await;
+    let listen = ClientFrame::Listen {
+        stream: 1,
+        port: 0,
+        window: 100,
+    };
+    send(&mut socket, listen.clone()).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Failed {
+            stream: 1,
+            reason: Failure::Denied
+        }
+    );
+
+    // Find a free port, then listen on it through the relay.
+    let free = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    let mut socket = page(&inbound_relay().await).await;
+    send(
+        &mut socket,
+        ClientFrame::Listen {
+            stream: 1,
+            port,
+            window: 100,
+        },
+    )
+    .await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+
+    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    let ServerFrame::Incoming {
+        stream,
+        listener: 1,
+        peer: Peer::Address([127, 0, 0, 1]),
+        ..
+    } = next(&mut socket).await
+    else {
+        panic!("an incoming connection");
+    };
+    assert!(stream >= switch_relay_proto::RELAY_STREAMS);
+    client.write_all(b"hi").await.unwrap();
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Data {
+            stream,
+            data: b"hi".to_vec()
+        }
+    );
+    send(
+        &mut socket,
+        ClientFrame::Data {
+            stream,
+            data: b"back".to_vec(),
+        },
+    )
+    .await;
+    let mut buffer = [0u8; 8];
+    let read = client.read(&mut buffer).await.unwrap();
+    assert_eq!(&buffer[..read], b"back");
+
+    // A second listener on the same port is told the port is taken.
+    send(
+        &mut socket,
+        ClientFrame::Listen {
+            stream: 2,
+            port,
+            window: 100,
+        },
+    )
+    .await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Failed {
+            stream: 2,
+            reason: Failure::InUse
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_page_may_not_use_the_relay_s_stream_numbers() {
+    let (url, port) = (relay(true).await, echo().await);
+    let mut socket = page(&url).await;
+    send(&mut socket, tcp(switch_relay_proto::RELAY_STREAMS, port, 0)).await;
+    assert_eq!(closed_with(&mut socket).await, CloseCode::Protocol);
+}
+
+#[tokio::test]
+async fn a_reply_from_a_host_reached_by_name_comes_from_that_name() {
+    let (port, _) = udp_echo().await;
+    let mut socket = page(&relay(true).await).await;
+    udp_open(&mut socket, 1).await;
+    send(
+        &mut socket,
+        ClientFrame::SendTo {
+            stream: 1,
+            port,
+            peer: Peer::Name("localhost".into()),
+            data: b"q".to_vec(),
+        },
+    )
+    .await;
+    let ServerFrame::ReceivedFrom { peer, data, .. } = next(&mut socket).await else {
+        panic!("the reply");
+    };
+    assert_eq!(peer, Peer::Name("localhost".into()));
+    assert_eq!(data, b"q");
 }

@@ -21,12 +21,18 @@ pub struct Policy {
     trusted: Vec<String>,
     unknown: Unknown,
     allow_private: bool,
+    allow_inbound: bool,
     /// Answers given to unknown origins. Held across the question, so one is asked at a time.
     decided: Mutex<HashMap<String, bool>>,
 }
 
 impl Policy {
-    pub fn new(extra_origins: Vec<String>, unknown: Unknown, allow_private: bool) -> Policy {
+    pub fn new(
+        extra_origins: Vec<String>,
+        unknown: Unknown,
+        allow_private: bool,
+        allow_inbound: bool,
+    ) -> Policy {
         let trusted = TRUSTED_ORIGINS
             .iter()
             .map(|origin| (*origin).to_owned())
@@ -37,6 +43,7 @@ impl Policy {
             trusted,
             unknown,
             allow_private,
+            allow_inbound,
             decided: Mutex::new(HashMap::new()),
         }
     }
@@ -59,6 +66,11 @@ impl Policy {
         };
         decided.insert(origin, answer);
         answer
+    }
+
+    /// Whether guests may listen for connections and hear from hosts they never sent to.
+    pub fn inbound(&self) -> bool {
+        self.allow_inbound
     }
 
     /// Whether the relay may reach a resolved address.
@@ -145,7 +157,12 @@ mod tests {
     use super::*;
 
     fn closed() -> Policy {
-        Policy::new(vec!["https://Example.org".into()], Unknown::Deny, false)
+        Policy::new(
+            vec!["https://Example.org".into()],
+            Unknown::Deny,
+            false,
+            false,
+        )
     }
 
     #[tokio::test]
@@ -251,7 +268,7 @@ mod tests {
 
     #[test]
     fn private_addresses_can_be_allowed_on_request() {
-        let policy = Policy::new(Vec::new(), Unknown::Deny, true);
+        let policy = Policy::new(Vec::new(), Unknown::Deny, true, false);
         assert!(policy.address_allowed(Ipv4Addr::LOCALHOST));
     }
 }

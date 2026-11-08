@@ -16,6 +16,8 @@ Run it with no arguments. The emulator finds it at ws://127.0.0.1:18787.
   --port <n>             listen on another port
   --allow-origin <url>   trust another page without asking (repeatable)
   --allow-private        let guests reach loopback and local networks
+  --allow-inbound        let guests listen for connections and hear from hosts they never
+                         sent to, on this machine's ports
 ";
 
 #[tokio::main]
@@ -23,6 +25,7 @@ async fn main() -> ExitCode {
     let mut port = DEFAULT_PORT;
     let mut origins = Vec::new();
     let mut allow_private = false;
+    let mut allow_inbound = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -35,6 +38,7 @@ async fn main() -> ExitCode {
                 None => return usage("--allow-origin needs an origin"),
             },
             "--allow-private" => allow_private = true,
+            "--allow-inbound" => allow_inbound = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -64,7 +68,7 @@ async fn main() -> ExitCode {
     };
     eprintln!("switch-relay listening on ws://127.0.0.1:{port}");
     eprintln!("trusted: {}", TRUSTED_ORIGINS.join(", "));
-    let policy = Arc::new(Policy::new(origins, unknown, allow_private));
+    let policy = Arc::new(Policy::new(origins, unknown, allow_private, allow_inbound));
     if let Some(listener) = listener_v6 {
         tokio::spawn(switch_relay::serve(
             listener,

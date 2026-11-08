@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
-use switch_relay_proto::{ClientFrame, ServerFrame, StreamId, MAX_DATA, VERSION};
+use switch_relay_proto::{
+    ClientFrame, Failure, ServerFrame, StreamId, MAX_DATA, MAX_DATAGRAM, RELAY_STREAMS, VERSION,
+};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -15,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::policy::Policy;
-use crate::stream::{self, Command, Credit, Open};
+use crate::stream::{self, Accepted, Command, Credit, Kind, Links, Open};
 use crate::Timeouts;
 
 /// Most streams one WebSocket may have open.
@@ -79,6 +81,8 @@ pub async fn run(
     });
 
     let (done, mut finished) = unbounded_channel::<StreamId>();
+    let (accepted, mut incoming) = unbounded_channel::<Accepted>();
+    let mut next_relay_stream = RELAY_STREAMS;
     let mut streams: HashMap<StreamId, Handle> = HashMap::new();
     let mut ending = CloseCode::Normal;
     let mut end = End::Left;
@@ -102,28 +106,16 @@ pub async fn run(
                     ending = CloseCode::Protocol;
                     break;
                 };
-                match frame {
-                    ClientFrame::Connect { stream, proto, port, window, peer } => {
-                        if streams.contains_key(&stream) {
-                            ending = CloseCode::Protocol;
-                            break;
-                        }
-                        if streams.len() >= usize::from(MAX_STREAMS) {
-                            let reason = switch_relay_proto::Failure::Denied;
-                            let _ = frames.send(ServerFrame::Failed { stream, reason });
-                            continue;
-                        }
-                        let (commands, commands_rx) = unbounded_channel();
-                        let credit = Arc::new(Credit::new(window));
-                        let task = tokio::spawn(stream::run(
-                            Open { id: stream, proto, port, peer },
-                            policy.clone(),
-                            credit.clone(),
-                            frames.clone(),
-                            commands_rx,
-                            done.clone(),
-                        ));
-                        streams.insert(stream, Handle { commands, credit, task });
+                let (stream, kind, window) = match frame {
+                    ClientFrame::Connect { stream, port, window, peer } => {
+                        (stream, Kind::Tcp { port, peer }, window)
+                    }
+                    ClientFrame::UdpOpen { stream, port, window } => {
+                        (stream, Kind::Udp { port }, window)
+                    }
+                    ClientFrame::Listen { stream, port, window } => {
+                        // A listener receives nothing itself; its connections get the window.
+                        (stream, Kind::Listen { port, window }, 0)
                     }
                     ClientFrame::Data { stream, data } => {
                         if data.len() > MAX_DATA {
@@ -133,26 +125,85 @@ pub async fn run(
                         if let Some(handle) = streams.get(&stream) {
                             let _ = handle.commands.send(Command::Data(data));
                         }
+                        continue;
+                    }
+                    ClientFrame::SendTo { stream, port, peer, data } => {
+                        if data.len() > MAX_DATAGRAM {
+                            ending = CloseCode::Protocol;
+                            break;
+                        }
+                        if let Some(handle) = streams.get(&stream) {
+                            let _ = handle.commands.send(Command::SendTo { port, peer, data });
+                        }
+                        continue;
                     }
                     ClientFrame::ShutdownWrite { stream } => {
                         if let Some(handle) = streams.get(&stream) {
                             let _ = handle.commands.send(Command::ShutdownWrite);
                         }
+                        continue;
                     }
                     ClientFrame::Credit { stream, bytes } => {
                         if let Some(handle) = streams.get(&stream) {
                             handle.credit.add(bytes);
                         }
+                        continue;
                     }
                     ClientFrame::Close { stream } => {
                         if let Some(handle) = streams.remove(&stream) {
                             handle.task.abort();
                         }
+                        continue;
                     }
+                };
+                // The page numbers its streams below the relay's, and never reuses a live one.
+                if stream >= RELAY_STREAMS || streams.contains_key(&stream) {
+                    ending = CloseCode::Protocol;
+                    break;
                 }
+                if streams.len() >= usize::from(MAX_STREAMS) {
+                    let reason = Failure::Denied;
+                    let _ = frames.send(ServerFrame::Failed { stream, reason });
+                    continue;
+                }
+                let (commands, commands_rx) = unbounded_channel();
+                let credit = Arc::new(Credit::new(window));
+                let links = Links { out: frames.clone(), commands: commands_rx, done: done.clone() };
+                let task = tokio::spawn(stream::run(
+                    Open { id: stream, kind },
+                    policy.clone(),
+                    credit.clone(),
+                    links,
+                    accepted.clone(),
+                ));
+                streams.insert(stream, Handle { commands, credit, task });
             }
             Some(id) = finished.recv() => {
                 streams.remove(&id);
+            }
+            Some(connection) = incoming.recv() => {
+                // Past the limit the connection is dropped, which its peer sees as a reset.
+                if streams.len() >= usize::from(MAX_STREAMS) {
+                    continue;
+                }
+                let id = next_relay_stream;
+                next_relay_stream += 1;
+                let _ = frames.send(ServerFrame::Incoming {
+                    stream: id,
+                    listener: connection.listener,
+                    port: connection.from.port(),
+                    peer: stream::peer_of(connection.from.ip()),
+                });
+                let (commands, commands_rx) = unbounded_channel();
+                let credit = Arc::new(Credit::new(connection.window));
+                let links = Links { out: frames.clone(), commands: commands_rx, done: done.clone() };
+                let task = tokio::spawn(stream::run_accepted(
+                    id,
+                    connection.socket,
+                    credit.clone(),
+                    links,
+                ));
+                streams.insert(id, Handle { commands, credit, task });
             }
             _ = ping.tick() => {
                 // The browser answers the ping itself but never shows it to the page, which

@@ -178,9 +178,15 @@ impl Cpu {
     }
 
     /// `SendMMsg(fd, vlen, flags)`: each message's vectors, joined, to its name when it has one,
-    /// as a `sendto` would. Stops at the first that fails; that failure is the answer only if
-    /// it was the first message.
-    pub(super) fn bsd_send_messages(&mut self, tls: u32, fd: i32, count: u32) -> Result<()> {
+    /// as a `sendto` would. Only the first may wait for room. Stops at the first that fails;
+    /// that failure is the answer only if it was the first message.
+    pub(super) fn bsd_send_messages(
+        &mut self,
+        tls: u32,
+        fd: i32,
+        count: u32,
+        flags: u32,
+    ) -> Result<()> {
         let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
             return self.bsd_reply(tls, -1, BSD_EINVAL);
         };
@@ -196,7 +202,15 @@ impl Cpu {
         for (index, message) in messages.iter_mut().enumerate() {
             let data = message.vectors.concat();
             let address = (!message.name.is_empty()).then_some(message.name.as_slice());
-            let (ret, errno) = self.bsd_send_bytes(fd, data, address);
+            // Only the first message may wait for room, before anything has been sent.
+            let flags = if index == 0 {
+                flags
+            } else {
+                flags | BSD_MSG_DONTWAIT
+            };
+            let Some((ret, errno)) = self.bsd_send_bytes(fd, data, address, flags) else {
+                return Ok(());
+            };
             if ret < 0 {
                 if index == 0 {
                     return self.bsd_reply(tls, -1, errno);
@@ -219,6 +233,7 @@ mod tests {
     use super::super::tests::*;
     use super::*;
     use crate::kernel::ipc::testing::*;
+    use crate::services::netbridge::Peer;
 
     const BUFFER: u32 = SCRATCH + 0x200;
     const BUFFER_SIZE: u32 = 0x1000;
@@ -336,16 +351,14 @@ mod tests {
         let words = [fd as u32, 1, 0];
         call(&mut cpu, 30, &words, &[message(&destination, &[b"q"])], 1);
         cpu.take_net_commands();
-        cpu.deliver_net_events([
-            NetEvent::Data {
+        cpu.deliver_net_events([b"first".as_slice(), b"second, longer"].map(|data| {
+            NetEvent::Datagram {
                 stream: 1,
-                data: b"first".to_vec(),
-            },
-            NetEvent::Data {
-                stream: 1,
-                data: b"second, longer".to_vec(),
-            },
-        ]);
+                source: Source::Name("a.example".into()),
+                port: 53,
+                data: data.to_vec(),
+            }
+        }));
 
         let rooms = [room(16, &[8]), room(16, &[8]), room(16, &[8])];
         let (result, back) = receive(&mut cpu, fd, &rooms, 2);
@@ -379,11 +392,19 @@ mod tests {
             .take_net_commands()
             .into_iter()
             .filter_map(|command| match command {
-                NetCommand::Send { stream, data } => Some((stream, data)),
+                NetCommand::SendTo {
+                    stream, peer, data, ..
+                } => Some((stream, peer, data)),
                 _ => None,
             })
             .collect();
-        assert_eq!(sends, vec![(1, b"hello".to_vec()), (2, b"x".to_vec())]);
+        assert_eq!(
+            sends,
+            vec![
+                (1, Peer::Name("a.example".into()), b"hello".to_vec()),
+                (1, Peer::Name("b.example".into()), b"x".to_vec())
+            ]
+        );
     }
 
     #[test]

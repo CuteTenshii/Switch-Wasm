@@ -3,8 +3,8 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, openPage, openPanel, reloadPage, test } from './page';
 
-// A relay's first frame: HELLO, version 1, 64 streams.
-const HELLO = Buffer.from([0x80, 0, 0, 0, 0, 1, 0x40, 0]);
+// A relay's first frame: HELLO, version 3, 64 streams.
+const HELLO = Buffer.from([0x80, 0, 0, 0, 0, 3, 0x40, 0]);
 
 // A WebSocket server that greets like the relay and says nothing more. The page's socket lives
 // in a worker, which Playwright cannot intercept, so it has to be a real one.

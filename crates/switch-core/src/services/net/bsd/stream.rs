@@ -3,6 +3,10 @@
 use super::*;
 use crate::trace::Level;
 
+/// Bytes a connection may have handed to the host that the host has not delivered yet. A send
+/// past it waits, or on a non-blocking socket sends what fits.
+pub(super) const SEND_WINDOW: u32 = 256 * 1024;
+
 /// A connection the host carries: where it stands and the peer's `sockaddr`.
 #[derive(Debug, Clone)]
 pub(crate) struct Stream {
@@ -11,6 +15,8 @@ pub(crate) struct Stream {
     pub(super) address: Vec<u8>,
     /// A blocking `connect` is waiting on this stream: its next run reports how it ended.
     pub(super) deferred: bool,
+    /// Bytes sent that the host has not delivered yet.
+    pub(super) in_flight: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +25,11 @@ pub(super) enum StreamState {
     Open,
     /// The errno `SO_ERROR` reports once.
     Failed(i32),
+    /// The connection was reset; `reported` once a call has said `ECONNRESET`, after which reads
+    /// are end-of-file and sends `EPIPE`.
+    Reset {
+        reported: bool,
+    },
 }
 
 impl Cpu {
@@ -52,7 +63,9 @@ impl Cpu {
                 self.bsd_settle_connect(fd);
                 return self.bsd_reply(tls, 0, 0);
             }
-            Some(StreamState::Open) => return self.bsd_reply(tls, -1, BSD_EISCONN),
+            Some(StreamState::Open | StreamState::Reset { .. }) => {
+                return self.bsd_reply(tls, -1, BSD_EISCONN)
+            }
             Some(StreamState::Failed(errno)) => {
                 self.bsd_clear_stream(fd);
                 return self.bsd_reply(tls, -1, errno);
@@ -68,7 +81,6 @@ impl Cpu {
         );
         self.net.outbox.push(NetCommand::Connect {
             stream: id,
-            udp: false,
             peer,
             port,
         });
@@ -87,6 +99,7 @@ impl Cpu {
                 state: StreamState::Connecting,
                 address: address.to_vec(),
                 deferred: blocking,
+                in_flight: 0,
             });
         }
         if blocking {
@@ -108,8 +121,11 @@ impl Cpu {
         }
     }
 
-    /// `SO_ERROR`: the failure of a connect, reported once; zero otherwise.
+    /// `SO_ERROR`: the failure of a connect, or a reset not yet reported, once; zero otherwise.
     pub(super) fn bsd_take_stream_error(&mut self, fd: i32) -> u32 {
+        if let Some(errno) = self.bsd_take_reset(fd) {
+            return errno as u32;
+        }
         let state = self
             .process()
             .bsd_sockets
@@ -122,6 +138,29 @@ impl Cpu {
         errno as u32
     }
 
+    /// `ECONNRESET` the first time a call on a reset connection asks; `None` otherwise.
+    pub(super) fn bsd_take_reset(&mut self, fd: i32) -> Option<i32> {
+        let stream = self
+            .process_mut()
+            .bsd_sockets
+            .get_mut(&fd)?
+            .stream
+            .as_mut()?;
+        if stream.state != (StreamState::Reset { reported: false }) {
+            return None;
+        }
+        stream.state = StreamState::Reset { reported: true };
+        Some(BSD_ECONNRESET)
+    }
+
+    /// Whether `fd`'s host connection was reset.
+    pub(crate) fn bsd_reset(&self, fd: i32) -> bool {
+        self.process()
+            .bsd_sockets
+            .get(&fd)
+            .is_some_and(|socket| matches!(socket.stream_state(), Some(StreamState::Reset { .. })))
+    }
+
     /// Forget a stream that failed once its error has been reported.
     fn bsd_clear_stream(&mut self, fd: i32) {
         if let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) {
@@ -129,19 +168,52 @@ impl Cpu {
         }
     }
 
-    /// `Send` on a host-carried stream: queued for the host once it is open.
-    pub(super) fn bsd_send_outside(&mut self, fd: i32, data: Vec<u8>) -> (i32, i32) {
-        let Some(socket) = self.process().bsd_sockets.get(&fd) else {
-            return (-1, BSD_EBADF);
-        };
-        let (Some(StreamState::Open), Some(stream)) = (socket.stream_state(), &socket.stream)
-        else {
-            return (-1, BSD_ENOTCONN);
-        };
-        let stream = stream.id;
-        let sent = data.len() as i32;
-        self.net.outbox.push(NetCommand::Send { stream, data });
-        (sent, 0)
+    /// `Send` on a host-carried stream, within its send window: all of it when it fits (or the
+    /// window is empty, so one send larger than the window still goes), else on a non-blocking
+    /// socket or under `MSG_DONTWAIT` what fits, and on a blocking one a wait for room until
+    /// `SO_SNDTIMEO`, after which what fits. `None` while it waits.
+    pub(super) fn bsd_send_outside(
+        &mut self,
+        fd: i32,
+        mut data: Vec<u8>,
+        flags: u32,
+    ) -> Option<(i32, i32)> {
+        if let Some(errno) = self.bsd_take_reset(fd) {
+            return Some((-1, errno));
+        }
+        let socket = self.process().bsd_sockets.get(&fd)?;
+        let stream = socket.stream.as_ref()?;
+        match stream.state {
+            StreamState::Open => {}
+            StreamState::Reset { .. } => return Some((-1, BSD_EPIPE)),
+            StreamState::Connecting | StreamState::Failed(_) => return Some((-1, BSD_ENOTCONN)),
+        }
+        let (id, in_flight) = (stream.id, stream.in_flight);
+        let room = SEND_WINDOW.saturating_sub(in_flight) as usize;
+        if data.len() > room && in_flight > 0 {
+            let timeout = self.bsd_option_timeout(fd, BSD_SO_SNDTIMEO);
+            if self.bsd_waits(fd, timeout, flags & BSD_MSG_DONTWAIT != 0) {
+                return None;
+            }
+            if room == 0 {
+                self.pending_yield = true;
+                return Some((-1, BSD_EAGAIN));
+            }
+            data.truncate(room);
+        }
+        let sent = data.len() as u32;
+        if let Some(stream) = self
+            .process_mut()
+            .bsd_sockets
+            .get_mut(&fd)
+            .and_then(|socket| socket.stream.as_mut())
+        {
+            stream.in_flight = stream.in_flight.saturating_add(sent);
+        }
+        if sent > 0 {
+            self.net.outbox.push(NetCommand::Send { stream: id, data });
+        }
+        Some((sent as i32, 0))
     }
 
     /// Let guests reach the outside through the host, or back to an empty network.
@@ -154,7 +226,8 @@ impl Cpu {
         std::mem::take(&mut self.net.outbox)
     }
 
-    /// Apply what the host reports about its streams; one for a socket since closed is dropped.
+    /// Apply what the host reports about its streams; one for a socket since closed is dropped,
+    /// and a connection to a listener that is gone is closed.
     pub fn deliver_net_events(&mut self, events: impl IntoIterator<Item = NetEvent>) {
         for event in events {
             let id = match &event {
@@ -162,10 +235,25 @@ impl Cpu {
                 | NetEvent::Failed { stream, .. }
                 | NetEvent::Data { stream, .. }
                 | NetEvent::Closed { stream }
+                | NetEvent::Reset { stream }
+                | NetEvent::Sent { stream, .. }
+                | NetEvent::Datagram { stream, .. }
                 | NetEvent::TlsEstablished { stream, .. }
                 | NetEvent::TlsFailed { stream, .. } => *stream,
+                NetEvent::Incoming {
+                    listener,
+                    stream,
+                    source,
+                    port,
+                } => {
+                    self.bsd_incoming(*listener, *stream, source, *port);
+                    continue;
+                }
             };
-            if self.ssl_event(id, &event) || self.bsd_datagram_event(id, &event) {
+            if self.ssl_event(id, &event)
+                || self.bsd_datagram_event(id, &event)
+                || self.bsd_listener_event(id, &event)
+            {
                 continue;
             }
             let socket = self
@@ -185,16 +273,97 @@ impl Cpu {
                 NetEvent::Failed { reason, .. } => {
                     stream.state = StreamState::Failed(match reason {
                         NetFailure::Refused => BSD_ECONNREFUSED,
-                        NetFailure::Unreachable => BSD_ENETUNREACH,
+                        NetFailure::Unreachable | NetFailure::Denied | NetFailure::InUse => {
+                            BSD_ENETUNREACH
+                        }
                         NetFailure::TimedOut => BSD_ETIMEDOUT,
                         NetFailure::NotFound => BSD_EHOSTUNREACH,
                     });
                 }
+                // After `SHUT_RD` what arrives is dropped, but the host may still send it.
+                NetEvent::Data { data, .. } if socket.shut_read => {
+                    let bytes = data.len() as u32;
+                    self.net
+                        .outbox
+                        .push(NetCommand::Consumed { stream: id, bytes });
+                }
                 NetEvent::Data { data, .. } => socket.rx.extend(data),
                 NetEvent::Closed { .. } => socket.peer_closed = true,
-                NetEvent::TlsEstablished { .. } | NetEvent::TlsFailed { .. } => {}
+                NetEvent::Reset { .. } => {
+                    // A reset takes what was queued with it.
+                    stream.state = StreamState::Reset { reported: false };
+                    socket.rx.clear();
+                    socket.peer_closed = true;
+                }
+                NetEvent::Sent { bytes, .. } => {
+                    stream.in_flight = stream.in_flight.saturating_sub(bytes);
+                }
+                NetEvent::Datagram { .. }
+                | NetEvent::Incoming { .. }
+                | NetEvent::TlsEstablished { .. }
+                | NetEvent::TlsFailed { .. } => {}
             }
         }
+    }
+
+    /// What the host says about a listener's own stream: a failure or an end means the host no
+    /// longer takes connections for it, which leaves it listening on this console only.
+    fn bsd_listener_event(&mut self, id: StreamId, event: &NetEvent) -> bool {
+        let Some(socket) = self
+            .machine
+            .processes
+            .values_mut()
+            .flat_map(|process| process.bsd_sockets.values_mut())
+            .find(|socket| socket.host_listener == Some(id))
+        else {
+            return false;
+        };
+        if matches!(
+            event,
+            NetEvent::Failed { .. } | NetEvent::Closed { .. } | NetEvent::Reset { .. }
+        ) {
+            socket.host_listener = None;
+        }
+        true
+    }
+
+    /// A connection the host accepted for listener `listener`: an open socket on its queue, which
+    /// `accept` hands out with the peer's address.
+    fn bsd_incoming(&mut self, listener: StreamId, stream: StreamId, source: &Source, port: u16) {
+        let found = self.machine.processes.iter().find_map(|(&pid, process)| {
+            process
+                .bsd_sockets
+                .iter()
+                .find(|(_, socket)| socket.host_listener == Some(listener) && socket.listening)
+                .map(|(&fd, socket)| (pid, fd, socket.domain, socket.kind, socket.bound.clone()))
+        });
+        let address = self.net.address_for(source);
+        let (Some((pid, fd, domain, kind, bound)), Some(ip)) = (found, address) else {
+            self.net.outbox.push(NetCommand::Close { stream });
+            return;
+        };
+        let mut accepted = BsdSocket::new(domain, kind);
+        accepted.bound = bound;
+        accepted.stream = Some(Stream {
+            id: stream,
+            state: StreamState::Open,
+            address: sockaddr_in_bytes(ip, port),
+            deferred: false,
+            in_flight: 0,
+        });
+        let process = self.machine.process_mut(pid);
+        let accepted_fd = process.next_bsd_fd;
+        process.next_bsd_fd = process.next_bsd_fd.wrapping_add(1);
+        process.bsd_sockets.insert(accepted_fd, accepted);
+        if let Some(socket) = process.bsd_sockets.get_mut(&fd) {
+            socket.incoming.push_back(accepted_fd);
+        }
+        self.log(
+            Level::Info,
+            &format!(
+                "[net] fd {fd} accepted stream {stream} from {ip:?}:{port} as fd {accepted_fd}"
+            ),
+        );
     }
 }
 
@@ -264,7 +433,6 @@ mod tests {
             cpu.take_net_commands(),
             vec![NetCommand::Connect {
                 stream: 1,
-                udp: false,
                 peer: Peer::Name("example.com".into()),
                 port: 443,
             }]
@@ -326,9 +494,123 @@ mod tests {
             "what the guest read is handed back to the host"
         );
 
+        // The peer finishing is end-of-file, and the guest may still send.
         cpu.deliver_net_events([NetEvent::Closed { stream: 1 }]);
         assert_eq!(recv_on(&mut cpu, fd, 16).0, (0, 0), "end of file");
-        assert_eq!(send_on(&mut cpu, fd, b"more"), (-1, super::BSD_EPIPE));
+        assert_eq!(send_on(&mut cpu, fd, b"more"), (4, 0));
+    }
+
+    #[test]
+    fn a_reset_is_reported_once_and_then_the_connection_is_dead() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.deliver_net_events([
+            NetEvent::Connected { stream: 1 },
+            NetEvent::Data {
+                stream: 1,
+                data: b"lost".to_vec(),
+            },
+            NetEvent::Reset { stream: 1 },
+        ]);
+        assert_eq!(
+            cpu.bsd_poll_revents(fd, POLLIN | POLLOUT),
+            POLLIN | POLLOUT | 0x0010 | 0x0008,
+            "readable, writable, hung up, with an error"
+        );
+        assert_eq!(
+            recv_on(&mut cpu, fd, 16).0,
+            (-1, BSD_ECONNRESET),
+            "what was queued went with it"
+        );
+        assert_eq!(recv_on(&mut cpu, fd, 16).0, (0, 0), "then end of file");
+        assert_eq!(send_on(&mut cpu, fd, b"x"), (-1, super::BSD_EPIPE));
+        assert_eq!(so_error(&mut cpu, fd), 0, "reported already");
+        assert_eq!(cpu.bsd_poll_revents(fd, 0) & 0x0008, 0);
+    }
+
+    #[test]
+    fn a_reset_not_yet_reported_is_what_so_error_and_send_say() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.deliver_net_events([
+            NetEvent::Connected { stream: 1 },
+            NetEvent::Reset { stream: 1 },
+        ]);
+        assert_eq!(so_error(&mut cpu, fd), BSD_ECONNRESET as u32);
+        assert_eq!(send_on(&mut cpu, fd, b"x"), (-1, super::BSD_EPIPE));
+
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.deliver_net_events([
+            NetEvent::Connected { stream: 1 },
+            NetEvent::Reset { stream: 1 },
+        ]);
+        assert_eq!(send_on(&mut cpu, fd, b"x"), (-1, BSD_ECONNRESET));
+    }
+
+    #[test]
+    fn sends_stop_at_the_window_until_the_host_delivers() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        cpu.mem.map_zero(0x10_0000, SEND_WINDOW as usize).unwrap();
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
+        cpu.take_net_commands();
+        let send_big = |cpu: &mut Cpu, len: u32| {
+            write_map_buffer_request(cpu, 10, &fd.to_le_bytes(), 0x10_0000, len, true);
+            cpu.bsd_request(TLS, 9, Some(10)).unwrap();
+            bsd_result(cpu)
+        };
+        assert_eq!(
+            send_big(&mut cpu, SEND_WINDOW - 100),
+            ((SEND_WINDOW - 100) as i32, 0)
+        );
+        assert_eq!(
+            cpu.bsd_poll_revents(fd, POLLOUT),
+            POLLOUT,
+            "100 bytes of room"
+        );
+        assert_eq!(send_big(&mut cpu, 300), (100, 0), "non-blocking: what fits");
+        assert_eq!(cpu.bsd_poll_revents(fd, POLLOUT), 0, "full");
+        assert_eq!(send_big(&mut cpu, 10), (-1, BSD_EAGAIN));
+
+        cpu.deliver_net_events([NetEvent::Sent {
+            stream: 1,
+            bytes: 1000,
+        }]);
+        assert_eq!(cpu.bsd_poll_revents(fd, POLLOUT), POLLOUT);
+        assert_eq!(send_big(&mut cpu, 1000), (1000, 0));
+    }
+
+    #[test]
+    fn a_blocking_send_waits_for_room_and_then_sends_it_all() {
+        let (mut cpu, fd, address) = blocking_socket("example.com");
+        cpu.mem.map_zero(0x10_0000, SEND_WINDOW as usize).unwrap();
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.pending_retry = None;
+        cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
+        rerun_connect(&mut cpu);
+        cpu.take_net_commands();
+        let send_big = |cpu: &mut Cpu, len: u32| {
+            write_map_buffer_request(cpu, 10, &fd.to_le_bytes(), 0x10_0000, len, true);
+            cpu.bsd_request(TLS, 9, Some(10)).unwrap();
+        };
+        send_big(&mut cpu, SEND_WINDOW);
+        assert_eq!(bsd_result(&cpu), (SEND_WINDOW as i32, 0));
+        cpu.take_net_commands();
+
+        send_big(&mut cpu, 10);
+        assert!(cpu.pending_retry.take().is_some(), "the window is full");
+        assert!(
+            cpu.take_net_commands().is_empty(),
+            "nothing sent while waiting"
+        );
+        cpu.deliver_net_events([NetEvent::Sent {
+            stream: 1,
+            bytes: 10,
+        }]);
+        send_big(&mut cpu, 10);
+        assert!(cpu.pending_retry.is_none());
+        assert_eq!(bsd_result(&cpu), (10, 0));
     }
 
     #[test]

@@ -466,6 +466,9 @@ impl Cpu {
         let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
             return self.ssl_reply(tls, key, RESULT_INTERNAL_LOGIC, &[]);
         };
+        if self.bsd_reset(fd) {
+            return self.ssl_reply(tls, key, RESULT_CONNECTION_RESET, &[]);
+        }
         let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) else {
             return self.ssl_reply(tls, key, RESULT_INVALID_SOCKET, &[]);
         };
@@ -496,9 +499,12 @@ impl Cpu {
     /// `Write`: handed to the host as plaintext, which it encrypts.
     fn ssl_write(&mut self, tls: u32, key: u64) -> Result<()> {
         let connection = self.process().ssl_connections[&key].clone();
-        let (Some(_), Some(stream)) = (connection.fd, connection.stream) else {
+        let (Some(fd), Some(stream)) = (connection.fd, connection.stream) else {
             return self.ssl_reply(tls, key, RESULT_NO_CONNECTION, &[]);
         };
+        if self.bsd_reset(fd) {
+            return self.ssl_reply(tls, key, RESULT_CONNECTION_RESET, &[]);
+        }
         if let Handshake::Failed(code) = connection.handshake {
             return self.ssl_reply(tls, key, code, &[]);
         }
@@ -515,6 +521,7 @@ impl Cpu {
             Some((addr, size)) => self.read_bytes(addr, size),
             None => Vec::new(),
         };
+        // TLS writes stay outside the socket's send window: the host acknowledges ciphertext.
         let sent = data.len() as u32;
         self.net.outbox.push(NetCommand::Send { stream, data });
         self.ssl_reply(tls, key, 0, &sent.to_le_bytes())

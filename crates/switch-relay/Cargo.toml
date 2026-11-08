@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 futures-util = "0.3.34"
+socket2 = "0.6.5"
 switch-relay-proto = { path = "../switch-relay-proto" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "io-std", "signal"] }
 tokio-tungstenite = "0.30.0"
