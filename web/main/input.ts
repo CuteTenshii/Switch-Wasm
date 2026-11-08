@@ -33,10 +33,6 @@ function padName(pad: Gamepad): string {
   return name || 'gamepad';
 }
 
-function showPad(pad: Gamepad): void {
-  inputStatus(padName(pad), pad.id);
-}
-
 // Keyboard fallback: dpad + A/B/X/Y + start/select.
 const KEY_MAP: Record<string, number> = {
   arrowleft: BTN.LEFT, arrowup: BTN.UP, arrowright: BTN.RIGHT, arrowdown: BTN.DOWN,
@@ -198,7 +194,7 @@ function pushInput(): void {
     sly = Math.round(-axis(1) * 32767);
     srx = Math.round(axis(2) * 32767);
     sry = Math.round(-axis(3) * 32767);
-    showPad(pad);
+    inputStatus(padName(pad), pad.id);
   } else if (touchpadActive()) {
     inputStatus('touch controls');
   } else if (mask) {
@@ -217,7 +213,7 @@ function pushInput(): void {
 setInterval(pushInput, 16);
 window.addEventListener('gamepadconnected', (e) => {
   const pad = e.gamepad;
-  showPad(pad);
+  inputStatus(padName(pad), pad.id);
   // Buttons are read by W3C standard layout position.
   const layout = pad.mapping === 'standard'
     ? 'standard layout'

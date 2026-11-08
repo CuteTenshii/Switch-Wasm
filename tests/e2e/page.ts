@@ -18,18 +18,14 @@ export { expect };
 
 export type EmuState = 'idle' | 'running' | 'paused' | 'halted' | 'fault';
 
-async function coreUp(page: Page): Promise<void> {
-  await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
-}
-
 export async function openPage(page: Page): Promise<void> {
   await page.goto('./');
-  await coreUp(page);
+  await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
 }
 
 export async function reloadPage(page: Page): Promise<void> {
   await page.reload();
-  await coreUp(page);
+  await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
 }
 
 export async function expectState(page: Page, state: EmuState): Promise<void> {

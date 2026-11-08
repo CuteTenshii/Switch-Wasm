@@ -21,10 +21,6 @@ type Place =
 
 const sdVolume: StorageVolume = { kind: 'sd' };
 
-function saveVolume(id: string): StorageVolume {
-  return { kind: 'save', id };
-}
-
 const dialog = $<HTMLDialogElement>('files');
 const list = $('files-list');
 const crumbs = $('files-crumbs');
@@ -126,7 +122,7 @@ async function droppedFiles(transfer: DataTransfer): Promise<[string, File][]> {
 
 function volumeOf(at: Place): StorageVolume | null {
   if (at.kind === 'sd') return sdVolume;
-  if (at.kind === 'save') return saveVolume(at.id);
+  if (at.kind === 'save') return { kind: 'save', id: at.id };
   return null;
 }
 
@@ -423,9 +419,9 @@ async function renderSaves(mine: number): Promise<void> {
     const label = titleLabel(save);
     const { actions } = row(Save, label, (label === save ? '' : save + ' · ') + owner,
       () => go({ kind: 'save', id, dir: '/' }));
-    action(actions, 'Export ' + label + ' as .zip', () => void guarded(() => exportZip(saveVolume(id), '/', id)), false, Archive);
+    action(actions, 'Export ' + label + ' as .zip', () => void guarded(() => exportZip({ kind: 'save', id }, '/', id)), false, Archive);
     action(actions, 'Delete ' + label, () => confirmIn(actions, 'Delete this save?', 'Delete', async () => {
-      await call('storageRemove', saveVolume(id), '/');
+      await call('storageRemove', { kind: 'save', id }, '/');
       setStatus('Deleted the save ' + id + '.');
     }), true, Trash2);
   }

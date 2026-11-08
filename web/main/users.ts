@@ -54,14 +54,6 @@ function toRecord({ uid, nickname, editedAt, picture }: Profile): UserRecord {
   return { uid, nickname, editedAt, picture };
 }
 
-async function storeProfile(profile: Profile): Promise<void> {
-  await call('usersStore', [[profile.uid, profile]]);
-}
-
-async function storeCurrent(): Promise<void> {
-  await call('usersStore', [[CURRENT_KEY, current]]);
-}
-
 function firstProfile(): Profile {
   return { uid: newUid(), nickname: 'Player', editedAt: 0, picture: null, created: Date.now() };
 }
@@ -76,7 +68,7 @@ async function readProfiles(): Promise<void> {
   if (!profiles.length) {
     const first = firstProfile();
     profiles.push(first);
-    await storeProfile(first);
+    await call('usersStore', [[first.uid, first]]);
   }
   if (!profiles.some((p) => p.uid === current)) current = profiles[0].uid;
 }
@@ -394,7 +386,7 @@ function uidForm(profile: Profile): HTMLFormElement {
 async function update(profile: Profile): Promise<void> {
   profile.editedAt = now();
   try {
-    await storeProfile(profile);
+    await call('usersStore', [[profile.uid, profile]]);
   } catch (err) {
     log('Profiles: could not be saved (' + (err as Error).message + ')', 'error');
   }
@@ -405,7 +397,7 @@ async function update(profile: Profile): Promise<void> {
 async function choose(profile: Profile): Promise<void> {
   current = profile.uid;
   try {
-    await storeCurrent();
+    await call('usersStore', [[CURRENT_KEY, current]]);
   } catch (err) {
     log('Profiles: the choice could not be saved (' + (err as Error).message + ')', 'error');
   }
@@ -512,7 +504,7 @@ addForm.addEventListener('submit', (e) => {
   };
   profiles.push(profile);
   addName.value = '';
-  void storeProfile(profile)
+  void call('usersStore', [[profile.uid, profile]])
     .catch((err: Error) => log('Profiles: could not be saved (' + err.message + ')', 'error'))
     .then(() => {
       renderProfiles();

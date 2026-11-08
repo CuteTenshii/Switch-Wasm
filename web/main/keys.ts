@@ -37,18 +37,18 @@ async function acceptKeys(e: Event, which: 'prod' | 'title'): Promise<void> {
   // A file picker filters by extension only, so the other key file would get through.
   const expected = which + '.keys';
   if (file.name.toLowerCase() !== expected) {
-    refuseKeys(file.name + ' is not ' + expected + '. Pick the file named ' + expected + '.');
+    log(file.name + ' is not ' + expected + '. Pick the file named ' + expected + '.', 'error');
     return;
   }
   let text: string | null;
   try {
     text = await readKeysFile(file);
   } catch (err) {
-    refuseKeys('Could not read ' + file.name + ': ' + (err as Error).message);
+    log('Could not read ' + file.name + ': ' + (err as Error).message, 'error');
     return;
   }
   if (text === null) {
-    refuseKeys(file.name + ' is not a keys file - expected "name = hex" lines.');
+    log(file.name + ' is not a keys file - expected "name = hex" lines.', 'error');
     return;
   }
   if (which === 'prod') prodKeysText = text;
@@ -58,10 +58,6 @@ async function acceptKeys(e: Event, which: 'prod' | 'title'): Promise<void> {
   log(which === 'prod'
     ? 'prod.keys loaded - NCA header decryption enabled.'
     : 'title.keys loaded.', 'info');
-}
-
-function refuseKeys(why: string): void {
-  log(why, 'error');
 }
 
 $('prod-keys').addEventListener('change', (e) => acceptKeys(e, 'prod'));

@@ -23,11 +23,6 @@ const GPU_INTERLEAVE = false;
 const GPU_REOPENS = 3;
 let gpuReopens = 0;
 
-// Cheaper than parsing the JSON report after every slice.
-function gpuLost(): boolean {
-  return switch_gpu_lost();
-}
-
 export function tryGpu(): void {
   if (!GPU_BACKEND_READY) {
     if (gpu === 'no') {
@@ -36,7 +31,8 @@ export function tryGpu(): void {
     }
     return;
   }
-  if (gpu === 'done' && gpuLost()) {
+  // Cheaper than parsing the JSON report after every slice.
+  if (gpu === 'done' && switch_gpu_lost()) {
     if (gpuReopens >= GPU_REOPENS) {
       gpu = 'never';
       workerLog(
