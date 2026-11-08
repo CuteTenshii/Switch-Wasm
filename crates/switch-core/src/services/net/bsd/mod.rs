@@ -128,6 +128,8 @@ impl BsdSocket {
 
 /// `bsd` errnos in Linux's numbering (`EAGAIN` is 11): libnx converts them to newlib's with a table
 /// indexed that way ("Nintendo actually used the Linux errno definitions for their FreeBSD build").
+const BSD_ENOENT: i32 = 2;
+
 const BSD_EBADF: i32 = 9;
 
 const BSD_EINVAL: i32 = 22;
@@ -260,8 +262,13 @@ impl Cpu {
         let word =
             |cpu: &Cpu, index: u32| cpu.mem.read_u32(data.wrapping_add(index * 4)).unwrap_or(0);
         match cmd_id {
-            // RegisterClient(BsdInitConfig, pid, tmem_size, tmem) -> u64.
-            Some(0) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+            // RegisterClient(BsdInitConfig, pid, tmem_size, tmem) -> u64, and
+            // RegisterClientShared, the same without the transfer memory.
+            Some(0) | Some(33) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+            // Open(flags, path): only `/dev/bpf` on a console, and there is no device here.
+            Some(4) => self.bsd_reply(tls, -1, BSD_ENOENT),
+            // Sysctl(name, new, old) -> old length: no MIB answers.
+            Some(7) => self.bsd_reply_len(tls, -1, BSD_ENOENT, 0),
             // RecvMMsg(fd, vlen, flags, padding, timespec) and SendMMsg(fd, vlen, flags).
             Some(29) => {
                 let (fd, count, flags) = (word(self, 0) as i32, word(self, 1), word(self, 2));
@@ -271,6 +278,8 @@ impl Cpu {
                 let (fd, count) = (word(self, 0) as i32, word(self, 1));
                 self.bsd_send_messages(tls, fd, count)
             }
+            // Cmd36(pid, version, pid_reserved) -> u32: a stub that returns 0 on the Switch.
+            Some(36) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
             // StartMonitoring(pid).
             Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // Socket(domain, type, protocol) / SocketExempt. The family is not validated.

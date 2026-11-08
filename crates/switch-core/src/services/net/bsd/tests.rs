@@ -747,3 +747,30 @@ pub(in crate::services::net) fn fionread_counts_what_is_queued() {
     assert_eq!(bytes_waiting(&mut cpu, server), ((0, 0), 3));
     assert_eq!(bytes_waiting(&mut cpu, 999).0, (-1, super::BSD_EBADF));
 }
+
+#[test]
+pub(in crate::services::net) fn open_and_sysctl_find_nothing_and_the_registration_variants_succeed()
+{
+    let (mut cpu, _) = bsd_socket(1);
+    assert_eq!(
+        bsd_command(&mut cpu, 4, &[0]),
+        (-1, super::BSD_ENOENT),
+        "open"
+    );
+    assert_eq!(
+        bsd_command(&mut cpu, 7, &[0]),
+        (-1, super::BSD_ENOENT),
+        "sysctl"
+    );
+    assert_eq!(
+        bsd_command(&mut cpu, 33, &[0; 8]),
+        (0, 0),
+        "RegisterClientShared"
+    );
+    assert_eq!(bsd_command(&mut cpu, 36, &[0; 4]).0, 0, "Cmd36");
+    assert!(
+        cpu.unimplemented_ipc.is_empty(),
+        "{:?}",
+        cpu.unimplemented_ipc
+    );
+}
