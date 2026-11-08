@@ -7,8 +7,16 @@ static SHARED: std::sync::OnceLock<
     Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue), String>,
 > = std::sync::OnceLock::new();
 
-/// A fresh backend on the shared device, or `None` with a notice; with `REQUIRE_GPU` set, a panic.
-pub(crate) fn device() -> Option<super::Gpu> {
+/// Held for a test's whole use of the device: concurrent tests on one software Vulkan device fail at random.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A fresh backend on the shared device, with the lease that keeps other tests off it until
+/// dropped; `None` with a notice when there is no device, or with `REQUIRE_GPU` set, a panic.
+pub(crate) fn device() -> Option<(std::sync::MutexGuard<'static, ()>, super::Gpu)> {
+    // A test that panicked while holding the lease leaves nothing to repair.
+    let serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match SHARED.get_or_init(super::Gpu::open_parts) {
         Ok((instance, adapter, device, queue)) => {
             let mut gpu = super::Gpu::with_device(
@@ -18,7 +26,7 @@ pub(crate) fn device() -> Option<super::Gpu> {
                 queue.clone(),
             );
             gpu.device_is_shared = true;
-            Some(gpu)
+            Some((serial, gpu))
         }
         Err(why) if std::env::var_os("REQUIRE_GPU").is_some_and(|v| !v.is_empty()) => {
             panic!("REQUIRE_GPU is set and there is no device: {why}")
@@ -34,7 +42,9 @@ pub(crate) fn device() -> Option<super::Gpu> {
 /// `return false;` (Tint warns about it); this fails once naga stops requiring it.
 #[test]
 fn naga_still_needs_a_return_after_a_loop_that_cannot_fall_through() {
-    let Some(gpu) = device() else { return };
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
     let module = |name: &str, trailing: &str| {
         let src = [
             "fn f() -> bool {",
@@ -80,7 +90,9 @@ fn the_quad_swap_a_browser_gets_is_wgsl_naga_accepts() {
     use switch_core::gpu::shader::isa::{Instruction, Operand, Pred, ShflMode};
     use switch_core::gpu::shader::{Op, Program};
 
-    let Some(gpu) = device() else { return };
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
     let mut program = Program::default();
     for (index, op) in [
         Op::Shfl {
@@ -124,7 +136,9 @@ fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
     use switch_core::gpu::shader::isa::{self, Instruction, Pred};
     use switch_core::gpu::shader::{Op, Program};
 
-    let Some(gpu) = device() else { return };
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
     let mut program = Program::default();
     let ops = [0xdf020080c0a7010e].map(|word| isa::decode(word).op);
     for (index, op) in ops.into_iter().chain([Op::Exit]).enumerate() {
@@ -203,7 +217,9 @@ fn tomodachi_lifes_cube_array_and_video_min_are_wgsl_naga_accepts() {
     use switch_core::gpu::shader::isa::{self, Instruction, Pred};
     use switch_core::gpu::shader::{Op, Program};
 
-    let Some(gpu) = device() else { return };
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
     let mut program = Program::default();
     let words = [0xc03a0087fff70400, 0xc1ba0087f0970400, 0x3a2c03e060c70907];
     let ops = words.map(|word| isa::decode(word).op);
@@ -252,7 +268,9 @@ fn a_float32_target_blends_only_where_the_device_offers_it() {
 #[test]
 fn a_lost_device_is_reported_rather_than_failing_the_flush() {
     use switch_core::gpu::renderer::Renderer;
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut h = Harness::new();
     h.triangle([1.0, 0.0, 1.0, 1.0]);
     h.draw_with(&mut gpu).expect("the draw");
@@ -273,7 +291,9 @@ fn a_lost_device_is_reported_rather_than_failing_the_flush() {
 /// A rejection the backend never asks about still reaches the report.
 #[test]
 fn a_rejection_nothing_asked_about_is_still_counted_and_reported() {
-    let Some(gpu) = device() else { return };
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
     assert_eq!(gpu.device_errors(), (0, Vec::new()), "nothing rejected yet");
 
     // `bool` is not a valid fragment output.
@@ -315,7 +335,9 @@ fn nintendo_switch_sports_txq_and_tld4_are_wgsl_naga_accepts() {
     use switch_core::gpu::shader::isa::{self, Instruction, Pred};
     use switch_core::gpu::shader::{Op, Program};
 
-    let Some(gpu) = device() else { return };
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
     let mut program = Program::default();
     let words = [0xdf48008180470800, 0xc83a0086aff70208];
     let ops = words.map(|word| isa::decode(word).op);
@@ -351,7 +373,9 @@ fn nintendo_switch_sports_csetp_is_wgsl_naga_accepts() {
     use switch_core::gpu::shader::isa::{self, Instruction, Pred};
     use switch_core::gpu::shader::{Op, Program};
 
-    let Some(gpu) = device() else { return };
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
     let mut program = Program::default();
     let words = [0x5ce0800000170aff, 0x50a0038000070d07];
     let ops = words.map(|word| isa::decode(word).op);
@@ -381,7 +405,9 @@ fn nintendo_switch_sports_csetp_is_wgsl_naga_accepts() {
 
 #[test]
 fn every_pass_the_backend_builds_for_itself_compiles() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     // A multisampled colour format and the two readback depth formats.
     let colour = wgpu::TextureFormat::Bgra8Unorm;
     let depths = [
@@ -605,7 +631,9 @@ fn vertex_arrays_past_the_limit_fold_into_one_interleaved_buffer_and_one_shared_
 #[test]
 fn the_report_is_the_json_the_page_reads() {
     use switch_core::gpu::renderer::Renderer;
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     gpu.drawn = 12;
     gpu.fallbacks = 3;
     gpu.uploaded = super::stats::UploadBytes {
@@ -744,7 +772,9 @@ fn xorshift(x: &mut u32) -> u32 {
 /// An uploaded `S8D24` word converts to the stencil's bits and the unorm depth the rasterizer reads.
 #[test]
 fn the_packed_depth_pass_converts_uploaded_words_bit_for_bit() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let width = 256u32;
     let mut x = 0x9E37_79B9u32;
     let mut words: Vec<u32> = vec![0, 0xff, 0xffff_ff00, u32::MAX, 0x0100, 0x8000_0000];
@@ -767,7 +797,9 @@ fn the_packed_depth_pass_converts_uploaded_words_bit_for_bit() {
 /// The packed-depth pass converts every held depth exactly as guest memory and the rasterizer would.
 #[test]
 fn the_packed_depth_pass_converts_depths_bit_for_bit() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut depths: Vec<f32> = vec![
         0.0,
         -0.5,

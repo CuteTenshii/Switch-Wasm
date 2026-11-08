@@ -8,7 +8,9 @@ use switch_core::gpu::testing::{self, Harness};
 
 /// A solid white triangle over a multisample mode, by both renderers; only coverage can differ.
 fn compare(mode: u32, samples_x: u32, samples_y: u32, set_up: impl Fn(&mut Harness)) {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let colour = [1.0f32, 1.0, 1.0, 1.0];
 
     let build = |gpu: Option<&mut super::Gpu>| {
@@ -53,7 +55,9 @@ fn agrees_shading(
     tune: impl Fn(&mut super::Gpu),
     set_up: impl Fn(&mut Harness),
 ) {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     tune(&mut gpu);
     let build = |gpu: Option<&mut super::Gpu>| {
         let mut h = new();
@@ -448,7 +452,9 @@ fn a_global_reduction_leaves_the_same_words_in_guest_memory_on_both_renderers() 
     assert_eq!(words_after(&want)[0], 100, "a word left alone");
     assert_eq!(words_after(&want)[2], 7, "the or");
 
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut got = Harness::with_fragment_shader(shader());
     set_up(&mut got);
     let before = gpu.fallbacks;
@@ -727,7 +733,9 @@ fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
 /// Vertex arrays past the device's buffer count are interleaved into one buffer and draw alike.
 #[test]
 fn vertex_arrays_past_the_device_limit_are_folded_and_draw_alike() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     // Off the eight-bit half-way points, so both renderers round alike.
     let colour = [0.2f32, 0.4, 0.8, 1.0];
     let build = |gpu: Option<&mut super::Gpu>| {
@@ -778,7 +786,9 @@ fn vertex_arrays_past_the_device_limit_are_folded_and_draw_alike() {
 /// memory, whether or not a stencil byte shares its texels.
 #[test]
 fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     for (zt_format, tic_format, name) in [(0x0A, 0x2f, "ZF32"), (0x19, 0x30, "ZF32_X24S8")] {
         let build = |gpu: Option<&mut super::Gpu>| {
             let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
@@ -849,7 +859,9 @@ fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
 /// A held `Z24S8` surface sampled as `S8D24` reads the device's depth as guest memory would hold it.
 #[test]
 fn a_held_packed_depth_surface_samples_its_depth_in_green() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let build = |gpu: Option<&mut super::Gpu>| {
         let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
         h.bindless_texture();
@@ -911,7 +923,9 @@ fn a_held_packed_depth_surface_samples_its_depth_in_green() {
 /// A `ZF32_X24S8` image in guest memory samples as its depth, the stencil half of each texel left out.
 #[test]
 fn a_float_depth_image_with_stencil_samples_as_its_depth() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let build = |gpu: Option<&mut super::Gpu>| {
         let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
         h.bindless_texture();
@@ -979,7 +993,9 @@ fn a_float_depth_image_with_stencil_samples_as_its_depth() {
 /// An `S8D24` image in guest memory samples as the rasterizer reads it: unorm depth in green.
 #[test]
 fn a_packed_depth_image_samples_its_depth_in_green() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let build = |gpu: Option<&mut super::Gpu>| {
         let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
         h.bindless_texture();
@@ -1045,7 +1061,9 @@ fn a_packed_depth_image_samples_its_depth_in_green() {
 /// A held depth surface sampled as a shadow map, whole and as a padded surface's corner.
 #[test]
 fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     for width in [testing::TARGET_WIDTH, testing::TARGET_WIDTH / 2] {
         let build = |gpu: Option<&mut super::Gpu>, clear: f32| {
             let mut h = Harness::with_fragment_shader(testing::shadow_fragment_shader());
@@ -1110,7 +1128,9 @@ fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
 /// A texture that is the corner of a held surface is copied from the device.
 #[test]
 fn a_held_surface_stands_in_for_a_smaller_texture_laid_out_the_same_way() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let build = |gpu: Option<&mut super::Gpu>| {
         let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
         h.bindless_texture();
@@ -1283,7 +1303,9 @@ fn a_depth_surface_smaller_than_the_colour_target_confines_the_draw() {
 /// hold on the device, and what lies outside the colour target's extent stays as it was.
 #[test]
 fn a_depth_clear_and_draw_beside_a_smaller_colour_target_agree() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let (width, height) = (testing::TARGET_WIDTH, testing::TARGET_HEIGHT);
     let build = |gpu: Option<&mut super::Gpu>| {
         let mut h = Harness::new();
@@ -1426,7 +1448,9 @@ fn a_bgra_attribute_is_swapped_the_way_the_rasterizer_swaps_one() {
 /// With late readbacks, the frame after a fallback and those following go to the rasterizer.
 #[test]
 fn a_frame_the_device_cannot_finish_is_a_frame_it_does_not_start() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     // What a browser teaches it on its first present.
     gpu.deferred_readbacks = true;
     let colour = [1.0f32, 0.0, 1.0, 1.0];
@@ -1479,7 +1503,9 @@ fn a_frame_the_device_cannot_finish_is_a_frame_it_does_not_start() {
 /// The latch holds through unrunnable frames, releases after a clean one, and doubles each relatch.
 #[test]
 fn the_latch_lets_go_after_clean_frames_and_waits_longer_each_time() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     gpu.deferred_readbacks = true;
     let mut h = Harness::new();
     h.triangle([1.0, 0.0, 1.0, 1.0]);
@@ -1531,7 +1557,9 @@ fn the_latch_lets_go_after_clean_frames_and_waits_longer_each_time() {
 /// no render target, so it neither counts as a fallback nor hands the frames over.
 #[test]
 fn a_store_only_points_draw_lands_without_latching_the_frame() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     gpu.deferred_readbacks = true;
     let mut h = Harness::new();
     let dest = h.base + 0x1000;
@@ -1562,7 +1590,9 @@ fn a_store_only_points_draw_lands_without_latching_the_frame() {
 /// A tall image sampled over eight rows starting at `first` (past the end where it
 /// repeats), by both renderers: they must agree and the device must draw it.
 fn folded_image_agrees(repeat: bool, first: impl Fn(u32) -> u32, wanted: impl Fn(u32) -> [u32; 2]) {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let max = gpu.device.limits().max_texture_dimension_2d;
     let (width, height) = (8u32, max + 8);
     let first = first(max);
@@ -1657,7 +1687,9 @@ fn a_repeating_tall_image_wraps_from_its_last_row_to_its_first() {
 /// the rasterizer without counting as a fallback or handing the frames over.
 #[test]
 fn a_clear_the_device_cannot_hold_does_not_latch_the_frames() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     gpu.deferred_readbacks = true;
     // No browser renders into `R16_UNORM`.
     gpu.set_web_limits(true);
@@ -1690,7 +1722,9 @@ fn a_clear_the_device_cannot_hold_does_not_latch_the_frames() {
 
 #[test]
 fn a_clear_writes_what_the_rasterizer_would_have_written() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     for channels in [[true; 4], [true, false, true, false], [false; 4]] {
         let build = |gpu: Option<&mut super::Gpu>| {
             let mut h = Harness::new();
@@ -1746,7 +1780,9 @@ fn a_multisampled_draw_reaches_the_same_texels_the_rasterizer_reaches() {
 /// The device multisampling route: fully covered pixels match, edges may differ.
 #[test]
 fn the_device_route_agrees_wherever_an_edge_is_not() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     gpu.set_device_msaa(true);
     let colour = [1.0f32, 1.0, 1.0, 1.0];
     let mut ran = 0;
@@ -1869,7 +1905,9 @@ fn programmed_sample_locations_reach_the_same_texels_the_rasterizer_reaches() {
 
 #[test]
 fn two_address_spaces_with_a_surface_at_one_address_keep_their_own() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut below = Harness::new();
     below.as_id = 1;
     below.triangle([1.0, 0.0, 0.0, 1.0]);
@@ -1907,7 +1945,9 @@ fn two_address_spaces_with_a_surface_at_one_address_keep_their_own() {
 /// Two presented frames drawn into one surface land in order, the second's pixels last.
 #[test]
 fn presented_frames_land_in_the_order_they_were_submitted() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     gpu.deferred_readbacks = true;
     gpu.defer_readbacks = true;
     let mut h = Harness::new();
@@ -2020,7 +2060,9 @@ fn expected_blit(blit: &Blit, source: &[u32]) -> Vec<u32> {
 }
 
 fn blit_on_device_agrees_with_the_engine(filtered: bool) {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut h = shaded(&mut gpu);
     let blit = downscale(&h, filtered);
     let route = gpu.blit(&blit, &mut h.ctx()).expect("the blit");
@@ -2050,7 +2092,9 @@ fn a_point_sampled_blit_on_the_device_agrees_with_the_engine() {
 
 #[test]
 fn a_blit_away_from_held_surfaces_stays_in_guest_memory() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut h = shaded(&mut gpu);
     let blit = Blit {
         src: colour_surface(h.base + BLIT_TARGET, 4, 4),
@@ -2066,7 +2110,9 @@ fn a_blit_away_from_held_surfaces_stays_in_guest_memory() {
 
 #[test]
 fn a_blit_out_of_a_surface_on_another_format_flushes() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut h = shaded(&mut gpu);
     let mut blit = downscale(&h, false);
     blit.src.format = ColorFormat::from_raw(0xCA).expect("a format");
@@ -2076,7 +2122,9 @@ fn a_blit_out_of_a_surface_on_another_format_flushes() {
 
 #[test]
 fn a_copy_away_from_held_surfaces_needs_no_flush() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut h = shaded(&mut gpu);
     let base = h.base;
     let away = base + BLIT_TARGET;
@@ -2091,7 +2139,9 @@ fn a_copy_away_from_held_surfaces_needs_no_flush() {
 
 #[test]
 fn a_blit_out_of_guest_memory_uploads_its_source_and_agrees_with_the_engine() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let mut h = Harness::new();
     let base = h.base;
     let source = base + BLIT_TARGET;
@@ -2129,7 +2179,9 @@ fn a_depth_surface_alternating_with_its_crop_stays_on_the_device_and_agrees() {
     const COLOUR_ADDRESS_LOW: u32 = 0x201;
     const COLOUR_PITCH: u32 = 0x202;
     const NARROW_TARGET: u64 = 0x3000;
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let build = |renderer: &mut dyn Renderer| {
         let mut h = Harness::new();
         h.depth_target(0x0203);
@@ -2180,7 +2232,9 @@ fn a_depth_surface_alternating_with_its_crop_stays_on_the_device_and_agrees() {
 
 #[test]
 fn a_draw_beside_a_depth_surface_larger_only_one_way_agrees() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let (width, height) = (testing::TARGET_WIDTH * 2, testing::TARGET_HEIGHT / 2);
     let build = |renderer: &mut dyn Renderer| {
         let mut h = Harness::new();
@@ -2208,7 +2262,9 @@ fn a_draw_beside_a_depth_surface_larger_only_one_way_agrees() {
 /// An `RGBA32_UINT` target takes the fragment shader's register words as they are, on both renderers.
 #[test]
 fn an_integer_target_takes_the_shader_words_on_both_renderers() {
-    let Some(mut gpu) = device() else { return };
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
     let colour = [1.0f32, 2.0, 3.0, 4.0];
     let build = |gpu: Option<&mut super::Gpu>| {
         let mut h = Harness::new();
