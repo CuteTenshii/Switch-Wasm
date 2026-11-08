@@ -1,9 +1,9 @@
 // The application shell: stage and side panel.
 
 import {
-  Bug, Cpu, Download, Ellipsis, Eraser, FileText, Folder, FolderOpen, FolderSearch, FolderUp, HardDrive, History,
-  KeyRound, Maximize, Network, PackagePlus, PanelRight, Square, SquareTerminal, StepForward, Trash2, UserPlus, X,
-  type IconNode,
+  Bug, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cpu, Download, Ellipsis, Eraser, FileText, FileUp,
+  Folder, FolderOpen, FolderSearch, FolderUp, HardDrive, History, KeyRound, Keyboard, Maximize, Network,
+  PackagePlus, PanelRight, Square, SquareTerminal, StepForward, Trash2, UserPlus, X, type IconNode,
 } from 'lucide';
 import { $ } from './dom';
 import { icon } from './icons';
@@ -156,6 +156,9 @@ const staticIcons: [string, IconNode][] = [
   ['#btn-fullscreen', Maximize], ['#btn-panel', PanelRight], ['#btn-more', Ellipsis], ['#btn-panel-close', X],
   ['#btn-profiles-close', X], ['#btn-files-close', X],
   ['#btn-step', StepForward], ['#btn-stop', Square], ['#btn-open', FolderOpen],
+  ['#overlay-mark', FileUp], ['#overlay-open', FolderOpen], ['#keymap-title', Keyboard],
+  ['.keymap-button[data-glyph="up"]', ChevronUp], ['.keymap-button[data-glyph="down"]', ChevronDown],
+  ['.keymap-button[data-glyph="left"]', ChevronLeft], ['.keymap-button[data-glyph="right"]', ChevronRight],
   ['#crash-save', Download], ['#crash-console', SquareTerminal], ['#crash-stop', Square],
   ['.tab[data-tab="console"]', SquareTerminal], ['.tab[data-tab="debug"]', Bug],
   ['.tab[data-tab="files"]', Folder], ['.tab[data-tab="nand"]', HardDrive], ['.tab[data-tab="network"]', Network],

@@ -119,17 +119,44 @@
 
     <div class="overlay" id="overlay">
       <div class="overlay-inner">
-        <h1>Drop a homebrew <code>.nro</code> or a title <code>.nsp</code> / <code>.xci</code> to boot</h1>
+        <span class="overlay-mark" id="overlay-mark" aria-hidden="true"></span>
+        <h1>Drop a <code>.nro</code>, <code>.nsp</code> or <code>.xci</code> to boot</h1>
         <p class="muted">…or open one. Everything runs locally in your browser.</p>
         <div class="overlay-actions">
-          <label class="btn primary big" for="nro-file">Open a file</label>
+          <label class="btn primary big" id="overlay-open" for="nro-file">Open a file</label>
         </div>
-        <p class="muted tiny">A container is opened where it sits and read a range at a time, so a
-          retail <code>.nsp</code> or cartridge image never has to fit in memory. It needs <code>prod.keys</code>,
-          which the Files panel takes.</p>
-        <p class="muted tiny">Keyboard: arrows = D-pad · Z/X = A/B · A/S = X/Y · Q/E = L/R · Enter = + · Shift = −.
-          A connected gamepad is used automatically, and a touchscreen gets an on-screen controller.</p>
       </div>
+
+      <!-- Mirrors KEY_MAP in input.ts: each Switch button with the key that presses it. -->
+      <figure class="keymap" aria-labelledby="keymap-title">
+        <figcaption class="keymap-title" id="keymap-title">Keyboard</figcaption>
+        <div class="keymap-pads">
+          <div class="keymap-pad">
+            <dl class="keymap-row">
+              <div class="keymap-key"><dt class="keymap-button wide">L</dt><dd><kbd>Q</kbd></dd></div>
+              <div class="keymap-key"><dt class="keymap-button">−</dt><dd><kbd>Shift</kbd></dd></div>
+            </dl>
+            <dl class="keymap-cross">
+              <div class="keymap-key up"><dt class="keymap-button" data-glyph="up"><span class="sr-only">Up</span></dt><dd><kbd>↑</kbd></dd></div>
+              <div class="keymap-key left"><dt class="keymap-button" data-glyph="left"><span class="sr-only">Left</span></dt><dd><kbd>←</kbd></dd></div>
+              <div class="keymap-key right"><dt class="keymap-button" data-glyph="right"><span class="sr-only">Right</span></dt><dd><kbd>→</kbd></dd></div>
+              <div class="keymap-key down"><dt class="keymap-button" data-glyph="down"><span class="sr-only">Down</span></dt><dd><kbd>↓</kbd></dd></div>
+            </dl>
+          </div>
+          <div class="keymap-pad">
+            <dl class="keymap-row">
+              <div class="keymap-key"><dt class="keymap-button">+</dt><dd><kbd>Enter</kbd></dd></div>
+              <div class="keymap-key"><dt class="keymap-button wide">R</dt><dd><kbd>E</kbd></dd></div>
+            </dl>
+            <dl class="keymap-cross">
+              <div class="keymap-key up"><dt class="keymap-button">X</dt><dd><kbd>A</kbd></dd></div>
+              <div class="keymap-key left"><dt class="keymap-button">Y</dt><dd><kbd>S</kbd></dd></div>
+              <div class="keymap-key right"><dt class="keymap-button">A</dt><dd><kbd>Z</kbd></dd></div>
+              <div class="keymap-key down"><dt class="keymap-button">B</dt><dd><kbd>X</kbd></dd></div>
+            </dl>
+          </div>
+        </div>
+      </figure>
     </div>
 
     <!-- Above the idle overlay and below the drop veil: it covers the stage

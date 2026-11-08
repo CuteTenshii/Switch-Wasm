@@ -163,8 +163,11 @@ body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-stat
   position: absolute;
   inset: 0;
   display: grid;
+  grid-template-rows: 1fr auto;
   place-items: center;
+  gap: 20px;
   padding: 24px;
+  overflow-y: auto;
   text-align: center;
   background:
     radial-gradient(120% 80% at 50% 0%, var(--bg-glow) 0%, var(--bg) 60%);
@@ -175,6 +178,16 @@ body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-stat
   visibility: hidden;
 }
 .overlay-inner { max-width: 560px; }
+.overlay-mark {
+  display: inline-flex;
+  margin-bottom: 14px;
+  color: var(--accent);
+}
+.overlay-mark svg {
+  width: 40px;
+  height: 40px;
+  stroke-width: 1.5;
+}
 .overlay h1 {
   margin: 0 0 6px;
   font-size: var(--text-xl);
@@ -197,6 +210,94 @@ body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-stat
 .tiny {
   font-size: var(--text-xs);
   line-height: 1.55;
+}
+
+/* The keyboard map: two Joy-Con halves, each Switch button over the key that presses it. */
+.keymap {
+  margin: 0;
+  color: var(--muted);
+}
+.keymap-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: var(--text-xs);
+}
+.keymap-pads {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+.keymap-pad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: rgb(14 16 23 / 60%);
+}
+.keymap-row {
+  display: flex;
+  gap: 18px;
+  margin: 0;
+}
+.keymap-cross {
+  display: grid;
+  grid-template:
+    ". up ." auto
+    "left . right" auto
+    ". down ." auto / 48px 48px 48px;
+  row-gap: 2px;
+  margin: 0;
+}
+.keymap-key {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.keymap-key.up { grid-area: up; }
+.keymap-key.left { grid-area: left; }
+.keymap-key.right { grid-area: right; }
+.keymap-key.down { grid-area: down; }
+.keymap-key dd { margin: 0; }
+.keymap-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-hi);
+  border-radius: 50%;
+  background: var(--chrome-hi);
+  color: var(--text);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.keymap-button.wide {
+  width: 40px;
+  border-radius: var(--radius-sm);
+}
+.keymap kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 5px;
+  border: 1px solid var(--border-hi);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text);
+}
+
+/* Touch devices get the on-screen controller instead. */
+@media (hover: none) and (pointer: coarse) {
+  .keymap { display: none; }
 }
 
 /* Drag-and-drop veil over the stage. */
