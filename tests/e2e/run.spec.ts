@@ -1,4 +1,5 @@
-import { aarch64Elf, ASM, bootElf, expect, expectState, openPage, test } from './page';
+import type { Page } from '@playwright/test';
+import { aarch64Elf, ASM, bootElf, type EmuState, expect, expectState, openPage, reloadPage, test } from './page';
 
 test.beforeEach(async ({ page }) => {
   await openPage(page);
@@ -32,6 +33,53 @@ test('Stop ends a running program without a loading screen, and the next boot ru
 
   await bootElf(page, aarch64Elf([ASM.halt]), 'halted');
   await expect(page.locator('#console .error')).toHaveCount(0);
+});
+
+// Booting through a click: browsers ask before unload only after a user gesture.
+async function openElf(page: Page, until: EmuState): Promise<void> {
+  const chooser = page.waitForEvent('filechooser');
+  await page.locator('.overlay-actions label').click();
+  await (await chooser).setFiles({
+    name: 'test.elf', mimeType: 'application/octet-stream', buffer: aarch64Elf([ASM.spin]),
+  });
+  await expectState(page, until);
+}
+
+async function reloadAsks(page: Page): Promise<boolean> {
+  let asked = false;
+  page.on('dialog', (dialog) => {
+    asked = true;
+    void dialog.accept();
+  });
+  await reloadPage(page);
+  return asked;
+}
+
+// Locally the tests run against the dev server, which never asks; CI runs them against `dist`.
+const dev = !process.env.CI;
+
+test('leaving the page asks first while a program is loaded', async ({ page }) => {
+  test.skip(dev, 'the dev server never asks');
+  await openElf(page, 'running');
+  const dialog = page.waitForEvent('dialog');
+  await page.close({ runBeforeUnload: true });
+  const asked = await dialog;
+  expect(asked.type()).toBe('beforeunload');
+  await asked.dismiss();
+  expect(page.isClosed()).toBe(false);
+});
+
+test('the dev server lets the page go with a program loaded', async ({ page }) => {
+  test.skip(!dev, 'only the dev server skips the question');
+  await openElf(page, 'running');
+  expect(await reloadAsks(page)).toBe(false);
+});
+
+test('leaving the page after Stop does not ask', async ({ page }) => {
+  await openElf(page, 'running');
+  await page.locator('#btn-stop').click();
+  await expectState(page, 'idle');
+  expect(await reloadAsks(page)).toBe(false);
 });
 
 test('a guest crash says why and offers the log, the console and Stop', async ({ page }) => {

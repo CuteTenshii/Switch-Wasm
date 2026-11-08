@@ -17,6 +17,14 @@ export function titleBooted(): boolean {
   return booted;
 }
 
+// Leaving the page drops a loaded title's unsaved progress; the idle console loses nothing.
+// Development skips it so reloads stay one keystroke.
+if (!import.meta.env.DEV) {
+  window.addEventListener('beforeunload', (event) => {
+    if (booted) event.preventDefault();
+  });
+}
+
 // End the running title; the console, with its storage, keys and system data, stays.
 export async function endTitle(): Promise<void> {
   abortRun();
