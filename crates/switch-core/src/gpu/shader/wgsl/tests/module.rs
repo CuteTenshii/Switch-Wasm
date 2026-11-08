@@ -351,6 +351,18 @@ fn an_integer_attribute_is_declared_as_one_and_carried_as_its_bits() {
 }
 
 #[test]
+fn a_scaled_attribute_is_declared_integer_and_converted_to_its_value() {
+    let (vs, _) = pair(3);
+    let vs = translate(&vs).unwrap();
+    let mut layout = Layout::of(&vs, Stage::Vertex);
+    layout.integer_attributes = vec![(3, AttributeBase::Uscaled)];
+    let source = module(&vs, Stage::Vertex, &layout).unwrap();
+    assert!(source.contains("@location(3) attr3: vec4<u32>"), "{source}");
+    assert!(source.contains("f32(input.attr3.x)"), "{source}");
+    assert!(!source.contains("bitcast<f32>(input."), "{source}");
+}
+
+#[test]
 fn a_depth_only_pass_writes_no_colour_and_still_shades() {
     // Depth-only fragments return nothing but still run for `kil`.
     let p = program(&[

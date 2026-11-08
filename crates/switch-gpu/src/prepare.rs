@@ -149,8 +149,8 @@ impl Gpu {
             .vertex_buffers
             .iter()
             .flat_map(|buffer| &buffer.attributes)
-            .filter(|a| a.format.base() != AttributeBase::Float)
-            .map(|a| (a.location as usize, a.format.base()))
+            .filter(|a| a.base() != AttributeBase::Float)
+            .map(|a| (a.location as usize, a.base()))
             .collect();
         // WebGPU has no BGRA vertex format, so the entry point swaps.
         vs_layout.bgra_attributes = state

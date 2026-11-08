@@ -193,6 +193,9 @@ pub enum AttributeBase {
     Float,
     Sint,
     Uint,
+    /// An integer the shader reads as the float of its value.
+    Sscaled,
+    Uscaled,
 }
 
 /// A 10-10-10-2 attribute (size `0x30`), red in the low bits. WebGPU only has
@@ -365,6 +368,18 @@ pub struct VertexAttribute {
     pub location: u32,
     /// Swap the first and third components; WebGPU has no BGRA vertex format.
     pub is_bgra: bool,
+    /// An integer `format` converted to the float of its value; WebGPU has no scaled formats.
+    pub scaled: bool,
+}
+
+impl VertexAttribute {
+    pub fn base(&self) -> AttributeBase {
+        match (self.format.base(), self.scaled) {
+            (AttributeBase::Sint, true) => AttributeBase::Sscaled,
+            (AttributeBase::Uint, true) => AttributeBase::Uscaled,
+            (base, _) => base,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -698,6 +713,8 @@ const ATTRIB_TYPE_SNORM: u32 = 1;
 const ATTRIB_TYPE_UNORM: u32 = 2;
 const ATTRIB_TYPE_SINT: u32 = 3;
 const ATTRIB_TYPE_UINT: u32 = 4;
+const ATTRIB_TYPE_USCALED: u32 = 5;
+const ATTRIB_TYPE_SSCALED: u32 = 6;
 const ATTRIB_TYPE_FLOAT: u32 = 7;
 
 /// Only the formats `raster::fetch_attribute` decodes.
@@ -774,11 +791,18 @@ fn vertex_buffers(engine: &Engine3D) -> Result<(Vec<VertexBuffer>, Vec<u32>), Un
                 attrib.buffer_id
             )));
         }
+        let scaled = matches!(attrib.ty, ATTRIB_TYPE_USCALED | ATTRIB_TYPE_SSCALED);
+        let ty = match attrib.ty {
+            ATTRIB_TYPE_USCALED => ATTRIB_TYPE_UINT,
+            ATTRIB_TYPE_SSCALED => ATTRIB_TYPE_SINT,
+            ty => ty,
+        };
         let attribute = VertexAttribute {
-            format: vertex_format(attrib.size, attrib.ty)?,
+            format: vertex_format(attrib.size, ty)?,
             offset: attrib.offset,
             location,
             is_bgra: attrib.is_bgra,
+            scaled,
         };
         match buffers.iter_mut().find(|b| b.index == attrib.buffer_id) {
             Some(buffer) => buffer.attributes.push(attribute),
@@ -1106,6 +1130,29 @@ mod tests {
             translate: [0.0, 0.0, 0.0],
         });
         assert!(!vulkan.depth_minus_one_to_one());
+    }
+
+    #[test]
+    fn a_scaled_attribute_keeps_its_integer_format_and_says_it_is_scaled() {
+        let attribute = |format, scaled| VertexAttribute {
+            format,
+            offset: 0,
+            location: 0,
+            is_bgra: false,
+            scaled,
+        };
+        assert_eq!(
+            attribute(VertexFormat::Uint8x4, true).base(),
+            AttributeBase::Uscaled
+        );
+        assert_eq!(
+            attribute(VertexFormat::Sint16x2, true).base(),
+            AttributeBase::Sscaled
+        );
+        assert_eq!(
+            attribute(VertexFormat::Uint8x4, false).base(),
+            AttributeBase::Uint
+        );
     }
 
     #[test]

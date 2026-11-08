@@ -528,8 +528,8 @@ fn vertex_entry(layout: &Layout) -> String {
             }
             continue;
         }
-        // Integer attributes are carried as bits.
-        let integer = layout.attribute_base(*slot) != AttributeBase::Float;
+        // Integer attributes are carried as bits, scaled ones as their value.
+        let base = layout.attribute_base(*slot);
         // BGRA swaps the first and third components.
         let axes = if layout.bgra_attributes.contains(slot) {
             ["z", "y", "x", "w"]
@@ -538,10 +538,10 @@ fn vertex_entry(layout: &Layout) -> String {
         };
         for (component, axis) in axes.iter().enumerate() {
             let read = format!("input.attr{slot}.{axis}");
-            let read = if integer {
-                format!("bitcast<f32>({read})")
-            } else {
-                read
+            let read = match base {
+                AttributeBase::Float => read,
+                AttributeBase::Sint | AttributeBase::Uint => format!("bitcast<f32>({read})"),
+                AttributeBase::Sscaled | AttributeBase::Uscaled => format!("f32({read})"),
             };
             out.push_str(&format!(
                 "  attr_in[{}u] = {read};\n",

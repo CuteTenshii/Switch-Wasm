@@ -1145,6 +1145,7 @@ mod tests {
             offset,
             location: 0,
             is_bgra: false,
+            scaled: false,
         };
         // Two 32-byte elements using 16 bytes each reach 48 bytes.
         let buffer = VertexBuffer {

@@ -270,8 +270,8 @@ pub(super) fn unpack_1010102(word: &str, packing: Packed1010102) -> [String; 4] 
 pub(super) fn attribute_scalar(base: AttributeBase) -> &'static str {
     match base {
         AttributeBase::Float => "f32",
-        AttributeBase::Sint => "i32",
-        AttributeBase::Uint => "u32",
+        AttributeBase::Sint | AttributeBase::Sscaled => "i32",
+        AttributeBase::Uint | AttributeBase::Uscaled => "u32",
     }
 }
 
