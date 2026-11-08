@@ -11,7 +11,7 @@ import { showView } from './fileview';
 import { fmtSize } from './format';
 import { icon } from './icons';
 import { onInstallStatus, removeNandTitle, titleLabel } from './nand';
-import { call, hasSession } from './rpc';
+import { call } from './rpc';
 
 type Place =
   | { kind: 'sd'; dir: string }
@@ -224,11 +224,7 @@ function renderTools(): void {
     tab.classList.toggle('is-active', on);
     tab.setAttribute('aria-selected', String(on));
   });
-  note.textContent = place.kind === 'nand'
-    ? 'Removing a data archive takes effect once the running title is replaced.'
-    : hasSession()
-      ? 'Changes reach the running title straight away.'
-      : 'Changes are kept in this browser and load with the next title.';
+  note.hidden = place.kind !== 'nand';
 }
 
 function message(text: string): void {

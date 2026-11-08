@@ -9,7 +9,6 @@ const KEYS_STORE = { prod: 'switch-prod-keys', title: 'switch-title-keys' };
 
 let prodKeysText = localStorage.getItem(KEYS_STORE.prod) || '';
 let titleKeysText = localStorage.getItem(KEYS_STORE.title) || '';
-let restoredKeys = Boolean(prodKeysText || titleKeysText);
 
 export function hasKeys(): boolean {
   return Boolean(prodKeysText || titleKeysText);
@@ -27,9 +26,6 @@ export function updateKeysState(): void {
   const parts = [];
   if (prodKeysText) parts.push('prod.keys');
   if (titleKeysText) parts.push('title.keys');
-  $('keys-state').textContent = parts.length === 0
-    ? 'no keys loaded - encrypted NCA headers can\'t be inspected'
-    : 'loaded: ' + parts.join(' + ') + (restoredKeys ? ' (from storage)' : '');
   setNote('keys-badge', parts.length ? parts.length + ' loaded' : 'none', parts.length > 0);
 }
 
@@ -57,7 +53,6 @@ async function acceptKeys(e: Event, which: 'prod' | 'title'): Promise<void> {
   }
   if (which === 'prod') prodKeysText = text;
   else titleKeysText = text;
-  restoredKeys = false;
   localStorage.setItem(KEYS_STORE[which], text);
   await stageKeys();
   log(which === 'prod'
@@ -66,7 +61,6 @@ async function acceptKeys(e: Event, which: 'prod' | 'title'): Promise<void> {
 }
 
 function refuseKeys(why: string): void {
-  $('keys-state').textContent = why;
   log(why, 'error');
 }
 
@@ -78,7 +72,6 @@ $('btn-clear-keys').addEventListener('click', () => {
   titleKeysText = '';
   localStorage.removeItem(KEYS_STORE.prod);
   localStorage.removeItem(KEYS_STORE.title);
-  restoredKeys = false;
   void stageKeys();
   log('Keys cleared.');
 });

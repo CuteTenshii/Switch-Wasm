@@ -121,7 +121,6 @@
       <div class="overlay-inner">
         <span class="overlay-mark" id="overlay-mark" aria-hidden="true"></span>
         <h1>Drop a <code>.nro</code>, <code>.nsp</code> or <code>.xci</code> to boot</h1>
-        <p class="muted">…or open one. Everything runs locally in your browser.</p>
         <div class="overlay-actions">
           <label class="btn primary big" id="overlay-open" for="nro-file">Open a file</label>
         </div>
@@ -197,7 +196,6 @@
       <button type="button" class="icon-btn" id="btn-profiles-close" aria-label="Close">
       </button>
     </header>
-    <p class="muted tiny">Titles save separately for each profile. Click a picture to change it.</p>
     <p class="muted tiny" id="profile-running-note" hidden>The running title keeps the profile it
       started with. A change applies to the next title you start.</p>
     <ul class="profile-list" id="profile-list"></ul>
@@ -261,7 +259,7 @@
     <p class="files-status tiny" id="files-status" role="status" aria-live="polite"></p>
     <ul class="files-list" id="files-list"></ul>
     <section class="files-view" id="files-view" aria-label="File contents" hidden></section>
-    <p class="muted tiny" id="files-note"></p>
+    <p class="muted tiny" id="files-note" hidden>Removing a data archive takes effect once the running title is replaced.</p>
   </dialog>
 
   <footer class="statusbar">
@@ -545,7 +543,6 @@
           <input type="file" id="title-keys" accept=".keys" hidden>
           <button id="btn-clear-keys" class="btn small ghost">Clear</button>
         </div>
-        <p class="muted tiny" id="keys-state">no keys loaded</p>
       </div>
     </details>
 
