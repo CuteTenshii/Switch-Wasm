@@ -1,7 +1,13 @@
 //! The frames the page and the relay exchange over one WebSocket; `docs/relay.md` is the
 //! spec. A frame is `u8 op | u32 stream | payload`, little-endian, one per binary message.
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
+
+/// The oldest version a page still understands.
+pub const OLDEST_VERSION: u8 = 1;
+
+/// The first version whose relay sends `ALIVE`.
+pub const ALIVE_SINCE: u8 = 2;
 
 /// Most bytes a relay puts in one `DATA` frame.
 pub const MAX_DATA: usize = 16 * 1024;
@@ -56,11 +62,26 @@ pub enum ClientFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerFrame {
-    Hello { version: u8, max_streams: u16 },
-    Connected { stream: StreamId },
-    Failed { stream: StreamId, reason: Failure },
-    Data { stream: StreamId, data: Vec<u8> },
-    Closed { stream: StreamId },
+    Hello {
+        version: u8,
+        max_streams: u16,
+    },
+    Connected {
+        stream: StreamId,
+    },
+    Failed {
+        stream: StreamId,
+        reason: Failure,
+    },
+    Data {
+        stream: StreamId,
+        data: Vec<u8>,
+    },
+    Closed {
+        stream: StreamId,
+    },
+    /// The relay is still there; sent on a timer, whatever else is going on.
+    Alive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +106,7 @@ const CONNECTED: u8 = 0x81;
 const FAILED: u8 = 0x82;
 const SERVER_DATA: u8 = 0x83;
 const CLOSED: u8 = 0x84;
+const ALIVE: u8 = 0x85;
 
 const PEER_ADDRESS: u8 = 0;
 const PEER_NAME: u8 = 1;
@@ -280,6 +302,7 @@ impl ServerFrame {
                 out.extend_from_slice(data);
             }
             ServerFrame::Closed { stream } => header(&mut out, CLOSED, *stream),
+            ServerFrame::Alive => header(&mut out, ALIVE, 0),
         }
         out
     }
@@ -312,6 +335,10 @@ impl ServerFrame {
             CLOSED => {
                 rest.finish()?;
                 ServerFrame::Closed { stream }
+            }
+            ALIVE => {
+                rest.finish()?;
+                ServerFrame::Alive
             }
             other => return Err(DecodeError::UnknownOp(other)),
         };
@@ -360,7 +387,7 @@ mod tests {
             version: VERSION,
             max_streams: 64,
         };
-        assert_eq!(hello.encode(), [0x80, 0, 0, 0, 0, 1, 0x40, 0]);
+        assert_eq!(hello.encode(), [0x80, 0, 0, 0, 0, 2, 0x40, 0]);
         assert_eq!(
             ServerFrame::Connected { stream: 1 }.encode(),
             [0x81, 1, 0, 0, 0]
@@ -369,6 +396,7 @@ mod tests {
             ServerFrame::Closed { stream: 1 }.encode(),
             [0x84, 1, 0, 0, 0]
         );
+        assert_eq!(ServerFrame::Alive.encode(), [0x85, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -429,6 +457,7 @@ mod tests {
                 data: vec![1, 2, 3],
             },
             ServerFrame::Closed { stream: 5 },
+            ServerFrame::Alive,
         ];
         for frame in frames {
             assert_eq!(ServerFrame::decode(&frame.encode()).as_ref(), Ok(&frame));

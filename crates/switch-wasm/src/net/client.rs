@@ -9,7 +9,8 @@ use rustls::RootCertStore;
 use switch_core::json;
 use switch_core::services::netbridge::{NetCommand, NetEvent, NetFailure, Peer, StreamId};
 use switch_relay_proto::{
-    ClientFrame, DecodeError, Failure, Peer as WirePeer, Proto, ServerFrame, VERSION,
+    ClientFrame, DecodeError, Failure, Peer as WirePeer, Proto, ServerFrame, OLDEST_VERSION,
+    VERSION,
 };
 
 /// Bytes the relay may send on a stream before the guest has read any.
@@ -74,6 +75,8 @@ pub(crate) enum Refused {
 pub(crate) struct Pump {
     pub frames: Vec<Vec<u8>>,
     pub events: Vec<NetEvent>,
+    /// The relay's version, when this came from its `HELLO`.
+    pub hello: Option<u8>,
 }
 
 impl Pump {
@@ -229,10 +232,13 @@ impl Client {
         let frame = ServerFrame::decode(raw).map_err(Refused::Undecodable)?;
         let mut pump = Pump::default();
         match frame {
-            ServerFrame::Hello { version, .. } if version != VERSION => {
+            ServerFrame::Hello { version, .. }
+                if !(OLDEST_VERSION..=VERSION).contains(&version) =>
+            {
                 return Err(Refused::Version(version))
             }
-            ServerFrame::Hello { .. } => {}
+            ServerFrame::Hello { version, .. } => pump.hello = Some(version),
+            ServerFrame::Alive => {}
             ServerFrame::Connected { stream } => {
                 self.set_state(stream, State::Open);
                 pump.events.push(NetEvent::Connected { stream });
@@ -554,18 +560,33 @@ mod tests {
     #[test]
     fn hello_carries_no_event_and_a_foreign_version_ends_the_link() {
         let mut client = Client::default();
-        let hello = ServerFrame::Hello {
-            version: VERSION,
-            max_streams: 8,
-        };
-        assert_eq!(client.incoming(&hello.encode()), Ok(Pump::default()));
-        let foreign = ServerFrame::Hello {
-            version: VERSION + 1,
-            max_streams: 8,
-        };
+        for version in [OLDEST_VERSION, VERSION] {
+            let hello = ServerFrame::Hello {
+                version,
+                max_streams: 8,
+            };
+            assert_eq!(
+                client.incoming(&hello.encode()),
+                Ok(Pump {
+                    hello: Some(version),
+                    ..Pump::default()
+                })
+            );
+        }
+        for foreign in [OLDEST_VERSION - 1, VERSION + 1] {
+            let hello = ServerFrame::Hello {
+                version: foreign,
+                max_streams: 8,
+            };
+            assert_eq!(
+                client.incoming(&hello.encode()),
+                Err(Refused::Version(foreign))
+            );
+        }
         assert_eq!(
-            client.incoming(&foreign.encode()),
-            Err(Refused::Version(VERSION + 1))
+            client.incoming(&ServerFrame::Alive.encode()),
+            Ok(Pump::default()),
+            "the relay being there is the socket's business"
         );
         assert_eq!(
             client.incoming(&[0x7f, 0, 0, 0, 0]),

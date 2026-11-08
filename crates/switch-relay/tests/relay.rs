@@ -68,7 +68,7 @@ async fn send(socket: &mut Socket, frame: ClientFrame) {
         .unwrap();
 }
 
-/// The next relay frame. Pings are answered by the socket as it reads, and skipped.
+/// The next relay frame. Pings, which the socket answers as it reads, and `ALIVE` are skipped.
 async fn next(socket: &mut Socket) -> ServerFrame {
     loop {
         let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
@@ -77,7 +77,10 @@ async fn next(socket: &mut Socket) -> ServerFrame {
             .expect("the socket stays open")
             .unwrap();
         match message {
-            Message::Binary(raw) => return ServerFrame::decode(&raw).unwrap(),
+            Message::Binary(raw) => match ServerFrame::decode(&raw).unwrap() {
+                ServerFrame::Alive => continue,
+                frame => return frame,
+            },
             Message::Ping(_) | Message::Pong(_) => continue,
             other => panic!("a binary frame, got {other:?}"),
         }
@@ -406,17 +409,23 @@ async fn a_malformed_frame_or_a_reused_stream_id_closes_the_socket() {
     assert_eq!(closed_with(&mut socket).await, CloseCode::Unsupported);
 }
 
-/// Keep reading for `span`, answering pings, and count them. Nothing else may arrive.
-async fn pings_during(socket: &mut Socket, span: Duration) -> usize {
+fn is_alive(message: &Message) -> bool {
+    matches!(message, Message::Binary(raw) if ServerFrame::decode(raw) == Ok(ServerFrame::Alive))
+}
+
+/// Keep reading for `span`, answering pings: how many pings and `ALIVE` frames came. Nothing
+/// else may arrive.
+async fn keepalives_during(socket: &mut Socket, span: Duration) -> (usize, usize) {
     let until = tokio::time::Instant::now() + span;
-    let mut pings = 0;
+    let (mut pings, mut alive) = (0, 0);
     while let Ok(message) = tokio::time::timeout_at(until, socket.next()).await {
         match message {
             Some(Ok(Message::Ping(_))) => pings += 1,
-            other => panic!("only pings, got {other:?}"),
+            Some(Ok(message)) if is_alive(&message) => alive += 1,
+            other => panic!("only pings and ALIVE, got {other:?}"),
         }
     }
-    pings
+    (pings, alive)
 }
 
 #[tokio::test]
@@ -429,8 +438,13 @@ async fn a_page_that_answers_pings_stays_connected_however_quiet_it_is() {
         ServerFrame::Connected { stream: 1 }
     );
 
-    let pings = pings_during(&mut socket, BRISK.silence * 3).await;
+    let (pings, alive) = keepalives_during(&mut socket, BRISK.silence * 3).await;
     assert!(pings >= 5, "pinged {pings} times");
+    // One of the pair can land just past the end of the wait.
+    assert!(
+        alive.abs_diff(pings) <= 1,
+        "{alive} ALIVE for {pings} pings"
+    );
 
     send(
         &mut socket,
@@ -476,6 +490,7 @@ async fn a_page_that_stops_answering_is_dropped_with_its_streams() {
             .expect("the relay hangs up")
         {
             Some(Ok(Message::Ping(_))) => continue,
+            Some(Ok(message)) if is_alive(&message) => continue,
             None | Some(Err(_)) => break,
             other => panic!("dropped without a close frame, got {other:?}"),
         }

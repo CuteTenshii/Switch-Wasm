@@ -13,6 +13,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 
 use super::client::Client;
+use super::watchdog::Watchdog;
 use crate::post::post;
 
 /// What the callbacks leave for `exchange`.
@@ -27,6 +28,7 @@ struct Link {
     inbox: Rc<RefCell<Inbox>>,
     /// Frames for a socket that has not opened yet.
     pending: Vec<Vec<u8>>,
+    watchdog: Watchdog,
     /// Kept alive for as long as the socket can call them.
     _callbacks: [Closure<dyn FnMut(JsValue)>; 3],
 }
@@ -99,6 +101,7 @@ pub fn switch_net_connect(url: &str) -> Result<(), JsValue> {
             socket,
             inbox,
             pending: Vec::new(),
+            watchdog: Watchdog::default(),
             _callbacks: [on_message, on_open, on_close],
         });
     });
@@ -187,12 +190,18 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
         let mut replies = Vec::new();
         let mut gone = false;
         let mut broken = false;
+        let mut silent = false;
         if let Some(link) = link.as_mut() {
+            let now = js_sys::Date::now();
             let frames: Vec<_> = link.inbox.borrow_mut().frames.drain(..).collect();
             *frames_in += frames.len() as u32;
+            let heard = !frames.is_empty();
             for raw in frames {
                 match client.incoming(&raw) {
                     Ok(pump) => {
+                        if let Some(version) = pump.hello {
+                            link.watchdog.hello(version, now);
+                        }
                         events.extend(pump.events);
                         replies.extend(pump.frames);
                     }
@@ -202,7 +211,8 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
                     }
                 }
             }
-            gone = broken || link.inbox.borrow().ended;
+            silent = !broken && link.watchdog.silent(now, heard);
+            gone = broken || silent || link.inbox.borrow().ended;
         }
 
         let commands = cpu.take_net_commands();
@@ -230,8 +240,8 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
                 close(&link.socket);
             }
             events.extend(client.lost());
-            // A closed socket has already said so; one that spoke nonsense has not.
-            if broken {
+            // A closed socket has already said so; one that spoke nonsense or went quiet has not.
+            if broken || silent {
                 post("net_state", &[("state", "unreachable".into())]);
             }
         }

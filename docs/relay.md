@@ -21,7 +21,7 @@ Run `switch-relay` (no arguments), open the Network tab, and turn it on. The tab
 u8 op | u32 stream | payload
 ```
 
-`HELLO` has no stream; its stream field is 0.
+`HELLO` and `ALIVE` have no stream; their stream field is 0.
 
 ### Client to relay
 
@@ -37,13 +37,14 @@ u8 op | u32 stream | payload
 
 | Op | Name | Payload |
 | --- | --- | --- |
-| `0x80` | `HELLO` | `u8 version` (1), `u16 max_streams` |
+| `0x80` | `HELLO` | `u8 version` (2), `u16 max_streams` |
 | `0x81` | `CONNECTED` | none |
 | `0x82` | `FAILED` | `u8 reason`: 0 refused, 1 unreachable, 2 timed out, 3 name not found, 4 denied by policy |
 | `0x83` | `DATA` | the bytes; for UDP, exactly one datagram |
 | `0x84` | `CLOSED` | none. The peer finished sending or the connection was reset; nothing more arrives on this stream |
+| `0x85` | `ALIVE` | none. The relay is still there; see [Keepalive](#keepalive) |
 
-`HELLO` is the relay's first message. A client that does not understand the version closes the WebSocket.
+`HELLO` is the relay's first message. A client that does not understand the version closes the WebSocket. The page understands versions 1 and 2; version 1 is the same protocol without `ALIVE`.
 
 ## Streams
 
@@ -69,6 +70,8 @@ Client to relay needs no window: the guest writes at its own pace, and the WebSo
 A connection that has not finished the WebSocket upgrade within 10 seconds is closed. The question about an unknown origin comes after the upgrade, so this does not limit how long it waits for an answer.
 
 The relay sends a WebSocket Ping every 15 seconds. A page that sends nothing for 45 seconds, not even the Pong a browser returns on its own, is gone: the relay drops the WebSocket without a close frame and closes every stream it held.
+
+The browser answers pings without showing them to the page, so the relay also sends `ALIVE` with each one. A page that hears nothing from a version 2 relay for 45 seconds treats the link as lost, as if the socket had closed: what was connecting fails, what was open closes, and the Network tab shows the relay unreachable. Time the page's worker did not run, such as a background tab or a sleeping machine, does not count, since the frames sent meanwhile have not been delivered yet.
 
 A quiet stream on a page that still answers is left open, however long it stays quiet. The guest may hold a connection on purpose, and a page that answers is still there to close it.
 

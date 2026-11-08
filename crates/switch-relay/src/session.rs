@@ -151,7 +151,10 @@ pub async fn run(
                 streams.remove(&id);
             }
             _ = ping.tick() => {
+                // The browser answers the ping itself but never shows it to the page, which
+                // watches for `ALIVE` instead.
                 let _ = out.send(Message::Ping(Default::default()));
+                let _ = frames.send(ServerFrame::Alive);
             }
             () = sleep_until(heard + timeouts.silence) => {
                 end = End::Silent;
