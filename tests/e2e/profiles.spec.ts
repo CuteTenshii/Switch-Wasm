@@ -40,6 +40,38 @@ async function openProfiles(page: Page): Promise<void> {
   await expect(page.locator('#profiles')).toBeVisible();
 }
 
+async function uidOf(page: Page, name: string): Promise<string> {
+  return (await row(page, name).locator('.profile-uid').textContent()) ?? '';
+}
+
+// Opens the UID form of `name` unless it is open, and submits `uid`.
+async function submitUid(page: Page, name: string, uid: string): Promise<void> {
+  const input = page.locator('.profile-uid-form input');
+  if (!await input.isVisible()) await row(page, name).getByRole('button', { name: 'Edit UID' }).click();
+  await input.fill(uid);
+  await input.press('Enter');
+}
+
+// Every key in the NAND's saves store, after putting `seed` there.
+async function saveKeys(page: Page, seed: string[] = []): Promise<string[]> {
+  return page.evaluate(async (keys) => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open('switch-wasm-nand');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error ?? new Error('open failed'));
+    });
+    const tx = db.transaction('saves', 'readwrite');
+    const store = tx.objectStore('saves');
+    for (const key of keys) store.put({ kind: 'file', data: new Uint8Array([1, 2, 3]) }, key);
+    const all = store.getAllKeys();
+    await new Promise((resolve) => {
+      tx.oncomplete = resolve;
+    });
+    db.close();
+    return (all.result as string[]).sort();
+  }, seed);
+}
+
 test.beforeEach(async ({ page }) => {
   await openPage(page);
   await openProfiles(page);
@@ -79,6 +111,50 @@ test('deleting asks first, and the last profile cannot be deleted', async ({ pag
   await row(page, 'Quinn').getByRole('button', { name: 'Delete' }).click();
   await page.locator('.profile-row.is-confirming').getByRole('button', { name: 'Delete' }).click();
   await expect(page.locator('.profile-row')).toHaveCount(1);
+});
+
+test('a bad UID is refused with the reason, and Escape leaves it unchanged', async ({ page }) => {
+  const old = await uidOf(page, 'Player');
+  expect(old).toMatch(/^[0-9a-f]{32}$/);
+  const error = page.locator('.profile-error');
+  await submitUid(page, 'Player', 'not hex');
+  await expect(error).toHaveText('A UID is 32 hex digits, 0-9 and a-f.');
+  await submitUid(page, 'Player', '0'.repeat(32));
+  await expect(error).toContainText('can\'t be all zeros');
+
+  await addProfile(page, 'Kim');
+  await submitUid(page, 'Player', await uidOf(page, 'Kim'));
+  await expect(error).toHaveText('Kim already has this UID.');
+
+  await page.locator('.profile-uid-form input').press('Escape');
+  await expect(page.locator('.profile-uid-form')).toHaveCount(0);
+  expect(await uidOf(page, 'Player')).toBe(old);
+});
+
+test('a new UID takes the profile\'s saves along and survives a reload', async ({ page }) => {
+  const old = await uidOf(page, 'Player');
+  const fresh = '0123456789abcdef0123456789abcdef';
+  await saveKeys(page, [`0100000000001000@${old}/save.bin`, '0100000000002000/shared.bin']);
+
+  await submitUid(page, 'Player', fresh.toUpperCase());
+  await expect(row(page, 'Player').locator('.profile-uid')).toHaveText(fresh);
+  expect(await saveKeys(page)).toEqual([`0100000000001000@${fresh}/save.bin`, '0100000000002000/shared.bin']);
+
+  await reloadPage(page);
+  await openProfiles(page);
+  await expect(row(page, 'Player').locator('.profile-uid')).toHaveText(fresh);
+  await expect(row(page, 'Player')).toContainText('Playing');
+});
+
+test('a UID change is refused when both UIDs hold a save of the same title', async ({ page }) => {
+  const old = await uidOf(page, 'Player');
+  const other = 'fedcba9876543210fedcba9876543210';
+  const seeded = [`0100000000001000@${old}/a.bin`, `0100000000001000@${other}/b.bin`].sort();
+  await saveKeys(page, seeded);
+  await submitUid(page, 'Player', other);
+  await expect(page.locator('.profile-error')).toContainText('already has saves for title 0100000000001000');
+  await expect(page.locator('.profile-uid-form')).toBeVisible();
+  expect(await saveKeys(page)).toEqual(seeded);
 });
 
 test('a console holds at most eight profiles', async ({ page }) => {

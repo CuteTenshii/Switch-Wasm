@@ -99,6 +99,15 @@ async function scan(volume: StorageVolume): Promise<Map<string, StorageInfo>> {
   });
 }
 
+async function saveKeys(db: IDBDatabase): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(NAND_SAVES, 'readonly');
+    const req = tx.objectStore(NAND_SAVES).getAllKeys();
+    tx.oncomplete = () => resolve(req.result as string[]);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+  });
+}
+
 function under(all: Map<string, StorageInfo>, root: string): string[] {
   return [...all.keys()].filter((p) => root === '/' || p === root || p.startsWith(root + '/'));
 }
@@ -179,13 +188,7 @@ export const STORAGE = {
   async savesList() {
     await flush();
     const db = await nandIdb();
-    const ids = await new Promise<string[]>((resolve, reject) => {
-      const tx = db.transaction(NAND_SAVES, 'readonly');
-      const req = tx.objectStore(NAND_SAVES).getAllKeys();
-      tx.oncomplete = () => resolve(
-        [...new Set((req.result as string[]).map((k) => k.slice(0, k.indexOf('/'))))].sort());
-      tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
-    });
+    const ids = [...new Set((await saveKeys(db)).map((k) => k.slice(0, k.indexOf('/'))))].sort();
     const names = new Map<string, string>();
     for (const [, value] of await idbGetAll<{ uid?: string; nickname?: string }>(db, NAND_USERS)) {
       if (value.uid && value.nickname) names.set(value.uid, value.nickname);
@@ -213,6 +216,41 @@ export const STORAGE = {
     };
     await committed(tx);
     return removed;
+  },
+
+  // New copies are written before the old ones go, so an interrupted move loses nothing.
+  async savesMoveUser(from, to) {
+    await flush();
+    // Keys are "<save id>[@<uid>]/<path>"; a save both UIDs own would merge two titles' saves.
+    const moves = new Map<string, string[]>();
+    const taken = new Set<string>();
+    for (const key of await saveKeys(await nandIdb())) {
+      const cut = key.indexOf('/');
+      if (cut < 0) continue;
+      const [save, owner] = key.slice(0, cut).split('@');
+      if (owner === to) taken.add(save);
+      if (owner !== from) continue;
+      const paths = moves.get(save) ?? [];
+      paths.push(key.slice(cut));
+      moves.set(save, paths);
+    }
+    const clashes = [...moves.keys()].filter((save) => taken.has(save));
+    if (clashes.length) {
+      throw new Error(`${to} already has saves for ${clashes.length === 1 ? 'title' : 'titles'} ${clashes.join(', ')}`);
+    }
+    let moved = 0;
+    for (const [save, paths] of moves) {
+      const source = placeOf({ kind: 'save', id: `${save}@${from}` });
+      const changes: [string, StoredEntry][] = [];
+      for (const path of paths) {
+        const value = await readEntry(source, path);
+        if (value) changes.push([path, value]);
+      }
+      await apply(placeOf({ kind: 'save', id: `${save}@${to}` }), changes);
+      await apply(source, paths.map((path) => [path, null]));
+      moved += changes.length;
+    }
+    return moved;
   },
 
   async usersRead() {

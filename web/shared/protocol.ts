@@ -307,6 +307,8 @@ export interface Commands {
   savesList(): SaveListing;
   // Delete the saves a profile owns; how many entries went.
   savesDeleteUser(uid: string): number;
+  // Give `from`'s saves to `to`, refused if both own a save of the same title; how many entries moved.
+  savesMoveUser(from: string, to: string): number;
 
   // Profile records by uid, plus the playing one under its own key.
   usersRead(): [string, unknown][];

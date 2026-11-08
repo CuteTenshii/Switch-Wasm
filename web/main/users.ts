@@ -1,6 +1,6 @@
 // User profiles and the picker the top bar opens.
 
-import { ImageOff, Pencil, Trash2, UserCheck, type IconNode } from 'lucide';
+import { Fingerprint, ImageOff, Pencil, Trash2, UserCheck, type IconNode } from 'lucide';
 import type { Bytes, UserRecord } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
 import { icon } from './icons';
@@ -152,6 +152,13 @@ const runningNote = $('profile-running-note');
 
 let confirming: string | null = null;
 let renaming: string | null = null;
+let editingUid: string | null = null;
+
+function closeForms(): void {
+  confirming = null;
+  renaming = null;
+  editingUid = null;
+}
 
 function button(label: string, className: string, glyph?: IconNode): HTMLButtonElement {
   const b = el('button', className);
@@ -223,8 +230,11 @@ function renderRow(profile: Profile): HTMLElement {
   });
 
   const main = el('div', 'profile-main');
+  const editing = renaming === profile.uid || editingUid === profile.uid;
   if (renaming === profile.uid) {
     main.append(renameForm(profile));
+  } else if (editingUid === profile.uid) {
+    main.append(uidForm(profile));
   } else {
     main.append(el('span', 'profile-name', profile.nickname));
     if (isPlaying) main.append(el('span', 'profile-playing', 'Playing'));
@@ -234,18 +244,16 @@ function renderRow(profile: Profile): HTMLElement {
   if (confirming === profile.uid) {
     row.classList.add('is-confirming');
     main.replaceChildren(el('span', 'profile-confirm', `Delete ${profile.nickname} and their saves?`));
-    const yes = el('button', 'btn small danger-solid', 'Delete');
-    yes.type = 'button';
+    const yes = button('Delete', 'btn small danger-solid');
     yes.addEventListener('click', () => void removeProfile(profile));
-    const no = el('button', 'btn small ghost', 'Keep');
-    no.type = 'button';
+    const no = button('Keep', 'btn small ghost');
     no.addEventListener('click', () => {
       confirming = null;
       renderProfiles();
     });
     actions.append(yes, no);
     queueMicrotask(() => no.focus());
-  } else if (renaming !== profile.uid) {
+  } else if (!editing) {
     if (!isPlaying) {
       const play = button('Play as', 'btn small', UserCheck);
       play.addEventListener('click', () => void choose(profile));
@@ -253,11 +261,21 @@ function renderRow(profile: Profile): HTMLElement {
     }
     const rename = button('Rename', 'btn small ghost', Pencil);
     rename.addEventListener('click', () => {
+      closeForms();
       renaming = profile.uid;
-      confirming = null;
       renderProfiles();
     });
     actions.append(rename);
+    // The running title committed the user list, and its saves sit in the core under these UIDs.
+    const editUid = button('Edit UID', 'btn small ghost', Fingerprint);
+    editUid.disabled = titleBooted();
+    if (editUid.disabled) editUid.title = 'Stop the title to change a UID';
+    editUid.addEventListener('click', () => {
+      closeForms();
+      editingUid = profile.uid;
+      renderProfiles();
+    });
+    actions.append(editUid);
     if (profile.picture) {
       const clear = button('Remove picture', 'btn small ghost', ImageOff);
       clear.addEventListener('click', () => void clearPicture(profile));
@@ -270,14 +288,19 @@ function renderRow(profile: Profile): HTMLElement {
       del.disabled = locked;
       if (locked) del.title = 'Stop the title to delete the profile the running title is playing as';
       del.addEventListener('click', () => {
+        closeForms();
         confirming = profile.uid;
-        renaming = null;
         renderProfiles();
       });
       actions.append(del);
     }
   }
   row.append(picture, main, actions);
+  if (!editing && confirming !== profile.uid) {
+    const uid = el('span', 'profile-uid', profile.uid);
+    uid.title = 'UID';
+    row.append(uid);
+  }
   return row;
 }
 
@@ -290,8 +313,7 @@ function renameForm(profile: Profile): HTMLFormElement {
   input.setAttribute('aria-label', `New name for ${profile.nickname}`);
   const save = el('button', 'btn small', 'Save');
   save.type = 'submit';
-  const cancel = el('button', 'btn small ghost', 'Cancel');
-  cancel.type = 'button';
+  const cancel = button('Cancel', 'btn small ghost');
   cancel.addEventListener('click', () => {
     renaming = null;
     renderProfiles();
@@ -309,6 +331,59 @@ function renameForm(profile: Profile): HTMLFormElement {
     }
   });
   form.append(input, save, cancel);
+  queueMicrotask(() => {
+    input.focus();
+    input.select();
+  });
+  return form;
+}
+
+function uidForm(profile: Profile): HTMLFormElement {
+  const form = el('form', 'profile-rename profile-uid-form');
+  const input = el('input', 'text mono');
+  input.value = profile.uid;
+  input.maxLength = 32;
+  input.required = true;
+  input.spellcheck = false;
+  input.autocomplete = 'off';
+  input.setAttribute('aria-label', `UID for ${profile.nickname}`);
+  const error = el('span', 'profile-error');
+  error.id = `uid-error-${profile.uid}`;
+  error.setAttribute('role', 'alert');
+  error.hidden = true;
+  input.setAttribute('aria-describedby', error.id);
+  const save = el('button', 'btn small', 'Save');
+  save.type = 'submit';
+  const cancel = button('Cancel', 'btn small ghost');
+  const close = () => {
+    editingUid = null;
+    renderProfiles();
+  };
+  cancel.addEventListener('click', close);
+  input.addEventListener('input', () => {
+    error.hidden = true;
+    input.removeAttribute('aria-invalid');
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    save.disabled = true;
+    void changeUid(profile, input.value).then((why) => {
+      save.disabled = false;
+      if (!why) return;
+      error.textContent = why;
+      error.hidden = false;
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+    });
+  });
+  form.append(input, save, cancel, error);
   queueMicrotask(() => {
     input.focus();
     input.select();
@@ -347,6 +422,47 @@ async function rename(profile: Profile, name: string): Promise<void> {
   profile.nickname = [...nickname].slice(0, NICKNAME_MAX).join('');
   renaming = null;
   await update(profile);
+}
+
+// Moves the profile's saves along with it; resolves to why the UID was refused, or null.
+async function changeUid(profile: Profile, text: string): Promise<string | null> {
+  const uid = text.trim().toLowerCase();
+  if (uid === profile.uid) {
+    editingUid = null;
+    renderProfiles();
+    return null;
+  }
+  if (!/^[0-9a-f]{32}$/.test(uid)) return 'A UID is 32 hex digits, 0-9 and a-f.';
+  if (/^0+$/.test(uid)) return 'A UID can\'t be all zeros: titles read that as no user.';
+  const owner = profiles.find((p) => p.uid === uid);
+  if (owner) return `${owner.nickname} already has this UID.`;
+  if (titleBooted()) return 'Stop the title to change a UID.';
+
+  let moved: number;
+  try {
+    moved = await call('savesMoveUser', profile.uid, uid);
+  } catch (err) {
+    return 'The saves could not be moved: ' + (err as Error).message;
+  }
+  const old = profile.uid;
+  const picture = pictureUrls.get(old);
+  if (picture) {
+    pictureUrls.delete(old);
+    pictureUrls.set(uid, picture);
+  }
+  profile.uid = uid;
+  profile.editedAt = now();
+  if (current === old) current = uid;
+  editingUid = null;
+  try {
+    await call('usersStore', [[old, null], [uid, profile], [CURRENT_KEY, current]]);
+  } catch (err) {
+    log('Profiles: the new UID could not be saved (' + (err as Error).message + ')', 'error');
+  }
+  log(`Profiles: ${profile.nickname} now has UID ${uid}` + (moved ? `, with ${moved} saved entries` : '') + '.');
+  renderProfiles();
+  await stageIfIdle();
+  return null;
 }
 
 async function setPicture(profile: Profile, file: File): Promise<void> {
@@ -405,8 +521,7 @@ addForm.addEventListener('submit', (e) => {
 });
 
 buttonEl.addEventListener('click', () => {
-  confirming = null;
-  renaming = null;
+  closeForms();
   renderProfiles();
   dialogEl.showModal();
 });
@@ -415,7 +530,4 @@ $('btn-profiles-close').addEventListener('click', () => dialogEl.close());
 dialogEl.addEventListener('click', (e) => {
   if (e.target === dialogEl) dialogEl.close();
 });
-dialogEl.addEventListener('close', () => {
-  confirming = null;
-  renaming = null;
-});
+dialogEl.addEventListener('close', closeForms);
