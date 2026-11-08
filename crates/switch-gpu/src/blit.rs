@@ -51,6 +51,31 @@ impl Gpu {
         self.touches_nothing_held(&[surface_span(&blit.src), surface_span(&blit.dst)])
     }
 
+    /// Whether a surface held at another address shares memory with the blit's surfaces, which
+    /// only guest memory tells apart.
+    pub(super) fn blit_aliases_held(&self, blit: &Blit) -> bool {
+        [&blit.src, &blit.dst].into_iter().any(|surface| {
+            let range = surface.addr..surface.addr + u64::from(surface.size());
+            self.space.held.values().any(|held| {
+                held.target.addr != surface.addr && overlap(&span(&held.target), &range)
+            })
+        })
+    }
+
+    /// Whether a surface rebound or on its way back to guest memory shares memory with `range`,
+    /// so guest memory is not yet what the device would be given.
+    fn in_flight_overlaps(&self, range: &Range<u64>) -> bool {
+        self.space
+            .evicted
+            .iter()
+            .any(|held| overlap(&span(&held.target), range))
+            || self
+                .space
+                .pending
+                .iter()
+                .any(|pending| pending.target().is_some_and(|t| overlap(&span(t), range)))
+    }
+
     /// Whether nothing held, rebound or on its way back shares memory with `ranges`.
     pub(super) fn touches_nothing_held(&self, ranges: &[Range<u64>]) -> bool {
         let clear = |target: &Target| {
@@ -93,6 +118,7 @@ impl Gpu {
         match self.space.held.get(&source.addr) {
             Some(held) if held.target != source => return None,
             Some(_) => {}
+            None if self.in_flight_overlaps(&span(&source)) => return None,
             None => self.hold(&source, ctx).ok()?,
         }
         let format = device_attachment_format(self.features(), target.format).ok()?;
@@ -102,6 +128,11 @@ impl Gpu {
             self.hold_blank(&target).ok()?;
             self.discard_companion(target.addr);
         } else {
+            if !self.space.held.contains_key(&target.addr)
+                && self.in_flight_overlaps(&span(&target))
+            {
+                return None;
+            }
             self.hold(&target, ctx).ok()?;
             self.resolve_companion(target.addr).ok()?;
         }

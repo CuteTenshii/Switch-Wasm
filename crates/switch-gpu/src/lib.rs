@@ -855,7 +855,7 @@ impl Renderer for Gpu {
         if in_guest_memory && !blit::worth_uploading(blit) {
             return Ok(BlitRoute::GuestMemory);
         }
-        let route = if self.space.sync_all && !in_guest_memory {
+        let route = if self.space.sync_all && !in_guest_memory && self.blit_aliases_held(blit) {
             BlitRoute::Flush
         } else {
             self.blit_on_device(blit, ctx)
