@@ -25,12 +25,6 @@
     transition-duration: .01ms !important;
   }
   body.panel-open .panel { animation: none; }
-  /* Reduced motion: a dim full-width rule instead of a sweep. */
-  .loading-bar span {
-    animation: none;
-    width: 100%;
-    opacity: .55;
-  }
   .section-head::before { transition: none; }
   .console div { animation: none; }
 }

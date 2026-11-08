@@ -6,20 +6,13 @@ import { hideCrash } from './crash';
 const rootEl = $('loading');
 const iconEl = $<HTMLImageElement>('loading-icon');
 const titleEl = $('loading-title');
-const fillEl = $('loading-fill');
 const phaseEl = $('loading-phase');
 const detailEl = $('loading-detail');
 const dismissEl = $('loading-dismiss');
 
-function setBar(fraction: number | null): void {
-  rootEl.classList.toggle('is-determinate', fraction !== null);
-  fillEl.style.width = fraction === null ? '' : (fraction * 100).toFixed(1) + '%';
-}
-
 export function beginLoad(title: string, phase: string, iconUrl?: string | null): void {
   hideCrash();
   rootEl.classList.remove('hidden', 'is-error');
-  setBar(null);
   phaseEl.textContent = phase;
   detailEl.textContent = '';
   dismissEl.hidden = true;
@@ -35,13 +28,8 @@ export function loadIdentity(title: string, iconUrl: string | null): void {
 }
 
 export function loadPhase(phase: string, detail?: string): void {
-  setBar(null);
   phaseEl.textContent = phase;
   detailEl.textContent = detail || '';
-}
-
-export function loadProgress(done: number, total: number): void {
-  setBar(total > 0 ? Math.min(1, done / total) : null);
 }
 
 // The guest is running but has not presented a frame; offers a way out.
@@ -59,7 +47,6 @@ export function endLoad(): void {
 export function failLoad(message: string, title?: string): void {
   rootEl.classList.remove('hidden');
   rootEl.classList.add('is-error');
-  setBar(1);
   if (title) loadIdentity(title, null);
   phaseEl.textContent = message;
   detailEl.textContent = '';
