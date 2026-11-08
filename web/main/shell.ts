@@ -1,6 +1,10 @@
 // The application shell: stage and side panel.
 
-import { Ellipsis, Maximize, PanelRight, X } from 'lucide';
+import {
+  Bug, Cpu, Download, Ellipsis, Eraser, FileText, Folder, FolderOpen, FolderSearch, FolderUp, HardDrive, History,
+  KeyRound, Maximize, Network, PackagePlus, PanelRight, Square, SquareTerminal, StepForward, Trash2, UserPlus, X,
+  type IconNode,
+} from 'lucide';
 import { $ } from './dom';
 import { icon } from './icons';
 import { call } from './rpc';
@@ -148,11 +152,22 @@ gripEl.addEventListener('keydown', (e) => {
   e.stopPropagation();
 });
 
-for (const [id, glyph] of [
-  ['btn-fullscreen', Maximize], ['btn-panel', PanelRight], ['btn-more', Ellipsis], ['btn-panel-close', X],
-  ['btn-profiles-close', X], ['btn-files-close', X],
-] as const) {
-  $(id).prepend(icon(glyph));
+const staticIcons: [string, IconNode][] = [
+  ['#btn-fullscreen', Maximize], ['#btn-panel', PanelRight], ['#btn-more', Ellipsis], ['#btn-panel-close', X],
+  ['#btn-profiles-close', X], ['#btn-files-close', X],
+  ['#btn-step', StepForward], ['#btn-stop', Square], ['#btn-open', FolderOpen],
+  ['#crash-save', Download], ['#crash-console', SquareTerminal], ['#crash-stop', Square],
+  ['.tab[data-tab="console"]', SquareTerminal], ['.tab[data-tab="debug"]', Bug],
+  ['.tab[data-tab="files"]', Folder], ['.tab[data-tab="nand"]', HardDrive], ['.tab[data-tab="network"]', Network],
+  ['#btn-save-console', Download], ['#btn-save-previous', History], ['#btn-clear-console', Eraser],
+  ['#btn-dumptrace', FileText], ['#btn-dumpregs', Cpu],
+  ['#btn-files', FolderSearch], ['label[for="prod-keys"]', KeyRound], ['label[for="title-keys"]', KeyRound],
+  ['#btn-clear-keys', Eraser], ['.tabpanel label[for="firmware-dir"]', FolderUp],
+  ['.tabpanel label[for="firmware-zip"]', PackagePlus], ['#btn-erase-nand', Trash2],
+  ['#profile-add-submit', UserPlus],
+];
+for (const [selector, glyph] of staticIcons) {
+  for (const target of document.querySelectorAll(selector)) target.prepend(icon(glyph));
 }
 
 // Below the breakpoint, the bar's secondary controls live in the More menu.

@@ -2,9 +2,11 @@
 // (`crates/switch-relay`, run on this computer; see docs/relay.md), and the guest's
 // connections. Off, the guest sees a network that never answers.
 
+import { Power, PowerOff } from 'lucide';
 import type { NetState } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { $ } from './dom';
+import { icon } from './icons';
 import { log } from './log';
 import { call, onNetState, whenReady } from './rpc';
 
@@ -52,7 +54,7 @@ function say(text: string): void {
 function render(): void {
   badge.textContent = BADGES[state];
   badge.classList.toggle('on', state === 'open');
-  button.textContent = on() ? 'Turn off' : 'Turn on';
+  button.replaceChildren(icon(on() ? PowerOff : Power), on() ? 'Turn off' : 'Turn on');
   button.setAttribute('aria-pressed', String(on()));
   urlInput.disabled = on();
 }

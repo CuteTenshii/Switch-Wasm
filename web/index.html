@@ -62,8 +62,8 @@
       <button id="btn-run" class="btn primary" title="Run / Pause">
         <span class="glyph" id="run-glyph"></span><span id="run-label">Run</span>
       </button>
-      <button id="btn-step" class="btn" title="Execute one instruction">Step</button>
-      <button id="btn-stop" class="btn" title="Stop the title and close the console">Stop</button>
+      <button id="btn-step" class="btn" title="Execute one instruction"><span>Step</span></button>
+      <button id="btn-stop" class="btn" title="Stop the title and close the console"><span>Stop</span></button>
     </div>
 
     <div class="spacer"></div>
@@ -73,7 +73,7 @@
               title="Choose the profile">Player</button>
       <button id="btn-dock" class="btn" title="Dock or undock the console (Handheld: 720p and a touchscreen; Docked: 1080p and boost clocks)"
               aria-pressed="false">Handheld</button>
-      <label class="btn" for="nro-file" title="Open an .nro, .elf, .nsp, .nsz, .xci or .nca">Open</label>
+      <label class="btn" id="btn-open" for="nro-file" title="Open an .nro, .elf, .nsp, .nsz, .xci or .nca">Open</label>
       <input type="file" id="nro-file" accept=".nro,.elf,.bin,.nsp,.nsz,.xci,.nca" hidden>
       <button id="btn-fullscreen" class="btn icon" title="Fullscreen" aria-label="Fullscreen">
         <span class="menu-label">Fullscreen</span>
@@ -279,7 +279,7 @@
         <option value="trace">Trace</option>
       </select>
       <span class="spacer"></span>
-      <button id="btn-save-console" class="btn small ghost" title="Save the whole log as a file - including the lines the view has scrolled past">Save</button>
+      <button id="btn-save-console" class="btn small ghost" title="Save the whole log as a file - including the lines the view has scrolled past"><span id="save-console-label">Save</span></button>
       <button id="btn-save-previous" class="btn small ghost" title="Save what the previous session had said before it ended" hidden>Save previous</button>
       <button id="btn-clear-console" class="btn small ghost">Clear</button>
     </div>

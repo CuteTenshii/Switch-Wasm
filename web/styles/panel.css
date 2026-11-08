@@ -105,16 +105,20 @@ body.resizing {
 
 .tab {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   flex: none;
   background: none;
   border: none;
   color: var(--muted);
   font: inherit;
   font-size: var(--text-sm);
-  padding: 0 12px;
+  padding: 0 10px;
   cursor: pointer;
   transition: color .12s;
 }
+.tab svg { flex: none; }
 .tab::after {
   content: "";
   position: absolute;

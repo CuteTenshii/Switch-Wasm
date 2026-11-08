@@ -1,7 +1,9 @@
 // Handheld/docked toggle (Horizon's `AppletOperationMode`), changeable while a
 // title runs: the core queues the AM messages a real dock sends.
 
-import { $ } from './dom';
+import { Gamepad2, Tv } from 'lucide';
+import { $, el } from './dom';
+import { icon } from './icons';
 import { log } from './log';
 import { call, whenReady } from './rpc';
 
@@ -11,7 +13,7 @@ const button = $<HTMLButtonElement>('btn-dock');
 let docked = localStorage.getItem(DOCKED_KEY) === '1';
 
 function render(): void {
-  button.textContent = docked ? 'Docked' : 'Handheld';
+  button.replaceChildren(icon(docked ? Tv : Gamepad2), el('span', null, docked ? 'Docked' : 'Handheld'));
   button.setAttribute('aria-pressed', docked ? 'true' : 'false');
 }
 

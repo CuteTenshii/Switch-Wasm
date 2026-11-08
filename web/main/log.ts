@@ -153,14 +153,14 @@ function asLine(entry: Entry): string {
   return entry.count > 1 ? `${line}  (x${entry.count})` : line;
 }
 
-const saveBtn = $('btn-save-console');
+const saveLabel = $('save-console-label');
 
 let saveLabelTimer = 0;
 function flashSaveLabel(text: string): void {
   clearTimeout(saveLabelTimer);
-  saveBtn.textContent = text;
+  saveLabel.textContent = text;
   saveLabelTimer = setTimeout(() => {
-    saveBtn.textContent = 'Save';
+    saveLabel.textContent = 'Save';
   }, 1400);
 }
 
@@ -301,4 +301,4 @@ export function saveLog(): void {
   download(`switch-wasm-log-${stamp()}.txt`, logHeader() + '\n\n' + text);
 }
 
-saveBtn.addEventListener('click', saveLog);
+$('btn-save-console').addEventListener('click', saveLog);

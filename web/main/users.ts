@@ -1,7 +1,9 @@
 // User profiles and the picker the top bar opens.
 
+import { ImageOff, Pencil, Trash2, UserCheck, type IconNode } from 'lucide';
 import type { Bytes, UserRecord } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
+import { icon } from './icons';
 import { log } from './log';
 import { call, hasSession } from './rpc';
 import { titleBooted } from './session';
@@ -151,6 +153,14 @@ const runningNote = $('profile-running-note');
 let confirming: string | null = null;
 let renaming: string | null = null;
 
+function button(label: string, className: string, glyph?: IconNode): HTMLButtonElement {
+  const b = el('button', className);
+  b.type = 'button';
+  if (glyph) b.append(icon(glyph));
+  b.append(label);
+  return b;
+}
+
 function avatar(profile: Profile, className: string): HTMLElement {
   if (profile.picture) {
     let entry = pictureUrls.get(profile.uid);
@@ -237,13 +247,11 @@ function renderRow(profile: Profile): HTMLElement {
     queueMicrotask(() => no.focus());
   } else if (renaming !== profile.uid) {
     if (!isPlaying) {
-      const play = el('button', 'btn small', 'Play as');
-      play.type = 'button';
+      const play = button('Play as', 'btn small', UserCheck);
       play.addEventListener('click', () => void choose(profile));
       actions.append(play);
     }
-    const rename = el('button', 'btn small ghost', 'Rename');
-    rename.type = 'button';
+    const rename = button('Rename', 'btn small ghost', Pencil);
     rename.addEventListener('click', () => {
       renaming = profile.uid;
       confirming = null;
@@ -251,16 +259,14 @@ function renderRow(profile: Profile): HTMLElement {
     });
     actions.append(rename);
     if (profile.picture) {
-      const clear = el('button', 'btn small ghost', 'Remove picture');
-      clear.type = 'button';
+      const clear = button('Remove picture', 'btn small ghost', ImageOff);
       clear.addEventListener('click', () => void clearPicture(profile));
       actions.append(clear);
     }
     // The last profile and the one a running title uses can't be deleted.
     const locked = isPlaying && titleBooted();
     if (profiles.length > 1) {
-      const del = el('button', 'btn small ghost danger', 'Delete');
-      del.type = 'button';
+      const del = button('Delete', 'btn small ghost danger', Trash2);
       del.disabled = locked;
       if (locked) del.title = 'Stop the title to delete the profile the running title is playing as';
       del.addEventListener('click', () => {
