@@ -2,15 +2,6 @@
 
 Build profiles, hooks, benchmarks and diagnostic examples.
 
-## `tools/wasm_bench.mjs`
-
-- Host timings are not a scaled version of browser timings: removing a libcall only wasm pays for was about 1.15x natively and 1.44x in the browser. Use host examples (`frame_work`) for work counts, and this tool for milliseconds.
-- The bench mirrors `web/worker/hostfiles.ts`'s per-file LRU (same 1 MiB chunks, depth, and large-read bypass) so the wasm side sees the shipped access pattern, even though node's `readSync` is cheaper than `FileReaderSync`.
-- Frames are timed by sampling the frame counter between slices of a single run, because boot time varies by seconds between runs. One extra frame is timed and dropped because it absorbs the warmup's tail.
-- It loads `target/wasm32-unknown-unknown/release` unless `--build=<dir>` names another wasm-bindgen output: comparing two builds means copying each out and naming it, or both runs measure the same one.
-- `--cores=N` serves N more guest cores on `worker_threads` over the shared memory, as `web/worker/coreworkers.ts` does in the page.
-- Native examples take `--cores <n>` for the same, and `--no-draw` to swap in a renderer that draws nothing, so a run times the CPU as it is with a GPU doing the drawing.
-
 ## `Cargo.toml`
 
 - `[profile.test]` uses opt-level 0 because optimizing the large test targets made CI spend far longer compiling than running them; `switch-core` tests keep opt-level 1 because they execute guest code.
@@ -75,7 +66,9 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 ## `crates/switch-core/examples/frame_work.rs`
 
-- Work counts (instructions, blocks, interpreter fallbacks, draws, pixels) are identical under native and V8; use them to decide what to fix and prove a fix landed, and `tools/wasm_bench.mjs` for what it was worth. A change that moves no count but looks faster on the host only made the host faster.
+- Work counts (instructions, blocks, interpreter fallbacks, draws, pixels) are identical under native and V8; use them to decide what to fix and prove a fix landed, and a headed `tools/browser_boot.mjs` or `tools/profile_ingame.mjs` run for what it was worth. A change that moves no count but looks faster on the host only made the host faster.
+- Host timings are not a scaled version of browser timings: removing a libcall only wasm pays for was about 1.15x natively and 1.44x in the browser.
+- Native examples take `--cores <n>` to serve more guest cores, and `--no-draw` to swap in a renderer that draws nothing, so a run times the CPU as it is with a GPU doing the drawing.
 - Startup frames (loader, allocator, first upload) are skipped so they don't skew the steady-state mean.
 
 ## `tools/make_font.py`

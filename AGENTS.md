@@ -135,8 +135,9 @@ actual browser run, not just host tests.
   an assembler rather than hand-deriving expected values. The interpreter is
   the JIT correctness reference.
 - Do not optimize from host timing alone. Browser performance claims require the
-  produced WebAssembly artifact and `tools/wasm_bench.mjs`; native examples are
-  for diagnosis and work counts.
+  produced WebAssembly artifact running in a headed browser
+  (`tools/browser_boot.mjs`, `tools/profile_ingame.mjs`); native examples are for
+  diagnosis and work counts.
 - Keep generated output, game images, keys, firmware, and other copyrighted or
   secret material out of the repository.
 - Do not edit unrelated user changes. `dist` and Cargo target output are build
