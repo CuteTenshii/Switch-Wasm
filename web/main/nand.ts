@@ -126,7 +126,7 @@ function nandRow(id: string, entry: NandEntry): HTMLButtonElement {
 
 function launchInstalled(id: string, entry: NandEntry): Promise<void> {
   const name = titleLabel(id);
-  beginLoad(name, 'reading ' + entry.name + ' from the NAND');
+  beginLoad(name, 'Reading ' + entry.name + ' from the NAND');
   return doLaunchNca(name, () => call('nandLaunch', entry.name));
 }
 

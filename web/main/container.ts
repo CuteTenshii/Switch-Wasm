@@ -232,7 +232,7 @@ function pairedNotes(): string[] {
 // Boot from the stage: open the container and launch its Program NCA.
 export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'): Promise<void> {
   setState('loading');
-  beginLoad(file.name, 'opening the container (' + fmtSize(file.size) + ')');
+  beginLoad(file.name, 'Opening the container (' + fmtSize(file.size) + ')');
   if (format === 'nca') {
     const info = await handleStandaloneNca(file);
     if (!info) {
@@ -285,7 +285,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     openPanel('files');
     return;
   }
-  loadPhase('looking for the title\'s program');
+  loadPhase('Looking for the title\'s program');
   let index: number;
   try {
     index = await call('programNcaIndex');
@@ -590,7 +590,7 @@ export async function doLaunchNca(
   if (note) log(note, 'info');
   setState('loading');
   setRunning(null);
-  beginLoad(identity?.name || name, 'decrypting the program and reading its ExeFS',
+  beginLoad(identity?.name || name, 'Decrypting the program and reading its ExeFS',
     identity?.iconUrl);
   try {
     await endTitle();
@@ -620,7 +620,7 @@ export async function doLaunchNca(
   });
   noteBooted();
   setState('loaded');
-  loadPhase('starting the process');
+  loadPhase('Starting the process');
   showScreen();
   awaitFirstFrame();
   await updateReadouts();

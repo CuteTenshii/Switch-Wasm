@@ -17,9 +17,9 @@ import type { RunningTitle } from './title';
 
 export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
   setState('loading');
-  beginLoad(file.name, 'reading ' + fmtSize(file.size));
-  loadPhase(kind === 'nro' ? 'loading the NRO' : 'loading the ELF',
-    'reading, mapping the image and seeding the guest');
+  beginLoad(file.name, 'Reading ' + fmtSize(file.size));
+  loadPhase(kind === 'nro' ? 'Loading the NRO' : 'Loading the ELF',
+    'Reading, mapping the image and seeding the guest');
   return loadWith(file.name, () => call('loadProgram', file));
 }
 
@@ -28,7 +28,7 @@ export async function launchFromSd(path: string): Promise<void> {
   const name = path.slice(path.lastIndexOf('/') + 1);
   if (!(await replaceTitle(name))) return;
   setState('loading');
-  loadPhase('loading the NRO', 'mapping the image and seeding the guest');
+  loadPhase('Loading the NRO', 'Mapping the image and seeding the guest');
   if (await loadWith(name, () => call('loadSd', path))) await run();
 }
 
@@ -94,7 +94,7 @@ async function bootFile(file: File): Promise<void> {
 // End whatever runs before booting `name`.
 async function replaceTitle(name: string): Promise<boolean> {
   try {
-    beginLoad(name, 'ending the running title');
+    beginLoad(name, 'Ending the running title');
     setRunning(null);
     await endTitle();
     return true;

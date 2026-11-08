@@ -34,7 +34,7 @@ export function loadPhase(phase: string, detail?: string): void {
 
 // The guest is running but has not presented a frame; offers a way out.
 export function awaitFirstFrame(): void {
-  loadPhase('booting', 'waiting for the first frame');
+  loadPhase('Booting', 'Waiting for the first frame');
   dismissEl.hidden = false;
 }
 

@@ -43,7 +43,7 @@ async function init(): Promise<void> {
     await whenStarted();
     // The worker paints the screen from here on.
     attachScreen(screenEl.transferControlToOffscreen());
-    loadPhase('restoring the SD card, saves, profiles and keys');
+    loadPhase('Restoring the SD card, saves, profiles and keys');
     // Independent of each other; the worker built the session when it loaded the core.
     await Promise.all([
       sdRequestPersistence(),
@@ -55,7 +55,7 @@ async function init(): Promise<void> {
     ]);
     updateKeysState();
     // The NAND needs the keys. Only its index is awaited; archives register later.
-    loadPhase('reading the NAND');
+    loadPhase('Reading the NAND');
     await initNand();
     await updateRam();
   } catch (err) {
