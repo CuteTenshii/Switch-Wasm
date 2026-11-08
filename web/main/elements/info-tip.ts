@@ -42,6 +42,8 @@ class InfoTip extends HTMLElement {
     this.button.addEventListener('pointerleave', hide);
     this.button.addEventListener('focus', show);
     this.button.addEventListener('blur', hide);
+    // Inside a <summary>, a click would otherwise toggle the section.
+    this.button.addEventListener('click', (e) => e.preventDefault());
     this.button.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') hide();
     });

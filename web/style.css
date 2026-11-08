@@ -862,8 +862,6 @@ body.resizing {
   cursor: pointer;
   user-select: none;
   font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: .7px;
   color: var(--muted);
   list-style: none;
 }
@@ -886,6 +884,7 @@ body.resizing {
 .section-title {
   font-weight: 600;
   color: var(--text);
+  text-transform: uppercase;
   letter-spacing: .7px;
 }
 .section-note {
@@ -895,8 +894,6 @@ body.resizing {
   white-space: nowrap;
   text-overflow: ellipsis;
   font-size: var(--text-xs);
-  text-transform: none;
-  letter-spacing: 0;
   color: var(--muted);
 }
 .section-note.on { color: var(--green); }
