@@ -173,10 +173,17 @@ pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
     }
 
     crate::log::collect(cpu);
+    let title = program.program_id;
     let loaded = cpu.boot_program(&program).map_err(|e| e.to_string())?;
+    let entry = u64::from(loaded[0].entry);
     // After the modules, so its lines follow the boot's.
     mount_add_on_content(cpu, keys, added.dlc);
-    Ok(u64::from(loaded[0].entry))
+    cpu.log(
+        Level::Info,
+        &format!("Launched {title:016x}, entry {entry:#010x}"),
+    );
+    crate::log::collect(cpu);
+    Ok(entry)
 }
 
 /// Mount the added DLC whose ids belong to this title; report and skip the rest.

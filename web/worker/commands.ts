@@ -3,10 +3,9 @@
 import type {
   CommandHandlers, DlcEntry, GpuReport, JitStats, MemoryReport, NandIdentity, NspFile, UpdateInfo,
 } from '../shared/protocol';
-import { fmtSize } from '../shared/format';
 import { noteRegistered } from './activity';
 import { addHostFile, openHostFile } from './hostfiles';
-import { flushLog, workerLog } from './log';
+import { flushLog } from './log';
 import {
   switch_add_dlc, switch_add_update, switch_clear_dlc, switch_clear_screen, switch_clear_update,
   switch_control_icon, switch_control_json, switch_end_title, switch_flush_storage, switch_get_reg,
@@ -25,11 +24,6 @@ import {
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { nandContent, STORAGE } from './storage';
 import { core, parseOr } from './wasm';
-
-function describe(file: Blob): string {
-  const name = file instanceof File ? `"${file.name}" ` : '';
-  return name + '(' + fmtSize(file.size) + ')';
-}
 
 export const CMD = {
   endTitle() {
@@ -59,29 +53,20 @@ export const CMD = {
     return JSON.parse(switch_open_nsp(openHostFile(file))) as NspFile[];
   },
   openNca(file) {
-    const result = switch_open_nca(openHostFile(file));
-    workerLog(`[io] opened ${describe(file)} as a standalone NCA`);
-    return result;
+    return switch_open_nca(openHostFile(file), file.name);
   },
   // Register the stored firmware with the session; how many system data archives it took.
   restoreNand: switch_restore_nand,
   // The base title the update patches and its version, or null if it is not an update.
   addUpdate(file) {
     const index = addHostFile(file);
-    const found = switch_add_update(index, BigInt(file.size));
-    if (!found) return null;
-    const update = JSON.parse(found) as UpdateInfo;
-    workerLog(`[io] opened ${describe(file)} as an update for ${update.title}`);
-    return update;
+    const found = switch_add_update(index, BigInt(file.size), file.name);
+    return found ? JSON.parse(found) as UpdateInfo : null;
   },
   // The pieces the add-on content container holds.
   addDlc(file) {
     const index = addHostFile(file);
-    const pieces = JSON.parse(switch_add_dlc(index, BigInt(file.size))) as DlcEntry[];
-    if (pieces.length > 0) {
-      workerLog(`[io] opened ${describe(file)} as add-on content, ${pieces.length} pieces`);
-    }
-    return pieces;
+    return JSON.parse(switch_add_dlc(index, BigInt(file.size), file.name)) as DlcEntry[];
   },
   clearDlc: switch_clear_dlc,
   clearUpdate: switch_clear_update,
@@ -97,9 +82,7 @@ export const CMD = {
   async nandLaunch(name) {
     const content = await nandContent(name);
     if (!content) throw new Error(name + ' is indexed but its content is missing.');
-    const entry = switch_nand_launch(content);
-    workerLog(`[io] launched ${name} from the NAND`);
-    return entry;
+    return switch_nand_launch(content);
   },
   loadNcaFromNsp: switch_load_nca_from_nsp,
   loadNca: switch_load_nca,

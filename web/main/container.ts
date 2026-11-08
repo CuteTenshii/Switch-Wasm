@@ -139,10 +139,10 @@ function handleDlcFile(file: File, packs: DlcEntry[]): void {
   heldDlc = heldDlc.filter((held) => held.file.name !== file.name);
   heldDlc.push({ file, titleId, indices: packs.map((e) => e.index) });
   rememberDlc(titleId, file.name);
-  log(describeDlc(packs.length) + ' for ' + titleId + ' - '
-    + (titleId === openTitleId
-      ? 'mounted when this title launches.'
-      : 'open that game to launch it with them.'), 'info');
+  // The core has logged what the file holds; this is what happens to it.
+  log(titleId === openTitleId
+    ? 'The add-on content is mounted when this title launches.'
+    : 'Open that game to launch it with the add-on content.', 'info');
   showPairedNotes();
 }
 
@@ -153,10 +153,10 @@ function describeDlc(packs: number): string {
 async function handleUpdateFile(file: File, { title: titleId, version }: UpdateInfo): Promise<void> {
   heldUpdate = { file, titleId, version };
   rememberUpdate(heldUpdate);
-  log('Update ' + describeUpdate(heldUpdate) + ' for ' + titleId + ' - '
-    + (titleId === openTitleId
-      ? 'applied when this title launches.'
-      : 'open that game to launch it patched.'), 'info');
+  // The core has logged what the file holds; this is what happens to it.
+  log(titleId === openTitleId
+    ? 'The update is applied when this title launches.'
+    : 'Open that game to launch it patched.', 'info');
   await syncPaired();
 }
 
@@ -601,9 +601,8 @@ export async function doLaunchNca(
     log('The running title could not be ended: ' + why, 'error');
     return;
   }
-  let entry: number;
   try {
-    entry = await loadFn();
+    await loadFn();
   } catch (err) {
     const why = (err as Error).message;
     setState('fault');
@@ -611,7 +610,6 @@ export async function doLaunchNca(
     log('Launch failed: ' + why, 'error');
     return;
   }
-  log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'info');
   setRunning({
     name: identity?.name || name,
     publisher: identity?.publisher || '',
