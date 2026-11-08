@@ -1,5 +1,6 @@
 // The core workers beyond the one this worker runs: the console gives a title three.
 
+import { workerErrorText } from '../shared/workererror';
 import type { CoreMessage, CoreStarted } from './core';
 import { workerLog } from './log';
 import { switch_add_core } from '@core/switch_wasm.js';
@@ -26,7 +27,7 @@ export function startCores(module: WebAssembly.Module, memory: WebAssembly.Memor
         workerLog(`[core] ${CORE_WORKERS} core workers started on shared memory`);
       }
     };
-    worker.onerror = (e) => workerLog(`[core] core worker ${i + 1} failed: ${e.message}`, 'error');
+    worker.onerror = (e) => workerLog(`[core] core worker ${i + 1} ${workerErrorText(e)}`, 'error');
     worker.postMessage({ module, memory } satisfies CoreMessage);
   }
 }

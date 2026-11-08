@@ -8,7 +8,7 @@ import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
 import { log, logLevel, offerPreviousLog, onLogLevel } from './log';
 import { initNand } from './nand';
-import { attachScreen, call, initWorker, whenReady } from './rpc';
+import { attachScreen, call, initWorker, whenStarted } from './rpc';
 import { updateReadouts, updateRam } from './runloop';
 import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence } from './sdcard';
@@ -40,7 +40,7 @@ onLogLevel((level) => void call('setTraceChannels', level === 'trace'));
 async function init(): Promise<void> {
   try {
     initWorker();
-    await whenReady();
+    await whenStarted();
     // The worker paints the screen from here on.
     attachScreen(screenEl.transferControlToOffscreen());
     loadPhase('restoring the SD card, saves, profiles and keys');
@@ -59,8 +59,9 @@ async function init(): Promise<void> {
     await initNand();
     await updateRam();
   } catch (err) {
-    failLoad('The core could not be started: ' + (err as Error).message);
-    log('core failed to start: ' + (err as Error).message, 'error');
+    const why = (err as Error).message;
+    failLoad(why, 'The core could not be started');
+    log('The core could not be started: ' + why, 'error');
     return;
   }
   endLoad();

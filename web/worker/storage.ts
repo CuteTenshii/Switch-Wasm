@@ -18,6 +18,7 @@ import {
 import {
   switch_flush_storage, switch_fs_create_dir, switch_fs_remove, switch_fs_write,
 } from '@core/switch_wasm.js';
+import { workerErrorText } from '../shared/workererror';
 import { coreLoaded } from './wasm';
 import type { ZipEntry } from './zip';
 import type { ZipReply } from './zipper';
@@ -33,7 +34,7 @@ function zipOffThread(entries: ZipEntry[]): Promise<Blob> {
     };
     worker.onerror = (e) => {
       worker.terminate();
-      reject(new Error(e.message));
+      reject(new Error('the zip worker ' + workerErrorText(e)));
     };
     worker.postMessage(entries, [...new Set(entries.map((entry) => entry.data.buffer))]);
   });

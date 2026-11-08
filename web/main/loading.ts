@@ -55,11 +55,12 @@ export function endLoad(): void {
   dismissEl.hidden = true;
 }
 
-// The load failed; the screen stays up showing why.
-export function failLoad(message: string): void {
+// The load failed; the screen stays up showing why, retitled when `title` is given.
+export function failLoad(message: string, title?: string): void {
   rootEl.classList.remove('hidden');
   rootEl.classList.add('is-error');
   setBar(1);
+  if (title) loadIdentity(title, null);
   phaseEl.textContent = message;
   detailEl.textContent = '';
   dismissEl.hidden = false;

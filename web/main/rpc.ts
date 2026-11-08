@@ -3,16 +3,24 @@
 import type {
   CallRequest, Commands, ErrorDialog, KeyboardRequest, NetState, SliceReport, WorkerMessage,
 } from '../shared/protocol';
+import { workerErrorText } from '../shared/workererror';
 import { setAudioFormat, setAudioRing } from './audio';
 import { log } from './log';
 import { setMailbox } from './mailbox';
 
 let worker: Worker | null = null;
 let ready = false;
-let readyResolve!: () => void;
-const readyPromise = new Promise<void>((r) => {
-  readyResolve = r;
+let startResolve!: () => void;
+let startReject!: (err: Error) => void;
+const started = new Promise<void>((resolve, reject) => {
+  startResolve = resolve;
+  startReject = reject;
 });
+// Never settles when the start fails, so work queued behind it is dropped.
+const readyPromise = started.catch(() => new Promise<void>(() => undefined));
+
+// Why the worker could not start, once it has failed.
+let startFailure: string | null = null;
 
 // Whether the worker has loaded the core, which builds its session.
 let loaded = false;
@@ -56,6 +64,11 @@ export function whenReady(): Promise<void> {
   return readyPromise;
 }
 
+// Settles once the worker has loaded the core, rejecting with the reason when it could not.
+export function whenStarted(): Promise<void> {
+  return started;
+}
+
 export function hasSession(): boolean {
   return loaded;
 }
@@ -66,7 +79,7 @@ export function call<K extends keyof Commands>(
 ): Promise<ReturnType<Commands[K]>> {
   return new Promise<ReturnType<Commands[K]>>((resolve, reject) => {
     if (!worker) {
-      reject(new Error('the emulator worker has not been started'));
+      reject(new Error(startFailure ?? 'the emulator worker has not been started'));
       return;
     }
     const id = ++msgId;
@@ -127,18 +140,31 @@ export function initWorker(): void {
         nandProgress?.(d.done, d.total);
         break;
       case 'ready':
-        ready = true;
         // A core that failed to load still reports ready, with the error.
-        if (d.error) log('core failed to load: ' + d.error, 'error');
-        else loaded = true;
-        readyResolve();
+        if (d.error) {
+          failStart(`The WebAssembly core did not load (${d.error})`);
+          break;
+        }
+        ready = true;
+        loaded = true;
+        startResolve();
         break;
     }
   };
   worker.onerror = (e) => {
-    readyResolve();
-    log('worker error: ' + e.message, 'error');
+    if (ready) log('The emulator worker ' + workerErrorText(e), 'error');
+    else failStart('The emulator worker ' + workerErrorText(e));
   };
+}
+
+// A worker that never started answers nothing, so its calls fail now rather than hang.
+function failStart(why: string): void {
+  startFailure = why;
+  worker?.terminate();
+  worker = null;
+  for (const p of pending.values()) p.reject(new Error(why));
+  pending.clear();
+  startReject(new Error(why));
 }
 
 // Give the worker the canvas; it paints every frame from then on.
