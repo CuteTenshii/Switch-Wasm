@@ -75,21 +75,17 @@ impl Cpu {
     /// `sendto` (or `send` after a `connect`) to an address outside the console.
     pub(super) fn bsd_send_outside_datagram(
         &mut self,
-        tls: u32,
         fd: i32,
+        data: Vec<u8>,
         ip: [u8; 4],
         port: u16,
-    ) -> Result<()> {
-        let data = match self.ipc_input_buffer(tls, 0) {
-            Some((addr, size)) => self.read_bytes(addr, size),
-            None => Vec::new(),
-        };
+    ) -> (i32, i32) {
         let Some(stream) = self.bsd_peering(fd, ip, port) else {
-            return self.bsd_reply(tls, -1, BSD_ENOBUFS);
+            return (-1, BSD_ENOBUFS);
         };
         let sent = data.len() as i32;
         self.net.outbox.push(NetCommand::Send { stream, data });
-        self.bsd_reply(tls, sent, 0)
+        (sent, 0)
     }
 
     /// The host stream for `ip:port`, opened if this socket has not sent there; `None` when the
@@ -129,41 +125,21 @@ impl Cpu {
         Some(id)
     }
 
-    /// `recv`/`recvfrom` on a datagram socket with one queued: one datagram, cut to the
-    /// caller's buffer, and where it came from; `peek` leaves it queued. `None` when there is
-    /// nothing to hand over.
+    /// `recv`/`recvfrom` on a datagram socket with one queued: one datagram, cut to `room`, and
+    /// where it came from; `peek` leaves it queued. `None` when there is nothing to hand over.
     pub(super) fn bsd_receive_datagram(
         &mut self,
-        tls: u32,
         fd: i32,
+        room: usize,
         peek: bool,
-    ) -> Result<Option<Recv>> {
-        let has = self
-            .process()
-            .bsd_sockets
-            .get(&fd)
-            .is_some_and(|socket| !socket.datagram.received.is_empty());
-        if !has {
-            return Ok(None);
-        }
-        let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
-            return Ok(Some((-1, BSD_EINVAL, None)));
-        };
-        let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) else {
-            return Ok(None);
-        };
+    ) -> Option<Receipt> {
+        let socket = self.process_mut().bsd_sockets.get_mut(&fd)?;
         let queue = &mut socket.datagram.received;
-        let Some(received) = (if peek {
+        let received = if peek {
             queue.front().cloned()
         } else {
             queue.pop_front()
-        }) else {
-            return Ok(None);
-        };
-        let take = (size as usize).min(received.payload.len());
-        for (offset, &byte) in received.payload[..take].iter().enumerate() {
-            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
-        }
+        }?;
         // The whole datagram was read as far as the host's window goes, however much fitted.
         if !peek {
             self.net.outbox.push(NetCommand::Consumed {
@@ -171,7 +147,10 @@ impl Cpu {
                 bytes: received.payload.len() as u32,
             });
         }
-        Ok(Some((take as i32, 0, Some(received.source))))
+        let truncated = received.payload.len() > room;
+        let mut data = received.payload;
+        data.truncate(room);
+        Some(Receipt::read(data, Some(received.source), truncated))
     }
 
     /// What the host says about a datagram socket's stream `id`. `true` when the stream is one

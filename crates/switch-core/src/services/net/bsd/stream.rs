@@ -130,22 +130,18 @@ impl Cpu {
     }
 
     /// `Send` on a host-carried stream: queued for the host once it is open.
-    pub(super) fn bsd_send_outside(&mut self, tls: u32, fd: i32) -> Result<()> {
+    pub(super) fn bsd_send_outside(&mut self, fd: i32, data: Vec<u8>) -> (i32, i32) {
         let Some(socket) = self.process().bsd_sockets.get(&fd) else {
-            return self.bsd_reply(tls, -1, BSD_EBADF);
+            return (-1, BSD_EBADF);
         };
         let (Some(StreamState::Open), Some(stream)) = (socket.stream_state(), &socket.stream)
         else {
-            return self.bsd_reply(tls, -1, BSD_ENOTCONN);
+            return (-1, BSD_ENOTCONN);
         };
         let stream = stream.id;
-        let data = match self.ipc_input_buffer(tls, 0) {
-            Some((addr, size)) => self.read_bytes(addr, size),
-            None => Vec::new(),
-        };
         let sent = data.len() as i32;
         self.net.outbox.push(NetCommand::Send { stream, data });
-        self.bsd_reply(tls, sent, 0)
+        (sent, 0)
     }
 
     /// Let guests reach the outside through the host, or back to an empty network.

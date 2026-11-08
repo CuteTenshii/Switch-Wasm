@@ -13,12 +13,42 @@ use crate::Result;
 
 /// One open `bsd:u` socket. It can only connect to sockets of this process.
 mod datagram;
+mod mmsg;
 mod stream;
 #[cfg(test)]
 pub(in crate::services::net) mod tests;
 
-/// What a receive answers: the result, the errno, and where a datagram came from.
-type Recv = (i32, i32, Option<Vec<u8>>);
+/// What a receive comes to: the result and errno, the bytes, where a datagram came from, and
+/// whether it was cut to fit.
+pub(super) struct Receipt {
+    pub ret: i32,
+    pub errno: i32,
+    pub data: Vec<u8>,
+    pub source: Option<Vec<u8>>,
+    pub truncated: bool,
+}
+
+impl Receipt {
+    fn failed(errno: i32) -> Receipt {
+        Receipt {
+            ret: -1,
+            errno,
+            data: Vec::new(),
+            source: None,
+            truncated: false,
+        }
+    }
+
+    pub(super) fn read(data: Vec<u8>, source: Option<Vec<u8>>, truncated: bool) -> Receipt {
+        Receipt {
+            ret: data.len() as i32,
+            errno: 0,
+            data,
+            source,
+            truncated,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct BsdSocket {
@@ -232,6 +262,15 @@ impl Cpu {
         match cmd_id {
             // RegisterClient(BsdInitConfig, pid, tmem_size, tmem) -> u64.
             Some(0) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+            // RecvMMsg(fd, vlen, flags, padding, timespec) and SendMMsg(fd, vlen, flags).
+            Some(29) => {
+                let (fd, count, flags) = (word(self, 0) as i32, word(self, 1), word(self, 2));
+                self.bsd_receive_messages(tls, fd, count, flags)
+            }
+            Some(30) => {
+                let (fd, count) = (word(self, 0) as i32, word(self, 1));
+                self.bsd_send_messages(tls, fd, count)
+            }
             // StartMonitoring(pid).
             Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // Socket(domain, type, protocol) / SocketExempt. The family is not validated.
@@ -748,54 +787,62 @@ impl Cpu {
         self.bsd_reply(tls, 0, 0)
     }
 
-    /// `Send`/`SendTo`/`Write`: everything goes into the peer's queue at once.
+    /// `Send`/`SendTo`/`Write`, from the request's buffers. See [`Cpu::bsd_send_bytes`].
     fn bsd_send(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
-        let peer = match self.process().bsd_sockets.get(&fd) {
-            None => return self.bsd_reply(tls, -1, BSD_EBADF),
-            Some(socket) if socket.peer_closed => return self.bsd_reply(tls, -1, BSD_EPIPE),
-            Some(socket) if socket.stream.is_some() => return self.bsd_send_outside(tls, fd),
-            Some(socket) => match socket.peer {
-                Some(peer) => peer,
-                None => return self.bsd_send_datagram(tls, fd, destination),
-            },
-        };
-        let bytes = match self.ipc_input_buffer(tls, 0) {
+        let data = match self.ipc_input_buffer(tls, 0) {
             Some((addr, size)) => self.read_bytes(addr, size),
             None => Vec::new(),
         };
-        let sent = bytes.len() as i32;
+        let address = destination
+            .and_then(|index| self.ipc_input_buffer(tls, index))
+            .map(|(addr, size)| self.read_bytes(addr, size.min(0x80)));
+        let (ret, errno) = self.bsd_send_bytes(fd, data, address.as_deref());
+        self.bsd_reply(tls, ret, errno)
+    }
+
+    /// Send `data` on `fd`, to `address` when one is given: everything goes into the peer's
+    /// queue at once. `(ret, errno)`.
+    pub(super) fn bsd_send_bytes(
+        &mut self,
+        fd: i32,
+        data: Vec<u8>,
+        address: Option<&[u8]>,
+    ) -> (i32, i32) {
+        let peer = match self.process().bsd_sockets.get(&fd) {
+            None => return (-1, BSD_EBADF),
+            Some(socket) if socket.peer_closed => return (-1, BSD_EPIPE),
+            Some(socket) if socket.stream.is_some() => return self.bsd_send_outside(fd, data),
+            Some(socket) => match socket.peer {
+                Some(peer) => peer,
+                None => return self.bsd_send_datagram(fd, data, address),
+            },
+        };
+        let sent = data.len() as i32;
         if let Some(peer) = self.process_mut().bsd_sockets.get_mut(&peer) {
-            peer.rx.extend(bytes);
+            peer.rx.extend(data);
         }
-        self.bsd_reply(tls, sent, 0)
+        (sent, 0)
     }
 
     /// `SendTo` from a datagram socket with no peer: to an address outside the console it goes to
     /// the host, and anywhere else the link takes it and drops it.
-    fn bsd_send_datagram(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
+    fn bsd_send_datagram(&mut self, fd: i32, data: Vec<u8>, address: Option<&[u8]>) -> (i32, i32) {
         let (datagram, default_peer) = match self.process().bsd_sockets.get(&fd) {
             Some(socket) => (socket.kind == BSD_SOCK_DGRAM, socket.datagram.default_peer),
             None => (false, None),
         };
-        let given = destination
-            .and_then(|index| self.ipc_input_buffer(tls, index))
-            .map(|(addr, size)| self.read_bytes(addr, size.min(0x80)))
-            .and_then(|address| sockaddr_in(&address));
+        let given = address.and_then(sockaddr_in);
         if datagram && self.net.enabled {
             if let Some((ip, port)) = given.or(default_peer) {
                 if is_carried(ip) && port != 0 {
-                    return self.bsd_send_outside_datagram(tls, fd, ip, port);
+                    return self.bsd_send_outside_datagram(fd, data, ip, port);
                 }
             }
         }
-        let addressed = given.is_some();
-        if !datagram || !addressed {
-            return self.bsd_unconnected(tls, fd);
+        if !datagram || given.is_none() {
+            return self.bsd_unconnected(fd);
         }
-        let sent = self
-            .ipc_input_buffer(tls, 0)
-            .map_or(0, |(_, size)| size as i32);
-        self.bsd_reply(tls, sent, 0)
+        (data.len() as i32, 0)
     }
 
     /// `Recv`/`RecvFrom`/`Read`, with the sender's address when `address_buffer` names one.
@@ -806,39 +853,49 @@ impl Cpu {
         flags: u32,
         address_buffer: Option<u32>,
     ) -> Result<()> {
-        let Some((ret, errno, source)) = self.bsd_receive_bytes(tls, fd, flags)? else {
+        let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
+            return self.bsd_reply(tls, -1, BSD_EINVAL);
+        };
+        let Some(receipt) = self.bsd_receive_bytes(fd, size as usize, flags) else {
             return Ok(());
         };
         self.bsd_end_wait(fd);
+        for (offset, &byte) in receipt.data.iter().enumerate() {
+            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
+        }
         let Some(index) = address_buffer else {
-            return self.bsd_reply(tls, ret, errno);
+            return self.bsd_reply(tls, receipt.ret, receipt.errno);
         };
-        let address = match source {
+        let address = match receipt.source {
             Some(source) => source,
-            None if ret >= 0 => self.bsd_peer_address(fd),
+            None if receipt.ret >= 0 => self.bsd_peer_address(fd),
             None => Vec::new(),
         };
         let written = self.bsd_write_address(tls, index, &address)?;
-        self.bsd_reply_len(tls, ret, errno, written)
+        self.bsd_reply_len(tls, receipt.ret, receipt.errno, written)
     }
 
-    /// Drain the peer's bytes into the caller's buffer, or one datagram with its source. An
-    /// empty live queue waits on a blocking socket (`None`, and no reply) and is `EAGAIN` plus a
-    /// yield on a non-blocking one, under `MSG_DONTWAIT`, or once the wait has timed out.
+    /// Take up to `room` of the peer's bytes, or one datagram with its source. An empty live
+    /// queue waits on a blocking socket (`None`: the call writes no reply) and is `EAGAIN` plus
+    /// a yield on a non-blocking one, under `MSG_DONTWAIT`, or once the wait has timed out.
     /// `MSG_PEEK` leaves what it read queued; `MSG_WAITALL` on a stream socket waits for the
-    /// whole buffer, and returns what there is when the peer closes or the wait times out.
-    fn bsd_receive_bytes(&mut self, tls: u32, fd: i32, flags: u32) -> Result<Option<Recv>> {
-        let failed = |errno| Ok(Some((-1, errno, None)));
+    /// whole of `room`, and returns what there is when the peer closes or the wait times out.
+    pub(super) fn bsd_receive_bytes(
+        &mut self,
+        fd: i32,
+        room: usize,
+        flags: u32,
+    ) -> Option<Receipt> {
         // There is never urgent data to read.
         if flags & BSD_MSG_OOB != 0 {
-            return failed(BSD_EINVAL);
+            return Some(Receipt::failed(BSD_EINVAL));
         }
         let peek = flags & BSD_MSG_PEEK != 0;
-        if let Some(received) = self.bsd_receive_datagram(tls, fd, peek)? {
-            return Ok(Some(received));
+        if let Some(received) = self.bsd_receive_datagram(fd, room, peek) {
+            return Some(received);
         }
-        match self.process().bsd_sockets.get(&fd) {
-            None => return failed(BSD_EBADF),
+        let socket = match self.process().bsd_sockets.get(&fd) {
+            None => return Some(Receipt::failed(BSD_EBADF)),
             // A stream socket needs a connection; a datagram socket just has an empty queue.
             Some(socket)
                 if socket.kind != BSD_SOCK_DGRAM
@@ -846,48 +903,37 @@ impl Cpu {
                     && !socket.peer_closed
                     && socket.stream_state() != Some(StreamState::Open) =>
             {
-                return failed(BSD_ENOTCONN);
+                return Some(Receipt::failed(BSD_ENOTCONN));
             }
-            Some(_) => {}
-        }
-        let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
-            return failed(BSD_EINVAL);
-        };
-        let Some(socket) = self.process().bsd_sockets.get(&fd) else {
-            return failed(BSD_EBADF);
+            Some(socket) => socket,
         };
         let (queued, closed) = (socket.rx.len(), socket.peer_closed);
         let wait_all = flags & BSD_MSG_WAITALL != 0 && !peek && socket.kind != BSD_SOCK_DGRAM;
-        let short = queued == 0 || (wait_all && queued < size as usize);
+        let short = queued == 0 || (wait_all && queued < room);
         if short && !closed {
             let timeout = self.bsd_receive_timeout(fd);
             if self.bsd_waits(fd, timeout, flags & BSD_MSG_DONTWAIT != 0) {
-                return Ok(None);
+                return None;
             }
             if queued == 0 {
                 self.pending_yield = true;
-                return failed(BSD_EAGAIN);
+                return Some(Receipt::failed(BSD_EAGAIN));
             }
         }
         // With nothing queued, the peer has closed: end-of-file is a read of zero bytes.
-        let take = (size as usize).min(queued);
-        let Some(socket) = self.process_mut().bsd_sockets.get_mut(&fd) else {
-            return failed(BSD_EBADF);
-        };
-        let bytes: Vec<u8> = if peek {
+        let take = room.min(queued);
+        let socket = self.process_mut().bsd_sockets.get_mut(&fd)?;
+        let data: Vec<u8> = if peek {
             socket.rx.iter().take(take).copied().collect()
         } else {
             socket.rx.drain(..take).collect()
         };
         let stream = socket.stream.as_ref().map(|stream| stream.id);
-        for (offset, &byte) in bytes.iter().enumerate() {
-            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
-        }
         if let Some(stream) = stream.filter(|_| !peek && take > 0) {
             let bytes = take as u32;
             self.net.outbox.push(NetCommand::Consumed { stream, bytes });
         }
-        Ok(Some((take as i32, 0, None)))
+        Some(Receipt::read(data, None, false))
     }
 
     /// Whether a call that found nothing on `fd` waits for it. A blocking socket does: the
@@ -949,13 +995,11 @@ impl Cpu {
     }
 
     /// The error for a send with no destination.
-    fn bsd_unconnected(&mut self, tls: u32, fd: i32) -> Result<()> {
+    fn bsd_unconnected(&self, fd: i32) -> (i32, i32) {
         match self.process().bsd_sockets.get(&fd) {
-            None => self.bsd_reply(tls, -1, BSD_EBADF),
-            Some(socket) if socket.kind == BSD_SOCK_DGRAM => {
-                self.bsd_reply(tls, -1, BSD_ENETUNREACH)
-            }
-            Some(_) => self.bsd_reply(tls, -1, BSD_ENOTCONN),
+            None => (-1, BSD_EBADF),
+            Some(socket) if socket.kind == BSD_SOCK_DGRAM => (-1, BSD_ENETUNREACH),
+            Some(_) => (-1, BSD_ENOTCONN),
         }
     }
 
