@@ -263,6 +263,11 @@ fn a_lost_device_is_reported_rather_than_failing_the_flush() {
     let json = switch_core::json::object(|o| gpu.report(o));
     assert!(json.contains("\"gaveUp\":true"), "{json}");
     assert!(json.contains("Out of memory"), "{json}");
+    assert!(
+        gpu.lost().is_some_and(|why| why.contains("Out of memory")),
+        "the loss names its cause: {:?}",
+        gpu.lost()
+    );
 }
 
 /// A rejection the backend never asks about still reaches the report.

@@ -104,9 +104,9 @@ pub trait Renderer: std::fmt::Debug {
         let _ = as_id;
     }
 
-    /// Whether the device was lost and the backend wants replacing.
-    fn lost(&self) -> bool {
-        false
+    /// Why the device was lost, once it has been and the backend wants replacing.
+    fn lost(&self) -> Option<&str> {
+        None
     }
 }
 

@@ -1,6 +1,9 @@
 //! Translator, GPU and memory reports.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use switch_core::json;
+use switch_core::trace::Level;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::session;
@@ -39,10 +42,21 @@ pub fn switch_gpu_report_json() -> String {
     })
 }
 
-/// Whether the GPU backend has lost its device. Cheap; polled every slice.
+/// Whether the installed backend's loss has been logged; a newly installed one clears it.
+pub(crate) static GPU_LOSS_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the GPU backend has lost its device, logging why the first time. Cheap; polled
+/// every slice.
 #[wasm_bindgen]
 pub fn switch_gpu_lost() -> bool {
-    session().cpu.nv.gpu.renderer_lost()
+    let s = session();
+    let Some(why) = s.cpu.nv.gpu.renderer_lost().map(str::to_owned) else {
+        return false;
+    };
+    if !GPU_LOSS_LOGGED.swap(true, Ordering::Relaxed) {
+        s.cpu.log(Level::Error, &format!("[gpu] {why}"));
+    }
+    true
 }
 
 /// The title's backed guest memory by region, as JSON. The page adds the heap size itself.

@@ -232,7 +232,7 @@ impl Engine3D {
     }
 
     /// See [`Renderer::lost`].
-    pub fn renderer_lost(&self) -> bool {
+    pub fn renderer_lost(&self) -> Option<&str> {
         self.renderer.lost()
     }
 

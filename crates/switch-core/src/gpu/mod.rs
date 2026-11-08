@@ -282,7 +282,8 @@ impl Gpu {
         self.renderer.report(out);
     }
 
-    pub fn renderer_lost(&self) -> bool {
+    /// Why the renderer's device was lost, once it has been.
+    pub fn renderer_lost(&self) -> Option<&str> {
         self.renderer.lost()
     }
 

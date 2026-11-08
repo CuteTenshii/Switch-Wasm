@@ -917,9 +917,9 @@ impl Renderer for Gpu {
         self.drop_space(closed);
     }
 
-    fn lost(&self) -> bool {
+    fn lost(&self) -> Option<&str> {
         // Only a lost device is fixed by replacing it.
-        self.gave_up
+        self.report.as_deref().filter(|_| self.gave_up)
     }
 
     fn report(&self, out: &mut json::Object) {

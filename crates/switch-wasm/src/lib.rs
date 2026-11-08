@@ -362,4 +362,5 @@ mod tests;
 #[cfg(feature = "gpu")]
 fn install_gpu(gpu: switch_gpu::Gpu) {
     session().cpu.nv.gpu.set_renderer(Box::new(gpu));
+    stats::GPU_LOSS_LOGGED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
