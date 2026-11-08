@@ -1,4 +1,4 @@
-.PHONY: all wasm wasm-release assets clean
+.PHONY: wasm wasm-release assets clean
 
 TARGET := wasm32-unknown-unknown
 DIST   := dist
@@ -11,7 +11,7 @@ NIGHTLY_CARGO := $(shell rustup which --toolchain $(NIGHTLY) cargo 2>/dev/null)
 NIGHTLY_RUSTC := $(shell rustup which --toolchain $(NIGHTLY) rustc 2>/dev/null)
 NIGHTLY_HINT  := rustup toolchain install $(NIGHTLY) --profile minimal --component rust-src --target $(TARGET)
 
-all: assets
+.DEFAULT_GOAL := assets
 
 # The bindings crate with the WebGPU backend: `wasm` is the dev build `bun run dev`
 # serves, `wasm-release` the shipped fat-LTO one. `wasm-bindgen` must match Cargo.lock.

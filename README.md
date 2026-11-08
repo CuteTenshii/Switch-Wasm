@@ -6,7 +6,7 @@ A Nintendo Switch emulator running directly in the browser, using WebAssembly an
 
 ```sh
 bun install
-make all
+make
 ```
 
 Requires `rustup target add wasm32-unknown-unknown`, and [bun](https://bun.com)
