@@ -34,9 +34,11 @@ export function setState(text: EmuState): void {
   state = text;
   document.body.dataset.state = text;
   for (const item of programItems) item.hidden = !loaded();
-  runEl.disabled = !loaded();
-  stepEl.disabled = !loaded();
-  stopEl.disabled = !loaded();
+  // Hidden with nothing to act on, and disabled so a stray click or Enter can't reach them either.
+  for (const button of [runEl, stepEl, stopEl]) {
+    button.hidden = !loaded();
+    button.disabled = !loaded();
+  }
 }
 
 setState('idle');

@@ -142,14 +142,14 @@ test('the translation section counts the blocks a program ran', async ({ page })
 test('Stop ends a running program without a loading screen, and the next boot runs', async ({ page }) => {
   await openPage(page);
   const stop = page.locator('#btn-stop');
-  await expect(stop).toBeDisabled();
+  await expect(stop).toBeHidden();
   // b .
   await bootElf(page, aarch64Elf([0x14000000]));
   await expect(stop).toBeEnabled();
   await stop.click();
   await expect(page.locator('body')).toHaveAttribute('data-state', 'idle');
   await expect(page.locator('#loading')).toBeHidden();
-  await expect(stop).toBeDisabled();
+  await expect(stop).toBeHidden();
 
   await bootElf(page, aarch64Elf([0xd4000001]));
   await expect(page.locator('body')).toHaveAttribute('data-state', 'halted');
