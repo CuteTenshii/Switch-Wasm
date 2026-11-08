@@ -38,6 +38,12 @@ async function acceptKeys(e: Event, which: 'prod' | 'title'): Promise<void> {
   const file = pickedFile(e);
   (e.target as HTMLInputElement).value = '';
   if (!file) return;
+  // A file picker filters by extension only, so the other key file would get through.
+  const expected = which + '.keys';
+  if (file.name.toLowerCase() !== expected) {
+    refuseKeys(file.name + ' is not ' + expected + '. Pick the file named ' + expected + '.');
+    return;
+  }
   let text: string | null;
   try {
     text = await readKeysFile(file);
