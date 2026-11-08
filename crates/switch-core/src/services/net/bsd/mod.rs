@@ -1028,7 +1028,8 @@ impl Cpu {
             .bsd_sockets
             .get(&fd)
             .and_then(|socket| socket.stream.as_ref())
-            .filter(|stream| stream.state == StreamState::Open)
+            // Still connecting is fine: the relay acts on it once the connection opens.
+            .filter(|stream| matches!(stream.state, StreamState::Open | StreamState::Connecting))
         {
             let stream = stream.id;
             self.net.outbox.push(NetCommand::ShutdownWrite { stream });

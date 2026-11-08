@@ -399,6 +399,29 @@ mod tests {
     }
 
     #[test]
+    fn a_shutdown_before_the_connection_opens_still_reaches_the_host() {
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.take_net_commands();
+        assert_eq!(bsd_command(&mut cpu, 22, &[fd as u32, 1]), (0, 0));
+        assert_eq!(
+            cpu.take_net_commands(),
+            vec![NetCommand::ShutdownWrite { stream: 1 }]
+        );
+
+        // A connection that failed has nothing to shut down.
+        let (mut cpu, fd, address) = networked_socket("example.com");
+        connect_to(&mut cpu, fd, address, 80);
+        cpu.deliver_net_events([NetEvent::Failed {
+            stream: 1,
+            reason: NetFailure::Refused,
+        }]);
+        cpu.take_net_commands();
+        bsd_command(&mut cpu, 22, &[fd as u32, 1]);
+        assert!(cpu.take_net_commands().is_empty());
+    }
+
+    #[test]
     fn bsd_peer_name_of_a_stream_is_what_the_guest_connected_to() {
         let (mut cpu, fd, address) = networked_socket("example.com");
         connect_to(&mut cpu, fd, address, 443);
