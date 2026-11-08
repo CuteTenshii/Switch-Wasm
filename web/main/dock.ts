@@ -4,7 +4,6 @@
 import { Gamepad2, Tv } from 'lucide';
 import { $, el } from './dom';
 import { icon } from './icons';
-import { log } from './log';
 import { call, whenReady } from './rpc';
 
 const DOCKED_KEY = 'docked';
@@ -22,11 +21,6 @@ button.addEventListener('click', () => {
   render();
   localStorage.setItem(DOCKED_KEY, docked ? '1' : '0');
   void call('setOperationMode', docked);
-  log(
-    docked
-      ? 'Docked - 1080p, boost clocks, no touchscreen.'
-      : 'Handheld - 720p, normal clocks, touchscreen.',
-  );
 });
 
 render();

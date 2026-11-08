@@ -2,17 +2,26 @@
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
+use switch_core::cpu::OperationMode;
+
+use crate::log::{push, PageLevel};
 use crate::session;
 
-/// Dock or undock the console. Queues the AM messages titles react to.
+/// Dock or undock the console, and say what that changes. Queues the AM messages titles react to.
 #[wasm_bindgen]
 pub fn switch_set_operation_mode(docked: bool) {
     let mode = if docked {
-        switch_core::cpu::OperationMode::Docked
+        OperationMode::Docked
     } else {
-        switch_core::cpu::OperationMode::Handheld
+        OperationMode::Handheld
     };
     session().cpu.set_operation_mode(mode);
+    let (_, height) = mode.display_size();
+    let (name, rest) = match mode {
+        OperationMode::Docked => ("Docked", "boost clocks, no touchscreen"),
+        OperationMode::Handheld => ("Handheld", "normal clocks, touchscreen"),
+    };
+    push(PageLevel::Log, &format!("{name} - {height}p, {rest}."));
 }
 
 /// Set the battery level `psm` reports.

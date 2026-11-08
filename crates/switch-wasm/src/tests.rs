@@ -125,6 +125,28 @@ fn each_line_carries_its_level_so_the_page_reads_none_of_its_text() {
     );
 }
 
+#[test]
+fn docking_tells_the_page_the_resolution_titles_are_now_offered() {
+    let _host = new_session();
+    take_log();
+    crate::system::switch_set_operation_mode(true);
+    crate::system::switch_set_operation_mode(false);
+    let log = log::PageLevel::Log as u32;
+    assert_eq!(
+        take_log(),
+        [
+            (
+                log,
+                "Docked - 1080p, boost clocks, no touchscreen.".to_owned()
+            ),
+            (
+                log,
+                "Handheld - 720p, normal clocks, touchscreen.".to_owned()
+            ),
+        ]
+    );
+}
+
 /// A new session starts without the old one's panic, but keeps every line it logged.
 #[test]
 fn a_new_session_inherits_the_log_but_not_the_panic_of_the_one_before_it() {
