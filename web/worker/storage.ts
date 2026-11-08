@@ -233,10 +233,10 @@ export const STORAGE = {
   },
   nandContent: nandContent,
   // Content and index entry go in one transaction so the index never names missing content.
-  async nandInstall(file, id, kind) {
+  async nandInstall(content, name, id, kind) {
     const tx = (await nandIdb()).transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
-    tx.objectStore(NAND_CONTENT).put(file, file.name);
-    tx.objectStore(NAND_TITLES).put({ name: file.name, kind }, id);
+    tx.objectStore(NAND_CONTENT).put(content, name);
+    tx.objectStore(NAND_TITLES).put({ name, kind }, id);
     await committed(tx);
   },
   // Content and index entry go together; a registered archive stays until the session is replaced.

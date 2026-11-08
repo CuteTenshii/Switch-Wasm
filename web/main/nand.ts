@@ -7,6 +7,7 @@ import { log } from './log';
 import { call, onNandProgress } from './rpc';
 import { setNote } from './shell';
 import { doLaunchNca } from './container';
+import { zipExtract, zipMembers, type ZipMember } from './unzip';
 
 // Shared data archives (applet assets, Mii and amiibo models) registered by title id.
 let archiveCount = 0;
@@ -105,7 +106,7 @@ function renderNandTitles(): void {
   $('nand-tools').hidden = nandTitles.length === 0;
   if (!programs.length) {
     host.appendChild(el('p', 'muted tiny empty-note',
-      'Nothing installed - point "Install firmware" at a dump to put the system applets here.'));
+      'Nothing installed. Install a firmware dump from a folder or a .zip to put the system applets here.'));
     return;
   }
   for (const [id, entry] of programs) host.appendChild(nandRow(id, entry));
@@ -158,34 +159,90 @@ function updateFirmwareState(): void {
     nandTitles.length > 0);
 }
 
-$('firmware-ncas').addEventListener('change', async (e) => {
-  const input = e.target as HTMLInputElement;
-  const picked = Array.from(input.files || []);
-  input.value = '';
-  if (!picked.length) return;
-  const files = picked.filter((f) => /\.nca$/i.test(f.name));
-  if (picked.length !== files.length) {
-    log('Ignoring ' + (picked.length - files.length) + ' file(s) that are not .nca.');
+let installListener: ((text: string, error: boolean) => void) | null = null;
+
+// The Files tab shows an install's progress and outcome too, since it offers the same buttons.
+export function onInstallStatus(handler: NonNullable<typeof installListener>): void {
+  installListener = handler;
+}
+
+function installStatus(text: string, error = false): void {
+  const status = $('firmware-status');
+  status.textContent = text;
+  status.classList.toggle('is-error', error);
+  installListener?.(text, error);
+}
+
+// An NCA to install, read only when its turn comes.
+interface FirmwareNca {
+  name: string;
+  open: () => Promise<Blob>;
+}
+
+// Plain `x.nca` files, and the `x.nca/00`, `x.nca/01`… pieces the console's own Contents folder splits them into.
+function gatherNcas<T>(
+  items: { path: string; item: T }[],
+  open: (pieces: T[]) => Promise<Blob>,
+): { ncas: FirmwareNca[]; ignored: number; failures: string[] } {
+  const found = new Map<string, { name: string; pieces: { order: number; item: T }[] }>();
+  let ignored = 0;
+  for (const { path, item } of items) {
+    const parts = path.split('/');
+    const base = parts[parts.length - 1];
+    const parent = parts.length > 1 ? parts[parts.length - 2] : '';
+    let key: string;
+    let name: string;
+    let order = 0;
+    if (/\.nca$/i.test(base)) {
+      key = path;
+      name = base;
+    } else if (/\.nca$/i.test(parent) && /^\d{2}$/.test(base)) {
+      key = parts.slice(0, -1).join('/');
+      name = parent;
+      order = Number(base);
+    } else {
+      ignored++;
+      continue;
+    }
+    const nca = found.get(key) ?? { name, pieces: [] };
+    nca.pieces.push({ order, item });
+    found.set(key, nca);
   }
-  if (!files.length) {
-    log('Nothing in that selection is an .nca.', 'error');
+  const ncas: FirmwareNca[] = [];
+  const failures: string[] = [];
+  for (const { name, pieces } of found.values()) {
+    pieces.sort((a, b) => a.order - b.order);
+    if (pieces.some((piece, i) => piece.order !== i)) {
+      failures.push(name + ' (some of its pieces are missing)');
+      continue;
+    }
+    ncas.push({ name, open: () => open(pieces.map((piece) => piece.item)) });
+  }
+  return { ncas, ignored, failures };
+}
+
+async function installFirmware(
+  source: string,
+  { ncas, ignored, failures }: { ncas: FirmwareNca[]; ignored: number; failures: string[] },
+): Promise<void> {
+  if (!ncas.length && !failures.length) {
+    installStatus('Nothing in ' + source + ' is an NCA.', true);
     return;
   }
-  log('Reading ' + files.length + ' firmware file(s) ...');
   let installed = 0;
-  const stateEl = $('firmware-state');
-  for (const [index, f] of files.entries()) {
-    stateEl.textContent = 'Reading ' + (index + 1) + ' of ' + files.length + ': ' + f.name;
-    setNote('nand-badge', (index + 1) + '/' + files.length, false);
+  for (const [index, nca] of ncas.entries()) {
+    installStatus('Reading ' + (index + 1) + ' of ' + ncas.length + ' from ' + source + ' (' + nca.name + ')');
+    setNote('nand-badge', (index + 1) + '/' + ncas.length, false);
     try {
-      // Identify from the header without reading the file.
-      const what = await call('nandIdentify', f);
-      if (!what || what.kind === 2) continue;
-      // Store the File itself so the browser owns the bytes.
-      await call('nandInstall', f, what.id, what.kind);
+      const blob = await nca.open();
+      // Identify from the header without reading the rest.
+      const what = await call('nandIdentify', blob);
+      if (what.kind === 2) continue;
+      // Store the Blob itself so the browser owns the bytes.
+      await call('nandInstall', blob, nca.name, what.id, what.kind);
       installed++;
     } catch (err) {
-      log('Could not read ' + f.name + ': ' + (err as Error).message, 'error');
+      failures.push(nca.name + ' (' + (err as Error).message + ')');
     }
   }
   try {
@@ -195,10 +252,49 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   // Registered from the NAND so an archive counts once across repeated installs.
   const registered = await beginArchiveRestore();
   updateFirmwareState();
-  log('Installed ' + installed + ' title(s) of ' + files.length + ' file(s); '
-    + registered + ' registered as system data archives.',
-  installed ? 'info' : 'log');
+  let outcome = 'Installed ' + installed + ' title(s) from ' + source + '; '
+    + registered + ' system data archive(s) registered.';
+  if (ignored) outcome += ' Skipped ' + ignored + ' file(s) that are not NCAs.';
+  if (failures.length) outcome += ' ' + failures.length + ' could not be installed: ' + failures.join(', ') + '.';
+  installStatus(outcome, failures.length > 0);
   document.dispatchEvent(new Event('nand-changed'));
+}
+
+function takeFiles(e: Event): File[] {
+  const input = e.target as HTMLInputElement;
+  const picked = Array.from(input.files || []);
+  input.value = '';
+  return picked;
+}
+
+$('firmware-dir').addEventListener('change', (e) => {
+  const files = takeFiles(e);
+  if (!files.length) return;
+  const folder = files[0].webkitRelativePath.split('/')[0] || 'the folder';
+  void installFirmware(folder, gatherNcas(
+    files.map((file) => ({ path: file.webkitRelativePath || file.name, item: file })),
+    (pieces) => Promise.resolve(pieces.length === 1 ? pieces[0] : new Blob(pieces)),
+  ));
+});
+
+$('firmware-zip').addEventListener('change', async (e) => {
+  const [zip] = takeFiles(e);
+  if (!zip) return;
+  let members: ZipMember[];
+  try {
+    members = await zipMembers(zip);
+  } catch (err) {
+    installStatus(zip.name + ' could not be read (' + (err as Error).message + ').', true);
+    return;
+  }
+  await installFirmware(zip.name, gatherNcas(
+    members.filter((member) => !member.path.endsWith('/')).map((member) => ({ path: member.path, item: member })),
+    async (pieces) => {
+      const blobs: Blob[] = [];
+      for (const piece of pieces) blobs.push(await zipExtract(zip, piece));
+      return blobs.length === 1 ? blobs[0] : new Blob(blobs);
+    },
+  ));
 });
 
 $('btn-erase-nand').addEventListener('click', async () => {

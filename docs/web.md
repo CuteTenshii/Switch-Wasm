@@ -60,6 +60,7 @@ The page, the worker, and the wasm bindings between them.
 
 - Containers are never handed to wasm whole (multi-GB, beyond wasm32). The File/Blob stays in the browser and wasm pulls ranges through the synchronous `hostRead` import; it must be synchronous because RomFS reads happen inside `switch_run`, and `FileReaderSync` only exists in workers.
 - NAND content comes back from IndexedDB as Blobs, so firmware is registered for the cost of its headers rather than copied through the wasm heap. The wasm side reads IndexedDB itself (`idb/nand.rs`) and hands each Blob to the `addHostFile` import, which returns its index; one host file serves every registration made from an NCA.
+- Firmware installs from a folder or a .zip (`web/main/nand.ts`, `web/main/unzip.ts`). The zip is read by range: its directory, then one member at a time. A stored member is a slice of the archive, and a deflated one is inflated through `DecompressionStream` with its CRC checked. The console's `x.nca/00`, `x.nca/01`… pieces are joined into one Blob without copying.
 - The chunk cache is per file, not shared: a title with an update reads two containers at once and a shared LRU thrashes at every crossing.
 - Reads larger than a chunk (ExeFS pulled in one go) bypass the cache so they don't evict the working set.
 - The host file table only grows (wasm sources address archives by index). System archives and applets are added once per page; each update or DLC added appends a file with its chunk cache.

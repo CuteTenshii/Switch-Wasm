@@ -252,7 +252,7 @@ export interface Commands {
   addDlc(file: File): DlcEntry[];
   clearDlc(): void;
   clearUpdate(): void;
-  nandIdentify(file: File): NandIdentity | null;
+  nandIdentify(content: Blob): NandIdentity;
   // The stored content named `name`; it is read here, not by the page.
   nandLaunch(name: string): number;
   loadNcaFromNsp(index: number): number;
@@ -317,8 +317,8 @@ export interface Commands {
   nandTitles(): [string, NandEntry][];
   nandList(): NandTitle[];
   nandContent(name: string): Blob | undefined;
-  // Store `file` under its name and index it as title `id`.
-  nandInstall(file: File, id: string, kind: number): void;
+  // Store `content` as `name` and index it as title `id`.
+  nandInstall(content: Blob, name: string, id: string, kind: number): void;
   nandRemove(id: string): void;
   nandErase(): void;
 

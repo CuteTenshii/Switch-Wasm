@@ -25,7 +25,8 @@ test('an empty card, no saves and no system titles say so', async ({ page }) => 
   await expect(page.locator('.files-empty')).toContainText('No save data yet');
   await page.getByRole('tab', { name: 'System titles' }).click();
   await expect(page.locator('.files-empty')).toContainText('Nothing installed');
-  await expect(page.locator('#files-install-label')).toBeVisible();
+  await expect(page.locator('#files-install-dir-label')).toBeVisible();
+  await expect(page.locator('#files-install-zip-label')).toBeVisible();
 });
 
 test('folders and files can be made, renamed, downloaded and deleted, and survive a reload', async ({ page }) => {

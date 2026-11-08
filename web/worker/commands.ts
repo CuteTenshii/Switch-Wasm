@@ -85,12 +85,13 @@ export const CMD = {
   },
   clearDlc: switch_clear_dlc,
   clearUpdate: switch_clear_update,
-  // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; null if unreadable.
-  nandIdentify(file) {
-    const index = addHostFile(file);
-    noteRegistered('NAND files to identify', file.size);
-    const found = switch_nand_identify(index, BigInt(file.size));
-    return found ? JSON.parse(found) as NandIdentity : null;
+  // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; throws the core's reason if unreadable.
+  nandIdentify(content) {
+    const index = addHostFile(content);
+    noteRegistered('NAND files to identify', content.size);
+    const found = switch_nand_identify(index, BigInt(content.size));
+    if (!found) throw new Error(switch_last_error() || 'the core could not read it');
+    return JSON.parse(found) as NandIdentity;
   },
   // The content stays in the browser's copy and the core reads it by range.
   async nandLaunch(name) {

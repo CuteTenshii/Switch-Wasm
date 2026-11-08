@@ -10,7 +10,7 @@ import { $, el } from './dom';
 import { showView } from './fileview';
 import { fmtSize } from './format';
 import { icon } from './icons';
-import { removeNandTitle, titleLabel } from './nand';
+import { onInstallStatus, removeNandTitle, titleLabel } from './nand';
 import { call, hasSession } from './rpc';
 
 type Place =
@@ -217,7 +217,8 @@ function renderTools(): void {
   $('files-upload-label').hidden = !files;
   $('files-upload-dir-label').hidden = !files;
   $('btn-files-export').hidden = !files;
-  $('files-install-label').hidden = place.kind !== 'nand';
+  $('files-install-dir-label').hidden = place.kind !== 'nand';
+  $('files-install-zip-label').hidden = place.kind !== 'nand';
   document.querySelectorAll<HTMLElement>('.files-tab').forEach((tab) => {
     const on = tab.dataset.volume === (place.kind === 'save' ? 'saves' : place.kind);
     tab.classList.toggle('is-active', on);
@@ -439,7 +440,7 @@ async function renderNand(mine: number): Promise<void> {
   if (mine !== generation) return;
   list.textContent = '';
   if (!titles.length) {
-    message('Nothing installed. Install firmware to add the system applets and data archives.');
+    message('Nothing installed. Install a firmware dump from a folder or a .zip to add the system applets and data archives.');
     return;
   }
   titles.sort((a, b) => a.kind - b.kind || titleLabel(a.id).localeCompare(titleLabel(b.id)));
@@ -497,7 +498,8 @@ dialog.addEventListener('cancel', (e) => {
 const tabIcons: Record<string, IconNode> = { sd: MemoryStick, saves: Save, nand: Package };
 const toolIcons: [string, IconNode][] = [
   ['btn-files-mkdir', FolderPlus], ['files-upload-label', FileUp], ['files-upload-dir-label', FolderUp],
-  ['btn-files-export', FileArchive], ['files-install-label', PackagePlus],
+  ['btn-files-export', FileArchive], ['files-install-dir-label', FolderUp],
+  ['files-install-zip-label', PackagePlus],
 ];
 for (const [id, glyph] of toolIcons) $(id).prepend(icon(glyph));
 
@@ -561,6 +563,10 @@ list.addEventListener('drop', (e) => {
   e.preventDefault();
   const transfer = e.dataTransfer;
   void guarded(async () => upload(volume, dirOf(place), await droppedFiles(transfer)));
+});
+
+onInstallStatus((text, error) => {
+  if (dialog.open && place.kind === 'nand') setStatus(text, error);
 });
 
 document.addEventListener('nand-changed', () => {

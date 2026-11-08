@@ -226,7 +226,8 @@
         <label class="btn small" id="files-upload-dir-label" for="files-upload-dir">Upload folder</label>
         <input type="file" id="files-upload-dir" webkitdirectory hidden>
         <button type="button" class="btn small" id="btn-files-export">Export as .zip</button>
-        <label class="btn small" id="files-install-label" for="firmware-ncas" hidden>Install firmware&hellip;</label>
+        <label class="btn small" id="files-install-dir-label" for="firmware-dir" hidden>Install from folder&hellip;</label>
+        <label class="btn small" id="files-install-zip-label" for="firmware-zip" hidden>Install from .zip&hellip;</label>
       </div>
     </div>
     <p class="files-status tiny" id="files-status" role="status" aria-live="polite"></p>
@@ -545,12 +546,15 @@
       <div class="section-body">
         <div id="nand-titles" class="nand-titles"></div>
         <div class="panel-tools">
-          <label class="btn small" for="firmware-ncas">Install firmware&hellip;</label>
-          <input type="file" id="firmware-ncas" accept=".nca" multiple hidden>
+          <label class="btn small" for="firmware-dir">Install from folder&hellip;</label>
+          <input type="file" id="firmware-dir" webkitdirectory hidden>
+          <label class="btn small" for="firmware-zip">Install from .zip&hellip;</label>
+          <input type="file" id="firmware-zip" accept=".zip" hidden>
           <span id="nand-tools" hidden>
             <button id="btn-erase-nand" class="btn small ghost danger">Erase NAND</button>
           </span>
         </div>
+        <p class="install-status tiny" id="firmware-status" role="status" aria-live="polite"></p>
         <p class="muted tiny" id="firmware-state">no system data archives</p>
       </div>
     </details>
