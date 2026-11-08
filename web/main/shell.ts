@@ -196,8 +196,10 @@ function placeMoreItems(): void {
 
 placeMoreItems();
 narrowBar.addEventListener('change', placeMoreItems);
+// The path, not `target.closest`: a button that re-renders its contents on click
+// has detached the target by the time the click bubbles here.
 moreMenu.addEventListener('click', (e) => {
-  if ((e.target as Element).closest('button')) moreMenu.hidePopover();
+  if (e.composedPath().some((node) => node instanceof HTMLButtonElement)) moreMenu.hidePopover();
 });
 
 $('btn-fullscreen').addEventListener('click', () => {
