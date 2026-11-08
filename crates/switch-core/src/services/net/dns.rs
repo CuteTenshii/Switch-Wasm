@@ -101,6 +101,23 @@ fn serialize_addrinfo(out: &mut Vec<u8>, socktype: u32, protocol: u32, ip: [u8; 
     out.push(0);
 }
 
+/// A lookup's reply words, errno always 0. The plain requests answer `{ error, errno, size }`,
+/// as libnx's `sfdnsres` calls read them; the WithOptions forms answer `{ size, error, errno }`.
+/// Asphalt 9's `GetHostByNameRequestWithOptions` took the first order as a failure every time
+/// and retried, and connected with the second.
+fn results(with_options: bool, error: u32, size: u32) -> [u8; 12] {
+    let words = if with_options {
+        [size, error, 0]
+    } else {
+        [error, 0, size]
+    };
+    let mut out = [0u8; 12];
+    for (slot, word) in out.chunks_mut(4).zip(words) {
+        slot.copy_from_slice(&word.to_le_bytes());
+    }
+    out
+}
+
 impl Cpu {
     /// `sfdnsres` (`IResolver`): nothing resolves. Every lookup fails definitively,
     /// `EAI_NONAME` or `HOST_NOT_FOUND`, including numeric addresses.
@@ -109,15 +126,26 @@ impl Cpu {
             return self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[]);
         }
         match cmd_id {
-            // GetHostByNameRequest / GetHostByAddrRequest and WithOptions forms (`h_errno`).
+            // GetHostByNameRequest / GetHostByAddrRequest and WithOptions forms, once the host
+            // carries traffic; `h_errno` otherwise.
+            Some(2) | Some(10) if self.net.enabled => {
+                self.sfdnsres_host_by_name(tls, cmd_id == Some(10))
+            }
+            Some(3) | Some(11) if self.net.enabled => {
+                self.sfdnsres_host_by_address(tls, cmd_id == Some(11))
+            }
             Some(2) | Some(3) | Some(10) | Some(11) => {
-                self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND)
+                let with_options = matches!(cmd_id, Some(10 | 11));
+                self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND, with_options)
             }
             // GetAddrInfoRequest and its WithOptions form, once the host carries traffic.
-            Some(6) | Some(12) if self.net.enabled => self.sfdnsres_addrinfo(tls),
+            Some(6) | Some(12) if self.net.enabled => {
+                self.sfdnsres_addrinfo(tls, cmd_id == Some(12))
+            }
             // GetAddrInfoRequest / GetNameInfoRequest and WithOptions forms (`gai` error).
             Some(6) | Some(7) | Some(12) | Some(13) => {
-                self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME)
+                let with_options = matches!(cmd_id, Some(12 | 13));
+                self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, with_options)
             }
             // GetHostStringErrorRequest / GetGaiStringErrorRequest.
             Some(4) | Some(5) => {
@@ -171,7 +199,7 @@ impl Cpu {
 
     /// `GetAddrInfoRequest` with a network: a literal address answers as itself, a name as
     /// its synthetic address, which `bsd` maps back to the name when the guest connects.
-    fn sfdnsres_addrinfo(&mut self, tls: u32) -> Result<()> {
+    fn sfdnsres_addrinfo(&mut self, tls: u32, with_options: bool) -> Result<()> {
         let read = |cpu: &Cpu, index: u32| {
             cpu.ipc_input_buffer(tls, index)
                 .map(|(addr, size)| cpu.read_bytes(addr, size))
@@ -194,11 +222,11 @@ impl Cpu {
                 Level::Info,
                 &format!("[net] getaddrinfo {asked}: unknown service"),
             );
-            return self.sfdnsres_failure(tls, SFDNSRES_EAI_SERVICE);
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_SERVICE, with_options);
         };
         if hints.family != 0 && hints.family != u32::from(BSD_AF_INET) {
             self.log(Level::Info, &format!("[net] getaddrinfo {asked}: not IPv4"));
-            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME);
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, with_options);
         }
         let literal = host
             .parse::<std::net::Ipv4Addr>()
@@ -214,7 +242,7 @@ impl Cpu {
                 Level::Info,
                 &format!("[net] getaddrinfo {asked}: not a name"),
             );
-            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME);
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, with_options);
         };
         let [a, b, c, d] = address;
         self.log(
@@ -233,19 +261,100 @@ impl Cpu {
             .ipc_output_buffer(tls, 0)
             .is_some_and(|(_, size)| serialized.len() <= size as usize);
         if !fits {
-            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME);
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, with_options);
         }
         self.write_output_buffer(tls, 0, &serialized);
-        let mut results = [0u8; 12];
-        results[8..].copy_from_slice(&(serialized.len() as u32).to_le_bytes());
+        let results = results(with_options, 0, serialized.len() as u32);
         self.write_ipc_response(tls, 0, &[], &results, &[])
     }
 
-    /// A failed lookup. `SfdnsresRequestResults` is { return value, errno, bytes
-    /// written }; the error goes in the first word, errno stays 0.
-    fn sfdnsres_failure(&mut self, tls: u32, error: i32) -> Result<()> {
-        let mut results = [0u8; 12];
-        results[..4].copy_from_slice(&error.to_le_bytes());
+    /// `GetHostByNameRequest`, and its WithOptions form, with a network: a literal address
+    /// answers as itself, a name as its synthetic address, as `GetAddrInfoRequest` does. The
+    /// name is the first input buffer (the options, when there are any, the second), the
+    /// serialized `hostent` the first output buffer.
+    fn sfdnsres_host_by_name(&mut self, tls: u32, with_options: bool) -> Result<()> {
+        let name = self
+            .ipc_input_buffer(tls, 0)
+            .map(|(addr, size)| self.read_bytes(addr, size))
+            .unwrap_or_default();
+        let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        let name = String::from_utf8_lossy(&name[..end]).into_owned();
+        let literal = name
+            .parse::<std::net::Ipv4Addr>()
+            .ok()
+            .map(|ip| ip.octets());
+        let address = match literal {
+            Some(address) => Some(address),
+            None if is_hostname(&name) => self.net.synthesize(&name),
+            None => None,
+        };
+        let Some(address) = address else {
+            self.log(
+                Level::Info,
+                &format!("[net] gethostbyname {name}: not a name"),
+            );
+            return self.sfdnsres_host_failure(tls, with_options);
+        };
+        let [a, b, c, d] = address;
+        self.log(
+            Level::Info,
+            &format!("[net] gethostbyname {name} -> {a}.{b}.{c}.{d}"),
+        );
+        self.sfdnsres_hostent(tls, with_options, &name, address)
+    }
+
+    /// `GetHostByAddrRequest`, and its WithOptions form, with a network: a synthetic address
+    /// names the host it stands for. Anything else would need a reverse lookup the host does
+    /// not offer, and is not found.
+    fn sfdnsres_host_by_address(&mut self, tls: u32, with_options: bool) -> Result<()> {
+        let raw = self
+            .ipc_input_buffer(tls, 0)
+            .map(|(addr, size)| self.read_bytes(addr, size.min(4)))
+            .unwrap_or_default();
+        let address: Option<[u8; 4]> = raw.try_into().ok();
+        let name = address.and_then(|ip| self.net.name_of(ip).map(str::to_owned));
+        let (Some(address), Some(name)) = (address, name) else {
+            return self.sfdnsres_host_failure(tls, with_options);
+        };
+        self.sfdnsres_hostent(tls, with_options, &name, address)
+    }
+
+    /// Answer a host lookup with one address. The serialized `hostent` is libnx's
+    /// `_resolverDeserializeHostent` format: the name and its NUL, a big-endian alias count (no
+    /// aliases), the big-endian 16-bit family and address length, a big-endian address count,
+    /// then each address as a little-endian word, since libnx byte-swaps it into `s_addr`.
+    fn sfdnsres_hostent(
+        &mut self,
+        tls: u32,
+        with_options: bool,
+        name: &str,
+        address: [u8; 4],
+    ) -> Result<()> {
+        let mut serialized = name.as_bytes().to_vec();
+        serialized.push(0);
+        serialized.extend_from_slice(&0u32.to_be_bytes());
+        serialized.extend_from_slice(&u16::from(BSD_AF_INET).to_be_bytes());
+        serialized.extend_from_slice(&4u16.to_be_bytes());
+        serialized.extend_from_slice(&1u32.to_be_bytes());
+        serialized.extend_from_slice(&u32::from_be_bytes(address).to_le_bytes());
+        let fits = self
+            .ipc_output_buffer(tls, 0)
+            .is_some_and(|(_, size)| serialized.len() <= size as usize);
+        if !fits {
+            return self.sfdnsres_host_failure(tls, with_options);
+        }
+        self.write_output_buffer(tls, 0, &serialized);
+        let results = results(with_options, 0, serialized.len() as u32);
+        self.write_ipc_response(tls, 0, &[], &results, &[])
+    }
+
+    fn sfdnsres_host_failure(&mut self, tls: u32, with_options: bool) -> Result<()> {
+        self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND, with_options)
+    }
+
+    /// A failed lookup: the error in its word, errno 0, nothing written. See [`results`].
+    fn sfdnsres_failure(&mut self, tls: u32, error: i32, with_options: bool) -> Result<()> {
+        let results = results(with_options, error as u32, 0);
         self.write_ipc_response(tls, 0, &[], &results, &[])
     }
 }
@@ -396,5 +505,102 @@ mod tests {
             lookup("example.com", "gopher", None).0 .0,
             super::SFDNSRES_EAI_SERVICE
         );
+    }
+
+    /// `gethostbyname(name)` with the network on, as command `cmd` (2, or 10 with an options
+    /// buffer); the three reply words and the serialized `hostent`.
+    fn host_by_name(cpu: &mut Cpu, name: &str, cmd: u32) -> ([u32; 3], Vec<u8>) {
+        cpu.mem
+            .write_bytes(LOOKUP_HOST, format!("{name}\0").as_bytes())
+            .unwrap();
+        let mut send = vec![(LOOKUP_HOST, 0x100)];
+        if cmd == 10 {
+            send.push((LOOKUP_HINTS, 0x10));
+        }
+        write_buffer_request(cpu, cmd, &[0; 16], &send, &[(LOOKUP_OUT, 0x100)]);
+        cpu.sfdnsres_request(TLS, Some(cmd)).unwrap();
+        let word = |at: u32| cpu.mem.read_u32(TLS + at).unwrap();
+        let words = [word(0x20), word(0x24), word(0x28)];
+        let size = if cmd == 10 { words[0] } else { words[2] };
+        (words, cpu.read_bytes(LOOKUP_OUT, size))
+    }
+
+    fn networked() -> Cpu {
+        let mut cpu = Cpu::new();
+        cpu.net.enabled = true;
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.map_zero(LOOKUP_HOST, 0x2000).unwrap();
+        cpu
+    }
+
+    /// The name and the single IPv4 address of a serialized `hostent`, read as libnx's
+    /// `_resolverDeserializeHostent` does.
+    fn hostent(raw: &[u8]) -> (String, [u8; 4]) {
+        let end = raw.iter().position(|&b| b == 0).unwrap();
+        let name = String::from_utf8(raw[..end].to_vec()).unwrap();
+        let mut at = end + 1;
+        let be32 = |at: usize| u32::from_be_bytes(raw[at..at + 4].try_into().unwrap());
+        assert_eq!(be32(at), 0, "no aliases");
+        at += 4;
+        assert_eq!(raw[at..at + 4], [0, 2, 0, 4], "AF_INET, 4 bytes");
+        at += 4;
+        assert_eq!(be32(at), 1, "one address");
+        at += 4;
+        // libnx reads each address as a native word and byte-swaps it into `s_addr`.
+        let word = u32::from_le_bytes(raw[at..at + 4].try_into().unwrap());
+        assert_eq!(at + 4, raw.len());
+        (name, word.to_be_bytes())
+    }
+
+    #[test]
+    fn gethostbyname_answers_a_name_with_its_synthetic_address() {
+        let mut cpu = networked();
+        let expected = cpu.net.synthesize("server.example").unwrap();
+        let (words, raw) = host_by_name(&mut cpu, "server.example", 2);
+        assert_eq!(words[..2], [0, 0], "h_errno and errno");
+        assert_eq!(hostent(&raw), ("server.example".into(), expected));
+
+        let (_, raw) = host_by_name(&mut cpu, "1.2.3.4", 2);
+        assert_eq!(hostent(&raw).1, [1, 2, 3, 4], "a literal is itself");
+
+        let (words, _) = host_by_name(&mut cpu, "not a name", 2);
+        assert_eq!(words, [super::SFDNSRES_HOST_NOT_FOUND as u32, 0, 0]);
+    }
+
+    #[test]
+    fn the_with_options_forms_put_the_size_first() {
+        let mut cpu = networked();
+        let (words, raw) = host_by_name(&mut cpu, "server.example", 10);
+        assert_eq!(words, [raw.len() as u32, 0, 0]);
+        assert_eq!(hostent(&raw).0, "server.example");
+
+        let (words, _) = host_by_name(&mut cpu, "not a name", 10);
+        assert_eq!(words, [0, super::SFDNSRES_HOST_NOT_FOUND as u32, 0]);
+    }
+
+    #[test]
+    fn gethostbyaddr_names_a_synthetic_address_and_nothing_else() {
+        let mut cpu = networked();
+        let address = cpu.net.synthesize("server.example").unwrap();
+        for (ip, found) in [(address, true), ([1, 2, 3, 4], false)] {
+            cpu.mem.write_bytes(LOOKUP_HOST, &ip).unwrap();
+            write_buffer_request(
+                &mut cpu,
+                3,
+                &[0; 24],
+                &[(LOOKUP_HOST, 4)],
+                &[(LOOKUP_OUT, 0x100)],
+            );
+            cpu.sfdnsres_request(TLS, Some(3)).unwrap();
+            let h_errno = cpu.mem.read_u32(TLS + 0x20).unwrap();
+            if found {
+                let size = cpu.mem.read_u32(TLS + 0x28).unwrap();
+                assert_eq!(h_errno, 0);
+                let raw = cpu.read_bytes(LOOKUP_OUT, size);
+                assert_eq!(hostent(&raw), ("server.example".into(), address));
+            } else {
+                assert_eq!(h_errno, super::SFDNSRES_HOST_NOT_FOUND as u32);
+            }
+        }
     }
 }
