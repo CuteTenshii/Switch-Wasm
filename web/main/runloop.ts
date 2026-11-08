@@ -145,7 +145,6 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   if (steps < 0) {
     const err = await call('lastError');
     setState('fault');
-    log('Fault: ' + err, 'error');
     showGuestCrash(err || 'The guest returned a fault without a message.');
   } else if (await call('halted')) {
     const [fatal, next] = await Promise.all([call('guestFatal'), call('nextLoad')]);
@@ -154,7 +153,6 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
       showGuestCrash(fatal);
     } else {
       setState('halted');
-      log('Halted (ExitProcess)', 'info');
       if (next) launchNext(next);
     }
   } else if (!stepped) {

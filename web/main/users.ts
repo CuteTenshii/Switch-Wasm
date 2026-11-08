@@ -102,8 +102,8 @@ export async function reloadProfiles(): Promise<void> {
 
 export async function stageUsers(): Promise<void> {
   if (!hasSession()) return;
-  const refused = await call('usersSet', profiles.map(toRecord), current);
-  if (refused) log(`Profiles: the core refused the list (code ${refused}).`, 'error');
+  // A refused list is logged by the core with its reason.
+  await call('usersSet', profiles.map(toRecord), current);
 }
 
 // A running title keeps the user it started with; an idle session gets changes now.

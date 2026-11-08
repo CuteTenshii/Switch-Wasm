@@ -1,5 +1,6 @@
 //! The console's user accounts.
 
+use switch_core::trace::Level;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::session;
@@ -42,11 +43,16 @@ pub fn switch_users_commit(current: &str) -> u32 {
     use switch_core::cpu::UsersRefused;
     let s = session();
     let users = std::mem::take(&mut s.staged_users);
-    match s.cpu.set_users(users, uid_from_hex(current)) {
-        Ok(()) => 0,
-        Err(UsersRefused::Count) => 1,
-        Err(UsersRefused::ZeroUid) => 2,
-        Err(UsersRefused::DuplicateUid) => 3,
-        Err(UsersRefused::UnknownCurrent) => 4,
-    }
+    let (code, why) = match s.cpu.set_users(users, uid_from_hex(current)) {
+        Ok(()) => return 0,
+        Err(UsersRefused::Count) => (1, "it needs one to eight users"),
+        Err(UsersRefused::ZeroUid) => (2, "a user has a zero uid"),
+        Err(UsersRefused::DuplicateUid) => (3, "two users share a uid"),
+        Err(UsersRefused::UnknownCurrent) => (4, "the playing user is not in it"),
+    };
+    s.cpu.log(
+        Level::Error,
+        &format!("Profiles: the core refused the list ({why})."),
+    );
+    code
 }

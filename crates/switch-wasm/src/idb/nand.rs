@@ -46,7 +46,17 @@ struct Title {
 #[wasm_bindgen]
 pub async fn switch_restore_nand() -> u32 {
     match restore().await {
-        Ok(registered) => registered,
+        Ok(registered) => {
+            if registered > 0 {
+                if let Some(s) = session_if_live() {
+                    s.cpu.log(
+                        Level::Info,
+                        &format!("NAND: {registered} system data archive(s) restored."),
+                    );
+                }
+            }
+            registered
+        }
         Err(err) => {
             if let Some(s) = session_if_live() {
                 s.cpu.log(

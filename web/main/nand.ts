@@ -86,9 +86,8 @@ export async function initNand(): Promise<void> {
   }
   renderNandTitles();
   updateFirmwareState();
-  void beginArchiveRestore().then((registered) => {
-    if (registered) log('NAND: ' + registered + ' system data archive(s) restored.', 'info');
-  }, (err) => {
+  // The core logs how many archives it restored.
+  void beginArchiveRestore().catch((err) => {
     log('NAND: the archives could not be registered (' + (err as Error).message + ')', 'error');
   });
 }

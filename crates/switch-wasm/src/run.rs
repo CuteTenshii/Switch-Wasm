@@ -1,5 +1,6 @@
 //! Running the guest and reading its state.
 
+use switch_core::trace::Level;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::session;
@@ -21,13 +22,19 @@ pub fn switch_run(max_steps: f64) -> f64 {
     }
     #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
     crate::idb::usage::refresh_if_due(s.cpu.take_storage_usage_wanted());
+    let was_halted = s.cpu.halted;
     let steps = match s.cpu.run(max_steps as u64) {
         Ok(report) => report.steps as f64,
         Err(e) => {
             s.last_error = e.to_string();
+            s.cpu.log(Level::Error, &format!("Fault: {e}"));
             -1.0
         }
     };
+    // A fatal report is the guest crashing, which the page shows in its place.
+    if s.cpu.halted && !was_halted && s.cpu.guest_fatal().is_none() {
+        s.cpu.log(Level::Info, "Halted (ExitProcess)");
+    }
     crate::input::release_if_seen(&mut s.cpu);
     #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
     {

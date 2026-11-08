@@ -279,6 +279,13 @@ fn users_are_staged_committed_and_read_back() {
     assert_eq!(switch_users_commit("09000000000000000900000000000000"), 4);
     assert_eq!(session().cpu.users().len(), 2);
     assert!(!session().cpu.take_profile_edits());
+    // The page shows why from the log rather than the code.
+    let log = switch_log_drain();
+    assert!(
+        log.iter()
+            .any(|line| line.contains("refused the list (the playing user is not in it)")),
+        "{log:?}"
+    );
 }
 
 #[test]
