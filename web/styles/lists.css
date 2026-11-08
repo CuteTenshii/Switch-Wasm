@@ -1,0 +1,199 @@
+/* dropzone */
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 18px 12px;
+  text-align: center;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.dropzone.drag, .dropzone:hover {
+  border-color: var(--accent);
+  background: #10182a;
+}
+.dropzone-title {
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+.dropzone-sub { font-size: var(--text-xs); }
+.dropzone label {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.dropzone code {
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+/* list rows */
+
+/* The NAND's installed programs; the only way to start a system applet. */
+.nand-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--chrome-hi);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.row-item:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-hi);
+}
+.row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.row-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.row-sub {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.row-action {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  transition: color .12s;
+}
+.row-item:hover .row-action { color: var(--accent); }
+
+.empty-note {
+  padding: 10px 0 2px;
+  text-align: center;
+}
+
+/* container contents */
+
+.nsp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+.nsp-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--border);
+}
+.nsp-list li:last-child { border-bottom: none; }
+.nsp-list .name { overflow-wrap: anywhere; }
+.nsp-list .size {
+  flex: none;
+  color: var(--muted);
+}
+.nsp-list li.clickable { cursor: pointer; }
+.nsp-list li.clickable:hover {
+  background: var(--chrome-hi);
+  color: var(--accent);
+}
+.nsp-list li.clickable .size { color: inherit; }
+
+.nca-info {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--chrome-hi);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.nca-info div { padding: 2px 0; }
+.nca-info .k { color: var(--muted); }
+.nca-actions {
+  display: flex;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.paired-note { border-left: 3px solid var(--accent); }
+
+#nsp-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#nsp-result:empty { display: none; }
+
+/* Title identity above the file list; wraps so a missing icon leaves no hole. */
+.title-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--chrome-hi);
+}
+.title-icon {
+  flex: none;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-sm);
+  background: var(--chrome);
+  object-fit: cover;
+}
+.title-meta {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.title-name {
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.title-publisher {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.title-tags {
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+.title-card .nca-info {
+  flex-basis: 100%;
+  padding: 8px 0 0;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
+}

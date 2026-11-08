@@ -1,0 +1,234 @@
+/* panel controls */
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
+.check:hover { color: var(--text); }
+.check input[type="checkbox"] {
+  appearance: none;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--chrome-hi);
+  cursor: pointer;
+  position: relative;
+  transition: background .12s, border-color .12s;
+}
+.check input[type="checkbox"]:hover { border-color: var(--border-hi); }
+.check input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* The tick is a rotated corner, which stays sharp at any zoom. */
+.check input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4.5px;
+  top: 1.5px;
+  width: 3px;
+  height: 7px;
+  border-right: 2px solid #08101f;
+  border-bottom: 2px solid #08101f;
+  transform: rotate(42deg);
+}
+
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.field-label { font-family: var(--mono); }
+.num {
+  width: 58px;
+  background: var(--chrome-hi);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  font: inherit;
+  font-size: var(--text-xs);
+}
+.addr {
+  width: 15em;
+  max-width: 100%;
+  background: var(--chrome-hi);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+.addr:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.net-table th:first-child,
+.net-table td:first-child {
+  width: 46%;
+  overflow-wrap: anywhere;
+}
+.num:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.regval {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.debug-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 5px 16px;
+  margin: 0 0 12px;
+  font-size: var(--text-xs);
+}
+.debug-caption { margin: 0 0 5px; }
+.debug-totals div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.debug-totals dt {
+  flex: none;
+  color: var(--muted);
+}
+.debug-totals dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.debug-list {
+  margin: 0;
+  padding-left: 16px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.debug-timings {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.debug-timings caption {
+  padding-bottom: 5px;
+  color: var(--muted);
+  font-family: var(--sans);
+  text-align: left;
+}
+.debug-timings th,
+.debug-timings td {
+  padding: 4px 3px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+.debug-timings th:first-child {
+  width: 40%;
+  padding-left: 0;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-weight: 400;
+  text-align: left;
+}
+.debug-timings thead th {
+  color: var(--muted);
+  font-weight: 600;
+}
+.debug-timings thead th:first-child { font-weight: 600; }
+.debug-timings tbody td { color: var(--text); }
+
+.memory-history { margin: 0 0 12px; }
+.memory-history figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.memory-plot { position: relative; }
+.memory-plot svg {
+  display: block;
+  width: 100%;
+  height: 72px;
+  overflow: visible;
+}
+.memory-plot svg:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The viewBox stretches to the panel, so strokes keep their width in screen pixels. */
+.memory-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.memory-baseline,
+.memory-rule {
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+.memory-baseline { stroke: var(--border); }
+.memory-rule { stroke: var(--muted); }
+/* HTML, not SVG: a circle in a stretched viewBox would draw as an ellipse. */
+.memory-marker {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--chrome-hi);
+  border-radius: 50%;
+  background: var(--accent);
+  transform: translate(-50%, -50%);
+  box-sizing: content-box;
+  pointer-events: none;
+}
+.memory-scale {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.memory-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+}
+.memory-readout {
+  min-height: 1.55em;
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.memory-regions th:first-child { width: 62%; }
+.memory-regions th[scope="row"] { white-space: normal; }
+.memory-range {
+  display: block;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
