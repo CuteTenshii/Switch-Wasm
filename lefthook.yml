@@ -37,6 +37,10 @@ pre-push:
       run: make test
       fail_text: "Host tests failed."
 
+    - name: unit
+      run: bun run test:unit
+      fail_text: "Unit tests failed."
+
     - name: e2e
       run: bun run test:e2e
       fail_text: "Page tests failed."

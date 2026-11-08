@@ -48,6 +48,9 @@ jobs:
       - name: Lint CSS
         run: bun run stylelint
 
+      - name: Unit tests
+        run: bun run test:unit
+
   test:
     runs-on: ubuntu-latest
     steps:
