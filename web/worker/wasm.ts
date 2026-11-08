@@ -30,7 +30,8 @@ export function parseOr<T>(text: string, fallback: T): T {
 // What a thrown `err` says. A Rust panic traps as a bare `unreachable`, so the hook's message
 // goes with it.
 export function explainFailure(err: unknown): string {
-  const why = String(err);
+  // A plain Error's name says nothing; a `RuntimeError` from a trap keeps it.
+  const why = err instanceof Error && err.name === 'Error' ? err.message : String(err);
   try {
     const panic = coreLoaded() ? switch_panic_message() : '';
     return panic ? why + ' - ' + panic : why;
