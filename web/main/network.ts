@@ -6,10 +6,11 @@ import type { NetState } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { $ } from './dom';
 import { log } from './log';
-import { call, onNetState } from './rpc';
+import { call, onNetState, whenReady } from './rpc';
 
 const DEFAULT_URL = 'ws://127.0.0.1:18787';
 const URL_KEY = 'relay-url';
+const ON_KEY = 'relay-on';
 
 interface Connection {
   id: number;
@@ -89,20 +90,28 @@ onNetState((next) => {
   void refresh();
 });
 
-button.addEventListener('click', () => {
-  if (on()) {
-    void call('disconnectNetwork');
-    return;
-  }
+function connect(): void {
   const url = urlInput.value.trim();
   if (!/^wss?:\/\//.test(url)) {
     say('The relay address starts with ws:// or wss://.');
     return;
   }
   localStorage.setItem(URL_KEY, url);
+  localStorage.setItem(ON_KEY, '1');
   say('');
   void call('connectNetwork', url).catch((e: Error) => say(`Relay: ${e.message}`));
+}
+
+button.addEventListener('click', () => {
+  if (on()) {
+    localStorage.removeItem(ON_KEY);
+    void call('disconnectNetwork');
+    return;
+  }
+  connect();
 });
+
+if (localStorage.getItem(ON_KEY) === '1') void whenReady().then(connect);
 
 // Only while someone can see the table, and the guest can have connections.
 setInterval(() => {

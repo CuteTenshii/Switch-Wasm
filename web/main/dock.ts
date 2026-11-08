@@ -3,10 +3,12 @@
 
 import { $ } from './dom';
 import { log } from './log';
-import { call } from './rpc';
+import { call, whenReady } from './rpc';
+
+const DOCKED_KEY = 'docked';
 
 const button = $<HTMLButtonElement>('btn-dock');
-let docked = false;
+let docked = localStorage.getItem(DOCKED_KEY) === '1';
 
 function render(): void {
   button.textContent = docked ? 'Docked' : 'Handheld';
@@ -16,6 +18,7 @@ function render(): void {
 button.addEventListener('click', () => {
   docked = !docked;
   render();
+  localStorage.setItem(DOCKED_KEY, docked ? '1' : '0');
   void call('setOperationMode', docked);
   log(
     docked
@@ -25,3 +28,4 @@ button.addEventListener('click', () => {
 });
 
 render();
+if (docked) void whenReady().then(() => call('setOperationMode', true));
