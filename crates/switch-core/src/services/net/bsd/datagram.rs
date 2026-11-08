@@ -413,7 +413,7 @@ mod tests {
         sendto(&mut cpu, fd, b"q", a, 53);
         cpu.take_net_commands();
         let mut v6 = [0u8; 16];
-        v6[..2].copy_from_slice(&[0x26, 0x06]);
+        v6[..4].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
         v6[15] = 7;
         cpu.deliver_net_events([NetEvent::Datagram {
             stream: 1,
@@ -430,7 +430,7 @@ mod tests {
             cpu.take_net_commands(),
             vec![NetCommand::SendTo {
                 stream: 1,
-                peer: Peer::Name("2606::7".into()),
+                peer: Peer::Name("2001:db8::7".into()),
                 port: 3478,
                 data: b"back".to_vec()
             }]

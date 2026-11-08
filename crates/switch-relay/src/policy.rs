@@ -233,12 +233,12 @@ mod tests {
     fn only_routable_ipv6_addresses_are_allowed() {
         let policy = closed();
         for allowed in [
-            "2606:4700:4700::1111",
-            "2a00:1450:4001:82a::200e",
-            "2001:0:4136:e378::1",
-            "64:ff9b::808:808",
-            "2002:0808:0808::1",
-            "::ffff:8.8.8.8",
+            "2600:1:2::3",
+            "2a01:2:3::4",
+            "2001:0:102:304::1",
+            "64:ff9b::102:304",
+            "2002:102:304::1",
+            "::ffff:1.2.3.4",
         ] {
             let address: Ipv6Addr = allowed.parse().unwrap();
             assert!(policy.address_allowed(address), "{allowed}");

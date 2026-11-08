@@ -276,15 +276,15 @@ mod tests {
     fn an_ipv6_source_stands_as_a_synthetic_address_that_names_it() {
         let mut bridge = NetBridge::default();
         let mut v6 = [0u8; 16];
-        v6[..4].copy_from_slice(&[0x26, 0x06, 0x47, 0x00]);
+        v6[..4].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
         v6[15] = 1;
         let address = bridge.address_for(&Source::V6(v6)).unwrap();
         assert_eq!(address[..2], [198, 18]);
-        assert_eq!(bridge.peer_for(address), Peer::Name("2606:4700::1".into()));
+        assert_eq!(bridge.peer_for(address), Peer::Name("2001:db8::1".into()));
         assert_eq!(bridge.address_for(&Source::V6(v6)), Some(address), "stable");
         assert_eq!(
-            bridge.address_for(&Source::V4([8, 8, 8, 8])),
-            Some([8, 8, 8, 8])
+            bridge.address_for(&Source::V4([1, 2, 3, 4])),
+            Some([1, 2, 3, 4])
         );
         let named = bridge.synthesize("dns.example").unwrap();
         assert_eq!(

@@ -619,10 +619,10 @@ mod tests {
                 stream: RELAY_STREAMS,
                 listener: 3,
                 port: 0x1f90,
-                peer: Peer::Address([8, 8, 4, 4]),
+                peer: Peer::Address([1, 2, 3, 4]),
             }
             .encode(),
-            [0x89, 0, 0, 0, 0x80, 3, 0, 0, 0, 0x90, 0x1f, 0, 8, 8, 4, 4]
+            [0x89, 0, 0, 0, 0x80, 3, 0, 0, 0, 0x90, 0x1f, 0, 1, 2, 3, 4]
         );
     }
 
