@@ -20,8 +20,14 @@ fn bootstrap_provides_stack_and_low_memory() {
         0x1234_5678
     );
 
-    // Untouched low memory reads as zero instead of faulting.
+    // Untouched memory above the reserved low region reads as zero instead of faulting.
     assert_eq!(cpu.mem.read_u32(0x244498).unwrap(), 0);
+    // The first 2 MiB is not part of the process address space.
+    assert!(cpu.mem.read_u32(0xc).is_err());
+    assert!(cpu
+        .mem
+        .read_u32(switch_core::cpu::GUEST_SPACE_START - 4)
+        .is_err());
     // Writes allocate a private page on first touch.
     cpu.mem.write_u32(0xb00, 0xDEAD_BEEF).unwrap();
     assert_eq!(cpu.mem.read_u32(0xb00).unwrap(), 0xDEAD_BEEF);

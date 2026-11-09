@@ -97,6 +97,10 @@ impl OperationMode {
 pub const GUEST_STACK_REGION_ADDR: u32 = 0x1800_0000;
 pub const GUEST_STACK_REGION_SIZE: u32 = SELF_RETURN_TRAMPOLINE - GUEST_STACK_REGION_ADDR;
 
+/// Start of the guest address space: below it faults, as on Horizon, so a NULL
+/// dereference aborts where it happens instead of reading zeros.
+pub const GUEST_SPACE_START: u32 = 0x0020_0000;
+
 /// End of the guest address space: below is soft-mapped by [`Cpu::bootstrap`],
 /// above faults (hbmenu probes the top to size the space).
 pub const GUEST_SPACE_END: u32 = 0xFF00_0000;

@@ -17,7 +17,7 @@ impl Cpu {
     /// The address-space half of [`Cpu::bootstrap`]: the stack and the exit trampolines.
     pub(crate) fn map_runtime(&mut self) {
         // The whole guest space is lazily mapped: reads see zeros, writes allocate on first touch.
-        self.mem.soft_map_zero(0, GUEST_SPACE_END);
+        self.mem.soft_map_zero(GUEST_SPACE_START, GUEST_SPACE_END);
         let _ = self
             .mem
             .map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
