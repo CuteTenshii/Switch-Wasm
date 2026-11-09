@@ -9,8 +9,13 @@ bun install
 make
 ```
 
-Requires `rustup target add wasm32-unknown-unknown`, and [bun](https://bun.com)
-for the frontend.
+Requires [Bun](https://bun.com) for the frontend, and the pinned nightly Rust toolchain, which the browser build needs to rebuild std with atomics:
+
+```sh
+rustup toolchain install nightly-2026-11-07 --profile minimal --component rust-src --target wasm32-unknown-unknown
+```
+
+It also needs a `wasm-bindgen` CLI matching the version in `Cargo.lock`.
 
 ## Serve
 
@@ -19,8 +24,7 @@ bun run dev       # Vite dev server, http://localhost:8000
 bun run preview   # the built site from dist/
 ```
 
-`dev` needs the core built once with `make wasm`, since the frontend imports
-it; `preview` serves what `make assets` built.
+`dev` needs the core built once with `make wasm`, since the frontend imports it. `preview` serves what `make assets` built.
 
 ## Acknowledgments
 
