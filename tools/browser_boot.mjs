@@ -180,10 +180,10 @@ try {
   if (titleKeys) await page.setInputFiles('#title-keys', titleKeys);
   if (firmware) {
     const ncas = readdirSync(firmware).filter((name) => /\.nca$/i.test(name));
-    await page.setInputFiles('#firmware-ncas', ncas.map((name) => join(firmware, name)));
-    // The page logs `Installed N title(s)` once every archive is registered.
+    await page.setInputFiles('#firmware-dir', firmware);
+    // The firmware status reads `Installed N title(s)` once every archive is registered.
     let progress = '';
-    while (!(await page.locator('#console', { hasText: /Installed \d+ title/ }).count())) {
+    while (!/Installed \d+ title/.test(await page.locator('#firmware-status').innerText())) {
       await page.waitForTimeout(2000);
       const now = await page.locator('#firmware-state').innerText();
       if (now !== progress) say(`firmware: ${now}`);
