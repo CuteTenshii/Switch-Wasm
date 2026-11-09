@@ -423,6 +423,7 @@ impl Cpu {
             busy_at: cycles,
             lent: false,
             kernel_pending: false,
+            sync_cancelled: false,
         });
     }
 }

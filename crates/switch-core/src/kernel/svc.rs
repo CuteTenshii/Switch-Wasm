@@ -502,12 +502,12 @@ impl Cpu {
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
-            0x17 | 0x28 | 0x5F => {
-                // CancelSynchronization / ReturnFromException / FlushProcessDataCache
+            0x28 | 0x5F => {
+                // ReturnFromException / FlushProcessDataCache
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
-            0x19 => {
+            0x17 => {
                 // ResetSignal(handle): clear an event and report whether it was signalled.
                 const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
                 let handle = self.read_zr(0);
@@ -524,6 +524,19 @@ impl Cpu {
                         RESULT_OK
                     } else {
                         RESULT_INVALID_STATE
+                    },
+                );
+                Ok(())
+            }
+            0x19 => {
+                // CancelSynchronization(thread): wakes a `nn::os::MultiWait` waiting on no handle.
+                let cancelled = self.cancel_synchronization(self.read_zr(0));
+                self.write_zr(
+                    0,
+                    if cancelled {
+                        RESULT_OK
+                    } else {
+                        RESULT_INVALID_HANDLE
                     },
                 );
                 Ok(())
@@ -563,6 +576,7 @@ impl Cpu {
                 // WaitSynchronization(out_index, handles, num_handles, timeout). X1 is the
                 // index of the signalled handle.
                 const RESULT_TIMED_OUT: u64 = 0xEA01;
+                const RESULT_CANCELLED: u64 = 1 | (118 << 9);
                 let handles_ptr = self.read_zr(1) as u32;
                 let count = (self.read_zr(2) as u32).min(0x40);
                 let timeout = self.svc_arg64(3, 0, 3) as i64;
@@ -611,18 +625,13 @@ impl Cpu {
                     self.yield_thread();
                     return Ok(());
                 }
-                // Nothing fired. A poll times out. A blocking wait parks only while another
-                // thread can run (timing out would hand `MultiWaitImpl::WaitAny` a null holder).
-                // Results are written before yielding, which switches register files.
-                if timeout == 0 {
-                    self.write_zr(0, RESULT_TIMED_OUT);
+                if self.take_sync_cancelled() {
+                    self.write_zr(0, RESULT_CANCELLED);
                     return Ok(());
                 }
-                // A wait on no handles can never be satisfied and either answer jumps to 0,
-                // so rewind onto the `svc` and yield.
-                if handles.is_empty() && self.has_other_runnable() {
-                    self.pc = self.pc.wrapping_sub(4);
-                    self.yield_thread();
+                // Nothing fired. A poll times out; a blocking wait parks.
+                if timeout == 0 {
+                    self.write_zr(0, RESULT_TIMED_OUT);
                     return Ok(());
                 }
                 // A blocking wait on vsync is certain to fire, so park until the tick.
@@ -1431,6 +1440,23 @@ mod tests {
             "a kept ideal core the new mask leaves out"
         );
         assert_eq!(set_core_mask(&mut cpu, 0xdead, 1, 0b011), 1 | (114 << 9));
+    }
+
+    #[test]
+    fn a_cancelled_thread_answers_its_next_wait_once() {
+        const RESULT_CANCELLED: u64 = 1 | (118 << 9);
+        let mut cpu = Cpu::new();
+        cpu.write_zr(0, CURRENT_THREAD_PSEUDO_HANDLE);
+        cpu.horizon_syscall(0x19).unwrap();
+        assert_eq!(cpu.read_zr(0), 0);
+        cpu.write_zr(2, 0);
+        cpu.write_zr(3, u64::MAX);
+        cpu.horizon_syscall(0x18).unwrap();
+        assert_eq!(cpu.read_zr(0), RESULT_CANCELLED);
+        assert!(!cpu.take_sync_cancelled());
+        cpu.write_zr(0, 0xdead);
+        cpu.horizon_syscall(0x19).unwrap();
+        assert_eq!(cpu.read_zr(0), 1 | (114 << 9));
     }
 
     fn thread_id(cpu: &mut Cpu, handle: u64) -> (u64, u64) {

@@ -77,6 +77,8 @@ pub struct ThreadContext {
     pub(crate) lent: bool,
     /// Handed back on an instruction only core 0 may run, so not lent again first.
     pub(crate) kernel_pending: bool,
+    /// The next `svcWaitSynchronization` answers cancelled.
+    pub(crate) sync_cancelled: bool,
 }
 
 impl ThreadContext {
@@ -142,6 +144,7 @@ impl Cpu {
                     busy_at: self.cycles,
                     lent: false,
                     kernel_pending: false,
+                    sync_cancelled: false,
                 });
             self.current_thread = 0;
         }
@@ -216,6 +219,7 @@ impl Cpu {
                 busy_at: self.cycles,
                 lent: false,
                 kernel_pending: false,
+                sync_cancelled: false,
             });
         let line = format!(
             "{} created by {}: arg {arg:#x}, stack top {stack_top:#x}, priority {priority}, \
@@ -454,6 +458,32 @@ impl Cpu {
         } else {
             handle
         }
+    }
+
+    /// `svcCancelSynchronization`; `false` for a non-thread handle.
+    pub(crate) fn cancel_synchronization(&mut self, handle: u64) -> bool {
+        let handle = self.resolve_thread_handle(handle);
+        self.ensure_main_thread();
+        let Some(thread) = self
+            .process_mut()
+            .threads
+            .iter_mut()
+            .find(|t| t.handle == handle)
+        else {
+            return false;
+        };
+        thread.sync_cancelled = true;
+        if matches!(thread.state, ThreadState::WaitEvent { .. }) {
+            thread.state = ThreadState::Runnable;
+        }
+        true
+    }
+
+    /// Whether the running thread was cancelled, clearing the mark.
+    pub(crate) fn take_sync_cancelled(&mut self) -> bool {
+        self.ensure_main_thread();
+        let index = self.current_thread;
+        std::mem::take(&mut self.process_mut().threads[index].sync_cancelled)
     }
 
     /// The main thread's priority from `main.npdm`.

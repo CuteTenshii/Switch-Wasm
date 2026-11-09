@@ -889,7 +889,7 @@ pub fn binder_parcel(body: &[u8]) -> Vec<u8> {
 pub fn reset_signal(cpu: &mut Cpu, handle: u32) -> u64 {
     cpu.set_reg(0, u64::from(handle));
     let pc = cpu.get_pc();
-    cpu.mem.map(pc, &svc(0x19).to_le_bytes()).unwrap();
+    cpu.mem.map(pc, &svc(0x17).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     cpu.set_pc(pc);
     cpu.read_x(0)
