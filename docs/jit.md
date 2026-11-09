@@ -16,12 +16,16 @@ How AArch64 blocks are translated, run, and written out as wasm.
 
 ## `crates/switch-core/src/cpu/jit/a32/`
 
-- The A32 translator is a separate, smaller pipeline: `decode.rs` turns each ARM word into an `a32::Op` (pre-decoded fields, the condition on every op), `exec.rs` runs it, and `Jit::a32` caches the blocks. There is no emitted form yet; `run_translated` picks `run_jit` or `run_a32_jit` by the running thread's mode, and each returns when the mode changes.
+- The A32 translator is a separate, smaller pipeline: `decode.rs` turns each ARM word into an `a32::Op` (pre-decoded fields, the condition on every op), `exec.rs` runs it, and `Jit::a32` caches the blocks. `run_translated` picks `run_jit` or `run_a32_jit` by the running thread's mode, and each returns when the mode changes.
 - A block ends at the first instruction that can write the PC (`B`, `BL`, `BX`, `SVC`, a data-processing or load destination of `r15`, `LDM` with `pc`, `BLX`), as `a32::Term`. Branches are not followed, and a conditional terminator that is skipped falls through to the next address.
 - Ops call the interpreter's helpers (`a32_alu`, `a32_single`, `a32_extra`, `a32_block_transfer`, `shift_c`), so semantics are shared. `self.pc` is set before every op, which is what makes `r15` reads and the helpers' own `pc + 4` correct.
 - Anything else (multiplies, media, VFP, NEON, coprocessor, `MRS`/`MSR`, exclusives) is `Kind::Interpret`, which calls `execute_a32` and so tests the condition itself; an instruction of those that can write the PC is `TermKind::Interpret`.
 - Invalidation, per-process caches and the retire/clock accounting are the A64 path's: `Jit::invalidate` and `clear` drop A32 blocks too.
+- Hot blocks are emitted (`emit/a32.rs`) as the leading ops the emitter can write, then a stop; `exec` carries on from the count with the op walk, so an op with no writer (a multiply, a shift by register, `LDRD`, media, VFP, NEON) ends the compiled part of its block, not the block's chance. A block written whole ends in a `B`, `BL` or `BX` that leaves with `pc` set and, where the engine has tail calls, jumps into the next compiled block through the same chain table as A64. `SVC`, an interpreted terminator and a `BX` to an odd address are left to `exec`.
+- Every memory access checks the page table first and hands the instruction back, as in A64. `LDM` and `STM` check all their addresses before making any access, so handing one back leaves no register or word half done; an `LDM` that loads its own base is not written.
+- The extra loads (`LDRH` and friends) write the base last, a single load into its own base keeps the loaded value: the emitter follows the interpreter in each.
 - T32 has no translation because the interpreter has no T32.
+- `examples/a32_emit_selftest.rs` generates random data-processing, load/store, `LDM`/`STM` and branch encodings by field, emits each under several register sets and flag values, and records the interpreter's result; `node tools/emit_difftest.mjs --out=target/a32-emit-selftest` runs the modules under V8. `tools/jit_wasm_check.mjs` boots small A32 and A64 ELFs in the browser build, JIT on and off, after `make wasm`.
 - `tests/jit_a32_test.rs` runs `llvm-mc` programs both ways and compares registers, flags, cycles, steps and memory at every step budget.
 
 ## `crates/switch-core/src/cpu/jit/ir.rs`

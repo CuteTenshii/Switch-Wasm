@@ -3,8 +3,22 @@
 use super::decode::translate;
 use super::{Block, Kind, Offset, Op, Operand, Term, TermKind, ALWAYS};
 use crate::cpu::a32::shift::{shift_by_register, shift_c};
-use crate::cpu::{Cpu, ExecMode, Result, RunReport};
+use crate::cpu::jit::emit::{emit_a32, COUNT_MASK, LEFT};
+use crate::cpu::jit::exec::{HOT, MAX_MISSES};
+use crate::cpu::jit::host;
+use crate::cpu::jit::ir::Code;
+use crate::cpu::{Cpu, ExecMode, Layout, Result, RunReport};
 use std::rc::Rc;
+
+/// What a visit to an emitted block did.
+struct Entered {
+    /// Instructions the block that answered retired.
+    retired: usize,
+    /// Whether it left through a branch, with the target in `pc`.
+    left: bool,
+    /// Instructions retired by the blocks jumped out of before it.
+    chained: u64,
+}
 
 impl Cpu {
     /// [`Cpu::run`] over translated A32 blocks. The step budget is exact: a
@@ -12,13 +26,18 @@ impl Cpu {
     /// running thread is no longer A32.
     pub(in crate::cpu) fn run_a32_jit(&mut self, max_steps: u64) -> Result<RunReport> {
         let mut steps = 0u64;
+        let watches = self.mem.watchpoints_armed();
+        if watches != self.jit.watches {
+            self.jit.clear();
+            self.jit.watches = watches;
+        }
         while steps < max_steps && !self.halted {
             self.preemption_point();
             if self.handback.is_some() || self.mode != ExecMode::A32 {
                 break;
             }
-            let block = self.a32_block_at(self.pc);
-            let ran = self.exec_a32_block(&block, max_steps - steps)?;
+            let mut block = self.a32_block_at(self.pc);
+            let ran = self.exec_a32_block(&mut block, max_steps - steps)?;
             self.slice_used += ran;
             steps += ran;
         }
@@ -47,17 +66,29 @@ impl Cpu {
         }
         self.jit.translated += 1;
         self.jit.executed += 1;
-        self.jit.a32.insert(block.clone());
+        self.jit.insert_a32(block.clone());
         block
     }
 
     /// Run at most `budget` of a block's instructions, returning how many
     /// retired. `self.pc` tracks the current instruction, so faults match the
-    /// interpreter.
-    fn exec_a32_block(&mut self, block: &Block, budget: u64) -> Result<u64> {
+    /// interpreter. A chain of compiled blocks leaves `block` on the last one.
+    fn exec_a32_block(&mut self, block: &mut Rc<Block>, budget: u64) -> Result<u64> {
+        let entered = self.enter_a32_emitted(block, budget);
+        // Blocks the visit left through a branch before the one that answered.
+        self.cycles += entered.chained;
+        self.steps += entered.chained;
+        let budget = budget - entered.chained;
+        let block: &Block = block;
+        if entered.left {
+            // The branch set `pc`; its terminator, if it had one, retired with it.
+            self.retire_run(block.start, entered.retired);
+            return Ok(entered.chained + entered.retired as u64);
+        }
+        let first = entered.retired;
         let body = (block.ops.len() as u64).min(budget) as usize;
-        let mut pc = block.start;
-        for (i, op) in block.ops[..body].iter().enumerate() {
+        let mut pc = block.start.wrapping_add(4 * first as u32);
+        for (i, op) in block.ops[..body].iter().enumerate().skip(first) {
             if op.cond != ALWAYS && !self.condition_holds(op.cond) {
                 pc = pc.wrapping_add(4);
                 continue;
@@ -90,7 +121,99 @@ impl Cpu {
             }
             _ => self.pc = pc,
         }
-        Ok(ran)
+        Ok(entered.chained + ran)
+    }
+
+    /// Run `block`'s emitted form, and the compiled blocks it jumps into,
+    /// leaving `block` on the one that answered. The op walk carries on from
+    /// what that one retired. A visit that retires nothing counts against it.
+    fn enter_a32_emitted(&mut self, block: &mut Rc<Block>, budget: u64) -> Entered {
+        const NOTHING: Entered = Entered {
+            retired: 0,
+            left: false,
+            chained: 0,
+        };
+        let Code::Ready { entry, misses } = block.code.get() else {
+            self.warm_a32(block);
+            return NOTHING;
+        };
+        if block.emitted.get() as u64 > budget {
+            return NOTHING;
+        }
+        self.jit.entered_emitted += 1;
+        let fuel = self.chain_fuel(budget);
+        self.jit.chain.fuel = fuel;
+        self.jit.chain.origin = self.cycles.wrapping_add_signed(i64::from(fuel));
+        self.jit.chain.hops = 0;
+        let state = self as *mut Cpu;
+        // SAFETY: `entry` came from `host::install` for this block and is only
+        // released after it leaves the chain table; it was emitted against
+        // `Layout::of_cpu`, as were the blocks it can jump to.
+        let answer = unsafe { host::enter(entry, state) };
+        let entered = Entered {
+            retired: (answer & COUNT_MASK) as usize,
+            left: answer & LEFT != 0,
+            chained: (fuel - self.jit.chain.fuel) as u64,
+        };
+        let hops = u64::from(self.jit.chain.hops);
+        if hops != 0 {
+            self.jit.chained += hops;
+            self.jit.executed += hops;
+            self.jit.entered_emitted += hops;
+            *block = self
+                .jit
+                .a32
+                .get(self.jit.chain.last)
+                .expect("the chain table holds only cached blocks");
+            if let Code::Ready { entry, misses } = block.code.get() {
+                if misses != 0 {
+                    block.code.set(Code::Ready { entry, misses: 0 });
+                }
+            }
+            return entered;
+        }
+        if entered.retired == 0 && !entered.left {
+            if misses + 1 >= MAX_MISSES {
+                self.jit.unchain_a32(block);
+                block.drop_code();
+            } else {
+                block.code.set(Code::Ready {
+                    entry,
+                    misses: misses + 1,
+                });
+            }
+        } else if misses != 0 {
+            block.code.set(Code::Ready { entry, misses: 0 });
+        }
+        entered
+    }
+
+    /// Count a visit to an unemitted block and emit it after [`HOT`] visits.
+    fn warm_a32(&mut self, block: &Block) {
+        let Code::Cold(seen) = block.code.get() else {
+            return;
+        };
+        if seen + 1 < HOT {
+            block.code.set(Code::Cold(seen + 1));
+            return;
+        }
+        block.code.set(Code::Never);
+        if !host::available() {
+            return;
+        }
+        let chain = host::chains();
+        let Ok(emitted) = emit_a32(block, Layout::of_cpu(), chain, self.jit.watches) else {
+            return;
+        };
+        let entry = host::install(&emitted.module);
+        if entry != 0 {
+            block.emitted.set(emitted.retires);
+            block.code.set(Code::Ready { entry, misses: 0 });
+            if chain {
+                self.jit.chain_to_a32(block.start, entry as u32);
+            }
+            self.jit.emitted += 1;
+        }
     }
 
     fn retire_run(&mut self, start: u32, ran: usize) {
@@ -151,6 +274,14 @@ impl Cpu {
             Kind::Extra { access, sh, offset } => {
                 let offset = self.a32_offset(offset);
                 return self.a32_extra(access, sh, offset);
+            }
+            Kind::MoveWide { rd, imm, top } => {
+                let value = if top {
+                    (self.r32(rd) & 0xFFFF) | (u32::from(imm) << 16)
+                } else {
+                    u32::from(imm)
+                };
+                self.set_r32(rd, value);
             }
             Kind::Block { access, list } => return self.a32_block_transfer(access, list),
         }

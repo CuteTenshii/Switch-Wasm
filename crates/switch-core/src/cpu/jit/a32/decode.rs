@@ -1,21 +1,39 @@
 //! Translation: walking forward from an address, one op per instruction.
 
+use super::super::ir::Code;
 use super::{Block, Kind, Offset, Op, Operand, Term, TermKind, ALWAYS};
 use crate::cpu::a32::loadstore::Access;
 use crate::cpu::a32::shift::{decode_imm_shift, expand_imm_c};
 use crate::mem::{Memory, PAGE_BITS};
+use std::cell::Cell;
 
 /// Longest run of instructions one block may cover.
 const MAX_BLOCK_OPS: usize = 64;
 
-enum Decoded {
+pub(in crate::cpu::jit) enum Decoded {
     Op(Op),
     Term(Term),
 }
 
+/// Whether the A32 translator has a real op for `insn`, or hands it back to
+/// the interpreter to decode again on every execution.
+pub fn a32_translates(insn: u32) -> bool {
+    const REPRESENTATIVE_PC: u32 = 0x0800_0000;
+    !matches!(
+        decode(insn, REPRESENTATIVE_PC),
+        Decoded::Op(Op {
+            kind: Kind::Interpret { .. },
+            ..
+        }) | Decoded::Term(Term {
+            kind: TermKind::Interpret { .. },
+            ..
+        })
+    )
+}
+
 /// Translate the block starting at `start`, ending at the first instruction
 /// that can write the PC. Every page read is listed in [`Block::pages`].
-pub(super) fn translate(mem: &Memory, start: u32) -> Block {
+pub(in crate::cpu::jit) fn translate(mem: &Memory, start: u32) -> Block {
     let mut ops = Vec::with_capacity(MAX_BLOCK_OPS);
     let mut words = Vec::with_capacity(MAX_BLOCK_OPS);
     let mut pages = Vec::with_capacity(2);
@@ -46,6 +64,8 @@ pub(super) fn translate(mem: &Memory, start: u32) -> Block {
     ops.shrink_to_fit();
     words.shrink_to_fit();
     Block {
+        code: Cell::new(Code::Cold(0)),
+        emitted: Cell::new(0),
         start,
         ops,
         words,
@@ -71,7 +91,7 @@ fn interpret(insn: u32, writes_pc: bool) -> Decoded {
     }
 }
 
-fn decode(insn: u32, pc: u32) -> Decoded {
+pub(in crate::cpu::jit) fn decode(insn: u32, pc: u32) -> Decoded {
     let cond = (insn >> 28) as u8;
     if cond == 0xF {
         // The unconditional space: BLX immediate is the only branch.
@@ -134,8 +154,18 @@ fn data_processing(insn: u32, cond: u8) -> Decoded {
         }
     } else if misc_slot {
         // MOVW and MOVT have bit 21 clear; a hint has an empty field mask.
+        let rd = ((insn >> 12) & 0xF) as u8;
         return if (insn >> 21) & 1 != 0 && (insn >> 16) & 0xF == 0 {
             op(cond, Kind::Nop)
+        } else if (insn >> 21) & 1 == 0 && rd != 15 {
+            op(
+                cond,
+                Kind::MoveWide {
+                    rd,
+                    imm: (((insn >> 4) & 0xF000) | (insn & 0xFFF)) as u16,
+                    top: (insn >> 22) & 1 != 0,
+                },
+            )
         } else {
             data_processing_fallback(insn)
         };

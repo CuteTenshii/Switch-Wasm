@@ -24,8 +24,12 @@ use crate::cpu::system::{SysOp, SysReg, TICK_HZ};
 use crate::cpu::{Cpu, CONDITION_MASKS, REG_SLOTS, SELF_RETURN_TRAMPOLINE};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
+mod a32;
 mod fp;
 mod simd;
+
+pub use a32::a32_emits;
+pub(super) use a32::emit_a32;
 
 /// Whether the emitter has a way to write `insn` out as wasm. Block-ending and
 /// branching instructions answer `false`: those are exits, not ops.
@@ -2692,6 +2696,13 @@ pub(super) fn emit_region(
 }
 
 impl Cpu {
+    /// The same for the A32 block at `pc`, with how many instructions it can retire.
+    pub fn emit_a32_block_at(&self, pc: u32, layout: Layout) -> Result<(Vec<u8>, usize), Refused> {
+        let block = super::a32::translate(&self.mem, pc);
+        let emitted = emit_a32(&block, layout, false, self.mem.watchpoints_armed())?;
+        Ok((emitted.module, emitted.retires))
+    }
+
     /// Translate the block at `pc` and emit it against `layout`, for
     /// `examples/emit_difftest.rs`. Also reports the address of each covered
     /// instruction and the one after.

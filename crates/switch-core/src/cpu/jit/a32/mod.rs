@@ -5,18 +5,24 @@
 //! interpreter uses, and a block ends at the first instruction that can write
 //! the PC.
 
-mod decode;
+pub(in crate::cpu::jit) mod decode;
 mod exec;
 
+pub use decode::a32_translates;
+pub(in crate::cpu::jit) use decode::translate;
+
+use super::host;
+use super::ir::Code;
 use crate::cpu::a32::loadstore::Access;
 use crate::IdMap;
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// The condition field of an instruction that always runs.
-const ALWAYS: u8 = 0xE;
+pub(super) const ALWAYS: u8 = 0xE;
 
 /// Blocks cached before the cache starts over.
-const MAX_BLOCKS: usize = 32 * 1024;
+pub(super) const MAX_BLOCKS: usize = 32 * 1024;
 
 /// Direct-mapped lookup slots, indexed by entry address.
 const LOOKUP_SLOTS: usize = 4096;
@@ -73,6 +79,12 @@ pub(super) enum Kind {
         sh: u8,
         offset: Offset,
     },
+    /// `MOVW` and `MOVT`: the halfword into the low half, or the high half over the low.
+    MoveWide {
+        rd: u8,
+        imm: u16,
+        top: bool,
+    },
     /// `LDM` and `STM`, with no PC in the list.
     Block {
         access: Access,
@@ -119,6 +131,9 @@ pub(super) struct Term {
 /// A run of instructions with a single entry point, translated once.
 #[derive(Debug)]
 pub(super) struct Block {
+    pub(super) code: Cell<Code>,
+    /// How many leading ops the emitted form covers.
+    pub(super) emitted: Cell<usize>,
     pub(super) start: u32,
     pub(super) ops: Vec<Op>,
     /// Original instruction words, kept for fault reports.
@@ -127,6 +142,13 @@ pub(super) struct Block {
     pub(super) term: Option<Term>,
     /// Page numbers the block was read from; a store to any drops it.
     pub(super) pages: Vec<u32>,
+}
+
+/// Free the function table slot when a block is dropped.
+impl Drop for Block {
+    fn drop(&mut self) {
+        self.drop_code();
+    }
 }
 
 /// Translated blocks by entry address, and the pages they were read from.
@@ -144,6 +166,15 @@ impl Default for Cache {
             lookup: vec![None; LOOKUP_SLOTS],
             blocks: IdMap::default(),
             by_page: IdMap::default(),
+        }
+    }
+}
+
+impl Block {
+    /// Release the emitted form's table slot; the block goes on being walked.
+    pub(super) fn drop_code(&self) {
+        if let Code::Ready { entry, .. } = self.code.replace(Code::Never) {
+            host::release(entry);
         }
     }
 }
@@ -170,9 +201,6 @@ impl Cache {
     }
 
     pub(super) fn insert(&mut self, block: Rc<Block>) {
-        if self.blocks.len() >= MAX_BLOCKS {
-            self.clear();
-        }
         for &page in &block.pages {
             self.by_page.entry(page).or_default().push(block.start);
         }
@@ -180,15 +208,16 @@ impl Cache {
         self.blocks.insert(block.start, block);
     }
 
-    /// Drop every block read from one of `pages`, returning how many went.
-    pub(super) fn invalidate(&mut self, pages: &[u32]) -> usize {
-        let mut dropped = 0;
+    /// Drop every block read from one of `pages`, returning them so their
+    /// compiled forms can be unchained before they are released.
+    pub(super) fn invalidate(&mut self, pages: &[u32]) -> Vec<Rc<Block>> {
+        let mut dropped = Vec::new();
         for page in pages {
             for start in self.by_page.remove(page).into_iter().flatten() {
-                dropped += usize::from(self.blocks.remove(&start).is_some());
+                dropped.extend(self.blocks.remove(&start));
             }
         }
-        if dropped != 0 {
+        if !dropped.is_empty() {
             self.lookup.fill(None);
         }
         dropped

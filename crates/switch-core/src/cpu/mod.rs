@@ -46,8 +46,8 @@ pub use crate::services::fs::{FsActivity, SaveDataQuota};
 pub use crate::services::storage::{Mount, SaveKey, StorageUsage};
 pub use a32::ExecMode;
 pub use jit::{
-    defers, emits, set_jit_host, simd_probe, tail_call_probe, translates, Entry, JitHost, JitStats,
-    Layout, Refused, HOT, LEFT,
+    a32_emits, a32_translates, defers, emits, set_jit_host, simd_probe, tail_call_probe,
+    translates, Entry, JitHost, JitStats, Layout, Refused, HOT, LEFT,
 };
 
 pub(crate) use crate::services::acc::{default_uid, DEFAULT_NICKNAME};

@@ -198,6 +198,30 @@ impl Jit {
         self.chain.slots[Chain::slot(block.start)] = [block.start, entry];
     }
 
+    /// The same for the A32 block at `start`.
+    pub(super) fn chain_to_a32(&mut self, start: u32, entry: u32) {
+        self.chain.slots[Chain::slot(start)] = [start, entry];
+    }
+
+    /// Stop emitted blocks jumping to the A32 `block`, before its compiled form is released.
+    pub(super) fn unchain_a32(&mut self, block: &a32::Block) {
+        let Code::Ready { entry, .. } = block.code.get() else {
+            return;
+        };
+        let slot = Chain::slot(block.start);
+        if self.chain.slots[slot] == [block.start, entry as u32] {
+            self.chain.slots[slot] = [Chain::vacant(slot), 0];
+        }
+    }
+
+    /// Cache an A32 block, starting over when the cache is full.
+    pub(super) fn insert_a32(&mut self, block: Rc<a32::Block>) {
+        if self.a32.len() >= a32::MAX_BLOCKS {
+            self.clear();
+        }
+        self.a32.insert(block);
+    }
+
     /// Stop emitted blocks jumping to `block`, before its compiled form is released.
     pub(super) fn unchain(&mut self, block: &Block) {
         let Code::Ready { entry, .. } = block.code.get() else {
@@ -265,7 +289,11 @@ impl Jit {
         if dropped {
             self.drop_lookup();
         }
-        self.invalidated += self.a32.invalidate(pages) as u64;
+        for block in self.a32.invalidate(pages) {
+            self.unchain_a32(&block);
+            block.drop_code();
+            self.invalidated += 1;
+        }
     }
 
     pub(super) fn clear(&mut self) {

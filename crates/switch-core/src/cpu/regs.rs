@@ -219,6 +219,10 @@ impl Cpu {
         self.nzcv
     }
 
+    pub fn set_nzcv(&mut self, nzcv: u32) {
+        self.nzcv = nzcv;
+    }
+
     pub fn fpsr(&self) -> u32 {
         self.fpsr
     }

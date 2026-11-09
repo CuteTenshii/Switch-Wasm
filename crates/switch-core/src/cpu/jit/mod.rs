@@ -14,9 +14,10 @@ mod host;
 pub(in crate::cpu) mod ir;
 mod wasm;
 
+pub use a32::a32_translates;
 pub use cache::JitStats;
 pub use decode::translates;
-pub use emit::{defers, emits, simd_probe, tail_call_probe, Layout, Refused, LEFT};
+pub use emit::{a32_emits, defers, emits, simd_probe, tail_call_probe, Layout, Refused, LEFT};
 pub use exec::HOT;
 pub use host::{set_jit_host, Entry, JitHost};
 

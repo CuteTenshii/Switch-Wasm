@@ -20,7 +20,7 @@ use std::sync::atomic::{fence, Ordering::SeqCst};
 pub const HOT: u32 = 512;
 
 /// Hand-backs at a block's first instruction before its emitted form is dropped.
-const MAX_MISSES: u16 = 8;
+pub(super) const MAX_MISSES: u16 = 8;
 
 /// The most blocks a region compiles together.
 const MAX_REGION_BLOCKS: usize = 32;
@@ -493,7 +493,7 @@ impl Cpu {
     /// come back here: where `run_jit` would stop following blocks (budget,
     /// time slice, timed-wait sweep), less room for the next block to fit.
     #[inline(always)]
-    fn chain_fuel(&self, budget: u64) -> i32 {
+    pub(in crate::cpu::jit) fn chain_fuel(&self, budget: u64) -> i32 {
         let room = budget.min(i32::MAX as u64) as i64 - MAX_WHOLE;
         let slice = TIME_SLICE as i64 - 1 - self.slice_used as i64;
         let sweep = self

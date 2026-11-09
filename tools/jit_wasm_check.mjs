@@ -14,20 +14,102 @@ const wasmPath = commandLine().flag('wasm') || join(out, 'switch_wasm_bg.wasm');
 // Node cannot resolve `@host/files`, so point it at a shim that refuses.
 const shim =
   'data:text/javascript,'
-  + encodeURIComponent('export const hostRead = () => 0;');
+  + encodeURIComponent('export const hostRead = () => 0; export const addHostFile = () => 0;');
 const glue = join(out, 'switch_wasm.jitcheck.mjs');
 writeFileSync(
   glue,
   readFileSync(join(out, 'switch_wasm.js'), 'utf8').replace(
-    '\'@host/files\'',
-    JSON.stringify(shim),
+    /from (['"])@host\/files\1/g,
+    `from ${JSON.stringify(shim)}`,
   ),
 );
-const init = (await import(pathToFileURL(glue).href)).default;
-const api = await init({ module_or_path: readFileSync(wasmPath) });
+const api = await import(pathToFileURL(glue).href);
+await api.default({ module_or_path: readFileSync(wasmPath) });
 
 const BASE = 0x04000000;
 const DATA = BASE + 0x1000;
+
+// Each A32 program is a loop through `bx lr` back to its own start, as the
+// A64 ones are through `ret x30`. Encodings are `llvm-mc -triple=armv7-none-eabi`.
+const A32_PROGRAMS = [
+  {
+    name: 'A32 data processing: flags, carries, shifts',
+    a32: true,
+    data: false,
+    code: [
+      0xe24fe008, // sub  lr, pc, #8      -> lr = BASE
+      0xe2800001, // add  r0, r0, #1
+      0xe0911000, // adds r1, r1, r0
+      0xe2b22000, // adcs r2, r2, #0
+      0xe0233181, // eor  r3, r3, r1, lsl #3
+      0xe1a042e0, // mov  r4, r0, ror #5
+      0xe0c55004, // sbc  r5, r5, r4
+      0xe12fff1e, // bx   lr
+    ],
+    steps: 8001n,
+    expect: { 0: 1000n },
+  },
+  {
+    name: 'A32 loads and stores: write-back, halfwords, multiples, a skipped add',
+    a32: true,
+    data: true,
+    code: [
+      0xe24fe008, // sub   lr, pc, #8     -> lr = BASE
+      0xe3011008, // movw  r1, #0x1008
+      0xe3401400, // movt  r1, #0x0400    -> r1 = DATA + 8
+      0xe2800001, // add   r0, r0, #1
+      0xe4810004, // str   r0, [r1], #4
+      0xe5a10004, // str   r0, [r1, #4]!
+      0xe5912000, // ldr   r2, [r1]
+      0xe15130b4, // ldrh  r3, [r1, #-4]
+      0xe1d140d0, // ldrsb r4, [r1]
+      0xe2505032, // subs  r5, r0, #50
+      0x02866001, // addeq r6, r6, #1
+      0xe9010005, // stmdb r1, {r0, r2}
+      0xe8b10180, // ldmia r1!, {r7, r8}
+      0xe12fff1e, // bx    lr
+    ],
+    steps: 14001n,
+    expect: { 0: 1000n },
+  },
+  {
+    name: 'A32 calls and returns, through conditional branches and links',
+    a32: true,
+    data: false,
+    code: [
+      0xe2800001, // add    r0, r0, #1
+      0xeb000003, // bl     #0x18        -> f1
+      0xeb000004, // bl     #0x20        -> f2
+      0xe3500000, // cmp    r0, #0
+      0x1afffffa, // bne    #-0x18       -> back to the add
+      0xe320f000, // nop
+      0xe2822001, // f1: add r2, r2, #1
+      0xe12fff1e, //     bx  lr
+      0xe0833000, // f2: add r3, r3, r0
+      0xe0934002, //     adds r4, r3, r2
+      0x03a05001, //     moveq r5, #1
+      0x112fff1e, //     bxne lr
+      0xe12fff1e, //     bx   lr
+    ],
+    steps: 20001n,
+    expect: {},
+  },
+  {
+    name: 'A32 loop whose back edge is a conditional branch',
+    a32: true,
+    data: false,
+    code: [
+      0xe24fe008, // sub  lr, pc, #8      -> lr = BASE
+      0xe2800001, // add  r0, r0, #1
+      0xe3500064, // cmp  r0, #100
+      0x1afffffc, // bne  #-0x10          -> back to the add
+      0xe2822001, // add  r2, r2, #1
+      0xe12fff1e, // bx   lr
+    ],
+    steps: 4001n,
+    expect: {},
+  },
+];
 
 // Each program is one block the emitter can write whole; `adr` puts the loop's
 // own address in x30.
@@ -139,6 +221,10 @@ const PROGRAMS = [
 ];
 
 function elf(program) {
+  return program.a32 ? elf32(program) : elf64(program);
+}
+
+function elf64(program) {
   const code = new Uint8Array(program.code.length * 4);
   const cv = new DataView(code.buffer);
   program.code.forEach((insn, i) => cv.setUint32(i * 4, insn, true));
@@ -185,56 +271,69 @@ function elf(program) {
   return file;
 }
 
-function withBytes(bytes, body) {
-  const ptr = api.switch_alloc(bytes.length) >>> 0;
-  if (!ptr) throw new Error('the core refused the staging buffer');
-  try {
-    new Uint8Array(api.memory.buffer, ptr, bytes.length).set(bytes);
-    return body(ptr, bytes.length);
-  } finally {
-    api.switch_free(ptr, bytes.length);
-  }
-}
+// A 32-bit little-endian ARM `ET_EXEC` with the same layout as `elf64`'s.
+function elf32(program) {
+  const code = new Uint8Array(program.code.length * 4);
+  const cv = new DataView(code.buffer);
+  program.code.forEach((insn, i) => cv.setUint32(i * 4, insn, true));
 
-function readJson(fill) {
-  const cap = 4096;
-  const ptr = api.switch_alloc(cap) >>> 0;
-  try {
-    const n = fill(ptr, cap);
-    return JSON.parse(
-      new TextDecoder().decode(new Uint8Array(api.memory.buffer, ptr, n)),
-    );
-  } finally {
-    api.switch_free(ptr, cap);
+  const EHDR = 52;
+  const PHDR = 32;
+  const phnum = program.data ? 2 : 1;
+  const body = EHDR + PHDR * phnum;
+  const file = new Uint8Array(body + code.length);
+  const v = new DataView(file.buffer);
+  file.set([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0], 0); // \x7fELF, 32-bit, LE
+  v.setUint16(16, 2, true); // ET_EXEC
+  v.setUint16(18, 40, true); // EM_ARM
+  v.setUint32(20, 1, true); // EV_CURRENT
+  v.setUint32(24, BASE, true); // e_entry
+  v.setUint32(28, EHDR, true); // e_phoff
+  v.setUint16(40, EHDR, true); // e_ehsize
+  v.setUint16(42, PHDR, true); // e_phentsize
+  v.setUint16(44, phnum, true); // e_phnum
+
+  const segment = (i, { offset, vaddr, filesz, memsz, flags }) => {
+    const ph = EHDR + i * PHDR;
+    v.setUint32(ph + 0, 1, true); // PT_LOAD
+    v.setUint32(ph + 4, offset, true);
+    v.setUint32(ph + 8, vaddr, true);
+    v.setUint32(ph + 12, vaddr, true);
+    v.setUint32(ph + 16, filesz, true);
+    v.setUint32(ph + 20, memsz, true);
+    v.setUint32(ph + 24, flags, true);
+    v.setUint32(ph + 28, 4096, true);
+  };
+  segment(0, { offset: body, vaddr: BASE, filesz: code.length, memsz: code.length, flags: 5 });
+  if (program.data) {
+    segment(1, { offset: body, vaddr: DATA, filesz: 0, memsz: 0x1000, flags: 6 });
   }
+  file.set(code, body);
+  return file;
 }
 
 const STEPS = 4001n;
 
-function run(program, jit) {
-  const handle = api.switch_new();
-  api.switch_set_jit(handle, jit ? 1 : 0);
-  const entry = withBytes(elf(program), (ptr, len) =>
-    api.switch_load_elf(handle, ptr, len),
-  );
-  if (entry !== BigInt(BASE)) {
+async function run(program, jit) {
+  api.switch_init();
+  api.switch_set_jit(jit);
+  const blob = new Blob([elf(program)]);
+  const entry = await api.switch_load_program(blob);
+  if (entry !== BASE) {
     throw new Error(`the core loaded the program at ${entry}, not ${BASE}`);
   }
-  const steps = api.switch_run(handle, program.steps ?? STEPS);
+  const steps = api.switch_run(Number(program.steps ?? STEPS));
   const regs = [];
-  for (let i = 0; i < 31; i++) regs.push(api.switch_get_reg(handle, i));
-  const state = {
+  for (let i = 0; i < (program.a32 ? 15 : 31); i++) regs.push(api.switch_get_reg(i));
+  return {
     steps,
     regs,
-    pc: BigInt(api.switch_get_pc(handle) >>> 0),
-    cycles: api.switch_get_cycles(handle),
-    jit: readJson((ptr, cap) => api.switch_jit_stats_json(handle, ptr, cap)),
+    // Every register, the flags and the pc, as the core prints them.
+    dump: api.switch_reg_dump(),
+    retired: api.switch_get_steps(),
+    jit: JSON.parse(api.switch_jit_stats_json()),
   };
-  api.switch_free_session(handle);
-  return state;
 }
-
-api.switch_init();
 
 let failed = false;
 const check = (what, a, b) => {
@@ -244,22 +343,22 @@ const check = (what, a, b) => {
 };
 
 let totalChained = 0;
-for (const program of PROGRAMS) {
+for (const program of [...PROGRAMS, ...A32_PROGRAMS]) {
   console.log(`${program.name}:`);
-  const interpreted = run(program, false);
-  const translated = run(program, true);
+  const interpreted = await run(program, false);
+  const translated = await run(program, true);
 
-  check('steps retired', interpreted.steps, translated.steps);
-  check('cycles', interpreted.cycles, translated.cycles);
-  check('pc', interpreted.pc, translated.pc);
-  for (let i = 0; i < 31; i++) {
-    check(`x${i}`, interpreted.regs[i], translated.regs[i]);
+  check('steps run', interpreted.steps, translated.steps);
+  check('steps retired', interpreted.retired, translated.retired);
+  check('registers, flags and pc', interpreted.dump, translated.dump);
+  for (let i = 0; i < interpreted.regs.length; i++) {
+    check(`r${i}`, interpreted.regs[i], translated.regs[i]);
   }
 
   for (const [reg, want] of Object.entries(program.expect)) {
     if (interpreted.regs[reg] !== want) {
       failed = true;
-      console.log(`  FAIL the interpreter left x${reg} = ${interpreted.regs[reg]}, not ${want}`);
+      console.log(`  FAIL the interpreter left register ${reg} = ${interpreted.regs[reg]}, not ${want}`);
     }
   }
 
