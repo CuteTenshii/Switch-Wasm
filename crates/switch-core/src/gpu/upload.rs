@@ -653,11 +653,11 @@ fn read_texture(
         handle,
     )?
     else {
-        return Err(Error::Gpu(
-            "upload: the draw samples a null image (TIC address 0), which only the \
-             rasterizer reads as zeros"
-                .into(),
-        ));
+        let sampler = texture::read_sampler(
+            ctx,
+            engine.tex_sampler_pool() + u64::from(texture::sampler_id(handle)) * 32,
+        )?;
+        return Ok(null_texture(stage, slot, handle, sampler));
     };
     let image = descriptors.texture;
 
@@ -788,6 +788,49 @@ fn read_texture(
         swizzle: image.swizzle,
         sampler: descriptors.sampler,
     })
+}
+
+/// One transparent texel: what every read of a null image answers.
+fn null_texture(
+    stage: ShaderStage,
+    slot: TextureSlot,
+    handle: u32,
+    sampler: Sampler,
+) -> TextureUpload {
+    let format = Format::Rgba8Unorm;
+    TextureUpload {
+        stage,
+        slot,
+        handle,
+        format,
+        width: 1,
+        height: 1,
+        layers: 1,
+        row_bytes: 4,
+        rows: 1,
+        bytes: std::sync::Arc::from([0u8; 4]),
+        key: TextureKey {
+            addr: 0,
+            width: 1,
+            height: 1,
+            layers: 1,
+            layer_stride: 0,
+            row_bytes: 4,
+            rows: 1,
+            block_depth_gobs: 1,
+            layout: Layout::Pitch { pitch: 4 },
+            format,
+            srgb: false,
+        },
+        source_len: 0,
+        swizzle: [
+            SwizzleSource::R,
+            SwizzleSource::G,
+            SwizzleSource::B,
+            SwizzleSource::A,
+        ],
+        sampler,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
