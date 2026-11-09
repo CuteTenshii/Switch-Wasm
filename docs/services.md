@@ -30,7 +30,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 - **`pdm:qry`** and **`prepo`** - a factory-fresh console that has never played anything and never transmits.
 - **`pm:*`** are four interfaces on four names. `pm`'s process id must equal `svcGetProcessId`'s: both are `PROCESS_ID` (1) in every process, library applet processes included, whatever their kernel pid; `pm:info`'s program id defaults to the Album applet's.
 - **`pcv`/`clkrst`** are the same manager either side of 8.0.0, numbered **by an offset**: a `clkrst` device code is `0x40000000 + module + 1` (reading its low bits as the module put the GPU rate under "CPU" in NX-Fetch). A rate a guest sets reads back.
-- **`mii`** is a database with no user Miis in it and the six built-in faces `nn::mii` carries: `BuildDefault` and `BuildRandom` hand those out, and every list read (`Get` through `Get3`) reports zero records rather than refusing.
+- **`mii`** is a database with no user Miis in it and the six built-in faces `nn::mii` carries: `BuildDefault` and `BuildRandom` hand those out, `Get`, `Get1` and `GetCount` list them for the Default source (flag bit 1) and nothing for the database, and `Get2`/`Get3` report zero records rather than refusing.
 - **`mm:u`** holds the multimedia clock requests the video decoder makes before it runs. `Initialize` must hand out a request: NVIDIA's multimedia library calls `SetAndWait` through a client pointer only a successful `Initialize` fills in (Just Dance 2019 jumped to address 0 without it). The floor a request asks for is what `Get` reads back.
 
 ## What the Home Menu opens that homebrew never does
@@ -181,6 +181,7 @@ What each system service must answer, and why. `svc.rs` dispatches by session na
 ### `crates/switch-core/src/services/mii.rs`
 
 - The Mii database is empty (no NAND), but the six default Miis live in `nn::mii`'s image, so `BuildDefault` builds them; an empty count plus no defaults would leave every Mii picker unable to open.
+- `Get` must list those six for the Default source: Mario Kart 8 Deluxe asks for them into zeroed `CharInfoElement`s, rejects the nil create id, and goes on with a pool pointer it never set, calling through NULL.
 - Default Mii colours are stored in the 3DS/Wii U palette and widened to the Switch palette (`MII_HAIR_COLORS`, `MII_EYE_COLORS`); faceline colour numbers are the same in both.
 - Create ids are counted, not random (deterministic across runs for trace comparison), with version-4/variant bits set. The tag's last byte holds the count (256 ids, above the 100-Mii database limit). Default and random Miis use different tags so a built Mii never shares a built-in identity (databases key on create id).
 - `BuildRandom` only filters on Gender (the only attribute the defaults differ in) and walks matches in sequence, since editors call it once per face.

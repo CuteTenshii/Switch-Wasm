@@ -6,6 +6,12 @@ use crate::Result;
 /// `nn::mii::CharInfo`: create id, nickname, then one byte per feature.
 const MII_CHAR_INFO_LEN: usize = 0x58;
 
+/// `nn::mii::CharInfoElement`: a `CharInfo` and the `Source` it came from.
+const MII_CHAR_INFO_ELEMENT_LEN: usize = MII_CHAR_INFO_LEN + 4;
+
+/// `SourceFlag::Default`; `Database` is bit 0.
+const MII_SOURCE_DEFAULT: u32 = 2;
+
 const MII_CREATE_ID_LEN: usize = 0x10;
 
 /// Create id tags for default and `BuildRandom` Miis; distinct so they never collide.
@@ -242,11 +248,45 @@ impl Cpu {
                 // IsFullDatabase -> bool.
                 Some(1) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // GetCount(SourceFlag) -> u32.
-                Some(2) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-                // Get through Get3: list reads, empty.
-                Some(3) | Some(4) | Some(8) | Some(9) => {
-                    self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+                Some(2) => {
+                    let flag = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
+                    let count = if flag & MII_SOURCE_DEFAULT != 0 {
+                        DEFAULT_MIIS.len() as u32
+                    } else {
+                        0
+                    };
+                    self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
                 }
+                // Get(SourceFlag) -> (count, CharInfoElement[]), Get1 -> CharInfo[].
+                Some(3) | Some(4) => {
+                    let flag = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
+                    let element = if cmd_id == Some(3) {
+                        MII_CHAR_INFO_ELEMENT_LEN
+                    } else {
+                        MII_CHAR_INFO_LEN
+                    };
+                    let (address, size) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
+                    let room = size as usize / element;
+                    let count = if flag & MII_SOURCE_DEFAULT != 0 {
+                        DEFAULT_MIIS.len().min(room)
+                    } else {
+                        0
+                    };
+                    for index in 0..count {
+                        let mut bytes = default_mii_char_info(index as u32)
+                            .unwrap_or([0; MII_CHAR_INFO_LEN])
+                            .to_vec();
+                        bytes.resize(element, 0);
+                        if element > MII_CHAR_INFO_LEN {
+                            bytes[MII_CHAR_INFO_LEN..].copy_from_slice(&1u32.to_le_bytes());
+                        }
+                        self.mem
+                            .write_bytes(address.wrapping_add((index * element) as u32), &bytes)?;
+                    }
+                    self.write_ipc_response(tls, 0, &[], &(count as u32).to_le_bytes(), &[])
+                }
+                // Get2 and Get3: store data reads, empty.
+                Some(8) | Some(9) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 // BuildRandom(Age, Gender, Race): only Gender narrows; each gets its own create id.
                 Some(6) => {
                     let data = self.ipc_request_data(tls);
@@ -423,5 +463,91 @@ mod tests {
             cpu.mem.read_u32(TLS + 0x28).unwrap(),
             super::MII_INVALID_ARGUMENT
         );
+    }
+
+    /// A domain `Get`-style request with one receive buffer at `buffer`.
+    fn get_request(command_id: u32, flag: u32, buffer: u32, size: u32) -> super::Cpu {
+        const OUT: u32 = 0x3000;
+        let mut cpu = request(true, command_id, &flag.to_le_bytes());
+        cpu.mem.map_zero(OUT, 0x1000).unwrap();
+        cpu.record_domain_object(9, 7, "mii:database");
+        assert_eq!(buffer, OUT);
+        // One receive buffer ahead of the data area, which moves it to 0x20.
+        for offset in (0..0x200u32).step_by(4) {
+            cpu.mem.write_u32(TLS + offset, 0).unwrap();
+        }
+        cpu.mem.write_u32(TLS, 4 | (1 << 24)).unwrap();
+        cpu.mem.write_u32(TLS + 4, 8).unwrap();
+        cpu.mem.write_u32(TLS + 8, size).unwrap();
+        cpu.mem.write_u32(TLS + 12, buffer).unwrap();
+        cpu.mem.write_u8(TLS + 0x20, 1).unwrap();
+        cpu.mem.write_u32(TLS + 0x24, 7).unwrap();
+        cpu.mem.write_u32(TLS + 0x30, SFCI).unwrap();
+        cpu.mem.write_u32(TLS + 0x38, command_id).unwrap();
+        cpu.mem.write_u32(TLS + 0x40, flag).unwrap();
+        cpu
+    }
+
+    #[test]
+    fn mii_get_lists_the_default_miis_for_the_default_source_only() {
+        const OUT: u32 = 0x3000;
+        let element = super::MII_CHAR_INFO_ELEMENT_LEN as u32;
+
+        // The six defaults as CharInfoElements, the source after each CharInfo.
+        let mut cpu = get_request(3, 2, OUT, 100 * element);
+        cpu.mii_request(TLS, 9, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 6, "count");
+        for index in 0..6u32 {
+            let expected = super::default_mii_char_info(index).unwrap();
+            for (offset, &byte) in expected.iter().enumerate() {
+                let at = OUT + index * element + offset as u32;
+                assert_eq!(
+                    cpu.mem.read_u8(at).unwrap(),
+                    byte,
+                    "Mii {index} byte {offset:#x}"
+                );
+            }
+            let source = OUT + index * element + super::MII_CHAR_INFO_LEN as u32;
+            assert_eq!(cpu.mem.read_u32(source).unwrap(), 1, "Source::Default");
+        }
+        assert_eq!(
+            cpu.mem.read_u32(OUT + 6 * element).unwrap(),
+            0,
+            "no seventh"
+        );
+
+        // The database holds none, and a small buffer caps the count.
+        let mut cpu = get_request(3, 1, OUT, 100 * element);
+        cpu.mii_request(TLS, 9, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 0, "database");
+        let mut cpu = get_request(3, 3, OUT, 2 * element);
+        cpu.mii_request(TLS, 9, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 2, "capped");
+
+        // Get1 packs bare CharInfos.
+        let mut cpu = get_request(4, 2, OUT, 6 * super::MII_CHAR_INFO_LEN as u32);
+        cpu.mii_request(TLS, 9, Some(4)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 6, "Get1 count");
+        let second = super::default_mii_char_info(1).unwrap();
+        assert_eq!(
+            cpu.mem
+                .read_u8(OUT + super::MII_CHAR_INFO_LEN as u32 + 0x28)
+                .unwrap(),
+            second[0x28]
+        );
+    }
+
+    #[test]
+    fn mii_get_count_counts_the_default_miis() {
+        let mut cpu = request(true, 2, &2u32.to_le_bytes());
+        cpu.record_domain_object(9, 7, "mii:database");
+        cpu.mii_request(TLS, 9, Some(2)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 6);
+
+        let mut cpu = request(true, 2, &1u32.to_le_bytes());
+        cpu.record_domain_object(9, 7, "mii:database");
+        cpu.mii_request(TLS, 9, Some(2)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 0);
     }
 }
