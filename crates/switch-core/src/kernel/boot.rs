@@ -83,11 +83,14 @@ impl Cpu {
         (!path.is_empty()).then(|| path.to_owned())
     }
 
-    /// Load an AArch64 ELF and point the CPU at its entry.
+    /// Load an AArch64 or 32-bit ARM ELF and point the CPU at its entry.
     pub fn boot_elf(&mut self, data: &[u8]) -> Result<crate::elf::LoadedElf> {
         let elf = crate::elf::load_elf(&self.mem, data)?;
         self.set_pc(elf.entry as u32);
         self.set_entry_regs(0);
+        if elf.is_32_bit {
+            self.set_mode(crate::cpu::ExecMode::A32);
+        }
         Ok(elf)
     }
 
