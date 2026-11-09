@@ -5,6 +5,7 @@
 //! and installed through [`host`]; anything without an op falls back to
 //! [`ir::Op::Interpret`]. [`cache`] drops blocks whose pages a store touched.
 
+mod a32;
 mod cache;
 mod decode;
 mod emit;

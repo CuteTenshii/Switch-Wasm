@@ -129,13 +129,29 @@ impl Cpu {
 
     pub(crate) fn run_engine(&mut self, max_steps: u64) -> Result<RunReport> {
         self.complete_pending_present();
-        if self.jit_enabled && !self.trace_enabled && self.mode == ExecMode::A64 {
-            return self.run_jit(max_steps);
+        if self.jit_enabled && !self.trace_enabled {
+            return self.run_translated(max_steps);
         }
         let mut steps = 0u64;
         while steps < max_steps && !self.halted && self.handback.is_none() {
             self.step_inner()?;
             steps += 1;
+        }
+        Ok(RunReport {
+            steps,
+            halted: self.halted,
+        })
+    }
+
+    /// [`Cpu::run_engine`] over translated blocks, in the state the running thread is in.
+    fn run_translated(&mut self, max_steps: u64) -> Result<RunReport> {
+        let mut steps = 0u64;
+        while steps < max_steps && !self.halted && self.handback.is_none() {
+            let left = max_steps - steps;
+            steps += match self.mode {
+                ExecMode::A64 => self.run_jit(left)?.steps,
+                ExecMode::A32 => self.run_a32_jit(left)?.steps,
+            };
         }
         Ok(RunReport {
             steps,

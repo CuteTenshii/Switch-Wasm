@@ -14,6 +14,16 @@ How AArch64 blocks are translated, run, and written out as wasm.
 - Caches are per core and per process: `Cpu::jit` holds the running process's blocks, and `enter_process` swaps it with that process's entry in `parked_jits`. `forget_translations` drops an ended process's cache, `jit_flush` clears the parked ones too, and `run_jit` drops its held block when the pid changes, so one process's code is never linked to another's.
 - The dirty-page list lives in the process's shared `Memory` and draining it empties it, so only one cache per process sees each store; two cores running one process would need their own reports.
 
+## `crates/switch-core/src/cpu/jit/a32/`
+
+- The A32 translator is a separate, smaller pipeline: `decode.rs` turns each ARM word into an `a32::Op` (pre-decoded fields, the condition on every op), `exec.rs` runs it, and `Jit::a32` caches the blocks. There is no emitted form yet; `run_translated` picks `run_jit` or `run_a32_jit` by the running thread's mode, and each returns when the mode changes.
+- A block ends at the first instruction that can write the PC (`B`, `BL`, `BX`, `SVC`, a data-processing or load destination of `r15`, `LDM` with `pc`, `BLX`), as `a32::Term`. Branches are not followed, and a conditional terminator that is skipped falls through to the next address.
+- Ops call the interpreter's helpers (`a32_alu`, `a32_single`, `a32_extra`, `a32_block_transfer`, `shift_c`), so semantics are shared. `self.pc` is set before every op, which is what makes `r15` reads and the helpers' own `pc + 4` correct.
+- Anything else (multiplies, media, VFP, NEON, coprocessor, `MRS`/`MSR`, exclusives) is `Kind::Interpret`, which calls `execute_a32` and so tests the condition itself; an instruction of those that can write the PC is `TermKind::Interpret`.
+- Invalidation, per-process caches and the retire/clock accounting are the A64 path's: `Jit::invalidate` and `clear` drop A32 blocks too.
+- T32 has no translation because the interpreter has no T32.
+- `tests/jit_a32_test.rs` runs `llvm-mc` programs both ways and compares registers, flags, cycles, steps and memory at every step budget.
+
 ## `crates/switch-core/src/cpu/jit/ir.rs`
 
 - Size budgets (asserted in tests): `Op` is 16 bytes (one 64-bit payload plus tag), which is why `Op::MovK` stores shift+halfword instead of mask+value and `SysReg::Fixed` is a `u32`; `Exit` is 16 bytes with its own tag byte (a niche-hidden tag cost several instructions per taken exit), which is why `Exit::CmpImm` keeps the encoded immediate instead of the inverted `u64`; `Branch` is 24 bytes, its precomputed span fitting in existing padding.

@@ -5,7 +5,7 @@ const SHIFT_RRX: u8 = 4;
 
 /// Resolve an immediate shift's type and amount, where an amount of zero is special.
 #[inline]
-pub(super) fn decode_imm_shift(ty: u8, imm5: u8) -> (u8, u32) {
+pub(in crate::cpu) fn decode_imm_shift(ty: u8, imm5: u8) -> (u8, u32) {
     match ty {
         0 => (0, u32::from(imm5)),
         1 | 2 if imm5 == 0 => (ty, 32),
@@ -17,7 +17,7 @@ pub(super) fn decode_imm_shift(ty: u8, imm5: u8) -> (u8, u32) {
 
 /// The barrel shifter, returning the carry it produces as well as the value.
 #[inline]
-pub(super) fn shift_c(value: u32, ty: u8, amount: u32, carry_in: bool) -> (u32, bool) {
+pub(in crate::cpu) fn shift_c(value: u32, ty: u8, amount: u32, carry_in: bool) -> (u32, bool) {
     match ty {
         0 => match amount {
             0 => (value, carry_in),
@@ -59,7 +59,7 @@ pub(super) fn shift_c(value: u32, ty: u8, amount: u32, carry_in: bool) -> (u32, 
 
 /// The 12-bit data-processing immediate: an 8-bit value rotated right by twice a 4-bit field.
 #[inline]
-pub(super) fn expand_imm_c(imm12: u32, carry_in: bool) -> (u32, bool) {
+pub(in crate::cpu) fn expand_imm_c(imm12: u32, carry_in: bool) -> (u32, bool) {
     let rot = (imm12 >> 8) & 0xF;
     let val = imm12 & 0xFF;
     if rot == 0 {
@@ -67,5 +67,21 @@ pub(super) fn expand_imm_c(imm12: u32, carry_in: bool) -> (u32, bool) {
     } else {
         let out = val.rotate_right(rot * 2);
         (out, out >> 31 != 0)
+    }
+}
+
+/// A shift by a register: only its bottom byte counts, and an amount of zero keeps the carry.
+#[inline]
+pub(in crate::cpu) fn shift_by_register(
+    value: u32,
+    ty: u8,
+    amount: u32,
+    carry_in: bool,
+) -> (u32, bool) {
+    let amount = amount & 0xFF;
+    if amount == 0 {
+        (value, carry_in)
+    } else {
+        shift_c(value, ty, amount, carry_in)
     }
 }

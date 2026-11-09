@@ -6,10 +6,10 @@
 mod branch;
 mod dataproc;
 mod disasm;
-mod loadstore;
+pub(in crate::cpu) mod loadstore;
 mod media;
 mod neon;
-mod shift;
+pub(in crate::cpu) mod shift;
 mod vfp;
 
 use super::Cpu;

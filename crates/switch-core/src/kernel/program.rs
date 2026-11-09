@@ -128,10 +128,7 @@ impl Cpu {
     pub fn boot_program(&mut self, program: &Program) -> Result<Vec<crate::nso::LoadedNso>> {
         self.adopt_program(program)?;
         if !program.is_64_bit() {
-            self.log(
-                Level::Info,
-                "[npdm] AArch32 title: running the A32 interpreter",
-            );
+            self.log(Level::Info, "[npdm] AArch32 title: running in A32 state");
             self.set_mode(ExecMode::A32);
         }
         self.boot_retail_program(&program.modules())

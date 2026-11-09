@@ -5,20 +5,46 @@ use crate::cpu::Cpu;
 use crate::{Error, Result};
 use std::sync::atomic::{fence, Ordering::SeqCst};
 
+/// The addressing common to every A32 load and store: which registers, which way, and when the base moves.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::cpu) struct Access {
+    pub(in crate::cpu) rn: u8,
+    pub(in crate::cpu) rt: u8,
+    pub(in crate::cpu) load: bool,
+    pub(in crate::cpu) pre: bool,
+    pub(in crate::cpu) add: bool,
+    pub(in crate::cpu) wb: bool,
+}
+
+impl Access {
+    pub(in crate::cpu) fn of(insn: u32) -> Access {
+        Access {
+            rn: ((insn >> 16) & 0xF) as u8,
+            rt: ((insn >> 12) & 0xF) as u8,
+            load: (insn >> 20) & 1 != 0,
+            pre: (insn >> 24) & 1 != 0,
+            add: (insn >> 23) & 1 != 0,
+            wb: (insn >> 21) & 1 != 0,
+        }
+    }
+
+    /// Whether the base register is written: post-indexed forms always are.
+    pub(in crate::cpu) fn writes_base(self) -> bool {
+        !self.pre || self.wb
+    }
+}
+
 impl Cpu {
     /// Returns the address to access and the base register's new value; post-indexed forms always write back.
     #[inline]
-    fn a32_address(&self, base: u32, offset: u32, insn: u32) -> (u32, Option<u32>) {
-        let pre = (insn >> 24) & 1 != 0;
-        let add = (insn >> 23) & 1 != 0;
-        let writeback = (insn >> 21) & 1 != 0;
-        let moved = if add {
+    fn a32_address(&self, base: u32, offset: u32, a: Access) -> (u32, Option<u32>) {
+        let moved = if a.add {
             base.wrapping_add(offset)
         } else {
             base.wrapping_sub(offset)
         };
-        if pre {
-            (moved, if writeback { Some(moved) } else { None })
+        if a.pre {
+            (moved, if a.wb { Some(moved) } else { None })
         } else {
             (base, Some(moved))
         }
@@ -26,24 +52,21 @@ impl Cpu {
 
     /// `LDR`/`STR`/`LDRB`/`STRB` with a 12-bit immediate offset.
     pub(super) fn a32_load_store_imm(&mut self, insn: u32) -> Result<()> {
-        self.a32_load_store(insn, insn & 0xFFF)
+        self.a32_single(Access::of(insn), (insn >> 22) & 1 != 0, insn & 0xFFF)
     }
 
     /// The same, with a shifted register offset.
     pub(super) fn a32_load_store_reg(&mut self, insn: u32) -> Result<()> {
         let (ty, amount) = decode_imm_shift(((insn >> 5) & 0b11) as u8, ((insn >> 7) & 0x1F) as u8);
         let (offset, _) = shift_c(self.r32((insn & 0xF) as u8), ty, amount, self.carry_flag());
-        self.a32_load_store(insn, offset)
+        self.a32_single(Access::of(insn), (insn >> 22) & 1 != 0, offset)
     }
 
-    fn a32_load_store(&mut self, insn: u32, offset: u32) -> Result<()> {
-        let rn = ((insn >> 16) & 0xF) as u8;
-        let rt = ((insn >> 12) & 0xF) as u8;
-        let byte = (insn >> 22) & 1 != 0;
-        let load = (insn >> 20) & 1 != 0;
-        let (addr, writeback) = self.a32_address(self.r32(rn), offset, insn);
+    /// A word or byte transfer at the base plus `offset`.
+    pub(in crate::cpu) fn a32_single(&mut self, a: Access, byte: bool, offset: u32) -> Result<()> {
+        let (addr, writeback) = self.a32_address(self.r32(a.rn), offset, a);
 
-        if load {
+        if a.load {
             let value = if byte {
                 u32::from(self.mem.read_u8(addr)?)
             } else {
@@ -51,21 +74,21 @@ impl Cpu {
             };
             // Writeback first, so `ldr r0, [r0], #4` keeps the loaded value.
             if let Some(value) = writeback {
-                self.set_r32(rn, value);
+                self.set_r32(a.rn, value);
             }
-            if rt == 15 {
+            if a.rt == 15 {
                 return self.a32_write_pc(value);
             }
-            self.set_r32(rt, value);
+            self.set_r32(a.rt, value);
         } else {
-            let value = self.r32(rt);
+            let value = self.r32(a.rt);
             if byte {
                 self.mem.write_u8(addr, value as u8)?;
             } else {
                 self.mem.write_u32(addr, value)?;
             }
             if let Some(value) = writeback {
-                self.set_r32(rn, value);
+                self.set_r32(a.rn, value);
             }
         }
         self.pc = self.pc.wrapping_add(4);
@@ -74,18 +97,20 @@ impl Cpu {
 
     /// The halfword, signed-byte and doubleword forms.
     pub(super) fn a32_extra_load_store(&mut self, insn: u32) -> Result<()> {
-        let rn = ((insn >> 16) & 0xF) as u8;
-        let rt = ((insn >> 12) & 0xF) as u8;
-        let immediate = (insn >> 22) & 1 != 0;
-        let offset = if immediate {
+        let offset = if (insn >> 22) & 1 != 0 {
             ((insn >> 4) & 0xF0) | (insn & 0xF)
         } else {
             self.r32((insn & 0xF) as u8)
         };
-        let (addr, writeback) = self.a32_address(self.r32(rn), offset, insn);
-        let load = (insn >> 20) & 1 != 0;
+        self.a32_extra(Access::of(insn), ((insn >> 5) & 0b11) as u8, offset)
+    }
 
-        match ((insn >> 5) & 0b11, load) {
+    /// An extra transfer of kind `sh` (bits 6:5 of the encoding) at the base plus `offset`.
+    pub(in crate::cpu) fn a32_extra(&mut self, a: Access, sh: u8, offset: u32) -> Result<()> {
+        let (addr, writeback) = self.a32_address(self.r32(a.rn), offset, a);
+        let rt = a.rt;
+
+        match (sh, a.load) {
             (0b01, true) => {
                 let value = u32::from(self.mem.read_u16(addr)?);
                 self.set_r32(rt, value);
@@ -112,7 +137,7 @@ impl Cpu {
             }
         }
         if let Some(value) = writeback {
-            self.set_r32(rn, value);
+            self.set_r32(a.rn, value);
         }
         self.pc = self.pc.wrapping_add(4);
         Ok(())
@@ -126,12 +151,16 @@ impl Cpu {
                 insn, self.pc
             )));
         }
-        let rn = ((insn >> 16) & 0xF) as u8;
-        let list = insn & 0xFFFF;
+        self.a32_block_transfer(Access::of(insn), insn as u16)
+    }
+
+    /// `LDM`/`STM` of the registers in `list`.
+    pub(in crate::cpu) fn a32_block_transfer(&mut self, a: Access, list: u16) -> Result<()> {
+        let rn = a.rn;
+        let list = u32::from(list);
         let count = list.count_ones();
         let base = self.r32(rn);
-        let pre = (insn >> 24) & 1 != 0;
-        let add = (insn >> 23) & 1 != 0;
+        let (pre, add) = (a.pre, a.add);
         let bytes = count * 4;
 
         // Lowest address for each addressing mode; decrement-after ends at the base.
@@ -147,8 +176,7 @@ impl Cpu {
             base.wrapping_sub(bytes)
         };
 
-        let load = (insn >> 20) & 1 != 0;
-        let writeback = (insn >> 21) & 1 != 0;
+        let (load, writeback) = (a.load, a.wb);
         // A load naming its base keeps the loaded value; a store transfers the original base.
         let base_in_list = list & (1 << rn) != 0;
 

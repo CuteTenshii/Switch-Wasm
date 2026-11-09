@@ -1,5 +1,6 @@
 //! Translation cache: block lookup, generations, and store invalidation.
 
+use super::a32;
 use super::ir::{Block, Code};
 use crate::IdMap;
 use std::rc::Rc;
@@ -83,6 +84,7 @@ pub(in crate::cpu) struct Jit {
     pub(super) entered_emitted: u64,
     pub(super) chained: u64,
     pub(super) chain: Chain,
+    pub(super) a32: a32::Cache,
     /// Whether emitted code tests the watchpoints: one was armed when it was written.
     pub(super) watches: bool,
 }
@@ -125,6 +127,7 @@ impl Default for Jit {
             entered_emitted: 0,
             chained: 0,
             chain: Chain::default(),
+            a32: a32::Cache::default(),
             watches: false,
         }
     }
@@ -262,10 +265,12 @@ impl Jit {
         if dropped {
             self.drop_lookup();
         }
+        self.invalidated += self.a32.invalidate(pages) as u64;
     }
 
     pub(super) fn clear(&mut self) {
         self.invalidated += (self.blocks.len() + self.older.len()) as u64;
+        self.invalidated += self.a32.clear() as u64;
         for block in self.blocks.values().chain(self.older.values()) {
             block.drop_code();
         }
@@ -278,7 +283,7 @@ impl Jit {
 
     pub(super) fn stats(&self) -> JitStats {
         JitStats {
-            blocks: self.blocks.len() + self.older.len(),
+            blocks: self.blocks.len() + self.older.len() + self.a32.len(),
             translated: self.translated,
             executed: self.executed,
             linked: self.linked,

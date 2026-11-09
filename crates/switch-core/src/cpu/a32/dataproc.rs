@@ -1,6 +1,6 @@
 //! A32 data processing, multiplies, and the miscellaneous branch/status group.
 
-use super::shift::{decode_imm_shift, expand_imm_c, shift_c};
+use super::shift::{decode_imm_shift, expand_imm_c, shift_by_register, shift_c};
 use crate::cpu::Cpu;
 use crate::{Error, Result};
 
@@ -47,13 +47,8 @@ impl Cpu {
                     decode_imm_shift(((insn >> 5) & 0b11) as u8, ((insn >> 7) & 0x1F) as u8);
                 shift_c(rm, ty, amount, carry_in)
             } else {
-                // Only the bottom byte of the shift register counts.
-                let amount = self.r32(((insn >> 8) & 0xF) as u8) & 0xFF;
-                if amount == 0 {
-                    (rm, carry_in)
-                } else {
-                    shift_c(rm, ((insn >> 5) & 0b11) as u8, amount, carry_in)
-                }
+                let amount = self.r32(((insn >> 8) & 0xF) as u8);
+                shift_by_register(rm, ((insn >> 5) & 0b11) as u8, amount, carry_in)
             }
         };
 
@@ -63,6 +58,27 @@ impl Cpu {
         let rd = ((insn >> 12) & 0xF) as u8;
         let a = self.r32(rn);
 
+        if let Some(result) = self.a32_alu(op, set_flags, a, operand, carry_in, shifter_carry) {
+            if rd == 15 {
+                return self.a32_write_pc(result);
+            }
+            self.set_r32(rd, result);
+        }
+        self.pc = self.pc.wrapping_add(4);
+        Ok(())
+    }
+
+    /// The ALU step: the value `op` produces, or `None` for the compares, which only set flags.
+    /// Logical operations take C from the shifter and leave V alone.
+    pub(in crate::cpu) fn a32_alu(
+        &mut self,
+        op: u32,
+        set_flags: bool,
+        a: u32,
+        operand: u32,
+        carry_in: bool,
+        shifter_carry: bool,
+    ) -> Option<u32> {
         let (result, writes) = match op {
             0x0 => (a & operand, true),
             0x1 => (a ^ operand, true),
@@ -81,21 +97,11 @@ impl Cpu {
             0xE => (a & !operand, true),
             _ => (!operand, true),
         };
-
-        // Logical ops take C from the shifter and leave V alone.
         let logical = matches!(op, 0x0 | 0x1 | 0x8 | 0x9 | 0xC | 0xD | 0xE | 0xF);
         if logical && set_flags {
             self.set_nzc32(result, shifter_carry);
         }
-
-        if writes {
-            if rd == 15 {
-                return self.a32_write_pc(result);
-            }
-            self.set_r32(rd, result);
-        }
-        self.pc = self.pc.wrapping_add(4);
-        Ok(())
+        writes.then_some(result)
     }
 
     fn a32_misc(&mut self, insn: u32) -> Result<()> {

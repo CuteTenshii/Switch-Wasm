@@ -12,7 +12,7 @@ use super::ir::{Block, Code, Exit, Op, PackedImm, Term};
 use crate::cpu::bits::*;
 use crate::cpu::loadstore::{Acc, PairKind, Wb};
 use crate::cpu::system::{SysOp, SysReg};
-use crate::cpu::{Cpu, Layout, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
+use crate::cpu::{Cpu, ExecMode, Layout, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use std::rc::Rc;
 use std::sync::atomic::{fence, Ordering::SeqCst};
 
@@ -141,7 +141,7 @@ impl Cpu {
         while steps < max_steps && !self.halted {
             // Between blocks.
             self.preemption_point();
-            if self.handback.is_some() {
+            if self.handback.is_some() || self.mode != ExecMode::A64 {
                 break;
             }
             if self.pid != held_pid {
