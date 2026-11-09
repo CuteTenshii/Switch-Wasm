@@ -59,11 +59,15 @@ enum SlotState {
     Empty,
     Free,
     Dequeued,
+    /// On screen until the next frame replaces it.
+    Displayed,
 }
 
 #[derive(Debug, Clone, Default)]
 struct Slot {
     state: SlotState,
+    /// When it last went free, so the longest-free slot is dequeued first.
+    freed_at: u64,
     buffer: Option<DisplayBuffer>,
     /// Kept verbatim: `REQUEST_BUFFER` hands the same bytes back.
     blob: Option<Vec<u8>>,
@@ -84,6 +88,8 @@ pub struct BufferQueue {
     pub height: u32,
     pub connected: bool,
     pub queued: u64,
+    displayed: Option<usize>,
+    frees: u64,
 }
 
 impl Default for BufferQueue {
@@ -101,6 +107,8 @@ impl BufferQueue {
             height,
             connected: false,
             queued: 0,
+            displayed: None,
+            frees: 0,
         }
     }
 
@@ -248,29 +256,47 @@ impl BufferQueue {
         let index = self
             .slots
             .iter()
-            .position(|s| s.state == SlotState::Free && s.buffer.is_some())?;
+            .enumerate()
+            .filter(|(_, s)| s.state == SlotState::Free && s.buffer.is_some())
+            .min_by_key(|(_, s)| s.freed_at)
+            .map(|(index, _)| index)?;
         self.slots[index].state = SlotState::Dequeued;
         Some(index)
     }
 
-    /// Scan-out is immediate, so the slot goes straight back to free.
+    fn free(&mut self, index: usize) {
+        self.frees += 1;
+        let freed_at = self.frees;
+        let entry = &mut self.slots[index];
+        entry.state = SlotState::Free;
+        entry.freed_at = freed_at;
+    }
+
+    /// The queued slot stays on screen, and so out of reach, until the next one replaces it.
+    /// A lone buffer has nothing to alternate with, so it goes straight back.
     fn queue(&mut self, slot: i32, transform: u32, crop: Crop) -> Option<DisplayBuffer> {
         let index = usize::try_from(slot).ok()?;
         let entry = self.slots.get_mut(index)?;
         let mut buffer = entry.buffer?;
         buffer.transform = transform;
         buffer.crop = crop;
-        entry.state = SlotState::Free;
+        let buffers = self.slots.iter().filter(|s| s.buffer.is_some()).count();
+        if buffers < 2 {
+            self.free(index);
+        } else {
+            self.slots[index].state = SlotState::Displayed;
+            if let Some(previous) = self.displayed.replace(index) {
+                self.free(previous);
+            }
+        }
         self.queued += 1;
         Some(buffer)
     }
 
     fn release(&mut self, slot: i32) {
         if let Ok(index) = usize::try_from(slot) {
-            if let Some(entry) = self.slots.get_mut(index) {
-                if entry.buffer.is_some() {
-                    entry.state = SlotState::Free;
-                }
+            if self.slots.get(index).is_some_and(|e| e.buffer.is_some()) {
+                self.free(index);
             }
         }
     }
@@ -279,6 +305,9 @@ impl BufferQueue {
         if let Ok(index) = usize::try_from(slot) {
             if let Some(entry) = self.slots.get_mut(index) {
                 *entry = Slot::default();
+                if self.displayed == Some(index) {
+                    self.displayed = None;
+                }
             }
         }
     }
@@ -314,6 +343,7 @@ impl BufferQueue {
         }
         self.slots[index] = Slot {
             state: SlotState::Free,
+            freed_at: 0,
             buffer: Some(buffer),
             blob: Some(blob.to_vec()),
         };
@@ -472,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_slot_is_dequeued_again_on_the_next_frame() {
+    fn two_buffers_take_turns_on_screen() {
         let mut q = BufferQueue::new();
         preallocate(&mut q, 0, 7, 0);
         preallocate(&mut q, 1, 7, 0x10_0000);
@@ -483,9 +513,19 @@ mod tests {
             seen.push(slot);
             q.transact(QUEUE_BUFFER, &request(&words(&[slot, 0, 0])));
         }
-        // Scan-out is immediate, so the display never holds slot 0.
-        assert_eq!(seen, [0, 0, 0, 0]);
+        assert_eq!(seen, [0, 1, 0, 1]);
         assert_eq!(q.queued, 4);
+    }
+
+    #[test]
+    fn a_lone_buffer_is_dequeued_again_at_once() {
+        let mut q = BufferQueue::new();
+        preallocate(&mut q, 0, 7, 0);
+        for _ in 0..3 {
+            let (reply, _) = q.transact(DEQUEUE_BUFFER, &request(&words(&[0, 1280, 720, 1, 0])));
+            assert_eq!(ParcelReader::new(&reply).read_i32(), 0);
+            q.transact(QUEUE_BUFFER, &request(&words(&[0, 0, 0])));
+        }
     }
 
     #[test]
