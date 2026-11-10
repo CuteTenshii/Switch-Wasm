@@ -203,8 +203,16 @@ impl Decoder {
             (hdr.width, hdr.height) = read_frame_size(&mut rb)?;
             self.read_render_size(&mut rb)?;
         } else {
-            hdr.intra_only = if hdr.show_frame { false } else { rb.read_bit()? };
-            hdr.reset_frame_context = if hdr.error_resilient { 0 } else { rb.read(2)? as u8 };
+            hdr.intra_only = if hdr.show_frame {
+                false
+            } else {
+                rb.read_bit()?
+            };
+            hdr.reset_frame_context = if hdr.error_resilient {
+                0
+            } else {
+                rb.read(2)? as u8
+            };
             if hdr.intra_only {
                 read_sync_code(&mut rb)?;
                 hdr.refresh_frame_flags = rb.read(8)? as u8;
@@ -251,7 +259,11 @@ impl Decoder {
         hdr.frame_context_idx = rb.read(2)? as usize;
 
         self.frame_key = hdr.key_frame;
-        self.intra_only = if hdr.key_frame { self.intra_only } else { hdr.intra_only };
+        self.intra_only = if hdr.key_frame {
+            self.intra_only
+        } else {
+            hdr.intra_only
+        };
 
         if hdr.is_intra() || hdr.error_resilient {
             self.setup_past_independence(&mut hdr);
@@ -271,11 +283,11 @@ impl Decoder {
         self.read_segmentation(&mut rb)?;
 
         let sb_cols = hdr.mi_cols().div_ceil(8);
-        let mut min_log2 = 0;
+        let mut min_log2 = 0u32;
         while (64usize << min_log2) < sb_cols {
             min_log2 += 1;
         }
-        let mut max_log2 = 1;
+        let mut max_log2 = 1u32;
         while (sb_cols >> max_log2) >= 4 {
             max_log2 += 1;
         }
@@ -357,7 +369,11 @@ impl Decoder {
         seg.update_map = rb.read_bit()?;
         if seg.update_map {
             for prob in &mut seg.tree_probs {
-                *prob = if rb.read_bit()? { rb.read(8)? as u8 } else { 255 };
+                *prob = if rb.read_bit()? {
+                    rb.read(8)? as u8
+                } else {
+                    255
+                };
             }
             seg.temporal_update = rb.read_bit()?;
             for prob in &mut seg.pred_probs {
@@ -394,7 +410,11 @@ impl Decoder {
 
     /// Applies the compressed header's probability updates to `self.fc` and returns the modes it
     /// chose.
-    pub(super) fn read_compressed_header(&mut self, hdr: &mut FrameHeader, data: &[u8]) -> Result<(), Error> {
+    pub(super) fn read_compressed_header(
+        &mut self,
+        hdr: &mut FrameHeader,
+        data: &[u8],
+    ) -> Result<(), Error> {
         let mut r = BoolDecoder::new(data)?;
         let fc = &mut self.fc;
 
@@ -575,7 +595,11 @@ fn decode_term_subexp(r: &mut BoolDecoder) -> i32 {
         return r.read_literal(5) as i32 + 32;
     }
     let v = r.read_literal(7) as i32;
-    let uniform = if v < 65 { v } else { (v << 1) - 65 + i32::from(r.read_bit()) };
+    let uniform = if v < 65 {
+        v
+    } else {
+        (v << 1) - 65 + i32::from(r.read_bit())
+    };
     uniform + 64
 }
 
