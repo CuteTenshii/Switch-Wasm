@@ -129,6 +129,11 @@ impl Cpu {
         }
     }
 
+    /// Whether the A32 thread is in the Thumb instruction set.
+    pub fn is_thumb(&self) -> bool {
+        self.thumb
+    }
+
     pub fn set_pc(&mut self, pc: u32) {
         self.pc = pc;
     }

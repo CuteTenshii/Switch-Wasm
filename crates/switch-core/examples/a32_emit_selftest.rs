@@ -41,8 +41,14 @@ const SVC: u32 = 0xEF00_0000;
 /// Random encodings per instruction class, and register sets each runs under.
 const DATA_PROCESSING: usize = 4000;
 const TRANSFERS: usize = 2500;
+const EXCLUSIVE_PAIRS: usize = 600;
 const BRANCHES: usize = 3000;
+const THREAD_POINTER_READS: usize = 60;
 const SEEDS: usize = 6;
+
+/// Above 32 bits, so a read that fails to narrow shows.
+const TPIDR_SEED: u64 = 0x1234_5678_9ABC;
+const TPIDR_RW_SEED: u64 = 0x0FED_CBA9_8765;
 
 /// What a case's block does that the emitted form has to match.
 #[derive(Clone, Copy, PartialEq)]
@@ -51,6 +57,9 @@ enum Kind {
     Pure,
     /// One memory access, which may hand back.
     Memory,
+    /// A load-exclusive and a store-exclusive at the address in `rn`, whose alignment
+    /// is `mask`: the module retires both or hands back neither.
+    Pair { rn: usize, mask: u32 },
     /// Ends in a branch, which the module leaves through with the target in the pc.
     Branch,
 }
@@ -81,15 +90,50 @@ fn main() {
     for _ in 0..TRANSFERS {
         cases.push((vec![transfer(&mut rng)], Kind::Memory));
     }
+    for _ in 0..THREAD_POINTER_READS {
+        // MRC p15, 0, rt, c13, c0, 2 or 3.
+        let r = next(&mut rng);
+        let (rt, opc2) = ((r & 0xF) as u32 % 15, 2 + (r >> 4 & 1) as u32);
+        cases.push((vec![0xEE1D_0F10 | rt << 12 | opc2 << 5], Kind::Pure));
+    }
+    for _ in 0..EXCLUSIVE_PAIRS {
+        // A load that arms the monitor and a store to the same address that can succeed.
+        let r = next(&mut rng);
+        let (rn, dest, status, value) = (
+            (r & 0xF) as u32 % 13,
+            (r >> 4 & 0xF) as u32 % 13,
+            (r >> 8 & 0xF) as u32 % 13,
+            (r >> 12 & 0xF) as u32 % 13,
+        );
+        let size = [0b00, 0b10, 0b11][(r >> 16) as usize % 3] << 21;
+        // A load into the base would move the store's address.
+        let dest = if dest == rn { (rn + 1) % 13 } else { dest };
+        let ldrex = 0xE190_0F9F | size | rn << 16 | dest << 12;
+        let strex = 0xE180_0F90 | size | rn << 16 | status << 12 | value;
+        cases.push((
+            vec![ldrex, strex],
+            Kind::Pair {
+                rn: rn as usize,
+                mask: [3, 0, 0, 1][(size >> 21) as usize],
+            },
+        ));
+    }
     for _ in 0..BRANCHES {
-        let run = next(&mut rng) as usize % 3;
+        let end = branch(&mut rng);
+        // A load into the PC may hand back, which the check only knows as all or nothing.
+        let run = if loads_pc(end) {
+            0
+        } else {
+            next(&mut rng) as usize % 3
+        };
         let mut body: Vec<u32> = (0..run).map(|_| data_processing(&mut rng)).collect();
-        body.push(branch(&mut rng));
+        body.push(end);
         cases.push((body, Kind::Branch));
     }
 
     let mut manifest = String::new();
-    let (mut written, mut refused, mut faulted, mut rewrote, mut pinned) = (0, 0, 0, 0, 0);
+    let (mut written, mut refused, mut faulted, mut rewrote, mut pinned, mut to_thumb) =
+        (0, 0, 0, 0, 0, 0);
     for (body, kind) in &cases {
         let memory = *kind == Kind::Memory;
         let mut program = body.clone();
@@ -101,6 +145,9 @@ fn main() {
         for set in 0..SEEDS {
             cpu.mem.map(0, &baseline).expect("the window is mapped");
             seed(&mut cpu, set, (next(&mut rng) & 0xF) as u8);
+            cpu.set_thread_pointers(TPIDR_SEED, TPIDR_RW_SEED);
+            arm_monitor(&mut cpu, body[0], set);
+            let monitor_before = cpu.exclusive_state();
             let before = cpu.reg_slots();
             let nzcv_before = cpu.nzcv();
             let Ok((module, ops)) = cpu.emit_a32_block_at(CODE_AT, LAYOUT) else {
@@ -124,6 +171,12 @@ fn main() {
                 faulted += 1;
                 continue;
             }
+            // An interworking branch to Thumb is the interpreter's.
+            if cpu.is_thumb() {
+                to_thumb += 1;
+                cpu = mapped_cpu(&code);
+                continue;
+            }
             // A store over the block's own code leaves the interpreter running other words.
             let mut now = vec![0u8; code.len()];
             cpu.mem
@@ -140,9 +193,20 @@ fn main() {
                     .mem
                     .dirty_code_pages(0)
                     .is_none_or(|pages| !pages.is_empty());
+            if let Kind::Pair { rn, mask } = kind {
+                if must_hand_back || before[*rn] as u32 & mask != 0 {
+                    continue;
+                }
+            }
             // The terminator is the last of the body when the module covers it.
             let left = *kind == Kind::Branch && ops == body.len();
+            let loaded_pc = loads_pc(body[body.len() - 1]);
             let mode = match (memory, must_hand_back, left) {
+                (_, true, true) if loaded_pc => {
+                    pinned += 1;
+                    "none".into()
+                }
+                (_, _, true) if loaded_pc => format!("maybe-left:{:#010x}", cpu.get_pc()),
                 (_, _, true) => format!("left:{:#010x}", cpu.get_pc()),
                 (false, _, false) => "exact".into(),
                 (true, false, _) => "maybe".into(),
@@ -177,6 +241,19 @@ fn main() {
             }
             manifest.push_str(" !");
             manifest.push_str(&memory_delta(&cpu, &baseline));
+            let monitor_after = cpu.exclusive_state();
+            let _ = write!(
+                manifest,
+                " excl:{:x}:{}:{:x}:{:x}:{:x}:{}:{:x}:{:x}",
+                monitor_before.0,
+                u8::from(monitor_before.1),
+                monitor_before.2[0],
+                monitor_before.2[1],
+                monitor_after.0,
+                u8::from(monitor_after.1),
+                monitor_after.2[0],
+                monitor_after.2[1],
+            );
             manifest.push('\n');
             written += 1;
         }
@@ -189,6 +266,7 @@ fn main() {
              read_watch {READ_WATCH_AT} {}\n\
              watch {WATCH_AT} {}\n\
              watched_page {WATCHED_PAGE_AT} {}\n\
+             tpidr_values {TPIDR_SEED} {TPIDR_RW_SEED}\n\
              wasm_pages {}\n\
              {}",
             READ_WATCH_AT + READ_WATCH_BYTES,
@@ -201,7 +279,7 @@ fn main() {
         .expect("cannot write the manifest");
     println!(
         "{written} cases written to {out_dir}/ ({pinned} where memory has to hand back, \
-         {refused} blocks refused, {faulted} faulted, {rewrote} stored over their code)"
+         {refused} blocks refused, {faulted} faulted, {to_thumb} to Thumb, {rewrote} stored over their code)"
     );
     println!("now run: node tools/emit_difftest.mjs --out={out_dir}");
 }
@@ -257,11 +335,70 @@ fn branch(rng: &mut u64) -> u32 {
     } else {
         0xE
     };
+    let rm = (r >> 10) as u32 & 0xF;
     if (r >> 8) & 3 == 0 {
-        cond << 28 | 0x012F_FF10 | ((r >> 10) as u32 & 0xF)
+        cond << 28 | 0x012F_FF10 | rm
+    } else if (r >> 8) & 3 == 1 && rm != 15 {
+        cond << 28 | 0x012F_FF30 | rm
+    } else if (r >> 8) & 3 == 2 {
+        pc_load(cond, r >> 14)
     } else {
         // The offset is in words and signed.
         cond << 28 | 0b101 << 25 | ((r >> 9) as u32 & 1) << 24 | (r >> 12) as u32 & 0x00FF_FFFF
+    }
+}
+
+/// Whether `insn` is a load that writes the PC.
+fn loads_pc(insn: u32) -> bool {
+    insn >> 28 != 0xF && insn >> 26 & 0b11 == 0b01 && insn >> 20 & 1 == 1 && insn >> 12 & 0xF == 15
+        || insn >> 25 & 0b111 == 0b100 && insn >> 20 & 1 == 1 && insn >> 15 & 1 == 1
+}
+
+/// Arm the monitor for a store-exclusive at the address its base register holds: not at
+/// all, with what memory holds, or with something else, by seed set.
+fn arm_monitor(cpu: &mut Cpu, insn: u32, set: usize) {
+    let store = insn & 0x0F90_00F0 == 0x0180_0090 && (insn >> 8) & 0b11 != 0;
+    let addr = cpu.reg_slots()[(insn >> 16) as usize & 0xF] as u32;
+    let held = match (insn >> 21) & 0b11 {
+        0b10 => cpu.mem.read_u8(addr).map(u32::from),
+        0b11 => cpu.mem.read_u16(addr).map(u32::from),
+        _ => cpu.mem.read_u32(addr),
+    };
+    match held {
+        Ok(held) if store && !set.is_multiple_of(3) => {
+            let value = if set % 3 == 1 { held } else { held ^ 1 };
+            cpu.set_exclusive(true, addr, [u64::from(value), 0]);
+        }
+        _ => cpu.set_exclusive(false, 0, [0, 0]),
+    }
+}
+
+/// A random `LDR pc, [..]` or `LDM` that loads the PC.
+fn pc_load(cond: u32, r: u64) -> u32 {
+    let (pre, add) = ((r & 1) as u32, (r >> 1 & 1) as u32);
+    let rn = (r >> 4 & 0xF) as u32;
+    if r >> 2 & 1 == 0 {
+        // The pre-indexed form may write back; the post-indexed one always does.
+        let wb = if rn == 15 { 0 } else { (r >> 3 & 1) as u32 };
+        let pre = if rn == 15 { 1 } else { pre };
+        let offset = if r >> 8 & 1 == 0 {
+            (r >> 9) as u32 & 0xFFF
+        } else {
+            1 << 25 | (r >> 9) as u32 & 0xFFF & !0x10 & !0xF | ((r >> 21) as u32 & 0xE)
+        };
+        cond << 28
+            | 0b01 << 26
+            | pre << 24
+            | add << 23
+            | wb << 21
+            | 1 << 20
+            | rn << 16
+            | 15 << 12
+            | offset
+    } else {
+        let wb = if rn == 15 { 0 } else { (r >> 3 & 1) as u32 };
+        let list = (r >> 8) as u32 & 0x7FFF | 1 << 15;
+        cond << 28 | 0b100 << 25 | pre << 24 | add << 23 | wb << 21 | 1 << 20 | rn << 16 | list
     }
 }
 
@@ -277,6 +414,24 @@ fn transfer(rng: &mut u64) -> u32 {
     let rn = ((r >> 12) & 0xF) as u32 % 15;
     let rt = ((r >> 16) & 0xF) as u32 % 15;
     let low = r >> 24;
+    if (r >> 22) & 0xF == 0 {
+        // LDREX{,B,H} and STREX{,B,H}, with the acquire and release forms among them.
+        let size = [0b00, 0b10, 0b11][(r >> 26) as usize % 3];
+        let monitor = [0xF, 0xF, 0xE, 0xC][(r >> 28) as usize % 4];
+        let low = if load == 1 {
+            0xF
+        } else {
+            (r >> 30) as u32 % 15
+        };
+        return cond << 28
+            | 0x0180_0090
+            | size << 21
+            | (load as u32) << 20
+            | rn << 16
+            | rt << 12
+            | monitor << 8
+            | low;
+    }
     let flags = (pre as u32) << 24 | (add as u32) << 23 | (wb as u32) << 21 | (load as u32) << 20;
     match (r >> 20) & 3 {
         0 => {

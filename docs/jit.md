@@ -19,9 +19,9 @@ How AArch64 blocks are translated, run, and written out as wasm.
 - The A32 translator is a separate, smaller pipeline: `decode.rs` turns each ARM word into an `a32::Op` (pre-decoded fields, the condition on every op), `exec.rs` runs it, and `Jit::a32` caches the blocks. `run_translated` picks `run_jit` or `run_a32_jit` by the running thread's mode, and each returns when the mode changes.
 - A block ends at the first instruction that can write the PC (`B`, `BL`, `BX`, `SVC`, a data-processing or load destination of `r15`, `LDM` with `pc`, `BLX`), as `a32::Term`. Branches are not followed, and a conditional terminator that is skipped falls through to the next address.
 - Ops call the interpreter's helpers (`a32_alu`, `a32_single`, `a32_extra`, `a32_block_transfer`, `shift_c`), so semantics are shared. `self.pc` is set before every op, which is what makes `r15` reads and the helpers' own `pc + 4` correct.
-- Anything else (multiplies, media, VFP, NEON, coprocessor, `MRS`/`MSR`, exclusives) is `Kind::Interpret`, which calls `execute_a32` and so tests the condition itself; an instruction of those that can write the PC is `TermKind::Interpret`.
+- `LDREX`/`STREX` of a word, halfword or byte and the `MRC` reads of `TPIDRURO`/`TPIDRURW` are ops. `BLX` through a register, `LDR pc` and `LDM` with `pc` in the list are terminators with their own kinds. Anything else (multiplies, media, VFP, NEON, other coprocessor access, `MRS`/`MSR`, `LDREXD`, acquire/release) is `Kind::Interpret`, which calls `execute_a32` and so tests the condition itself; an instruction of those that can write the PC is `TermKind::Interpret`.
 - Invalidation, per-process caches and the retire/clock accounting are the A64 path's: `Jit::invalidate` and `clear` drop A32 blocks too.
-- Hot blocks are emitted (`emit/a32.rs`) as the leading ops the emitter can write, then a stop; `exec` carries on from the count with the op walk, so an op with no writer (a multiply, a shift by register, `LDRD`, media, VFP, NEON) ends the compiled part of its block, not the block's chance. A block written whole ends in a `B`, `BL` or `BX` that leaves with `pc` set and, where the engine has tail calls, jumps into the next compiled block through the same chain table as A64. `SVC`, an interpreted terminator and a `BX` to an odd address are left to `exec`.
+- Hot blocks are emitted (`emit/a32.rs`) as the leading ops the emitter can write, then a stop; `exec` carries on from the count with the op walk, so an op with no writer (a multiply, a shift by register, `LDRD`, media, VFP, NEON) ends the compiled part of its block, not the block's chance. A block written whole ends in a `B`, `BL`, `BX`, `BLX` register, `LDR pc` or `LDM` with `pc` that leaves with `pc` set and, where the engine has tail calls, jumps into the next compiled block through the same chain table as A64. `SVC`, an interpreted terminator and a branch to an odd address (a switch to Thumb) are left to `exec`.
 - Every memory access checks the page table first and hands the instruction back, as in A64. `LDM` and `STM` check all their addresses before making any access, so handing one back leaves no register or word half done; an `LDM` that loads its own base is not written.
 - The extra loads (`LDRH` and friends) write the base last, a single load into its own base keeps the loaded value: the emitter follows the interpreter in each.
 - T32 has no translation: a Thumb thread runs in the interpreter and the A32 JIT leaves the block loop when `thumb` is set.
@@ -155,6 +155,10 @@ How AArch64 blocks are translated, run, and written out as wasm.
 ## `crates/switch-core/examples/jit_coverage.rs`
 
 - Untranslated coverage is answered statically by `switch_core::cpu::translates` weighted by a real frame's instruction mix, not by host timing.
+
+## `crates/switch-core/examples/a32_jit_coverage.rs`
+
+- The A32 counterpart, with `a32_translates` and `a32_emits`. It skips `--skip` steps, then measures `--window` instructions one by one, and ranks the classes (bits 27:20 and 7:4) the emitter has no writer for. Mario Kart 8 Deluxe never presented a frame in this setup, so the window is its boot loop: 869 distinct words, an unrepresentative mix.
 
 ## `crates/switch-core/tests/jit_test.rs`
 

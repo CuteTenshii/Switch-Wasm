@@ -23,6 +23,18 @@ const CORPUS: &[u32] = &[
     0x112fff1e, 0xe12fff1e, 0xe1580008, 0x11a0f000, 0xef000000,
 ];
 
+/// Exclusives, thread pointer reads and PC loads: `LDR pc`, `POP {pc}` and `BLX` through a register.
+#[rustfmt::skip]
+const PC_AND_EXCLUSIVE: &[u32] = &[
+    0xe3a08902, 0xe2888c01, 0xe3010234, 0xe5880000, 0xe1981f9f, 0xe1882f91, 0xe1883f91,
+    0xe1d84f9f, 0xe1e85f90, 0xe1f89f9f, 0xe1c8af90, 0xe0060090, 0xe08a9090, 0xee1d7f70,
+    0xee1dbf50, 0xe28fc00c, 0xe1500000, 0x112fff3c, 0xe12fff3c, 0xea000001, 0xe2800001,
+    0xe12fff1e, 0xe28fc008, 0xe588c004, 0xe598f004, 0xe3a00063, 0xe28fc008, 0xe588c008,
+    0xe5b8f008, 0xe3a00062, 0xe28fc008, 0xe92d1001, 0xe8bd8002, 0xe3a00061, 0xe28fc01c,
+    0xe92d5000, 0xe1500000, 0x18bd8004, 0xe8bd0018, 0xe28f500c, 0xe588500c, 0x0598f00c,
+    0xe3a00060, 0xe3a0005f, 0xef000000,
+];
+
 /// A conditional branch, link, return and `SVC`, taken and skipped.
 const CONDITIONAL: &[u32] = &[
     0xe3a00000, 0xe3500000, 0x02800001, 0x12800064, 0x0a000000, 0xe3a00032, 0x1a000004, 0xe2800002,
@@ -131,6 +143,7 @@ fn the_interpreter_halts_on_every_program() {
         ("corpus", CORPUS),
         ("conditional", CONDITIONAL),
         ("self-modifying", SELF_MODIFYING),
+        ("pc and exclusive", PC_AND_EXCLUSIVE),
     ] {
         let mut cpu = loaded(code, false);
         let report = cpu.run(1000).unwrap();
@@ -144,6 +157,7 @@ fn a_translated_run_matches_an_interpreted_one() {
         ("corpus", CORPUS),
         ("conditional", CONDITIONAL),
         ("self-modifying", SELF_MODIFYING),
+        ("pc and exclusive", PC_AND_EXCLUSIVE),
     ] {
         compare(code, 1000, what);
     }
@@ -154,6 +168,13 @@ fn a_translated_run_matches_at_every_step_budget() {
     // A budget ending mid-block stops on the next instruction with an exact retired count.
     for steps in 1..=200 {
         compare(CORPUS, steps, &format!("corpus, {steps} steps"));
+    }
+    for steps in 1..=PC_AND_EXCLUSIVE.len() as u64 + 2 {
+        compare(
+            PC_AND_EXCLUSIVE,
+            steps,
+            &format!("pc and exclusive, {steps} steps"),
+        );
     }
     for steps in 1..=CONDITIONAL.len() as u64 + 2 {
         compare(CONDITIONAL, steps, &format!("conditional, {steps} steps"));

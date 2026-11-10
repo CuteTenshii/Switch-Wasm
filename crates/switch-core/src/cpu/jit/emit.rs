@@ -1444,6 +1444,19 @@ impl Emitter<'_> {
         self.store_reg(rt);
     }
 
+    /// A word from `L_ADDR` into `L_TARGET`, leaving the block if its bit 0 is set:
+    /// an interworking branch the interpreter runs.
+    fn load_branch_target(&mut self, retired: usize) {
+        self.page_for_read(4, retired);
+        self.in_page();
+        self.f.i64_load32_u(UNALIGNED, 0);
+        self.f.i32_wrap_i64();
+        self.f.local_tee(L_TARGET);
+        self.f.i32_const(1);
+        self.f.i32_and();
+        self.deopt_if(retired);
+    }
+
     /// A store of `rt` to `L_ADDR`.
     fn store(&mut self, rt: u8, acc: Acc, retired: usize) {
         self.page_for_write(access_bytes(acc), retired);
@@ -1461,6 +1474,11 @@ impl Emitter<'_> {
     /// `LDXR`/`LDAXR`: the load, then the monitor armed at the address with what was read.
     fn load_exclusive(&mut self, rt: u8, rn: u8, sz: u8, retired: usize) {
         self.address(rn, 0, Wb::None);
+        self.load_exclusive_at(rt, sz, retired);
+    }
+
+    /// The same at `L_ADDR`.
+    fn load_exclusive_at(&mut self, rt: u8, sz: u8, retired: usize) {
         self.page_for_read(1 << sz, retired);
         self.in_page();
         match sz {
@@ -1480,6 +1498,11 @@ impl Emitter<'_> {
     /// address is the interpreter's, since a wasm atomic would trap on it.
     fn store_exclusive(&mut self, rs: u8, rt: u8, rn: u8, sz: u8, retired: usize) {
         self.address(rn, 0, Wb::None);
+        self.store_exclusive_at(rs, rt, sz, retired);
+    }
+
+    /// The same at `L_ADDR`.
+    fn store_exclusive_at(&mut self, rs: u8, rt: u8, sz: u8, retired: usize) {
         self.page_for_write(1 << sz, retired);
         if sz > 0 {
             self.f.local_get(L_ADDR);

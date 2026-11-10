@@ -113,6 +113,14 @@ pub(in crate::cpu::jit) fn decode(insn: u32, pc: u32) -> Decoded {
             }
         }
         0b110 => interpret(insn, false),
+        // MRC p15, 0, rt, c13, c0, 2 or 3.
+        _ if insn & 0x0FFF_0FDF == 0x0E1D_0F50 && (insn >> 12) & 0xF != 15 => op(
+            cond,
+            Kind::ReadThreadPointer {
+                rt: ((insn >> 12) & 0xF) as u8,
+                rw: (insn >> 5) & 1 == 0,
+            },
+        ),
         _ if (insn >> 24) & 1 != 0 => term(
             cond,
             TermKind::Svc {
@@ -138,7 +146,7 @@ fn data_processing(insn: u32, cond: u8) -> Decoded {
             return if insn & 0x60 != 0 {
                 extra(insn, cond)
             } else {
-                data_processing_fallback(insn)
+                exclusive(insn, cond)
             };
         }
         if misc_slot {
@@ -146,6 +154,14 @@ fn data_processing(insn: u32, cond: u8) -> Decoded {
                 return term(
                     cond,
                     TermKind::Bx {
+                        rm: (insn & 0xF) as u8,
+                    },
+                );
+            }
+            if insn & 0x0FFF_FFF0 == 0x012F_FF30 && insn & 0xF != 15 {
+                return term(
+                    cond,
+                    TermKind::Blx {
                         rm: (insn & 0xF) as u8,
                     },
                 );
@@ -216,9 +232,43 @@ fn transfer_writes_pc(access: Access) -> bool {
     (access.load && access.rt == 15) || (access.writes_base() && access.rn == 15)
 }
 
+/// `LDREX` and `STREX` of a byte, halfword or word; the rest of the group is the interpreter's.
+fn exclusive(insn: u32, cond: u8) -> Decoded {
+    let size = match (insn >> 21) & 0b11 {
+        0b00 => 2,
+        0b10 => 0,
+        0b11 => 1,
+        _ => return data_processing_fallback(insn),
+    };
+    let load = (insn >> 20) & 1 != 0;
+    let (rn, rd, rt) = (
+        ((insn >> 16) & 0xF) as u8,
+        ((insn >> 12) & 0xF) as u8,
+        (insn & 0xF) as u8,
+    );
+    // Bits 9:8 clear is a plain acquire or release, which leaves the monitor alone.
+    let operands = [rn, rd, if load { rn } else { rt }];
+    if (insn >> 23) & 0x1F != 0b00011 || (insn >> 8) & 0b11 == 0 || operands.contains(&15) {
+        return data_processing_fallback(insn);
+    }
+    op(
+        cond,
+        Kind::Exclusive {
+            load,
+            size,
+            rd,
+            rn,
+            rt,
+        },
+    )
+}
+
 fn single(insn: u32, cond: u8, register: bool) -> Decoded {
     let access = Access::of(insn);
-    if transfer_writes_pc(access) {
+    let byte = (insn >> 22) & 1 != 0;
+    let loads_pc =
+        access.load && access.rt == 15 && !byte && !(access.writes_base() && access.rn == 15);
+    if transfer_writes_pc(access) && !loads_pc {
         return interpret(insn, true);
     }
     let offset = if register {
@@ -231,11 +281,14 @@ fn single(insn: u32, cond: u8, register: bool) -> Decoded {
     } else {
         Offset::Imm((insn & 0xFFF) as u16)
     };
+    if loads_pc {
+        return term(cond, TermKind::LdrPc { access, offset });
+    }
     op(
         cond,
         Kind::Single {
             access,
-            byte: (insn >> 22) & 1 != 0,
+            byte,
             offset,
         },
     )
@@ -269,8 +322,17 @@ fn block(insn: u32, cond: u8) -> Decoded {
     let access = Access::of(insn);
     let loads_pc = access.load && insn & 0x8000 != 0;
     // The banked and PSR forms are privileged; the interpreter reports them.
-    if loads_pc || (access.wb && access.rn == 15) || (insn >> 22) & 1 != 0 {
+    if (access.wb && access.rn == 15) || (insn >> 22) & 1 != 0 {
         return interpret(insn, true);
+    }
+    if loads_pc {
+        return term(
+            cond,
+            TermKind::LdmPc {
+                access,
+                list: insn as u16,
+            },
+        );
     }
     op(
         cond,

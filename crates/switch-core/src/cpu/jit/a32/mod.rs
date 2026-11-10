@@ -85,6 +85,19 @@ pub(super) enum Kind {
         imm: u16,
         top: bool,
     },
+    /// `LDREX{,B,H}` and `STREX{,B,H}`: `rt` is loaded or stored, `rd` takes the status of a store.
+    Exclusive {
+        load: bool,
+        size: u8,
+        rd: u8,
+        rn: u8,
+        rt: u8,
+    },
+    /// `MRC` of `TPIDRURO`, or of `TPIDRURW` when `rw`.
+    ReadThreadPointer {
+        rt: u8,
+        rw: bool,
+    },
     /// `LDM` and `STM`, with no PC in the list.
     Block {
         access: Access,
@@ -109,6 +122,19 @@ pub(super) enum TermKind {
     },
     Bx {
         rm: u8,
+    },
+    Blx {
+        rm: u8,
+    },
+    /// `LDR pc, [..]`: a word load into the PC.
+    LdrPc {
+        access: Access,
+        offset: Offset,
+    },
+    /// `LDM` with the PC in the list.
+    LdmPc {
+        access: Access,
+        list: u16,
     },
     Svc {
         imm: u16,

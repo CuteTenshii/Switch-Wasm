@@ -84,23 +84,42 @@ pub fn a32_emits(insn: u32) -> bool {
     const REPRESENTATIVE_PC: u32 = 0x0800_0000;
     match decode(insn, REPRESENTATIVE_PC) {
         Decoded::Op(op) => writable(&op),
-        Decoded::Term(term) => matches!(
-            term.kind,
-            TermKind::B { .. } | TermKind::Bl { .. } | TermKind::Bx { .. }
-        ),
+        Decoded::Term(term) => term_writable(&term.kind),
     }
+}
+
+/// Whether [`Emitter::a32_term`] has a writer for a terminator of `kind`.
+fn term_writable(kind: &TermKind) -> bool {
+    match *kind {
+        TermKind::B { .. }
+        | TermKind::Bl { .. }
+        | TermKind::Bx { .. }
+        | TermKind::Blx { .. }
+        | TermKind::LdrPc { .. } => true,
+        TermKind::LdmPc { access, list } => block_writable(access, list),
+        TermKind::Svc { .. } | TermKind::Interpret { .. } | TermKind::Fetch => false,
+    }
+}
+
+/// An `LDM` or `STM` the emitter can write.
+fn block_writable(access: Access, list: u16) -> bool {
+    // A load that names its base is not safe to hand back half-way.
+    list != 0 && !(access.load && list & (1 << access.rn) != 0)
 }
 
 /// Whether [`Emitter::a32_op`] has a writer for `op`.
 fn writable(op: &A32Op) -> bool {
     match op.kind {
-        Kind::Nop | Kind::Single { .. } | Kind::MoveWide { .. } => true,
+        Kind::Nop
+        | Kind::Single { .. }
+        | Kind::MoveWide { .. }
+        | Kind::Exclusive { .. }
+        | Kind::ReadThreadPointer { .. } => true,
         Kind::Interpret { .. } => false,
         Kind::Dp { operand, .. } => !matches!(operand, Operand::RegReg { .. }),
         // LDRD and STRD.
         Kind::Extra { access, sh, .. } => (sh == 0b01) || (access.load && sh >= 0b10),
-        // A load that names its base is not safe to hand back half-way.
-        Kind::Block { access, list } => list != 0 && !(access.load && list & (1 << access.rn) != 0),
+        Kind::Block { access, list } => block_writable(access, list),
     }
 }
 
@@ -159,6 +178,33 @@ impl Emitter<'_> {
                 }
                 self.store_reg(rd);
             }
+            Kind::ReadThreadPointer { rt, rw } => {
+                self.f.local_get(STATE);
+                let at = if rw {
+                    self.layout.tpidr_rw
+                } else {
+                    self.layout.tpidr
+                };
+                self.f.i64_load(ALIGN_8, at);
+                self.mask_to(false);
+                self.store_reg(rt);
+            }
+            Kind::Exclusive {
+                load,
+                size,
+                rd,
+                rn,
+                rt,
+            } => {
+                self.a32_read(rn, pc);
+                self.f.i32_wrap_i64();
+                self.f.local_set(L_ADDR);
+                if load {
+                    self.load_exclusive_at(rd, size, i);
+                } else {
+                    self.store_exclusive_at(rd, rt, size, i);
+                }
+            }
             Kind::Block { access, list } => self.a32_block_transfer(access, list, i, pc),
         }
         if predicated {
@@ -170,10 +216,7 @@ impl Emitter<'_> {
     /// Write `term`, which follows `len` instructions and sits at `pc`, leaving
     /// through every path. `false`, with nothing written, when the host has to run it.
     fn a32_term(&mut self, term: &A32Term, len: usize, pc: u32) -> bool {
-        if matches!(
-            term.kind,
-            TermKind::Svc { .. } | TermKind::Interpret { .. } | TermKind::Fetch
-        ) {
+        if !term_writable(&term.kind) {
             return false;
         }
         let predicated = term.cond != ALWAYS;
@@ -189,20 +232,31 @@ impl Emitter<'_> {
                 self.store_reg(14);
                 self.goto(retired, target, false);
             }
-            TermKind::Bx { rm } => {
+            TermKind::Bx { rm } | TermKind::Blx { rm } => {
                 self.a32_read(rm, pc);
                 self.f.local_tee(L_T);
                 self.f.i64_const(1);
                 self.f.i64_and();
                 self.f.i32_wrap_i64();
-                // An odd target is a switch to Thumb, which the interpreter reports.
+                // An odd target is a switch to Thumb, which the interpreter runs.
                 self.deopt_if(len);
+                if matches!(term.kind, TermKind::Blx { .. }) {
+                    self.f.i64_const(i64::from(pc.wrapping_add(4)));
+                    self.store_reg(14);
+                }
                 self.f.local_get(L_T);
-                self.f.i64_const(!3);
-                self.f.i64_and();
                 self.f.i32_wrap_i64();
-                self.f.local_set(L_TARGET);
-                self.exit_with(self.answer(retired) | LEFT);
+                self.a32_leave_to_target(retired);
+            }
+            TermKind::LdrPc { access, offset } => {
+                self.a32_transfer(access, Acc::Load32, offset, false, len, pc);
+                self.f.local_get(L_TARGET);
+                self.a32_leave_to_target(retired);
+            }
+            TermKind::LdmPc { access, list } => {
+                self.a32_block_transfer(access, list, len, pc);
+                self.f.local_get(L_TARGET);
+                self.a32_leave_to_target(retired);
             }
             TermKind::Svc { .. } | TermKind::Interpret { .. } | TermKind::Fetch => unreachable!(),
         }
@@ -211,6 +265,14 @@ impl Emitter<'_> {
             self.goto(retired, pc.wrapping_add(4), false);
         }
         true
+    }
+
+    /// Leave to the word-aligned branch target on the stack, an `i32`.
+    fn a32_leave_to_target(&mut self, retired: usize) {
+        self.f.i32_const(!3);
+        self.f.i32_and();
+        self.f.local_set(L_TARGET);
+        self.exit_with(self.answer(retired) | LEFT);
     }
 
     /// Push `r`, with `r15` as the address of the instruction at `pc` plus 8.
@@ -540,7 +602,13 @@ impl Emitter<'_> {
         self.f.i32_wrap_i64();
         self.f.local_set(L_ADDR);
 
-        if a.load {
+        if a.load && a.rt == 15 {
+            self.load_branch_target(at);
+            if a.writes_base() {
+                self.f.local_get(L_W);
+                self.store_reg(a.rn);
+            }
+        } else if a.load {
             self.load(a.rt, acc, at);
             // `ldr r0, [r0], #4` keeps the loaded value.
             if a.writes_base() && (base_last || a.rt != a.rn) {
@@ -599,6 +667,8 @@ impl Emitter<'_> {
                 self.f.i32_wrap_i64();
                 self.f.local_set(L_ADDR);
                 match (check, a.load) {
+                    (true, true) if reg == 15 => self.load_branch_target(at),
+                    (false, true) if reg == 15 => {}
                     (true, true) => self.page_for_read(4, at),
                     (true, false) => self.page_for_write(4, at),
                     (false, true) => self.load(reg, Acc::Load32, at),

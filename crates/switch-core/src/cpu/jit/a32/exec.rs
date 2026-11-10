@@ -283,6 +283,32 @@ impl Cpu {
                 };
                 self.set_r32(rd, value);
             }
+            Kind::ReadThreadPointer { rt, rw } => {
+                let value = if rw { self.tpidr_rw } else { self.tpidr };
+                self.set_r32(rt, value as u32);
+            }
+            Kind::Exclusive {
+                load,
+                size,
+                rd,
+                rn,
+                rt,
+            } => {
+                let addr = self.r32(rn);
+                if load {
+                    let value = match size {
+                        0 => u32::from(self.mem.read_u8(addr)?),
+                        1 => u32::from(self.mem.read_u16(addr)?),
+                        _ => self.mem.read_u32(addr)?,
+                    };
+                    self.set_r32(rd, value);
+                    self.exclusive.arm(addr, [u64::from(value), 0]);
+                } else {
+                    let value = u64::from(self.r32(rt));
+                    let stored = self.store_exclusive_at(addr, 1 << size, [value, 0])?;
+                    self.set_r32(rd, u32::from(!stored));
+                }
+            }
             Kind::Block { access, list } => return self.a32_block_transfer(access, list),
         }
         Ok(())
@@ -325,6 +351,16 @@ impl Cpu {
                 let target = self.r32(rm);
                 self.a32_write_pc(target)?;
             }
+            TermKind::Blx { rm } => {
+                let target = self.r32(rm);
+                self.regs[14] = u64::from(pc.wrapping_add(4));
+                self.a32_write_pc(target)?;
+            }
+            TermKind::LdrPc { access, offset } => {
+                let offset = self.a32_offset(offset);
+                return self.a32_single(access, false, offset);
+            }
+            TermKind::LdmPc { access, list } => return self.a32_block_transfer(access, list),
             TermKind::Svc { imm } => {
                 // Retire the SVC first: a thread switch installs the next thread's PC.
                 self.pc = pc.wrapping_add(4);
