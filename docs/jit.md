@@ -158,7 +158,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 
 ## `crates/switch-core/examples/a32_jit_coverage.rs`
 
-- The A32 counterpart, with `a32_translates` and `a32_emits`. It skips `--skip` steps, then measures `--window` instructions one by one, and ranks the classes (bits 27:20 and 7:4) the emitter has no writer for. Mario Kart 8 Deluxe never presented a frame in this setup, so the window is its boot loop: 869 distinct words, an unrepresentative mix.
+- The A32 counterpart, with `a32_translates` and `a32_emits`. It skips `--skip` steps, then measures `--window` instructions one by one, and ranks the classes (bits 27:20 and 7:4) the emitter has no writer for. On Mario Kart 8 Deluxe (3B steps in, 100M measured, 32k distinct words) 1.02% decodes to the interpreter and 1.15% has no writer; the hottest class is `UXTB`-style extends at 0.29%, then a long tail under 0.1% each (VFP, NEON, long multiplies, register shifts).
 
 ## `crates/switch-core/tests/jit_test.rs`
 
