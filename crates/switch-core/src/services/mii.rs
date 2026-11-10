@@ -285,6 +285,15 @@ impl Cpu {
                     }
                     self.write_ipc_response(tls, 0, &[], &(count as u32).to_le_bytes(), &[])
                 }
+                // UpdateLatest(CharInfo, SourceFlag) -> CharInfo: nothing newer exists, so echo it.
+                Some(5) => {
+                    let data = self.ipc_request_data(tls);
+                    let mut info = [0u8; MII_CHAR_INFO_LEN];
+                    for (offset, byte) in info.iter_mut().enumerate() {
+                        *byte = self.mem.read_u8(data.wrapping_add(offset as u32))?;
+                    }
+                    self.write_ipc_response(tls, 0, &[], &info, &[])
+                }
                 // Get2 and Get3: store data reads, empty.
                 Some(8) | Some(9) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 // BuildRandom(Age, Gender, Race): only Gender narrows; each gets its own create id.
@@ -549,5 +558,20 @@ mod tests {
         cpu.record_domain_object(9, 7, "mii:database");
         cpu.mii_request(TLS, 9, Some(2)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 0);
+    }
+
+    #[test]
+    fn mii_update_latest_echoes_the_char_info() {
+        let info = super::default_mii_char_info(4).unwrap();
+        let mut payload = info.to_vec();
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        let mut cpu = request(true, 5, &payload);
+        cpu.record_domain_object(9, 7, "mii:database");
+        cpu.mii_request(TLS, 9, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
+        for (offset, &byte) in info.iter().enumerate() {
+            let at = TLS + 0x30 + offset as u32;
+            assert_eq!(cpu.mem.read_u8(at).unwrap(), byte, "byte {offset:#x}");
+        }
     }
 }
