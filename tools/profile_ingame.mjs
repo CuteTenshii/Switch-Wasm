@@ -3,13 +3,15 @@
 //                                 [--settle=samples] [--record=seconds] [--dir=out] [browser_boot flags]
 // Recording starts once `--settle` samples in a row, past `--after`, sit in the fps range. The report
 // names the wasm functions of the busiest thread, and gives every thread's CPU in the page and the
-// GPU process, which perf cannot attach to. Needs perf, and --seconds caps the wait.
+// GPU process, which perf cannot attach to. Needs perf on Linux and sample on macOS (the report then
+// has process CPU and the busiest threads, not per-thread CPU), and --seconds caps the wait.
 import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { commandLine, fail, repoRoot } from './common.mjs';
 
+const darwin = process.platform === 'darwin';
 const OWN_FLAGS = ['when-fps', 'after', 'settle', 'record', 'dir'];
 const SAMPLE_HZ = 500;
 const TOP_INTERVAL_S = 5;
@@ -92,6 +94,49 @@ function reportPerf(data, map) {
   return out;
 }
 
+// `sample` lists the frames at the top of stack across all threads; the kernel waits of idle threads are
+// set aside and the rest ranked.
+const IDLE_WAITS = /^(mach_msg2?_trap|kevent64|__psynch_cvwait|__workq_kernreturn|semaphore_wait_trap|__ulock_wait2?|__semwait_signal|select|poll|read)\b/;
+
+function reportSample(path, map) {
+  const symbols = resolveSymbols(map);
+  const lines = readFileSync(path, 'utf8').split('\n');
+  const start = lines.findIndex((line) => line.startsWith('Sort by top of stack'));
+  const frames = new Map();
+  for (const line of lines.slice(start + 1)) {
+    if (!line.trim()) break;
+    const match = /^\s+(.*?)\s+(\d+)$/.exec(line);
+    if (!match) continue;
+    const address = /(?:^|\[)0x([0-9a-f]+)\]?/.exec(match[1]);
+    const name = (address ? symbolAt(symbols, BigInt(`0x${address[1]}`)) ?? match[1] : match[1])
+      .replace(/^(LazyCompile|Function|JS):/, '').slice(0, 100);
+    frames.set(name, (frames.get(name) ?? 0) + Number(match[2]));
+  }
+  const busy = [...frames].filter(([name]) => !IDLE_WAITS.test(name)).sort((a, b) => b[1] - a[1]);
+  const total = busy.reduce((sum, [, n]) => sum + n, 0);
+  const all = [...frames.values()].reduce((sum, n) => sum + n, 0);
+  return [`Top of stack in the page, ${total} busy of ${all} thread samples:`,
+    ...busy.slice(0, FUNCTIONS_SHOWN).map(([name, n]) => `${(100 * n / total).toFixed(2).padStart(7)}%  ${name}`)];
+}
+
+// The page's and the GPU process's CPU, one `ps` reading each interval.
+function pollCpu(pids, seconds) {
+  const done = new Promise((resolveDone) => {
+    const rows = new Map();
+    let left = Math.round(seconds / TOP_INTERVAL_S);
+    const timer = setInterval(() => {
+      for (const p of processes()) {
+        if (pids.includes(p.pid)) rows.set(p.pid, [...(rows.get(p.pid) ?? []), p.cpu]);
+      }
+      if (--left <= 0) {
+        clearInterval(timer);
+        resolveDone(rows);
+      }
+    }, TOP_INTERVAL_S * 1000);
+  });
+  return done;
+}
+
 function reportTop(path, renderer, gpu) {
   const seen = new Map();
   for (const line of readFileSync(path, 'utf8').split('\n')) {
@@ -141,19 +186,38 @@ if (!await triggered) {
 const renderer = browserProcess(boot.pid, 'renderer');
 const gpu = browserProcess(boot.pid, 'gpu-process');
 console.log(`recording ${record}s of page ${renderer}, GPU process ${gpu}`);
-const data = join(dir, 'perf.data');
+const data = join(dir, darwin ? 'sample.txt' : 'perf.data');
 const topPath = join(dir, 'top.txt');
-const topFile = createWriteStream(topPath);
-const shots = String(Math.round(record / TOP_INTERVAL_S) + 1);
-const top = spawn('top', ['-H', '-b', '-d', String(TOP_INTERVAL_S), '-n', shots, '-p', `${renderer},${gpu}`], { stdio: ['ignore', 'pipe', 'ignore'] });
-top.stdout.pipe(topFile);
-const perf = spawnSync('perf', ['record', '-q', '-e', 'cpu-clock:u', '-F', String(SAMPLE_HZ), '-p', String(renderer), '-o', data, '--', 'sleep', String(record)], { encoding: 'utf8' });
-if (perf.status !== 0) console.error(`perf failed: ${perf.stderr.trim()}`);
-await new Promise((done) => top.on('close', done));
+let profiled;
+let cpu;
+if (darwin) {
+  // The page is sampled every millisecond; the processes' CPU is read beside it.
+  const sampled = spawn('sample', [String(renderer), String(record), '1', '-file', data], { stdio: 'ignore' });
+  const closed = new Promise((done) => sampled.on('close', done));
+  cpu = await pollCpu([renderer, gpu], record);
+  profiled = await closed === 0;
+  if (!profiled) console.error('sample failed');
+} else {
+  const topFile = createWriteStream(topPath);
+  const shots = String(Math.round(record / TOP_INTERVAL_S) + 1);
+  const top = spawn('top', ['-H', '-b', '-d', String(TOP_INTERVAL_S), '-n', shots, '-p', `${renderer},${gpu}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+  top.stdout.pipe(topFile);
+  const perf = spawnSync('perf', ['record', '-q', '-e', 'cpu-clock:u', '-F', String(SAMPLE_HZ), '-p', String(renderer), '-o', data, '--', 'sleep', String(record)], { encoding: 'utf8' });
+  profiled = perf.status === 0;
+  if (!profiled) console.error(`perf failed: ${perf.stderr.trim()}`);
+  await new Promise((done) => top.on('close', done));
+}
 boot.kill('SIGTERM');
 await ended;
 bootLog.end();
 
-const report = [...(perf.status === 0 ? reportPerf(data, `/tmp/perf-${renderer}.map`) : []), ...reportTop(topPath, renderer, gpu)];
+const map = `/tmp/perf-${renderer}.map`;
+const processCpu = () => ['', 'CPU by process, mean of the readings:', ...[[renderer, 'page'], [gpu, 'GPU process']].map(([pid, name]) => {
+  const readings = cpu.get(pid) ?? [0];
+  return `${(readings.reduce((a, b) => a + b, 0) / readings.length).toFixed(1).padStart(7)}%  ${name} ${pid}`;
+})];
+const report = darwin
+  ? [...(profiled ? reportSample(data, map) : []), ...processCpu()]
+  : [...(profiled ? reportPerf(data, map) : []), ...reportTop(topPath, renderer, gpu)];
 writeFileSync(join(dir, 'report.txt'), `${report.join('\n')}\n`);
 console.log(report.join('\n'));

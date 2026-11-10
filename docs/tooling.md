@@ -51,6 +51,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 - Runs `browser_boot.mjs`, waits until `--settle` samples past `--after` sit inside `--when-fps=low-high`, then records `--record` seconds with perf and ends the run. Other flags go to `browser_boot.mjs`.
 - Writes `report.txt`, `perf.data`, `top.txt` and `boot.txt` to `--dir`. It resolves wasm function names itself from V8's `/tmp/perf-<pid>.map`, because perf does not apply it to V8's anonymous pages.
 - Chromium's sandbox is off for the run, or perf cannot attach. The GPU process refuses perf, so it only appears through `top`'s per-thread CPU.
+- On macOS it uses `sample` on the page process (1 ms interval, `sample.txt`) instead of perf and `top`: the report ranks the busy frames at the top of stack, idle kernel waits set aside, and gives the page's and the GPU process's CPU from `ps`, without per-thread CPU. Wasm frames are named by function index, as V8 names them.
 
 ## `tools/log_summary.mjs`
 
