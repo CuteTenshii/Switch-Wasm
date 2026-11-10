@@ -42,6 +42,7 @@ impl Gpu {
             space: Space::default(),
             parked: std::collections::HashMap::new(),
             scratch: Vec::new(),
+            bind_groups: std::collections::HashMap::new(),
             modules: std::collections::HashMap::new(),
             pipelines: std::collections::HashMap::new(),
             samplers: std::collections::HashMap::new(),
@@ -144,6 +145,7 @@ impl Gpu {
         self.space = Space::default();
         self.parked.clear();
         self.scratch.clear();
+        self.bind_groups.clear();
         true
     }
 

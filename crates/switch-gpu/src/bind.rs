@@ -5,8 +5,8 @@ use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
 use crate::held::spans_overlap;
 use crate::readback::{HeldGlobal, Scratch};
 use crate::{
-    same_rows, GlobalUpload, Gpu, HeldLayer, Prepared, Red, Resource, SamplerKey, MAX_GLOBAL,
-    TEXTURE_BINDING,
+    same_rows, BindKey, CachedBinding, GlobalUpload, Gpu, HeldLayer, Prepared, Red, Resource,
+    SamplerKey, MAX_GLOBAL, TEXTURE_BINDING,
 };
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
@@ -52,6 +52,8 @@ impl Gpu {
         };
         let mut entries = Vec::new();
         let mut resources: Vec<Resource> = Vec::new();
+        // Whether everything it binds outlives the draw, so the group can serve the next one.
+        let mut persistent = true;
         // Only its own stage reads a stage's buffers, and each stage has a storage buffer limit.
         let own = if stage == ShaderStage::VertexB {
             wgpu::ShaderStages::VERTEX
@@ -71,10 +73,7 @@ impl Gpu {
                 count: None,
             });
             let packed = pack_banks(p.uploads.constants.iter().filter(|c| c.stage == stage));
-            resources.push(Resource::Buffer(
-                wgsl::CONSTANTS_BINDING,
-                self.buffer("constants", &packed, wgpu::BufferUsages::STORAGE),
-            ));
+            resources.push(Resource::Bytes(wgsl::CONSTANTS_BINDING, packed));
         }
 
         for (index, upload) in p
@@ -155,11 +154,19 @@ impl Gpu {
                 None => self.held_layers(upload, compare, view_dimension)?,
             };
             let texture = if !held.is_empty() {
+                persistent = false;
                 self.texture_over_held(upload, view_dimension, &held, compare)?
             } else if compare {
+                persistent = false;
                 self.shadow_texture(upload)?
             } else {
-                self.texture(upload, view_dimension, fold)?
+                let texture = self.texture(upload, view_dimension, fold)?;
+                persistent &= self
+                    .space
+                    .gpu_textures
+                    .get(&upload.key)
+                    .is_some_and(|made| made.iter().any(|(_, kept)| *kept == texture));
+                texture
             };
             resources.push(Resource::Texture(binding, texture, view_dimension));
             resources.push(Resource::Sampler(
@@ -183,13 +190,21 @@ impl Gpu {
                 },
                 count: None,
             });
-            let buffer = match &global.held {
-                Some(held) => held.clone(),
-                None => self.buffer("global", &global.bytes, wgpu::BufferUsages::STORAGE),
-            };
-            resources.push(Resource::Buffer(binding, buffer));
+            // What a shader writes goes back to the guest, so it is never shared.
+            persistent &= global.held.is_none() && !written;
+            resources.push(match &global.held {
+                Some(held) => Resource::Buffer(binding, held.clone()),
+                None => Resource::Bytes(binding, global.bytes.to_vec()),
+            });
         }
 
+        let key = persistent.then(|| BindKey {
+            entries: entries.clone(),
+            resources: resources.clone(),
+        });
+        if let Some(cached) = key.as_ref().and_then(|key| self.bind_groups.get(key)) {
+            return Ok((cached.layout.clone(), cached.group.clone()));
+        }
         let layout = match self.group_layouts.get(&entries) {
             Some(layout) => layout.clone(),
             None => {
@@ -203,6 +218,28 @@ impl Gpu {
                 layout
             }
         };
+        let mut owned = Vec::new();
+        let resources: Vec<Resource> = resources
+            .into_iter()
+            .map(|resource| match resource {
+                Resource::Bytes(binding, bytes) => {
+                    let what = if binding == wgsl::CONSTANTS_BINDING {
+                        "constants"
+                    } else {
+                        "global"
+                    };
+                    let buffer = if persistent {
+                        let buffer = self.kept_buffer(what, &bytes, wgpu::BufferUsages::STORAGE);
+                        owned.push(buffer.clone());
+                        buffer
+                    } else {
+                        self.buffer(what, &bytes, wgpu::BufferUsages::STORAGE)
+                    };
+                    Resource::Buffer(binding, buffer)
+                }
+                other => other,
+            })
+            .collect();
         // The views have to outlive the descriptor that borrows them.
         let views: Vec<Option<wgpu::TextureView>> = resources
             .iter()
@@ -232,6 +269,7 @@ impl Gpu {
                     binding: *binding,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
+                Resource::Bytes(..) => unreachable!("made into buffers above"),
             })
             .collect();
         let group_name = format!("group {group}");
@@ -240,6 +278,16 @@ impl Gpu {
             layout: &layout,
             entries: &bindings,
         });
+        if let Some(key) = key {
+            self.bind_groups.insert(
+                key,
+                CachedBinding {
+                    layout: layout.clone(),
+                    group: bind_group.clone(),
+                    buffers: owned,
+                },
+            );
+        }
         Ok((layout, bind_group))
     }
 

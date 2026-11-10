@@ -67,6 +67,18 @@ impl Gpu {
         bytes: &[u8],
         usage: wgpu::BufferUsages,
     ) -> wgpu::Buffer {
+        let buffer = self.kept_buffer(what, bytes, usage);
+        self.scratch.push(Scratch::Buffer(buffer.clone()));
+        buffer
+    }
+
+    /// A buffer of `bytes` that its owner destroys.
+    pub(super) fn kept_buffer(
+        &mut self,
+        what: &str,
+        bytes: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
         // Padded to four bytes.
         let mut padded = bytes.to_vec();
         while !padded.len().is_multiple_of(4) || padded.is_empty() {
@@ -79,7 +91,6 @@ impl Gpu {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, &padded);
-        self.scratch.push(Scratch::Buffer(buffer.clone()));
         buffer
     }
 
@@ -211,6 +222,13 @@ impl Gpu {
             match made {
                 Scratch::Buffer(buffer) => buffer.destroy(),
                 Scratch::Texture(texture) => texture.destroy(),
+            }
+        }
+        if self.bind_groups.len() >= crate::MAX_BIND_GROUPS {
+            for binding in self.bind_groups.drain().map(|(_, binding)| binding) {
+                for buffer in binding.buffers {
+                    buffer.destroy();
+                }
             }
         }
     }
