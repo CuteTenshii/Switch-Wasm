@@ -5,8 +5,8 @@ use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
 use crate::held::spans_overlap;
 use crate::readback::{HeldGlobal, Scratch};
 use crate::{
-    same_rows, BindKey, CachedBinding, GlobalUpload, Gpu, HeldLayer, Prepared, Red, Resource,
-    SamplerKey, MAX_GLOBAL, TEXTURE_BINDING,
+    same_rows, CachedBinding, GlobalUpload, Gpu, HeldLayer, Prepared, Red, Resource, SamplerKey,
+    MAX_GLOBAL, TEXTURE_BINDING,
 };
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
@@ -16,6 +16,47 @@ use switch_core::gpu::surface::{
 };
 use switch_core::gpu::upload::TextureKey;
 use switch_core::gpu::upload::{ConstantUpload, Uploads};
+
+/// A fast fingerprint of what a stage binds. Constants run to tens of kilobytes a draw, which
+/// the default hasher is too slow for; four lanes keep the multiplies from waiting on each other.
+fn fingerprint(entries: &[wgpu::BindGroupLayoutEntry], resources: &[Resource]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    const K: [u64; 4] = [
+        0x9E37_79B9_7F4A_7C15,
+        0xC2B2_AE3D_27D4_EB4F,
+        0x1656_67B1_9E37_79F9,
+        0x27D4_EB2F_1656_67C5,
+    ];
+    let mut small = std::collections::hash_map::DefaultHasher::new();
+    entries.hash(&mut small);
+    let mut lanes = [small.finish(), 1, 2, 3];
+    for resource in resources {
+        let Resource::Bytes(binding, bytes) = resource else {
+            let mut other = std::collections::hash_map::DefaultHasher::new();
+            resource.hash(&mut other);
+            lanes[0] = (lanes[0] ^ other.finish())
+                .wrapping_mul(K[0])
+                .rotate_left(29);
+            continue;
+        };
+        lanes[0] = (lanes[0] ^ u64::from(*binding) ^ (bytes.len() as u64) << 32)
+            .wrapping_mul(K[0])
+            .rotate_left(29);
+        let mut blocks = bytes.chunks_exact(32);
+        for block in &mut blocks {
+            for (lane, word) in lanes.iter_mut().zip(block.chunks_exact(8)) {
+                let word = u64::from_le_bytes(word.try_into().expect("eight bytes"));
+                *lane = (*lane ^ word).wrapping_mul(K[1]).rotate_left(31);
+            }
+        }
+        for &byte in blocks.remainder() {
+            lanes[0] = (lanes[0] ^ u64::from(byte)).wrapping_mul(K[2]);
+        }
+    }
+    lanes.iter().zip(K).fold(0, |acc, (lane, k)| {
+        (acc ^ lane).wrapping_mul(k).rotate_left(27)
+    })
+}
 
 /// A stage's banks as the table `cbRead` indexes, then the banks themselves, whole words.
 fn pack_banks<'a>(banks: impl Iterator<Item = &'a ConstantUpload>) -> Vec<u8> {
@@ -209,14 +250,15 @@ impl Gpu {
             });
         }
 
-        let key = persistent.then(|| BindKey {
-            entries: entries.clone(),
-            resources: resources.clone(),
-        });
-        if let Some(cached) = key.as_ref().and_then(|key| self.bind_groups.get(key)) {
+        let key = persistent.then(|| fingerprint(&entries, &resources));
+        if let Some(cached) = key
+            .and_then(|key| self.bind_groups.get(&key))
+            .filter(|cached| cached.entries == entries && cached.resources == resources)
+        {
             self.bind_hits += 1;
             return Ok((cached.layout.clone(), cached.group.clone()));
         }
+        let remembered = key.map(|key| (key, entries.clone(), resources.clone()));
         if key.is_some() {
             self.bind_misses += 1;
         } else {
@@ -298,10 +340,12 @@ impl Gpu {
             layout: &layout,
             entries: &bindings,
         });
-        if let Some(key) = key {
+        if let Some((key, entries, resources)) = remembered {
             self.bind_groups.insert(
                 key,
                 CachedBinding {
+                    entries,
+                    resources,
                     layout: layout.clone(),
                     group: bind_group.clone(),
                     buffers: owned,

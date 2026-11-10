@@ -411,7 +411,7 @@ pub struct Gpu {
     /// Per-draw resources, destroyed after submission: a browser only frees dropped resources on GC.
     scratch: Vec<Scratch>,
     /// Bind groups of draws whose textures stay cached, by what they bind: most draws repeat one.
-    bind_groups: std::collections::HashMap<BindKey, CachedBinding>,
+    bind_groups: std::collections::HashMap<u64, CachedBinding>,
     /// Compiled shader modules, keyed by a hash of the WGSL source.
     modules: std::collections::HashMap<u64, wgpu::ShaderModule>,
     /// Render pipelines, by everything they were built from.
@@ -637,16 +637,12 @@ enum Render {
     Companion(Shape),
 }
 
-/// What a stage's bind group was built from.
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct BindKey {
-    entries: Vec<wgpu::BindGroupLayoutEntry>,
-    resources: Vec<Resource>,
-}
-
-/// A stage's bind group and the buffers it owns, which go with it.
+/// A stage's bind group and the buffers it owns, which go with it, found by a fingerprint of
+/// what it was built from and checked against that.
 #[derive(Debug)]
 struct CachedBinding {
+    entries: Vec<wgpu::BindGroupLayoutEntry>,
+    resources: Vec<Resource>,
     layout: wgpu::BindGroupLayout,
     group: wgpu::BindGroup,
     buffers: Vec<wgpu::Buffer>,
