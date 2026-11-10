@@ -95,6 +95,33 @@ const A32_PROGRAMS = [
     expect: {},
   },
   {
+    name: 'A32 exclusives, thread pointer reads, BLX register, LDR pc and POP {pc}',
+    a32: true,
+    data: true,
+    code: [
+      0xe24fe008, // sub   lr, pc, #8     -> lr = BASE
+      0xe1a0800e, // mov   r8, lr
+      0xe3011008, // movw  r1, #0x1008
+      0xe3401400, // movt  r1, #0x0400    -> r1 = DATA + 8
+      0xe281dc01, // add   sp, r1, #0x100
+      0xe2800001, // add   r0, r0, #1
+      0xe1912f9f, // ldrex r2, [r1]
+      0xe1813f90, // strex r3, r0, [r1]
+      0xee1d4f70, // mrc   p15, 0, r4, c13, c0, 3
+      0xe28f900c, // add   r9, pc, #12    -> the push
+      0xe5819004, // str   r9, [r1, #4]
+      0xe28fc00c, // add   r12, pc, #12   -> the add below the pop
+      0xe12fff3c, // blx   r12
+      0xe591f004, // ldr   pc, [r1, #4]
+      0xe92d0101, // push  {r0, r8}
+      0xe8bd8020, // pop   {r5, pc}       -> BASE
+      0xe2866001, // add   r6, r6, #1
+      0xe12fff1e, // bx    lr
+    ],
+    steps: 17001n,
+    expect: {},
+  },
+  {
     name: 'A32 loop whose back edge is a conditional branch',
     a32: true,
     data: false,
