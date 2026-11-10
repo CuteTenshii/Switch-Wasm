@@ -57,8 +57,10 @@ mod tests {
             let n = 4usize << size;
             let count = n * n;
             let coeffs: Vec<i32> = data[at..at + count * 4]
-                .chunks_exact(4)
-                .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| i32::from_le_bytes(*b))
                 .collect();
             at += count * 4;
             let mut dest = data[at..at + count].to_vec();
