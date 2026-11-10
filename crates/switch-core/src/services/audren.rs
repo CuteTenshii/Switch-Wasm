@@ -568,7 +568,7 @@ impl Cpu {
                 {
                     Some(event) => event,
                     None => {
-                        let event = self.alloc_event("audren:frame", true);
+                        let event = self.alloc_event("audren:frame", false);
                         if let Some(renderer) = self.process_mut().audren_renderers.get_mut(&handle)
                         {
                             renderer.frame_event = Some(event);

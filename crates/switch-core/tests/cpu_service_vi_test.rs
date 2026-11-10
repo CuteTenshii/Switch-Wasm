@@ -284,7 +284,7 @@ fn the_display_refreshes_without_being_drawn_to() {
         "vsync fired early"
     );
 
-    // Run out the refresh period on nops; the auto-clear event fires once per period.
+    // Run out the refresh period on nops; the event stays signalled until the guest resets it.
     cpu.mem.map_zero(0x2000, 0x100).unwrap();
     cpu.mem.map(0x2000, &nop().to_le_bytes()).unwrap();
     for _ in 0..switch_core::cpu::VSYNC_PERIOD_CYCLES {
@@ -296,6 +296,12 @@ fn the_display_refreshes_without_being_drawn_to() {
         0,
         "the display never refreshed"
     );
+    assert_eq!(
+        wait_sync(&mut cpu, &[vsync], 0).0,
+        0,
+        "a wait must not clear the event"
+    );
+    assert_eq!(reset_signal(&mut cpu, vsync), 0);
     assert_eq!(
         wait_sync(&mut cpu, &[vsync], 0).0,
         RESULT_TIMED_OUT,
