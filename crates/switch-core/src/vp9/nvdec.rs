@@ -163,6 +163,8 @@ mod table {
     pub const SINGLE_REF: usize = 1408;
     pub const COMP_REF: usize = 1418;
     pub const COEF: usize = 1440;
+    pub const SEG_TREE: usize = 903;
+    pub const SEG_PRED: usize = 910;
 }
 
 pub fn parse_prob_table(p: &[u8]) -> FrameContext {
@@ -273,7 +275,14 @@ impl Channel {
         let input = super::decoder::FrameInput {
             hdr: header,
             fc: parse_prob_table(probs),
-            seg: setup.seg.clone(),
+            seg: {
+                let mut seg = setup.seg.clone();
+                seg.tree_probs
+                    .copy_from_slice(&probs[table::SEG_TREE..table::SEG_PRED]);
+                seg.pred_probs
+                    .copy_from_slice(&probs[table::SEG_PRED..table::SEG_PRED + 3]);
+                seg
+            },
             lf: setup.lf.clone(),
             refs,
             prev_mvs: self.prev.clone(),

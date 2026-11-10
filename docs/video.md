@@ -18,7 +18,7 @@ An `EXECUTE` (method 0xC0) with codec 9 in method 0x80 decodes one frame. The dr
 
 - The picture setup (`SET_DRV_PIC_SETUP_OFFSET`, 0x101). Offsets: `+0x30` tile data size, `+0x48/0x50/0x58/0x60` last, golden, altref and current frame size (`u16` width, height, luma pitch, chroma pitch), `+0x68` flags, `+0x6c` reference sign biases, `+0x70..0x7f` loop filter level and sharpness, quantizer, tx mode, interpolation filter, reference mode, compound references, tile log2s, `+0x80` segmentation, `+0xe4` loop filter deltas. Flags: bit 0 key frame, bit 1 last frame was a key frame, bit 4 last frame was shown.
 - The tile data (`SET_IN_BUF_BASE_OFFSET`, 0x102): the tiles only, each but the last behind a big-endian size. The compressed header is not there; the driver applies its probability updates itself.
-- The probability table (`SET_PROB_TAB_BUF_OFFSET`, 0x170), already holding the frame's final probabilities. Offsets are in `vp9/nvdec.rs`: the intra mode tables keep their ninth probability apart, three-probability rows are padded to four bytes, coefficients are `[tx][plane][ref][band][6 contexts][4]` from `+0x5a0`.
+- The probability table (`SET_PROB_TAB_BUF_OFFSET`, 0x170), already holding the frame's final probabilities. Offsets are in `vp9/nvdec.rs`: the segmentation tree and prediction probabilities are ten bytes at +903 (a stream without segmentation leaves them zero), the intra mode tables keep their ninth probability apart, three-probability rows are padded to four bytes, coefficients are `[tx][plane][ref][band][6 contexts][4]` from `+0x5a0`.
 - Luma surface addresses in slots 0 to 2 (last, golden, altref) and 3 (the frame written), at `SET_PICTURE_LUMA_OFFSET + i` (0x10c).
 
 The decoded frame is kept by its slot 3 luma address in `Video::surfaces`; nothing is written to the surface itself.
@@ -30,6 +30,5 @@ An `EXECUTE` composes slot 0 into the output surface. The configuration struct (
 ## Not done
 
 - Backward adaptation: the game's library did not adapt from the counter buffer for the stream tested (a pattern written into it changed nothing), so the counters are never written. A stream that adapts needs them, in a layout not known yet.
-- Segmentation probabilities: the table that carries them is not located.
 - The decoded surfaces are never written to guest memory, so a title that reads nvdec's output without VIC sees nothing.
 - VIC pitch alignment (64) is unconfirmed for widths that are not a multiple of 64.
