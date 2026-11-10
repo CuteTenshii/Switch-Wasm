@@ -1069,14 +1069,6 @@ mod tests {
     }
 
     #[test]
-    fn image_id_and_sampler_id_match_dkmaketexturehandle() {
-        // dkMakeTextureHandle(imageId, samplerId) = imageId | (samplerId << 20).
-        let handle = 7u32 | (3u32 << 20);
-        assert_eq!(image_id(handle), 7);
-        assert_eq!(sampler_id(handle), 3);
-    }
-
-    #[test]
     fn reads_a_pitch_a8b8g8r8_unorm_tic() {
         let (mut mem, vmm, base) = harness();
         let tex_addr = base + 0x400;

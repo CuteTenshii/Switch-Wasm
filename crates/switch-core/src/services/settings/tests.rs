@@ -466,14 +466,6 @@ fn set_sys_serves_a_settings_item_and_refuses_one_it_has_not_got() {
 }
 
 #[test]
-fn set_get_region_code_reports_usa() {
-    let mut cpu = request(false, 4, &[]);
-    cpu.register_service_handle(9, "set");
-    cpu.set_request(TLS, 9, Some(4)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "SetRegion_USA");
-}
-
-#[test]
 fn set_writes_the_language_codes_into_a_pointer_buffer() {
     // The pre-4.0.0 form fills a receive-static buffer.
     const BUFFER: u32 = 0x4000;

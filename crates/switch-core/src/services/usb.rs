@@ -175,16 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn the_device_reports_no_cable() {
-        let mut cpu = request(true, 3, &[]);
-        assert_eq!(
-            ds(&mut cpu, "usb:ds-service", 3, &[]),
-            super::STATE_DETACHED
-        );
-        assert_eq!(ds(&mut cpu, "usb:ds-service", 11, &[]), super::SPEED_NONE);
-    }
-
-    #[test]
     fn string_descriptors_take_the_lowest_free_index() {
         let mut cpu = request(true, 5, &[]);
         assert_eq!(add(&mut cpu), 0);

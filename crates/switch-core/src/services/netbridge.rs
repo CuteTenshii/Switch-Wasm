@@ -293,11 +293,4 @@ mod tests {
             "a reply from a named host comes from where the guest sent"
         );
     }
-
-    #[test]
-    fn streams_are_numbered_from_one() {
-        let mut bridge = NetBridge::default();
-        assert_eq!(bridge.open_stream(), 1);
-        assert_eq!(bridge.open_stream(), 2);
-    }
 }

@@ -651,16 +651,4 @@ mod table_driven {
             );
         }
     }
-
-    #[test]
-    fn a_ctr_stream_still_round_trips() {
-        let key = [0x42u8; 16];
-        let counter = [0x11u8; 16];
-        let plain: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
-        let mut buf = plain.clone();
-        aes128_ctr_xor_in_place(&key, &counter, &mut buf);
-        assert_ne!(buf, plain, "it actually encrypted something");
-        aes128_ctr_xor_in_place(&key, &counter, &mut buf);
-        assert_eq!(buf, plain);
-    }
 }

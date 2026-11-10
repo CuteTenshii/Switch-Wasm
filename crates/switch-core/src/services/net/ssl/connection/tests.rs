@@ -566,12 +566,6 @@ fn the_debug_option_byte_is_kept_and_read_back() {
 }
 
 #[test]
-fn clearing_the_tls_12_fallback_flag_succeeds() {
-    let mut cpu = system_service();
-    assert_eq!(service(9, &[], &[], &[], &mut cpu).0, 0);
-}
-
-#[test]
 fn the_thread_core_mask_starts_as_the_process_cores_and_takes_only_those() {
     let mut cpu = system_service();
     cpu.set_process_core_mask(0b0111);

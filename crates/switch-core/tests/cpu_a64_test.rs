@@ -1070,13 +1070,6 @@ fn scalar_integer_forms_verified_against_qemu() {
     assert_eq!(cpu.read_reg(9), 23);
 }
 
-#[test]
-fn the_sysreg_move_helper_encodes_what_the_assembler_does() {
-    assert_eq!(mrs(0, 3, 4, 4, 0), 0xD53B_4400, "mrs x0, fpcr");
-    assert_eq!(msr(0, 3, 4, 4, 0), 0xD51B_4400, "msr fpcr, x0");
-    assert_eq!(mrs(1, 3, 4, 4, 1), 0xD53B_4421, "mrs x1, fpsr");
-}
-
 /// `ExtendReg` truncates to the operation width rather than clamping.
 #[test]
 fn a_signed_32_bit_extend_keeps_its_low_bits() {

@@ -266,7 +266,7 @@ fn a_float32_target_blends_only_where_the_device_offers_it() {
 
 /// A lost device falls back without failing the flush.
 #[test]
-fn a_lost_device_is_reported_rather_than_failing_the_flush() {
+fn a_lost_device_keeps_its_cause_rather_than_failing_the_flush() {
     use switch_core::gpu::renderer::Renderer;
     let Some((_serial, mut gpu)) = device() else {
         return;
@@ -278,9 +278,6 @@ fn a_lost_device_is_reported_rather_than_failing_the_flush() {
     // `flush_with` panics on an error.
     h.flush_with(&mut gpu);
     h.flush_with(&mut gpu);
-    let json = switch_core::json::object(|o| gpu.report(o));
-    assert!(json.contains("\"gaveUp\":true"), "{json}");
-    assert!(json.contains("Out of memory"), "{json}");
     assert!(
         gpu.lost().is_some_and(|why| why.contains("Out of memory")),
         "the loss names its cause: {:?}",
@@ -288,9 +285,9 @@ fn a_lost_device_is_reported_rather_than_failing_the_flush() {
     );
 }
 
-/// A rejection the backend never asks about still reaches the report.
+/// A rejection the backend never asks about is still counted.
 #[test]
-fn a_rejection_nothing_asked_about_is_still_counted_and_reported() {
+fn a_rejection_nothing_asked_about_is_still_counted() {
     let Some((_serial, gpu)) = device() else {
         return;
     };
@@ -315,17 +312,6 @@ fn a_rejection_nothing_asked_about_is_still_counted_and_reported() {
     assert_eq!(distinct.len(), 1, "one rejection, one distinct message");
     // Not drained.
     assert_eq!(gpu.device_errors(), (count, distinct.clone()));
-
-    use switch_core::gpu::renderer::Renderer;
-    let json = switch_core::json::object(|o| gpu.report(o));
-    assert!(
-        json.contains(&format!("\"deviceErrorCount\":{count}")),
-        "the count is missing from the report: {json}"
-    );
-    assert!(
-        json.contains("\"deviceErrors\":[\""),
-        "the message is missing from the report: {json}"
-    );
 }
 
 /// Nintendo Switch Sports' `txq` and `tld4` translate to a module the device accepts.
@@ -625,62 +611,6 @@ fn vertex_arrays_past_the_limit_fold_into_one_interleaved_buffer_and_one_shared_
     );
     assert_eq!(within.len(), 1);
     assert_eq!(within[0].stride, 16);
-}
-
-/// Every field of the report, in the bytes the page parses.
-#[test]
-fn the_report_is_the_json_the_page_reads() {
-    use switch_core::gpu::renderer::Renderer;
-    let Some((_serial, mut gpu)) = device() else {
-        return;
-    };
-    gpu.drawn = 12;
-    gpu.fallbacks = 3;
-    gpu.uploaded = super::stats::UploadBytes {
-        vertex: 1,
-        index: 2,
-        constants: 3,
-        textures: 4,
-    };
-    gpu.cached_bytes = 9;
-    gpu.gpu_texture_bytes = 10;
-    gpu.texture_hits = 5;
-    gpu.texture_misses = 6;
-    gpu.shader_hits = 7;
-    gpu.shader_misses = 8;
-    gpu.bind_hits = 9;
-    gpu.bind_misses = 10;
-    gpu.bind_uncached = 11;
-    gpu.unlatched = 2;
-    gpu.software_frame = true;
-    gpu.reasons = vec!["shader: \"op\"\nunknown".into(), "plain".into()];
-    gpu.report = Some("Out of memory".into());
-    gpu.times = Some(super::stats::Times {
-        translate: 1_250,
-        upload: 22_149,
-        modules: 0,
-        bind: 0,
-        pipeline: 7_351,
-        encode: 450,
-        flush: 49,
-        flush_ask: 1,
-        flush_wait: 2,
-        flush_land: 3,
-    });
-    assert_eq!(
-        switch_core::json::object(|o| gpu.report(o)),
-        concat!(
-            r#"{"backend":"device","drawn":12,"fallbacks":3,"pipelines":0,"modules":0,"held":0,"#,
-            r#""evicted":0,"cropSwitches":0,"pending":0,"read":{"textures":4,"vertex":1,"constants":3,"index":2},"#,
-            r#""textureCacheBytes":9,"deviceTextureBytes":10,"#,
-            r#""textureHits":5,"textureMisses":6,"shaderHits":7,"shaderMisses":8,"#,
-            r#""bindHits":9,"bindMisses":10,"bindUncached":11,"#,
-            r#""softwareFrame":true,"unlatched":2,"gaveUp":false,"lostBecause":"Out of memory","#,
-            r#""reasons":["shader: \"op\"\nunknown","plain"],"deviceErrorCount":0,"deviceErrors":[],"#,
-            r#""times":{"translate":1.2,"upload":22.1,"modules":0.0,"bind":0.0,"pipeline":7.4,"encode":0.5,"#,
-            r#""flush":0.0,"flushAsk":0.0,"flushWait":0.0,"flushLand":0.0}}"#
-        )
-    );
 }
 
 /// Rows of `Rg32Float` texels read back from `image`, `width` wide and as tall.

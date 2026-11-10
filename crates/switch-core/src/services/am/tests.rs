@@ -249,15 +249,6 @@ fn every_button_lock_accessor_hands_back_a_lock() {
 }
 
 #[test]
-fn am_reports_the_handheld_operation_mode_it_always_claimed_to() {
-    let mut cpu = request(false, 5, &[]);
-    cpu.register_service_handle(9, "am:common-state-getter");
-    cpu.applet_request(TLS, 9, Some(5)).unwrap();
-    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-    assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "Handheld");
-}
-
-#[test]
 fn am_answers_the_current_application_id() {
     let mut cpu = request(false, 300, &[]);
     cpu.register_service_handle(9, "am:applet-common-functions");

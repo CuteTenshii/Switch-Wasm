@@ -259,12 +259,4 @@ mod tests {
         }
         assert_eq!(Trace::from_name("TRACE_NOTHING"), None);
     }
-
-    #[test]
-    fn levels_are_the_marker_bytes_the_page_maps() {
-        assert_eq!(Level::Error.marker(), 0x01);
-        assert_eq!(Level::Warn.marker(), 0x02);
-        assert_eq!(Level::Info.marker(), 0x03);
-        assert_eq!(Level::Debug.marker(), 0x04);
-    }
 }

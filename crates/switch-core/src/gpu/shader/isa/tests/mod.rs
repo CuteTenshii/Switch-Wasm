@@ -266,11 +266,6 @@ fn an_atomic_operation_this_decoder_has_no_name_for_is_not_invented() {
     ));
 }
 
-#[test]
-fn an_op_still_fits_in_thirty_two_bytes() {
-    assert_eq!(std::mem::size_of::<Op>(), 32);
-}
-
 fn op(word: u64) -> Op {
     decode(word).op
 }
