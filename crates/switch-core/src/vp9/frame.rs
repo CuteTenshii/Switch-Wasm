@@ -3,7 +3,7 @@
 use super::header::{FrameHeader, LoopFilterParams, Segmentation};
 use super::probs::{Counts, FrameContext};
 use super::types::*;
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mv {
@@ -146,8 +146,8 @@ pub struct FrameState {
     pub seg: Segmentation,
     pub lf: LoopFilterParams,
     pub cur: Frame,
-    pub refs: [Option<Rc<Frame>>; 3],
-    pub prev_mvs: Option<Rc<Frame>>,
+    pub refs: [Option<Arc<Frame>>; 3],
+    pub prev_mvs: Option<Arc<Frame>>,
     pub mi_cols: usize,
     pub mi_rows: usize,
     /// Mode info of every block, index 0 being an all-zero block for what is not decoded.

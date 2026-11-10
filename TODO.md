@@ -30,3 +30,7 @@ Each stage builds, passes `cargo test --workspace` and clippy, keeps every title
 - Just Dance 2019 stops presenting on "Hold on... and warm up..." after one to two minutes and stays there (0 fps, over 100B instructions). The main thread only sleeps and polls, while two priority-29 threads run flat out on the other cores (a float-to-16-bit conversion loop, and `nn::hid::VibrationMixer`). Whether it waits on something the emulator never delivers is not known.
 - Compute dispatches, and copy-engine transfers that are not one plain run or that overlap a held surface, still send every held surface back; a per-surface flush would keep the rest on the device.
 - Minecraft's Terms and Conditions page panics in the `web` applet (`010000000000100a`): `Heap::allocate` fails for `0x2c000` bytes (2048 elements of `0x58`, built at `0x0818039c` in the 21.2.0 applet, count read from a config struct at `+0x9c`) from a heap object at `0x3004d000` in the applet's `SetHeapSize` region. Neither the applet heap size nor any `GetInfo` answer explains it; find where that heap's capacity is set.
+
+## Video
+
+- JD2022's intro video decodes and plays; see `docs/video.md` for what is still missing: counter output for streams that adapt probabilities, the segmentation probabilities, nvdec surfaces in guest memory, VIC pitch alignment, and VP9 decoder speed in the browser.

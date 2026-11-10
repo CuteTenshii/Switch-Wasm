@@ -18,6 +18,7 @@ mod inter;
 mod intra;
 mod loopfilter;
 mod modeinfo;
+pub mod nvdec;
 mod probs;
 mod tables;
 mod tokens;

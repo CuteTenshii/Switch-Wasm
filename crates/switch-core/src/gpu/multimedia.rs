@@ -6,8 +6,10 @@ use crate::gpu::nvmap::NvMap;
 use crate::gpu::syncpt::Host1x;
 use crate::mem::Memory;
 use crate::trace::{enabled, Trace};
+use crate::vp9;
 use crate::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// host1x's own class, for syncpoint waits and loads.
 const CLASS_HOST1X: u32 = 0x01;
@@ -23,6 +25,8 @@ const METHOD_FILE_WORDS: usize = 0x400;
 /// nvdec `EXECUTE`: decode the frame described by the methods before it.
 const NVDEC_EXECUTE: u32 = 0xC0;
 
+const NVDEC_CODEC_VP9: u32 = 9;
+
 /// nvdec frame methods, as word offsets; buffer addresses are device addresses >> 8.
 const NVDEC_SET_APPLICATION_ID: u32 = 0x80;
 const NVDEC_SET_DRV_PIC_SETUP_OFFSET: u32 = 0x101;
@@ -37,6 +41,14 @@ const VP9_PICTURE_BITSTREAM_SIZE: u32 = 0x30;
 const PICTURE_SETUP_TRACE_BYTES: u32 = 0x100;
 
 const VIC_EXECUTE: u32 = 0xC0;
+const VIC_SET_CONFIG_STRUCT_OFFSET: u32 = 0x1C2;
+const VIC_SET_OUTPUT_LUMA_OFFSET: u32 = 0x1C8;
+const VIC_SET_OUTPUT_CHROMA_OFFSET: u32 = 0x1C9;
+const VIC_SLOT0_LUMA_OFFSET: u32 = 0x100;
+/// Where the output surface's description sits in VIC's configuration struct.
+const VIC_CONFIG_OUTPUT_SURFACE: u32 = 0x20;
+/// `Y8___U8V8_N420`: two planes, the second an interleaved chroma plane at half size.
+const VIC_PIXEL_FORMAT_NV12: u32 = 0x44;
 
 /// Sizes of the records after `SUBMIT`'s header, in bytes.
 const SUBMIT_HEADER: usize = 0x10;
@@ -102,7 +114,11 @@ pub struct MmChannel {
     methods: Vec<u32>,
     pub submits: u64,
     pub executes: u64,
+    vp9: vp9::nvdec::Channel,
 }
+
+/// Decoded frames by the address of their luma surface: what nvdec "writes" and VIC reads.
+type Surfaces = HashMap<u32, Arc<vp9::Frame>>;
 
 impl MmChannel {
     fn new(engine: Engine, syncpt: u32) -> MmChannel {
@@ -113,6 +129,7 @@ impl MmChannel {
             methods: vec![0; METHOD_FILE_WORDS],
             submits: 0,
             executes: 0,
+            vp9: Default::default(),
         }
     }
 
@@ -203,6 +220,7 @@ fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
 pub struct Video {
     channels: HashMap<u32, MmChannel>,
     next_channel: u32,
+    surfaces: Surfaces,
 }
 
 impl Video {
@@ -240,7 +258,10 @@ impl Video {
         nvmap: &NvMap,
         host1x: &mut Host1x,
     ) -> Result<bool> {
-        let Some(channel) = self.channels.get_mut(&id) else {
+        let Video {
+            channels, surfaces, ..
+        } = self;
+        let Some(channel) = channels.get_mut(&id) else {
             return Ok(false);
         };
         let count = |at: usize| read_u32(args, at) as usize;
@@ -304,7 +325,7 @@ impl Video {
                     stream[word as usize] = address.wrapping_add(target_offset) >> shift;
                 }
             }
-            channel.run(&stream, mem, host1x)?;
+            channel.run(&stream, mem, host1x, surfaces)?;
         }
 
         // Force each syncpoint to its threshold so no fence is left unreachable.
@@ -327,7 +348,13 @@ impl Video {
 }
 
 impl MmChannel {
-    fn run(&mut self, stream: &[u32], mem: &Memory, host1x: &mut Host1x) -> Result<()> {
+    fn run(
+        &mut self,
+        stream: &[u32],
+        mem: &Memory,
+        host1x: &mut Host1x,
+        surfaces: &mut Surfaces,
+    ) -> Result<()> {
         let (writes, stopped) = decode_stream(stream, self.engine.class());
         for write in writes {
             match (write.class, write.offset) {
@@ -336,7 +363,7 @@ impl MmChannel {
                 }
                 (class, THI_METHOD0) if class == self.engine.class() => self.method = write.value,
                 (class, THI_METHOD1) if class == self.engine.class() => {
-                    self.write_method(self.method, write.value, mem)
+                    self.write_method(self.method, write.value, mem, surfaces)
                 }
                 (CLASS_HOST1X, offset) => {
                     if enabled(Trace::Video) {
@@ -367,7 +394,7 @@ impl MmChannel {
         Ok(())
     }
 
-    fn write_method(&mut self, method: u32, value: u32, mem: &Memory) {
+    fn write_method(&mut self, method: u32, value: u32, mem: &Memory, surfaces: &mut Surfaces) {
         if let Some(slot) = self.methods.get_mut(method as usize) {
             *slot = value;
         }
@@ -382,7 +409,81 @@ impl MmChannel {
             if self.engine == Engine::Nvdec && enabled(Trace::Video) {
                 self.trace_decode(mem);
             }
+            match self.engine {
+                Engine::Nvdec if self.method(NVDEC_SET_APPLICATION_ID) == NVDEC_CODEC_VP9 => {
+                    self.decode_vp9(mem, surfaces)
+                }
+                Engine::Vic => self.compose(mem, surfaces),
+                _ => {}
+            }
         }
+    }
+
+    /// Decodes the VP9 frame an nvdec `EXECUTE` describes and keeps it for VIC under its surface.
+    fn decode_vp9(&mut self, mem: &Memory, surfaces: &mut Surfaces) {
+        const SETUP_BYTES: usize = 0x100;
+        const PROBABILITY_BYTES: usize = 3744;
+        let read = |at: u32, len: usize| {
+            let mut buf = vec![0u8; len];
+            let _ = mem.read_into(at, &mut buf);
+            buf
+        };
+        let setup_at = self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET);
+        let setup = read(setup_at, SETUP_BYTES);
+        let size = u32::from_le_bytes(
+            setup[VP9_PICTURE_BITSTREAM_SIZE as usize..VP9_PICTURE_BITSTREAM_SIZE as usize + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let bitstream = read(self.address(NVDEC_SET_IN_BUF_BASE_OFFSET), size);
+        let probs = read(
+            self.address(NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET),
+            PROBABILITY_BYTES,
+        );
+        let slots = [0, 1, 2, 3].map(|i| self.address(NVDEC_SET_PICTURE_LUMA_OFFSET + i));
+        let refs = [0, 1, 2].map(|i| surfaces.get(&slots[i]).cloned());
+        match self.vp9.decode(&setup, &bitstream, &probs, refs) {
+            Ok(frame) => {
+                surfaces.insert(slots[3], frame);
+            }
+            Err(e) => {
+                if enabled(Trace::Video) {
+                    crate::traceln!(
+                        "[video] nvdec VP9 frame {} not decoded: {e:?}",
+                        self.executes
+                    );
+                }
+            }
+        }
+    }
+
+    /// VIC reduced to what the game asks of it: the decoded frame in slot 0 written to the output
+    /// surfaces as pitch-linear NV12, scaled if the sizes differ.
+    fn compose(&mut self, mem: &Memory, surfaces: &Surfaces) {
+        let config = self.address(VIC_SET_CONFIG_STRUCT_OFFSET);
+        let word = |at: u32| mem.read_u32(config.wrapping_add(at)).unwrap_or(0);
+        let out = VIC_CONFIG_OUTPUT_SURFACE;
+        let format = word(out) & 0x7f;
+        let block_kind = word(out) >> 11 & 0xf;
+        let width = (word(out + 8) & 0x3fff) + 1;
+        let height = (word(out + 8) >> 14 & 0x3fff) + 1;
+        let Some(frame) = surfaces.get(&self.address(VIC_SLOT0_LUMA_OFFSET)) else {
+            return;
+        };
+        if format != VIC_PIXEL_FORMAT_NV12 || block_kind != 0 {
+            if enabled(Trace::Video) {
+                crate::traceln!(
+                    "[video] vic output format {format:#x} kind {block_kind} is not composed"
+                );
+            }
+            return;
+        }
+        let (width, height) = (width as usize, height as usize);
+        let luma_pitch = width.next_multiple_of(VIC_PITCH_ALIGNMENT);
+        let chroma_pitch = (width.div_ceil(2) * 2).next_multiple_of(VIC_PITCH_ALIGNMENT);
+        let (luma, chroma) = nv12(frame, width, height, luma_pitch, chroma_pitch);
+        let _ = mem.write_bytes(self.address(VIC_SET_OUTPUT_LUMA_OFFSET), &luma);
+        let _ = mem.write_bytes(self.address(VIC_SET_OUTPUT_CHROMA_OFFSET), &chroma);
     }
 
     fn address(&self, method: u32) -> u32 {
@@ -434,6 +535,56 @@ impl MmChannel {
     }
 }
 
+const VIC_PITCH_ALIGNMENT: usize = 64;
+
+/// The frame as two NV12 planes of `width`x`height`, bilinearly scaled when it is another size.
+fn nv12(
+    frame: &vp9::Frame,
+    width: usize,
+    height: usize,
+    luma_pitch: usize,
+    chroma_pitch: usize,
+) -> (Vec<u8>, Vec<u8>) {
+    let sample = |plane: &vp9::Plane, x: f32, y: f32| -> u8 {
+        let x = x.clamp(0.0, (plane.width - 1) as f32);
+        let y = y.clamp(0.0, (plane.height - 1) as f32);
+        let (x0, y0) = (x as usize, y as usize);
+        let (x1, y1) = (
+            (x0 + 1).min(plane.width - 1),
+            (y0 + 1).min(plane.height - 1),
+        );
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let at = |x: usize, y: usize| f32::from(plane.data[y * plane.stride + x]);
+        let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
+        let bottom = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
+        (top * (1.0 - fy) + bottom * fy + 0.5) as u8
+    };
+    let scaled = |plane: &vp9::Plane, x: usize, y: usize, w: usize, h: usize| -> u8 {
+        if plane.width == w && plane.height == h {
+            return plane.data[y * plane.stride + x];
+        }
+        let sx = (x as f32 + 0.5) * plane.width as f32 / w as f32 - 0.5;
+        let sy = (y as f32 + 0.5) * plane.height as f32 / h as f32 - 0.5;
+        sample(plane, sx, sy)
+    };
+    let (chroma_w, chroma_h) = (width.div_ceil(2), height.div_ceil(2));
+    let mut luma = vec![0u8; luma_pitch * height];
+    for y in 0..height {
+        for x in 0..width {
+            luma[y * luma_pitch + x] = scaled(&frame.planes[0], x, y, width, height);
+        }
+    }
+    let mut chroma = vec![0u8; chroma_pitch * chroma_h];
+    for y in 0..chroma_h {
+        for x in 0..chroma_w {
+            chroma[y * chroma_pitch + 2 * x] = scaled(&frame.planes[1], x, y, chroma_w, chroma_h);
+            chroma[y * chroma_pitch + 2 * x + 1] =
+                scaled(&frame.planes[2], x, y, chroma_w, chroma_h);
+        }
+    }
+    (luma, chroma)
+}
+
 /// `MAP_BUFFER`: engines address guest memory directly, so each handle maps to its own address.
 pub fn map_buffer(args: &mut [u8], nvmap: &NvMap) -> bool {
     let entries = read_u32(args, 0) as usize;
@@ -471,6 +622,30 @@ fn write_u32(data: &mut [u8], at: usize, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nv12_packs_two_planes_with_the_requested_pitches() {
+        let mut frame = vp9::Frame::new(4, 2);
+        frame.planes[0].data[..4].copy_from_slice(&[10, 20, 30, 40]);
+        frame.planes[0].data[frame.planes[0].stride..][..4].copy_from_slice(&[50, 60, 70, 80]);
+        frame.planes[1].data[..2].copy_from_slice(&[1, 2]);
+        frame.planes[2].data[..2].copy_from_slice(&[3, 4]);
+        let (luma, chroma) = nv12(&frame, 4, 2, 8, 8);
+        assert_eq!(&luma[..4], &[10, 20, 30, 40]);
+        assert_eq!(&luma[8..12], &[50, 60, 70, 80]);
+        assert_eq!(&chroma[..4], &[1, 3, 2, 4]);
+    }
+
+    #[test]
+    fn nv12_scales_to_the_output_size() {
+        let mut frame = vp9::Frame::new(2, 2);
+        for y in 0..2 {
+            frame.planes[0].data[y * frame.planes[0].stride..][..2].copy_from_slice(&[0, 100]);
+        }
+        let (luma, _) = nv12(&frame, 4, 2, 4, 4);
+        assert_eq!(luma[0], 0);
+        assert!(luma[1] > 0 && luma[1] < luma[2] && luma[3] == 100);
+    }
 
     #[test]
     fn a_stream_selects_a_class_and_writes_its_methods() {
