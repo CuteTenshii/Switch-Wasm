@@ -500,6 +500,10 @@ pub struct Gpu {
     /// Draws served from [`Gpu::shader_cache`], and draws that missed.
     pub shader_hits: u64,
     pub shader_misses: u64,
+    /// Stage bind groups served from [`Gpu::bind_groups`], built and kept, and built for one draw.
+    pub bind_hits: u64,
+    pub bind_misses: u64,
+    pub bind_uncached: u64,
     gpu_texture_bytes: u64,
     /// Textures `prepare` read and has not watched yet.
     to_remember: Vec<(TextureKey, std::sync::Arc<[u8]>, u64)>,
@@ -543,6 +547,10 @@ impl Drop for Gpu {
         eprintln!(
             "[gpu] {} shader translations served from cache, {} not",
             self.shader_hits, self.shader_misses,
+        );
+        eprintln!(
+            "[gpu] {} stage bind groups reused, {} built and kept, {} built for one draw",
+            self.bind_hits, self.bind_misses, self.bind_uncached,
         );
         if let Some(t) = self.times {
             let ms = |v: u128| v as f64 / 1000.0;
@@ -974,6 +982,9 @@ impl Renderer for Gpu {
             .field("textureMisses", self.texture_misses)
             .field("shaderHits", self.shader_hits)
             .field("shaderMisses", self.shader_misses)
+            .field("bindHits", self.bind_hits)
+            .field("bindMisses", self.bind_misses)
+            .field("bindUncached", self.bind_uncached)
             .field("softwareFrame", self.software_frame)
             .field("unlatched", self.unlatched)
             .field("gaveUp", self.gave_up)

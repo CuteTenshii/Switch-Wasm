@@ -203,7 +203,13 @@ impl Gpu {
             resources: resources.clone(),
         });
         if let Some(cached) = key.as_ref().and_then(|key| self.bind_groups.get(key)) {
+            self.bind_hits += 1;
             return Ok((cached.layout.clone(), cached.group.clone()));
+        }
+        if key.is_some() {
+            self.bind_misses += 1;
+        } else {
+            self.bind_uncached += 1;
         }
         let layout = match self.group_layouts.get(&entries) {
             Some(layout) => layout.clone(),

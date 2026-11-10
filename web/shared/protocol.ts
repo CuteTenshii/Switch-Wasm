@@ -49,6 +49,10 @@ export interface GpuReport {
   // Texture reads served from cached deswizzled bytes vs re-read from guest memory.
   textureHits?: number;
   textureMisses?: number;
+  // Stage bind groups reused from the cache, built and kept, and built for one draw.
+  bindHits?: number;
+  bindMisses?: number;
+  bindUncached?: number;
   // The rasterizer holds frames after a fallback until enough in a row could run on the device.
   softwareFrame?: boolean;
   // Times the software-frame latch let go.

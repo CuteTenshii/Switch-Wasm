@@ -170,6 +170,10 @@ async function updateRenderDebug(): Promise<void> {
   const hits = g.textureHits ?? 0;
   const lookups = hits + (g.textureMisses ?? 0);
   $('render-texture-hits').textContent = lookups ? `${((hits * 100) / lookups).toFixed(1)}%` : '-';
+  const binds = (g.bindHits ?? 0) + (g.bindMisses ?? 0) + (g.bindUncached ?? 0);
+  $('render-bind-hits').textContent = binds
+    ? `${(((g.bindHits ?? 0) * 100) / binds).toFixed(1)}% (${fmtCount(g.bindMisses ?? 0)} missed, ${fmtCount(g.bindUncached ?? 0)} uncached)`
+    : '-';
   const r = g.read;
   for (const kind of ['textures', 'vertex', 'constants', 'index'] as const) {
     $(`render-read-${kind}`).textContent = formatBytes(r?.[kind] ?? 0);

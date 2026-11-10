@@ -648,6 +648,9 @@ fn the_report_is_the_json_the_page_reads() {
     gpu.texture_misses = 6;
     gpu.shader_hits = 7;
     gpu.shader_misses = 8;
+    gpu.bind_hits = 9;
+    gpu.bind_misses = 10;
+    gpu.bind_uncached = 11;
     gpu.unlatched = 2;
     gpu.software_frame = true;
     gpu.reasons = vec!["shader: \"op\"\nunknown".into(), "plain".into()];
@@ -671,6 +674,7 @@ fn the_report_is_the_json_the_page_reads() {
             r#""evicted":0,"cropSwitches":0,"pending":0,"read":{"textures":4,"vertex":1,"constants":3,"index":2},"#,
             r#""textureCacheBytes":9,"deviceTextureBytes":10,"#,
             r#""textureHits":5,"textureMisses":6,"shaderHits":7,"shaderMisses":8,"#,
+            r#""bindHits":9,"bindMisses":10,"bindUncached":11,"#,
             r#""softwareFrame":true,"unlatched":2,"gaveUp":false,"lostBecause":"Out of memory","#,
             r#""reasons":["shader: \"op\"\nunknown","plain"],"deviceErrorCount":0,"deviceErrors":[],"#,
             r#""times":{"translate":1.2,"upload":22.1,"modules":0.0,"bind":0.0,"pipeline":7.4,"encode":0.5,"#,
