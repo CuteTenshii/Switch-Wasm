@@ -88,6 +88,7 @@ pub mod ticket;
 pub mod trace;
 pub mod uuid;
 pub mod vfs;
+pub mod vp9;
 pub mod xci;
 
 pub use error::{Error, Result};
