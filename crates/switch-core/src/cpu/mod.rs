@@ -73,6 +73,10 @@ pub struct Cpu {
     /// NZCV as PSTATE packs it (N=31, Z=30, C=29, V=28); shared with AArch32's CPSR.
     pub(crate) nzcv: u32,
     pub(crate) mode: ExecMode,
+    /// AArch32 CPSR.T: the running thread executes T32, the halfword encodings.
+    pub(crate) thumb: bool,
+    /// ITSTATE: the condition and remaining mask of an `IT` block, zero outside one.
+    pub(crate) it_state: u8,
     /// AArch32 CPSR.Q, sticky until an APSR write.
     pub(crate) cpsr_q: bool,
     /// CPSR.GE, written by parallel adds and read by `SEL`.
@@ -473,6 +477,8 @@ impl Cpu {
         let clock = std::sync::Arc::default();
         let cpu = Cpu {
             mode: ExecMode::A64,
+            thumb: false,
+            it_state: 0,
             cpsr_q: false,
             cpsr_ge: 0,
             fpscr_nzcv: 0,

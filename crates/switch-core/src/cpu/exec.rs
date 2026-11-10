@@ -18,6 +18,9 @@ impl Cpu {
         }
         self.slice_used += 1;
         self.preemption_point();
+        if self.thumb {
+            return self.step_thumb();
+        }
         let pc = self.pc;
         let insn = match self.mem.fetch(pc) {
             Ok(i) => i,
@@ -150,6 +153,7 @@ impl Cpu {
             let left = max_steps - steps;
             steps += match self.mode {
                 ExecMode::A64 => self.run_jit(left)?.steps,
+                ExecMode::A32 if self.thumb => self.run_thumb(left)?,
                 ExecMode::A32 => self.run_a32_jit(left)?.steps,
             };
         }
@@ -157,6 +161,16 @@ impl Cpu {
             steps,
             halted: self.halted,
         })
+    }
+
+    /// Step T32 instructions until `max_steps` or the thread leaves T32, which has no translator.
+    fn run_thumb(&mut self, max_steps: u64) -> Result<u64> {
+        let mut steps = 0;
+        while steps < max_steps && !self.halted && self.handback.is_none() && self.thumb {
+            self.step_inner()?;
+            steps += 1;
+        }
+        Ok(steps)
     }
 
     #[inline]

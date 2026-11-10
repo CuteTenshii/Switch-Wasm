@@ -316,6 +316,8 @@ impl Cpu {
         }
         // The core's own registers belonged to the ended title's running thread.
         self.mode = ExecMode::A64;
+        self.thumb = false;
+        self.it_state = 0;
         self.cpsr_q = false;
         self.cpsr_ge = 0;
         self.fpscr_nzcv = 0;
@@ -403,6 +405,8 @@ impl Cpu {
             pc: entry,
             nzcv: 0,
             mode: ExecMode::A64,
+            thumb: false,
+            it_state: 0,
             cpsr_q: false,
             cpsr_ge: 0,
             fpscr_nzcv: 0,

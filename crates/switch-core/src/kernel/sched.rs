@@ -310,6 +310,8 @@ impl Cpu {
         thread.pc = self.pc;
         thread.nzcv = self.nzcv;
         thread.mode = self.mode;
+        thread.thumb = self.thumb;
+        thread.it_state = self.it_state;
         thread.cpsr_q = self.cpsr_q;
         thread.cpsr_ge = self.cpsr_ge;
         thread.fpscr_nzcv = self.fpscr_nzcv;
@@ -329,6 +331,8 @@ impl Cpu {
         self.pc = thread.pc;
         self.nzcv = thread.nzcv;
         self.mode = thread.mode;
+        self.thumb = thread.thumb;
+        self.it_state = thread.it_state;
         self.cpsr_q = thread.cpsr_q;
         self.cpsr_ge = thread.cpsr_ge;
         self.fpscr_nzcv = thread.fpscr_nzcv;

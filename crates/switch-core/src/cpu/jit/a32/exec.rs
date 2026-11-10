@@ -33,7 +33,7 @@ impl Cpu {
         }
         while steps < max_steps && !self.halted {
             self.preemption_point();
-            if self.handback.is_some() || self.mode != ExecMode::A32 {
+            if self.handback.is_some() || self.mode != ExecMode::A32 || self.thumb {
                 break;
             }
             let mut block = self.a32_block_at(self.pc);

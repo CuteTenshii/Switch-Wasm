@@ -1,7 +1,7 @@
 //! The AArch32 (A32) execution state.
 //!
 //! `r0`..`r14` alias the low halves of `X0`..`X14`, with `r13` as SP and `r14` as LR;
-//! `r15` is not stored and reads as `pc + 8`. N/Z/C/V are shared with A64. T32 is not implemented.
+//! `r15` is not stored and reads as `pc + 8` (`pc + 4` in T32, see `thumb`). N/Z/C/V are shared with A64.
 
 mod branch;
 mod dataproc;
@@ -10,10 +10,11 @@ pub(in crate::cpu) mod loadstore;
 mod media;
 mod neon;
 pub(in crate::cpu) mod shift;
+mod thumb;
 mod vfp;
 
 use super::Cpu;
-use crate::{Error, Result};
+use crate::Result;
 
 pub use disasm::disassemble_a32;
 use vfp::vfp_mnemonic;
@@ -30,9 +31,19 @@ impl Cpu {
     #[inline(always)]
     pub(super) fn r32(&self, r: u8) -> u32 {
         if r == 15 {
-            self.pc.wrapping_add(8)
+            self.pc.wrapping_add(if self.thumb { 4 } else { 8 })
         } else {
             self.regs[(r & 0xF) as usize] as u32
+        }
+    }
+
+    /// A register as the base of an address: the PC is word-aligned, as a literal load needs.
+    #[inline(always)]
+    pub(super) fn base32(&self, r: u8) -> u32 {
+        if r == 15 {
+            self.r32(15) & !3
+        } else {
+            self.r32(r)
         }
     }
 
@@ -80,16 +91,11 @@ impl Cpu {
         result
     }
 
-    /// Branch; an interworking switch to Thumb is reported as an error.
+    /// An interworking branch: bit 0 of the target selects T32.
     #[inline]
     pub(super) fn a32_write_pc(&mut self, target: u32) -> Result<()> {
-        if target & 1 != 0 {
-            return Err(Error::Cpu(format!(
-                "branch to Thumb code at {:#010x} from pc={:#010x}; T32 is not implemented",
-                target, self.pc
-            )));
-        }
-        self.pc = target & !3;
+        self.thumb = target & 1 != 0;
+        self.pc = target & if self.thumb { !1 } else { !3 };
         Ok(())
     }
 
@@ -158,6 +164,8 @@ impl Cpu {
                     .write_u32(super::THREAD_EXIT_TRAMPOLINE + 4, 0xEAFF_FFFE); // b .
             }
             ExecMode::A64 => {
+                self.thumb = false;
+                self.it_state = 0;
                 self.regs[super::SP_SLOT] = self.regs[13];
                 self.regs[30] = self.regs[14];
             }

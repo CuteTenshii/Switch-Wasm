@@ -64,7 +64,7 @@ impl Cpu {
 
     /// A word or byte transfer at the base plus `offset`.
     pub(in crate::cpu) fn a32_single(&mut self, a: Access, byte: bool, offset: u32) -> Result<()> {
-        let (addr, writeback) = self.a32_address(self.r32(a.rn), offset, a);
+        let (addr, writeback) = self.a32_address(self.base32(a.rn), offset, a);
 
         if a.load {
             let value = if byte {
@@ -107,7 +107,7 @@ impl Cpu {
 
     /// An extra transfer of kind `sh` (bits 6:5 of the encoding) at the base plus `offset`.
     pub(in crate::cpu) fn a32_extra(&mut self, a: Access, sh: u8, offset: u32) -> Result<()> {
-        let (addr, writeback) = self.a32_address(self.r32(a.rn), offset, a);
+        let (addr, writeback) = self.a32_address(self.base32(a.rn), offset, a);
         let rt = a.rt;
 
         match (sh, a.load) {
@@ -159,7 +159,7 @@ impl Cpu {
         let rn = a.rn;
         let list = u32::from(list);
         let count = list.count_ones();
-        let base = self.r32(rn);
+        let base = self.base32(rn);
         let (pre, add) = (a.pre, a.add);
         let bytes = count * 4;
 

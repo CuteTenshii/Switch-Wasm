@@ -1135,7 +1135,7 @@ impl Cpu {
         let rn = ((insn >> 16) & 0xF) as u8;
         let vd = (((insn >> 22) & 1) as u8) << 4 | ((insn >> 12) & 0xF) as u8;
         let rm = (insn & 0xF) as u8;
-        let base = self.r32(rn);
+        let base = self.base32(rn);
         let mut addr = base;
 
         let bytes = if !single {

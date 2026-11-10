@@ -48,6 +48,8 @@ pub struct ThreadContext {
     pub(crate) pc: u32,
     pub(crate) nzcv: u32,
     pub(crate) mode: ExecMode,
+    pub(crate) thumb: bool,
+    pub(crate) it_state: u8,
     pub(crate) cpsr_q: bool,
     pub(crate) cpsr_ge: u8,
     pub(crate) fpscr_nzcv: u32,
@@ -93,6 +95,8 @@ impl ThreadContext {
         self.pc = from.pc;
         self.nzcv = from.nzcv;
         self.mode = from.mode;
+        self.thumb = from.thumb;
+        self.it_state = from.it_state;
         self.cpsr_q = from.cpsr_q;
         self.cpsr_ge = from.cpsr_ge;
         self.fpscr_nzcv = from.fpscr_nzcv;
@@ -124,6 +128,8 @@ impl Cpu {
                     pc: 0,
                     nzcv: 0,
                     mode: self.mode,
+                    thumb: false,
+                    it_state: 0,
                     cpsr_q: false,
                     cpsr_ge: 0,
                     fpscr_nzcv: 0,
@@ -199,6 +205,8 @@ impl Cpu {
                 pc: entry,
                 nzcv: 0,
                 mode: self.mode,
+                thumb: false,
+                it_state: 0,
                 cpsr_q: false,
                 cpsr_ge: 0,
                 fpscr_nzcv: 0,

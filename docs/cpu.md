@@ -35,7 +35,7 @@ Interpreter details for A64, A32, SIMD and floating point that the code relies o
 
 - Horizon runs some retail titles in AArch32 (e.g. Mario Kart 8 Deluxe); bit 0 of the `main.npdm` flags byte at 0x0C (`Is64BitInstruction`) is clear for them. A 32-bit `rtld` starts with `b #+8`, which the A64 decoder reads as a valid `ANDS`.
 - One `Cpu` and register file for both states; `ExecMode` is per thread and travels with the context. `r13`/`r14` replace A64's separate SP slot and X30. Q and GE live in `cpsr_q`/`cpsr_ge`.
-- T32 is not implemented: MK8D's 4.8M instruction words contain one `BLX` immediate (a literal pool word). Interworking branches to Thumb are reported as errors rather than silently misexecuted.
+- T32 (`a32/thumb.rs`) runs Thumb-2 with `thumb` and `it_state` in the CPU and thread context. `BX`, `BLX`, `LDR pc` and `POP {pc}` interwork; BLX immediate enters Thumb. 16-bit forms run directly and most 32-bit forms are rewritten to the equivalent ARM word. `tools/thumb_difftest.py` and the `thumb_difftest` example compare random snippets against `qemu-system-arm`. Known difference: VFP operations on NaN operands return the default NaN where QEMU propagates the operand (also in ARM state).
 - AArch32 syscalls: same numbers and low registers as A64, but 64-bit arguments are split across (not always adjacent) register pairs. They are accessors rather than a register shuffle because a blocking syscall is reissued and must re-read unmodified argument registers.
 - `set_mode` re-assembles the `bootstrap` trampolines as A32 so `main` returning exits cleanly.
 

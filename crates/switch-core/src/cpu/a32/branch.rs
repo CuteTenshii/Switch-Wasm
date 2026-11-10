@@ -55,10 +55,9 @@ impl Cpu {
                 .wrapping_add(imm as u32)
                 .wrapping_add(h << 1);
             self.regs[14] = u64::from(self.pc.wrapping_add(4));
-            return Err(Error::Cpu(format!(
-                "BLX to Thumb code at {:#010x} from pc={:#010x}; T32 is not implemented",
-                target, self.pc
-            )));
+            self.thumb = true;
+            self.pc = target;
+            return Ok(());
         }
         Err(Error::Cpu(format!(
             "unimplemented unconditional A32 instruction {:#010x} at pc={:#010x}",

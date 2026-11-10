@@ -3,7 +3,7 @@
 
 mod a32;
 
-use a32::{cpu, load, r, run, run_failing, BASE, HALT};
+use a32::{cpu, load, r, run, BASE, HALT};
 
 use switch_core::cpu::{Cpu, ExecMode};
 
@@ -45,18 +45,6 @@ fn bx_is_decoded_as_a_branch_and_not_as_a_multiply() {
     ]);
     assert_eq!(r(&cpu, 4), 4);
     assert_eq!(r(&cpu, 2), 0, "the branch skipped this");
-}
-
-/// Branching to Thumb is unimplemented and must fault at the branch.
-#[test]
-fn an_interworking_branch_to_thumb_is_reported_where_it_happens() {
-    let err = run_failing(&[
-        0xE3A0_0A08, // mov r0, #0x8000
-        0xE280_0001, // add r0, r0, #1
-        0xE12F_FF10, // bx  r0
-    ]);
-    assert!(err.contains("T32 is not implemented"), "got {err}");
-    assert!(err.contains("0x00008001"), "and says where: {err}");
 }
 
 /// `TPIDRURO` and `TPIDRURW` are distinct registers.

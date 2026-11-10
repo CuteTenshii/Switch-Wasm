@@ -109,7 +109,7 @@ impl Cpu {
         if pre && !writeback {
             // VLDR/VSTR
             let offset = imm8 * 4;
-            let base = self.r32(rn);
+            let base = self.base32(rn);
             let addr = if add {
                 base.wrapping_add(offset)
             } else {
@@ -144,7 +144,7 @@ impl Cpu {
         // VLDM/VSTM (and VPUSH/VPOP): `imm8` counts words.
         let count = if double { imm8 / 2 } else { imm8 };
         let bytes = imm8 * 4;
-        let base = self.r32(rn);
+        let base = self.base32(rn);
         let mut addr = if add { base } else { base.wrapping_sub(bytes) };
         for i in 0..count as u8 {
             if double {

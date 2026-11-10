@@ -90,6 +90,11 @@ impl Cpu {
         self.set_entry_regs(0);
         if elf.is_32_bit {
             self.set_mode(crate::cpu::ExecMode::A32);
+            // A Thumb entry point has bit 0 set.
+            if elf.entry & 1 != 0 {
+                self.thumb = true;
+                self.pc = elf.entry as u32 & !1;
+            }
         }
         Ok(elf)
     }
