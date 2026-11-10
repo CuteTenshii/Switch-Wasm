@@ -54,6 +54,8 @@ impl Gpu {
         let mut resources: Vec<Resource> = Vec::new();
         // Whether everything it binds outlives the draw, so the group can serve the next one.
         let mut persistent = true;
+        // Why it is not: a held surface, a shadow map, a texture the cache does not keep, a global.
+        let mut why = [false; 4];
         // Only its own stage reads a stage's buffers, and each stage has a storage buffer limit.
         let own = if stage == ShaderStage::VertexB {
             wgpu::ShaderStages::VERTEX
@@ -155,17 +157,21 @@ impl Gpu {
             };
             let texture = if !held.is_empty() {
                 persistent = false;
+                why[0] = true;
                 self.texture_over_held(upload, view_dimension, &held, compare)?
             } else if compare {
                 persistent = false;
+                why[1] = true;
                 self.shadow_texture(upload)?
             } else {
                 let texture = self.texture(upload, view_dimension, fold)?;
-                persistent &= self
+                let kept = self
                     .space
                     .gpu_textures
                     .get(&upload.key)
                     .is_some_and(|made| made.iter().any(|(_, kept)| *kept == texture));
+                persistent &= kept;
+                why[2] |= !kept;
                 texture
             };
             resources.push(Resource::Texture(binding, texture, view_dimension));
@@ -191,7 +197,9 @@ impl Gpu {
                 count: None,
             });
             // What a shader writes goes back to the guest, so it is never shared.
-            persistent &= global.held.is_none() && !written;
+            let shared = global.held.is_none() && !written;
+            persistent &= shared;
+            why[3] |= !shared;
             resources.push(match &global.held {
                 Some(held) => Resource::Buffer(binding, held.clone()),
                 None => Resource::Bytes(binding, global.bytes.to_vec()),
@@ -210,6 +218,9 @@ impl Gpu {
             self.bind_misses += 1;
         } else {
             self.bind_uncached += 1;
+            for (count, why) in self.bind_uncached_why.iter_mut().zip(why) {
+                *count += u64::from(why);
+            }
         }
         let layout = match self.group_layouts.get(&entries) {
             Some(layout) => layout.clone(),

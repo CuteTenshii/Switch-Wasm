@@ -93,6 +93,7 @@ impl Gpu {
             bind_hits: 0,
             bind_misses: 0,
             bind_uncached: 0,
+            bind_uncached_why: [0; 4],
             texture_misses: 0,
             gpu_texture_bytes: 0,
             to_remember: Vec::new(),

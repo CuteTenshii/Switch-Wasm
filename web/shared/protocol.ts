@@ -53,6 +53,11 @@ export interface GpuReport {
   bindHits?: number;
   bindMisses?: number;
   bindUncached?: number;
+  // Of the uncached ones, how many bound each kind of resource; one can count in several.
+  bindUncachedHeld?: number;
+  bindUncachedShadow?: number;
+  bindUncachedTexture?: number;
+  bindUncachedGlobal?: number;
   // The rasterizer holds frames after a fallback until enough in a row could run on the device.
   softwareFrame?: boolean;
   // Times the software-frame latch let go.

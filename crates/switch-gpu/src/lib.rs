@@ -504,6 +504,9 @@ pub struct Gpu {
     pub bind_hits: u64,
     pub bind_misses: u64,
     pub bind_uncached: u64,
+    /// Of those, how many bound a held surface, a shadow map, a texture the cache does not
+    /// keep, or a global; one that did several counts in each.
+    pub bind_uncached_why: [u64; 4],
     gpu_texture_bytes: u64,
     /// Textures `prepare` read and has not watched yet.
     to_remember: Vec<(TextureKey, std::sync::Arc<[u8]>, u64)>,
@@ -549,8 +552,15 @@ impl Drop for Gpu {
             self.shader_hits, self.shader_misses,
         );
         eprintln!(
-            "[gpu] {} stage bind groups reused, {} built and kept, {} built for one draw",
-            self.bind_hits, self.bind_misses, self.bind_uncached,
+            "[gpu] {} stage bind groups reused, {} built and kept, {} built for one draw \
+             (held surface {}, shadow map {}, texture not kept {}, global {})",
+            self.bind_hits,
+            self.bind_misses,
+            self.bind_uncached,
+            self.bind_uncached_why[0],
+            self.bind_uncached_why[1],
+            self.bind_uncached_why[2],
+            self.bind_uncached_why[3],
         );
         if let Some(t) = self.times {
             let ms = |v: u128| v as f64 / 1000.0;
@@ -985,6 +995,10 @@ impl Renderer for Gpu {
             .field("bindHits", self.bind_hits)
             .field("bindMisses", self.bind_misses)
             .field("bindUncached", self.bind_uncached)
+            .field("bindUncachedHeld", self.bind_uncached_why[0])
+            .field("bindUncachedShadow", self.bind_uncached_why[1])
+            .field("bindUncachedTexture", self.bind_uncached_why[2])
+            .field("bindUncachedGlobal", self.bind_uncached_why[3])
             .field("softwareFrame", self.software_frame)
             .field("unlatched", self.unlatched)
             .field("gaveUp", self.gave_up)
