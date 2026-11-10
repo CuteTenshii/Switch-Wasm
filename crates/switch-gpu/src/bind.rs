@@ -155,7 +155,10 @@ impl Gpu {
                 Some(_) => Vec::new(),
                 None => self.held_layers(upload, compare, view_dimension)?,
             };
-            let texture = if !held.is_empty() {
+            let direct = self.directly_sampled(p, upload, view_dimension, compare, &held)?;
+            let texture = if let Some(surface) = direct {
+                surface
+            } else if !held.is_empty() {
                 persistent = false;
                 why[0] = true;
                 self.texture_over_held(upload, view_dimension, &held, compare)?
@@ -460,6 +463,50 @@ impl Gpu {
             layers.push((layer, HeldLayer::Colour(held.texture.clone())));
         }
         Ok(layers)
+    }
+
+    /// The held colour surface itself, when sampling it is the same as sampling the copy that
+    /// [`Gpu::texture_over_held`] would make: one layer of the same size and format, which this
+    /// draw does not also render to.
+    fn directly_sampled(
+        &self,
+        p: &Prepared,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        view: wgpu::TextureViewDimension,
+        compare: bool,
+        held: &[(u32, HeldLayer)],
+    ) -> std::result::Result<Option<wgpu::Texture>, String> {
+        let [(0, HeldLayer::Colour(surface))] = held else {
+            return Ok(None);
+        };
+        let size = surface.size();
+        if compare
+            || view != wgpu::TextureViewDimension::D2
+            || upload.layers.max(1) != 1
+            || (size.width, size.height, size.depth_or_array_layers)
+                != (upload.width, upload.height, 1)
+            || surface.sample_count() != 1
+            || surface.mip_level_count() != 1
+            || surface.dimension() != wgpu::TextureDimension::D2
+        {
+            return Ok(None);
+        }
+        let (format, widening) =
+            sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
+        if widening != Widen::None || format != surface.format() {
+            return Ok(None);
+        }
+        // A pass cannot sample what it draws to.
+        let target = |addr: u64| self.space.held.get(&addr).map(|held| &held.texture);
+        let drawn = [p.color.map(|c| c.addr), p.depth.map(|d| d.addr)];
+        if drawn
+            .into_iter()
+            .flatten()
+            .any(|addr| target(addr) == Some(surface))
+        {
+            return Ok(None);
+        }
+        Ok(Some(surface.clone()))
     }
 
     /// Upload a texture, then copy the held layers over it; never cached.
