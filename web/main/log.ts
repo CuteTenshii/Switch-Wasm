@@ -12,19 +12,9 @@ const autoscrollCb = $<HTMLInputElement>('autoscroll-cb');
 const levelSelect = $<HTMLSelectElement>('log-level');
 
 const LEVELS: LogLevel[] = ['error', 'warn', 'info', 'log', 'debug', 'trace'];
-const LEVEL_KEY = 'switch-wasm-log-level';
-
-function storedLevel(): LogLevel {
-  try {
-    const stored = localStorage.getItem(LEVEL_KEY) as LogLevel | null;
-    return stored && LEVELS.includes(stored) ? stored : 'log';
-  } catch {
-    return 'log';
-  }
-}
 
 // The least severe level the console shows.
-let threshold = storedLevel();
+let threshold: LogLevel = 'log';
 levelSelect.value = threshold;
 
 function shown(level: LogLevel): boolean {
@@ -43,9 +33,6 @@ export function onLogLevel(listener: (level: LogLevel) => void): void {
 
 levelSelect.addEventListener('change', () => {
   threshold = levelSelect.value as LogLevel;
-  try {
-    localStorage.setItem(LEVEL_KEY, threshold);
-  } catch { /* the choice still holds for this session */ }
   renderConsole();
   for (const listener of levelListeners) listener(threshold);
 });
