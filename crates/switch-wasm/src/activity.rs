@@ -111,6 +111,7 @@ fn host_io_lines(files: &[Io]) -> Vec<(PageLevel, String)> {
                     format!("{} read from disk ({misses})", size(disk))
                 }),
                 (disk == 0).then(|| "all from cache".to_owned()),
+                stalled(sum_f64(&small, |io| io.stall_ms)),
             ]);
             lines.push((
                 PageLevel::Debug,
@@ -119,6 +120,15 @@ fn host_io_lines(files: &[Io]) -> Vec<(PageLevel, String)> {
         }
     }
     lines
+}
+
+fn sum_f64(files: &[&Io], key: fn(&Io) -> f64) -> f64 {
+    files.iter().map(|io| key(io)).sum()
+}
+
+/// How long the emulator waited on reads, when it was a millisecond or more.
+fn stalled(ms: f64) -> Option<String> {
+    (ms >= 1.0).then(|| format!("waited {ms:.0} ms"))
 }
 
 fn host_io(io: &Io) -> (PageLevel, String) {
@@ -133,6 +143,7 @@ fn host_io(io: &Io) -> (PageLevel, String) {
             format!("{} read from disk{misses}", size(io.disk_bytes))
         }),
         (io.disk_bytes == 0).then(|| "all from cache".to_owned()),
+        stalled(io.stall_ms),
         (io.failures > 0).then(|| format!("{} failed ({})", io.failures, io.last_failure)),
     ]);
     let level = if io.failures > 0 {
@@ -792,6 +803,7 @@ mod tests {
             disk_bytes,
             failures,
             last_failure: "moved".to_owned(),
+            stall_ms: if file == "game.nsp" { 412.4 } else { 0.0 },
         };
         let lines = host_io_lines(&[
             io("game.nsp", 40, 3 << 20, 2, 4 << 20, 0),
@@ -803,7 +815,7 @@ mod tests {
         assert_eq!(
             text,
             [
-                "[io] game.nsp: 40 reads (3.00 MiB), 4.00 MiB read from disk (2 chunk misses)",
+                "[io] game.nsp: 40 reads (3.00 MiB), 4.00 MiB read from disk (2 chunk misses), waited 412 ms",
                 "[io] gone.nsp: 1 read (0 B), all from cache, 2 failed (moved)",
                 "[io] 2 files with small reads: 5 reads (1.5 KiB), 1.00 MiB read from disk (1 chunk miss)",
             ]

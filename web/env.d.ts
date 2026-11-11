@@ -30,6 +30,8 @@ declare module '@core/switch_wasm.js' {
   // The scalar exports. Each `u64` is a bigint, each `u32` and `i32` a number, each `bool` a boolean.
   export function switch_init(): void;
   export function switch_add_core(): number;
+  // `hostfiles.rs`: the worker (`worker/reader.ts`) that fills the host file cache; throws without `SharedArrayBuffer`.
+  export function switch_set_reader(worker: Worker): void;
   // Blocks the calling core worker until the session stops the core.
   export function switch_serve_core(slot: number): void;
   export function switch_end_title(): void;
