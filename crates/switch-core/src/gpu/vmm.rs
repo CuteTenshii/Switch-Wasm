@@ -4,7 +4,8 @@
 use crate::mem::Memory;
 use crate::{Error, Result};
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write;
 
 pub const SMALL_PAGE_SIZE: u64 = 0x1000;
 pub const BIG_PAGE_SIZE: u64 = 0x1_0000;
@@ -53,6 +54,8 @@ struct Reservation {
 }
 
 const TRANSLATION_WAYS: usize = 8;
+/// Releases remembered to explain a later access to the range.
+const RELEASES_KEPT: usize = 32;
 
 /// One `/dev/nvhost-as-gpu` fd.
 #[derive(Debug)]
@@ -61,6 +64,8 @@ pub struct AddressSpace {
     pub big_page_size: u64,
     mappings: BTreeMap<u64, Mapping>,
     reservations: BTreeMap<u64, Reservation>,
+    /// The latest ranges the guest unmapped or freed, as `(call, start, size)`.
+    releases: VecDeque<(&'static str, u64, u64)>,
     next_small: u64,
     next_big: u64,
     /// Recently translated mappings, split by field so the per-pixel scan reads
@@ -83,6 +88,7 @@ impl AddressSpace {
             big_page_size: BIG_PAGE_SIZE,
             mappings: BTreeMap::new(),
             reservations: BTreeMap::new(),
+            releases: VecDeque::new(),
             recent_base: [const { Cell::new(0) }; TRANSLATION_WAYS],
             recent_size: [const { Cell::new(0) }; TRANSLATION_WAYS],
             recent_cpu: [const { Cell::new(0) }; TRANSLATION_WAYS],
@@ -128,6 +134,7 @@ impl AddressSpace {
             .checked_mul(page_size as u64)
             .ok_or(Error::Overflow)?;
         self.reservations.remove(&base);
+        self.release("FreeSpace", base, size);
         let doomed: Vec<u64> = self
             .mappings
             .range(base..base.saturating_add(size))
@@ -238,6 +245,13 @@ impl AddressSpace {
 
     /// Undo the map that returned `gpu_va`, including every piece a remap split off it.
     pub fn unmap(&mut self, gpu_va: u64) -> Result<()> {
+        let gone: Vec<(u64, u64)> = (self.mappings.values())
+            .filter(|m| m.origin == gpu_va)
+            .map(|m| (m.gpu_va, m.size))
+            .collect();
+        for (start, size) in gone {
+            self.release("UnmapBuffer", start, size);
+        }
         self.mappings.retain(|_, m| m.origin != gpu_va);
         self.forget_translations();
         Ok(())
@@ -245,6 +259,7 @@ impl AddressSpace {
 
     /// Clear a range, trimming partly covered mappings so ranges stay disjoint.
     pub fn unmap_range(&mut self, gpu_va: u64, size: u64) {
+        self.release("Remap", gpu_va, size);
         let end = gpu_va.saturating_add(size);
         let overlapping: Vec<Mapping> = self
             .mappings
@@ -274,6 +289,40 @@ impl AddressSpace {
             }
         }
         self.forget_translations();
+    }
+
+    fn release(&mut self, call: &'static str, start: u64, size: u64) {
+        if self.releases.len() == RELEASES_KEPT {
+            self.releases.pop_front();
+        }
+        self.releases.push_back((call, start, size));
+    }
+
+    /// The error for an access to `gpu_va`, which no mapping holds, with what is known of why.
+    pub fn unmapped(&self, gpu_va: u64) -> Error {
+        let mut why = String::new();
+        if let Some((_, m)) = self.mappings.range(..gpu_va).next_back() {
+            let _ = write!(why, "; mapping below {:#x}+{:#x}", m.gpu_va, m.size);
+        }
+        if let Some((_, m)) = self.mappings.range(gpu_va..).next() {
+            let _ = write!(why, "; mapping above {:#x}+{:#x}", m.gpu_va, m.size);
+        }
+        let reserved = (self.reservations.range(..=gpu_va).next_back())
+            .map(|(_, r)| r)
+            .filter(|r| gpu_va - r.base < r.size);
+        if let Some(r) = reserved {
+            let _ = write!(
+                why,
+                "; inside the space reserved at {:#x}+{:#x}",
+                r.base, r.size
+            );
+        }
+        let released = (self.releases.iter().rev())
+            .find(|&&(_, start, size)| gpu_va.wrapping_sub(start) < size);
+        if let Some((call, start, size)) = released {
+            let _ = write!(why, "; released by {call} ({start:#x}+{size:#x})");
+        }
+        Error::Gpu(format!("gpu va {gpu_va:#x} is not mapped{why}"))
     }
 
     fn bump(&mut self, size: u64, page_size: u64) -> Result<u64> {
@@ -349,7 +398,7 @@ impl AddressSpace {
                 "gpu va {:#x}: access of {} bytes crosses the end of its mapping ({} left)",
                 gpu_va, len, left
             ))),
-            None => Err(Error::Gpu(format!("gpu va {:#x} is not mapped", gpu_va))),
+            None => Err(self.unmapped(gpu_va)),
         }
     }
 
@@ -388,6 +437,27 @@ mod tests {
             .map(cpu_addr, size, 1, 0, SMALL_PAGE_SIZE, 0, 0)
             .unwrap();
         (vmm, va)
+    }
+
+    #[test]
+    fn an_unmapped_access_says_what_released_the_range() {
+        let (mut vmm, va) = space_with_buffer(0x2000_0000, 0x4000);
+        vmm.unmap(va).unwrap();
+        let Error::Gpu(text) = vmm.unmapped(va + 0x800) else {
+            panic!("expected a GPU error");
+        };
+        assert!(
+            text.starts_with(&format!("gpu va {:#x} is not mapped", va + 0x800)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("released by UnmapBuffer ({va:#x}+0x4000)")),
+            "{text}"
+        );
+        let Error::Gpu(text) = vmm.unmapped(0x1234_5000) else {
+            panic!("expected a GPU error");
+        };
+        assert!(!text.contains("released"), "{text}");
     }
 
     #[test]

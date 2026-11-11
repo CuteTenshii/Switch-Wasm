@@ -167,14 +167,14 @@ impl ExecCtx<'_> {
     pub fn vmm_read_u8(&self, gpu_va: u64) -> Result<u8> {
         match self.vmm.translate(gpu_va) {
             Some((cpu, _)) => self.mem.read_u8(cpu),
-            None => Err(Error::Gpu(format!("gpu va {:#x} is not mapped", gpu_va))),
+            None => Err(self.vmm.unmapped(gpu_va)),
         }
     }
 
     pub fn vmm_write_u8(&mut self, gpu_va: u64, value: u8) -> Result<()> {
         match self.vmm.translate(gpu_va) {
             Some((cpu, _)) => self.mem.write_u8(cpu, value),
-            None => Err(Error::Gpu(format!("gpu va {:#x} is not mapped", gpu_va))),
+            None => Err(self.vmm.unmapped(gpu_va)),
         }
     }
 }

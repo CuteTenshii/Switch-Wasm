@@ -1107,7 +1107,10 @@ fn read_range(ctx: &ExecCtx, gpu_va: u64, len: u64, what: &str) -> Result<Vec<u8
     while at < out.len() {
         let va = gpu_va + at as u64;
         let Some((_, left)) = ctx.vmm.translate(va) else {
-            return Err(Error::Gpu(format!("gpu va {va:#x} is not mapped")));
+            return Err(match ctx.vmm.unmapped(va) {
+                Error::Gpu(why) => Error::Gpu(format!("{what}: {why}")),
+                other => other,
+            });
         };
         let end = out
             .len()

@@ -48,9 +48,34 @@ impl EngineCopy {
     pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
         self.regs.set(method, arg);
         if method == LAUNCH_DMA {
-            self.launch(arg, ctx)?;
+            self.launch(arg, ctx).map_err(|e| match e {
+                Error::Gpu(why) => Error::Gpu(format!("{}: {why}", self.describe(arg))),
+                other => other,
+            })?;
         }
         Ok(())
+    }
+
+    /// The launch and the registers it reads, for an error that names them.
+    fn describe(&self, flags: u32) -> String {
+        let r = &self.regs;
+        format!(
+            "dma copy {flags:#x} from {:#x} (pitch {:#x}, origin {:#x}, width {:#x}, block {:#x}) \
+             to {:#x} (pitch {:#x}, origin {:#x}, width {:#x}, block {:#x}), \
+             {:#x} bytes x {} lines",
+            r.iova(OFFSET_IN),
+            r.get(PITCH_IN),
+            r.get(SET_SRC_ORIGIN),
+            r.get(SET_SRC_WIDTH),
+            r.get(SET_SRC_BLOCK_SIZE),
+            r.iova(OFFSET_OUT),
+            r.get(PITCH_OUT),
+            r.get(SET_DST_ORIGIN),
+            r.get(SET_DST_WIDTH),
+            r.get(SET_DST_BLOCK_SIZE),
+            r.get(LINE_LENGTH_IN),
+            r.get(LINE_COUNT),
+        )
     }
 
     /// The source and destination a launch with `flags` touches, when it is one plain run
@@ -172,7 +197,7 @@ impl EngineCopy {
                 {
                     let mut v = 0u32;
                     for b in 0..component_size {
-                        let addr = src_base + (src_off + i as u32 * component_size + b) as u64;
+                        let addr = at(src_base, src_off + i64::from(i as u32 * component_size + b));
                         v |= (ctx.vmm_read_u8(addr)? as u32) << (8 * b);
                     }
                     *s = v;
@@ -194,7 +219,7 @@ impl EngineCopy {
                         }
                     };
                     for b in 0..component_size {
-                        let addr = dst_base + (dst_off + i * component_size + b) as u64;
+                        let addr = at(dst_base, dst_off + i64::from(i * component_size + b));
                         ctx.vmm_write_u8(addr, (value >> (8 * b)) as u8)?;
                     }
                 }
@@ -279,6 +304,11 @@ impl RemapComponents {
     }
 }
 
+/// `base` moved by a signed `offset`.
+fn at(base: u64, offset: i64) -> u64 {
+    base.wrapping_add_signed(offset)
+}
+
 #[derive(Clone, Copy)]
 struct SurfaceWalk {
     layout: Layout,
@@ -302,12 +332,11 @@ impl SurfaceWalk {
         element_bytes: u32,
     ) -> Result<SurfaceWalk> {
         if pitch {
+            let pitch = regs.get(pitch_reg);
             return Ok(SurfaceWalk {
-                layout: Layout::Pitch {
-                    pitch: regs.get(pitch_reg),
-                },
+                layout: Layout::Pitch { pitch },
                 base: 0,
-                width_bytes: regs.get(pitch_reg),
+                width_bytes: (pitch as i32).unsigned_abs(),
                 origin_x_bytes: 0,
                 origin_y: 0,
                 element_bytes,
@@ -331,10 +360,15 @@ impl SurfaceWalk {
         })
     }
 
-    fn offset(&self, element: u32, line: u32) -> u32 {
+    /// Bytes from the surface's base to `(element, line)`; negative for a pitch layout whose
+    /// pitch is, writing the rows bottom to top.
+    fn offset(&self, element: u32, line: u32) -> i64 {
         let x = self.origin_x_bytes + element * self.element_bytes;
-        self.layout
-            .offset(x, self.origin_y + line, self.width_bytes)
+        let y = self.origin_y + line;
+        match self.layout {
+            Layout::Pitch { pitch } => i64::from(y) * i64::from(pitch as i32) + i64::from(x),
+            layout => i64::from(layout.offset(x, y, self.width_bytes)),
+        }
     }
 
     fn based_at(&self, base: u64) -> SurfaceWalk {
@@ -344,10 +378,11 @@ impl SurfaceWalk {
     /// GPU address of `(element, line)` and how many bytes from there are contiguous.
     fn run_at(&self, element: u32, line: u32) -> (u64, u32) {
         let x = self.origin_x_bytes + element * self.element_bytes;
-        let (offset, run) = self
-            .layout
-            .run_at(x, self.origin_y + line, self.width_bytes);
-        (self.base + u64::from(offset), run)
+        let run = match self.layout {
+            Layout::Pitch { .. } => self.width_bytes.saturating_sub(x),
+            layout => layout.run_at(x, self.origin_y + line, self.width_bytes).1,
+        };
+        (at(self.base, self.offset(element, line)), run)
     }
 }
 
@@ -448,6 +483,36 @@ mod tests {
             for x in 0..8u32 {
                 assert_eq!(
                     h.mem.read_u8(0x3000_0400 + y * 8 + x).unwrap(),
+                    (y * 8 + x) as u8
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_negative_destination_pitch_writes_the_rows_bottom_to_top() {
+        let mut h = Harness::new();
+        for i in 0..32u32 {
+            h.mem.write_u8(0x3000_0000 + i, i as u8).unwrap();
+        }
+        let mut engine = EngineCopy::new();
+        set_iova(&mut engine, OFFSET_IN, h.base);
+        // The first row goes to the last of four 8-byte rows.
+        set_iova(&mut engine, OFFSET_OUT, h.base + 0x400 + 3 * 8);
+        engine.regs.set(PITCH_IN, 8);
+        engine.regs.set(PITCH_OUT, (-8i32) as u32);
+        engine.regs.set(LINE_LENGTH_IN, 8);
+        engine.regs.set(LINE_COUNT, 4);
+
+        let mut ctx = h.ctx();
+        engine
+            .write(LAUNCH_DMA, (1 << 7) | (1 << 8) | (1 << 9), &mut ctx)
+            .unwrap();
+
+        for y in 0..4u32 {
+            for x in 0..8u32 {
+                assert_eq!(
+                    h.mem.read_u8(0x3000_0400 + (3 - y) * 8 + x).unwrap(),
                     (y * 8 + x) as u8
                 );
             }

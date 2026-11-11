@@ -195,7 +195,12 @@ impl Channel {
             crate::traceln!("[gpu] pushbuffer {:#x} ({} words)", address, words);
         }
         let mut pushbuffer = vec![0u8; words as usize * 4];
-        ctx.vmm.read_into(ctx.mem, address, &mut pushbuffer)?;
+        ctx.vmm
+            .read_into(ctx.mem, address, &mut pushbuffer)
+            .map_err(|e| match e {
+                Error::Gpu(why) => Error::Gpu(format!("pushbuffer of {words} words: {why}")),
+                other => other,
+            })?;
         self.run_pushbuffer(&pushbuffer, ctx)
     }
 
@@ -259,7 +264,32 @@ impl Channel {
         self.method(subchannel, method, word, last_call, ctx)
     }
 
+    /// Run one method, naming it in the error if it fails.
     pub fn method(
+        &mut self,
+        subchannel: u32,
+        method: u32,
+        arg: u32,
+        last_call: bool,
+        ctx: &mut ExecCtx,
+    ) -> Result<()> {
+        self.run_method(subchannel, method, arg, last_call, ctx)
+            .map_err(|e| match e {
+                Error::Gpu(why) => {
+                    let class = self
+                        .subchannel_class
+                        .get(subchannel as usize)
+                        .copied()
+                        .unwrap_or(0);
+                    Error::Gpu(format!(
+                        "class {class:#x} method {method:#x} (arg {arg:#x}): {why}"
+                    ))
+                }
+                other => other,
+            })
+    }
+
+    fn run_method(
         &mut self,
         subchannel: u32,
         method: u32,
