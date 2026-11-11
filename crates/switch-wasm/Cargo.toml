@@ -46,6 +46,7 @@ features = [
   "Blob",
   "Event",
   "File",
+  "FileReaderSync",
   "IdbCursorWithValue",
   "IdbDatabase",
   "IdbFactory",

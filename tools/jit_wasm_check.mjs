@@ -3,7 +3,7 @@
 //   node tools/jit_wasm_check.mjs [--wasm=<switch_wasm_bg.wasm>]
 //
 // Needs `make wasm` to have been run.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { commandLine, repoRoot } from './common.mjs';
@@ -11,19 +11,7 @@ import { commandLine, repoRoot } from './common.mjs';
 const out = join(repoRoot, 'target/wasm32-unknown-unknown/debug');
 const wasmPath = commandLine().flag('wasm') || join(out, 'switch_wasm_bg.wasm');
 
-// Node cannot resolve `@host/files`, so point it at a shim that refuses.
-const shim =
-  'data:text/javascript,'
-  + encodeURIComponent('export const hostRead = () => 0; export const addHostFile = () => 0;');
-const glue = join(out, 'switch_wasm.jitcheck.mjs');
-writeFileSync(
-  glue,
-  readFileSync(join(out, 'switch_wasm.js'), 'utf8').replace(
-    /from (['"])@host\/files\1/g,
-    `from ${JSON.stringify(shim)}`,
-  ),
-);
-const api = await import(pathToFileURL(glue).href);
+const api = await import(pathToFileURL(join(out, 'switch_wasm.js')).href);
 await api.default({ module_or_path: readFileSync(wasmPath) });
 
 const BASE = 0x04000000;

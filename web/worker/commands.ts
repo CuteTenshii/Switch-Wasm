@@ -4,7 +4,6 @@ import type {
   CommandHandlers, DlcEntry, GpuReport, JitStats, MemoryReport, NandIdentity, NspFile, UpdateInfo,
 } from '../shared/protocol';
 import { noteRegistered } from './activity';
-import { addHostFile, openHostFile } from './hostfiles';
 import { flushLog } from './log';
 import {
   switch_add_dlc, switch_add_update, switch_clear_dlc, switch_clear_screen, switch_clear_update,
@@ -50,31 +49,28 @@ export const CMD = {
 
   // The File is kept and read by range.
   openNsp(file) {
-    return JSON.parse(switch_open_nsp(openHostFile(file))) as NspFile[];
+    return JSON.parse(switch_open_nsp(file)) as NspFile[];
   },
   openNca(file) {
-    return switch_open_nca(openHostFile(file), file.name);
+    return switch_open_nca(file, file.name);
   },
   // Register the stored firmware with the session; how many system data archives it took.
   restoreNand: switch_restore_nand,
   // The base title the update patches and its version, or null if it is not an update.
   addUpdate(file) {
-    const index = addHostFile(file);
-    const found = switch_add_update(index, BigInt(file.size), file.name);
+    const found = switch_add_update(file, file.name);
     return found ? JSON.parse(found) as UpdateInfo : null;
   },
   // The pieces the add-on content container holds.
   addDlc(file) {
-    const index = addHostFile(file);
-    return JSON.parse(switch_add_dlc(index, BigInt(file.size), file.name)) as DlcEntry[];
+    return JSON.parse(switch_add_dlc(file, file.name)) as DlcEntry[];
   },
   clearDlc: switch_clear_dlc,
   clearUpdate: switch_clear_update,
   // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; throws the core's reason if unreadable.
   nandIdentify(content) {
-    const index = addHostFile(content);
     noteRegistered('NAND files to identify', content.size);
-    const found = switch_nand_identify(index, BigInt(content.size));
+    const found = switch_nand_identify(content);
     if (!found) throw new Error(switch_last_error() || 'the core could not read it');
     return JSON.parse(found) as NandIdentity;
   },

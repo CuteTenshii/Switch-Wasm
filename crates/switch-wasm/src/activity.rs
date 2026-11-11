@@ -8,6 +8,7 @@ use switch_core::cpu::{AudioActivity, Cpu, GapKind, ThreadReport};
 use switch_core::gpu::activity::{Kind, Tally};
 use wasm_bindgen::prelude::wasm_bindgen;
 
+use crate::hostfiles::Io;
 use crate::log::{push, PageLevel};
 use crate::session;
 
@@ -77,7 +78,69 @@ fn report(cpu: &mut Cpu, reporter: &mut Reporter, seconds: f64) {
     idle_threads(reporter, &threads);
     input(before.input, now.input);
     memory(cpu, reporter);
+    for (level, line) in host_io_lines(&crate::hostfiles::take_io()) {
+        push(level, &line);
+    }
     reporter.previous = now;
+}
+
+/// Up to this much read per file per report, with no failures, is a header read.
+const SMALL_IO: u64 = 4 * 1024;
+
+/// The `[io]` lines for what each host file served: one each, except that header reads of
+/// several files are summed.
+fn host_io_lines(files: &[Io]) -> Vec<(PageLevel, String)> {
+    let (small, rest): (Vec<&Io>, Vec<&Io>) = files
+        .iter()
+        .partition(|io| io.bytes <= SMALL_IO && io.failures == 0);
+    let mut lines: Vec<_> = rest.into_iter().map(host_io).collect();
+    match small[..] {
+        [] => {}
+        [one] => lines.push(host_io(one)),
+        _ => {
+            let sum = |key: fn(&Io) -> u64| small.iter().map(|io| key(io)).sum::<u64>();
+            let disk = sum(|io| io.disk_bytes);
+            let line = joined(&[
+                Some(format!(
+                    "{} ({})",
+                    count(sum(|io| io.reads), "read"),
+                    size(sum(|io| io.bytes))
+                )),
+                (disk > 0).then(|| {
+                    let misses = count_as(sum(|io| io.chunk_misses), "chunk miss", "chunk misses");
+                    format!("{} read from disk ({misses})", size(disk))
+                }),
+                (disk == 0).then(|| "all from cache".to_owned()),
+            ]);
+            lines.push((
+                PageLevel::Debug,
+                format!("[io] {} files with small reads: {line}", small.len()),
+            ));
+        }
+    }
+    lines
+}
+
+fn host_io(io: &Io) -> (PageLevel, String) {
+    let line = joined(&[
+        Some(format!("{} ({})", count(io.reads, "read"), size(io.bytes))),
+        (io.disk_bytes > 0).then(|| {
+            let misses = if io.chunk_misses > 0 {
+                format!(" ({} chunk misses)", io.chunk_misses)
+            } else {
+                String::new()
+            };
+            format!("{} read from disk{misses}", size(io.disk_bytes))
+        }),
+        (io.disk_bytes == 0).then(|| "all from cache".to_owned()),
+        (io.failures > 0).then(|| format!("{} failed ({})", io.failures, io.last_failure)),
+    ]);
+    let level = if io.failures > 0 {
+        PageLevel::Warn
+    } else {
+        PageLevel::Debug
+    };
+    (level, format!("[io] {}: {line}", io.file))
 }
 
 fn count(n: u64, noun: &str) -> String {
@@ -717,6 +780,37 @@ mod tests {
         assert_eq!(duration(7200.0, 48000), "150 ms");
         assert_eq!(duration(96000.0, 48000), "2.0 s");
         assert_eq!(duration(3.0, 0), "3 frames");
+    }
+
+    #[test]
+    fn host_file_reads_are_listed_with_header_reads_summed() {
+        let io = |file: &str, reads, bytes, chunk_misses, disk_bytes, failures| Io {
+            file: file.to_owned(),
+            reads,
+            bytes,
+            chunk_misses,
+            disk_bytes,
+            failures,
+            last_failure: "moved".to_owned(),
+        };
+        let lines = host_io_lines(&[
+            io("game.nsp", 40, 3 << 20, 2, 4 << 20, 0),
+            io("a.nca", 2, 512, 1, 1 << 20, 0),
+            io("b.nca", 3, 1024, 0, 0, 0),
+            io("gone.nsp", 1, 0, 0, 0, 2),
+        ]);
+        let text: Vec<_> = lines.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            text,
+            [
+                "[io] game.nsp: 40 reads (3.00 MiB), 4.00 MiB read from disk (2 chunk misses)",
+                "[io] gone.nsp: 1 read (0 B), all from cache, 2 failed (moved)",
+                "[io] 2 files with small reads: 5 reads (1.5 KiB), 1.00 MiB read from disk (1 chunk miss)",
+            ]
+        );
+        assert_eq!(lines[1].0, PageLevel::Warn);
+        assert_eq!(lines[0].0, PageLevel::Debug);
+        assert!(host_io_lines(&[]).is_empty());
     }
 
     #[test]

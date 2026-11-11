@@ -59,6 +59,7 @@ pub type IdMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDef
 
 pub mod bktr;
 pub mod bucket;
+pub mod chunk_cache;
 pub mod compressed;
 pub mod control;
 pub mod cpu;

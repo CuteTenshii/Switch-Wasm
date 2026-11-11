@@ -9,8 +9,9 @@ use wasm_bindgen::prelude::*;
 use web_sys::{Blob, File};
 
 use super::{self as idb, NAND_CONTENT, NAND_DB, NAND_STORES, NAND_TITLES, NAND_VERSION};
+use crate::hostfiles::add as add_host_file;
 use crate::post::post;
-use crate::{add_host_file, applets, container, session_if_live, HostSource};
+use crate::{applets, container, session_if_live, HostSource};
 
 /// Program ids of the library applets a title or the Home Menu can start.
 const LIBRARY_APPLETS: [u64; 15] = [

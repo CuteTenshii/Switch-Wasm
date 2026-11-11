@@ -23,6 +23,7 @@ mod blob;
 mod gpu;
 #[cfg(target_arch = "wasm32")]
 mod heap;
+mod hostfiles;
 #[cfg(target_arch = "wasm32")]
 mod jit;
 #[cfg(target_arch = "wasm32")]
@@ -52,6 +53,8 @@ mod storage;
 mod system;
 mod users;
 
+#[cfg(target_arch = "wasm32")]
+use hostfiles::read as host_read;
 use switch_core::cpu::Cpu;
 use switch_core::nca::Nca;
 use switch_core::source::{ByteSource, Window};
@@ -107,31 +110,9 @@ fn session_if_live() -> Option<&'static mut Session> {
     unsafe { &mut *SESSION.get() }.as_mut()
 }
 
-/// The host read as a `wasm-bindgen` import, since wasm-bindgen owns the import object.
-/// `@host/files` is resolved by the bundler (see `vite.config.ts`).
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen(raw_module = "@host/files")]
-extern "C" {
-    #[wasm_bindgen(js_name = hostRead)]
-    fn host_read_js(file: u32, offset: u64, ptr: u32, len: u32) -> u32;
-    /// Register a `File` or `Blob` as the next host file, returning its index.
-    #[wasm_bindgen(js_name = addHostFile)]
-    pub(crate) fn add_host_file(file: &web_sys::Blob) -> u32;
-}
-
-/// # Safety
-/// `ptr` must be valid for writes of `len` bytes.
-#[cfg(target_arch = "wasm32")]
-unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
-    host_read_js(file, offset, ptr as u32, len)
-}
-
 /// Host-build stand-in serving [`set_host_container`].
-///
-/// # Safety
-/// `ptr` must be valid for writes of `len` bytes.
 #[cfg(not(target_arch = "wasm32"))]
-unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
+fn host_read(file: u32, offset: u64, out: &mut [u8]) -> usize {
     if file != 0 {
         return 0; // host builds serve only the container
     }
@@ -141,9 +122,9 @@ unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
         return 0;
     }
     let start = offset as usize;
-    let n = (len as usize).min(data.len() - start);
-    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(start), ptr, n) };
-    n as u32
+    let n = out.len().min(data.len() - start);
+    out[..n].copy_from_slice(&data[start..start + n]);
+    n
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -174,23 +155,7 @@ impl ByteSource for HostSource {
             return Ok(0);
         }
         let want = ((out.len() as u64).min(self.len - offset)) as usize;
-        let mut done = 0;
-        while done < want {
-            // Also absorbs short reads at the host's cache-chunk boundary.
-            let ask = (want - done).min(u32::MAX as usize);
-            let got = unsafe {
-                host_read(
-                    self.file,
-                    offset + done as u64,
-                    out[done..].as_mut_ptr(),
-                    ask as u32,
-                )
-            } as usize;
-            if got == 0 {
-                break;
-            }
-            done += got;
-        }
+        let done = host_read(self.file, offset, &mut out[..want]);
         if done != want {
             return Err(switch_core::Error::Io(format!(
                 "host read of {} bytes at {:#x} returned {}",

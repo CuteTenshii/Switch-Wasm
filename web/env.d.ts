@@ -33,7 +33,7 @@ declare module '@core/switch_wasm.js' {
   // Blocks the calling core worker until the session stops the core.
   export function switch_serve_core(slot: number): void;
   export function switch_end_title(): void;
-  export function switch_open_nca(size: bigint, name: string): number;
+  export function switch_open_nca(file: Blob, name: string): number;
   export function switch_clear_dlc(): void;
   export function switch_clear_update(): void;
   export function switch_set_trace(enabled: boolean): void;
@@ -75,11 +75,11 @@ declare module '@core/switch_wasm.js' {
   export function switch_panic_message(): string;
   // `container.rs`
   // `{ title, version }` as JSON, or empty when the file is no update.
-  export function switch_add_update(file: number, size: bigint, name: string): string;
+  export function switch_add_update(file: Blob, name: string): string;
   // The pieces as JSON: `[{ id, title_id, index }]`, empty when the file is no add-on content.
-  export function switch_add_dlc(file: number, size: bigint, name: string): string;
+  export function switch_add_dlc(file: Blob, name: string): string;
   // The file table as JSON; throws the reason when the container cannot be read.
-  export function switch_open_nsp(size: bigint): string;
+  export function switch_open_nsp(file: Blob): string;
   export function switch_read_file(
     index: number, offset: bigint, len: number): Uint8Array<ArrayBuffer>;
   export function switch_parse_nca(header: Uint8Array): string;
@@ -96,7 +96,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_program_nca_index(): number;
   export function switch_nand_launch(content: Blob): number;
   // `{ id, kind }` as JSON, or empty when the file is no NCA.
-  export function switch_nand_identify(file: number, size: bigint): string;
+  export function switch_nand_identify(content: Blob): string;
   // `log.rs`, `run.rs`, `stats.rs`
   // Every queued line, each as its level digit (1 error to 5 debug) then its text.
   export function switch_log_drain(): string[];

@@ -61,9 +61,6 @@ export default defineConfig(({ command }) => ({
   resolve: {
     alias: {
       '@core': coreDir(command),
-      // The `host_read` import named by wasm-bindgen's generated glue.
-      '@host/files': fileURLToPath(
-        new URL('./web/worker/hostfiles.ts', import.meta.url)),
     },
   },
   server: {

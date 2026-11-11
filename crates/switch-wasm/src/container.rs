@@ -10,10 +10,14 @@ use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::{container, nsp_file_source, session, Dlc, HostSource, Session, Update};
 
-/// Open the `size`-byte container (NSP or XCI) the host has ready, read through
-/// `host_read`. Returns its file table as JSON, or fails with the reason.
+/// Open `file`, a container (NSP or XCI), read by range. Returns its file table as JSON, or
+/// fails with the reason.
 #[wasm_bindgen]
-pub fn switch_open_nsp(size: u64) -> Result<String, String> {
+pub fn switch_open_nsp(file: &web_sys::Blob) -> Result<String, String> {
+    open_nsp(crate::hostfiles::open_container(file))
+}
+
+pub(crate) fn open_nsp(size: u64) -> Result<String, String> {
     let s = session();
     let container = HostSource { file: 0, len: size };
     s.container = Some(container);
@@ -36,11 +40,14 @@ pub fn switch_open_nsp(size: u64) -> Result<String, String> {
     }
 }
 
-/// Open the host's container, the file `name`, as a single standalone `.nca`. Returns 0.
+/// Open `file`, named `name`, as a single standalone `.nca`. Returns 0.
 #[wasm_bindgen]
-pub fn switch_open_nca(size: u64, name: &str) -> i32 {
+pub fn switch_open_nca(file: &web_sys::Blob, name: &str) -> i32 {
     let s = session();
-    s.container = Some(HostSource { file: 0, len: size });
+    s.container = Some(HostSource {
+        file: 0,
+        len: crate::hostfiles::open_container(file),
+    });
     s.nsp_files = Vec::new();
     s.control = None;
     s.last_error.clear();
@@ -90,14 +97,17 @@ pub(crate) fn add_archive(s: &mut Session, src: HostSource) -> i32 {
     }
 }
 
-/// Register the host's update container, the file `name`, for the title about to run.
+/// Register `file`, an update container named `name`, for the title about to run.
 /// Returns `{ title, version }` as JSON, the base program id it patches and its NACP display
 /// version ("1.0.1", or empty), or nothing with the reason in `switch_last_error`. Pairing
 /// is checked at boot.
 #[wasm_bindgen]
-pub fn switch_add_update(file: u32, size: u64, name: &str) -> String {
+pub fn switch_add_update(file: &web_sys::Blob, name: &str) -> String {
     let s = session();
-    let src = HostSource { file, len: size };
+    let src = HostSource {
+        file: crate::hostfiles::add(file),
+        len: file.size() as u64,
+    };
     let files = match Pfs0::read_from(&src) {
         Ok(pfs0) => pfs0.files,
         Err(e) => {
@@ -160,13 +170,16 @@ fn display_version(
     control().map_or_else(String::new, |control| control.nacp.display_version)
 }
 
-/// Register a container of add-on content, the file `name`. Returns the pieces it holds as
+/// Register `file`, a container of add-on content named `name`. Returns the pieces it holds as
 /// JSON, each with its content id, base title and index; none, with the reason in
 /// `switch_last_error`, if it is not add-on content. Pairing is checked at boot.
 #[wasm_bindgen]
-pub fn switch_add_dlc(file: u32, size: u64, name: &str) -> String {
+pub fn switch_add_dlc(file: &web_sys::Blob, name: &str) -> String {
     let s = session();
-    let src = HostSource { file, len: size };
+    let src = HostSource {
+        file: crate::hostfiles::add(file),
+        len: file.size() as u64,
+    };
     let files = match Pfs0::read_from(&src) {
         Ok(pfs0) => pfs0.files,
         Err(e) => {

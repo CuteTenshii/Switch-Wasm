@@ -10,9 +10,12 @@ use crate::HostSource;
 /// Identify a firmware NCA from its header as `{ id, kind }` JSON, where `kind` is 0 for a
 /// program, 1 for a data archive and 2 for anything else; empty when it cannot be read.
 #[wasm_bindgen]
-pub fn switch_nand_identify(file: u32, size: u64) -> String {
+pub fn switch_nand_identify(content: &web_sys::Blob) -> String {
     let s = session();
-    let src = HostSource { file, len: size };
+    let src = HostSource {
+        file: crate::hostfiles::add(content),
+        len: content.size() as u64,
+    };
     let nca = match Nca::parse_source(&src, Some(&s.keys)) {
         Ok(nca) => nca,
         Err(e) => {
@@ -42,7 +45,7 @@ pub fn switch_nand_launch(content: &web_sys::Blob) -> Result<f64, String> {
     use crate::Added;
     let s = session();
     let src = HostSource {
-        file: crate::add_host_file(content),
+        file: crate::hostfiles::add(content),
         len: content.size() as u64,
     };
     load_and_boot_nca(&s.keys, &mut s.cpu, src, Added::default()).map(|entry| entry as f64)
