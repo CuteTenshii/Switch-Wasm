@@ -113,6 +113,8 @@ pub(crate) struct Process {
     pub(crate) manual_romfs: Option<Box<dyn crate::source::ByteSource>>,
     /// Whether the shared buffer's pages are mapped at `SHARED_BUFFER_ADDR`.
     pub(crate) shared_buffer_mapped: bool,
+    /// Bytes `svcSetHeapSize` last granted, which `svcQueryMemory` reports as heap.
+    pub(crate) heap_size: u32,
     /// Guest address of hid shared memory; 0 until mapped.
     pub(crate) hid_shmem_addr: u32,
     /// Handle used to recognise hid's shared memory in `svcMapSharedMemory`.
@@ -212,6 +214,7 @@ impl Process {
             romfs: None,
             manual_romfs: None,
             shared_buffer_mapped: false,
+            heap_size: 0,
             hid_shmem_addr: 0,
             hid_shmem_handle: None,
             time_shmem_handle: None,

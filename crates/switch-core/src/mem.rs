@@ -33,6 +33,8 @@ pub enum MemoryState {
     Unmapped = 0,
     Code = 3,
     CodeData = 4,
+    /// Heap granted by `svcSetHeapSize`.
+    Normal = 5,
     /// The same two for an `ldr:ro` module.
     AliasCode = 8,
     AliasCodeData = 9,

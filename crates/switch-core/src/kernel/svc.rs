@@ -5,6 +5,7 @@ use crate::cpu::{
     GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
 use crate::kernel::cores::Handback;
+use crate::mem::{MemoryState, StateRun};
 use crate::{Error, Result};
 use std::fmt::Write;
 
@@ -73,6 +74,7 @@ impl Cpu {
                     self.write_zr(0, RESULT_OUT_OF_MEMORY);
                     return Ok(());
                 }
+                self.process_mut().heap_size = size as u32;
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, u64::from(layout.heap_addr));
                 Ok(())
@@ -175,7 +177,23 @@ impl Cpu {
                 let out = self.read_zr(0) as u32;
                 let addr = self.read_zr(2) as u32;
                 // See [`crate::mem::Memory::state_run`].
-                let run = self.mem.state_run(addr, GUEST_SPACE_END);
+                let mut run = self.mem.state_run(addr, GUEST_SPACE_END);
+                // The granted heap is in use even where no page has been touched yet.
+                let heap =
+                    layout.heap_addr..layout.heap_addr.saturating_add(self.process().heap_size);
+                if heap.contains(&addr) {
+                    run = StateRun {
+                        start: heap.start,
+                        end: heap.end,
+                        mapped: true,
+                        readonly: false,
+                        state: MemoryState::Normal,
+                    };
+                } else if addr < heap.start {
+                    run.end = run.end.min(heap.start);
+                } else if !heap.is_empty() {
+                    run.start = run.start.max(heap.end);
+                }
                 let (base, end, mapped, text) = (run.start, run.end, run.mapped, run.readonly);
                 let mut info = Vec::with_capacity(40);
                 info.extend_from_slice(&(base as u64).to_le_bytes());
@@ -1334,6 +1352,35 @@ mod tests {
         cpu.write_zr(2, mask);
         cpu.horizon_syscall(0x0F).unwrap();
         cpu.read_zr(0)
+    }
+
+    #[test]
+    fn query_memory_reports_the_granted_heap_before_it_is_touched() {
+        const OUT: u32 = 0x0800_0000;
+        const SIZE: u64 = 0x0100_0000;
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(OUT, 0x1000).unwrap();
+        cpu.write_zr(1, SIZE);
+        cpu.horizon_syscall(0x01).unwrap();
+        let heap = cpu.read_zr(1) as u32;
+        cpu.write_zr(0, u64::from(OUT));
+        cpu.write_zr(2, u64::from(heap) + 0x0050_0000);
+        cpu.horizon_syscall(0x06).unwrap();
+        assert_eq!(cpu.mem.read_u32(OUT).unwrap(), heap);
+        assert_eq!(cpu.mem.read_u32(OUT + 8).unwrap(), SIZE as u32);
+        assert_eq!(cpu.mem.read_u32(OUT + 16).unwrap(), 5, "Normal");
+        cpu.write_zr(0, u64::from(OUT));
+        cpu.write_zr(2, u64::from(heap) - 0x1000);
+        cpu.horizon_syscall(0x06).unwrap();
+        let (base, len) = (
+            cpu.mem.read_u32(OUT).unwrap(),
+            cpu.mem.read_u32(OUT + 8).unwrap(),
+        );
+        assert_eq!(
+            base + len,
+            heap,
+            "the run before the heap ends where it starts"
+        );
     }
 
     #[test]
