@@ -3,14 +3,10 @@
 import { workerLog } from './log';
 import { core } from './wasm';
 
-// File 0 is the container being run; the rest are system data archives.
-let hostFiles: (Blob | null)[] = [];
-let hostReader: FileReaderSync | null = null;
-
-// Per-file chunk cache; Map insertion order makes it an LRU.
 const HOST_CHUNK = 1 << 20;
-const HOST_CACHE_CHUNKS = 16;
-const hostChunks = new Map<number, Map<number, Uint8Array>>();
+const HOST_CACHE_CHUNKS = 32;
+// Read-ahead on a sequential streak is 1 << run chunks.
+const MAX_STREAK = 3;
 
 // Reads out of one host file since the last `takeHostIo`.
 export interface HostIo {
@@ -22,115 +18,131 @@ export interface HostIo {
   failures: number;
 }
 
-let io = new Map<number, HostIo>();
-
-function ioOf(fileIndex: number): HostIo {
-  let entry = io.get(fileIndex);
-  if (!entry) {
-    const file = hostFiles[fileIndex];
-    const name = file instanceof File
-      ? file.name
-      : fileIndex === 0 ? 'the container' : `host file ${fileIndex}`;
-    entry = { file: name, reads: 0, bytes: 0, chunkMisses: 0, diskBytes: 0, failures: 0 };
-    io.set(fileIndex, entry);
-  }
-  return entry;
-}
-
-export function takeHostIo(): HostIo[] {
-  const taken = [...io.values()];
-  io = new Map();
-  return taken;
-}
+let hostReader: FileReaderSync | null = null;
 
 function reader(): FileReaderSync {
-  if (!hostReader) hostReader = new FileReaderSync();
-  return hostReader;
+  return (hostReader ??= new FileReaderSync());
+}
+
+class HostFile {
+  // Insertion order makes the chunk map an LRU.
+  private readonly chunks = new Map<number, Uint8Array>();
+  // The chunk a sequential reader misses next, and how many misses in a row were sequential.
+  private nextMiss = -1;
+  private streak = 0;
+  io: HostIo | null = null;
+
+  constructor(
+    readonly blob: Blob,
+    private readonly slot: number,
+  ) {}
+
+  private stats(): HostIo {
+    return (this.io ??= {
+      file: this.blob instanceof File
+        ? this.blob.name
+        : this.slot === 0 ? 'the container' : `host file ${this.slot}`,
+      reads: 0,
+      bytes: 0,
+      chunkMisses: 0,
+      diskBytes: 0,
+      failures: 0,
+    });
+  }
+
+  private readBlob(start: number, end: number): Uint8Array {
+    const bytes = new Uint8Array(reader().readAsArrayBuffer(this.blob.slice(start, end)));
+    this.stats().diskBytes += bytes.length;
+    return bytes;
+  }
+
+  private chunk(index: number): Uint8Array {
+    const hit = this.chunks.get(index);
+    if (hit) {
+      this.chunks.delete(index);
+      this.chunks.set(index, hit);
+      return hit;
+    }
+    this.stats().chunkMisses++;
+    this.streak = index === this.nextMiss ? Math.min(this.streak + 1, MAX_STREAK) : 0;
+    const count = Math.min(1 << this.streak, Math.ceil(this.blob.size / HOST_CHUNK) - index);
+    this.nextMiss = index + count;
+    const start = index * HOST_CHUNK;
+    const span = this.readBlob(start, Math.min(start + count * HOST_CHUNK, this.blob.size));
+    for (let i = 0; i < count; i++) {
+      this.chunks.set(index + i, span.subarray(i * HOST_CHUNK, (i + 1) * HOST_CHUNK));
+    }
+    while (this.chunks.size > HOST_CACHE_CHUNKS) {
+      this.chunks.delete(this.chunks.keys().next().value!);
+    }
+    return span.subarray(0, HOST_CHUNK);
+  }
+
+  // Fills `out` from `at`, returning how many bytes were filled.
+  read(at: number, out: Uint8Array): number {
+    const stats = this.stats();
+    const end = at + out.length;
+    stats.reads++;
+    let written = 0;
+    try {
+      // Reads larger than a chunk bypass the cache.
+      if (out.length > HOST_CHUNK) {
+        out.set(this.readBlob(at, end));
+        written = out.length;
+      }
+      while (written < out.length) {
+        const index = Math.floor(at / HOST_CHUNK);
+        const chunk = this.chunk(index);
+        const from = at - index * HOST_CHUNK;
+        const take = Math.min(chunk.length - from, end - at);
+        if (take <= 0) break;
+        out.set(chunk.subarray(from, from + take), written);
+        written += take;
+        at += take;
+      }
+    } catch (e) {
+      stats.failures++;
+      workerLog(`[io] ${stats.file}: read at ${at} failed: ${String(e)}`, 'error');
+    }
+    stats.bytes += written;
+    return written;
+  }
+}
+
+// File 0 is the container being run; the rest are system data archives.
+const hostFiles: (HostFile | undefined)[] = [];
+
+export function takeHostIo(): HostIo[] {
+  const taken: HostIo[] = [];
+  for (const file of hostFiles) {
+    if (file?.io) taken.push(file.io);
+    if (file) file.io = null;
+  }
+  return taken;
 }
 
 // Replaces slot 0 only: the wasm side addresses the other files by index.
 export function openHostFile(file: Blob): bigint {
   reader();
-  if (hostFiles.length === 0) hostFiles = [null];
-  hostFiles[0] = file;
-  hostChunks.delete(0);
+  hostFiles[0] = new HostFile(file, 0);
   return BigInt(file.size);
 }
 
 // Slot 0 stays reserved for the container.
 export function addHostFile(file: Blob): number {
   reader();
-  if (hostFiles.length === 0) hostFiles = [null];
-  return hostFiles.push(file) - 1;
-}
-
-function readBlob(stats: HostIo, file: Blob, start: number, end: number): Uint8Array {
-  const bytes = new Uint8Array(reader().readAsArrayBuffer(file.slice(start, end)));
-  stats.diskBytes += bytes.length;
-  return bytes;
-}
-
-function hostChunk(stats: HostIo, file: Blob, fileIndex: number, index: number): Uint8Array {
-  let cache = hostChunks.get(fileIndex);
-  if (!cache) hostChunks.set(fileIndex, (cache = new Map<number, Uint8Array>()));
-  const hit = cache.get(index);
-  if (hit) {
-    cache.delete(index);
-    cache.set(index, hit);
-    return hit;
-  }
-  stats.chunkMisses++;
-  const start = index * HOST_CHUNK;
-  const chunk = readBlob(stats, file, start, Math.min(start + HOST_CHUNK, file.size));
-  cache.set(index, chunk);
-  if (cache.size > HOST_CACHE_CHUNKS) {
-    const oldest = cache.keys().next();
-    if (!oldest.done) cache.delete(oldest.value);
-  }
-  return chunk;
+  const slot = Math.max(hostFiles.length, 1);
+  hostFiles[slot] = new HostFile(file, slot);
+  return slot;
 }
 
 // The wasm import: fill `len` bytes at `ptr` from `offset`, returning how many were filled.
-export function hostRead(
-  fileIndex: number,
-  offset: bigint,
-  ptr: number,
-  len: number,
-): number {
-  ptr >>>= 0;
-  len >>>= 0;
-  fileIndex >>>= 0;
-  const file = hostFiles[fileIndex];
+export function hostRead(fileIndex: number, offset: bigint, ptr: number, len: number): number {
+  const file = hostFiles[fileIndex >>> 0];
   if (!file || !len) return 0;
-  let at = Number(offset);
-  const end = Math.min(at + len, file.size);
-  if (at >= end) return 0;
+  const at = Number(offset);
+  const size = Math.min(len >>> 0, file.blob.size - at);
+  if (size <= 0) return 0;
   // Not cached: growing the heap detaches it.
-  const out = new Uint8Array(core.memory.buffer, ptr, end - at);
-  let written = 0;
-  const stats = ioOf(fileIndex);
-  stats.reads++;
-  try {
-    // Reads larger than a chunk bypass the cache.
-    if (end - at > HOST_CHUNK) {
-      out.set(readBlob(stats, file, at, end));
-      stats.bytes += end - at;
-      return end - at;
-    }
-    while (at < end) {
-      const index = Math.floor(at / HOST_CHUNK);
-      const chunk = hostChunk(stats, file, fileIndex, index);
-      const from = at - index * HOST_CHUNK;
-      const take = Math.min(chunk.length - from, end - at);
-      if (take <= 0) break;
-      out.set(chunk.subarray(from, from + take), written);
-      written += take;
-      at += take;
-    }
-  } catch (e) {
-    stats.failures++;
-    workerLog(`[io] ${stats.file}: read at ${at} failed: ${String(e)}`, 'error');
-  }
-  stats.bytes += written;
-  return written;
+  return file.read(at, new Uint8Array(core.memory.buffer, ptr >>> 0, size));
 }
