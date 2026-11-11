@@ -42,14 +42,15 @@ fn fingerprint(entries: &[wgpu::BindGroupLayoutEntry], resources: &[Resource]) -
         lanes[0] = (lanes[0] ^ u64::from(*binding) ^ (bytes.len() as u64) << 32)
             .wrapping_mul(K[0])
             .rotate_left(29);
-        let mut blocks = bytes.chunks_exact(32);
-        for block in &mut blocks {
-            for (lane, word) in lanes.iter_mut().zip(block.chunks_exact(8)) {
-                let word = u64::from_le_bytes(word.try_into().expect("eight bytes"));
-                *lane = (*lane ^ word).wrapping_mul(K[1]).rotate_left(31);
+        let (blocks, rest) = bytes.as_chunks::<32>();
+        for block in blocks {
+            for (lane, word) in lanes.iter_mut().zip(block.as_chunks::<8>().0) {
+                *lane = (*lane ^ u64::from_le_bytes(*word))
+                    .wrapping_mul(K[1])
+                    .rotate_left(31);
             }
         }
-        for &byte in blocks.remainder() {
+        for &byte in rest {
             lanes[0] = (lanes[0] ^ u64::from(byte)).wrapping_mul(K[2]);
         }
     }
