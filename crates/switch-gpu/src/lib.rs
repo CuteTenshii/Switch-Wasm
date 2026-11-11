@@ -277,6 +277,25 @@ fn within_stride<'a>(
         .collect())
 }
 
+/// Widen each element to a multiple of four bytes, which WebGPU requires of a stride and
+/// Maxwell does not. Attribute offsets stay valid: the padding follows the element.
+fn aligned_stride(
+    bytes: std::borrow::Cow<'_, [u8]>,
+    stride: u64,
+) -> (std::borrow::Cow<'_, [u8]>, u64) {
+    let wide = stride.next_multiple_of(4);
+    if wide == stride {
+        return (bytes, stride);
+    }
+    let (narrow, wide_len) = (stride as usize, wide as usize);
+    let mut padded = Vec::with_capacity(bytes.len() / narrow * wide_len);
+    for element in bytes.chunks_exact(narrow) {
+        padded.extend_from_slice(element);
+        padded.resize(padded.len() + wide_len - narrow, 0);
+    }
+    (std::borrow::Cow::Owned(padded), wide)
+}
+
 /// A vertex buffer's bytes and layout, before it is created as a [`Bound`].
 struct Feed<'a> {
     bytes: std::borrow::Cow<'a, [u8]>,

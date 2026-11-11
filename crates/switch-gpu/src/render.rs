@@ -109,6 +109,7 @@ impl Gpu {
                 state::StepMode::Vertex => wgpu::VertexStepMode::Vertex,
             };
             for (bytes, attributes) in crate::within_stride(bytes, attributes, stride)? {
+                let (bytes, stride) = crate::aligned_stride(bytes, stride);
                 feeds.push(Feed {
                     bytes,
                     attributes,

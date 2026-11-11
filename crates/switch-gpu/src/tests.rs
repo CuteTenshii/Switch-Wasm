@@ -862,3 +862,13 @@ fn an_attribute_wider_than_its_stride_is_refused_before_the_device_sees_it() {
     let refused = super::within_stride(std::borrow::Cow::Borrowed(&[0u8; 16][..]), vec![wide], 8);
     assert!(refused.is_err());
 }
+
+#[test]
+fn a_stride_off_a_word_is_widened_to_one() {
+    let bytes = [1u8, 2, 3, 4, 5, 6];
+    let (widened, stride) = super::aligned_stride(std::borrow::Cow::Borrowed(&bytes[..]), 2);
+    assert_eq!(stride, 4);
+    assert_eq!(widened.as_ref(), [1, 2, 0, 0, 3, 4, 0, 0, 5, 6, 0, 0]);
+    let (same, stride) = super::aligned_stride(std::borrow::Cow::Borrowed(&bytes[..4]), 4);
+    assert_eq!((same.as_ref(), stride), (&bytes[..4], 4));
+}
