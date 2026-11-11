@@ -31,6 +31,9 @@ const MII_DEFAULT_NICKNAME: &str = "no name";
 /// Module 126, description 1: index out of range.
 const MII_INVALID_ARGUMENT: u32 = 126 | (1 << 9);
 
+/// Module 126, description 4: no such Mii in the database.
+const MII_NOT_FOUND: u32 = 126 | (4 << 9);
+
 const MII_GENDER_ALL: u8 = 2;
 
 /// 3DS/Wii U hair, eyebrow and beard colours widened to the Switch palette.
@@ -326,6 +329,8 @@ impl Cpu {
                 }
                 // IsBrokenDatabaseWithClearFlag -> bool.
                 Some(20) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
+                // GetIndex(CharInfo) -> s32: the database is empty, so nothing is found.
+                Some(21) => self.write_ipc_response(tls, MII_NOT_FOUND, &[], &[], &[]),
                 // SetInterfaceVersion(u32).
                 Some(22) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -573,5 +578,14 @@ mod tests {
             let at = TLS + 0x30 + offset as u32;
             assert_eq!(cpu.mem.read_u8(at).unwrap(), byte, "byte {offset:#x}");
         }
+    }
+
+    #[test]
+    fn mii_get_index_finds_nothing_in_the_empty_database() {
+        let info = super::default_mii_char_info(0).unwrap();
+        let mut cpu = request(true, 21, &info);
+        cpu.record_domain_object(9, 7, "mii:database");
+        cpu.mii_request(TLS, 9, Some(21)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), super::MII_NOT_FOUND);
     }
 }
