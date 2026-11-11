@@ -192,6 +192,19 @@ impl Gpu {
                     upload.layers
                 ));
             }
+            // A cube view takes exactly six layers and a cube array a multiple of six; anything
+            // else invalidates the whole command buffer.
+            let layers = upload.layers.max(1);
+            let cube_layers_fit = match view_dimension {
+                wgpu::TextureViewDimension::Cube => layers == 6,
+                wgpu::TextureViewDimension::CubeArray => layers.is_multiple_of(6),
+                _ => true,
+            };
+            if !cube_layers_fit {
+                return Err(format!(
+                    "binds a {layers}-layer texture where the program declared a {view_dimension:?}"
+                ));
+            }
             // Nothing the device holds is as tall as an image that needs folding.
             let held = match fold {
                 Some(_) => Vec::new(),
