@@ -489,6 +489,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x01, FLOAT) => 0xC0, // R32_G32_B32_A32   -> RGBA32Float
         (0x01, UINT) => 0xC2,  // R32_G32_B32_A32   -> RGBA32Uint
         (0x03, FLOAT) => 0xCA, // R16_G16_B16_A16   -> RGBA16Float
+        (0x0C, FLOAT) => 0xDE, // R16_G16           -> RG16Float
         (0x0F, FLOAT) => 0xE5, // R32               -> R32Float
         (0x1B, FLOAT) => 0xF2, // R16               -> R16Float
         (0x1B, UNORM) => 0xEE, // R16               -> R16Unorm
@@ -1578,6 +1579,10 @@ mod tests {
         assert_eq!(
             texel_kind_for(0x21, 7).unwrap(),
             TexelKind::Plain(ColorFormat::from_raw(0xE0).unwrap())
+        );
+        assert_eq!(
+            texel_kind_for(0x0c, 7).unwrap(),
+            TexelKind::Plain(ColorFormat::from_raw(0xDE).unwrap())
         );
 
         // Every ASTC footprint; 0x43 is not a format.
