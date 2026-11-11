@@ -1,7 +1,7 @@
 //! The library applets the page shows: the software keyboard, which the page
 //! answers, and the error applet, which it only displays.
 
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -10,7 +10,7 @@ use crate::session;
 
 /// Tell the page about the error applets the guest raised and the keyboard it waits on,
 /// each once. Errors are taken from the queue; the keyboard stays until answered.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn announce(cpu: &mut switch_core::cpu::Cpu) {
     use crate::post::post;
     use wasm_bindgen::JsValue;
@@ -47,7 +47,7 @@ pub(crate) fn announce(cpu: &mut switch_core::cpu::Cpu) {
 }
 
 /// Whether the page has been told about the keyboard that is waiting now.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 static KEYBOARD_POSTED: AtomicBool = AtomicBool::new(false);
 
 /// Answer the waiting keyboard with `text`, or cancel it when there is none. Returns 1 if a

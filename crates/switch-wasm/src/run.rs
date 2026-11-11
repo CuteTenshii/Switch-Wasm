@@ -12,7 +12,7 @@ pub fn switch_run(max_steps: f64) -> f64 {
     crate::input::exchange(&mut s.cpu);
     crate::net::exchange(&mut s.cpu);
     // The page's clock and time zone, read here rather than handed in before every slice.
-    #[cfg(all(target_arch = "wasm32", feature = "jit"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let now = js_sys::Date::new_0();
         s.cpu
@@ -20,7 +20,7 @@ pub fn switch_run(max_steps: f64) -> f64 {
         s.cpu
             .set_unix_time((now.get_time() / 1000.0).floor() as i64);
     }
-    #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+    #[cfg(target_arch = "wasm32")]
     crate::idb::usage::refresh_if_due(s.cpu.take_storage_usage_wanted());
     let was_halted = s.cpu.halted;
     let steps = match s.cpu.run(max_steps as u64) {
@@ -36,7 +36,7 @@ pub fn switch_run(max_steps: f64) -> f64 {
         s.cpu.log(Level::Info, "Halted (ExitProcess)");
     }
     crate::input::release_if_seen(&mut s.cpu);
-    #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+    #[cfg(target_arch = "wasm32")]
     {
         crate::keyboard::announce(&mut s.cpu);
         crate::idb::persist::tick();

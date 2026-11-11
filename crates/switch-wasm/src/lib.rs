@@ -18,19 +18,18 @@ impl<T> SyncCell<T> {
     }
 }
 
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 mod blob;
-#[cfg(feature = "gpu")]
 mod gpu;
 #[cfg(target_arch = "wasm32")]
 mod heap;
-#[cfg(all(feature = "jit", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 mod jit;
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 mod screen;
 
 mod activity;
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 mod applets;
 mod audio;
 mod boot;
@@ -38,14 +37,14 @@ mod container;
 mod cores;
 mod debug;
 mod display;
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 mod idb;
 mod input;
 mod keyboard;
 mod log;
 mod nand;
 mod net;
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 mod post;
 mod run;
 mod stats;
@@ -110,7 +109,7 @@ fn session_if_live() -> Option<&'static mut Session> {
 
 /// The host read as a `wasm-bindgen` import, since wasm-bindgen owns the import object.
 /// `@host/files` is resolved by the bundler (see `vite.config.ts`).
-#[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(raw_module = "@host/files")]
 extern "C" {
     #[wasm_bindgen(js_name = hostRead)]
@@ -122,17 +121,9 @@ extern "C" {
 
 /// # Safety
 /// `ptr` must be valid for writes of `len` bytes.
-#[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+#[cfg(target_arch = "wasm32")]
 unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
     host_read_js(file, offset, ptr as u32, len)
-}
-
-#[cfg(all(target_arch = "wasm32", not(feature = "gpu")))]
-#[link(wasm_import_module = "env")]
-extern "C" {
-    /// Read `len` bytes at `offset` of host file `file` into wasm memory at `ptr`, returning
-    /// the count read. File 0 is the open container; the rest are system data archives.
-    fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32;
 }
 
 /// Host-build stand-in serving [`set_host_container`].
@@ -240,7 +231,7 @@ pub fn switch_init() {
             activity: activity::Reporter::default(),
         });
     }
-    #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     {
         audio::announce_ring();
         input::announce_mailbox();
@@ -249,7 +240,7 @@ pub fn switch_init() {
 
 /// Let the core run the blocks it emits, where the build can compile them.
 fn attach_jit() {
-    #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     jit::attach();
 }
 
@@ -359,7 +350,6 @@ fn nsp_file_source(s: &Session, index: u32) -> Result<Window<HostSource>, String
 mod tests;
 
 /// Install a GPU backend on the session's `Gpu` (not a channel).
-#[cfg(feature = "gpu")]
 fn install_gpu(gpu: switch_gpu::Gpu) {
     session().cpu.nv.gpu.set_renderer(Box::new(gpu));
     stats::GPU_LOSS_LOGGED.store(false, std::sync::atomic::Ordering::Relaxed);

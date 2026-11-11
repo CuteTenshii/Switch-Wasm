@@ -32,7 +32,7 @@ static MAILBOX: Mailbox = Mailbox {
 };
 
 /// Hand the page the mailbox over the shared memory.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn announce_mailbox() {
     use js_sys::WebAssembly;
     use wasm_bindgen::JsCast;

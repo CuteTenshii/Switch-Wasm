@@ -38,7 +38,7 @@ static RING: Ring = Ring {
 };
 
 /// Hand the page the ring over the shared memory, for its audio worklet to read.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn announce_ring() {
     use js_sys::WebAssembly;
     use wasm_bindgen::JsCast;
@@ -62,11 +62,11 @@ pub(crate) fn drop_queued() {
 pub(crate) fn feed() {
     let s = session();
     let format = format();
-    #[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     if RING.format.swap(format, Relaxed) != format {
         crate::post::post("audio_format", &[("format", format.into())]);
     }
-    #[cfg(not(all(feature = "gpu", target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     RING.format.store(format, Relaxed);
     let written = RING.written.load(Relaxed);
     let free = RING_SAMPLES - written.wrapping_sub(RING.read.load(Acquire)) as usize;

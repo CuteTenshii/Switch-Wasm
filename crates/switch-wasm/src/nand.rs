@@ -35,7 +35,7 @@ pub fn switch_nand_identify(file: u32, size: u64) -> String {
 
 /// Boot a Program NCA from the NAND (an applet), read by range from the browser's copy
 /// rather than copied into linear memory. Returns the entry address, or fails with the reason.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn switch_nand_launch(content: &web_sys::Blob) -> Result<f64, String> {
     use crate::boot::load_and_boot_nca;

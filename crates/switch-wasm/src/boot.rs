@@ -46,7 +46,7 @@ fn load_nro_bytes(
 
 /// Load the program in `file`, an ELF or an NRO by its magic, read here. Returns the entry
 /// address, or fails with the reason.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub async fn switch_load_program(file: web_sys::Blob) -> Result<f64, String> {
     let data = crate::blob::read_vec(&file)

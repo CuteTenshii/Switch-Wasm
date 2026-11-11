@@ -53,7 +53,7 @@ pub fn switch_open_nca(size: u64, name: &str) -> i32 {
 
 /// Register `src` as a system data archive for `OpenDataStorageByDataId`. Returns 0, or -1
 /// if it is not a readable data archive.
-#[cfg(all(feature = "gpu", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn add_archive(s: &mut Session, src: HostSource) -> i32 {
     let nca = match Nca::parse_source(&src, Some(&s.keys)) {
         Ok(nca) => nca,

@@ -7,7 +7,7 @@ The page, the worker, and the wasm bindings between them.
 - Every export is a `wasm-bindgen` export. Bytes and text take `&[u8]`/`&str` and return `String`/`Vec<u8>`, so no caller sizes a buffer and nothing truncates silently; flags are `bool`; a `Result` error is thrown to the caller. The page-facing declarations are in `web/env.d.ts`.
 - The session table uses `SyncCell` (an `UnsafeCell`), not `Mutex`: a reentrant `lock()` deadlocks and a panic while held leaves it locked. It is sound only because one worker calls exports; the core workers on the shared memory only instantiate. Host tests serialize on a `HOST` mutex because `cargo test` is multi-threaded, and a panic crossing `extern "C"` aborts the harness.
 - The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing, so panics are captured instead of trapping as bare `unreachable`. The panic message is cleared whenever `switch_init` builds the machine, otherwise the first error after Stop described the dead session. Log lines are not: what the dead session said still reaches the page.
-- With the `gpu` feature the host read is a wasm-bindgen import (`@host/files`, resolved by Vite) because wasm-bindgen owns the whole import object.
+- The host read is a wasm-bindgen import (`@host/files`, resolved by Vite) because wasm-bindgen owns the whole import object.
 - Everything the page parses is written with `switch_core::json`, which keeps keys in the order written and escapes per character: per-byte `\u00XX` escapes once turned "JUST DANCE® 2017" into "JUST DANCEÂ® 2017". The backend's report and `frames` go into one object (`Gpu::write_renderer_report`), so nothing splices JSON text.
 - Updates: the update's Program NCA carries the base title's program id (the `...800` id is only on its Meta NCA); its ExeFS replaces all modules and its RomFS is a patch over the base's. An update for a different title is refused at boot, which is where pairing is checked since the page may add the pieces in any order. Updates and DLC carry their own tickets.
 - DLC: one Data NCA with a RomFS, title id = base + 0x1000 + 11-bit index, mounted by id like system data; `aoc:u` only lists indices. Mounted after the program id and NACP override are known; content for another title is reported and skipped.
@@ -28,7 +28,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `crates/switch-wasm/src/gpu.rs`
 
-- `requestAdapter`/`requestDevice` are promises the emulator cannot wait on, so opening is `async` via `wasm-bindgen-futures`. The `gpu` feature exists because wgpu's web backend requires `wasm-bindgen` glue.
+- `requestAdapter`/`requestDevice` are promises the emulator cannot wait on, so opening is `async` via `wasm-bindgen-futures`.
 - Use `switch_gpu::device_descriptor`, not `DeviceDescriptor::default()`: compressed texture formats are behind optional features, and creating a BC texture without them panics (bare `unreachable` on wasm).
 - `device_msaa`: device multisampling at WebGPU's only count, 4, shades once per pixel (different AA than the rasterizer, see `route` in `switch-gpu`'s `multisample.rs`). `interleave`: keep sending single fallback draws to the rasterizer within a device frame.
 
