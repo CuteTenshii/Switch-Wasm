@@ -11,6 +11,9 @@
 // `--stream` prints console lines matching a regular expression as they appear; `--stream=.` is all.
 // `--trace=file@seconds:length` records a Chromium trace of the GPU process from that long after the
 // title starts; `tools/trace_summary.mjs` reads it.
+// `--dump-texture=dir@WxH[xLAYERS]` reads back the device textures of that size when the run ends:
+// raw bytes, and a PPM per layer for 8-bit colour. Not with `--dump-wgsl` or `--no-webgpu`, which
+// rewrite the same scripts.
 // `--browser-arg` passes a switch to Chromium, and can be repeated.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
 // a device frame is compared against.
@@ -27,11 +30,12 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join, resolve } from 'node:path';
 import { preview } from 'vite';
 import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
+import { hookSource, parseSpec, readTextures, writeTextures } from './texture_dump.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
   [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headless] [--docked] [--dock-at=N]
   [--relay=ws://127.0.0.1:18787] [--port=N]
-  [--dump-wgsl=dir] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
+  [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...]`;
 
@@ -62,6 +66,8 @@ const dockAt = flag('dock-at');
 const relay = flag('relay');
 const port = Number(flag('port') ?? 0);
 const dumpWgsl = pathFlag('dump-wgsl');
+const dumpTexture = /^(.+)@(.+)$/.exec(flag('dump-texture') ?? '');
+if (flag('dump-texture') && !dumpTexture) fail('--dump-texture: expected dir@WxH[xLAYERS]');
 const stream = flag('stream');
 const traceSpec = /^(.+)@(\d+):(\d+)$/.exec(flag('trace') ?? '');
 if (flag('trace') && !traceSpec) fail('--trace: expected file@seconds:length');
@@ -116,6 +122,13 @@ try {
         };
           }\n` + await response.text();
       await route.fulfill({ response, body });
+    });
+  }
+  if (dumpTexture) {
+    const spec = parseSpec(dumpTexture[2]);
+    await page.route(/\.js$/, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, body: hookSource(spec) + await response.text() });
     });
   }
   page.on('console', (m) => note(`page ${m.type()}: ${m.text()}`));
@@ -328,6 +341,13 @@ try {
   if (screenshot && !crashed) {
     await page.locator('#screen').screenshot({ path: screenshot });
     say(`saved the screen to ${screenshot}`);
+  }
+
+  if (dumpTexture && !crashed) {
+    const worker = page.workers()[0];
+    const textures = worker ? await readTextures(worker) : [];
+    say(`read back ${textures.length} texture(s) of ${dumpTexture[2]}`);
+    writeTextures(resolve(dumpTexture[1]), textures, say);
   }
 
   let network = '(not asked for)';
