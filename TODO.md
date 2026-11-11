@@ -33,4 +33,4 @@ Each stage builds, passes `cargo test --workspace` and clippy, keeps every title
 
 ## Video
 
-- JD2022's intro video decodes and plays; see `docs/video.md` for what is still missing: counter output for streams that adapt probabilities, the segmentation probabilities, nvdec surfaces in guest memory, VIC pitch alignment, and VP9 decoder speed in the browser.
+- JD2022's intro video decodes and plays; see `docs/video.md` for what is still missing: counter output for streams that adapt probabilities, nvdec surfaces in guest memory, VIC pitch alignment, and VP9 decoder speed in the browser.

@@ -5,8 +5,8 @@ The page, the worker, and the wasm bindings between them.
 ## `crates/switch-wasm/src/lib.rs`
 
 - Every export is a `wasm-bindgen` export. Bytes and text take `&[u8]`/`&str` and return `String`/`Vec<u8>`, so no caller sizes a buffer and nothing truncates silently; flags are `bool`; a `Result` error is thrown to the caller. The page-facing declarations are in `web/env.d.ts`.
-- The session table uses `SyncCell` (an `UnsafeCell`), not `Mutex`: a reentrant `lock()` deadlocks and a panic while held leaves it locked. It is sound only because one worker calls exports; the core workers on the shared memory only instantiate. Host tests serialize on a `HOST` mutex because `cargo test` is multi-threaded, and a panic crossing `extern "C"` aborts the harness.
-- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing, so panics are captured instead of trapping as bare `unreachable`. The panic message is cleared whenever `switch_init` builds the machine, otherwise the first error after Stop described the dead session. Log lines are not: what the dead session said still reaches the page.
+- The session table uses `SyncCell` (an `UnsafeCell`), not `Mutex`: a reentrant `lock()` deadlocks and a panic while held leaves it locked. It is sound only because one worker calls exports; the core workers on the shared memory call only `switch_serve_core` (`cores.rs`). Host tests serialize on a `HOST` mutex because `cargo test` is multi-threaded, and a panic crossing `extern "C"` aborts the harness.
+- The panic hook writes to a fixed 2048-byte buffer (512 was too small for payload, location and assertion values), truncated on a char boundary so the page's `TextDecoder` gets valid UTF-8. `switch_init` installs it first thing, so panics are captured instead of trapping as bare `unreachable`. The panic message is cleared whenever `switch_init` builds the machine, so an earlier session's panic is not reported for the new one. Log lines are not: what the dead session said still reaches the page.
 - Everything the page parses is written with `switch_core::json`, which keeps keys in the order written and escapes per character: per-byte `\u00XX` escapes once turned "JUST DANCE® 2017" into "JUST DANCEÂ® 2017". The backend's report and `frames` go into one object (`Gpu::write_renderer_report`), so nothing splices JSON text.
 - Updates: the update's Program NCA carries the base title's program id (the `...800` id is only on its Meta NCA); its ExeFS replaces all modules and its RomFS is a patch over the base's. An update for a different title is refused at boot, which is where pairing is checked since the page may add the pieces in any order. Updates and DLC carry their own tickets.
 - DLC: one Data NCA with a RomFS, title id = base + 0x1000 + 11-bit index, mounted by id like system data; `aoc:u` only lists indices. Mounted after the program id and NACP override are known; content for another title is reported and skipped.
@@ -15,7 +15,6 @@ The page, the worker, and the wasm bindings between them.
 - `switch_gpu_report_json` exists because `eprintln!` and env vars are unavailable on wasm32. The activity report is not data for the page: `activity.rs` writes its lines into the log.
 - `switch_present` forces opaque alpha: titles leave arbitrary alpha (Just Dance 2019 uses 0) and Chromium/macOS `putImageData` multiplies by it even with `alpha: false`.
 - The page hands its canvas to the worker once (`transferControlToOffscreen`); `screen.rs` paints each new frame on it through `web_sys` after the slice that presented it, into one reused `ImageData`. The page never reads pixels, and maps touches with the size the slice report carries.
-- SD and save host writes are not reported as changes (restores would otherwise be written straight back). Drains happen even if the JSON does not fit.
 - The device opens as the run loop starts, between slices since it is a promise. The backend installs on the session's single `Gpu`, not a channel (Asphalt 9 opens four).
 
 ## `crates/switch-wasm/src/log.rs`
@@ -31,19 +30,18 @@ The page, the worker, and the wasm bindings between them.
 - Use `switch_gpu::device_descriptor`, not `DeviceDescriptor::default()`: compressed texture formats are behind optional features, and creating a BC texture without them panics (bare `unreachable` on wasm).
 - `device_msaa`: device multisampling at WebGPU's only count, 4, shades once per pixel (different AA than the rasterizer, see `route` in `switch-gpu`'s `multisample.rs`). `interleave`: keep sending single fallback draws to the rasterizer within a device frame.
 
-## `web/worker/index.ts`
+## `web/worker/gpu.ts`
 
-- `gpuSession`: the backend belongs to the `Gpu` inside the session it was opened on, so freeing the session drops it. Every boot recycles the session, so without tracking this every session after the first silently ran on the rasterizer.
 - `GPU_BACKEND_READY`: `Renderer::flush` answers `Pending` instead of blocking, and `Cpu::complete_pending_present` presents the queued frames from a later slice, oldest first, after the event loop let the map complete. The constant is the switch if the browser disagrees with the CLI.
 - `GPU_DEVICE_MSAA` off: Maxwell samples sit at texel centres, WebGPU's on the spec's rotated grid, so device MSAA anti-aliases differently from the software reference. On would save fragment work. WebGPU guarantees only 4 samples, so 2x1, 4x2 and 4x4 always render expanded.
 - `GPU_INTERLEAVE` off: fallback draws inside a device frame race the readback and lose pixels. A frame that is slow without interleaving is slow because a shader `gpu::shader::wgsl` cannot translate; the fix is the translator, not the switch.
-- Adapter naming: wgpu names from `GPUAdapterInfo.description`, which Chrome leaves empty on macOS (it fills `vendor`/`architecture`), so the worker asks once with a second `requestAdapter`. Firefox (`dom/webgpu/Adapter.h`) blanks all four fields against fingerprinting, so "an unnamed adapter" is final there.
+- Adapter naming: wgpu names from `GPUAdapterInfo.description`, which Chrome leaves empty on macOS (it fills `vendor`/`architecture`), so the Debug panel (`web/main/debug.ts`) asks the page's own `requestAdapter` and joins all three. Firefox (`dom/webgpu/Adapter.h`) blanks all four fields against fingerprinting, so "an unnamed adapter" is final there.
 - `GPU_REOPENS = 3`: lost devices are replaced (the rasterizer is far slower), bounded so a device that dies on sight is not re-requested every slice. A new device shares no caches, so the first frames after pay for pipelines again.
 - Once a browser answers with no adapter or device, `gpu = 'never'`: asking each slice cost a `wgpu::Instance`, a `requestAdapter`, and two Chrome "Failed to create WebGPU Context Provider" warnings each.
 
 ## `web/worker/core.ts`
 
-- The system worker compiles the module once and starts `CORE_WORKERS` core workers on it and its shared memory, so guest RAM and the emulator's heap are the same bytes on every worker. They only instantiate for now; exports are still called from the system worker alone.
+- The system worker compiles the module once and `coreworkers.ts` starts `CORE_WORKERS` core workers on it and its shared memory, so guest RAM and the emulator's heap are the same bytes on every worker. Each one runs a guest core the session lends it (`switch_add_core`, `switch_serve_core`), blocking until the session stops it; every other export is called from the system worker alone.
 
 ## `web/worker/wasm.ts`
 
@@ -51,8 +49,6 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/worker/commands.ts`
 
-- Battery and dock state are cached in the worker so a reset session inherits them; time is sampled in the worker directly.
-- Change-list buffers are sized from the pending count (0x301-byte paths) because the wasm side drains whether or not the JSON fits.
 - `loadProgram` hands the core the `File`, which reads it in 8 MiB chunks straight into linear memory and tells an ELF from an NRO by its magic; no copy of the file is held in JavaScript. An SD NRO is read from the session's own SD card (`loadSd`), and a NAND program is registered as a host file and read by range (`nandLaunch`), so neither image is copied into the heap.
 
 ## `crates/switch-wasm/src/hostfiles.rs`
@@ -68,7 +64,7 @@ The page, the worker, and the wasm bindings between them.
 
 ## `crates/switch-wasm/src/input.rs`
 
-- The latch lives in Rust: `switch_set_input` and `switch_set_touch` apply it, and `switch_run` lets go of what the guest has had a frame to see. Input messages pile up while the worker is inside `switch_run`, so a tap can press and release entirely between guest polls. The unit a press must survive is a guest frame, not a run slice: the guest polls hid and presents once per loop iteration, so a press is held until the frame counter advances twice (only a full present-to-present interval is guaranteed to contain a poll). A slice cap releases the latch for programs that never present.
+- The latch lives in Rust: the page writes buttons and sticks into a `Mailbox` in shared memory (`exchange` takes it each slice), `switch_set_touch` applies touches, and `switch_run` lets go of what the guest has had a frame to see. Input piles up while the worker is inside `switch_run`, so a tap can press and release entirely between guest polls. The unit a press must survive is a guest frame, not a run slice: the guest polls hid and presents once per loop iteration, so a press is held until the frame counter advances twice (only a full present-to-present interval is guaranteed to contain a poll). A slice cap releases the latch for programs that never present.
 - Only bits the guest may not have seen are latched; keys the host still reports down publish live, so release takes effect on the next slice (an extra slice of stickiness made one d-pad tap step two menu entries).
 - Stick flicks past `HID_STICK_THRESHOLD` latch like buttons, since menus navigate with the derived stick pseudo-buttons. Touch uses the same latch.
 
@@ -93,8 +89,8 @@ The page, the worker, and the wasm bindings between them.
 ## `web/worker/loop.ts` and `web/main/runloop.ts`
 
 - The worker runs the loop: slices back to back, each queued as a `MessageChannel` task so input and commands still get in between them (a `setTimeout` chain is clamped to 4 ms). Slices are sized by wall time to about one display frame.
-- After each slice the worker posts one report: steps, timing, frame count and size, audio format, and every 8 slices the housekeeping (readouts). The wasm side posts the rest itself: log lines go through the worker, and `error_dialog`, `keyboard` and `profiles_edited` messages arrive when the guest raises one (`keyboard.rs`) or an edit is stored. The page reacts and polls nothing; it reads file contents only when told they changed.
-- Run starts the loop and Pause asks it to stop after the slice in flight. Freeing the session stops it, and the page ignores reports that arrive after Stop.
+- After each slice the worker posts one report: steps, timing, frame count and size, paint time, and every 8 slices the housekeeping (readouts). The wasm side posts the rest itself: log lines go through the worker, and `error_dialog`, `keyboard` and `profiles_edited` messages arrive when the guest raises one (`keyboard.rs`) or an edit is stored. The page reacts and polls nothing; it reads file contents only when told they changed.
+- Run starts the loop and Pause asks it to stop after the slice in flight. Stop (`endTitle`) stops it at once, and the page ignores reports that arrive after Stop.
 - The release profile aborts on panic, which on wasm is an empty `unreachable` trap; the panic hook stores the message and `switch_last_error` returns it without a live session. Linear memory survives the trap, so panic context is collected afterwards, each piece separately.
 - The status bar shows instructions retired, not the guest clock, which jumps forward when all threads are blocked.
 
@@ -138,9 +134,8 @@ The page, the worker, and the wasm bindings between them.
 ## `web/main/nand.ts`
 
 - The NAND lives in IndexedDB in two stores: `content` (NCA bytes by file name, stored as `Blob` so the browser owns the bytes and the worker reads ranges from a handle) and `titles` (index by title id, so the panel lists installs without reading content). A third store, `controls`, holds each opened title's NACP and icon: `idb/controls.rs` stores them when the page loads a title's details and hands them to the session at start.
-- Every stored NCA is also listed read-only at `/Contents/registered/<name>` on the SYSTEM BIS partition (`nand_mount`), read by range from its host file; a rebuilt session needs them again, like archives.
-- Data archives and library applets (`add_applet`) are registered per session; a rebuilt session needs them again (`restoreArchives` is awaited on rebuild because a title mounting an archive still being registered will not find it). A generation ticket lets a newer restore cancel an older one.
-- A launched program is booted from full bytes (the loader maps the whole image); archives and applets are range-read, and the core runs an applet as a process beside its caller.
+- Every stored NCA is also listed read-only at `/Contents/registered/<name>` on the SYSTEM BIS partition (`add_nand_content`), read by range from its host file.
+- Data archives and library applets (`add_applet`) are registered by `restoreNand` (`idb/nand.rs`); the page queues registrations so each runs after the last. A launched program is registered as a host file and read by range (`nandLaunch`), like archives and applets, and the core runs an applet as a process beside its caller.
 
 ## `crates/switch-wasm/src/idb/persist.rs`
 
@@ -178,11 +173,10 @@ The page, the worker, and the wasm bindings between them.
 
 ## `web/main/battery.ts`
 
-- Only Chromium exposes the Battery Status API; elsewhere the emulated battery stays at the wasm default (full, charging). Updates are event-driven and cached worker-side, so a new session (including after reset) picks them up.
+- Only Chromium exposes the Battery Status API; elsewhere the emulated battery stays at the wasm default (full, charging). Updates are event-driven.
 
 ## `vite.config.ts`
 
 - `web/public` holds the social card (its URL is baked into other sites' caches by meta tags), the home screen icons and `manifest.webmanifest` (fixed URLs), the font licence (the font itself is embedded in the wasm) and `_headers` (cross-origin isolation in deployment). Everything else is content-hashed; `assetsInlineLimit: 0` keeps every asset a file with a hashed URL.
 - `base: './'` because the site lives at tenshii.moe/Switch-Wasm/; '/' 404s only once deployed.
 - The worker must be a module on both sides: 'iife' fails in dev (the dev server serves the entry unbundled, so `import` breaks a classic worker), and dropping `type` in production only works until a chunk gains an `import`.
-- `@host/files` is a bare specifier so wasm-bindgen's glue in cargo's target dir can import `web/worker` code without a cross-directory relative path.

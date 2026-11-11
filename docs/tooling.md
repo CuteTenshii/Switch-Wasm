@@ -22,7 +22,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 ## `crates/switch-core/examples/screenshot_title.rs`
 
 - Stops at the Nth presented frame rather than a step budget (a title needs billions of steps before its first frame).
-- Flags beyond the shared ones (see [repro.md](repro.md); `--help` lists them all): `--firmware <dir>` registers system data archives; `--steps <n>` caps the run; `--profile <interval>` samples pcs by thread, page and return address, as `boot_nsp` does, and `--stacks` adds a call stack per sample (interval 4096 if `--profile` is unset); `--cover <lo>:<hi>` records executed instructions in a range; `--watch-mem <addr>` reports the first step a 4 KiB window becomes non-zero; `--scan-mem <addr>:<size>[,...]` lists non-zero spans at the end; `--dump-verts <addr>[,...]` reads three 60-byte rows as floats; `--dump-surface <addr>:<w>x<h>:<format>[:<block height>][,...]` writes a block-linear colour surface to `<out>.<addr>.ppm` (format as in the draw trace, block height in GOBs, default 16; float channels clamped, brightest reported); `--poke-u32 <addr>:<value>` writes every 4096 steps, or once at `--poke-at <step>`; `--gate-sniff` finds the applet frame-skip gate (`ldr w8, [xN, #0x3e8]`) and holds it at zero; `--find-magic SARC` scans memory for a magic.
+- Flags beyond the shared ones (see [repro.md](repro.md); `--help` lists them all): `--steps <n>` caps the run; `--profile <interval>` samples pcs by thread, page and return address, as `boot_nsp` does, and `--stacks` adds a call stack per sample (interval 4096 if `--profile` is unset); `--cover <lo>:<hi>` records executed instructions in a range; `--watch-mem <addr>` reports the first step a 4 KiB window becomes non-zero; `--scan-mem <addr>:<size>[,...]` lists non-zero spans at the end; `--dump-verts <addr>[,...]` reads three 60-byte rows as floats; `--dump-surface <addr>:<w>x<h>:<format>[:<block height>][,...]` writes a block-linear colour surface to `<out>.<addr>.ppm` (format as in the draw trace, block height in GOBs, default 16; float channels clamped, brightest reported); `--poke-u32 <addr>:<value>` writes every 4096 steps, or once at `--poke-at <step>`; `--gate-sniff` finds the applet frame-skip gate (`ldr w8, [xN, #0x3e8]`) and holds it at zero; `--find-magic SARC` scans memory for a magic.
 - `--profile`, `--stacks`, `--cover`, `--poke-u32`, `--gate-sniff`, `--trap-write`, `--trap-read` and `--watch-pc` force `Pace::Instructions`; otherwise the run uses the block translator like the frontend.
 
 ## `tools/browser_boot.mjs`
@@ -59,7 +59,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 ## `crates/switch-core/examples/difftest.rs`
 
-- Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, and reports the first differing register (found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.
+- Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, and reports the first differing register (found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> --inputs <inputs.bin> --out <out.bin> --inputs-addr <hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.
 
 ## `crates/switch-core/examples/hotspots.rs`
 

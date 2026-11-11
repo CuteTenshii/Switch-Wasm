@@ -1,6 +1,6 @@
 # Services
 
-What each system service must answer, and why. `svc.rs` dispatches by session name; each module owns its constants, handlers and tests, while service state lives on `Process` (per process) or `Machine` (per console).
+What each system service must answer, and why. `kernel/svc.rs` dispatches by session name; each module owns its constants, handlers and tests, while service state lives on `Process` (per process) or `Machine` (per console).
 
 ## The services
 

@@ -4,7 +4,7 @@ Goal: get real homebrew and real retail titles to **run**, and put what they ren
 
 ## Where it stands
 
-Title files are gitignored, so no row re-runs from a clean checkout. "measured" = run with `screenshot` or `screenshot_title` (retail titles with `SWITCH_FIRMWARE`) on 2026-10-13; "carried" = not re-run (most of those titles are not on hand).
+Title files are gitignored, so no row re-runs from a clean checkout. "measured" = run with `screenshot` or `screenshot_title` (retail titles with `--firmware`) on 2026-10-13; "carried" = not re-run (most of those titles are not on hand).
 
 | Title | Result | Frame | |
 |---|---|---|---|
@@ -108,7 +108,7 @@ The translator writes a hot block out as wasm and the browser runs it. A block t
 The wiring is checked from both ends, because neither end can check the other:
 
 - `crates/switch-core/tests/jit_emitted_test.rs` drives the state machine on the host with a Rust function standing in for the compiler: an entry point is a code address in whatever sense the target has one, so that is the real interface and not a mock of it. It covers when a block is emitted, the clock and the step budget across a block that stops early, and that a dropped or invalidated block gives its slot back.
-- `tools/jit_wasm_check.mjs` runs the artefact `make wasm` produces under V8. That is the only place the target-specific parts exist: the field offsets an emitted block reaches guest state by are wasm32's, and a page-table entry is four bytes there against eight on the host. Perturbing one offset by eight makes it name the exact registers that diverged.
+- `tools/jit_wasm_check.mjs` runs the artefact `make wasm` produces under V8. It is the only place the wasm32-specific offsets exist (see [jit.md](jit.md)). Perturbing one offset by eight makes it name the exact registers that diverged.
 
 **Guest state is reached by `offset_of!`, never by a written-down number.** Neither `Cpu` nor `Memory` is `repr(C)`, so the only offsets that are right are the ones the build chose, and the emitter runs in that build. A test walks them from the address of a `Cpu` the way emitted code does: register file, NZCV, both watchpoints, the watched-page bitmap, and the page-table walk down to the byte.
 
@@ -191,7 +191,7 @@ What carries over:
 
 ## Next
 
-- **A retail title that draws but never a scene.** A Short Hike presents 150 frames by 4.3B steps, but frame 150 is still a white square on navy. Unity culls on the CPU, so whatever it waits on is above the GPU. Tomodachi Life presented its loading screen at 3.98B steps with 7 draws and went no further (not re-run).
+- **A retail title that draws but never a scene.** A Short Hike (see [compat.md](compat.md)) never reaches a scene. Unity culls on the CPU, so whatever it waits on is above the GPU. Tomodachi Life presented its loading screen at 3.98B steps with 7 draws and went no further (not re-run).
 - **`CreateAliasStackUnsafe` is an open abort.** Just Dance 2023 maps 38 thread stacks and aborts on the 39th, which never reaches a syscall, so it is inside `nn::os::detail::AslrSpaceAllocator`'s own bookkeeping, built from `svcGetInfo` 12/13 with the heap and alias regions outside the ASLR region it is told about. Shrinking the stack region *looks* like a cure and is luck: the region size is the modulus nnSdk's random placement uses, so a different size is a different address sequence. Booted without its update the title deadlocks for real at 765M steps; patched with 1.0.1 it presents 76 frames and dies elsewhere. (Not re-run: the title is not on hand.)
 - **`ncm`**, the last service. Homebrew also still opens a service under an **empty name** (Checkpoint does), and `sm` hands out a working handle instead of failing the way real `sm` would.
 - **Hinted fonts render 1-3px wide.** The guest's own FreeType, running on the emulated CPU, gives glyphs from a font with hinting programs (`fpgm`/`prep`/`cvt`) correct heights and advances but collapsed bitmaps, as if untouched points never get interpolated; the same subset built with `tools/make_font.py --no-hinting` renders perfectly, so something the emulator runs under the hinting interpreter is wrong. The stand-in `web/font.ttf` has no hinting; whether the firmware fonts `pl:u` serves do is unchecked, and the bug has not been retested since many decode fixes landed.

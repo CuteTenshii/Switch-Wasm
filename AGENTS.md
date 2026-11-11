@@ -65,7 +65,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   anything that can compile a module.
 - `bun run test:unit` runs the `bun test` unit tests in `tests/unit` for the
   `web` modules that need no page: zip, file detection, formatting and display
-  metrics. They need no wasm build.
+  metrics, and CRC-32. They need no wasm build.
 - `bun run test:e2e` runs the Playwright page tests in `tests/e2e` against
   the dev server, so `make wasm` first (and `bunx playwright install
   chromium` once per machine). CI runs them against `dist`.
@@ -73,16 +73,15 @@ cargo clippy --workspace --all-targets -- -D warnings
   [--seconds=N] [--out=log.txt]` boots a container in the built site in a real
   browser and saves what the page and its worker said. It serves `dist` itself,
   so run `make assets` first. The browser is Playwright's
-  (`bunx playwright install chromium`, once per machine); a window opens by
-  default and gets the machine's GPU, and `--headless` runs without one.
+  (`bunx playwright install chromium`, once per machine). Flags are in
+  `docs/tooling.md`.
 - `make` with no target is `make assets`.
-- `make wasm` builds `switch-wasm` with the WebGPU feature in cargo's dev
+- `make wasm` builds `switch-wasm`, with its WebGPU backend, in cargo's dev
   profile and runs `wasm-bindgen`. The installed CLI version must match
   `Cargo.lock`. `make wasm-release` is the same in the release profile, the
   only build performance results are quoted from.
 - Both wasm builds use the nightly the `Makefile` pins (`NIGHTLY`), with
-  `rust-src`, because the core's memory is shared between workers and stable's
-  prebuilt std has no wasm atomics. Host builds, tests and clippy stay on
+  `rust-src`; see `docs/tooling.md`. Host builds, tests and clippy stay on
   stable. The `Makefile` prints the `rustup` command when that nightly is missing.
 - `ring`, under `rustls`, compiles C for wasm32, so the build needs a `clang` that targets it. On
   macOS, Apple's `ar` writes an empty archive for wasm objects and the wasm link fails on
@@ -117,7 +116,7 @@ actual browser run, not just host tests.
 - Container offsets remain `u64` end to end. A cast to `usize` can truncate
   offsets above 4 GiB on wasm32.
 - Never load an entire NSP, XCI, NCA, or RomFS into WebAssembly memory. Preserve
-  the `ByteSource` range-reading stack and per-file caching.
+  the `ByteSource` range-reading stack and the shared chunk cache.
 - Do not retain typed-array views across operations that can grow WebAssembly
   memory. Free staging buffers after use.
 - Stop must invalidate the main-thread session before the worker frees the
