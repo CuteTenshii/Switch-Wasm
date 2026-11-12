@@ -154,7 +154,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 
 ## `crates/switch-core/examples/jit_coverage.rs`
 
-- Untranslated coverage is answered statically by `switch_core::cpu::translates` weighted by a real frame's instruction mix, not by host timing.
+- Emitter coverage is answered statically by `switch_core::cpu::emits` (not `translates`, which says yes to forms the emitter still refuses) weighted by a real frame's instruction mix, not by host timing.
 
 ## `crates/switch-core/examples/a32_jit_coverage.rs`
 

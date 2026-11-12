@@ -1,4 +1,4 @@
-//! Lists the instructions a program runs that the block translator has no op for,
+//! Lists the instructions a program runs that the block emitter has no writer for,
 //! weighted by one steady frame's instruction mix:
 //! `jit_coverage <target> [--keys <prod.keys>]`.
 mod common;
@@ -46,7 +46,7 @@ fn main() {
     let total = run.steps;
     let mut missing: Vec<(u64, u32)> = seen
         .iter()
-        .filter(|(&insn, _)| !switch_core::cpu::translates(insn))
+        .filter(|(&insn, _)| !switch_core::cpu::emits(insn))
         .map(|(&insn, &count)| (count, insn))
         .collect();
     let fallbacks: u64 = missing.iter().map(|(count, _)| count).sum();
@@ -56,13 +56,13 @@ fn main() {
         seen.len()
     );
     println!(
-        "{fallbacks} of them ({:.2}%) fall back to the interpreter, over {} distinct encodings",
+        "{fallbacks} of them ({:.2}%) have no emitter writer, over {} distinct encodings",
         fallbacks as f64 * 100.0 / total as f64,
         missing.len(),
     );
 
     missing.sort_by_key(|&(count, insn)| (std::cmp::Reverse(count), insn));
-    println!("--- hottest untranslated encodings ---");
+    println!("--- hottest encodings with no writer ---");
     for (count, insn) in missing.iter().take(ROWS) {
         println!(
             "  {insn:#010x}  {count:>10}  {:5.2}%  {}",
@@ -76,7 +76,7 @@ fn main() {
     for (&insn, &count) in &seen {
         let top = ((insn >> 24) & 0xFF) as usize;
         by_top[top].0 += count;
-        if !switch_core::cpu::translates(insn) {
+        if !switch_core::cpu::emits(insn) {
             by_top[top].1 += count;
         }
     }

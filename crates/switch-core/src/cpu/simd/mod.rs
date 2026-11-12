@@ -495,14 +495,22 @@ impl Cpu {
                             let (x, y, acc) =
                                 (f64::from_bits(a), f64::from_bits(elem), f64::from_bits(d));
                             let x = if subtract { -x } else { x };
-                            let r = if accumulate { x.mul_add(y, acc) } else { x * y };
+                            let r = if accumulate {
+                                x.mul_add(y, acc)
+                            } else {
+                                fmul_f64(x, y)
+                            };
                             r.to_bits()
                         } else {
                             let x = f32::from_bits(a as u32);
                             let y = f32::from_bits(elem as u32);
                             let acc = f32::from_bits(d as u32);
                             let x = if subtract { -x } else { x };
-                            let r = if accumulate { x.mul_add(y, acc) } else { x * y };
+                            let r = if accumulate {
+                                x.mul_add(y, acc)
+                            } else {
+                                fmul_f32(x, y)
+                            };
                             u64::from(r.to_bits())
                         }
                     });

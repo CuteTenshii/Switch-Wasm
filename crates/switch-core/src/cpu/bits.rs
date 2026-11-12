@@ -247,6 +247,24 @@ pub(crate) fn fmulx(x: f64, y: f64) -> f64 {
     x * y
 }
 
+/// `x * y` where a NaN operand is the result, the first one winning, as on the hardware.
+pub(crate) fn fmul_f32(x: f32, y: f32) -> f32 {
+    match (x.is_nan(), y.is_nan()) {
+        (true, _) => f32::from_bits(x.to_bits() | 1 << 22),
+        (_, true) => f32::from_bits(y.to_bits() | 1 << 22),
+        _ => x * y,
+    }
+}
+
+/// [`fmul_f32`] for doubles.
+pub(crate) fn fmul_f64(x: f64, y: f64) -> f64 {
+    match (x.is_nan(), y.is_nan()) {
+        (true, _) => f64::from_bits(x.to_bits() | 1 << 51),
+        (_, true) => f64::from_bits(y.to_bits() | 1 << 51),
+        _ => x * y,
+    }
+}
+
 pub(crate) fn fp_max(a: f64, b: f64) -> f64 {
     if a.is_nan() {
         a
