@@ -64,6 +64,7 @@ impl Gpu {
             interleave: false,
             software_frame: false,
             forced_software: false,
+            syncs: [0; 6],
             fell_back_this_frame: false,
             checked_this_frame: false,
             would_fall_back_this_frame: false,

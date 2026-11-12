@@ -479,6 +479,9 @@ pub struct Gpu {
     software_frame: bool,
     /// Keeps [`Gpu::software_frame`] on whatever the draws say.
     forced_software: bool,
+    /// Full syncs by cause: no scan-out, over the held-bytes cap, a later ask for all, then what
+    /// asked for it: an aliasing surface, a read of a dirty one, a guest write to its pages.
+    syncs: [u64; 6],
     /// Whether anything fell back during the frame in progress.
     fell_back_this_frame: bool,
     /// Whether a draw of the rasterizer's frame was checked, and whether one would have fallen back.
@@ -1021,6 +1024,12 @@ impl Renderer for Gpu {
             .field("bindUncachedShadow", self.bind_uncached_why[1])
             .field("bindUncachedTexture", self.bind_uncached_why[2])
             .field("bindUncachedGlobal", self.bind_uncached_why[3])
+            .field("syncNoScanout", self.syncs[0])
+            .field("syncOverBytes", self.syncs[1])
+            .field("syncAll", self.syncs[2])
+            .field("syncAliases", self.syncs[3])
+            .field("syncReads", self.syncs[4])
+            .field("syncWrites", self.syncs[5])
             .field("softwareFrame", self.software_frame)
             .field("unlatched", self.unlatched)
             .field("gaveUp", self.gave_up)

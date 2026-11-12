@@ -14,7 +14,9 @@
 // `--dump-texture=dir@WxH[xLAYERS]` reads back the device textures of that size when the run ends:
 // raw bytes, and a PPM per layer for 8-bit colour. Not with `--dump-wgsl` or `--no-webgpu`, which
 // rewrite the same scripts.
-// `--software-at=N` draws on the CPU rasterizer from N seconds in, to compare with the device's frames.
+// `--software-at=N` draws on the CPU rasterizer from N seconds in, `--software-after=B` once B billion
+// instructions have run and the screen is lit (past the black loading screens), to compare with the device's frames.
+// `--trace-cpu` adds V8's sampling profiler to `--trace`; `tools/trace_cpu.mjs` reads it.
 // `--browser-arg` passes a switch to Chromium, and can be repeated.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
 // a device frame is compared against.
@@ -34,9 +36,9 @@ import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
 import { hookSource, parseSpec, readTextures, writeTextures } from './texture_dump.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
-  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headless] [--docked] [--dock-at=N] [--software-at=N]
+  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headless] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
   [--relay=ws://127.0.0.1:18787] [--port=N]
-  [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
+  [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...]`;
 
@@ -65,6 +67,7 @@ const headed = !hasFlag('headless');
 const docked = hasFlag('docked');
 const dockAt = flag('dock-at');
 const softwareAt = flag('software-at');
+const softwareAfter = Number(flag('software-after') ?? Infinity);
 const relay = flag('relay');
 const port = Number(flag('port') ?? 0);
 const dumpWgsl = pathFlag('dump-wgsl');
@@ -73,6 +76,7 @@ if (flag('dump-texture') && !dumpTexture) fail('--dump-texture: expected dir@WxH
 const stream = flag('stream');
 const traceSpec = /^(.+)@(\d+):(\d+)$/.exec(flag('trace') ?? '');
 if (flag('trace') && !traceSpec) fail('--trace: expected file@seconds:length');
+const traceCpu = hasFlag('trace-cpu');
 const browserArgs = flags('browser-arg');
 const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
   const match = /^(.+)@(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?))?$/.exec(spec);
@@ -282,16 +286,34 @@ try {
         say(`${elapsed()}s: toggled the dock`);
         return page.locator('#btn-dock').evaluate((button) => button.click());
       });
-  const forcing = softwareAt === undefined
-    ? null
-    : repeat(Number(softwareAt), 0, () => {
-        say(`${elapsed()}s: switched to the software rasterizer`);
-        return page.evaluate(() => {
-          const box = document.getElementById('render-force-software');
-          box.checked = true;
-          box.dispatchEvent(new Event('change'));
-        });
-      });
+  let software = false;
+  let litFailed = false;
+  const screenIsLit = () => page.evaluate(() => {
+    const screen = document.getElementById('screen');
+    const probe = document.createElement('canvas');
+    probe.width = 64;
+    probe.height = 36;
+    const context = probe.getContext('2d');
+    context.drawImage(screen, 0, 0, probe.width, probe.height);
+    const { data } = context.getImageData(0, 0, probe.width, probe.height);
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) sum += data[i] + data[i + 1] + data[i + 2];
+    return sum / (data.length / 4) / 3 > 20;
+  }).catch((error) => {
+    if (!litFailed) say(`could not read the screen: ${String(error.message).split('\n')[0]}`);
+    litFailed = true;
+    return false;
+  });
+  const useSoftware = () => {
+    software = true;
+    say(`${elapsed()}s: switched to the software rasterizer`);
+    return page.evaluate(() => {
+      const box = document.getElementById('render-force-software');
+      box.checked = true;
+      box.dispatchEvent(new Event('change'));
+    });
+  };
+  const forcing = softwareAt === undefined ? null : repeat(Number(softwareAt), 0, useSoftware);
   const tapping = presses.map(({ key, next, every }) => repeat(next, every, () => tap(key)));
   const shooting = screenshot && screenshotEvery
     ? repeat(screenshotEvery, screenshotEvery, (at) =>
@@ -303,7 +325,10 @@ try {
     if (crashed || stopped) return;
     await browser.startTracing(page, {
       path: resolve(traceSpec[1]),
-      categories: ['toplevel', 'gpu', 'gpu.dawn', 'disabled-by-default-gpu.dawn', 'webgpu', 'ipc'],
+      categories: [
+        'toplevel', 'gpu', 'gpu.dawn', 'disabled-by-default-gpu.dawn', 'webgpu', 'ipc',
+        ...traceCpu ? ['disabled-by-default-v8.cpu_profiler'] : [],
+      ],
     });
     await page.waitForTimeout(Number(traceSpec[3]) * 1000);
     await browser.stopTracing();
@@ -337,6 +362,10 @@ try {
       + `; last: ${sample.last.slice(0, 160)}`);
     lastRows = sample.rows;
     lastLine = sample.last;
+    const billions = /^([\d.]+)B/.exec(sample.instructions);
+    if (!software && billions && Number(billions[1]) >= softwareAfter && await screenIsLit()) {
+      await useSoftware();
+    }
     // Nothing more will happen, and the log is what the run is for.
     if (sample.state === 'fault' || sample.state === 'halted') {
       stopped = true;
@@ -388,6 +417,7 @@ try {
       await page.getByRole('button', { name: 'Graphics' }).click();
       await page.waitForTimeout(3000);
       rendering = await page.locator('#render-debug-section').innerText();
+      rendering += `\n${await page.locator('#display-debug-section').innerText()}`;
     } catch (error) {
       rendering = `(not read: ${String(error.message).split('\n')[0]})`;
     }

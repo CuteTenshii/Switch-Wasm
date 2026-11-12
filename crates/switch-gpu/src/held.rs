@@ -653,6 +653,7 @@ impl Gpu {
             .values()
             .any(|held| held.target.addr != target.addr && spans_overlap(&held_span(held), &new))
         {
+            self.syncs[3] += 1;
             self.space.sync_all = true;
         }
     }
@@ -665,6 +666,7 @@ impl Gpu {
             .values()
             .any(|held| held.dirty && spans_overlap(&held_span(held), &read))
         {
+            self.syncs[4] += 1;
             self.space.sync_all = true;
         }
     }
@@ -679,6 +681,7 @@ impl Gpu {
                 .values()
                 .any(|held| held.watched.iter().any(|page| written.contains(page)))
         {
+            self.syncs[5] += 1;
             self.space.sync_all = true;
         }
         let pending: Vec<_> = self
@@ -789,6 +792,16 @@ impl Gpu {
             || self.sync_every_present
             || self.space.sync_all
             || held_bytes > MAX_HELD_BYTES;
+        for (cause, hit) in [
+            scanout.is_none(),
+            held_bytes > MAX_HELD_BYTES,
+            self.space.sync_all,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.syncs[cause] += u64::from(hit);
+        }
         let shown = scanout.and_then(|cpu| {
             self.space
                 .held

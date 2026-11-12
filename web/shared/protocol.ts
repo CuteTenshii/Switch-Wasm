@@ -58,6 +58,13 @@ export interface GpuReport {
   bindUncachedShadow?: number;
   bindUncachedTexture?: number;
   bindUncachedGlobal?: number;
+  // Presents that asked for every held surface back, by what asked.
+  syncNoScanout?: number;
+  syncOverBytes?: number;
+  syncAll?: number;
+  syncAliases?: number;
+  syncReads?: number;
+  syncWrites?: number;
   // The rasterizer holds frames after a fallback until enough in a row could run on the device.
   softwareFrame?: boolean;
   // Times the software-frame latch let go.
