@@ -1,0 +1,15 @@
+# Title screen, controller choice, the Joy-Con prompts, the nickname, then what follows.
+wait 52
+press z
+wait 8
+press z
+pressuntil z 6 120
+text Player
+wait 20
+shot /tmp/jd22/s3.png
+press z
+wait 20
+shot /tmp/jd22/s4.png
+press z
+wait 20
+shot /tmp/jd22/s5.png

@@ -28,6 +28,11 @@
 // `--press` taps keyboard keys, as `web/main/input.ts` maps them (z is A, x is B, the arrows
 // are the d-pad), that long after the title starts and again every `every` seconds. A tap
 // first closes any dialog, since keys belong to the page while one is open.
+// `--script=<file>` (or the steps inline, `;` apart) drives the title one step after another, each
+// waiting for the one before: `wait <s>`, `press <key> [times [gap-s]]`, `pressuntil <key> <gap-s> <timeout-s>` (taps until the keyboard dialog
+// opens), `text <string>` (types into the
+// keyboard dialog and confirms it), `log <timeout-s> <regex>` (waits for a console line) and
+// `shot <file>`. A failed step stops the script and sets the exit code. `#` starts a comment line.
 // `--screenshot-every` also saves the screen every N seconds, beside `--screenshot`'s file.
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -40,11 +45,12 @@ const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--k
   [--relay=ws://127.0.0.1:18787] [--port=N]
   [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
-  [--jit-stats] [--press=key@seconds[:every],...]`;
+  [--jit-stats] [--press=key@seconds[:every],...] [--script=file|steps]`;
 
 const SAMPLE_MS = 5000;
 const START_MS = 120_000;
 const PRESS_HOLD_MS = 200;
+const STEP_TIMEOUT_MS = 120_000;
 
 const { flag, flags, has: hasFlag, path: pathFlag, positional } = commandLine();
 const container = positional[0];
@@ -83,6 +89,18 @@ const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
   if (!match) fail(`--press=${spec}: expected key@seconds[:every]`);
   return { key: match[1], next: Number(match[2]), every: Number(match[3] ?? 0) };
 });
+
+const SCRIPT_VERBS = ['wait', 'press', 'pressuntil', 'text', 'log', 'shot'];
+const scriptFile = flag('script') && resolve(flag('script'));
+const steps = (flag('script')
+  ? (existsSync(scriptFile) ? readFileSync(scriptFile, 'utf8') : flag('script'))
+  : '')
+  .split(/[\n;]/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'))
+  .map((line) => {
+    const [verb] = line.split(/\s+/);
+    if (!SCRIPT_VERBS.includes(verb)) fail(`--script: unknown step "${line}"`);
+    return { line, verb, rest: line.slice(verb.length).trim() };
+  });
 
 const server = await preview({
   configFile: join(repoRoot, 'vite.config.ts'),
@@ -319,6 +337,58 @@ try {
     ? repeat(screenshotEvery, screenshotEvery, (at) =>
         page.locator('#screen').screenshot({ path: screenshot.replace(/(\.\w+)?$/, `-${at}s$1`) }))
     : null;
+  const runStep = async ({ verb, rest }) => {
+    const [first, ...others] = rest.split(/\s+/);
+    if (verb === 'wait') {
+      await page.waitForTimeout(Number(first) * 1000);
+    } else if (verb === 'press') {
+      for (let i = 0; i < Number(others[0] ?? 1); i += 1) {
+        await page.keyboard.down(first);
+        await page.waitForTimeout(PRESS_HOLD_MS);
+        await page.keyboard.up(first);
+        await page.waitForTimeout(Number(others[1] ?? 1) * 1000);
+      }
+    } else if (verb === 'pressuntil') {
+      const deadline = Date.now() + Number(others[1]) * 1000;
+      while (!(await page.locator('#keyboard[open]').count())) {
+        if (Date.now() > deadline) throw new Error('the keyboard dialog never opened');
+        await page.keyboard.down(first);
+        await page.waitForTimeout(PRESS_HOLD_MS);
+        await page.keyboard.up(first);
+        await page.waitForTimeout(Number(others[0]) * 1000);
+      }
+    } else if (verb === 'text') {
+      await page.locator('#keyboard[open]').waitFor({ timeout: STEP_TIMEOUT_MS });
+      await page.locator('#keyboard-text').fill(rest);
+      await page.locator('#btn-keyboard-ok').click();
+    } else if (verb === 'log') {
+      const pattern = new RegExp(others.join(' '));
+      const deadline = Date.now() + Number(first) * 1000;
+      for (;;) {
+        const rows = await page.evaluate(() =>
+          [...document.getElementById('console').children].map((row) => row.textContent));
+        if (rows.some((row) => pattern.test(row))) return;
+        if (Date.now() > deadline) throw new Error(`no console line matched ${pattern}`);
+        await page.waitForTimeout(1000);
+      }
+    } else {
+      await page.locator('#screen').screenshot({ path: resolve(rest) });
+    }
+  };
+  const scripting = (async () => {
+    for (const [i, step] of steps.entries()) {
+      if (!running || crashed || stopped || Date.now() - started >= seconds * 1000) return;
+      say(`${elapsed()}s: script ${i + 1}/${steps.length}: ${step.line}`);
+      try {
+        await runStep(step);
+      } catch (error) {
+        say(`${elapsed()}s: script step ${i + 1} failed: ${String(error.message).split('\n')[0]}`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (steps.length) say(`${elapsed()}s: script finished`);
+  })();
   const tracing = (async () => {
     if (!traceSpec) return;
     await page.waitForTimeout(started + Number(traceSpec[2]) * 1000 - Date.now());
@@ -378,7 +448,7 @@ try {
     }
   }
 
-  await Promise.allSettled([...tapping, docking, forcing, shooting, tracing]);
+  await Promise.allSettled([...tapping, docking, forcing, shooting, scripting, tracing]);
   if (screenshot && !crashed) {
     await page.locator('#screen').screenshot({ path: screenshot });
     say(`saved the screen to ${screenshot}`);
