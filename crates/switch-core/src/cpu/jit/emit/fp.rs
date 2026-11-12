@@ -6,9 +6,9 @@ use super::*;
 use crate::cpu::bits::{FPSR_DZC, FPSR_IOC, FPSR_IXC};
 use crate::cpu::fp::FpForm;
 
-const F32X4_EXTRACT: u32 = 0x1F;
+pub(super) const F32X4_EXTRACT: u32 = 0x1F;
 const F32X4_REPLACE: u32 = 0x20;
-const F64X2_EXTRACT: u32 = 0x21;
+pub(super) const F64X2_EXTRACT: u32 = 0x21;
 const F64X2_REPLACE: u32 = 0x22;
 
 /// Wasm scalar float opcodes, single then double.

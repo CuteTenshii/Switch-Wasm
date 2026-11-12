@@ -3,6 +3,7 @@
 //! its block on the interpreter.
 
 use super::*;
+use crate::cpu::bits::simd_imm_const;
 
 /// Wasm SIMD opcodes, after the `0xFD` prefix.
 mod op {
@@ -46,6 +47,16 @@ mod op {
     pub const I32X4_MIN_U: u32 = 0xB7;
     pub const I32X4_MUL: u32 = 0xB5;
 }
+
+/// Float opcodes, single then double lanes.
+const F_ABS: [u32; 2] = [0xE0, 0xEC];
+const F_NEG: [u32; 2] = [0xE1, 0xED];
+const F_ADD: [u32; 2] = [0xE4, 0xF0];
+const F_SUB: [u32; 2] = [0xE5, 0xF1];
+const F_MUL: [u32; 2] = [0xE6, 0xF2];
+const F_EQ: [u32; 2] = [0x41, 0x47];
+const F_GT: [u32; 2] = [0x44, 0x4A];
+const F_GE: [u32; 2] = [0x46, 0x4C];
 
 /// Lane-size-indexed opcode families: 8-, 16-, 32- and 64-bit lanes.
 const ABS: [u32; 4] = [op::I8X16_ABS, 0x80, 0xA0, 0xC0];
@@ -217,6 +228,22 @@ impl Emitter<'_> {
             self.scalar_convert_to_int(insn, size & 1 == 1, u);
             return true;
         }
+        // Scalar FABD.
+        if insn & 0xFFA0_FC00 == 0x7EA0_D400 {
+            let double = size & 1 == 1;
+            self.binary(rn, rm, F_SUB[usize::from(double)]);
+            self.f.simd(F_ABS[usize::from(double)]);
+            self.f.simd_lane(
+                if double {
+                    super::fp::F64X2_EXTRACT
+                } else {
+                    super::fp::F32X4_EXTRACT
+                },
+                0,
+            );
+            self.fset(rd, double);
+            return true;
+        }
         // Three registers of the same type.
         if insn & 0x9F20_0400 == 0x0E20_0400 {
             return self.three_same(insn, q, u, size, rm, rn, rd);
@@ -236,6 +263,10 @@ impl Emitter<'_> {
         // Two-register miscellaneous.
         if insn & 0x9F3E_0C00 == 0x0E20_0800 {
             return self.two_misc(insn, q, u, size, rn, rd);
+        }
+        // FMUL by element.
+        if insn & 0xBF80_F400 == 0x0F80_9000 {
+            return self.fmul_by_element(insn, q);
         }
         // Permute.
         if insn & 0xBF20_8C00 == 0x0E00_0800 {
@@ -279,6 +310,9 @@ impl Emitter<'_> {
         rd: u32,
     ) -> bool {
         let opcode = (insn >> 11) & 0x1F;
+        if opcode >= 0b11000 {
+            return self.fp_three_same(insn, q, u, size, rm, rn, rd);
+        }
         if size == 3 && !q && opcode != 0b00011 {
             return false;
         }
@@ -347,6 +381,74 @@ impl Emitter<'_> {
             (0b10110, true) if size == 1 => self.binary(rn, rm, op::I16X8_Q15MULR_SAT_S),
             _ => return false,
         }
+        self.vlow(q);
+        self.vset(rd);
+        true
+    }
+
+    /// FADD, FSUB, FMUL, FABD and the compares, on single or double lanes.
+    #[allow(clippy::too_many_arguments)]
+    fn fp_three_same(
+        &mut self,
+        insn: u32,
+        q: bool,
+        u: bool,
+        size: u32,
+        rm: u32,
+        rn: u32,
+        rd: u32,
+    ) -> bool {
+        let d = (size & 1) as usize;
+        let a = size >> 1 == 1;
+        if d == 1 && !q {
+            return false;
+        }
+        match ((insn >> 11) & 0x1F, u, a) {
+            (0b11010, false, false) => self.binary(rn, rm, F_ADD[d]),
+            (0b11010, false, true) => self.binary(rn, rm, F_SUB[d]),
+            (0b11011, true, false) => self.binary(rn, rm, F_MUL[d]),
+            (0b11010, true, true) => {
+                self.binary(rn, rm, F_SUB[d]);
+                self.f.simd(F_ABS[d]);
+            }
+            (0b11100, false, false) => self.binary(rn, rm, F_EQ[d]),
+            (0b11100, true, false) => self.binary(rn, rm, F_GE[d]),
+            (0b11100, true, true) => self.binary(rn, rm, F_GT[d]),
+            (0b11101, true, _) => {
+                self.vget(rn);
+                self.f.simd(F_ABS[d]);
+                self.vget(rm);
+                self.f.simd(F_ABS[d]);
+                self.f.simd(if a { F_GT[d] } else { F_GE[d] });
+            }
+            _ => return false,
+        }
+        self.vlow(q);
+        self.vset(rd);
+        true
+    }
+
+    /// FMUL by element.
+    fn fmul_by_element(&mut self, insn: u32, q: bool) -> bool {
+        let size = (insn >> 22) & 3;
+        let (l, m, h) = ((insn >> 21) & 1, (insn >> 20) & 1, (insn >> 11) & 1);
+        let rm = (m << 4) | ((insn >> 16) & 0xF);
+        let (rn, rd) = ((insn >> 5) & 0x1F, insn & 0x1F);
+        let double = match size {
+            2 => false,
+            3 if q && l == 0 => true,
+            _ => return false,
+        };
+        self.vget(rn);
+        self.vget(rm);
+        if double {
+            self.f.simd_lane(op::I64X2_EXTRACT, h as u8);
+            self.f.simd(op::I64X2_SPLAT);
+        } else {
+            self.f.simd_lane(op::I32X4_EXTRACT, ((h << 1) | l) as u8);
+            self.f.simd(op::I32X4_SPLAT);
+        }
+        self.f.simd(F_MUL[usize::from(double)]);
         self.vlow(q);
         self.vset(rd);
         true
@@ -568,6 +670,41 @@ impl Emitter<'_> {
                 self.vset(rd);
                 true
             }
+            // FABS, FNEG.
+            (0b01111, _) if size >= 2 => {
+                if size == 3 && !q {
+                    return false;
+                }
+                self.vget(rn);
+                self.f
+                    .simd(if u { F_NEG } else { F_ABS }[(size & 1) as usize]);
+                self.vlow(q);
+                self.vset(rd);
+                true
+            }
+            // REV64, REV32, REV16.
+            (0b00000, _) | (0b00001, false) => {
+                let group = match (opcode, u) {
+                    (0, false) => 8,
+                    (0, true) => 4,
+                    _ => 2,
+                };
+                if 1 << size >= group {
+                    return false;
+                }
+                let (e, n) = (1usize << size, group >> size);
+                let mut lanes = [0u8; 16];
+                for (i, lane) in lanes.iter_mut().enumerate() {
+                    let (chunk, r) = (i / group, i % group);
+                    *lane = (chunk * group + (n - 1 - r / e) * e + r % e) as u8;
+                }
+                self.vget(rn);
+                self.vget(rn);
+                self.f.i8x16_shuffle(lanes);
+                self.vlow(q);
+                self.vset(rd);
+                true
+            }
             // CNT, NOT.
             (0b00101, _) if size == 0 => {
                 self.vget(rn);
@@ -724,11 +861,11 @@ impl Emitter<'_> {
         true
     }
 
-    /// MOVI, MVNI, and ORR/BIC (vector, immediate); not FMOV.
+    /// MOVI, MVNI, ORR/BIC (vector, immediate), and single and double FMOV.
     fn modified_immediate(&mut self, insn: u32, q: bool, rd: u32) -> bool {
         let op1 = (insn >> 29) & 1 == 1;
         let cmode = (insn >> 12) & 0xF;
-        if (insn >> 11) & 1 == 1 || cmode == 0b1111 {
+        if (insn >> 11) & 1 == 1 || (cmode == 0b1111 && op1 && !q) {
             return false;
         }
         let imm8 = u64::from(((insn >> 11) & 0xE0) | ((insn >> 5) & 0x1F));
@@ -756,6 +893,7 @@ impl Emitter<'_> {
                 (replicate(unit, 32), false)
             }
             0b1110 if !op1 => (replicate(imm8, 8), false),
+            0b1111 => (simd_imm_const(imm8 as u32, cmode, u32::from(op1)), false),
             // Each bit of imm8 a whole byte.
             _ => {
                 let mut bytes = 0u64;
@@ -768,7 +906,7 @@ impl Emitter<'_> {
             }
         };
         // MVNI and BIC invert; the byte-mask form uses op for its own meaning.
-        let invert = op1 && cmode != 0b1110;
+        let invert = op1 && cmode < 0b1110;
         let value = if invert && !modify { !pattern } else { pattern };
         let mut bytes = [0u8; 16];
         bytes[..8].copy_from_slice(&value.to_le_bytes());
