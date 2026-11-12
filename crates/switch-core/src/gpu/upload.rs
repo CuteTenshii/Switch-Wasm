@@ -435,19 +435,31 @@ impl Target {
         // One translation when one mapping holds it; the stencil byte is then in `raw`.
         if let Some((cpu, mut raw)) = self.mapped(ctx)? {
             let texel = self.unit as usize;
+            let runs = RowRuns::new(self.layout, self.row_bytes, per_row * self.unit);
+            // `Z16` and `ZF32` are already what the device holds, bit for bit.
+            let direct = !layout.packs_stencil()
+                && unit == texel
+                && (kind == DepthKind::Unorm16 || layout.depth_bits == 0);
             for y in 0..self.rows {
-                let row = self.layout.row_offset(y, self.row_bytes);
-                for x in 0..per_row {
-                    let at = (row + self.layout.column_offset(x * self.unit)) as usize;
-                    let from = (y * per_row + x) as usize * unit;
-                    let depth = kind.decode(&values[from..from + unit]);
-                    let value = if layout.packs_stencil() {
-                        layout.with_depth(le_depth_pixel(&raw[at..at + texel]), depth)
-                    } else {
-                        layout.encode_depth(depth)
-                    };
-                    raw[at..at + texel].copy_from_slice(&value.to_le_bytes()[..texel]);
+                let line = (y * per_row) as usize * unit;
+                if direct {
+                    runs.row(y, |at, x, take| {
+                        raw[at..at + take].copy_from_slice(&values[line + x..line + x + take]);
+                    });
+                    continue;
                 }
+                runs.row(y, |at, x, take| {
+                    for (i, dst) in raw[at..at + take].chunks_exact_mut(texel).enumerate() {
+                        let from = line + (x / texel + i) * unit;
+                        let depth = kind.decode(&values[from..from + unit]);
+                        let value = if layout.packs_stencil() {
+                            layout.with_depth(le_depth_pixel(dst), depth)
+                        } else {
+                            layout.encode_depth(depth)
+                        };
+                        dst.copy_from_slice(&value.to_le_bytes()[..texel]);
+                    }
+                });
             }
             return ctx.write_span(cpu, &raw);
         }
