@@ -45,6 +45,7 @@ const EXCLUSIVE_PAIRS: usize = 600;
 const BRANCHES: usize = 3000;
 const THREAD_POINTER_READS: usize = 60;
 const EXTENDS: usize = 600;
+const MEDIA_AND_MULTIPLIES: usize = 1500;
 const SEEDS: usize = 6;
 
 /// Above 32 bits, so a read that fails to narrow shows.
@@ -108,6 +109,12 @@ fn main() {
             vec![cond << 28 | op << 20 | rn << 16 | rd << 12 | rotate << 10 | 0x70 | rm],
             Kind::Pure,
         ));
+    }
+    for _ in 0..MEDIA_AND_MULTIPLIES {
+        // A short run, so flags and registers carry between them.
+        let run = 1 + next(&mut rng) as usize % 3;
+        let body: Vec<u32> = (0..run).map(|_| media_or_multiply(&mut rng)).collect();
+        cases.push((body, Kind::Pure));
     }
     for _ in 0..THREAD_POINTER_READS {
         // MRC p15, 0, rt, c13, c0, 2 or 3.
@@ -301,6 +308,69 @@ fn main() {
          {refused} blocks refused, {faulted} faulted, {to_thumb} to Thumb, {rewrote} stored over their code)"
     );
     println!("now run: node tools/emit_difftest.mjs --out={out_dir}");
+}
+
+/// A random `SXTB16`/`UXTB16`, `BFI`/`BFC`, multiply or data-processing instruction
+/// shifted by a register, none of which writes the PC.
+fn media_or_multiply(rng: &mut u64) -> u32 {
+    let r = next(rng);
+    let cond = (r & 0xF) as u32 % 15;
+    let (a, b, c, d) = (
+        (r >> 4 & 0xF) as u32,
+        (r >> 8 & 0xF) as u32,
+        (r >> 12 & 0xF) as u32,
+        (r >> 16 & 0xF) as u32,
+    );
+    let not_pc = |n: u32| n % 15;
+    match r >> 20 & 3 {
+        0 => {
+            // SXTB16 or UXTB16, the plain form when Rn is 15.
+            let op = [0x68, 0x6C][(r >> 22 & 1) as usize];
+            cond << 28
+                | op << 20
+                | a << 16
+                | not_pc(b) << 12
+                | u32::from((r >> 23 & 3) as u8) << 10
+                | 0x70
+                | not_pc(c)
+        }
+        1 => {
+            // BFI, or BFC when Rn is 15.
+            let lsb = (r >> 24 & 0x1F) as u32;
+            let msb = lsb + (r >> 29 & 0x1F) as u32 % (32 - lsb);
+            cond << 28 | 0x7C << 20 | msb << 16 | not_pc(b) << 12 | lsb << 7 | 0x10 | a
+        }
+        2 => {
+            // MUL, MLA, MLS, UMULL, UMLAL, SMULL or SMLAL, with or without S.
+            let op = [0, 1, 3, 4, 5, 6, 7][(r >> 24) as usize % 7];
+            let s = if op == 3 { 0 } else { (r >> 28 & 1) as u32 };
+            cond << 28
+                | op << 21
+                | s << 20
+                | not_pc(a) << 16
+                | not_pc(b) << 12
+                | not_pc(c) << 8
+                | 0x90
+                | not_pc(d)
+        }
+        _ => {
+            // A data-processing opcode with its second operand shifted by a register.
+            let opcode = (r >> 24 & 0xF) as u32;
+            let compare = (8..=11).contains(&opcode);
+            let s = compare || r >> 28 & 1 != 0;
+            let rd = not_pc(b);
+            let ty = (r >> 29 & 3) as u32;
+            cond << 28
+                | opcode << 21
+                | u32::from(s) << 20
+                | a << 16
+                | rd << 12
+                | c << 8
+                | ty << 5
+                | 0x10
+                | d
+        }
+    }
 }
 
 /// A random data-processing instruction with no register-specified shift, which

@@ -107,6 +107,11 @@ fn block_writable(access: Access, list: u16) -> bool {
     list != 0 && !(access.load && list & (1 << access.rn) != 0)
 }
 
+/// The data-processing opcodes whose flags come from the shifter's carry.
+fn is_logical(opcode: u8) -> bool {
+    matches!(opcode, 0x0 | 0x1 | 0x8 | 0x9 | 0xC | 0xD | 0xE | 0xF)
+}
+
 /// Whether [`Emitter::a32_op`] has a writer for `op`.
 fn writable(op: &A32Op) -> bool {
     match op.kind {
@@ -114,10 +119,20 @@ fn writable(op: &A32Op) -> bool {
         | Kind::Single { .. }
         | Kind::MoveWide { .. }
         | Kind::Extend { .. }
+        | Kind::Extend16 { .. }
+        | Kind::BitfieldInsert { .. }
+        | Kind::Multiply { .. }
         | Kind::Exclusive { .. }
         | Kind::ReadThreadPointer { .. } => true,
         Kind::Interpret { .. } => false,
-        Kind::Dp { operand, .. } => !matches!(operand, Operand::RegReg { .. }),
+        // A shift by a register has its carry out written only where nothing reads it.
+        Kind::Dp {
+            opcode,
+            set_flags,
+            operand: Operand::RegReg { .. },
+            ..
+        } => !(set_flags && is_logical(opcode)),
+        Kind::Dp { .. } => true,
         // LDRD and STRD.
         Kind::Extra { access, sh, .. } => (sh == 0b01) || (access.load && sh >= 0b10),
         Kind::Block { access, list } => block_writable(access, list),
@@ -215,6 +230,84 @@ impl Emitter<'_> {
                 self.mask_to(false);
                 self.store_reg(rd);
             }
+            Kind::Extend16 {
+                rd,
+                rn,
+                rm,
+                rotate,
+                signed,
+            } => {
+                self.read_reg_raw(rm);
+                if rotate != 0 {
+                    self.f.i64_const(i64::from(rotate));
+                    self.f.i64_shr_u();
+                    self.read_reg_raw(rm);
+                    self.f.i64_const(i64::from(32 - rotate));
+                    self.f.i64_shl();
+                    self.f.i64_or();
+                }
+                self.f.local_set(L_T);
+                if rn != 15 {
+                    self.read_reg_raw(rn);
+                    self.f.local_set(L_A);
+                }
+                // The low lane, in bits 15:0.
+                self.f.local_get(L_T);
+                if signed {
+                    self.f.i64_extend8_s();
+                } else {
+                    self.f.i64_const(0xFF);
+                    self.f.i64_and();
+                }
+                if rn != 15 {
+                    self.f.local_get(L_A);
+                    self.f.i64_add();
+                }
+                self.f.i64_const(0xFFFF);
+                self.f.i64_and();
+                // The high lane, in bits 31:16.
+                self.f.local_get(L_T);
+                if signed {
+                    self.f.i64_const(16);
+                    self.f.i64_shr_u();
+                    self.f.i64_extend8_s();
+                    self.f.i64_const(16);
+                    self.f.i64_shl();
+                } else {
+                    self.f.i64_const(0xFF_0000);
+                    self.f.i64_and();
+                }
+                if rn != 15 {
+                    self.f.local_get(L_A);
+                    self.f.i64_add();
+                }
+                self.f.i64_const(0xFFFF_0000);
+                self.f.i64_and();
+                self.f.i64_or();
+                self.store_reg(rd);
+            }
+            Kind::BitfieldInsert { rd, rn, lsb, mask } => {
+                self.read_reg_raw(rd);
+                self.f.i64_const(i64::from(!mask));
+                self.f.i64_and();
+                if rn != 15 {
+                    self.read_reg_raw(rn);
+                    self.f.i64_const(i64::from(lsb));
+                    self.f.i64_shl();
+                    self.f.i64_const(i64::from(mask));
+                    self.f.i64_and();
+                    self.f.i64_or();
+                }
+                self.store_reg(rd);
+            }
+            Kind::Multiply {
+                op,
+                set_flags,
+                rd_hi,
+                rd_lo,
+                rs,
+                rm,
+            } => self.a32_multiply(op, set_flags, rd_hi, rd_lo, rs, rm),
             Kind::ReadThreadPointer { rt, rw } => {
                 self.f.local_get(STATE);
                 let at = if rw {
@@ -362,8 +455,69 @@ impl Emitter<'_> {
                 self.f.local_set(L_T);
                 self.a32_shift(ty, u32::from(amount), carry_out);
             }
-            Operand::RegReg { .. } => unreachable!("`writable` refuses a shift by a register"),
+            Operand::RegReg { rm, ty, rs } => {
+                debug_assert!(
+                    !carry_out,
+                    "`writable` refuses a shift by a register that sets C"
+                );
+                self.a32_read(rm, pc);
+                self.f.local_set(L_T);
+                self.a32_read(rs, pc);
+                self.f.i64_const(0xFF);
+                self.f.i64_and();
+                self.f.local_set(L_A);
+                self.a32_shift_by_register(ty);
+            }
         }
+    }
+
+    /// Push `L_A` limited to `most`.
+    fn a32_amount_up_to(&mut self, most: i64) {
+        self.f.local_get(L_A);
+        self.f.i64_const(most);
+        self.f.local_get(L_A);
+        self.f.i64_const(most);
+        self.f.i64_lt_u();
+        self.f.select();
+    }
+
+    /// `L_T` shifted by `L_A` bits, a byte, into `L_B`; the carry out is not written.
+    fn a32_shift_by_register(&mut self, ty: u8) {
+        match ty {
+            0 | 1 => {
+                self.f.local_get(L_T);
+                self.a32_amount_up_to(32);
+                if ty == 0 {
+                    self.f.i64_shl();
+                    self.f.i64_const(WORD);
+                    self.f.i64_and();
+                } else {
+                    self.f.i64_shr_u();
+                }
+            }
+            2 => {
+                self.f.local_get(L_T);
+                self.f.i64_extend32_s();
+                self.a32_amount_up_to(31);
+                self.f.i64_shr_s();
+                self.f.i64_const(WORD);
+                self.f.i64_and();
+            }
+            _ => {
+                self.f.local_get(L_T);
+                self.f.i64_const(32);
+                self.f.i64_shl();
+                self.f.local_get(L_T);
+                self.f.i64_or();
+                self.f.local_get(L_A);
+                self.f.i64_const(31);
+                self.f.i64_and();
+                self.f.i64_shr_u();
+                self.f.i64_const(WORD);
+                self.f.i64_and();
+            }
+        }
+        self.f.local_set(L_B);
     }
 
     /// `L_T` shifted by a constant into `L_B`, with the carry out in `L_C`
@@ -458,7 +612,7 @@ impl Emitter<'_> {
         operand: Operand,
         pc: u32,
     ) {
-        let logical = matches!(opcode, 0x0 | 0x1 | 0x8 | 0x9 | 0xC | 0xD | 0xE | 0xF);
+        let logical = is_logical(opcode);
         self.a32_operand(operand, logical && set_flags, pc);
         if !matches!(opcode, 0xD | 0xF) {
             self.a32_read(rn, pc);
@@ -509,7 +663,7 @@ impl Emitter<'_> {
         }
         self.f.local_set(L_R);
         if set_flags {
-            self.a32_pack_nz();
+            self.a32_pack_nz(31);
             self.f.local_get(L_C);
             self.f.i32_const(29);
             self.f.i32_shl();
@@ -523,10 +677,66 @@ impl Emitter<'_> {
         }
     }
 
-    /// Push N and Z of `L_R` in their NZCV places, an `i32`.
-    fn a32_pack_nz(&mut self) {
+    /// `MUL`, `MLA`, `MLS` and the long multiplies into `L_R`, with N and Z set when `set_flags`.
+    fn a32_multiply(&mut self, op: u8, set_flags: bool, rd_hi: u8, rd_lo: u8, rs: u8, rm: u8) {
+        let long = !matches!(op, 0b000 | 0b001 | 0b011);
+        let signed = op & 0b010 != 0;
+        if op == 0b011 {
+            self.read_reg_raw(rd_lo);
+        }
+        for r in [rm, rs] {
+            self.read_reg_raw(r);
+            if long && signed {
+                self.f.i64_extend32_s();
+            }
+        }
+        self.f.i64_mul();
+        match (long, op) {
+            (false, 0b001) => {
+                self.read_reg_raw(rd_lo);
+                self.f.i64_add();
+            }
+            (false, 0b011) => self.f.i64_sub(),
+            (true, _) if op & 0b001 != 0 => {
+                self.read_reg_raw(rd_hi);
+                self.f.i64_const(32);
+                self.f.i64_shl();
+                self.read_reg_raw(rd_lo);
+                self.f.i64_or();
+                self.f.i64_add();
+            }
+            _ => {}
+        }
+        if !long {
+            self.mask_to(false);
+        }
+        self.f.local_set(L_R);
+        if set_flags {
+            self.a32_pack_nz(if long { 63 } else { 31 });
+            self.flags_used = true;
+            self.f.local_get(L_NZCV);
+            self.f.i32_const(0x3000_0000);
+            self.f.i32_and();
+            self.f.i32_or();
+            self.store_nzcv();
+        }
+        if long {
+            self.f.local_get(L_R);
+            self.mask_to(false);
+            self.store_reg(rd_lo);
+            self.f.local_get(L_R);
+            self.f.i64_const(32);
+            self.f.i64_shr_u();
+            self.store_reg(rd_hi);
+        } else {
+            self.write_reg_from_r(rd_hi);
+        }
+    }
+
+    /// Push N, from bit `sign` of `L_R`, and Z of `L_R` in their NZCV places, an `i32`.
+    fn a32_pack_nz(&mut self, sign: i64) {
         self.f.local_get(L_R);
-        self.f.i64_const(31);
+        self.f.i64_const(sign);
         self.f.i64_shr_u();
         self.f.i32_wrap_i64();
         self.f.i32_const(1);
@@ -578,7 +788,7 @@ impl Emitter<'_> {
         if !set_flags && !matches!(opcode, 0xA | 0xB) {
             return;
         }
-        self.a32_pack_nz();
+        self.a32_pack_nz(31);
         self.a32_bit_of_t(32);
         self.f.i32_const(29);
         self.f.i32_shl();

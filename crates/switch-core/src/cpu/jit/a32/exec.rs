@@ -305,6 +305,74 @@ impl Cpu {
                 };
                 self.set_r32(rd, result);
             }
+            Kind::Extend16 {
+                rd,
+                rn,
+                rm,
+                rotate,
+                signed,
+            } => {
+                let value = self.r32(rm).rotate_right(u32::from(rotate));
+                let lane = |byte: u32| -> u16 {
+                    if signed {
+                        byte as u8 as i8 as i16 as u16
+                    } else {
+                        byte as u8 as u16
+                    }
+                };
+                let (mut low, mut high) = (lane(value), lane(value >> 16));
+                if rn != 15 {
+                    let addend = self.r32(rn);
+                    low = low.wrapping_add(addend as u16);
+                    high = high.wrapping_add((addend >> 16) as u16);
+                }
+                self.set_r32(rd, u32::from(low) | u32::from(high) << 16);
+            }
+            Kind::BitfieldInsert { rd, rn, lsb, mask } => {
+                let source = if rn == 15 { 0 } else { self.r32(rn) << lsb };
+                self.set_r32(rd, (self.r32(rd) & !mask) | (source & mask));
+            }
+            Kind::Multiply {
+                op,
+                set_flags,
+                rd_hi,
+                rd_lo,
+                rs,
+                rm,
+            } => {
+                let (rm, rs) = (self.r32(rm), self.r32(rs));
+                if matches!(op, 0b000 | 0b001 | 0b011) {
+                    let product = rm.wrapping_mul(rs);
+                    let result = match op {
+                        0b000 => product,
+                        0b001 => product.wrapping_add(self.r32(rd_lo)),
+                        _ => self.r32(rd_lo).wrapping_sub(product),
+                    };
+                    self.set_r32(rd_hi, result);
+                    if set_flags {
+                        self.set_nz32(result);
+                    }
+                } else {
+                    let product = if op & 0b010 != 0 {
+                        (i64::from(rm as i32) * i64::from(rs as i32)) as u64
+                    } else {
+                        u64::from(rm) * u64::from(rs)
+                    };
+                    let product = if op & 0b001 != 0 {
+                        let acc = u64::from(self.r32(rd_hi)) << 32 | u64::from(self.r32(rd_lo));
+                        product.wrapping_add(acc)
+                    } else {
+                        product
+                    };
+                    self.set_r32(rd_lo, product as u32);
+                    self.set_r32(rd_hi, (product >> 32) as u32);
+                    if set_flags {
+                        let n = u32::from(product >> 63 != 0) << 31;
+                        let z = u32::from(product == 0) << 30;
+                        self.nzcv = (self.nzcv & 0x3000_0000) | n | z;
+                    }
+                }
+            }
             Kind::ReadThreadPointer { rt, rw } => {
                 let value = if rw { self.tpidr_rw } else { self.tpidr };
                 self.set_r32(rt, value as u32);

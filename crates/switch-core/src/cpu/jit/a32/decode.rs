@@ -116,6 +116,66 @@ fn extend(insn: u32, cond: u8) -> Option<Decoded> {
     ))
 }
 
+/// `SXTB16` and `UXTB16` with or without an addend.
+fn extend16(insn: u32, cond: u8) -> Option<Decoded> {
+    let rd = ((insn >> 12) & 0xF) as u8;
+    let rm = (insn & 0xF) as u8;
+    let op1 = (insn >> 20) & 0x1F;
+    if !matches!(op1, 0x08 | 0x0C) || (insn >> 4) & 0xF != 0b0111 || rd == 15 || rm == 15 {
+        return None;
+    }
+    Some(op(
+        cond,
+        Kind::Extend16 {
+            rd,
+            rn: ((insn >> 16) & 0xF) as u8,
+            rm,
+            rotate: ((insn >> 10) & 0b11) as u8 * 8,
+            signed: op1 == 0x08,
+        },
+    ))
+}
+
+/// `BFI` and `BFC`.
+fn bitfield_insert(insn: u32, cond: u8) -> Option<Decoded> {
+    let rd = ((insn >> 12) & 0xF) as u8;
+    let lsb = (insn >> 7) & 0x1F;
+    let msb = (insn >> 16) & 0x1F;
+    if (insn >> 21) & 0xF != 0xE || (insn >> 5) & 0b11 != 0 || msb < lsb || rd == 15 {
+        return None;
+    }
+    Some(op(
+        cond,
+        Kind::BitfieldInsert {
+            rd,
+            rn: (insn & 0xF) as u8,
+            lsb: lsb as u8,
+            mask: (u32::MAX >> (31 - (msb - lsb))) << lsb,
+        },
+    ))
+}
+
+/// `MUL`, `MLA`, `MLS`, `UMULL`, `UMLAL`, `SMULL` and `SMLAL`; `UMAAL` and a PC operand are the interpreter's.
+fn multiply(insn: u32, cond: u8) -> Decoded {
+    let field = |shift: u32| ((insn >> shift) & 0xF) as u8;
+    let (rd_hi, rd_lo, rs, rm) = (field(16), field(12), field(8), field(0));
+    let kind = (insn >> 21) & 0x7;
+    if kind == 0b010 || [rd_hi, rs, rm].contains(&15) || (kind != 0 && rd_lo == 15) {
+        return interpret(insn, false);
+    }
+    op(
+        cond,
+        Kind::Multiply {
+            op: kind as u8,
+            set_flags: (insn >> 20) & 1 != 0 && kind != 0b011,
+            rd_hi,
+            rd_lo,
+            rs,
+            rm,
+        },
+    )
+}
+
 pub(in crate::cpu::jit) fn decode(insn: u32, pc: u32) -> Decoded {
     let cond = (insn >> 28) as u8;
     if cond == 0xF {
@@ -125,7 +185,10 @@ pub(in crate::cpu::jit) fn decode(insn: u32, pc: u32) -> Decoded {
     match (insn >> 25) & 0x7 {
         0b000 | 0b001 => data_processing(insn, cond),
         0b010 => single(insn, cond, false),
-        0b011 if insn & 0x10 != 0 => extend(insn, cond).unwrap_or_else(|| interpret(insn, false)),
+        0b011 if insn & 0x10 != 0 => extend(insn, cond)
+            .or_else(|| extend16(insn, cond))
+            .or_else(|| bitfield_insert(insn, cond))
+            .unwrap_or_else(|| interpret(insn, false)),
         0b011 => single(insn, cond, true),
         0b100 => block(insn, cond),
         0b101 => {
@@ -167,6 +230,9 @@ fn data_processing(insn: u32, cond: u8) -> Decoded {
     // TST/TEQ/CMP/CMN without S encode the miscellaneous group.
     let misc_slot = (insn >> 23) & 0b11 == 0b10 && (insn >> 20) & 1 == 0;
     if !immediate {
+        if insn & 0x0F00_00F0 == 0x90 {
+            return multiply(insn, cond);
+        }
         if insn & 0x90 == 0x90 {
             return if insn & 0x60 != 0 {
                 extra(insn, cond)

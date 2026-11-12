@@ -43,6 +43,19 @@ const EXTENDS: &[u32] = &[
     0xef000000,
 ];
 
+/// `SXTB16`, `BFI`, every multiply form and shifts by a register at the edge amounts.
+#[rustfmt::skip]
+const MEDIA_AND_MULTIPLIES: &[u32] = &[
+    0xe3081081, 0xe34f1f7f, 0xe3a020ff, 0xe3822102, 0xe3a03003, 0xe3a04028, 0xe68f5071,
+    0xe6cf6471, 0xe6827871, 0xe6c28c71, 0xe7cf9211, 0xe7d7241f, 0xe00a0291, 0xe01b0493,
+    0xe02c3291, 0xe0303191, 0xe0654391, 0xe0876291, 0xe0998291, 0xe0a76291, 0xe0cba291,
+    0xe0dc0291, 0xe0eba291, 0xe0f65291, 0x10865291, 0xe1a00311, 0xe1b00411, 0xe0815332,
+    0xe0916432, 0xe0517352, 0xe1510452, 0xe1818372, 0xe1c19312, 0xe071a472, 0xe0b1b412,
+    0xe3a03000, 0xe1a0c351, 0xe0927331, 0xe3a03e12, 0xe1a05331, 0xe1a06371, 0xe3a03020,
+    0xe1a07311, 0xe1a08331, 0xe1a09351, 0xe1a0a371, 0xe3a0301f, 0xe1a07311, 0xe1e08351,
+    0xef000000,
+];
+
 /// A conditional branch, link, return and `SVC`, taken and skipped.
 const CONDITIONAL: &[u32] = &[
     0xe3a00000, 0xe3500000, 0x02800001, 0x12800064, 0x0a000000, 0xe3a00032, 0x1a000004, 0xe2800002,
@@ -153,6 +166,7 @@ fn the_interpreter_halts_on_every_program() {
         ("self-modifying", SELF_MODIFYING),
         ("pc and exclusive", PC_AND_EXCLUSIVE),
         ("extends", EXTENDS),
+        ("media and multiplies", MEDIA_AND_MULTIPLIES),
     ] {
         let mut cpu = loaded(code, false);
         let report = cpu.run(1000).unwrap();

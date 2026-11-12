@@ -94,6 +94,30 @@ pub(super) enum Kind {
         signed: bool,
         halfword: bool,
     },
+    /// `SXTB16` and `UXTB16` of `rm` rotated right by `rotate` bits, added lane by lane to `rn` unless it is 15.
+    Extend16 {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        rotate: u8,
+        signed: bool,
+    },
+    /// `BFI`, or `BFC` when `rn` is 15: the bits of `mask` of `rd` replaced by `rn << lsb`.
+    BitfieldInsert {
+        rd: u8,
+        rn: u8,
+        lsb: u8,
+        mask: u32,
+    },
+    /// `MUL`, `MLA`, `MLS` and the long forms; `op` is bits 23:21. The short forms write `rd_hi`.
+    Multiply {
+        op: u8,
+        set_flags: bool,
+        rd_hi: u8,
+        rd_lo: u8,
+        rs: u8,
+        rm: u8,
+    },
     /// `LDREX{,B,H}` and `STREX{,B,H}`: `rt` is loaded or stored, `rd` takes the status of a store.
     Exclusive {
         load: bool,
