@@ -237,6 +237,8 @@ export interface Commands {
   setTouch(points: Uint32Array): void;
   setBattery(percent: number, charging: boolean): void;
   setOperationMode(docked: boolean): void;
+  // Draw every frame on the CPU rasterizer, or hand the frames back to the device.
+  forceSoftware(on: boolean): void;
   // Give the guest a network through the relay at `url`, or take it away.
   connectNetwork(url: string): void;
   disconnectNetwork(): void;

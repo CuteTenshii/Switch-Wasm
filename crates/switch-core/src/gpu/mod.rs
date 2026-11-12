@@ -272,6 +272,11 @@ impl Gpu {
         self.renderer = renderer;
     }
 
+    /// See [`renderer::Renderer::force_software`].
+    pub fn force_software(&mut self, on: bool) {
+        self.renderer.force_software(on);
+    }
+
     /// See [`renderer::Renderer::report`].
     pub fn renderer_report(&self) -> String {
         crate::json::object(|o| self.renderer.report(o))

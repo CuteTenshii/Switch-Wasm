@@ -24,6 +24,13 @@ pub fn switch_set_operation_mode(docked: bool) {
     push(PageLevel::Log, &format!("{name} - {height}p, {rest}."));
 }
 
+/// Draw every frame on the CPU rasterizer (or give the frames back to the device), so the two
+/// can be compared on the same scene.
+#[wasm_bindgen]
+pub fn switch_force_software(on: bool) {
+    session().cpu.nv.gpu.force_software(on);
+}
+
 /// Set the battery level `psm` reports.
 #[wasm_bindgen]
 pub fn switch_set_battery(percent: u32, charging: bool) {

@@ -1500,6 +1500,38 @@ fn a_frame_the_device_cannot_finish_is_a_frame_it_does_not_start() {
     assert_eq!(gpu.unlatched, 1);
 }
 
+/// Forcing the rasterizer holds it through clean frames, and the same frame matches the reference.
+#[test]
+fn forced_software_draws_the_rasterizers_frame_however_clean() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let colour = [0.0f32, 1.0, 0.0, 1.0];
+    let mut h = Harness::new();
+    h.triangle(colour);
+    Renderer::force_software(&mut gpu, true);
+    for _ in 0..3 {
+        h.clear_with(&mut gpu, [true; 4]).expect("the clear");
+        let drawn = gpu.drawn;
+        h.draw_with(&mut gpu).expect("the draw");
+        assert_eq!(gpu.drawn, drawn, "a draw ran on the device while forced");
+        assert!(gpu.software_frame, "a clean frame released a forced latch");
+    }
+    let got = h.target();
+    let mut want = Harness::new();
+    want.triangle(colour);
+    want.clear_with(&mut Software, [true; 4])
+        .expect("the clear");
+    want.draw_with(&mut Software).expect("the draw");
+    assert_eq!(got, want.target());
+
+    Renderer::force_software(&mut gpu, false);
+    h.clear_with(&mut gpu, [true; 4]).expect("the clear");
+    h.draw_with(&mut gpu).expect("the draw");
+    assert!(!gpu.software_frame);
+    assert_eq!(gpu.drawn, 1, "the device has the frames back");
+}
+
 /// The latch holds through unrunnable frames, releases after a clean one, and doubles each relatch.
 #[test]
 fn the_latch_lets_go_after_clean_frames_and_waits_longer_each_time() {

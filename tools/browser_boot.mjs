@@ -14,6 +14,7 @@
 // `--dump-texture=dir@WxH[xLAYERS]` reads back the device textures of that size when the run ends:
 // raw bytes, and a PPM per layer for 8-bit colour. Not with `--dump-wgsl` or `--no-webgpu`, which
 // rewrite the same scripts.
+// `--software-at=N` draws on the CPU rasterizer from N seconds in, to compare with the device's frames.
 // `--browser-arg` passes a switch to Chromium, and can be repeated.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
 // a device frame is compared against.
@@ -33,7 +34,7 @@ import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
 import { hookSource, parseSpec, readTextures, writeTextures } from './texture_dump.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
-  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headless] [--docked] [--dock-at=N]
+  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headless] [--docked] [--dock-at=N] [--software-at=N]
   [--relay=ws://127.0.0.1:18787] [--port=N]
   [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
@@ -63,6 +64,7 @@ const noWebGpu = hasFlag('no-webgpu');
 const headed = !hasFlag('headless');
 const docked = hasFlag('docked');
 const dockAt = flag('dock-at');
+const softwareAt = flag('software-at');
 const relay = flag('relay');
 const port = Number(flag('port') ?? 0);
 const dumpWgsl = pathFlag('dump-wgsl');
@@ -280,6 +282,16 @@ try {
         say(`${elapsed()}s: toggled the dock`);
         return page.locator('#btn-dock').evaluate((button) => button.click());
       });
+  const forcing = softwareAt === undefined
+    ? null
+    : repeat(Number(softwareAt), 0, () => {
+        say(`${elapsed()}s: switched to the software rasterizer`);
+        return page.evaluate(() => {
+          const box = document.getElementById('render-force-software');
+          box.checked = true;
+          box.dispatchEvent(new Event('change'));
+        });
+      });
   const tapping = presses.map(({ key, next, every }) => repeat(next, every, () => tap(key)));
   const shooting = screenshot && screenshotEvery
     ? repeat(screenshotEvery, screenshotEvery, (at) =>
@@ -337,7 +349,7 @@ try {
     }
   }
 
-  await Promise.allSettled([...tapping, docking, shooting, tracing]);
+  await Promise.allSettled([...tapping, docking, forcing, shooting, tracing]);
   if (screenshot && !crashed) {
     await page.locator('#screen').screenshot({ path: screenshot });
     say(`saved the screen to ${screenshot}`);

@@ -77,6 +77,10 @@ async function updateJitDebug(): Promise<void> {
 
 const renderSection = $<HTMLDetailsElement>('render-debug-section');
 
+$<HTMLInputElement>('render-force-software').addEventListener('change', (event) => {
+  void call('forceSoftware', (event.target as HTMLInputElement).checked);
+});
+
 const RENDER_PHASES = ['translate', 'upload', 'modules', 'bind', 'pipeline', 'encode', 'flush'] as const;
 
 // Who draws, in a word for the badge and a sentence for the section.

@@ -94,6 +94,11 @@ pub trait Renderer: std::fmt::Debug {
         Ok(u64::MAX)
     }
 
+    /// Hand every draw to the rasterizer (or stop), for comparing the two.
+    fn force_software(&mut self, on: bool) {
+        let _ = on;
+    }
+
     /// What this backend has been doing, as the fields of a JSON object.
     fn report(&self, out: &mut crate::json::Object) {
         let _ = out;

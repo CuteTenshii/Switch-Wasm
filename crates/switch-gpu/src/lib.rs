@@ -477,6 +477,8 @@ pub struct Gpu {
     /// Whether the rasterizer has the whole frame. Latches; released after
     /// [`Gpu::clean_frames_needed`] frames whose draws all pass [`Gpu::check`], doubling on each relatch.
     software_frame: bool,
+    /// Keeps [`Gpu::software_frame`] on whatever the draws say.
+    forced_software: bool,
     /// Whether anything fell back during the frame in progress.
     fell_back_this_frame: bool,
     /// Whether a draw of the rasterizer's frame was checked, and whether one would have fallen back.
@@ -746,6 +748,11 @@ fn only_shades_vertices(engine: &Engine3D, ctx: &ExecCtx) -> bool {
 }
 
 impl Renderer for Gpu {
+    fn force_software(&mut self, on: bool) {
+        self.forced_software = on;
+        self.software_frame = on;
+    }
+
     fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         self.enter_space(ctx.as_id);
         if self.give_up() {

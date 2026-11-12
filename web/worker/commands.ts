@@ -7,7 +7,7 @@ import { noteRegistered } from './activity';
 import { flushLog } from './log';
 import {
   switch_add_dlc, switch_add_update, switch_clear_dlc, switch_clear_screen, switch_clear_update,
-  switch_control_icon, switch_control_json, switch_end_title, switch_flush_storage, switch_get_reg,
+  switch_control_icon, switch_control_json, switch_end_title, switch_flush_storage, switch_force_software, switch_get_reg,
   switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
   switch_load_keys, switch_load_nca, switch_load_nca_from_nsp, switch_load_program,
@@ -37,6 +37,7 @@ export const CMD = {
   // The Battery Status API is Window-only, so the main thread sends it.
   setBattery: switch_set_battery,
   setOperationMode: switch_set_operation_mode,
+  forceSoftware: switch_force_software,
   connectNetwork: switch_net_connect,
   disconnectNetwork: switch_net_disconnect,
   netConnections: switch_net_connections_json,

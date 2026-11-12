@@ -45,6 +45,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_log_activity(seconds: number): void;
   export function switch_set_battery(percent: number, charging: boolean): void;
   export function switch_set_operation_mode(docked: boolean): void;
+  export function switch_force_software(on: boolean): void;
   // Throws when `url` is not a WebSocket address.
   export function switch_net_connect(url: string): void;
   export function switch_net_disconnect(): void;

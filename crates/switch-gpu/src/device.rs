@@ -63,6 +63,7 @@ impl Gpu {
             defer_readbacks: false,
             interleave: false,
             software_frame: false,
+            forced_software: false,
             fell_back_this_frame: false,
             checked_this_frame: false,
             would_fall_back_this_frame: false,
@@ -169,7 +170,7 @@ impl Gpu {
         let (checked, would_fall_back) = (self.checked_this_frame, self.would_fall_back_this_frame);
         self.checked_this_frame = false;
         self.would_fall_back_this_frame = false;
-        if !self.software_frame || !checked {
+        if !self.software_frame || !checked || self.forced_software {
             return;
         }
         if would_fall_back {
