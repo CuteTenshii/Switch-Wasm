@@ -6,7 +6,7 @@ use crate::gpu::bcn::Codec;
 use crate::gpu::engine::threed::{DepthLayout, Engine3D, ShaderStage};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::pipeline::{Format, Pipeline, StepMode, VertexBuffer};
-use crate::gpu::surface::{ColorFormat, Layout};
+use crate::gpu::surface::{ColorFormat, Layout, RowRuns};
 use crate::gpu::texture::{
     self, DepthTexel, Sampler, SwizzleSource, TexelKind, Texture, TextureSlot,
 };
@@ -17,8 +17,8 @@ use crate::{Error, Result};
 pub enum Banks<'a> {
     /// Every bank the draw has bound.
     Bound,
-    /// Only the banks the shaders read, per stage.
-    Read(&'a [(ShaderStage, u32)]),
+    /// Only the banks the shaders read, per stage, and up to the byte each reads to.
+    Read(&'a [(ShaderStage, u32, u32)]),
 }
 
 /// The most one buffer will be read into memory: 64 MiB.
@@ -228,14 +228,19 @@ impl Uploads {
         let mut constants = Vec::new();
         for stage in [ShaderStage::VertexB, ShaderStage::Fragment] {
             for bank in 0..CONSTBUF_BANKS {
+                let mut reach = u32::MAX;
                 if let Banks::Read(wanted) = banks {
-                    if !wanted.contains(&(stage, bank)) {
+                    let Some(&(_, _, extent)) =
+                        wanted.iter().find(|&&(s, b, _)| (s, b) == (stage, bank))
+                    else {
                         continue;
-                    }
+                    };
+                    reach = extent;
                 }
                 let Some((addr, size)) = engine.bound_constbuf(stage, bank) else {
                     continue;
                 };
+                let size = size.min(reach);
                 if size == 0 {
                     continue;
                 }
@@ -350,21 +355,12 @@ impl Target {
         let per_row = self.row_bytes / self.unit.max(1);
         // Patched over the existing bytes: block-linear padding is not ours to zero.
         if let Some((cpu, mut raw)) = self.mapped(ctx)? {
-            // A contiguous run at a time, as `run_at` reports it.
-            let width = per_row * self.unit;
+            let runs = RowRuns::new(self.layout, self.row_bytes, per_row * self.unit);
             for y in 0..self.rows {
-                let mut x = 0;
-                while x < width {
-                    let (at, run) = self.layout.run_at(x, y, self.row_bytes);
-                    let take = run.min(width - x) as usize;
-                    if take == 0 {
-                        break;
-                    }
-                    let at = at as usize;
-                    let from = ((y * stride) + x) as usize;
-                    raw[at..at + take].copy_from_slice(&rows[from..from + take]);
-                    x += take as u32;
-                }
+                let line = (y * stride) as usize;
+                runs.row(y, |at, x, take| {
+                    raw[at..at + take].copy_from_slice(&rows[line + x..line + x + take]);
+                });
             }
             return ctx.write_span(cpu, &raw);
         }
@@ -1015,20 +1011,10 @@ fn deswizzle(
     if let Some(cpu) = ctx.span(base, swizzled) {
         let mut raw = vec![0u8; swizzled as usize];
         ctx.read_span(cpu, &mut raw)?;
-        // The run-at-a-time walk of `Target::write`, reversed.
-        let width = per_row * unit;
+        let runs = RowRuns::new(layout, row_bytes, per_row * unit);
+        out.reserve((per_row * unit * rows) as usize);
         for y in 0..rows {
-            let mut x = 0;
-            while x < width {
-                let (at, run) = layout.run_at(x, y, row_bytes);
-                let take = run.min(width - x) as usize;
-                if take == 0 {
-                    break;
-                }
-                let at = at as usize;
-                out.extend_from_slice(&raw[at..at + take]);
-                x += take as u32;
-            }
+            runs.row(y, |at, _, take| out.extend_from_slice(&raw[at..at + take]));
         }
         return Ok(());
     }

@@ -62,20 +62,16 @@ fn fingerprint(entries: &[wgpu::BindGroupLayoutEntry], resources: &[Resource]) -
 /// A stage's banks as the table `cbRead` indexes, then the banks themselves, whole words.
 fn pack_banks<'a>(banks: impl Iterator<Item = &'a ConstantUpload>) -> Vec<u8> {
     let table = wgsl::CONSTANT_BANKS as usize * 2;
-    let mut words = vec![0u32; table];
+    let mut bytes = vec![0u8; table * 4];
     for bank in banks.filter(|b| b.bank < wgsl::CONSTANT_BANKS) {
-        let at = bank.bank as usize * 2;
-        words[at] = words.len() as u32;
-        words[at + 1] = (bank.bytes.len() / 4) as u32;
-        words.extend(
-            bank.bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|w| u32::from_le_bytes(*w)),
-        );
+        let at = bank.bank as usize * 4 * 2;
+        let words = bank.bytes.len() / 4;
+        let start = (bytes.len() / 4) as u32;
+        bytes[at..at + 4].copy_from_slice(&start.to_le_bytes());
+        bytes[at + 4..at + 8].copy_from_slice(&(words as u32).to_le_bytes());
+        bytes.extend_from_slice(&bank.bytes[..words * 4]);
     }
-    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    bytes
 }
 
 impl Gpu {

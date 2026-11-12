@@ -162,6 +162,8 @@ pub struct Translation {
     pub centroid_loads: Vec<usize>,
     /// Constant banks read, ascending.
     pub const_banks: Vec<u8>,
+    /// Bytes of each of [`Translation::const_banks`] the program can read.
+    pub const_extents: Vec<u32>,
     /// Textures sampled, in first-mention order, with dimension and shadow flag.
     pub textures: Vec<(TextureSlot, TexDim, bool)>,
     /// Distinct `tex.aoffi` offsets `(x, y)`, named by index since WGSL needs constants.
@@ -214,7 +216,8 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         loads: emitter.loads.iter().copied().collect(),
         stores: emitter.stores.iter().copied().collect(),
         centroid_loads: emitter.centroid_loads.iter().copied().collect(),
-        const_banks: emitter.banks.iter().copied().collect(),
+        const_banks: emitter.banks.keys().copied().collect(),
+        const_extents: emitter.banks.values().copied().collect(),
         textures: emitter.textures.clone(),
         texture_offsets: emitter.texture_offsets.clone(),
         quad: emitter.quad,

@@ -7,7 +7,10 @@ use crate::gpu::shader::isa::{
     TexDim, RZ,
 };
 use crate::gpu::texture::TextureSlot;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A constant bank read at an offset the program computes: all of it.
+pub(super) const ALL_OF_BANK: u32 = u32::MAX;
 
 pub(super) struct Emitter<'a> {
     pub(super) program: &'a Compiled,
@@ -27,7 +30,8 @@ pub(super) struct Emitter<'a> {
     pub(super) loads: BTreeSet<usize>,
     pub(super) stores: BTreeSet<usize>,
     pub(super) centroid_loads: BTreeSet<usize>,
-    pub(super) banks: BTreeSet<u8>,
+    /// Constant banks read, with how many bytes of each ([`ALL_OF_BANK`] when indexed).
+    pub(super) banks: BTreeMap<u8, u32>,
     pub(super) textures: Vec<(TextureSlot, TexDim, bool)>,
     pub(super) globals: Vec<Global>,
     /// Counter naming `let` bindings.
@@ -56,7 +60,7 @@ impl<'a> Emitter<'a> {
             loads: BTreeSet::new(),
             stores: BTreeSet::new(),
             centroid_loads: BTreeSet::new(),
-            banks: BTreeSet::new(),
+            banks: BTreeMap::new(),
             textures: Vec::new(),
             globals: Vec::new(),
             temps: 0,
@@ -345,6 +349,12 @@ impl<'a> Emitter<'a> {
 
     // ---- operands ----
 
+    /// A constant bank read up to byte `end`, or at an offset the program computes.
+    pub(super) fn note_bank(&mut self, bank: u8, end: Option<u32>) {
+        let held = self.banks.entry(bank).or_insert(0);
+        *held = (*held).max(end.unwrap_or(ALL_OF_BANK));
+    }
+
     pub(super) fn r(&mut self, reg: u8) -> String {
         if reg == RZ {
             return "0u".to_string();
@@ -363,7 +373,7 @@ impl<'a> Emitter<'a> {
             Operand::Reg(reg) => self.r(reg),
             Operand::Imm(value) => format!("{value}u"),
             Operand::Const { bank, offset } => {
-                self.banks.insert(bank);
+                self.note_bank(bank, Some(offset as u32 + 4));
                 format!("cbRead({bank}u, {offset}u)")
             }
         }

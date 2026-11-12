@@ -33,6 +33,8 @@ pub struct Layout {
     /// Varyings read with `ipa.centroid`; both stages must agree.
     pub centroid_varyings: Vec<usize>,
     pub const_banks: Vec<u8>,
+    /// See [`Translation::const_extents`].
+    pub const_extents: Vec<u32>,
     pub textures: Vec<TextureBinding>,
     /// See [`Translation::texture_offsets`].
     pub texture_offsets: Vec<(i32, i32)>,
@@ -196,6 +198,7 @@ impl Layout {
                 Stage::Fragment => translated.centroid_loads.clone(),
             },
             const_banks: translated.const_banks.clone(),
+            const_extents: translated.const_extents.clone(),
             textures: translated
                 .textures
                 .iter()

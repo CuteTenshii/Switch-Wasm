@@ -147,6 +147,49 @@ impl Layout {
     }
 }
 
+/// Walks the contiguous runs of every row of a surface `width` bytes wide. A block-linear row is
+/// 16-byte runs whose column offsets are the same on every row, so they are worked out once.
+pub struct RowRuns {
+    layout: Layout,
+    row_bytes: u32,
+    width: u32,
+    columns: Vec<u32>,
+}
+
+impl RowRuns {
+    pub fn new(layout: Layout, row_bytes: u32, width: u32) -> RowRuns {
+        let columns = match layout {
+            Layout::Pitch { .. } => Vec::new(),
+            Layout::BlockLinear { block_height_gobs } => (0..width.div_ceil(16))
+                .map(|piece| block_linear_column(piece * 16, block_height_gobs))
+                .collect(),
+        };
+        RowRuns {
+            layout,
+            row_bytes,
+            width,
+            columns,
+        }
+    }
+
+    /// Calls `run(at, x, take)` for each run of row `y`: `take` bytes at offset `at` of the
+    /// swizzled surface are the row's bytes from `x`.
+    #[inline]
+    pub fn row(&self, y: u32, mut run: impl FnMut(usize, usize, usize)) {
+        let row = self.layout.row_offset(y, self.row_bytes) as usize;
+        match self.layout {
+            Layout::Pitch { .. } => run(row, 0, self.width as usize),
+            Layout::BlockLinear { .. } => {
+                let width = self.width as usize;
+                for (piece, column) in self.columns.iter().enumerate() {
+                    let x = piece * 16;
+                    run(row + *column as usize, x, (width - x).min(16));
+                }
+            }
+        }
+    }
+}
+
 /// The most samples per pixel any `MsaaMode` names (`4x4`).
 pub const MAX_SAMPLES: usize = 16;
 

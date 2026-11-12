@@ -185,17 +185,16 @@ impl Gpu {
                 .iter()
                 .map(|&(slot, _, _)| (ShaderStage::Fragment, slot)),
         );
-        let mut banks: Vec<(ShaderStage, u32)> = Vec::new();
-        banks.extend(
-            vs.const_banks
-                .iter()
-                .map(|&b| (ShaderStage::VertexB, u32::from(b))),
-        );
-        banks.extend(
-            fs.const_banks
-                .iter()
-                .map(|&b| (ShaderStage::Fragment, u32::from(b))),
-        );
+        let mut banks: Vec<(ShaderStage, u32, u32)> = Vec::new();
+        for (stage, layout) in [(ShaderStage::VertexB, &vs), (ShaderStage::Fragment, &fs)] {
+            banks.extend(
+                layout
+                    .const_banks
+                    .iter()
+                    .zip(&layout.const_extents)
+                    .map(|(&b, &extent)| (stage, u32::from(b), extent)),
+            );
+        }
         // Taken out of `self` because the closure holds it while `timed!` borrows `self`.
         let cache = std::mem::take(&mut self.space.texture_cache);
         let mut hits = 0u64;

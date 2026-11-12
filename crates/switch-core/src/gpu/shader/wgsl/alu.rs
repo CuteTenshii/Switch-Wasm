@@ -120,7 +120,10 @@ impl Emitter<'_> {
                 idx,
                 size,
             } => {
-                self.banks.insert(bank);
+                self.note_bank(
+                    bank,
+                    (idx == RZ).then(|| offset as u32 + size.regs() as u32 * 4),
+                );
                 let index = self.r(idx);
                 let base = self.bind(&format!("{}u + {index}", offset as u32));
                 for i in 0..size.regs() {
