@@ -273,16 +273,12 @@ fn flat_mask4(thresh: i32, p: &[i32; 4], q: &[i32; 4]) -> bool {
     (1..4).all(|i| (p[i] - p[0]).abs() <= thresh && (q[i] - q[0]).abs() <= thresh)
 }
 
-fn filter4(px: &mut Pixels, mask: bool, thresh: i32) {
+fn filter4(px: &mut Pixels, thresh: i32) {
     let (p1, p0, q0, q1) = (px.get(-2), px.get(-1), px.get(0), px.get(1));
     let (ps1, ps0, qs0, qs1) = (p1 - 128, p0 - 128, q0 - 128, q1 - 128);
     let hev = (p1 - p0).abs() > thresh || (q1 - q0).abs() > thresh;
     let mut filter = if hev { clamp8(ps1 - qs1) } else { 0 };
-    filter = if mask {
-        clamp8(filter + 3 * (qs0 - ps0))
-    } else {
-        0
-    };
+    filter = clamp8(filter + 3 * (qs0 - ps0));
     let filter1 = clamp8(filter + 4) >> 3;
     let filter2 = clamp8(filter + 3) >> 3;
     px.set(0, clamp8(qs0 - filter1) + 128);
@@ -292,8 +288,8 @@ fn filter4(px: &mut Pixels, mask: bool, thresh: i32) {
     px.set(-2, clamp8(ps1 + outer) + 128);
 }
 
-fn filter8(px: &mut Pixels, mask: bool, flat: bool, thresh: i32) {
-    if flat && mask {
+fn filter8(px: &mut Pixels, flat: bool, thresh: i32) {
+    if flat {
         let (p3, p2, p1, p0) = (px.get(-4), px.get(-3), px.get(-2), px.get(-1));
         let (q0, q1, q2, q3) = (px.get(0), px.get(1), px.get(2), px.get(3));
         px.set(-3, (p3 + p3 + p3 + 2 * p2 + p1 + p0 + q0 + 4) >> 3);
@@ -303,14 +299,14 @@ fn filter8(px: &mut Pixels, mask: bool, flat: bool, thresh: i32) {
         px.set(1, (p1 + p0 + q0 + 2 * q1 + q2 + q3 + q3 + 4) >> 3);
         px.set(2, (p0 + q0 + q1 + 2 * q2 + q3 + q3 + q3 + 4) >> 3);
     } else {
-        filter4(px, mask, thresh);
+        filter4(px, thresh);
     }
 }
 
-fn filter16(px: &mut Pixels, mask: bool, flat: bool, flat2: bool, thresh: i32) {
-    if flat2 && flat && mask {
-        let p: Vec<i32> = (1..=8).map(|k| px.get(-k)).collect();
-        let q: Vec<i32> = (0..8).map(|k| px.get(k)).collect();
+fn filter16(px: &mut Pixels, flat: bool, flat2: bool, thresh: i32) {
+    if flat2 && flat {
+        let p: [i32; 8] = std::array::from_fn(|k| px.get(-(k as isize) - 1));
+        let q: [i32; 8] = std::array::from_fn(|k| px.get(k as isize));
         // p[i] is p_i counting away from the edge, q[i] likewise.
         let (p0, p1, p2, p3, p4, p5, p6, p7) = (p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         let (q0, q1, q2, q3, q4, q5, q6, q7) = (q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]);
@@ -366,7 +362,7 @@ fn filter16(px: &mut Pixels, mask: bool, flat: bool, flat2: bool, thresh: i32) {
         );
         px.set(6, r(p0 + q0 + q1 + q2 + q3 + q4 + q5 + q6 * 2 + q7 * 7));
     } else {
-        filter8(px, mask, flat, thresh);
+        filter8(px, flat, thresh);
     }
 }
 
@@ -388,19 +384,23 @@ fn lpf(
         };
         let p = [px.get(-1), px.get(-2), px.get(-3), px.get(-4)];
         let q = [px.get(0), px.get(1), px.get(2), px.get(3)];
-        let mask = filter_mask(t.lim, t.mblim, &p, &q);
+        if !filter_mask(t.lim, t.mblim, &p, &q) {
+            continue;
+        }
         match kind {
-            4 => filter4(&mut px, mask, t.hev),
+            4 => filter4(&mut px, t.hev),
             8 => {
                 let flat = flat_mask4(1, &p, &q);
-                filter8(&mut px, mask, flat, t.hev);
+                filter8(&mut px, flat, t.hev);
             }
             _ => {
                 let flat = flat_mask4(1, &p, &q);
-                let (p0, q0) = (p[0], q[0]);
-                let flat2 = (4..8).all(|k| (px.get(-(k as isize) - 1) - p0).abs() <= 1)
-                    && (4..8).all(|k| (px.get(k as isize) - q0).abs() <= 1);
-                filter16(&mut px, mask, flat, flat2, t.hev);
+                let flat2 = flat && {
+                    let (p0, q0) = (p[0], q[0]);
+                    (4..8).all(|k| (px.get(-(k as isize) - 1) - p0).abs() <= 1)
+                        && (4..8).all(|k| (px.get(k as isize) - q0).abs() <= 1)
+                };
+                filter16(&mut px, flat, flat2, t.hev);
             }
         }
     }

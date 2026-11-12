@@ -10,6 +10,7 @@ Titles decode video on the console's nvdec engine and hand the frames to VIC. `g
 - Tests that need external files run only when their variable is set, and pass otherwise:
   - `VP9_CLIPS=<dir>`: every `x.ivf` beside an `x.yuv` that ffmpeg wrote (`ffmpeg -i x.ivf -f rawvideo -pix_fmt yuv420p x.yuv`). The clips covered tiles, hidden frames in superframes, segmentation, error-resilient and frame-parallel streams, odd sizes, lossless and compound prediction.
   - `VP9_IDCT_VECTORS` and `VP9_INTRA_VECTORS`: output of a small C harness linked to `libvpx.a` (random blocks through `vp9_iht*_add_c`, `vpx_idct32x32_1024_add_c`, `vpx_iwht4x4_16_add_c` and `vpx_*_predictor_*_c`).
+- `cargo run --release -p switch-core --example vp9_bench -- <clip.ivf>` times the decoder natively.
 - Unsupported: scaled reference frames, profiles 1 to 3, a frame whose size changes mid-stream.
 
 ## nvdec
