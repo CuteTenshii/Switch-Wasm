@@ -91,6 +91,31 @@ fn interpret(insn: u32, writes_pc: bool) -> Decoded {
     }
 }
 
+/// `SXTB`, `SXTH`, `UXTB` and `UXTH` with or without an addend.
+fn extend(insn: u32, cond: u8) -> Option<Decoded> {
+    let rd = ((insn >> 12) & 0xF) as u8;
+    let rm = (insn & 0xF) as u8;
+    let op1 = (insn >> 20) & 0x1F;
+    if !matches!(op1, 0x0A | 0x0B | 0x0E | 0x0F)
+        || (insn >> 4) & 0xF != 0b0111
+        || rd == 15
+        || rm == 15
+    {
+        return None;
+    }
+    Some(op(
+        cond,
+        Kind::Extend {
+            rd,
+            rn: ((insn >> 16) & 0xF) as u8,
+            rm,
+            rotate: ((insn >> 10) & 0b11) as u8 * 8,
+            signed: op1 & 0b00100 == 0,
+            halfword: op1 & 1 != 0,
+        },
+    ))
+}
+
 pub(in crate::cpu::jit) fn decode(insn: u32, pc: u32) -> Decoded {
     let cond = (insn >> 28) as u8;
     if cond == 0xF {
@@ -100,7 +125,7 @@ pub(in crate::cpu::jit) fn decode(insn: u32, pc: u32) -> Decoded {
     match (insn >> 25) & 0x7 {
         0b000 | 0b001 => data_processing(insn, cond),
         0b010 => single(insn, cond, false),
-        0b011 if insn & 0x10 != 0 => interpret(insn, false),
+        0b011 if insn & 0x10 != 0 => extend(insn, cond).unwrap_or_else(|| interpret(insn, false)),
         0b011 => single(insn, cond, true),
         0b100 => block(insn, cond),
         0b101 => {

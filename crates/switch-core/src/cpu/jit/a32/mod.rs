@@ -85,6 +85,15 @@ pub(super) enum Kind {
         imm: u16,
         top: bool,
     },
+    /// `SXTB`, `SXTH`, `UXTB` and `UXTH` of `rm` rotated right by `rotate` bits, added to `rn` unless it is 15.
+    Extend {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        rotate: u8,
+        signed: bool,
+        halfword: bool,
+    },
     /// `LDREX{,B,H}` and `STREX{,B,H}`: `rt` is loaded or stored, `rd` takes the status of a store.
     Exclusive {
         load: bool,

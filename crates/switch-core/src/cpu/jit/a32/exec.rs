@@ -283,6 +283,28 @@ impl Cpu {
                 };
                 self.set_r32(rd, value);
             }
+            Kind::Extend {
+                rd,
+                rn,
+                rm,
+                rotate,
+                signed,
+                halfword,
+            } => {
+                let value = self.r32(rm).rotate_right(u32::from(rotate));
+                let extended = match (signed, halfword) {
+                    (true, false) => value as u8 as i8 as i32 as u32,
+                    (true, true) => value as u16 as i16 as i32 as u32,
+                    (false, false) => value & 0xFF,
+                    (false, true) => value & 0xFFFF,
+                };
+                let result = if rn == 15 {
+                    extended
+                } else {
+                    self.r32(rn).wrapping_add(extended)
+                };
+                self.set_r32(rd, result);
+            }
             Kind::ReadThreadPointer { rt, rw } => {
                 let value = if rw { self.tpidr_rw } else { self.tpidr };
                 self.set_r32(rt, value as u32);

@@ -35,6 +35,14 @@ const PC_AND_EXCLUSIVE: &[u32] = &[
     0xe3a00060, 0xe3a0005f, 0xef000000,
 ];
 
+/// The sign and zero extends, plain and with an addend, at every rotation, taken and skipped.
+#[rustfmt::skip]
+const EXTENDS: &[u32] = &[
+    0xe3a01080, 0xe3811902, 0xe3811502, 0xe3811102, 0xe6af2071, 0xe6bf3471, 0xe6ef4871,
+    0xe6ff5c71, 0xe6a26471, 0xe6b37871, 0xe6e48071, 0xe6f59c71, 0x16e1a071, 0x06afb071,
+    0xef000000,
+];
+
 /// A conditional branch, link, return and `SVC`, taken and skipped.
 const CONDITIONAL: &[u32] = &[
     0xe3a00000, 0xe3500000, 0x02800001, 0x12800064, 0x0a000000, 0xe3a00032, 0x1a000004, 0xe2800002,
@@ -144,6 +152,7 @@ fn the_interpreter_halts_on_every_program() {
         ("conditional", CONDITIONAL),
         ("self-modifying", SELF_MODIFYING),
         ("pc and exclusive", PC_AND_EXCLUSIVE),
+        ("extends", EXTENDS),
     ] {
         let mut cpu = loaded(code, false);
         let report = cpu.run(1000).unwrap();

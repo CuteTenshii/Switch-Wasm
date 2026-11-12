@@ -44,6 +44,7 @@ const TRANSFERS: usize = 2500;
 const EXCLUSIVE_PAIRS: usize = 600;
 const BRANCHES: usize = 3000;
 const THREAD_POINTER_READS: usize = 60;
+const EXTENDS: usize = 600;
 const SEEDS: usize = 6;
 
 /// Above 32 bits, so a read that fails to narrow shows.
@@ -89,6 +90,24 @@ fn main() {
     }
     for _ in 0..TRANSFERS {
         cases.push((vec![transfer(&mut rng)], Kind::Memory));
+    }
+    for _ in 0..EXTENDS {
+        // SXTB, SXTH, UXTB or UXTH, rotated by 0 to 24, with Rn of 15 being the plain form.
+        let r = next(&mut rng);
+        let (cond, rd, rm) = (
+            (r & 0xF) as u32 % 15,
+            (r >> 4 & 0xF) as u32 % 15,
+            (r >> 8 & 0xF) as u32 % 15,
+        );
+        let (rn, rotate, op) = (
+            (r >> 12 & 0xF) as u32,
+            (r >> 16 & 3) as u32,
+            [0x6A, 0x6B, 0x6E, 0x6F][(r >> 18) as usize & 3],
+        );
+        cases.push((
+            vec![cond << 28 | op << 20 | rn << 16 | rd << 12 | rotate << 10 | 0x70 | rm],
+            Kind::Pure,
+        ));
     }
     for _ in 0..THREAD_POINTER_READS {
         // MRC p15, 0, rt, c13, c0, 2 or 3.

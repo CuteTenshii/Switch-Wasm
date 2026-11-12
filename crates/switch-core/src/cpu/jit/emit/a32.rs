@@ -113,6 +113,7 @@ fn writable(op: &A32Op) -> bool {
         Kind::Nop
         | Kind::Single { .. }
         | Kind::MoveWide { .. }
+        | Kind::Extend { .. }
         | Kind::Exclusive { .. }
         | Kind::ReadThreadPointer { .. } => true,
         Kind::Interpret { .. } => false,
@@ -176,6 +177,42 @@ impl Emitter<'_> {
                 } else {
                     self.f.i64_const(i64::from(imm));
                 }
+                self.store_reg(rd);
+            }
+            Kind::Extend {
+                rd,
+                rn,
+                rm,
+                rotate,
+                signed,
+                halfword,
+            } => {
+                self.read_reg_raw(rm);
+                if rotate != 0 {
+                    self.f.i64_const(i64::from(rotate));
+                    self.f.i64_shr_u();
+                    self.read_reg_raw(rm);
+                    self.f.i64_const(i64::from(32 - rotate));
+                    self.f.i64_shl();
+                    self.f.i64_or();
+                }
+                match (signed, halfword) {
+                    (true, false) => self.f.i64_extend8_s(),
+                    (true, true) => self.f.i64_extend16_s(),
+                    (false, false) => {
+                        self.f.i64_const(0xFF);
+                        self.f.i64_and();
+                    }
+                    (false, true) => {
+                        self.f.i64_const(0xFFFF);
+                        self.f.i64_and();
+                    }
+                }
+                if rn != 15 {
+                    self.read_reg_raw(rn);
+                    self.f.i64_add();
+                }
+                self.mask_to(false);
                 self.store_reg(rd);
             }
             Kind::ReadThreadPointer { rt, rw } => {
