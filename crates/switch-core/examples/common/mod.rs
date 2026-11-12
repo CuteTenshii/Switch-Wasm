@@ -63,6 +63,12 @@ pub struct Shared {
     /// Present frames without drawing them.
     #[arg(long)]
     no_draw: bool,
+    /// Write the screen to `<out>.<frame>.ppm` every this many presented frames.
+    #[arg(long, value_name = "K")]
+    shots_every: Option<u64>,
+    /// Draw nothing until this presented frame: reaches a late scene at no-draw speed.
+    #[arg(long, value_name = "N")]
+    draw_from_frame: Option<u64>,
     /// Extra guest cores, each on a host thread.
     #[arg(long, default_value_t = 0, value_name = "N")]
     cores: u64,
@@ -456,6 +462,49 @@ impl Press {
 pub fn apply_no_draw(cpu: &mut Cpu) {
     if shared().no_draw {
         cpu.nv.gpu.set_renderer(Box::new(NoDraw));
+    }
+}
+
+/// Installs `real`, or with `--draw-from-frame` draws nothing until that frame and then hands over to it.
+pub struct DrawGate {
+    real: Option<Box<dyn switch_core::gpu::renderer::Renderer>>,
+    from: u64,
+}
+
+impl DrawGate {
+    pub fn install(
+        cpu: &mut Cpu,
+        real: Box<dyn switch_core::gpu::renderer::Renderer>,
+    ) -> Option<DrawGate> {
+        let Some(from) = shared().draw_from_frame else {
+            cpu.nv.gpu.set_renderer(real);
+            return None;
+        };
+        cpu.nv.gpu.set_renderer(Box::new(NoDraw));
+        Some(DrawGate {
+            real: Some(real),
+            from,
+        })
+    }
+
+    pub fn tick(&mut self, cpu: &mut Cpu) {
+        if cpu.nv.gpu.frames >= self.from {
+            if let Some(real) = self.real.take() {
+                cpu.nv.gpu.set_renderer(real);
+            }
+        }
+    }
+}
+
+/// `--shots-every`: the screen at every Kth presented frame, beside `out`.
+pub fn shoot(cpu: &Cpu, out: &str, last: &mut u64) {
+    let Some(every) = shared().shots_every else {
+        return;
+    };
+    let frame = cpu.nv.gpu.frames;
+    if frame != *last && frame.is_multiple_of(every) && !cpu.nv.gpu.framebuffer.is_empty() {
+        *last = frame;
+        write_ppm(format!("{out}.{frame}.ppm"), &cpu.nv.gpu.framebuffer);
     }
 }
 

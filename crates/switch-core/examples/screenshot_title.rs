@@ -81,6 +81,9 @@ fn main() {
     cpu.bootstrap();
     program.boot(&mut cpu);
 
+    let mut last_shot = 0;
+    let mut draw_gate =
+        common::DrawGate::install(&mut cpu, Box::new(switch_core::gpu::renderer::Software));
     let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
     let mut press = common::Press::from_flags();
@@ -119,6 +122,10 @@ fn main() {
                 return Flow::Stop;
             }
             debug.tick(cpu, done);
+            if let Some(gate) = draw_gate.as_mut() {
+                gate.tick(cpu);
+            }
+            common::shoot(cpu, out, &mut last_shot);
             if let Some(press) = press.as_mut() {
                 press.tick(cpu, done);
             }

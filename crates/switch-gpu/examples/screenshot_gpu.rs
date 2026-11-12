@@ -75,9 +75,11 @@ fn main() {
     program.boot(&mut cpu);
 
     // Installed on the session so it precedes and covers every channel.
+    let mut last_shot = 0;
+    let mut draw_gate = None;
     if let Some(gpu) = gpu.take() {
         println!("[gpu] installed");
-        cpu.nv.gpu.set_renderer(Box::new(gpu));
+        draw_gate = common::DrawGate::install(&mut cpu, Box::new(gpu));
     }
     let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
@@ -85,6 +87,10 @@ fn main() {
     let pace = debug.pace(false);
     let run = common::drive(&mut cpu, pace, cli.steps, |cpu, done| {
         debug.tick(cpu, done);
+        if let Some(gate) = draw_gate.as_mut() {
+            gate.tick(cpu);
+        }
+        common::shoot(cpu, out, &mut last_shot);
         if let Some(press) = press.as_mut() {
             press.tick(cpu, done);
         }
