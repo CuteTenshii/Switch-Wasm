@@ -26,19 +26,23 @@ fn inverse<const N: usize>(
     shift: u32,
     skip_zero_rows: bool,
 ) {
-    let mut out = vec![0i32; N * N];
-    for i in 0..N {
+    let mut out = [[0i32; N]; N];
+    for (i, out_row) in out.iter_mut().enumerate() {
         let row = &input[i * N..(i + 1) * N];
-        if skip_zero_rows && row.iter().all(|&c| c as i16 == 0) {
-            continue;
+        let zero = if skip_zero_rows {
+            row.iter().all(|&c| c as i16 == 0)
+        } else {
+            row.iter().all(|&c| c == 0)
+        };
+        if !zero {
+            rows(row, out_row);
         }
-        rows(row, &mut out[i * N..(i + 1) * N]);
     }
     let mut column = [0i32; 32];
     let mut result = [0i32; 32];
     for i in 0..N {
         for j in 0..N {
-            column[j] = out[j * N + i];
+            column[j] = out[j][i];
         }
         cols(&column[..N], &mut result[..N]);
         for j in 0..N {
