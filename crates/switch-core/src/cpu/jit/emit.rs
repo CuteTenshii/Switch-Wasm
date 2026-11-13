@@ -206,6 +206,9 @@ const _: () = assert!(
 const ALIGN_4: u8 = 2;
 const ALIGN_8: u8 = 3;
 const UNALIGNED: u8 = 0;
+/// `v128.load` and `v128.store`, after the `0xFD` prefix.
+const V128_LOAD: u32 = 0x00;
+const V128_STORE: u32 = 0x0B;
 
 /// Why a block was not written out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,6 +392,14 @@ struct Emitter<'a> {
     written: u64,
     /// Each slot's local, or 0 before it has one.
     locals: [u32; REG_SLOTS],
+    /// Each vector register's local, or 0 before it has one.
+    vlocals: [u32; 32],
+    /// Vector registers the region touches, loaded on entry.
+    vused: u32,
+    /// Vector registers it writes, stored on the way out.
+    vwritten: u32,
+    /// The type of each local from `L_REGS` on, in index order.
+    local_types: Vec<u8>,
     next_local: u32,
     /// Whether a watchpoint was armed when the region was emitted.
     watches: bool,
@@ -423,6 +434,10 @@ impl<'a> Emitter<'a> {
             used: 0,
             written: 0,
             locals: [0; REG_SLOTS],
+            vlocals: [0; 32],
+            vused: 0,
+            vwritten: 0,
+            local_types: Vec::new(),
             next_local: L_REGS,
             flags_used: false,
             flags_written: false,
@@ -451,6 +466,18 @@ impl Emitter<'_> {
         if *local == 0 {
             *local = self.next_local;
             self.next_local += 1;
+            self.local_types.push(I64);
+        }
+        *local
+    }
+
+    /// The local holding `V<r>`, assigned on first use.
+    fn vlocal_of(&mut self, r: u32) -> u32 {
+        let local = &mut self.vlocals[r as usize];
+        if *local == 0 {
+            *local = self.next_local;
+            self.next_local += 1;
+            self.local_types.push(V128);
         }
         *local
     }
@@ -708,6 +735,14 @@ impl Emitter<'_> {
                 self.f.i64_store(ALIGN_8, regs + 8 * slot);
             }
         }
+        for r in 0..32u32 {
+            if self.vwritten & (1 << r) != 0 {
+                self.f.local_get(STATE);
+                self.f.local_get(self.vlocals[r as usize]);
+                self.f
+                    .simd_mem(V128_STORE, ALIGN_8, self.layout.vregs + 16 * r);
+            }
+        }
         if self.flags_written {
             self.f.local_get(STATE);
             self.f.local_get(L_NZCV);
@@ -789,6 +824,13 @@ impl Emitter<'_> {
                 f.local_get(STATE);
                 f.i64_load(ALIGN_8, self.layout.regs + 8 * slot);
                 f.local_set(self.locals[slot as usize]);
+            }
+        }
+        for r in 0..32u32 {
+            if self.vused & (1 << r) != 0 {
+                f.local_get(STATE);
+                f.simd_mem(V128_LOAD, ALIGN_8, self.layout.vregs + 16 * r);
+                f.local_set(self.vlocals[r as usize]);
             }
         }
         if self.flags_used {
@@ -1884,34 +1926,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Push the address of `vregs[reg]`'s half `half` (0 low, 1 high).
-    fn vreg_half(&mut self, reg: u8, half: u32) -> u32 {
-        self.f.local_get(STATE);
-        self.layout.vregs + 16 * u32::from(reg) + 8 * half
-    }
-
-    /// `LDP` of two Q registers, checked as one 32-byte access.
-    fn load_pair_q(&mut self, rt: u8, rt2: u8, retired: usize) {
-        self.page_for_read(32, retired);
-        for (i, reg) in [rt, rt, rt2, rt2].into_iter().enumerate() {
-            let at = self.vreg_half(reg, i as u32 & 1);
-            self.in_page();
-            self.f.i64_load(UNALIGNED, 8 * i as u32);
-            self.f.i64_store(ALIGN_8, at);
-        }
-    }
-
-    /// `STP` of two Q registers, checked as one 32-byte access.
-    fn store_pair_q(&mut self, rt: u8, rt2: u8, retired: usize) {
-        self.page_for_write(32, retired);
-        for (i, reg) in [rt, rt, rt2, rt2].into_iter().enumerate() {
-            self.in_page();
-            let at = self.vreg_half(reg, i as u32 & 1);
-            self.f.i64_load(ALIGN_8, at);
-            self.f.i64_store(UNALIGNED, 8 * i as u32);
-        }
-    }
-
     /// A single-register access. `PRFM` has no guard: it touches no memory.
     fn access(&mut self, rt: u8, acc: Acc, retired: usize) {
         match acc {
@@ -2719,9 +2733,11 @@ pub(super) fn emit_region(
     e.f.end();
     e.epilogue();
     let prologue = e.prologue();
-    let registers = e.next_local - L_REGS;
+    let local_types = std::mem::take(&mut e.local_types);
     f.prepend(&prologue);
-    f.locals(1, registers, I64);
+    for run in local_types.chunk_by(|a, b| a == b) {
+        f.locals(1, run.len() as u32, run[0]);
+    }
     f.end();
 
     let mut m = Module::new();

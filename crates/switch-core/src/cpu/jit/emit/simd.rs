@@ -114,18 +114,37 @@ fn truncate_lanes(dest: u32) -> [u8; 16] {
 impl Emitter<'_> {
     /// Push `V<r>`.
     pub(super) fn vget(&mut self, r: u32) {
-        self.f.local_get(STATE);
-        self.f
-            .simd_mem(op::V128_LOAD, ALIGN_8, self.layout.vregs + 16 * r);
+        self.vused |= 1 << r;
+        let local = self.vlocal_of(r);
+        self.f.local_get(local);
     }
 
     /// Pop into `V<r>`.
     pub(super) fn vset(&mut self, r: u32) {
-        self.f.local_set(L_V0);
-        self.f.local_get(STATE);
-        self.f.local_get(L_V0);
-        self.f
-            .simd_mem(op::V128_STORE, ALIGN_8, self.layout.vregs + 16 * r);
+        self.vused |= 1 << r;
+        self.vwritten |= 1 << r;
+        let local = self.vlocal_of(r);
+        self.f.local_set(local);
+    }
+
+    /// `LDP` of two Q registers, checked as one 32-byte access.
+    pub(super) fn load_pair_q(&mut self, rt: u8, rt2: u8, retired: usize) {
+        self.page_for_read(32, retired);
+        for (i, reg) in [rt, rt2].into_iter().enumerate() {
+            self.in_page();
+            self.f.simd_mem(op::V128_LOAD, UNALIGNED, 16 * i as u32);
+            self.vset(u32::from(reg));
+        }
+    }
+
+    /// `STP` of two Q registers, checked as one 32-byte access.
+    pub(super) fn store_pair_q(&mut self, rt: u8, rt2: u8, retired: usize) {
+        self.page_for_write(32, retired);
+        for (i, reg) in [rt, rt2].into_iter().enumerate() {
+            self.in_page();
+            self.vget(u32::from(reg));
+            self.f.simd_mem(op::V128_STORE, UNALIGNED, 16 * i as u32);
+        }
     }
 
     /// Clear the high 64 bits of the vector on the stack when `q` is clear.
