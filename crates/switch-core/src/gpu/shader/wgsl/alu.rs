@@ -1,11 +1,11 @@
 //! Translation of everything that is not control flow or texturing.
 
 use super::emitter::Emitter;
-use super::layout::{generic_slot, ATOMS};
+use super::layout::{atom_code, generic_slot};
 use super::texture::Gather;
 use super::Unsupported;
 use crate::gpu::shader::isa::{
-    AtomSpace, AtomType, MemSize, Op, Operand, ShflMode, TexDim, VoteMode, RZ,
+    AtomOp, AtomSpace, MemSize, Op, Operand, ShflMode, TexDim, VoteMode, RZ,
 };
 use crate::gpu::texture::TextureSlot;
 
@@ -349,8 +349,8 @@ impl Emitter<'_> {
 
             Op::Nop | Op::Inert => {}
 
-            // `ldg` from a constant bank descriptor binds a buffer; other global
-            // and shared memory, and barriers, are unsupported.
+            // Global memory is reachable only through a constant bank descriptor, which
+            // binds a buffer; shared memory and barriers have no compute stage to run in.
             Op::Ldg {
                 dst,
                 addr,
@@ -361,47 +361,94 @@ impl Emitter<'_> {
                     return Err(Unsupported::Op { at, op });
                 };
                 let slot = self.global_slot(bank, descriptor, false);
-                // The address register still holds descriptor plus offset, whatever
-                // happened to the register the offset was added from.
-                let address = self.r(addr);
-                let start = self.operand(Operand::Const {
-                    bank,
-                    offset: descriptor,
-                });
-                let base = self.bind(&format!("({address} - {start} + {offset}u)"));
-                for word in 0..size.regs() {
-                    let byte = u32::from(word) * 4;
-                    self.set_r(
-                        dst.wrapping_add(word),
-                        &format!("gRead({slot}u, {base} + {byte}u)"),
-                    );
+                let base = self.global_offset(bank, descriptor, addr, offset);
+                match size {
+                    MemSize::U8 | MemSize::S8 | MemSize::U16 | MemSize::S16 => {
+                        let mut bytes = (0..size.bytes()).map(|byte| {
+                            let place = self.bind(&format!("({base} + {byte}u)"));
+                            let shift = self.bind(&format!("(({place} & 3u) * 8u)"));
+                            format!("((gRead({slot}u, {place}) >> {shift}) & 0xffu)")
+                        });
+                        let low = bytes.next().expect("a byte");
+                        let raw = match bytes.next() {
+                            Some(high) => format!("({low} | ({high} << 8u))"),
+                            None => low,
+                        };
+                        let raw = if matches!(size, MemSize::S8 | MemSize::S16) {
+                            self.need("sext");
+                            format!("sext({raw}, {}u)", size.bytes())
+                        } else {
+                            raw
+                        };
+                        self.set_r(dst, &raw);
+                    }
+                    _ => {
+                        for word in 0..size.regs() {
+                            let byte = u32::from(word) * 4;
+                            self.set_r(
+                                dst.wrapping_add(word),
+                                &format!("gRead({slot}u, {base} + {byte}u)"),
+                            );
+                        }
+                    }
                 }
             }
 
-            // An unsigned atomic on a descriptor's buffer; the old value lands in `dst`.
+            // Stores past the buffer's end change nothing, where the interpreter faults.
+            Op::Stg {
+                addr,
+                offset,
+                src,
+                size,
+            } => {
+                let Some((bank, descriptor)) = self.global_base(at, addr) else {
+                    return Err(Unsupported::Op { at, op });
+                };
+                let slot = self.global_slot(bank, descriptor, true);
+                let base = self.global_offset(bank, descriptor, addr, offset);
+                let words: Vec<String> = (0..size.regs())
+                    .map(|i| self.r(src.wrapping_add(i)))
+                    .collect();
+                if size.bytes() < 4 {
+                    for byte in 0..size.bytes() {
+                        let place = self.bind(&format!("({base} + {byte}u)"));
+                        let value = format!("(({}) >> {}u) & 0xffu", words[0], byte * 8);
+                        self.line(&format!("gWrite({slot}u, {place}, {value}, 0xffu);"));
+                    }
+                } else {
+                    for (word, value) in words.iter().enumerate() {
+                        self.line(&format!(
+                            "gWrite({slot}u, {base} + {}u, {value}, 0xffffffffu);",
+                            word * 4
+                        ));
+                    }
+                }
+            }
+
+            // A 32-bit atomic on a descriptor's buffer; the old value lands in `dst`.
             Op::Atom {
                 dst,
                 addr,
                 offset,
                 src,
                 op: atom,
-                ty: AtomType::U32,
+                ty,
                 space: AtomSpace::Global,
             } => {
-                let code = ATOMS.iter().position(|&(known, _)| known == atom);
-                let (Some(code), Some((bank, descriptor))) = (code, self.global_base(at, addr))
+                let (Some(code), Some((bank, descriptor))) =
+                    (atom_code(atom, ty), self.global_base(at, addr))
                 else {
                     return Err(Unsupported::Op { at, op });
                 };
                 let slot = self.global_slot(bank, descriptor, true);
-                let address = self.r(addr);
-                let start = self.operand(Operand::Const {
-                    bank,
-                    offset: descriptor,
-                });
-                let base = self.bind(&format!("({address} - {start} + {}u)", offset as u32));
+                let base = self.global_offset(bank, descriptor, addr, offset);
                 let value = self.r(src);
-                let call = format!("gAtom({code}u, {slot}u, {base}, {value})");
+                let stored = if atom == AtomOp::Cas {
+                    self.r(src.wrapping_add(1))
+                } else {
+                    "0u".to_string()
+                };
+                let call = format!("gAtom({code}u, {slot}u, {base}, {value}, {stored})");
                 if dst == RZ {
                     self.line(&format!("_ = {call};"));
                 } else {
@@ -467,8 +514,7 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
-            Op::Stg { .. }
-            | Op::Lds { .. }
+            Op::Lds { .. }
             | Op::Sts { .. }
             | Op::Atom { .. }
             | Op::Bar { .. }
@@ -489,6 +535,19 @@ impl Emitter<'_> {
             | Op::Kil => unreachable!("control flow is emitted by emit_instruction"),
         }
         Ok(())
+    }
+
+    /// A global access's byte offset into its descriptor's buffer.
+    ///
+    /// The address register still holds descriptor plus offset, whatever happened to
+    /// the register the offset was added from.
+    fn global_offset(&mut self, bank: u8, descriptor: u16, addr: u8, offset: i32) -> String {
+        let address = self.r(addr);
+        let start = self.operand(Operand::Const {
+            bank,
+            offset: descriptor,
+        });
+        self.bind(&format!("({address} - {start} + {}u)", offset as u32))
     }
 
     /// `a[offset + Rn]`'s byte address, wrapping at 16 bits.

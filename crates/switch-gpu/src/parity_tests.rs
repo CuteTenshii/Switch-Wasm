@@ -480,6 +480,243 @@ fn a_global_reduction_leaves_the_same_words_in_guest_memory_on_both_renderers() 
     assert_eq!(twice[2], 7);
 }
 
+const PT: u64 = 7 << 16;
+const RZ: u64 = 0xff;
+
+fn mov32i(dst: u64, imm: u32) -> u64 {
+    0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst
+}
+
+/// `body` between a prologue that points `r10` at the global buffer and an `exit`, drawn by
+/// both renderers over `initial` words; returns the words the rasterizer leaves. The program
+/// has to fit the harness's 0x100 bytes before its vertex buffer.
+fn global_words_after_both(body: &[u64], initial: &[u32]) -> Vec<u32> {
+    use switch_core::gpu::testing::block;
+    let iadd_c0 = |dst: u64, word: u64, cin: u64, cout: u64| {
+        0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | RZ << 8 | dst
+    };
+    let mut words = vec![iadd_c0(10, 0x110 / 4, 0, 1), iadd_c0(11, 0x114 / 4, 1, 0)];
+    words.extend_from_slice(body);
+    words.extend([mov32i(3, 0x3f80_0000), 0xe300_0000_0007_000f]);
+    assert!(words.len() <= 24, "{} instructions", words.len());
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| {
+        h.triangle([0.0; 4]);
+        bind_global(h, initial);
+    };
+    let words_after = |h: &Harness| -> Vec<u32> {
+        (0..initial.len() as u64)
+            .map(|word| h.vmm.read_u32(&h.mem, h.base + 0x1a00 + word * 4).unwrap())
+            .collect()
+    };
+    let mut want = Harness::with_fragment_shader(shader());
+    set_up(&mut want);
+    want.draw_with(&mut Software).expect("the draw");
+    let want = words_after(&want);
+
+    let Some((_serial, mut gpu)) = device() else {
+        return want;
+    };
+    let mut got = Harness::with_fragment_shader(shader());
+    set_up(&mut got);
+    let before = gpu.fallbacks;
+    got.draw_with(&mut gpu).expect("the draw");
+    assert_eq!(
+        gpu.fallbacks, before,
+        "the draw did not run on the device: {:?}",
+        gpu.last_fallback
+    );
+    got.flush_with(&mut gpu);
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(words_after(&got), want, "the device left other words");
+    want
+}
+
+/// Every global atomic the device runs lands the word the rasterizer leaves, signed and float
+/// reductions and the compare-exchange forms included. Each is applied once per covered fragment.
+#[test]
+fn global_atomics_leave_the_same_words_on_both_renderers() {
+    use switch_core::gpu::shader::isa::{self, AtomOp, AtomSpace, AtomType};
+    use switch_core::gpu::shader::Op;
+    let red = |op: u64, ty: u64, word: u64, src: u64| {
+        0xebf8u64 << 48 | (word * 4) << 28 | op << 23 | ty << 20 | PT | 10 << 8 | src
+    };
+    let atom = |op: u64, word: u64, src: u64| {
+        0xedu64 << 56 | op << 52 | (word * 4) << 28 | src << 20 | PT | 10 << 8 | RZ
+    };
+    let cas =
+        |word: u64, src: u64| 0xeef0u64 << 48 | (word * 4) << 28 | src << 20 | PT | 10 << 8 | RZ;
+    let (add, min, max, xor, exch) = (0, 1, 2, 7, 8);
+    let (u32_, s32, f32_) = (0, 1, 3);
+    for (word, op, ty) in [
+        (red(add, u32_, 0, 2), AtomOp::Add, AtomType::U32),
+        (red(min, s32, 1, 2), AtomOp::Min, AtomType::S32),
+        (red(add, f32_, 5, 2), AtomOp::Add, AtomType::F32),
+        (atom(exch, 9, 2), AtomOp::Exch, AtomType::U32),
+        (cas(10, 2), AtomOp::Cas, AtomType::U32),
+    ] {
+        let Op::Atom {
+            op: got_op,
+            ty: got_ty,
+            space: AtomSpace::Global,
+            ..
+        } = isa::decode(word).op
+        else {
+            panic!("{word:#x} is not a global atomic");
+        };
+        assert_eq!((got_op, got_ty), (op, ty), "{word:#x}");
+    }
+    let one = 1.0f32.to_bits();
+    let initial = [
+        5,
+        10,
+        0xffff_fff0,
+        0,
+        3,
+        one,
+        one,
+        (-2.0f32).to_bits(),
+        0xff,
+        1,
+        7,
+    ];
+    let counted = global_words_after_both(
+        &[
+            mov32i(2, 3),
+            red(add, u32_, 0, 2),
+            mov32i(2, 0xffff_fffe),
+            red(min, s32, 1, 2),
+            mov32i(2, 4),
+            red(max, s32, 2, 2),
+            mov32i(2, 0.5f32.to_bits()),
+            red(add, f32_, 5, 2),
+        ],
+        &initial,
+    );
+    let covered = (f32::from_bits(counted[5]) - 1.0) * 2.0;
+    assert!(covered >= 1.0, "the triangle covers fragments");
+    let covered = covered as u32;
+    assert_eq!(counted[0], 5 + 3 * covered, "add");
+    assert_eq!(counted[1], 0xffff_fffe, "signed min");
+    assert_eq!(counted[2], 4, "signed max");
+
+    let rest = global_words_after_both(
+        &[
+            mov32i(2, 0x0f),
+            red(xor, u32_, 8, 2),
+            mov32i(2, 0x77),
+            atom(exch, 9, 2),
+            mov32i(2, 7),
+            mov32i(3, 9),
+            cas(10, 2),
+        ],
+        &initial,
+    );
+    assert_eq!(
+        rest[8],
+        0xff ^ if covered % 2 == 1 { 0x0f } else { 0 },
+        "xor"
+    );
+    assert_eq!(rest[9], 0x77, "exch");
+    assert_eq!(rest[10], 9, "cas");
+}
+
+/// Global stores of every size, and narrow loads read back through them, land the words the
+/// rasterizer leaves, including a 16-bit store straddling two words.
+#[test]
+fn global_stores_and_narrow_loads_leave_the_same_words_on_both_renderers() {
+    use switch_core::gpu::shader::isa::{self, MemSize};
+    use switch_core::gpu::shader::Op;
+    let stg = |size: u64, byte: u64, src: u64| {
+        0xeed8u64 << 48 | size << 48 | byte << 20 | PT | 10 << 8 | src
+    };
+    let ldg = |size: u64, byte: u64, dst: u64| {
+        0xeed0u64 << 48 | size << 48 | byte << 20 | PT | 10 << 8 | dst
+    };
+    let (u8_, s8, u16_, s16, b32, b64) = (0, 1, 2, 3, 4, 5);
+    assert_eq!(
+        isa::decode(stg(u16_, 7, 2)).op,
+        Op::Stg {
+            addr: 10,
+            offset: 7,
+            src: 2,
+            size: MemSize::U16
+        }
+    );
+    assert_eq!(
+        isa::decode(ldg(s16, 7, 4)).op,
+        Op::Ldg {
+            dst: 4,
+            addr: 10,
+            offset: 7,
+            size: MemSize::S16
+        }
+    );
+    let mut initial = vec![0u32; 12];
+    initial[1] = 0x0102_0304;
+    initial[2] = 0xffff_ffff;
+    initial[3] = 0xffff_ffff;
+    initial[6] = 0xaaaa_aaaa;
+    initial[7] = 0xbbbb_bbbb;
+    initial[8] = 0x8081_7f00;
+    initial[9] = 0xab;
+    let stored = global_words_after_both(
+        &[
+            mov32i(2, 0x1122_3344),
+            stg(b32, 0, 2),
+            mov32i(2, 0xaa),
+            stg(u8_, 4 + 1, 2),
+            mov32i(2, 0xbeef),
+            stg(u16_, 8 + 3, 2),
+            mov32i(2, 0xa0a0_a0a0),
+            mov32i(3, 0xb0b0_b0b0),
+            stg(b64, 16, 2),
+            mov32i(2, 0x1122_3344),
+            stg(b32, 6 * 4 + 2, 2),
+        ],
+        &initial,
+    );
+    assert_eq!(stored[0], 0x1122_3344, "b32");
+    assert_eq!(stored[1], 0x0102_aa04, "u8 beside its neighbours");
+    assert_eq!(stored[2], 0xefff_ffff, "u16 straddling, low byte");
+    assert_eq!(stored[3], 0xffff_ffbe, "u16 straddling, high byte");
+    assert_eq!(stored[4..6], [0xa0a0_a0a0, 0xb0b0_b0b0], "b64");
+    assert_eq!(
+        stored[6..8],
+        [0x3344_aaaa, 0xbbbb_1122],
+        "b32 off the word boundary"
+    );
+
+    let loaded = global_words_after_both(
+        &[
+            ldg(s8, 8 * 4 + 2, 4),
+            stg(b32, 0, 4),
+            ldg(u16_, 8 * 4 + 3, 4),
+            stg(b32, 4, 4),
+            ldg(s16, 8 * 4 + 3, 4),
+            stg(b32, 8, 4),
+            ldg(u8_, 8 * 4 + 1, 4),
+            stg(b32, 12, 4),
+        ],
+        &initial,
+    );
+    assert_eq!(loaded[0], 0xffff_ff81, "s8");
+    assert_eq!(loaded[1], 0xab80, "u16 straddling");
+    assert_eq!(loaded[2], 0xffff_ab80, "s16 straddling");
+    assert_eq!(loaded[3], 0x7f, "u8");
+}
+
 /// A shader reading its quad neighbour's register reads the same on both renderers,
 /// with native quad operations and with the browser's `QUAD_SWAP`.
 #[test]

@@ -623,6 +623,95 @@ fn every_tld4_form_is_wgsl_naga_accepts() {
     }
 }
 
+/// Every global store, narrow load and atomic form translates to valid WGSL.
+#[test]
+fn global_stores_loads_and_atomics_are_wgsl_naga_accepts() {
+    use super::{wgpu, wgsl, Compiled, Layout, Stage};
+    use switch_core::gpu::shader::isa::{
+        AtomOp, AtomSpace, AtomType, Instruction, MemSize, Pred, RZ,
+    };
+    use switch_core::gpu::shader::{Op, Program};
+
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    let atom = |op, ty| Op::Atom {
+        dst: 3,
+        addr: 0,
+        offset: -4,
+        src: 2,
+        op,
+        ty,
+        space: AtomSpace::Global,
+    };
+    let mut ops = vec![Op::Ldc {
+        dst: 0,
+        bank: 1,
+        offset: 0x40,
+        idx: RZ,
+        size: MemSize::B64,
+    }];
+    for op in [
+        AtomOp::Add,
+        AtomOp::Min,
+        AtomOp::Max,
+        AtomOp::And,
+        AtomOp::Or,
+        AtomOp::Xor,
+        AtomOp::Exch,
+        AtomOp::Cas,
+    ] {
+        for ty in [AtomType::U32, AtomType::S32] {
+            ops.push(atom(op, ty));
+        }
+    }
+    ops.push(atom(AtomOp::Add, AtomType::F32));
+    for size in [
+        MemSize::U8,
+        MemSize::S8,
+        MemSize::U16,
+        MemSize::S16,
+        MemSize::B32,
+        MemSize::B64,
+        MemSize::B128,
+    ] {
+        ops.push(Op::Stg {
+            addr: 0,
+            offset: 5,
+            src: 4,
+            size,
+        });
+        ops.push(Op::Ldg {
+            dst: 8,
+            addr: 0,
+            offset: -3,
+            size,
+        });
+    }
+    ops.push(Op::Exit);
+    let mut program = Program::default();
+    for (index, op) in ops.into_iter().enumerate() {
+        program.insns.push(Instruction {
+            pred: Pred::ALWAYS,
+            op,
+        });
+        program.offsets.push(index as u32 * 8);
+    }
+    let translated =
+        wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE).expect("translates");
+    let layout = Layout::of(&translated, Stage::Fragment);
+    let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+    let _ = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("globals"),
+            source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+        });
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+    assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+}
+
 /// Tomodachi Life's cube-array `tex` forms and its `vmnmx` translate to valid WGSL.
 #[test]
 fn tomodachi_lifes_cube_array_and_video_min_are_wgsl_naga_accepts() {

@@ -1,6 +1,6 @@
 //! Layout and module tests.
 
-use super::super::layout::{GENERIC_BASE, GENERIC_STRIDE};
+use super::super::layout::{atom_code, GENERIC_BASE, GENERIC_STRIDE};
 use super::*;
 use crate::gpu::pipeline::AttributeBase;
 use crate::gpu::shader::isa::{AtomOp, AtomSpace, AtomType};
@@ -1045,8 +1045,9 @@ fn an_atomic_on_a_descriptor_makes_its_buffer_read_write_and_only_for_fragments(
     );
 
     for (ty, space) in [
-        (AtomType::S32, AtomSpace::Global),
         (AtomType::U64, AtomSpace::Global),
+        (AtomType::S64, AtomSpace::Global),
+        (AtomType::U128, AtomSpace::Global),
         (AtomType::U32, AtomSpace::Shared),
     ] {
         let refused = translate(&program(&[
@@ -1057,6 +1058,242 @@ fn an_atomic_on_a_descriptor_makes_its_buffer_read_write_and_only_for_fragments(
         assert!(
             matches!(refused, Err(Unsupported::Op { at: 1, .. })),
             "{ty:?} {space:?}"
+        );
+    }
+}
+
+fn through_descriptor(op: Op) -> Result<Translation, Unsupported> {
+    translate(&program(&[
+        (
+            Op::Ldc {
+                dst: 0,
+                bank: 1,
+                offset: 0x40,
+                idx: RZ,
+                size: MemSize::B64,
+            },
+            ALWAYS,
+        ),
+        (op, ALWAYS),
+        (Op::Exit, ALWAYS),
+    ]))
+}
+
+fn fragment_module(translated: &Translation) -> String {
+    let layout = Layout::of(translated, Stage::Fragment);
+    module(translated, Stage::Fragment, &layout).unwrap()
+}
+
+#[test]
+fn an_atomic_runs_the_row_for_its_operation_and_type() {
+    let run = |op, ty| {
+        let translated = through_descriptor(Op::Atom {
+            dst: 3,
+            addr: 0,
+            offset: -4,
+            src: 2,
+            op,
+            ty,
+            space: AtomSpace::Global,
+        })
+        .unwrap();
+        let call = translated
+            .source
+            .lines()
+            .find(|line| line.contains("gAtom("))
+            .expect("a gAtom call")
+            .to_string();
+        (call, fragment_module(&translated))
+    };
+    let code = |op, ty| atom_code(op, ty).expect("a row");
+
+    // Signed minimum is a loop over signed words; unsigned minimum is the direct atomic.
+    let (call, source) = run(AtomOp::Min, AtomType::S32);
+    assert!(call.contains(&format!("gAtom({}u,", code(AtomOp::Min, AtomType::S32))));
+    assert!(source.contains("min(bitcast<i32>(was), bitcast<i32>(value))"));
+    assert_ne!(
+        code(AtomOp::Min, AtomType::S32),
+        code(AtomOp::Min, AtomType::U32)
+    );
+
+    // A type without a row of its own runs the unsigned row.
+    assert_eq!(
+        code(AtomOp::Xor, AtomType::S32),
+        code(AtomOp::Xor, AtomType::U32)
+    );
+    assert_eq!(
+        code(AtomOp::Add, AtomType::S32),
+        code(AtomOp::Add, AtomType::U32)
+    );
+
+    // Float add is a compare-exchange loop on the float's bits.
+    let (_, source) = run(AtomOp::Add, AtomType::F32);
+    assert!(source.contains("bitcast<f32>(was) + bitcast<f32>(value)"));
+    assert!(source.contains("atomicCompareExchangeWeak(&g0[word], was,"));
+
+    // `cas` passes the register after its comparand as the new word; the others pass zero.
+    let (call, _) = run(AtomOp::Cas, AtomType::U32);
+    assert!(call.ends_with(", r3);"), "{call}");
+    let (call, source) = run(AtomOp::Add, AtomType::U32);
+    assert!(call.ends_with(", 0u);"), "{call}");
+
+    // A negative offset wraps rather than printing a negative unsigned literal.
+    assert!(source.contains("+ 4294967292u"), "{source}");
+}
+
+#[test]
+fn only_the_atomics_eden_applies_have_a_row() {
+    use AtomOp::*;
+    for op in [Add, Min, Max, And, Or, Xor, Exch, Cas] {
+        for ty in [AtomType::U32, AtomType::S32] {
+            assert!(atom_code(op, ty).is_some(), "{op:?} {ty:?}");
+        }
+    }
+    assert!(atom_code(Add, AtomType::F32).is_some());
+    for (op, ty) in [
+        (Inc, AtomType::U32),
+        (Dec, AtomType::S32),
+        (SafeAdd, AtomType::U32),
+        (SafeAdd, AtomType::F32),
+        (Min, AtomType::F32),
+        (Max, AtomType::F32),
+        (Xor, AtomType::F32),
+        (Exch, AtomType::F32),
+    ] {
+        assert_eq!(atom_code(op, ty), None, "{op:?} {ty:?}");
+    }
+    for op in [Add, Min, Cas, Xor] {
+        for ty in [AtomType::U64, AtomType::S64, AtomType::U128] {
+            assert_eq!(atom_code(op, ty), None, "{op:?} {ty:?}");
+        }
+    }
+}
+
+#[test]
+fn an_atomic_without_a_row_is_refused() {
+    for (op, ty) in [
+        (AtomOp::Inc, AtomType::U32),
+        (AtomOp::SafeAdd, AtomType::U32),
+        (AtomOp::Min, AtomType::F32),
+    ] {
+        let refused = through_descriptor(Op::Atom {
+            dst: 3,
+            addr: 0,
+            offset: 0,
+            src: 2,
+            op,
+            ty,
+            space: AtomSpace::Global,
+        });
+        assert!(
+            matches!(refused, Err(Unsupported::Op { at: 1, .. })),
+            "{op:?} {ty:?}"
+        );
+    }
+}
+
+#[test]
+fn a_store_through_a_descriptor_makes_its_buffer_read_write_and_only_for_fragments() {
+    let stg = |size| Op::Stg {
+        addr: 0,
+        offset: 8,
+        src: 2,
+        size,
+    };
+    let translated = through_descriptor(stg(MemSize::B64)).unwrap();
+    assert_eq!(
+        translated.globals,
+        vec![Global {
+            bank: 1,
+            offset: 0x40,
+            written: true
+        }]
+    );
+    let source = fragment_module(&translated);
+    assert!(source.contains("var<storage, read_write> g0: array<atomic<u32>>"));
+    assert!(source.contains("atomicStore(&g0[word], low)"));
+    assert_eq!(translated.source.matches("gWrite(0u,").count(), 2);
+    assert!(translated.source.contains("0xffffffffu);"));
+    let layout = Layout::of(&translated, Stage::Fragment);
+    assert_eq!(
+        module(&translated, Stage::Vertex, &layout).unwrap_err(),
+        Unsupported::VertexWrite
+    );
+
+    // Narrow stores merge one byte at a time under a mask.
+    let narrow = through_descriptor(stg(MemSize::U16)).unwrap();
+    assert_eq!(narrow.source.matches("gWrite(0u,").count(), 2);
+    assert!(narrow.source.contains(", 0xffu);"));
+    assert!(!narrow.source.contains("0xffffffffu"));
+    assert!(fragment_module(&narrow).contains(
+        "atomicCompareExchangeWeak(&g0[word], was, (was & ~low_mask) | (low & low_mask))"
+    ));
+}
+
+#[test]
+fn a_narrow_global_load_reads_its_bytes_and_a_signed_one_extends_them() {
+    let ldg = |size| Op::Ldg {
+        dst: 2,
+        addr: 0,
+        offset: 6,
+        size,
+    };
+    let signed = through_descriptor(ldg(MemSize::S16)).unwrap();
+    assert_eq!(signed.source.matches("gRead(0u,").count(), 2);
+    assert!(signed.source.contains("sext("));
+    let unsigned = through_descriptor(ldg(MemSize::U8)).unwrap();
+    assert_eq!(unsigned.source.matches("gRead(0u,").count(), 1);
+    assert!(!unsigned.source.contains("sext("));
+    let wide = through_descriptor(ldg(MemSize::B64)).unwrap();
+    assert_eq!(wide.source.matches("gRead(0u,").count(), 2);
+}
+
+#[test]
+fn a_store_without_a_traced_descriptor_is_refused() {
+    let untraced = translate(&program(&[
+        (
+            Op::Stg {
+                addr: 4,
+                offset: 0,
+                src: 2,
+                size: MemSize::B32,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]));
+    assert!(matches!(untraced, Err(Unsupported::Op { at: 0, .. })));
+}
+
+#[test]
+fn shared_memory_and_barriers_are_refused_even_through_a_traced_descriptor() {
+    let traced = Op::Stg {
+        addr: 0,
+        offset: 0,
+        src: 2,
+        size: MemSize::B32,
+    };
+    assert!(through_descriptor(traced).is_ok());
+    for op in [
+        Op::Lds {
+            dst: 2,
+            addr: 0,
+            offset: 0,
+            size: MemSize::B32,
+        },
+        Op::Sts {
+            addr: 0,
+            offset: 0,
+            src: 2,
+            size: MemSize::B32,
+        },
+        Op::Bar {
+            mode: crate::gpu::shader::isa::BarMode::Sync,
+        },
+    ] {
+        assert!(
+            matches!(through_descriptor(op), Err(Unsupported::Op { at: 1, .. })),
+            "{op:?}"
         );
     }
 }
@@ -1472,4 +1709,47 @@ fn a_tld4_clears_the_predicate_its_sparse_field_names() {
             .count()
     };
     assert_eq!(cleared(&other), 0, "{other}");
+}
+
+#[test]
+fn a_global_load_store_or_atomic_outside_its_buffer_reads_zero_and_changes_nothing() {
+    let load = fragment_module(
+        &through_descriptor(Op::Ldg {
+            dst: 2,
+            addr: 0,
+            offset: 0,
+            size: MemSize::B32,
+        })
+        .unwrap(),
+    );
+    assert!(
+        load.contains("if (word >= arrayLength(&g0)) { return 0u; }"),
+        "{load}"
+    );
+
+    let store = fragment_module(
+        &through_descriptor(Op::Stg {
+            addr: 0,
+            offset: 0,
+            src: 2,
+            size: MemSize::B32,
+        })
+        .unwrap(),
+    );
+    assert!(store.contains("if (word < arrayLength(&g0))"), "{store}");
+    assert!(store.contains("word + 1u < arrayLength(&g0)"), "{store}");
+
+    let atom = fragment_module(
+        &through_descriptor(Op::Atom {
+            dst: 3,
+            addr: 0,
+            offset: 0,
+            src: 2,
+            op: AtomOp::Or,
+            ty: AtomType::U32,
+            space: AtomSpace::Global,
+        })
+        .unwrap(),
+    );
+    assert!(atom.contains("if (word < arrayLength(&g0))"), "{atom}");
 }

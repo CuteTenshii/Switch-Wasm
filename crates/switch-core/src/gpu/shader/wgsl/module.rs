@@ -1,9 +1,9 @@
 //! Wrapping a translation into a complete module with its entry points.
 
 use super::layout::{
-    attribute_scalar, unpack_1010102, Coverage, Fold, Layout, Stage, ATOMS, ATTRIBUTE_WORDS,
-    CONSTANTS_BINDING, CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE, GLOBAL_BINDING,
-    IDENTITY_SWIZZLE, INSTANCE_ID, POSITION, TEXTURE_BINDING, VERTEX_ID,
+    attribute_scalar, unpack_1010102, Coverage, Fold, Layout, Stage, Update, ATOMS,
+    ATTRIBUTE_WORDS, CONSTANTS_BINDING, CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE,
+    GLOBAL_BINDING, IDENTITY_SWIZZLE, INSTANCE_ID, POSITION, TEXTURE_BINDING, VERTEX_ID,
 };
 use super::{Translation, Unsupported};
 use crate::gpu::pipeline::AttributeBase;
@@ -43,6 +43,35 @@ fn quadSwapDiagonal(v: u32) -> u32 {
   // second derivative of.
   return quadSwapY(quadSwapX(v));
 }";
+
+/// Compare-exchange attempts `gAtom` makes; an unbounded loop zeroed the buffer on an Apple M4.
+const CAS_TRIES: u32 = 100_000;
+
+/// WGSL that replaces `array[word]` with `next` (an expression over `was`) by compare-exchange,
+/// leaving the word's previous value in `was`.
+fn compare_exchange(array: &str, word: &str, next: &str, indent: &str) -> String {
+    format!(
+        "{indent}var was = atomicLoad(&{array}[{word}]);\n\
+         {indent}for (var tries = 0u; tries < {CAS_TRIES}u; tries++) {{\n\
+         {indent}  let seen = atomicCompareExchangeWeak(&{array}[{word}], was, {next});\n\
+         {indent}  if (seen.exchanged) {{ break; }}\n\
+         {indent}  was = seen.old_value;\n\
+         {indent}}}\n"
+    )
+}
+
+/// WGSL that stores the `mask` bits of `value` into `array[word]`, atomically.
+fn merge(array: &str, word: &str, mask: &str, value: &str) -> String {
+    let swap = compare_exchange(
+        array,
+        word,
+        &format!("(was & ~{mask}) | ({value} & {mask})"),
+        "          ",
+    );
+    format!(
+        "        if ({mask} == 0xffffffffu) {{ atomicStore(&{array}[{word}], {value}); }} else {{\n{swap}        }}\n"
+    )
+}
 
 /// Wrap a translation into a complete shader module: bindings, attribute
 /// space and entry point. Varyings are `@interpolate(linear)` carrying value/w,
@@ -125,31 +154,57 @@ pub fn module(
         out.push('\n');
     }
     if !layout.globals.is_empty() {
-        out.push_str("fn gRead(slot: u32, offset: u32) -> u32 {\n  switch (slot) {\n");
+        out.push_str("fn gRead(slot: u32, offset: u32) -> u32 {\n  let word = offset >> 2u;\n  switch (slot) {\n");
         for (slot, global) in layout.globals.iter().enumerate() {
-            let word = format!("g{slot}[offset >> 2u]");
             let read = if global.written {
-                format!("atomicLoad(&{word})")
+                format!("atomicLoad(&g{slot}[word])")
             } else {
-                word
+                format!("g{slot}[word]")
             };
-            out.push_str(&format!("    case {slot}u: {{ return {read}; }}\n"));
+            out.push_str(&format!(
+                "    case {slot}u: {{\n      if (word >= arrayLength(&g{slot})) {{ return 0u; }}\n      return {read};\n    }}\n"
+            ));
         }
-        // Out of range reads zero.
+        // An unbound slot reads zero.
         out.push_str("    default: { return 0u; }\n  }\n}\n\n");
     }
     if layout.globals.iter().any(|g| g.written) {
+        // `value` under `mask` replaces the bits at `offset`; a store off the word boundary
+        // spills into the next word.
         out.push_str(
-            "fn gAtom(op: u32, slot: u32, offset: u32, value: u32) -> u32 {\n  let word = offset >> 2u;\n  switch (slot) {\n",
+            "fn gWrite(slot: u32, offset: u32, value: u32, mask: u32) {\n  let word = offset >> 2u;\n  \
+             let shift = (offset & 3u) * 8u;\n  let low_mask = mask << shift;\n  let low = value << shift;\n  \
+             let high_mask = select(0u, mask >> (32u - shift), shift != 0u);\n  \
+             let high = select(0u, value >> (32u - shift), shift != 0u);\n  switch (slot) {\n",
+        );
+        for (slot, _) in layout.globals.iter().enumerate().filter(|(_, g)| g.written) {
+            let array = format!("g{slot}");
+            let low = merge(&array, "word", "low_mask", "low");
+            let high = merge(&array, "word + 1u", "high_mask", "high");
+            out.push_str(&format!(
+                "    case {slot}u: {{\n      if (word < arrayLength(&{array})) {{\n{low}      }}\n      \
+                 if (high_mask != 0u && word + 1u < arrayLength(&{array})) {{\n{high}      }}\n    }}\n"
+            ));
+        }
+        out.push_str("    default: { }\n  }\n}\n\n");
+
+        out.push_str(
+            "fn gAtom(op: u32, slot: u32, offset: u32, value: u32, stored: u32) -> u32 {\n  let word = offset >> 2u;\n  switch (slot) {\n",
         );
         for (slot, _) in layout.globals.iter().enumerate().filter(|(_, g)| g.written) {
             out.push_str(&format!(
                 "    case {slot}u: {{\n      if (word < arrayLength(&g{slot})) {{\n        switch (op) {{\n"
             ));
-            for (code, (_, function)) in ATOMS.iter().enumerate() {
-                out.push_str(&format!(
-                    "          case {code}u: {{ return {function}(&g{slot}[word], value); }}\n"
-                ));
+            for (code, (_, _, update)) in ATOMS.iter().enumerate() {
+                match update {
+                    Update::Direct(function) => out.push_str(&format!(
+                        "          case {code}u: {{ return {function}(&g{slot}[word], value); }}\n"
+                    )),
+                    Update::Loop(next) => out.push_str(&format!(
+                        "          case {code}u: {{\n{}            return was;\n          }}\n",
+                        compare_exchange(&format!("g{slot}"), "word", next, "            ")
+                    )),
+                }
             }
             out.push_str("          default: { }\n        }\n      }\n    }\n");
         }

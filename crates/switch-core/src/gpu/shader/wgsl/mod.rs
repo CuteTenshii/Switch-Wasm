@@ -110,7 +110,8 @@ fn attrIn(offset: u32) -> f32 { return 0.0; }
 fn attrOut(offset: u32, value: f32) { }
 fn cbRead(bank: u32, offset: u32) -> u32 { return 0u; }
 fn gRead(slot: u32, offset: u32) -> u32 { return 0u; }
-fn gAtom(op: u32, slot: u32, offset: u32, value: u32) -> u32 { return 0u; }
+fn gWrite(slot: u32, offset: u32, value: u32, mask: u32) { }
+fn gAtom(op: u32, slot: u32, offset: u32, value: u32, stored: u32) -> u32 { return 0u; }
 fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }

@@ -2,7 +2,7 @@
 
 use super::Translation;
 use crate::gpu::pipeline::{AttributeBase, Packed1010102};
-use crate::gpu::shader::isa::{AtomOp, TexDim};
+use crate::gpu::shader::isa::{AtomOp, AtomType, TexDim};
 use crate::gpu::texture::{SwizzleSource, TextureSlot};
 
 /// A buffer a shader reaches through a 64-bit constant-bank descriptor.
@@ -10,7 +10,7 @@ use crate::gpu::texture::{SwizzleSource, TextureSlot};
 pub struct Global {
     pub bank: u8,
     pub offset: u16,
-    /// Whether an atomic writes it, which makes it a read-write binding.
+    /// Whether a store or atomic writes it, which makes it a read-write binding.
     pub written: bool,
 }
 
@@ -169,16 +169,60 @@ pub const CONSTANTS_BINDING: u32 = 0;
 /// Banks the table has entries for.
 pub const CONSTANT_BANKS: u32 = 18;
 
-/// The atomics `gAtom` runs, by the code it is passed; all on unsigned words.
-pub(super) const ATOMS: [(AtomOp, &str); 7] = [
-    (AtomOp::Add, "atomicAdd"),
-    (AtomOp::Min, "atomicMin"),
-    (AtomOp::Max, "atomicMax"),
-    (AtomOp::And, "atomicAnd"),
-    (AtomOp::Or, "atomicOr"),
-    (AtomOp::Xor, "atomicXor"),
-    (AtomOp::Exch, "atomicExchange"),
+/// How `gAtom` applies an atomic to a word.
+pub(super) enum Update {
+    /// A WGSL atomic function on the unsigned word.
+    Direct(&'static str),
+    /// A bounded compare-exchange loop; the expression over `was`, `value` and `stored` is the new word.
+    Loop(&'static str),
+}
+
+/// The atomics `gAtom` runs, by the code it is passed. Eden defines `inc` and `dec` on
+/// words, `safeadd`, and every `f32` operation but `add` as plain loads, so they have no row.
+/// An integer type with no row of its own runs its operation's `u32` row.
+pub(super) const ATOMS: [(AtomOp, AtomType, Update); 11] = [
+    (AtomOp::Add, AtomType::U32, Update::Direct("atomicAdd")),
+    (AtomOp::Min, AtomType::U32, Update::Direct("atomicMin")),
+    (AtomOp::Max, AtomType::U32, Update::Direct("atomicMax")),
+    (AtomOp::And, AtomType::U32, Update::Direct("atomicAnd")),
+    (AtomOp::Or, AtomType::U32, Update::Direct("atomicOr")),
+    (AtomOp::Xor, AtomType::U32, Update::Direct("atomicXor")),
+    (
+        AtomOp::Exch,
+        AtomType::U32,
+        Update::Direct("atomicExchange"),
+    ),
+    (
+        AtomOp::Cas,
+        AtomType::U32,
+        Update::Loop("select(was, stored, was == value)"),
+    ),
+    (
+        AtomOp::Min,
+        AtomType::S32,
+        Update::Loop("bitcast<u32>(min(bitcast<i32>(was), bitcast<i32>(value)))"),
+    ),
+    (
+        AtomOp::Max,
+        AtomType::S32,
+        Update::Loop("bitcast<u32>(max(bitcast<i32>(was), bitcast<i32>(value)))"),
+    ),
+    (
+        AtomOp::Add,
+        AtomType::F32,
+        Update::Loop("bitcast<u32>(bitcast<f32>(was) + bitcast<f32>(value))"),
+    ),
 ];
+
+/// The `gAtom` code for an atomic on a 32-bit word; `None` for the 64 and 128-bit types.
+pub(super) fn atom_code(op: AtomOp, ty: AtomType) -> Option<usize> {
+    let row = |want: AtomType| ATOMS.iter().position(|&(o, t, _)| o == op && t == want);
+    match ty {
+        AtomType::U32 | AtomType::F32 => row(ty),
+        AtomType::S32 => row(ty).or_else(|| row(AtomType::U32)),
+        _ => None,
+    }
+}
 
 impl Layout {
     /// Read a program's interface off its translation.

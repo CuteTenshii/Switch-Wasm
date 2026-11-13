@@ -497,7 +497,7 @@ fn a_global_load_through_a_descriptor_binds_the_memory_it_names() {
         "{source}"
     );
     assert!(
-        source.contains("case 0u: { return g0[offset >> 2u]; }"),
+        source.contains("if (word >= arrayLength(&g0)) { return 0u; }\n      return g0[word];"),
         "{source}"
     );
 
