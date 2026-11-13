@@ -495,9 +495,9 @@ fn vertex_entry(layout: &Layout) -> String {
         out.push_str("}\n\n");
     }
     out.push_str("struct VertexOutput {\n  @builtin(position) position: vec4<f32>,\n");
-    for slot in &layout.varyings {
+    for (location, slot) in layout.varyings.iter().enumerate() {
         out.push_str(&format!(
-            "  @location({slot}) @interpolate(linear{}) vary{slot}: vec4<f32>,\n",
+            "  @location({location}) @interpolate(linear{}) vary{slot}: vec4<f32>,\n",
             layout.sampling(*slot)
         ));
     }
@@ -611,9 +611,9 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         out.push_str("override pass_sample: u32 = 0u;\n\n");
     }
     out.push_str("struct FragmentInput {\n  @builtin(position) position: vec4<f32>,\n");
-    for slot in &layout.varyings {
+    for (location, slot) in layout.varyings.iter().enumerate() {
         out.push_str(&format!(
-            "  @location({slot}) @interpolate(linear{}) vary{slot}: vec4<f32>,\n",
+            "  @location({location}) @interpolate(linear{}) vary{slot}: vec4<f32>,\n",
             layout.sampling(*slot)
         ));
     }

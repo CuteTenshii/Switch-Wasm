@@ -257,11 +257,11 @@ fn both_stages_name_the_same_location_for_a_varying() {
     let vs = module(&vs, Stage::Vertex, &Layout::of(&vs, Stage::Vertex)).unwrap();
     let fs = module(&fs, Stage::Fragment, &Layout::of(&fs, Stage::Fragment)).unwrap();
     assert!(
-        vs.contains("@location(7) @interpolate(linear) vary7"),
+        vs.contains("@location(0) @interpolate(linear) vary7"),
         "{vs}"
     );
     assert!(
-        fs.contains("@location(7) @interpolate(linear) vary7"),
+        fs.contains("@location(0) @interpolate(linear) vary7"),
         "{fs}"
     );
 }
@@ -300,11 +300,11 @@ fn a_centroid_varying_is_qualified_the_same_way_in_both_stages() {
     let vs = module(&vs, Stage::Vertex, &vs_layout).unwrap();
     let fs = module(&fs, Stage::Fragment, &fs_layout).unwrap();
     assert!(
-        vs.contains("@location(5) @interpolate(linear, centroid) vary5"),
+        vs.contains("@location(0) @interpolate(linear, centroid) vary5"),
         "{vs}"
     );
     assert!(
-        fs.contains("@location(5) @interpolate(linear, centroid) vary5"),
+        fs.contains("@location(0) @interpolate(linear, centroid) vary5"),
         "{fs}"
     );
 }
