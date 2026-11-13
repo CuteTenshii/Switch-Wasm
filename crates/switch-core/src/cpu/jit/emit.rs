@@ -210,6 +210,15 @@ const UNALIGNED: u8 = 0;
 const V128_LOAD: u32 = 0x00;
 const V128_STORE: u32 = 0x0B;
 
+/// wasm `i64` comparisons that `i64_eq`, `i64_ne` and `i64_lt_u` do not cover.
+const I64_LT_S: u8 = 0x53;
+const I64_GT_S: u8 = 0x55;
+const I64_GT_U: u8 = 0x56;
+const I64_LE_S: u8 = 0x57;
+const I64_LE_U: u8 = 0x58;
+const I64_GE_S: u8 = 0x59;
+const I64_GE_U: u8 = 0x5A;
+
 /// Why a block was not written out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
@@ -401,6 +410,17 @@ struct Emitter<'a> {
     /// The type of each local from `L_REGS` on, in index order.
     local_types: Vec<u8>,
     next_local: u32,
+    /// The operands of a compare whose NZCV is not built yet, and which form
+    /// it is (0 when none is held, else 1 for 32-bit and 2 for 64-bit), once
+    /// the region has one. [`Emitter::epilogue`] builds the word if a run
+    /// leaves while one is held.
+    pend_a: u32,
+    pend_b: u32,
+    pend_kind: u32,
+    /// The forms of compare the region holds, as bit 0 for 32-bit and bit 1 for 64-bit.
+    pend_forms: u8,
+    /// Whether the compare being emitted is overwritten before anything reads its flags.
+    flags_dead: bool,
     /// Whether a watchpoint was armed when the region was emitted.
     watches: bool,
     /// Where the region's calls return to: what a `RET` in it is compared with.
@@ -439,6 +459,11 @@ impl<'a> Emitter<'a> {
             vwritten: 0,
             local_types: Vec::new(),
             next_local: L_REGS,
+            pend_a: 0,
+            pend_b: 0,
+            pend_kind: 0,
+            pend_forms: 0,
+            flags_dead: false,
             flags_used: false,
             flags_written: false,
             fuel_used: false,
@@ -460,26 +485,27 @@ impl Emitter<'_> {
         self.f.local_get(local);
     }
 
+    /// A new local of type `ty`.
+    fn fresh_local(&mut self, ty: u8) -> u32 {
+        self.local_types.push(ty);
+        self.next_local += 1;
+        self.next_local - 1
+    }
+
     /// The local holding `slot`, assigned on first use.
     fn local_of(&mut self, slot: u8) -> u32 {
-        let local = &mut self.locals[usize::from(slot)];
-        if *local == 0 {
-            *local = self.next_local;
-            self.next_local += 1;
-            self.local_types.push(I64);
+        if self.locals[usize::from(slot)] == 0 {
+            self.locals[usize::from(slot)] = self.fresh_local(I64);
         }
-        *local
+        self.locals[usize::from(slot)]
     }
 
     /// The local holding `V<r>`, assigned on first use.
     fn vlocal_of(&mut self, r: u32) -> u32 {
-        let local = &mut self.vlocals[r as usize];
-        if *local == 0 {
-            *local = self.next_local;
-            self.next_local += 1;
-            self.local_types.push(V128);
+        if self.vlocals[r as usize] == 0 {
+            self.vlocals[r as usize] = self.fresh_local(V128);
         }
-        *local
+        self.vlocals[r as usize]
     }
 
     /// Narrow the value on the stack to the operation's width.
@@ -682,6 +708,10 @@ impl Emitter<'_> {
             match block.exits.get(next_exit) {
                 Some(branch) if branch.at as usize == i => {
                     let retired = i + branch.span as usize;
+                    self.flags_dead = matches!(
+                        branch.exit,
+                        Exit::CmpImm { .. } | Exit::CmpReg { .. } | Exit::UpdateCmpImm { .. }
+                    ) && flags_overwritten(block, retired, next_exit + 1);
                     if !self.exit(&branch.exit, retired) {
                         return Err(Refused::ControlFlow);
                     }
@@ -727,6 +757,18 @@ impl Emitter<'_> {
     /// Store what the region changed and answer `L_RET`; a region that left
     /// writes the target to `pc` and, chained, jumps into its compiled form.
     fn epilogue(&mut self) {
+        if self.pend_kind != 0 {
+            for sf in [false, true] {
+                if self.pend_forms & (1 << u8::from(sf)) != 0 {
+                    self.f.local_get(self.pend_kind);
+                    self.f.i32_const(1 + i32::from(sf));
+                    self.f.i32_eq();
+                    self.f.if_void();
+                    self.materialize_pending(sf);
+                    self.f.end();
+                }
+            }
+        }
         let regs = self.layout.regs;
         for slot in 0..REG_SLOTS as u32 {
             if self.written & (1 << slot) != 0 {
@@ -1097,6 +1139,75 @@ impl Emitter<'_> {
         self.flags_used = true;
         self.flags_written = true;
         self.f.local_set(L_NZCV);
+        if self.pend_kind != 0 {
+            self.f.i32_const(0);
+            self.f.local_set(self.pend_kind);
+        }
+    }
+
+    /// Build NZCV from the compare held in the pending locals.
+    fn materialize_pending(&mut self, sf: bool) {
+        self.f.local_get(self.pend_a);
+        self.f.local_set(L_A);
+        self.f.local_get(self.pend_b);
+        self.invert_if(1, sf);
+        self.f.local_set(L_B);
+        self.add_carry(1, true, sf);
+        self.pack_nzcv(sf, true);
+        self.store_nzcv();
+    }
+
+    /// Whether `cond` after a `CMP` can be tested on the operands, and the
+    /// wasm comparison that does it.
+    fn direct_compare(cond: u8) -> Option<(u8, bool)> {
+        match cond & 0xF {
+            0 => Some((0x51, false)),
+            1 => Some((0x52, false)),
+            2 => Some((I64_GE_U, false)),
+            3 => Some((0x54, false)),
+            8 => Some((I64_GT_U, false)),
+            9 => Some((I64_LE_U, false)),
+            10 => Some((I64_GE_S, true)),
+            11 => Some((I64_LT_S, true)),
+            12 => Some((I64_GT_S, true)),
+            13 => Some((I64_LE_S, true)),
+            _ => None,
+        }
+    }
+
+    /// A fused `CMP` and branch whose flags nothing reads: the condition is
+    /// tested on the operands, which the caller left in the pending locals,
+    /// and NZCV is built only where the run could leave the compare behind.
+    fn lazy_branch(&mut self, cond: u8, sf: bool, retired: usize, target: u32) {
+        let (compare, signed) =
+            Self::direct_compare(cond).expect("the caller checked the condition");
+        self.pend_forms |= 1 << u8::from(sf);
+        self.f.i32_const(1 + i32::from(sf));
+        self.f.local_set(self.pend_kind);
+        self.flags_used = true;
+        self.flags_written = true;
+        for local in [self.pend_a, self.pend_b] {
+            self.f.local_get(local);
+            if signed && !sf {
+                self.f.i64_extend32_s();
+            }
+        }
+        self.f.op_raw(compare);
+        self.f.if_void();
+        if self.inside(target).is_some() {
+            self.materialize_pending(sf);
+        }
+        self.goto(retired, target, false);
+        self.f.end();
+    }
+
+    /// The locals a held compare's operands and form live in, assigned on first use.
+    fn pending_locals(&mut self) {
+        if self.pend_kind == 0 {
+            self.pend_a = self.fresh_local(I64);
+            self.pend_b = self.fresh_local(I64);
+            self.pend_kind = self.fresh_local(I32);
+        }
     }
 
     /// `AND`/`ORR`/`EOR`/`ANDS` with the second operand already in `L_B`.
@@ -1205,6 +1316,38 @@ impl Emitter<'_> {
                 target
             }
             // The compare runs whether or not the branch is taken.
+            Exit::CmpImm {
+                rn,
+                imm,
+                carry,
+                sf,
+                cond,
+                target,
+            } if carry != 0 && self.flags_dead && Self::direct_compare(cond).is_some() => {
+                self.pending_locals();
+                self.read_reg(rn, sf);
+                self.f.local_set(self.pend_a);
+                self.f.i64_const(i64::from(imm) & width_mask(sf));
+                self.f.local_set(self.pend_b);
+                self.lazy_branch(cond, sf, retired, target);
+                return true;
+            }
+            Exit::CmpReg {
+                rn,
+                rm,
+                carry,
+                sf,
+                cond,
+                target,
+            } if carry != 0 && self.flags_dead && Self::direct_compare(cond).is_some() => {
+                self.pending_locals();
+                self.read_reg(rn, sf);
+                self.f.local_set(self.pend_a);
+                self.read_reg(rm, sf);
+                self.f.local_set(self.pend_b);
+                self.lazy_branch(cond, sf, retired, target);
+                return true;
+            }
             Exit::CmpImm {
                 rn,
                 imm,
@@ -2618,6 +2761,87 @@ fn access_bytes(acc: Acc) -> u32 {
 }
 
 /// Whether [`emit_block`] writes `term` instead of leaving it to [`super::exec`].
+/// What an instruction does to NZCV.
+enum FlagEffect {
+    Neutral,
+    Overwrites,
+    Live,
+}
+
+fn flag_effect(op: &Op) -> FlagEffect {
+    match op {
+        Op::AddSubImm { set_flags, .. }
+        | Op::AddSubShifted { set_flags, .. }
+        | Op::AddSubReg { set_flags, .. }
+        | Op::AddSubExtended { set_flags, .. } => {
+            if *set_flags {
+                FlagEffect::Overwrites
+            } else {
+                FlagEffect::Neutral
+            }
+        }
+        // `ANDS` keeps C and V, so it reads the flags.
+        Op::LogicalImm { opc, .. }
+        | Op::LogicalShifted { opc, .. }
+        | Op::LogicalReg { opc, .. } => {
+            if *opc == 0b11 {
+                FlagEffect::Live
+            } else {
+                FlagEffect::Neutral
+            }
+        }
+        Op::Nop
+        | Op::MovConst { .. }
+        | Op::Mov32 { .. }
+        | Op::Mov64 { .. }
+        | Op::MovK { .. }
+        | Op::Extract { .. }
+        | Op::Bitfield { .. }
+        | Op::Extr { .. }
+        | Op::Madd { .. }
+        | Op::MaddLong { .. }
+        | Op::Mulh { .. }
+        | Op::ShiftVar { .. }
+        | Op::Divide { .. }
+        | Op::OneSource { .. }
+        | Op::Crc { .. }
+        | Op::LoadStoreImm { .. }
+        | Op::Load64 { .. }
+        | Op::Store64 { .. }
+        | Op::Load32 { .. }
+        | Op::Store32 { .. }
+        | Op::Load8 { .. }
+        | Op::Store8 { .. }
+        | Op::LoadStoreReg { .. }
+        | Op::Pair { .. }
+        | Op::PairLoad64 { .. }
+        | Op::PairStore64 { .. }
+        | Op::LoadLiteral { .. }
+        | Op::SimdLoadStore { .. } => FlagEffect::Neutral,
+        _ => FlagEffect::Live,
+    }
+}
+
+/// Whether a fused compare ending at op `from` (its next exit being `exit`)
+/// has its flags overwritten by a later compare or flag-setting instruction
+/// of the block before anything reads them or the block ends.
+fn flags_overwritten(block: &Block, from: usize, exit: usize) -> bool {
+    for i in from..block.ops.len() {
+        if let Some(branch) = block.exits.get(exit).filter(|b| b.at as usize == i) {
+            return matches!(
+                branch.exit,
+                Exit::CmpImm { .. } | Exit::CmpReg { .. } | Exit::UpdateCmpImm { .. }
+            );
+        }
+        match flag_effect(&block.ops[i]) {
+            FlagEffect::Neutral => {}
+            FlagEffect::Overwrites => return true,
+            FlagEffect::Live => return false,
+        }
+    }
+    false
+}
+
 pub(super) fn writes_term(term: &Term) -> bool {
     matches!(
         term,
