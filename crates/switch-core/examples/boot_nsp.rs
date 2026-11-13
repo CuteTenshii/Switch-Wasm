@@ -13,6 +13,14 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    report: common::Report,
+    #[command(flatten)]
+    play: common::Play,
+    #[command(flatten)]
+    probe: common::Probe,
     /// Instructions to run.
     #[arg(long, default_value_t = 2_000_000)]
     max_steps: u64,
@@ -28,7 +36,14 @@ struct Cli {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.boot)
+            .with(&cli.report)
+            .with(&cli.play)
+            .with(&cli.probe)
+    });
     let title = cli.target.open();
     println!(
         "program {:016x}: {} file(s) in the ExeFS",
@@ -66,12 +81,16 @@ fn main() {
     let mut profile = Profile::new(cli.profile, 0);
     let mut press = common::Press::from_flags();
     let pace = debug.pace(profile.is_on());
-    common::apply_no_draw(&mut cpu);
+    let mut draw_gate =
+        common::DrawGate::install(&mut cpu, Box::new(switch_core::gpu::renderer::Software));
     let cores = common::start_cores(&mut cpu);
     let started = std::time::Instant::now();
     let mut frames_seen = 0;
     let run = common::drive(&mut cpu, pace, cli.max_steps, |cpu, done| {
         debug.tick(cpu, done);
+        if let Some(gate) = draw_gate.as_mut() {
+            gate.tick(cpu);
+        }
         if cpu.nv.gpu.frames != frames_seen {
             frames_seen = cpu.nv.gpu.frames;
             println!(

@@ -16,6 +16,10 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    report: common::Report,
     /// Presented frame to start recording after.
     #[arg(long, default_value_t = 4)]
     frame: u64,
@@ -167,7 +171,12 @@ fn report(label: &str, used: &[Used], caps: Caps, before: Option<usize>) {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.boot)
+            .with(&cli.report)
+    });
     let title = cli.target.open();
     let want_frame = cli.frame;
 

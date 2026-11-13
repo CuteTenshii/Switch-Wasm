@@ -14,6 +14,16 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    report: common::Report,
+    #[command(flatten)]
+    play: common::Play,
+    #[command(flatten)]
+    shots: common::Shots,
+    #[command(flatten)]
+    probe: common::Probe,
     /// Where the frame is written.
     #[arg(long, value_name = "OUT.PPM")]
     out: String,
@@ -73,7 +83,15 @@ fn bounds(text: &str) -> Result<(u32, u32), String> {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.boot)
+            .with(&cli.report)
+            .with(&cli.play)
+            .with(&cli.shots)
+            .with(&cli.probe)
+    });
     let program = cli.target.open_program();
     let (out, want) = (&cli.out, cli.frame);
 
@@ -113,6 +131,7 @@ fn main() {
         u64::MAX
     };
     let pace = debug.pace(profile.is_on() || cover.is_some() || poke.is_some() || gate_sniff);
+    let cores = common::start_cores(&mut cpu);
     let run = common::drive(
         &mut cpu,
         pace,
@@ -252,6 +271,7 @@ fn main() {
     profile.report();
     println!("[bt] {:#x} <- {:x?}", cpu.get_pc(), cpu.backtrace(12));
     print!("{}", cpu.thread_dump());
+    common::stop_cores(&mut cpu, cores);
     common::report(&cpu, &run);
     debug.report();
     debug.stop_state(&cpu);

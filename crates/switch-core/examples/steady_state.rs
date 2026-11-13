@@ -15,6 +15,10 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    report: common::Report,
     /// Presented frame to start sampling after.
     #[arg(long, default_value_t = 60)]
     frame: u64,
@@ -33,7 +37,12 @@ const STACK_EVERY: u64 = 512;
 const BOOT_BUDGET: u64 = 20_000_000_000;
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.boot)
+            .with(&cli.report)
+    });
     let title = cli.target.open();
     let (want_frame, steps) = (cli.frame, cli.steps);
 

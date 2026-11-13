@@ -17,6 +17,10 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    report: common::Report,
     /// Frames to count.
     #[arg(long, default_value_t = 30)]
     frames: u64,
@@ -153,7 +157,12 @@ fn frame(cpu: &mut Cpu, total_steps: &mut u64) -> Option<Delta> {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.boot)
+            .with(&cli.report)
+    });
     let program = cli.target.open_program();
     let frames = cli.frames.max(1);
 

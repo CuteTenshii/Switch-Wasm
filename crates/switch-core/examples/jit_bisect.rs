@@ -18,6 +18,8 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
     /// Instructions to compare over.
     #[arg(long, default_value_t = 2_000_000_000)]
     max_steps: u64,
@@ -125,7 +127,8 @@ fn print_jit_stats(cpu: &Cpu) {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli =
+        common::parse::<Cli>(|cli| common::Flags::default().with(&cli.shared).with(&cli.boot));
     let max_steps = cli.max_steps;
     let window = cli.window.max(SLICE);
     let program = cli.target.open_program();

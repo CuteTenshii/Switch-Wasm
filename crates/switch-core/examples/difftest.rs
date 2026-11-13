@@ -20,7 +20,7 @@ struct Cli {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| common::Flags::default().with(&cli.shared));
     let code = common::read(&cli.code);
     let inputs = common::read(&cli.inputs);
     let (out, inputs_addr) = (&cli.out, cli.inputs_addr);

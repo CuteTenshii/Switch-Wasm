@@ -82,7 +82,7 @@ struct Cli {
 }
 
 fn main() {
-    let out_dir = common::parse::<Cli>(|cli| &cli.shared).out;
+    let out_dir = common::parse::<Cli>(|cli| common::Flags::default().with(&cli.shared)).out;
     std::fs::create_dir_all(&out_dir).expect("cannot create the output directory");
     std::fs::write(format!("{out_dir}/guest.bin"), window_bytes())
         .expect("cannot write the window");

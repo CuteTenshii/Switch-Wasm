@@ -24,7 +24,7 @@ use switch_core::trace::Trace;
 /// The font `pl:u` serves when no firmware fonts are registered.
 const FALLBACK_FONT: &[u8] = include_bytes!("../../../../web/font.ttf");
 
-// The flags a tool that boots a machine takes: what a run traces and dumps, and how it is driven.
+/// The flags every tool that builds a machine takes.
 #[derive(ClapArgs, Clone, Default)]
 pub struct Shared {
     /// Trace channels to switch on (`svc`, `ipc`, ...).
@@ -36,15 +36,11 @@ pub struct Shared {
     /// Present as fast as the guest asks instead of pacing to 60 Hz.
     #[arg(long)]
     no_vsync_throttle: bool,
-    /// Write every decoded texture into this directory.
-    #[arg(long, value_name = "DIR")]
-    dump_tex: Option<String>,
-    /// Write every translated shader's WGSL into this directory.
-    #[arg(long, value_name = "DIR")]
-    dump_wgsl: Option<String>,
-    /// Write the WGSL the device was handed into this directory.
-    #[arg(long, value_name = "DIR")]
-    dump_device_wgsl: Option<String>,
+}
+
+/// The flags of a tool that boots a container or an NRO through [`Program`] or [`Title`].
+#[derive(ClapArgs, Clone, Default)]
+pub struct Boot {
     /// Boot docked (1080p).
     #[arg(long)]
     docked: bool,
@@ -57,24 +53,53 @@ pub struct Shared {
     /// Add-on content containers to mount.
     #[arg(long, value_delimiter = ',', value_name = "NSP")]
     dlc: Vec<String>,
+}
+
+/// The flags of a tool that [`drive`]s a machine to frames and reports what the run produced.
+#[derive(ClapArgs, Clone, Default)]
+pub struct Report {
+    /// Write every decoded texture into this directory.
+    #[arg(long, value_name = "DIR")]
+    dump_tex: Option<String>,
+    /// Write every translated shader's WGSL into this directory.
+    #[arg(long, value_name = "DIR")]
+    dump_wgsl: Option<String>,
+    /// Write the WGSL the device was handed into this directory.
+    #[arg(long, value_name = "DIR")]
+    dump_device_wgsl: Option<String>,
+    /// Print each frame's wall-clock cost.
+    #[arg(long)]
+    frame_times: bool,
+}
+
+/// The flags of a tool that plays a title: input, drawing and extra cores.
+#[derive(ClapArgs, Clone, Default)]
+pub struct Play {
     /// Tap buttons every interval steps, e.g. `A+DOWN@300000000`.
     #[arg(long, value_parser = Press::parse, value_name = "BUTTONS@INTERVAL")]
     press: Option<Press>,
     /// Present frames without drawing them.
     #[arg(long)]
     no_draw: bool,
-    /// Write the screen to `<out>.<frame>.ppm` every this many presented frames.
-    #[arg(long, value_name = "K")]
-    shots_every: Option<u64>,
     /// Draw nothing until this presented frame: reaches a late scene at no-draw speed.
     #[arg(long, value_name = "N")]
     draw_from_frame: Option<u64>,
     /// Extra guest cores, each on a host thread.
     #[arg(long, default_value_t = 0, value_name = "N")]
     cores: u64,
-    /// Print each frame's wall-clock cost.
-    #[arg(long)]
-    frame_times: bool,
+}
+
+/// The flag of a tool that writes the screen out as it runs.
+#[derive(ClapArgs, Clone, Default)]
+pub struct Shots {
+    /// Write the screen to `<out>.<frame>.ppm` every this many presented frames.
+    #[arg(long, value_name = "K")]
+    shots_every: Option<u64>,
+}
+
+/// The watchpoints and dumps of a tool that runs a machine under [`Debug`].
+#[derive(ClapArgs, Clone, Default)]
+pub struct Probe {
     /// Report the pc and call stack of the first writes into a region.
     #[arg(long, value_parser = span, value_name = "ADDR:SIZE")]
     trap_write: Option<(u32, u32)>,
@@ -106,29 +131,63 @@ pub struct Shared {
     dump: Option<String>,
 }
 
-static SHARED: OnceLock<Shared> = OnceLock::new();
-
-fn shared() -> &'static Shared {
-    SHARED.get_or_init(Shared::default)
+/// The groups a tool flattened, handed to [`parse`] by [`Flags::with`].
+#[derive(Default)]
+pub struct Flags {
+    shared: Shared,
+    boot: Boot,
+    report: Report,
+    play: Play,
+    shots: Shots,
+    probe: Probe,
 }
 
-/// Parse the command line, `shared_of` naming where the tool flattened [`Shared`], and hand the
-/// core what the flags ask for: the trace channels and the dump directories. The core itself
-/// reads no environment.
-pub fn parse<C: Parser>(shared_of: impl FnOnce(&C) -> &Shared) -> C {
+/// A flag group a tool can flatten.
+pub trait Group: Clone {
+    fn put(&self, flags: &mut Flags);
+}
+
+macro_rules! groups {
+    ($($group:ident: $field:ident),*) => {$(
+        impl Group for $group {
+            fn put(&self, flags: &mut Flags) {
+                flags.$field = self.clone();
+            }
+        }
+    )*};
+}
+groups!(Shared: shared, Boot: boot, Report: report, Play: play, Shots: shots, Probe: probe);
+
+impl Flags {
+    pub fn with(mut self, group: &impl Group) -> Flags {
+        group.put(&mut self);
+        self
+    }
+}
+
+static FLAGS: OnceLock<Flags> = OnceLock::new();
+
+fn flags() -> &'static Flags {
+    FLAGS.get_or_init(Flags::default)
+}
+
+/// Parse the command line, `groups_of` naming the groups the tool flattened, and hand the core
+/// what the flags ask for: the trace channels and the dump directories. The core itself reads no
+/// environment.
+pub fn parse<C: Parser>(groups_of: impl FnOnce(&C) -> Flags) -> C {
     let cli = C::parse();
-    let flags = shared_of(&cli).clone();
-    let mut channels = flags.trace.clone();
-    if flags.dump_wgsl.is_some() && !channels.contains(&Trace::Wgsl) {
+    let flags = groups_of(&cli);
+    let mut channels = flags.shared.trace.clone();
+    if flags.report.dump_wgsl.is_some() && !channels.contains(&Trace::Wgsl) {
         channels.push(Trace::Wgsl);
     }
     switch_core::trace::set_mask(&channels);
     switch_core::dump::install(Box::new(DumpDirs {
-        texture: flags.dump_tex.clone(),
-        raster_wgsl: flags.dump_wgsl.clone(),
-        device_wgsl: flags.dump_device_wgsl.clone(),
+        texture: flags.report.dump_tex.clone(),
+        raster_wgsl: flags.report.dump_wgsl.clone(),
+        device_wgsl: flags.report.dump_device_wgsl.clone(),
     }));
-    SHARED.set(flags).ok();
+    FLAGS.set(flags).ok();
     cli
 }
 
@@ -140,8 +199,8 @@ fn channel(name: &str) -> Result<Trace, String> {
 /// A machine with the `--no-jit` and `--no-vsync-throttle` flags applied.
 pub fn new_cpu() -> Cpu {
     let mut cpu = Cpu::new();
-    cpu.set_jit_enabled(!shared().no_jit);
-    cpu.set_vsync_throttle(!shared().no_vsync_throttle);
+    cpu.set_jit_enabled(!flags().shared.no_jit);
+    cpu.set_vsync_throttle(!flags().shared.no_vsync_throttle);
     cpu
 }
 
@@ -305,7 +364,7 @@ impl Program {
 
 /// `--docked` boots docked (1080p), as the frontend's dock toggle does.
 fn apply_docked(cpu: &mut Cpu) {
-    if shared().docked {
+    if flags().boot.docked {
         cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
     }
 }
@@ -420,7 +479,7 @@ pub struct Press {
 impl Press {
     /// The `--press` flag, if given.
     pub fn from_flags() -> Option<Press> {
-        shared().press.clone()
+        flags().play.press.clone()
     }
 
     fn parse(raw: &str) -> Result<Press, String> {
@@ -458,14 +517,8 @@ impl Press {
     }
 }
 
-/// Swap in [`NoDraw`] for `--no-draw`.
-pub fn apply_no_draw(cpu: &mut Cpu) {
-    if shared().no_draw {
-        cpu.nv.gpu.set_renderer(Box::new(NoDraw));
-    }
-}
-
-/// Installs `real`, or with `--draw-from-frame` draws nothing until that frame and then hands over to it.
+/// Installs `real`, [`NoDraw`] for `--no-draw`, or with `--draw-from-frame` draws nothing until
+/// that frame and then hands over to `real`.
 pub struct DrawGate {
     real: Option<Box<dyn switch_core::gpu::renderer::Renderer>>,
     from: u64,
@@ -476,8 +529,11 @@ impl DrawGate {
         cpu: &mut Cpu,
         real: Box<dyn switch_core::gpu::renderer::Renderer>,
     ) -> Option<DrawGate> {
-        let Some(from) = shared().draw_from_frame else {
-            cpu.nv.gpu.set_renderer(real);
+        let play = &flags().play;
+        let Some(from) = play.draw_from_frame.filter(|_| !play.no_draw) else {
+            cpu.nv
+                .gpu
+                .set_renderer(if play.no_draw { Box::new(NoDraw) } else { real });
             return None;
         };
         cpu.nv.gpu.set_renderer(Box::new(NoDraw));
@@ -498,7 +554,7 @@ impl DrawGate {
 
 /// `--shots-every`: the screen at every Kth presented frame, beside `out`.
 pub fn shoot(cpu: &Cpu, out: &str, last: &mut u64) {
-    let Some(every) = shared().shots_every else {
+    let Some(every) = flags().shots.shots_every else {
         return;
     };
     let frame = cpu.nv.gpu.frames;
@@ -510,7 +566,7 @@ pub fn shoot(cpu: &Cpu, out: &str, last: &mut u64) {
 
 /// `--cores <n>` more guest cores, each served on a host thread, for [`stop_cores`].
 pub fn start_cores(cpu: &mut Cpu) -> Vec<std::thread::JoinHandle<()>> {
-    (0..shared().cores)
+    (0..flags().play.cores)
         .map(|_| {
             let slot = cpu.add_core();
             std::thread::spawn(move || switch_core::cpu::serve(slot))
@@ -540,7 +596,7 @@ pub fn load_fallback_font(cpu: &mut Cpu) {
 /// its programs as the browser's NAND does, so library applets run. Returns the
 /// number of data archives.
 pub fn register_firmware(cpu: &mut Cpu, keys: &KeySet) -> usize {
-    let Some(dir) = &shared().firmware else {
+    let Some(dir) = &flags().boot.firmware else {
         return 0;
     };
     let Ok(entries) = fs::read_dir(dir) else {
@@ -642,7 +698,7 @@ struct FrameTimes {
 impl FrameTimes {
     fn new(cpu: &Cpu) -> FrameTimes {
         FrameTimes {
-            on: shared().frame_times,
+            on: flags().report.frame_times,
             last_count: cpu.nv.gpu.frames,
             last_at: Instant::now(),
             deltas: Vec::new(),
@@ -972,7 +1028,7 @@ pub struct Debug {
 
 impl Debug {
     pub fn from_flags() -> Debug {
-        let flags = shared();
+        let flags = &flags().probe;
         Debug {
             write_trap: flags.trap_write,
             read_trap: flags.trap_read,
@@ -1404,7 +1460,7 @@ impl Update {
     /// The update `--update <path.nsp>` names, if any. Its title key goes into
     /// `keys`.
     fn from_env(keys: &mut KeySet) -> Option<Update> {
-        let path = std::path::PathBuf::from(shared().update.as_ref()?);
+        let path = std::path::PathBuf::from(flags().boot.update.as_ref()?);
         let (program, nca) = open_program(&path, keys);
         if !nca.is_update() {
             die(&format!(
@@ -1419,7 +1475,7 @@ impl Update {
 /// Give the running title the add-on content `--dlc <a.nsp>,<b.nsp>` names,
 /// skipping content that belongs to another title.
 pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
-    for path in &shared().dlc {
+    for path in &flags().boot.dlc {
         let path = Path::new(path);
         let src = open_source(path);
         let pfs0 = match switch_core::xci::read_container(&src) {

@@ -16,6 +16,10 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    report: common::Report,
     /// Instructions to run before measuring.
     #[arg(long, default_value_t = 5_000_000_000)]
     skip: u64,
@@ -30,7 +34,12 @@ fn class(word: u32) -> u32 {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.boot)
+            .with(&cli.report)
+    });
     let program = cli.target.open_program();
     let mut cpu = common::new_cpu();
     cpu.bootstrap();

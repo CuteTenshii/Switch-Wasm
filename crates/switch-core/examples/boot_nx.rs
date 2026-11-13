@@ -12,6 +12,12 @@ struct Cli {
     nro: String,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    report: common::Report,
+    #[command(flatten)]
+    play: common::Play,
+    #[command(flatten)]
+    probe: common::Probe,
     /// Instructions to run.
     #[arg(long, default_value_t = u64::MAX)]
     steps: u64,
@@ -25,7 +31,13 @@ struct Cli {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.report)
+            .with(&cli.play)
+            .with(&cli.probe)
+    });
     let data = common::read(&cli.nro);
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
@@ -38,13 +50,24 @@ fn main() {
         .expect("boot nro");
     println!("entry = {:#010x}", loaded.entry);
 
+    let mut draw_gate =
+        common::DrawGate::install(&mut cpu, Box::new(switch_core::gpu::renderer::Software));
     let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
+    let mut press = common::Press::from_flags();
     let pace = debug.pace(false);
+    let cores = common::start_cores(&mut cpu);
     let run = common::drive(&mut cpu, pace, cli.steps, |cpu, done| {
         debug.tick(cpu, done);
+        if let Some(gate) = draw_gate.as_mut() {
+            gate.tick(cpu);
+        }
+        if let Some(press) = press.as_mut() {
+            press.tick(cpu, done);
+        }
         Flow::Continue
     });
+    common::stop_cores(&mut cpu, cores);
     debug.report();
     debug.stop_state(&cpu);
     if let Some(fault) = &run.fault {

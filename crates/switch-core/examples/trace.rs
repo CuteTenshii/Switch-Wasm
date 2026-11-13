@@ -13,6 +13,8 @@ struct Cli {
     nro: String,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    report: common::Report,
     /// Hexadecimal pcs to break on.
     #[arg(long, value_delimiter = ',', value_parser = common::hex32, value_name = "PC")]
     pc: Vec<u32>,
@@ -22,7 +24,8 @@ struct Cli {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli =
+        common::parse::<Cli>(|cli| common::Flags::default().with(&cli.shared).with(&cli.report));
     let watch: HashSet<u32> = cli.pc.iter().copied().collect();
 
     let data = common::read(&cli.nro);

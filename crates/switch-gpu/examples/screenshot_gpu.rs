@@ -13,6 +13,16 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    report: common::Report,
+    #[command(flatten)]
+    play: common::Play,
+    #[command(flatten)]
+    shots: common::Shots,
+    #[command(flatten)]
+    probe: common::Probe,
     /// Where the frame is written.
     #[arg(long, value_name = "OUT.PPM")]
     out: String,
@@ -54,7 +64,15 @@ fn draw_range(spec: &str) -> Result<std::ops::Range<u32>, String> {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.boot)
+            .with(&cli.report)
+            .with(&cli.play)
+            .with(&cli.shots)
+            .with(&cli.probe)
+    });
     let program = cli.target.open_program();
     let (out, want) = (&cli.out, cli.frame);
 
@@ -76,15 +94,19 @@ fn main() {
 
     // Installed on the session so it precedes and covers every channel.
     let mut last_shot = 0;
-    let mut draw_gate = None;
-    if let Some(gpu) = gpu.take() {
-        println!("[gpu] installed");
-        draw_gate = common::DrawGate::install(&mut cpu, Box::new(gpu));
-    }
+    let real: Box<dyn switch_core::gpu::renderer::Renderer> = match gpu.take() {
+        Some(gpu) => {
+            println!("[gpu] installed");
+            Box::new(gpu)
+        }
+        None => Box::new(switch_core::gpu::renderer::Software),
+    };
+    let mut draw_gate = common::DrawGate::install(&mut cpu, real);
     let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
     let mut press = common::Press::from_flags();
     let pace = debug.pace(false);
+    let cores = common::start_cores(&mut cpu);
     let run = common::drive(&mut cpu, pace, cli.steps, |cpu, done| {
         debug.tick(cpu, done);
         if let Some(gate) = draw_gate.as_mut() {
@@ -103,6 +125,7 @@ fn main() {
             Flow::Continue
         }
     });
+    common::stop_cores(&mut cpu, cores);
     common::report(&cpu, &run);
     debug.report();
     debug.stop_state(&cpu);

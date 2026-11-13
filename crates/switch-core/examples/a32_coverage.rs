@@ -51,7 +51,7 @@ fn class(word: u32) -> u32 {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| common::Flags::default().with(&cli.shared));
     // Refused classes: how many words, one example, and the reason.
     let mut refused: BTreeMap<u32, (usize, u32, u32, String)> = BTreeMap::new();
     let mut scanned = 0usize;

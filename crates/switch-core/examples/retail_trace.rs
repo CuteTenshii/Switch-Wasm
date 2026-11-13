@@ -5,6 +5,7 @@
 mod common;
 
 use clap::Parser;
+use common::Flow;
 
 #[derive(Parser)]
 struct Cli {
@@ -12,6 +13,10 @@ struct Cli {
     target: common::Target,
     #[command(flatten)]
     shared: common::Shared,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    play: common::Play,
     /// Instructions kept in the ring.
     #[arg(long, default_value_t = 4000)]
     tail: usize,
@@ -55,14 +60,22 @@ fn mark_dump(spec: &str) -> Result<(u8, i64, u32), String> {
 }
 
 fn main() {
-    let cli = common::parse::<Cli>(|cli| &cli.shared);
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.boot)
+            .with(&cli.play)
+    });
     let title = cli.target.open();
     let (tail, budget) = (cli.tail, cli.max_steps);
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     title.boot(&mut cpu);
-    common::apply_no_draw(&mut cpu);
+    let mut draw_gate =
+        common::DrawGate::install(&mut cpu, Box::new(switch_core::gpu::renderer::Software));
+    let mut press = common::Press::from_flags();
+    let cores = common::start_cores(&mut cpu);
 
     let ring_from = cli.ring_from;
     let mut recording = ring_from.is_none();
@@ -76,14 +89,34 @@ fn main() {
     let mark_dump = cli.mark_dump;
     let mut done = 0u64;
     if let Some(from) = cli.ring_from_step {
-        let run = common::run_to(&mut cpu, from.min(budget), |_| false);
+        let run = common::drive(
+            &mut cpu,
+            common::Pace::Blocks,
+            from.min(budget),
+            |cpu, done| {
+                if let Some(gate) = draw_gate.as_mut() {
+                    gate.tick(cpu);
+                }
+                if let Some(press) = press.as_mut() {
+                    press.tick(cpu, done);
+                }
+                Flow::Continue
+            },
+        );
         done = run.steps;
         if let Some(fault) = run.fault {
             println!("FAULT before --ring-from-step, step {done}: {fault}");
+            common::stop_cores(&mut cpu, cores);
             return;
         }
     }
     while !cpu.halted && done < budget {
+        if let Some(gate) = draw_gate.as_mut() {
+            gate.tick(&mut cpu);
+        }
+        if let Some(press) = press.as_mut() {
+            press.tick(&mut cpu, done);
+        }
         let pc = cpu.get_pc();
         if let Some(name) = marks.get(&pc) {
             println!(
@@ -157,6 +190,7 @@ fn main() {
         }
         done += 1;
     }
+    common::stop_cores(&mut cpu, cores);
     println!("halted at step {done} pc={:#x}", cpu.get_pc());
     println!("--- last {} steps ---", ring.len());
     for (s, pc, r) in &ring {
