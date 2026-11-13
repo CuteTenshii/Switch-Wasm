@@ -80,6 +80,7 @@ How AArch64 blocks are translated, run, and written out as wasm.
 
 ## `crates/switch-core/src/cpu/jit/emit.rs`
 
+- The file holds the layout, constants, the `Emitter` state and the entry points. Its `impl Emitter` is split by concern into `emit/flow.rs` (block walk, exits, terminators, prologue and epilogue), `emit/alu.rs` (arithmetic, flags, shifts, multiplies), `emit/mem.rs` (page checks, loads, stores, the exclusive monitor) and `emit/dispatch.rs` (the per-instruction `op`), beside the `simd`, `fp` and `a32*` writers.
 - The `Cpu` address is a parameter, not baked in: blocks belong to guest addresses and guest threads share one `Cpu`, but tests build many, and a baked pointer would address a freed one. The module imports host memory, so nothing is copied in or out.
 - Everything the translator resolved (width, shift type and distance, extension, condition) is a constant in emitted code; a condition becomes its `CONDITION_MASKS` row shifted by NZCV.
 - Coverage is a performance question: a refused block runs on the interpreter, so ops are added one at a time behind `emit_difftest`. `Refused::Op` carries the instruction word that `examples/emit_difftest.rs` ranks; `examples/emit_selftest.rs` sweeps the encoding space with `emits()`.
