@@ -8,10 +8,10 @@ mod dataproc;
 mod disasm;
 pub(in crate::cpu) mod loadstore;
 mod media;
-mod neon;
+pub(in crate::cpu) mod neon;
 pub(in crate::cpu) mod shift;
 mod thumb;
-mod vfp;
+pub(in crate::cpu) mod vfp;
 
 use super::Cpu;
 use crate::Result;

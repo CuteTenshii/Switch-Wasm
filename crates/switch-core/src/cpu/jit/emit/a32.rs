@@ -2,6 +2,8 @@
 //! stop with the count retired, so `exec` carries on from the next one. Anything
 //! that needs the interpreter's memory path hands the instruction back, as in A64.
 
+use super::a32_neon::neon_writable;
+use super::a32_vfp::vfp_writable;
 use super::*;
 use crate::cpu::a32::loadstore::Access;
 use crate::cpu::jit::a32::decode::{decode, Decoded};
@@ -101,6 +103,22 @@ fn term_writable(kind: &TermKind) -> bool {
     }
 }
 
+/// `SBFX` and `UBFX` the emitter writes, as destination, source, least significant bit, width and signedness.
+fn bitfield_extract(insn: u32) -> Option<(u8, u8, u32, u32, bool)> {
+    let op1 = (insn >> 20) & 0x1F;
+    let rd = ((insn >> 12) & 0xF) as u8;
+    let rm = (insn & 0xF) as u8;
+    let (lsb, width) = ((insn >> 7) & 0x1F, ((insn >> 16) & 0x1F) + 1);
+    let media = insn >> 28 != 0xF && (insn >> 25) & 7 == 0b011 && insn & 0x10 != 0;
+    (media
+        && matches!(op1, 0x1A | 0x1B | 0x1E | 0x1F)
+        && (insn >> 5) & 0b11 == 0b10
+        && rd != 15
+        && rm != 15
+        && lsb + width <= 32)
+        .then_some((rd, rm, lsb, width, op1 & 0b00100 == 0))
+}
+
 /// An `LDM` or `STM` the emitter can write.
 fn block_writable(access: Access, list: u16) -> bool {
     // A load that names its base is not safe to hand back half-way.
@@ -124,17 +142,20 @@ fn writable(op: &A32Op) -> bool {
         | Kind::Multiply { .. }
         | Kind::Exclusive { .. }
         | Kind::ReadThreadPointer { .. } => true,
-        Kind::Interpret { .. } => false,
-        // A shift by a register has its carry out written only where nothing reads it.
-        Kind::Dp {
-            opcode,
-            set_flags,
-            operand: Operand::RegReg { .. },
-            ..
-        } => !(set_flags && is_logical(opcode)),
+        Kind::Interpret { insn } => {
+            vfp_writable(insn) || neon_writable(insn) || bitfield_extract(insn).is_some()
+        }
         Kind::Dp { .. } => true,
-        // LDRD and STRD.
-        Kind::Extra { access, sh, .. } => (sh == 0b01) || (access.load && sh >= 0b10),
+        Kind::Extra { access, sh, .. } => match (sh, access.load) {
+            (0b01, _) | (0b10 | 0b11, true) => true,
+            // LDRD and STRD move `rt` and `rt + 1`, and a written-back base may not be either.
+            _ => {
+                access.rt % 2 == 0
+                    && access.rt < 14
+                    && !(access.writes_base()
+                        && (access.rn == access.rt || access.rn == access.rt + 1))
+            }
+        },
         Kind::Block { access, list } => block_writable(access, list),
     }
 }
@@ -146,13 +167,37 @@ impl Emitter<'_> {
         if !writable(op) {
             return false;
         }
-        let predicated = op.cond != ALWAYS;
+        let cond = match op.kind {
+            Kind::Interpret { insn } if insn >> 28 != 0xF => (insn >> 28) as u8,
+            _ => op.cond,
+        };
+        let predicated = cond != ALWAYS;
         if predicated {
-            self.cond_holds(op.cond);
+            self.cond_holds(cond);
             self.f.if_void();
         }
         match op.kind {
-            Kind::Nop | Kind::Interpret { .. } => {}
+            Kind::Nop => {}
+            Kind::Interpret { insn } if vfp_writable(insn) => self.a32_vfp(insn, i, pc),
+            Kind::Interpret { insn } if neon_writable(insn) => self.a32_neon(insn, i, pc),
+            Kind::Interpret { insn } => {
+                let (rd, rm, lsb, width, signed) =
+                    bitfield_extract(insn).expect("`writable` was checked");
+                self.read_reg_raw(rm);
+                if signed {
+                    self.f.i64_const(i64::from(64 - lsb - width));
+                    self.f.i64_shl();
+                    self.f.i64_const(i64::from(64 - width));
+                    self.f.i64_shr_s();
+                    self.mask_to(false);
+                } else {
+                    self.f.i64_const(i64::from(lsb));
+                    self.f.i64_shr_u();
+                    self.f.i64_const(i64::from(u32::MAX >> (32 - width)));
+                    self.f.i64_and();
+                }
+                self.store_reg(rd);
+            }
             Kind::Dp {
                 opcode,
                 set_flags,
@@ -172,6 +217,34 @@ impl Emitter<'_> {
                     (false, false) => Acc::Store32,
                 };
                 self.a32_transfer(access, acc, offset, false, i, pc);
+            }
+            Kind::Extra { access, sh, offset } if sh >= 0b10 && !access.load => {
+                self.a32_effective_address(access, offset, pc);
+                if sh == 0b10 {
+                    self.page_for_read(8, i);
+                    self.in_page();
+                    self.f.i64_load(UNALIGNED, 0);
+                    self.f.local_tee(L_T);
+                    self.mask_to(false);
+                    self.store_reg(access.rt);
+                    self.f.local_get(L_T);
+                    self.f.i64_const(32);
+                    self.f.i64_shr_u();
+                    self.store_reg(access.rt + 1);
+                } else {
+                    self.page_for_write(8, i);
+                    self.in_page();
+                    self.a32_read(access.rt + 1, pc);
+                    self.f.i64_const(32);
+                    self.f.i64_shl();
+                    self.a32_read(access.rt, pc);
+                    self.f.i64_or();
+                    self.f.i64_store(UNALIGNED, 0);
+                }
+                if access.writes_base() {
+                    self.f.local_get(L_W);
+                    self.store_reg(access.rn);
+                }
             }
             Kind::Extra { access, sh, offset } => {
                 let acc = match (sh, access.load) {
@@ -406,7 +479,7 @@ impl Emitter<'_> {
     }
 
     /// Push `r`, with `r15` as the address of the instruction at `pc` plus 8.
-    fn a32_read(&mut self, r: u8, pc: u32) {
+    pub(super) fn a32_read(&mut self, r: u8, pc: u32) {
         if r == 15 {
             self.f.i64_const(i64::from(pc.wrapping_add(8)));
         } else {
@@ -456,10 +529,6 @@ impl Emitter<'_> {
                 self.a32_shift(ty, u32::from(amount), carry_out);
             }
             Operand::RegReg { rm, ty, rs } => {
-                debug_assert!(
-                    !carry_out,
-                    "`writable` refuses a shift by a register that sets C"
-                );
                 self.a32_read(rm, pc);
                 self.f.local_set(L_T);
                 self.a32_read(rs, pc);
@@ -467,6 +536,9 @@ impl Emitter<'_> {
                 self.f.i64_and();
                 self.f.local_set(L_A);
                 self.a32_shift_by_register(ty);
+                if carry_out {
+                    self.a32_register_shift_carry(ty);
+                }
             }
         }
     }
@@ -482,6 +554,68 @@ impl Emitter<'_> {
     }
 
     /// `L_T` shifted by `L_A` bits, a byte, into `L_B`; the carry out is not written.
+    /// The shifter's carry out for the shift of `L_T` by `L_A` (a byte) into `L_C`: C itself
+    /// for a shift of zero, else the last bit shifted out.
+    fn a32_register_shift_carry(&mut self, ty: u8) {
+        let last = |e: &mut Self| {
+            e.f.local_get(L_A);
+            e.f.i64_const(1);
+            e.f.i64_sub();
+        };
+        // The candidate: the bit of `L_T` that leaves last, or zero past the width.
+        match ty {
+            0 | 1 => {
+                self.f.local_get(L_T);
+                last(self);
+                if ty == 0 {
+                    self.f.i64_shl();
+                    self.f.i64_const(31);
+                }
+                self.f.i64_shr_u();
+                self.f.i64_const(1);
+                self.f.i64_and();
+                self.f.i32_wrap_i64();
+                self.f.i32_const(0);
+                self.f.local_get(L_A);
+                self.f.i64_const(33);
+                self.f.i64_lt_u();
+                self.f.select();
+            }
+            2 => {
+                self.f.local_get(L_T);
+                self.f.i64_extend32_s();
+                last(self);
+                self.f.i64_const(31);
+                last(self);
+                self.f.i64_const(31);
+                self.f.i64_lt_u();
+                self.f.select();
+                self.f.i64_shr_s();
+                self.f.i64_const(1);
+                self.f.i64_and();
+                self.f.i32_wrap_i64();
+            }
+            _ => {
+                self.f.local_get(L_T);
+                last(self);
+                self.f.i64_const(31);
+                self.f.i64_and();
+                self.f.i64_shr_u();
+                self.f.i64_const(1);
+                self.f.i64_and();
+                self.f.i32_wrap_i64();
+            }
+        }
+        self.f.local_set(L_C);
+        // `select` keeps its first operand when the condition holds.
+        self.a32_carry_flag();
+        self.f.local_get(L_C);
+        self.f.local_get(L_A);
+        self.f.i64_eqz();
+        self.f.select();
+        self.f.local_set(L_C);
+    }
+
     fn a32_shift_by_register(&mut self, ty: u8) {
         match ty {
             0 | 1 => {
@@ -812,18 +946,8 @@ impl Emitter<'_> {
         self.store_nzcv();
     }
 
-    /// A single or extra load or store: the address into `L_ADDR` and the
-    /// writeback value into `L_W`, then the access. A load into its own base
-    /// keeps the loaded value, except that the extra forms write the base last.
-    fn a32_transfer(
-        &mut self,
-        a: Access,
-        acc: Acc,
-        offset: Offset,
-        base_last: bool,
-        at: usize,
-        pc: u32,
-    ) {
+    /// The address of a single or extra transfer into `L_ADDR`, and the base's written-back value into `L_W`.
+    fn a32_effective_address(&mut self, a: Access, offset: Offset, pc: u32) {
         match offset {
             Offset::Imm(imm) => {
                 self.f.i64_const(i64::from(imm));
@@ -848,7 +972,21 @@ impl Emitter<'_> {
         self.f.local_get(if a.pre { L_W } else { L_A });
         self.f.i32_wrap_i64();
         self.f.local_set(L_ADDR);
+    }
 
+    /// A single or extra load or store: the address into `L_ADDR` and the
+    /// writeback value into `L_W`, then the access. A load into its own base
+    /// keeps the loaded value, except that the extra forms write the base last.
+    fn a32_transfer(
+        &mut self,
+        a: Access,
+        acc: Acc,
+        offset: Offset,
+        base_last: bool,
+        at: usize,
+        pc: u32,
+    ) {
+        self.a32_effective_address(a, offset, pc);
         if a.load && a.rt == 15 {
             self.load_branch_target(at);
             if a.writes_base() {

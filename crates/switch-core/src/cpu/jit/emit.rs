@@ -25,6 +25,8 @@ use crate::cpu::{Cpu, CONDITION_MASKS, REG_SLOTS, SELF_RETURN_TRAMPOLINE};
 use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
 mod a32;
+mod a32_neon;
+mod a32_vfp;
 mod fp;
 mod simd;
 
@@ -77,6 +79,7 @@ const SCRATCH: Layout = Layout {
     nzcv: 0,
     fpsr: 0,
     fpcr: 0,
+    fpscr_nzcv: 0,
     pc: 0,
     fuel: 0,
     memory: 0,
@@ -108,6 +111,8 @@ pub struct Layout {
     pub fpsr: u32,
     /// FPCR, whose rounding mode FRINTX and FRINTI follow.
     pub fpcr: u32,
+    /// The flags `VCMP` leaves in the FPSCR, in NZCV's bit positions.
+    pub fpscr_nzcv: u32,
     /// The guest program counter, written only by a taken branch leaving the region.
     pub pc: u32,
     /// Instructions blocks left through a branch may still retire, as an `i32`;
@@ -153,6 +158,7 @@ impl Layout {
             nzcv: std::mem::offset_of!(Cpu, nzcv) as u32,
             fpsr: std::mem::offset_of!(Cpu, fpsr) as u32,
             fpcr: std::mem::offset_of!(Cpu, fpcr) as u32,
+            fpscr_nzcv: std::mem::offset_of!(Cpu, fpscr_nzcv) as u32,
             pc: std::mem::offset_of!(Cpu, pc) as u32,
             fuel: (std::mem::offset_of!(Cpu, jit)
                 + std::mem::offset_of!(Jit, chain)
@@ -2810,6 +2816,7 @@ mod tests {
         nzcv: 2048,
         fpsr: 2092,
         fpcr: 2180,
+        fpscr_nzcv: 2184,
         pc: 2084,
         fuel: 2088,
         memory: 2096,

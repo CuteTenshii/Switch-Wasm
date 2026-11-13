@@ -60,7 +60,7 @@ fn sext(value: Lane, esize: u32) -> i64 {
 }
 
 /// The `VMOV`/`VMVN` modified immediate, expanded by `cmode`.
-fn modified_immediate(cmode: u32, op: u32, imm8: u32) -> Option<u64> {
+pub(in crate::cpu) fn modified_immediate(cmode: u32, op: u32, imm8: u32) -> Option<u64> {
     let byte = u64::from(imm8);
     let replicate32 = |v: u64| v | (v << 32);
     let replicate16 = |v: u64| {

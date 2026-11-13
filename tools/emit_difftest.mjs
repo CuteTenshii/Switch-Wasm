@@ -26,7 +26,7 @@ const HEADER_KEYS = new Set([
   'watch_hi_at', 'watched_at', 'pages_at', 'table_at', 'bitmap_at', 'slots',
   'code_at', 'read_watch', 'watch', 'watched_page', 'wasm_pages', 'pc_at',
   'discard_slot', 'vregs_at',
-  'fpsr_at', 'fpcr_at', 'exclusive_at', 'tpidr_at', 'tpidr_rw_at', 'tpidr_values', 'origin_at',
+  'fpsr_at', 'fpcr_at', 'fpscr_nzcv_at', 'exclusive_at', 'tpidr_at', 'tpidr_rw_at', 'tpidr_values', 'origin_at',
 ]);
 const header = {};
 // `(guest address, wasm offset)` per mapped page, in `guest.bin` order.
@@ -65,8 +65,8 @@ const VREGS = need('vregs_at');
 const M64 = (1n << 64n) - 1n;
 const SINGLES = [0, 0x80000000, 0x00800000, 0x00000001, 0x7F800000, 0xFF800000, 0x3F800000, 0xBF800000].map(BigInt);
 const DOUBLES = [0n, 1n << 63n, 0x7FF8000000000000n, 0x1n, 0x7FF0000000000000n, 0xFFF0000000000000n, 0x3FF0000000000000n, 0xBFF0000000000000n];
-const specialSeed = (i) => {
-  const half = (at) => (i % 2 === 0 ? DOUBLES[at % 8] : (SINGLES[(at + 3) % 8] << 32n) | SINGLES[at % 8]);
+const specialSeed = (i, nan = true) => {
+  const half = (at) => (i % 2 === 0 ? (!nan && at % 8 === 2 ? 0x7FEFFFFFFFFFFFFFn : DOUBLES[at % 8]) : (SINGLES[(at + 3) % 8] << 32n) | SINGLES[at % 8]);
   const pick = Math.floor(i / 2);
   return (half(pick + 5) << 64n) | half(pick);
 };
@@ -83,8 +83,21 @@ const mixedDouble = (n) => {
   magnitude.setFloat64(0, Number(significand) * scaleBits.getFloat64(0, true), true);
   return magnitude.getBigUint64(0, true) | ((h & 1n) << 63n);
 };
+// Every word that reads as a NaN becomes the canonical one, for cases whose NaN results
+// depend on the order a host compiler adds two NaNs in and on how it signs them.
+const foldNaNs = (v) => {
+  let out = v;
+  for (let at = 0n; at < 128n; at += 32n) {
+    const w = (out >> at) & 0xFFFFFFFFn;
+    if ((w & 0x7F800000n) === 0x7F800000n && (w & 0x7FFFFFn) !== 0n) {
+      out = (out & ~(0xFFFFFFFFn << at)) | (0x7FC00000n << at);
+    }
+  }
+  return out;
+};
 const vregSeed = (i, kind) => {
   if (kind === 'specials') return specialSeed(i);
+  if (kind === 'infinities') return specialSeed(i, false);
   if (kind === 'doubles') return (mixedDouble(BigInt(2 * i + 1)) << 64n) | mixedDouble(BigInt(2 * i));
   const lo = (0x9E3779B97F4A7C15n * BigInt(2 * i + 1)) & M64;
   const hi = (0xC2B2AE3D27D4EB4Fn * BigInt(2 * i + 2)) & M64;
@@ -195,12 +208,13 @@ for (const line of manifest.slice(first)) {
   const tpidrToken = f.slice(bang + 1).find((t) => t.startsWith('tpidr:'));
   // `clock:origin`, what the chain's clock origin holds when the case starts.
   const clockToken = f.slice(bang + 1).find((t) => t.startsWith('clock:'));
-  const specials = ['specials', 'doubles'].find((kind) => f.slice(bang + 1).includes(kind)) ?? null;
+  const nanSign = f.slice(bang + 1).includes('nansign');
+  const specials = ['specials', 'infinities', 'doubles'].find((kind) => f.slice(bang + 1).includes(kind)) ?? null;
   const vdelta = new Map(f.slice(bang + 1).filter((t) => t.startsWith('v')).map((t) => {
     const [reg, hex] = t.slice(1).split(':');
     return [Number(reg), BigInt('0x' + hex)];
   }));
-  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('fpcr:') && !t.startsWith('excl:') && !t.startsWith('tpidr:') && !t.startsWith('clock:') && t !== 'specials' && t !== 'doubles').map((run) => {
+  const delta = f.slice(bang + 1).filter((t) => !t.startsWith('v') && !t.startsWith('fpsr:') && !t.startsWith('fpcr:') && !t.startsWith('fpscr:') && !t.startsWith('excl:') && !t.startsWith('tpidr:') && !t.startsWith('clock:') && t !== 'nansign' && t !== 'specials' && t !== 'infinities' && t !== 'doubles').map((run) => {
     const [at, hex] = run.split(':');
     return [Number(at), Uint8Array.from(hex.match(/../g), (b) => Number.parseInt(b, 16))];
   });
@@ -218,7 +232,12 @@ for (const line of manifest.slice(first)) {
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
   if (fpsrToken) view.setUint32(need('fpsr_at'), fpsrBefore, true);
   const fpcrToken = f.slice(bang + 1).find((t) => t.startsWith('fpcr:'));
-  if (fpcrToken) view.setUint32(need('fpcr_at'), Number.parseInt(fpcrToken.slice(5), 16), true);
+  const [fpcrBefore, fpcrAfter] = fpcrToken ? fpcrToken.slice(5).split(':').map((h) => Number.parseInt(h, 16)) : [];
+  if (fpcrToken) view.setUint32(need('fpcr_at'), fpcrBefore, true);
+  // `fpscr:before:after`, the flags VCMP leaves.
+  const fpscrToken = f.slice(bang + 1).find((t) => t.startsWith('fpscr:'));
+  const [fpscrBefore, fpscrAfter] = fpscrToken ? fpscrToken.slice(6).split(':').map((h) => Number.parseInt(h, 16)) : [];
+  if (fpscrToken) view.setUint32(need('fpscr_nzcv_at'), fpscrBefore, true);
   if (clockToken) view.setBigUint64(need('origin_at'), BigInt('0x' + clockToken.slice(6)), true);
   if (tpidrToken) {
     const [tpidr, tpidrRw] = tpidrToken.slice(6).split(':').map((h) => BigInt('0x' + h));
@@ -291,7 +310,7 @@ for (const line of manifest.slice(first)) {
     for (let i = 0; i < 32; i++) {
       const wantV = (want === after && vdelta.has(i)) ? vdelta.get(i) : vregSeed(i, specials);
       const gotV = view.getBigUint64(VREGS + i * 16, true) | (view.getBigUint64(VREGS + i * 16 + 8, true) << 64n);
-      if (gotV !== wantV) {
+      if (nanSign ? foldNaNs(gotV) !== foldNaNs(wantV) : gotV !== wantV) {
         bad.push(`v${i}: emitted ${gotV.toString(16).padStart(32, '0')}, interpreted ${wantV.toString(16).padStart(32, '0')}`);
       }
     }
@@ -299,6 +318,16 @@ for (const line of manifest.slice(first)) {
       const gotFpsr = view.getUint32(need('fpsr_at'), true) >>> 0;
       const wantFpsr = (want === after ? fpsrAfter : fpsrBefore) >>> 0;
       if (gotFpsr !== wantFpsr) bad.push(`fpsr: emitted ${gotFpsr.toString(16)}, interpreted ${wantFpsr.toString(16)}`);
+    }
+    if (fpcrAfter !== undefined) {
+      const gotFpcr = view.getUint32(need('fpcr_at'), true) >>> 0;
+      const wantFpcr = (want === after ? fpcrAfter : fpcrBefore) >>> 0;
+      if (gotFpcr !== wantFpcr) bad.push(`fpcr: emitted ${gotFpcr.toString(16)}, interpreted ${wantFpcr.toString(16)}`);
+    }
+    if (fpscrToken) {
+      const gotFpscr = view.getUint32(need('fpscr_nzcv_at'), true) >>> 0;
+      const wantFpscr = (want === after ? fpscrAfter : fpscrBefore) >>> 0;
+      if (gotFpscr !== wantFpscr) bad.push(`fpscr flags: emitted ${gotFpscr.toString(16)}, interpreted ${wantFpscr.toString(16)}`);
     }
     if (excl && EXCL_AT >= 0) {
       const wantExcl = want === after ? excl.slice(4) : excl.slice(0, 4);

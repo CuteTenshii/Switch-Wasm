@@ -45,8 +45,14 @@ const EXCLUSIVE_PAIRS: usize = 600;
 const BRANCHES: usize = 3000;
 const THREAD_POINTER_READS: usize = 60;
 const EXTENDS: usize = 600;
+const BITFIELD_EXTRACTS: usize = 1500;
 const MEDIA_AND_MULTIPLIES: usize = 1500;
 const SEEDS: usize = 6;
+/// Random VFP instructions and doubleword transfers.
+const VFP: usize = 6000;
+const DOUBLEWORDS: usize = 800;
+/// Random Advanced SIMD data-processing and load/store instructions.
+const NEON: usize = 24000;
 
 /// Above 32 bits, so a read that fails to narrow shows.
 const TPIDR_SEED: u64 = 0x1234_5678_9ABC;
@@ -116,6 +122,65 @@ fn main() {
         let body: Vec<u32> = (0..run).map(|_| media_or_multiply(&mut rng)).collect();
         cases.push((body, Kind::Pure));
     }
+    for _ in 0..VFP {
+        // A run of non-memory instructions shares a block, so a compare's flags and a
+        // register's value carry between them; a transfer is alone, as it may hand back.
+        let first = vfp(&mut rng);
+        if first >> 25 & 0b111 == 0b110 {
+            cases.push((vec![first], Kind::Memory));
+            continue;
+        }
+        let mut body = vec![first];
+        for _ in 0..next(&mut rng) as usize % 3 {
+            let insn = vfp(&mut rng);
+            if insn >> 25 & 0b111 != 0b110 {
+                body.push(insn);
+            }
+        }
+        cases.push((body, Kind::Pure));
+    }
+    for _ in 0..NEON {
+        let first = neon(&mut rng);
+        if first >> 24 == 0xF4 {
+            cases.push((vec![first], Kind::Memory));
+            continue;
+        }
+        // A float result may be a NaN whose payload depends on the engine, which a later
+        // integer instruction would turn into a value that differs.
+        let mut body = vec![first];
+        for _ in 0..if rounds(first) {
+            0
+        } else {
+            next(&mut rng) as usize % 3
+        } {
+            let insn = neon(&mut rng);
+            if insn >> 24 != 0xF4 && !rounds(insn) {
+                body.push(insn);
+            }
+        }
+        cases.push((body, Kind::Pure));
+    }
+    for _ in 0..DOUBLEWORDS {
+        cases.push((vec![doubleword(&mut rng)], Kind::Memory));
+    }
+    for _ in 0..BITFIELD_EXTRACTS {
+        // SBFX or UBFX, whose field may run past the top of the word.
+        let r = next(&mut rng);
+        let (cond, rd, rm) = (
+            (r & 0xF) as u32 % 15,
+            (r >> 4 & 0xF) as u32,
+            (r >> 8 & 0xF) as u32,
+        );
+        let (op, lsb, width) = (
+            [0x7A, 0x7B, 0x7E, 0x7F][(r >> 12) as usize & 3],
+            (r >> 14 & 0x1F) as u32,
+            (r >> 19 & 0x1F) as u32,
+        );
+        cases.push((
+            vec![cond << 28 | op << 20 | width << 16 | rd << 12 | lsb << 7 | 0x50 | rm],
+            Kind::Pure,
+        ));
+    }
     for _ in 0..THREAD_POINTER_READS {
         // MRC p15, 0, rt, c13, c0, 2 or 3.
         let r = next(&mut rng);
@@ -171,6 +236,13 @@ fn main() {
         for set in 0..SEEDS {
             cpu.mem.map(0, &baseline).expect("the window is mapped");
             seed(&mut cpu, set, (next(&mut rng) & 0xF) as u8);
+            for i in 0..32 {
+                cpu.set_vreg(i, emit::kind_seed(i, seed_kind(set)));
+            }
+            let fpscr = FPSCR_SEEDS[set % FPSCR_SEEDS.len()];
+            cpu.set_fpscr_nzcv(fpscr.0);
+            cpu.set_fpcr(fpscr.1);
+            cpu.set_fpsr(fpscr.2);
             cpu.set_thread_pointers(TPIDR_SEED, TPIDR_RW_SEED);
             arm_monitor(&mut cpu, body[0], set);
             let monitor_before = cpu.exclusive_state();
@@ -267,6 +339,25 @@ fn main() {
             }
             manifest.push_str(" !");
             manifest.push_str(&memory_delta(&cpu, &baseline));
+            manifest.push_str(&emit::vreg_delta(&cpu, |i| {
+                emit::kind_seed(i, seed_kind(set))
+            }));
+            if let Some(kind) = seed_kind(set) {
+                let _ = write!(manifest, " {kind}");
+            }
+            if body.iter().copied().any(rounds) {
+                manifest.push_str(" nansign");
+            }
+            let _ = write!(
+                manifest,
+                " fpscr:{:x}:{:x} fpcr:{:x}:{:x} fpsr:{:x}:{:x}",
+                fpscr.0,
+                cpu.fpscr_nzcv(),
+                fpscr.1,
+                cpu.fpcr(),
+                fpscr.2,
+                cpu.fpsr()
+            );
             let monitor_after = cpu.exclusive_state();
             let _ = write!(
                 manifest,
@@ -308,6 +399,347 @@ fn main() {
          {refused} blocks refused, {faulted} faulted, {to_thumb} to Thumb, {rewrote} stored over their code)"
     );
     println!("now run: node tools/emit_difftest.mjs --out={out_dir}");
+}
+
+/// FPSCR as its flags, FPCR and FPSR, per seed set.
+const FPSCR_SEEDS: [(u32, u32, u32); 3] = [
+    (0, 0, 0),
+    (0xF000_0000, 0x07C0_0000, 0x9F),
+    (0x5000_0000, 0x0040_0000, 0x10),
+];
+
+/// What the vector registers hold for a seed set besides noise.
+fn seed_kind(set: usize) -> Option<&'static str> {
+    match set {
+        4 => Some("doubles"),
+        5 => Some("infinities"),
+        _ => None,
+    }
+}
+
+/// Whether `insn` is VFP arithmetic or a conversion, whose result for a NaN operand has
+/// a sign that neither the host's floating point nor the interpreter's compilation fixes.
+fn rounds(insn: u32) -> bool {
+    if insn >> 28 == 0xF && insn >> 25 & 7 == 1 {
+        let opc = insn >> 8 & 0xF;
+        return match (insn >> 23 & 1, insn >> 4 & 1, insn >> 20 & 3) {
+            (0, _, _) => matches!(opc, 0xD..=0xF),
+            (1, 0, size) if size != 3 && insn >> 6 & 1 == 1 => matches!(opc, 1 | 5 | 9),
+            (1, 0, 3) if insn >> 24 & 1 == 1 => insn >> 16 & 3 == 3,
+            _ => false,
+        };
+    }
+    let data = insn >> 24 & 0xF == 0xE && insn & 0x10 == 0 && matches!(insn >> 8 & 0xF, 0xA | 0xB);
+    let extended = data && insn >> 23 & 1 == 1 && insn >> 20 & 3 == 3;
+    let exact = extended
+        && (insn >> 6 & 1 == 0 || matches!((insn >> 16 & 0xF, insn >> 6 & 3), (0, _) | (1, 1)));
+    data && !exact
+}
+
+/// A random Advanced SIMD instruction: a data-processing group with its fixed bits set
+/// and the rest random, or a load or store.
+fn neon(rng: &mut u64) -> u32 {
+    let r = next(rng);
+    let bits = (r >> 8) as u32;
+    let low = r as u32;
+    let d = low >> 4 & 1;
+    let q = low >> 5 & 1;
+    let u = low >> 6 & 1;
+    let size = low >> 7 & 3;
+    let vd = bits >> 4 & 0xF;
+    let vn = bits >> 8 & 0xF;
+    let vm = bits >> 12 & 0xF;
+    let fields = d << 22 | vn << 16 | vd << 12 | vm | (low >> 9 & 1) << 7 | (low >> 10 & 1) << 5;
+    match r >> 40 & 15 {
+        0..=3 => {
+            // Three registers of the same length.
+            let opc = [0, 1, 2, 3, 6, 7, 8, 9, 0xD, 0xE, 0xF][(r >> 44) as usize % 11];
+            0xF200_0000 | u << 24 | size << 20 | opc << 8 | (low >> 11 & 1) << 4 | q << 6 | fields
+        }
+        4 => {
+            // Modified immediate.
+            let cmode = low >> 11 & 0xF;
+            0xF280_0010
+                | u << 24
+                | (low >> 15 & 7) << 16
+                | cmode << 8
+                | (low >> 19 & 1) << 5
+                | q << 6
+                | (d << 22 | vd << 12 | bits & 0xF)
+        }
+        5 => {
+            // Shifts by an immediate.
+            let opc = [0, 1, 5, 8, 0xA][(r >> 44) as usize % 5];
+            let imm6 = (low >> 11 | 8) & 0x3F;
+            0xF280_0010
+                | u << 24
+                | imm6 << 16
+                | opc << 8
+                | (low >> 17 & 1) << 7
+                | q << 6
+                | fields & !(0xF << 16 | 1 << 7)
+        }
+        6 => {
+            // VEXT.
+            0xF2B0_0000 | (low >> 11 & 0xF) << 8 | q << 6 | fields
+        }
+        7 | 8 => {
+            // Two registers, miscellaneous, and VDUP from a lane.
+            let table = low >> 11 & 3;
+            let op = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15][(r >> 44) as usize % 14];
+            if r >> 50 & 3 == 0 {
+                0xF3B0_0C00
+                    | (low >> 13 & 0xF) << 16
+                    | q << 6
+                    | (d << 22 | vd << 12 | vm | (low >> 9 & 1) << 5)
+            } else {
+                0xF3B0_0000
+                    | size << 18
+                    | table << 16
+                    | op << 7
+                    | q << 6
+                    | (d << 22 | vd << 12 | vm | (low >> 9 & 1) << 5)
+            }
+        }
+        9 => {
+            // Three registers of different lengths.
+            let opc = [0, 1, 2, 3, 5, 7, 8, 0xA, 0xC][(r >> 44) as usize % 9];
+            0xF280_0000
+                | u << 24
+                | (size % 3) << 20
+                | opc << 8
+                | fields & !(1 << 7 | 1 << 6 | 1 << 4)
+                | (low >> 9 & 1) << 7
+        }
+        10 => {
+            // By a scalar.
+            let opc = [0, 1, 4, 5, 8, 9][(r >> 44) as usize % 6];
+            0xF280_0040 | q << 24 | (1 + size % 2) << 20 | opc << 8 | fields
+        }
+        _ => {
+            // Loads and stores of vector elements and structures.
+            let rn = (low >> 11 & 0xF) % 15;
+            let rm = [15, 13, 0, 1, 2, 5][(r >> 44) as usize % 6];
+            let rm = if rm == 15 || rm == 13 { rm } else { rm % 13 };
+            let load = low >> 15 & 1;
+            if r >> 50 & 3 == 0 {
+                // One element or lane.
+                let all = r >> 52 & 1;
+                let ty = if all == 1 { 0xC } else { size << 2 };
+                0xF480_0000
+                    | d << 22
+                    | load << 21
+                    | rn << 16
+                    | vd << 12
+                    | ty << 8
+                    | (low >> 16 & 0xF) << 4
+                    | rm
+            } else {
+                let ty = [7, 10, 6, 2, 8, 9, 3, 4, 5, 0, 1][(r >> 44) as usize % 11];
+                0xF400_0000
+                    | d << 22
+                    | load << 21
+                    | rn << 16
+                    | vd << 12
+                    | ty << 8
+                    | size << 6
+                    | (low >> 16 & 3) << 4
+                    | rm
+            }
+        }
+    }
+}
+
+/// A random LDRD or STRD, whose pair of registers is even and below r14.
+fn doubleword(rng: &mut u64) -> u32 {
+    let r = next(rng);
+    let cond = if (r >> 4) & 3 == 0 {
+        (r & 0xF) as u32 % 15
+    } else {
+        0xE
+    };
+    let (pre, add, wb, store) = ((r >> 8) & 1, (r >> 9) & 1, (r >> 10) & 1, (r >> 11) & 1);
+    let rn = ((r >> 12) & 0xF) as u32 % 15;
+    let rt = ((r >> 16) & 0x7) as u32 * 2 % 14;
+    let offset = if (r >> 20) & 1 != 0 {
+        1 << 22 | ((r >> 24) as u32 & 0xF) << 8 | (r >> 28) as u32 & 0xF
+    } else {
+        (r >> 24) as u32 & 0xF
+    };
+    cond << 28
+        | (pre as u32) << 24
+        | (add as u32) << 23
+        | (wb as u32) << 21
+        | rn << 16
+        | rt << 12
+        | offset
+        | 0x90
+        | (0b10 + store as u32) << 5
+}
+
+/// A random VFP instruction of any shape the interpreter has: arithmetic, the one-operand
+/// group, loads and stores, and the transfers to and from core registers.
+fn vfp(rng: &mut u64) -> u32 {
+    let r = next(rng);
+    let cond = if (r >> 4) & 3 == 0 {
+        (r & 0xF) as u32 % 15
+    } else {
+        0xE
+    };
+    let double = (r >> 8 & 1) as u32;
+    let sz = 0xA | double;
+    let reg = |shift: u32| (r >> shift & 0xF) as u32;
+    let bit = |shift: u32| (r >> shift & 1) as u32;
+    let rt = (r >> 40 & 0xF) as u32 % 15;
+    let base = cond << 28;
+    match (r >> 12) % 9 {
+        0 => {
+            // Arithmetic: VMLA, VNMLA, VMUL, VADD, VDIV and their fused cousins.
+            let (p, qr) =
+                [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2)][(r >> 16) as usize % 7];
+            base | 0xE << 24
+                | p << 23
+                | bit(20) << 22
+                | qr << 20
+                | reg(24) << 16
+                | reg(28) << 12
+                | sz << 8
+                | bit(32) << 7
+                | bit(33) << 6
+                | bit(34) << 5
+                | reg(36)
+        }
+        1 => {
+            // The one-operand group: moves, absolute value, negation, square root, compares,
+            // conversions.
+            let (opc2, opc3) = [
+                (0, 1),
+                (0, 3),
+                (1, 1),
+                (1, 3),
+                (4, 1),
+                (4, 3),
+                (5, 1),
+                (5, 3),
+                (7, 3),
+                (8, 1),
+                (8, 3),
+                (12, 1),
+                (12, 3),
+                (13, 1),
+                (13, 3),
+                (10, 1),
+                (2, 3),
+            ][(r >> 16) as usize % 17];
+            base | 0xEB << 20
+                | bit(20) << 22
+                | opc2 << 16
+                | reg(24) << 12
+                | sz << 8
+                | opc3 << 6
+                | bit(34) << 5
+                | reg(36)
+        }
+        2 => {
+            // VMOV immediate.
+            base | 0xEB << 20
+                | bit(20) << 22
+                | reg(24) << 16
+                | reg(28) << 12
+                | sz << 8
+                | bit(34) << 5
+                | reg(36)
+        }
+        3 => {
+            // VLDR and VSTR.
+            let rn = if r >> 48 & 7 == 0 {
+                15
+            } else {
+                (r >> 44 & 0xF) as u32 % 15
+            };
+            base | 0xD << 24
+                | bit(20) << 23
+                | bit(21) << 22
+                | bit(22) << 20
+                | rn << 16
+                | reg(24) << 12
+                | sz << 8
+                | (r >> 28 & 0x3F) as u32
+        }
+        4 => {
+            // VLDM, VSTM, VPUSH and VPOP.
+            let (p, u, w) = [(0, 1, 0), (0, 1, 1), (1, 0, 1)][(r >> 16) as usize % 3];
+            let rn = (r >> 44 & 0xF) as u32 % 15;
+            let words = 1 + (r >> 24) as u32 % 12;
+            base | 0b110 << 25
+                | p << 24
+                | u << 23
+                | bit(20) << 22
+                | w << 21
+                | bit(21) << 20
+                | rn << 16
+                | reg(28) << 12
+                | sz << 8
+                | (words * (1 + double)) & 0xFF
+        }
+        5 => {
+            // VMOV between two core registers and a D register or two S registers.
+            let rt2 = (r >> 44 & 0xF) as u32 % 15;
+            base | 0xC4 << 20
+                | bit(20) << 20
+                | rt2 << 16
+                | rt << 12
+                | sz << 8
+                | bit(34) << 5
+                | 1 << 4
+                | reg(36)
+        }
+        6 => {
+            // VMOV between a single register and a core register.
+            base | 0xE0 << 20
+                | bit(20) << 20
+                | reg(24) << 16
+                | rt << 12
+                | 0xA << 8
+                | bit(34) << 7
+                | 1 << 4
+        }
+        7 => {
+            // VMRS and VMSR, with APSR_nzcv as the destination of a quarter of the reads.
+            let rt = if bit(20) == 1 && r >> 22 & 3 == 0 {
+                15
+            } else {
+                rt
+            };
+            base | 0xEE << 20 | 0xA10 | bit(20) << 20 | rt << 12 | 1 << 16
+        }
+        _ => {
+            if bit(20) == 1 {
+                // VDUP from a core register.
+                base | 0xE8 << 20
+                    | bit(21) << 22
+                    | bit(22) << 21
+                    | reg(24) << 16
+                    | rt << 12
+                    | 0xB << 8
+                    | bit(34) << 7
+                    | bit(35) << 5
+                    | 1 << 4
+            } else {
+                // VMOV between a core register and a lane of a D register.
+                base | 0xE0 << 20
+                    | bit(21) << 23
+                    | ((r >> 22 & 3) as u32) << 21
+                    | bit(23) << 20
+                    | reg(24) << 16
+                    | rt << 12
+                    | 0xB << 8
+                    | bit(34) << 7
+                    | ((r >> 35 & 3) as u32) << 5
+                    | 1 << 4
+            }
+        }
+    }
 }
 
 /// A random `SXTB16`/`UXTB16`, `BFI`/`BFC`, multiply or data-processing instruction

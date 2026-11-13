@@ -7,7 +7,7 @@ use crate::cpu::Cpu;
 use crate::{Error, Result};
 
 /// `VFPExpandImm` for a double.
-fn expand_imm_f64(imm8: u32) -> u64 {
+pub(in crate::cpu) fn expand_imm_f64(imm8: u32) -> u64 {
     let sign = u64::from((imm8 >> 7) & 1) << 63;
     let top = u64::from(!(imm8 >> 6) & 1) << 62;
     let fill = if (imm8 >> 6) & 1 != 0 { 0xFFu64 } else { 0 } << 54;
@@ -16,7 +16,7 @@ fn expand_imm_f64(imm8: u32) -> u64 {
 }
 
 /// `VFPExpandImm` for a single.
-fn expand_imm_f32(imm8: u32) -> u32 {
+pub(in crate::cpu) fn expand_imm_f32(imm8: u32) -> u32 {
     let sign = ((imm8 >> 7) & 1) << 31;
     let top = (!(imm8 >> 6) & 1) << 30;
     let fill = if (imm8 >> 6) & 1 != 0 { 0x1Fu32 } else { 0 } << 25;

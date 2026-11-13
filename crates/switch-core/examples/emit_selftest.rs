@@ -176,7 +176,7 @@ fn main() {
                         .expect("the window is mapped");
                     seed(&mut cpu, set, nzcv);
                     for i in 0..32 {
-                        cpu.set_vreg(i, vreg_seed(i, seed_kind(set)));
+                        cpu.set_vreg(i, emit::kind_seed(i, seed_kind(set)));
                     }
 
                     cpu.set_fpsr(0);
@@ -262,7 +262,9 @@ fn main() {
                     }
                     manifest.push_str(" !");
                     manifest.push_str(&memory_delta(&cpu, &start));
-                    manifest.push_str(&emit::vreg_delta(&cpu, |i| vreg_seed(i, seed_kind(set))));
+                    manifest.push_str(&emit::vreg_delta(&cpu, |i| {
+                        emit::kind_seed(i, seed_kind(set))
+                    }));
                     if let Some(kind) = seed_kind(set) {
                         let _ = write!(manifest, " {kind}");
                     }
@@ -337,66 +339,6 @@ fn seed_kind(set: usize) -> Option<&'static str> {
         DOUBLES_SET => Some("doubles"),
         _ => None,
     }
-}
-
-/// [`emit::vreg_seed`], IEEE special values for the specials set, or ordinary doubles for the
-/// doubles set.
-fn vreg_seed(i: u8, kind: Option<&str>) -> u128 {
-    match kind {
-        Some("specials") => special_floats(i),
-        Some("doubles") => {
-            u128::from(mixed_double(2 * u64::from(i) + 1)) << 64
-                | u128::from(mixed_double(2 * u64::from(i)))
-        }
-        _ => emit::vreg_seed(i),
-    }
-}
-
-/// A double with few significant bits and a small exponent, so that sums and products of
-/// several of them land on exact ties and near-cancellations where noise never would.
-fn mixed_double(n: u64) -> u64 {
-    let mut h = (n + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    h = (h ^ (h >> 29)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    h ^= h >> 32;
-    let bits = 1 + (h >> 1) % 53;
-    let significand = ((h >> 8) & ((1 << bits) - 1)) | (1 << (bits - 1));
-    let scale = f64::from_bits((1023 - 60 + (h >> 40) % 121) << 52);
-    (significand as f64 * scale).to_bits() | (h & 1) << 63
-}
-
-/// Signed zeros, infinities, denormals and unit values: as doubles in the even registers, as
-/// pairs of singles in the odd ones. Only the doubles hold a NaN; the emitted fused multiply-add
-/// of singles does not keep a NaN's sign.
-fn special_floats(i: u8) -> u128 {
-    const SINGLES: [u32; 8] = [
-        0,
-        0x8000_0000,
-        0x0080_0000,
-        0x0000_0001,
-        0x7F80_0000,
-        0xFF80_0000,
-        0x3F80_0000,
-        0xBF80_0000,
-    ];
-    const DOUBLES: [u64; 8] = [
-        0,
-        1 << 63,
-        0x7FF8_0000_0000_0000,
-        0x0000_0000_0000_0001,
-        0x7FF0_0000_0000_0000,
-        0xFFF0_0000_0000_0000,
-        0x3FF0_0000_0000_0000,
-        0xBFF0_0000_0000_0000,
-    ];
-    let pick = usize::from(i / 2);
-    let half = |at: usize| {
-        if i.is_multiple_of(2) {
-            DOUBLES[at % 8]
-        } else {
-            u64::from(SINGLES[(at + 3) % 8]) << 32 | u64::from(SINGLES[at % 8])
-        }
-    };
-    u128::from(half(pick + 5)) << 64 | u128::from(half(pick))
 }
 
 /// The byte at guest address `a`, distinct across load widths and signs.

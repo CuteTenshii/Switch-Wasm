@@ -276,6 +276,10 @@ impl Func {
         self.op(0x72);
     }
 
+    pub(super) fn i32_xor(&mut self) {
+        self.op(0x73);
+    }
+
     pub(super) fn i32_shl(&mut self) {
         self.op(0x74);
     }

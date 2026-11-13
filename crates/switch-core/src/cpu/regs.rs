@@ -236,8 +236,21 @@ impl Cpu {
         self.fpsr = fpsr;
     }
 
+    pub fn fpcr(&self) -> u32 {
+        self.fpcr
+    }
+
     pub fn set_fpcr(&mut self, fpcr: u32) {
         self.fpcr = fpcr;
+    }
+
+    /// The flags `VCMP` leaves in the FPSCR.
+    pub fn fpscr_nzcv(&self) -> u32 {
+        self.fpscr_nzcv
+    }
+
+    pub fn set_fpscr_nzcv(&mut self, flags: u32) {
+        self.fpscr_nzcv = flags;
     }
 
     #[inline(always)]
