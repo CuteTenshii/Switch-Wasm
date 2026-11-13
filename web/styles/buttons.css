@@ -3,6 +3,7 @@
 .btn {
   display: inline-flex;
   align-items: center;
+  text-decoration: none;
   gap: 6px;
   background: var(--chrome-hi);
   border: 1px solid var(--border);

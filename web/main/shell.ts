@@ -2,8 +2,8 @@
 
 import {
   Bug, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cpu, Download, Ellipsis, Eraser, FileText, FileUp,
-  Folder, FolderOpen, FolderSearch, FolderUp, HardDrive, History, KeyRound, Keyboard, Maximize, Network,
-  PackagePlus, PanelRight, Square, SquareTerminal, StepForward, Trash2, UserPlus, X, type IconNode,
+  Folder, FolderOpen, FolderSearch, FolderUp, HardDrive, History, KeyRound, Keyboard, Maximize, MessagesSquare,
+  Network, PackagePlus, PanelRight, Square, SquareTerminal, StepForward, Trash2, UserPlus, X, type IconNode,
 } from 'lucide';
 import { $ } from './dom';
 import { icon } from './icons';
@@ -155,7 +155,7 @@ gripEl.addEventListener('keydown', (e) => {
 });
 
 const staticIcons: [string, IconNode][] = [
-  ['#btn-fullscreen', Maximize], ['#btn-panel', PanelRight], ['#btn-more', Ellipsis], ['#btn-panel-close', X],
+  ['#btn-discord', MessagesSquare], ['#btn-fullscreen', Maximize], ['#btn-panel', PanelRight], ['#btn-more', Ellipsis], ['#btn-panel-close', X],
   ['#btn-profiles-close', X], ['#btn-files-close', X],
   ['#btn-step', StepForward], ['#btn-stop', Square], ['#btn-open', FolderOpen],
   ['#overlay-mark', FileUp], ['#overlay-open', FolderOpen], ['#keymap-title', Keyboard],
@@ -179,7 +179,7 @@ for (const [selector, glyph] of staticIcons) {
 const moreMenu = $('more-menu');
 const narrowBar = window.matchMedia('(width <= 900px)');
 // Each with a marker where it sits in the bar, to go back to.
-const moreItems = ['btn-profile', 'btn-dock', 'btn-fullscreen', 'btn-step'].map((id) => {
+const moreItems = ['btn-profile', 'btn-dock', 'btn-discord', 'btn-fullscreen', 'btn-step'].map((id) => {
   const item = $(id);
   const home = document.createComment(id);
   item.before(home);
