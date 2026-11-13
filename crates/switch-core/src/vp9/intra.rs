@@ -181,7 +181,7 @@ pub fn predict(plane: &mut [u8], pos: usize, stride: usize, mode: u8, tx_size: u
     );
 }
 
-pub(super) fn predict_from(
+pub fn predict_from(
     plane: &mut [u8],
     pos: usize,
     stride: usize,
@@ -538,8 +538,7 @@ pub(super) fn predict_from(
     }
 }
 
-#[cfg(test)]
-pub(super) fn edges_from(above_with_corner: &[u8], left: &[u8]) -> Edges {
+pub fn edges_from(above_with_corner: &[u8], left: &[u8]) -> Edges {
     let mut e = Edges {
         above: [0; ABOVE_BASE + 64],
         left: [0; 32],
@@ -548,47 +547,4 @@ pub(super) fn edges_from(above_with_corner: &[u8], left: &[u8]) -> Edges {
         .copy_from_slice(above_with_corner);
     e.left[..left.len()].copy_from_slice(left);
     e
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Checks every predictor against libvpx's C output: the file named by `VP9_INTRA_VECTORS`.
-    #[test]
-    fn predictors_match_libvpx_vectors() {
-        let Some(path) = std::env::var_os("VP9_INTRA_VECTORS") else {
-            return;
-        };
-        let data = std::fs::read(path).unwrap();
-        let mut at = 0;
-        let mut cases = 0;
-        while at < data.len() {
-            let (mode, size, have_left, have_top) =
-                (data[at], data[at + 1], data[at + 2] != 0, data[at + 3] != 0);
-            at += 4;
-            let bs = 4usize << size;
-            let above = &data[at..at + 1 + 2 * bs];
-            at += 1 + 2 * bs;
-            let left = &data[at..at + bs];
-            at += bs;
-            let expect = &data[at..at + bs * bs];
-            at += bs * bs;
-            let mut plane = vec![0u8; bs * bs];
-            predict_from(
-                &mut plane,
-                0,
-                bs,
-                mode,
-                size,
-                &edges_from(above, left),
-                have_left,
-                have_top,
-            );
-            let first = plane.iter().zip(expect).position(|(a, b)| a != b);
-            assert!(first.is_none(), "case {cases}: mode {mode}, size {size}, left {have_left}, top {have_top}, first mismatch at {first:?}");
-            cases += 1;
-        }
-        assert!(cases > 0);
-    }
 }

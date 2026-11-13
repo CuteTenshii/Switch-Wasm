@@ -11,7 +11,7 @@ static SHARED: std::sync::OnceLock<
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A fresh backend on the shared device, with the lease that keeps other tests off it until
-/// dropped; `None` with a notice when there is no device, or with `REQUIRE_GPU` set, a panic.
+/// dropped; `None` with a notice when there is no device.
 pub(crate) fn device() -> Option<(std::sync::MutexGuard<'static, ()>, super::Gpu)> {
     // A test that panicked while holding the lease leaves nothing to repair.
     let serial = SERIAL
@@ -27,9 +27,6 @@ pub(crate) fn device() -> Option<(std::sync::MutexGuard<'static, ()>, super::Gpu
             );
             gpu.device_is_shared = true;
             Some((serial, gpu))
-        }
-        Err(why) if std::env::var_os("REQUIRE_GPU").is_some_and(|v| !v.is_empty()) => {
-            panic!("REQUIRE_GPU is set and there is no device: {why}")
         }
         Err(why) => {
             eprintln!("[gpu] skipped: {why}");

@@ -7,9 +7,9 @@ Titles decode video on the console's nvdec engine and hand the frames to VIC. `g
 `vp9/` is bit-exact with libvpx v1.17.0 and is checked against it, not against ffmpeg alone:
 
 - `tools/extract_vp9_tables.py <libvpx checkout> crates/switch-core/src/vp9/tables.rs` writes the constant tables from the C initializers; `tools/extract_vp9_transforms.py` translates the 1-D inverse transforms. Both are pure Python; neither is needed to build.
-- Tests that need external files run only when their variable is set, and pass otherwise:
-  - `VP9_CLIPS=<dir>`: every `x.ivf` beside an `x.yuv` that ffmpeg wrote (`ffmpeg -i x.ivf -f rawvideo -pix_fmt yuv420p x.yuv`). The clips covered tiles, hidden frames in superframes, segmentation, error-resilient and frame-parallel streams, odd sizes, lossless and compound prediction.
-  - `VP9_IDCT_VECTORS` and `VP9_INTRA_VECTORS`: output of a small C harness linked to `libvpx.a` (random blocks through `vp9_iht*_add_c`, `vpx_idct32x32_1024_add_c`, `vpx_iwht4x4_16_add_c` and `vpx_*_predictor_*_c`).
+- `cargo run --release -p switch-core --example vp9_check -- <dir>` decodes every `x.ivf` beside an `x.yuv` that ffmpeg wrote (`ffmpeg -i x.ivf -f rawvideo -pix_fmt yuv420p x.yuv`) and compares every shown frame. The clips covered tiles, hidden frames in superframes, segmentation, error-resilient and frame-parallel streams, odd sizes, lossless and compound prediction.
+- `vp9_vectors idct|intra <file>` checks the transforms and the intra predictors against the output of a small C harness linked to `libvpx.a` (random blocks through `vp9_iht*_add_c`, `vpx_idct32x32_1024_add_c`, `vpx_iwht4x4_16_add_c` and `vpx_*_predictor_*_c`).
+- `vp9_capture <dir> <out.ppm>` decodes the first frame of a captured nvdec stream (`c10_001_{setup,bits,probs}.bin`) to a PPM.
 - `cargo run --release -p switch-core --example vp9_bench -- <clip.ivf>` times the decoder natively.
 - Unsupported: scaled reference frames, profiles 1 to 3, a frame whose size changes mid-stream.
 
