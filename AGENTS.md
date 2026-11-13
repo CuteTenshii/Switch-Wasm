@@ -110,6 +110,11 @@ actual browser run, not just host tests.
   so run `make assets` first. The browser is Playwright's
   (`bunx playwright install chromium`, once per machine). Flags are in
   `docs/tooling.md`.
+- Before reproducing a fault or fallback in a title, find out how the title
+  gets there: a menu, a prompt or a scene that waits for input may have to be
+  passed (`--press`, `--draw-from-frame`, shots to look at the screen) before
+  the fault can occur. Check the screenshots as the run goes; running to a
+  large frame count blind only waits for something that input never triggers.
 
 ## Browser invariants
 

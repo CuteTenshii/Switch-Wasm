@@ -473,8 +473,8 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     if let Some(codec) = codec {
         return Ok(TexelKind::Block(codec));
     }
-    if (components_sizes, data_type) == (0x30, FLOAT) {
-        return Ok(TexelKind::Depth(DepthTexel::F32X24S8)); // ZF32_X24S8
+    if matches!((components_sizes, data_type), (0x30 | 0x05, FLOAT)) {
+        return Ok(TexelKind::Depth(DepthTexel::F32X24S8)); // ZF32_X24S8, R32_B24G8
     }
     const UINT: u32 = 4;
     if (components_sizes, data_type) == (0x29, UINT) {
