@@ -17,6 +17,8 @@ struct Cli {
     #[command(flatten)]
     shared: common::Shared,
     #[command(flatten)]
+    play: common::Play,
+    #[command(flatten)]
     boot: common::Boot,
     #[command(flatten)]
     report: common::Report,
@@ -37,6 +39,7 @@ fn main() {
     let cli = common::parse::<Cli>(|cli| {
         common::Flags::default()
             .with(&cli.shared)
+            .with(&cli.play)
             .with(&cli.boot)
             .with(&cli.report)
     });
@@ -44,6 +47,7 @@ fn main() {
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     program.boot(&mut cpu);
+    common::start_play(&mut cpu);
     let mut next_report = 0;
     common::drive(&mut cpu, Pace::Blocks, cli.skip, |_, steps| {
         if steps >= next_report {

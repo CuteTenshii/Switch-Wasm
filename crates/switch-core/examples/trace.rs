@@ -14,6 +14,8 @@ struct Cli {
     #[command(flatten)]
     shared: common::Shared,
     #[command(flatten)]
+    play: common::Play,
+    #[command(flatten)]
     report: common::Report,
     /// Hexadecimal pcs to break on.
     #[arg(long, value_delimiter = ',', value_parser = common::hex32, value_name = "PC")]
@@ -24,14 +26,19 @@ struct Cli {
 }
 
 fn main() {
-    let cli =
-        common::parse::<Cli>(|cli| common::Flags::default().with(&cli.shared).with(&cli.report));
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.play)
+            .with(&cli.report)
+    });
     let watch: HashSet<u32> = cli.pc.iter().copied().collect();
 
     let data = common::read(&cli.nro);
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     cpu.boot_homebrew(&data, None).expect("boot");
+    common::start_play(&mut cpu);
 
     let mut hot: HashMap<u32, u64> = HashMap::new();
     let run = common::drive(&mut cpu, Pace::Instructions, cli.steps, |cpu, steps| {

@@ -16,6 +16,8 @@ struct Cli {
     #[command(flatten)]
     shared: common::Shared,
     #[command(flatten)]
+    play: common::Play,
+    #[command(flatten)]
     boot: common::Boot,
     #[command(flatten)]
     report: common::Report,
@@ -43,6 +45,7 @@ fn main() {
     let cli = common::parse::<Cli>(|cli| {
         common::Flags::default()
             .with(&cli.shared)
+            .with(&cli.play)
             .with(&cli.boot)
             .with(&cli.report)
     });
@@ -50,6 +53,7 @@ fn main() {
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     let booted = program.boot(&mut cpu);
+    common::start_play(&mut cpu);
 
     // Two frames of startup, so what follows is a steady-state frame.
     if common::reach_frame(&mut cpu, 2, u64::MAX).is_none() {

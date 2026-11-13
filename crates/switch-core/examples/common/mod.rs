@@ -552,6 +552,27 @@ impl DrawGate {
     }
 }
 
+/// What [`start_play`] installed, ticked by every [`drive`].
+struct Player {
+    gate: Option<DrawGate>,
+    press: Option<Press>,
+}
+
+thread_local! {
+    static PLAYER: std::cell::RefCell<Option<Player>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Apply the [`Play`] flags to a booted `cpu` for the tools that run it through [`drive`],
+/// [`run_to`] and [`reach_frame`]: the draw gate, the button taps and the extra cores, which
+/// run until the process exits.
+pub fn start_play(cpu: &mut Cpu) {
+    drop(start_cores(cpu));
+    PLAYER.set(Some(Player {
+        gate: DrawGate::install(cpu, Box::new(switch_core::gpu::renderer::Software)),
+        press: Press::from_flags(),
+    }));
+}
+
 /// `--shots-every`: the screen at every Kth presented frame, beside `out`.
 pub fn shoot(cpu: &Cpu, out: &str, last: &mut u64) {
     let Some(every) = flags().shots.shots_every else {
@@ -748,8 +769,17 @@ pub fn drive(
 ) -> Run {
     let mut run = Run::default();
     let mut frames = FrameTimes::new(cpu);
+    let mut player = PLAYER.take();
     while run.steps < budget && !cpu.halted {
         frames.sample(cpu);
+        if let Some(player) = player.as_mut() {
+            if let Some(gate) = player.gate.as_mut() {
+                gate.tick(cpu);
+            }
+            if let Some(press) = player.press.as_mut() {
+                press.tick(cpu, cpu.steps);
+            }
+        }
         if tick(cpu, run.steps) == Flow::Stop {
             break;
         }
@@ -775,6 +805,7 @@ pub fn drive(
             },
         }
     }
+    PLAYER.set(player);
     frames.sample(cpu);
     frames.report();
     run.halted = cpu.halted;
