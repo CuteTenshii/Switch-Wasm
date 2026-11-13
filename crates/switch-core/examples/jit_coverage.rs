@@ -6,6 +6,7 @@ mod common;
 use clap::Parser;
 use common::{Flow, Pace};
 use std::collections::HashMap;
+use switch_core::cpu::{emits, writes_exit};
 use switch_core::disasm::disassemble;
 
 const ROWS: usize = 20;
@@ -24,6 +25,70 @@ struct Cli {
     report: common::Report,
 }
 
+fn written(insn: u32) -> bool {
+    emits(insn) || writes_exit(insn)
+}
+
+fn percent(part: u64, whole: u64) -> f64 {
+    part as f64 * 100.0 / whole as f64
+}
+
+/// Executed encodings of one steady-state frame, with how often each ran, and the frame's length.
+fn sample_frame(cpu: &mut switch_core::cpu::Cpu) -> Option<(HashMap<u32, u64>, u64)> {
+    // Two frames of startup, so what follows is a steady-state frame.
+    common::reach_frame(cpu, 2, u64::MAX)?;
+
+    let mut seen: HashMap<u32, u64> = HashMap::new();
+    let start = cpu.nv.gpu.frames;
+    let run = common::drive(cpu, Pace::Instructions, u64::MAX, |cpu, _| {
+        if cpu.nv.gpu.frames != start {
+            return Flow::Stop;
+        }
+        if let Ok(insn) = cpu.mem.read_u32(cpu.get_pc()) {
+            *seen.entry(insn).or_default() += 1;
+        }
+        Flow::Continue
+    });
+    Some((seen, run.steps))
+}
+
+fn report_encodings(missing: &mut [(u64, u32)], total: u64) {
+    missing.sort_by_key(|&(count, insn)| (std::cmp::Reverse(count), insn));
+    println!("--- hottest encodings with no writer ---");
+    for &(count, insn) in missing.iter().take(ROWS) {
+        println!(
+            "  {insn:#010x}  {count:>10}  {:5.2}%  {}",
+            percent(count, total),
+            disassemble(insn),
+        );
+    }
+}
+
+/// Rolled up the way `examples/hotspots.rs` reports the mix.
+fn report_groups(seen: &HashMap<u32, u64>, missing: &[(u64, u32)], total: u64) {
+    let mut ran = [0u64; 256];
+    let mut gaps = [0u64; 256];
+    for (&insn, &count) in seen {
+        ran[(insn >> 24) as usize] += count;
+    }
+    for &(count, insn) in missing {
+        gaps[(insn >> 24) as usize] += count;
+    }
+    let mut groups: Vec<(u64, u64, usize)> = (0..256)
+        .filter(|&top| gaps[top] > 0)
+        .map(|top| (gaps[top], ran[top], top))
+        .collect();
+    groups.sort_by_key(|&(gap, ran, top)| (std::cmp::Reverse(gap), ran, top));
+    println!("--- by encoding group (bits 31:24) ---");
+    for &(gap, ran, top) in groups.iter().take(ROWS) {
+        println!(
+            "  {top:#04x}  {gap:>10} of {ran:>10} run  ({:5.1}% of the group, {:5.2}% of the frame)",
+            percent(gap, ran),
+            percent(gap, total),
+        );
+    }
+}
+
 fn main() {
     let cli = common::parse::<Cli>(|cli| {
         common::Flags::default()
@@ -38,31 +103,15 @@ fn main() {
     program.boot(&mut cpu);
     common::start_play(&mut cpu);
 
-    // Two frames of startup, so what follows is a steady-state frame.
-    if common::reach_frame(&mut cpu, 2, u64::MAX).is_none() {
+    let Some((seen, total)) = sample_frame(&mut cpu) else {
         return;
-    }
-
-    let mut seen: HashMap<u32, u64> = HashMap::new();
-    let start = cpu.nv.gpu.frames;
-    let run = common::drive(&mut cpu, Pace::Instructions, u64::MAX, |cpu, _| {
-        if cpu.nv.gpu.frames != start {
-            return Flow::Stop;
-        }
-        let pc = cpu.get_pc();
-        if let Ok(insn) = cpu.mem.read_u32(pc) {
-            *seen.entry(insn).or_default() += 1;
-        }
-        Flow::Continue
-    });
-
-    let total = run.steps;
+    };
     let mut missing: Vec<(u64, u32)> = seen
         .iter()
-        .filter(|(&insn, _)| !switch_core::cpu::emits(insn))
+        .filter(|(&insn, _)| !written(insn))
         .map(|(&insn, &count)| (count, insn))
         .collect();
-    let fallbacks: u64 = missing.iter().map(|(count, _)| count).sum();
+    let fallbacks: u64 = missing.iter().map(|&(count, _)| count).sum();
 
     println!(
         "one frame = {total} instructions, {} distinct encodings",
@@ -70,42 +119,9 @@ fn main() {
     );
     println!(
         "{fallbacks} of them ({:.2}%) have no emitter writer, over {} distinct encodings",
-        fallbacks as f64 * 100.0 / total as f64,
+        percent(fallbacks, total),
         missing.len(),
     );
-
-    missing.sort_by_key(|&(count, insn)| (std::cmp::Reverse(count), insn));
-    println!("--- hottest encodings with no writer ---");
-    for (count, insn) in missing.iter().take(ROWS) {
-        println!(
-            "  {insn:#010x}  {count:>10}  {:5.2}%  {}",
-            *count as f64 * 100.0 / total as f64,
-            disassemble(*insn),
-        );
-    }
-
-    // Rolled up the way `examples/hotspots.rs` reports the mix.
-    let mut by_top = [(0u64, 0u64); 256];
-    for (&insn, &count) in &seen {
-        let top = ((insn >> 24) & 0xFF) as usize;
-        by_top[top].0 += count;
-        if !switch_core::cpu::emits(insn) {
-            by_top[top].1 += count;
-        }
-    }
-    let mut groups: Vec<(u64, u64, usize)> = by_top
-        .iter()
-        .zip(0..256)
-        .filter(|((_, missing), _)| *missing > 0)
-        .map(|(&(ran, missing), top)| (missing, ran, top))
-        .collect();
-    groups.sort_by_key(|&(missing, ran, top)| (std::cmp::Reverse(missing), ran, top));
-    println!("--- by encoding group (bits 31:24) ---");
-    for (missing, ran, top) in groups.iter().take(ROWS) {
-        println!(
-            "  {top:#04x}  {missing:>10} of {ran:>10} run  ({:5.1}% of the group, {:5.2}% of the frame)",
-            *missing as f64 * 100.0 / *ran as f64,
-            *missing as f64 * 100.0 / total as f64,
-        );
-    }
+    report_encodings(&mut missing, total);
+    report_groups(&seen, &missing, total);
 }

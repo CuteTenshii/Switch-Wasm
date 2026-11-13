@@ -45,6 +45,16 @@ pub fn emits(insn: u32) -> bool {
     Emitter::new(&mut f, SCRATCH, false, Vec::new()).op(&op, 0)
 }
 
+/// Whether `insn` is a branch the emitter writes as a block exit or terminator.
+pub fn writes_exit(insn: u32) -> bool {
+    const REPRESENTATIVE_PC: u32 = 0x0800_0000;
+    match decode(insn, REPRESENTATIVE_PC) {
+        Decoded::Op(_) => false,
+        Decoded::Exit(_) => true,
+        Decoded::Term(term) => writes_term(&term),
+    }
+}
+
 /// Whether the emitted form of `insn` can decline and hand the instruction
 /// back to the interpreter (every guest access can). Derived by emitting the
 /// instruction under two retired counts and comparing the bodies.
