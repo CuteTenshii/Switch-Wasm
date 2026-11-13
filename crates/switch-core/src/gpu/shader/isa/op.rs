@@ -557,13 +557,21 @@ pub enum Op {
         f16: bool,
     },
 
-    /// `tlds dst, dst2, x, y, handle, mask`: the texel at integer `(x, y)` of level 0 of a
-    /// 2D image, landing as `texs` lands it.
+    /// `tlds dst, dst2, coords.., handle, mask`: the texel at integer coordinates, landing as
+    /// `texs` lands it. A 1D fetch is a 2D one with `y` at `RZ`.
     Tlds {
         dst: u8,
         dst2: u8,
-        coords: [u8; 2],
+        /// `x`, `y` and a 3D image's `z`; unused axes are `RZ`.
+        coords: [u8; 3],
+        /// An array's layer, in the low half of its register.
+        layer: Option<u8>,
+        /// The level register; the texture model holds level 0 only.
+        lod: Option<u8>,
+        /// `.AOFFI`'s register: a signed four-bit offset per axis, `x` low.
+        offset: Option<u8>,
         handle: u16,
+        dim: TexDim,
         mask: [bool; 4],
         f16: bool,
     },
@@ -596,11 +604,23 @@ pub enum Op {
     /// `tld4.<component> dst, coords.., handle, dim, mask`.
     Tld4 {
         dst: u8,
+        /// The coordinate registers; a cube's three are a direction.
         coords: [u8; 3],
+        /// An array's layer, or a cube array's cube.
         layer: Option<u8>,
-        /// `.AOFFI`'s register, as in [`Op::Tex`].
+        /// `.AOFFI`'s register: signed six-bit texel offsets, `x` at bit 0 and `y` at bit 8.
         offset: Option<u8>,
+        /// `.PTP`'s two registers: an offset for each of the four texels, `x0 y0 x1 y1` then
+        /// `x2 y2 x3 y3`, each a signed six-bit field a byte apart.
+        ptp: Option<[u8; 2]>,
+        /// `.DC`'s reference: each texel comes back compared against it, 1.0 or 0.0.
+        dref: Option<u8>,
         handle: u16,
+        /// A bindless gather's (`tld4.b`) handle register.
+        handle_reg: Option<u8>,
+        /// `.SPARSE`'s predicate, set when a texel is not resident; `PT` discards it. Every
+        /// texel of the texture model is resident, so it is cleared.
+        sparse: u8,
         dim: TexDim,
         /// Which channel, after the descriptor's swizzle.
         component: u8,
@@ -613,7 +633,7 @@ pub enum Op {
         dst: u8,
         dst2: u8,
         coords: [u8; 2],
-        /// `.AOFFI`'s register, as in [`Op::Tex`].
+        /// `.AOFFI`'s register, as in [`Op::Tld4`].
         offset: Option<u8>,
         /// `.DC`'s reference: each texel comes back compared against it, 1.0 or 0.0.
         dref: Option<u8>,

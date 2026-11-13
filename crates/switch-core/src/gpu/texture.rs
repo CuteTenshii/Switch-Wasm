@@ -827,7 +827,12 @@ pub fn read_descriptors(
     };
     let mut sampler = read_sampler(ctx, tex_sampler_pool + sampler_id(handle) as u64 * 32)?;
     // Integer textures are always read at the nearest texel.
-    if matches!(texture.kind, TexelKind::Depth(depth) if depth.is_integer()) {
+    let integer = match texture.kind {
+        TexelKind::Plain(format) => format.is_integer(),
+        TexelKind::Depth(depth) => depth.is_integer(),
+        TexelKind::Block(_) => false,
+    };
+    if integer {
         sampler.mag_linear = false;
         sampler.min_linear = false;
     }
@@ -928,22 +933,22 @@ pub fn gather_with(
     ])
 }
 
-/// `tlds`: the texel at integer `(x, y)` of the first layer, through the descriptor's swizzle.
+/// `tlds`: the texel at integer `(x, y, layer)` of level 0, through the descriptor's swizzle.
 /// Outside the image it is zero.
 pub fn fetch_with(
     ctx: &ExecCtx,
     d: &Descriptors,
-    x: u32,
-    y: u32,
+    at: [u32; 3],
     blocks: &RefCell<BlockCache>,
 ) -> Result<[f32; 4]> {
     let texture = &d.texture;
-    if x >= texture.width || y >= texture.height {
+    let [x, y, layer] = at;
+    if x >= texture.width || y >= texture.height || layer >= texture.layers.max(1) {
         return Ok([0.0; 4]);
     }
     Ok(apply_swizzle(
         texture.swizzle,
-        texture.texel(x, y, 0, ctx, blocks)?,
+        texture.texel(x, y, layer, ctx, blocks)?,
     ))
 }
 
@@ -1026,18 +1031,9 @@ pub fn sample_3d_with(
     Ok(out)
 }
 
-/// Sample a cubemap by direction, with OpenGL's face order and signs. Edge
-/// texels clamp inside the face rather than filtering across the seam. `cube`
-/// selects a cube of a cube array.
-pub fn sample_cube_with(
-    ctx: &ExecCtx,
-    d: &Descriptors,
-    s: f64,
-    t: f64,
-    r: f64,
-    cube: u32,
-    blocks: &RefCell<BlockCache>,
-) -> Result<[f32; 4]> {
+/// The face a cube direction hits, in OpenGL's order and signs, and the normalized coordinates on
+/// it. A zero direction is the centre of face 0.
+fn cube_face(s: f64, t: f64, r: f64) -> (u32, f64, f64) {
     let (face, sc, tc, ma) = if s.abs() >= t.abs() && s.abs() >= r.abs() {
         if s >= 0.0 {
             (0, -r, -t, s)
@@ -1055,16 +1051,103 @@ pub fn sample_cube_with(
     } else {
         (5, -s, -t, -r)
     };
-    // A zero direction samples the centre of face 0.
-    let last = d.texture.layers.saturating_sub(1);
-    let first_face = cube.saturating_mul(6);
     if ma == 0.0 {
-        return sample_with(ctx, d, 0.5, 0.5, first_face.min(last), blocks);
+        return (0, 0.5, 0.5);
     }
-    let u = (sc / ma + 1.0) * 0.5;
-    let v = (tc / ma + 1.0) * 0.5;
-    let face = first_face.saturating_add(face).min(last);
-    sample_with(ctx, d, u, v, face, blocks)
+    (face, (sc / ma + 1.0) * 0.5, (tc / ma + 1.0) * 0.5)
+}
+
+/// Which array layer face `face` of cube `cube` is, kept inside the image.
+fn cube_layer(d: &Descriptors, cube: u32, face: u32) -> u32 {
+    cube.saturating_mul(6)
+        .saturating_add(face)
+        .min(d.texture.layers.saturating_sub(1))
+}
+
+/// Sample a cubemap by direction, with OpenGL's face order and signs. Edge
+/// texels clamp inside the face rather than filtering across the seam. `cube`
+/// selects a cube of a cube array.
+pub fn sample_cube_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    s: f64,
+    t: f64,
+    r: f64,
+    cube: u32,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let (face, u, v) = cube_face(s, t, r);
+    sample_with(ctx, d, u, v, cube_layer(d, cube, face), blocks)
+}
+
+/// The face `face`'s plane extended past its edge: the face and texel the direction through
+/// texel `(x, y)` of `face` hits, with `size` texels a side. A footprint past a corner has no
+/// single neighbour; it takes the face the larger overshoot names.
+fn cube_neighbour(face: u32, x: i64, y: i64, size: u32) -> (u32, u32, u32) {
+    let size = i64::from(size.max(1));
+    let (sc, tc) = (
+        ((2 * x + 1) as f64) / size as f64 - 1.0,
+        ((2 * y + 1) as f64) / size as f64 - 1.0,
+    );
+    let (s, t, r) = match face {
+        0 => (1.0, -tc, -sc),
+        1 => (-1.0, -tc, sc),
+        2 => (sc, 1.0, tc),
+        3 => (sc, -1.0, -tc),
+        4 => (sc, -tc, 1.0),
+        _ => (-sc, -tc, -1.0),
+    };
+    let (face, u, v) = cube_face(s, t, r);
+    let index = |c: f64| ((c * size as f64) as i64).clamp(0, size - 1) as u32;
+    (face, index(u), index(v))
+}
+
+/// The four texels `(layer, x, y)` of a gather of a cube direction, in `textureGather` order.
+/// A footprint over a face's edge reads the neighbouring face, as a seamless cube does.
+fn cube_gather_taps(d: &Descriptors, direction: [f64; 3], cube: u32) -> [(u32, u32, u32); 4] {
+    let (face, u, v) = cube_face(direction[0], direction[1], direction[2]);
+    let size = d.texture.width;
+    let x0 = (u * f64::from(size) - 0.5).floor() as i64;
+    let y0 = (v * f64::from(d.texture.height) - 0.5).floor() as i64;
+    [(x0, y0 + 1), (x0 + 1, y0 + 1), (x0 + 1, y0), (x0, y0)].map(|(x, y)| {
+        let (face, x, y) = cube_neighbour(face, x, y, size);
+        (cube_layer(d, cube, face), x, y)
+    })
+}
+
+/// [`gather_with`] of a cube direction.
+pub fn gather_cube_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    direction: [f64; 3],
+    cube: u32,
+    component: usize,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let mut out = [0.0; 4];
+    for (value, (layer, x, y)) in out.iter_mut().zip(cube_gather_taps(d, direction, cube)) {
+        let texel = d.texture.texel(x, y, layer, ctx, blocks)?;
+        *value = apply_swizzle(d.texture.swizzle, texel)[component & 3];
+    }
+    Ok(out)
+}
+
+/// [`gather_compare_with`] of a cube direction.
+pub fn gather_compare_cube_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    direction: [f64; 3],
+    cube: u32,
+    reference: f32,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let compare = d.sampler.compare.unwrap_or(Compare::Always);
+    let mut out = [0.0; 4];
+    for (value, (layer, x, y)) in out.iter_mut().zip(cube_gather_taps(d, direction, cube)) {
+        let depth = d.texture.texel(x, y, layer, ctx, blocks)?[0];
+        *value = f32::from(u8::from(compare.passes(reference, depth)));
+    }
+    Ok(out)
 }
 
 /// A shadow sample: compare each texel against `reference`, then filter the
@@ -1107,6 +1190,29 @@ mod tests {
     const IDENTITY_SWIZZLE: u32 = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
     /// `TextureType_2D` in dword4.
     const TYPE_2D: u32 = 1 << 23;
+
+    #[test]
+    fn a_cube_texel_past_a_face_edge_lies_on_the_neighbouring_face() {
+        // Faces in GL order: +x, -x, +y, -y, +z, -z; the rows are 8 texels of 8.
+        assert_eq!(cube_neighbour(4, 2, 5, 8), (4, 2, 5), "inside stays put");
+        assert_eq!(
+            cube_neighbour(4, 8, 3, 8),
+            (0, 0, 3),
+            "+z right edge, onto +x"
+        );
+        assert_eq!(
+            cube_neighbour(4, -1, 3, 8),
+            (1, 7, 3),
+            "+z left edge, onto -x"
+        );
+        assert_eq!(
+            cube_neighbour(0, -1, 3, 8),
+            (4, 7, 3),
+            "+x left edge, onto +z"
+        );
+        assert_eq!(cube_neighbour(4, 3, -1, 8).0, 2, "+z top edge, onto +y");
+        assert_eq!(cube_neighbour(4, 3, 8, 8).0, 3, "+z bottom edge, onto -y");
+    }
 
     fn harness() -> (Memory, AddressSpace, u64) {
         let mem = Memory::new();
@@ -1918,9 +2024,177 @@ mod tests {
         let compared = gather_compare_with(&ctx, &d, 0.5, 0.5, 0, 0.5, &blocks).unwrap();
         assert_eq!(compared, [0.0, 1.0, 1.0, 0.0]);
 
-        assert_eq!(fetch_with(&ctx, &d, 1, 0, &blocks).unwrap()[0], 1.0);
-        assert_eq!(fetch_with(&ctx, &d, 0, 1, &blocks).unwrap()[0], 0.0);
-        assert_eq!(fetch_with(&ctx, &d, 2, 0, &blocks).unwrap(), [0.0; 4]);
-        assert_eq!(fetch_with(&ctx, &d, 0, 2, &blocks).unwrap(), [0.0; 4]);
+        assert_eq!(fetch_with(&ctx, &d, [1, 0, 0], &blocks).unwrap()[0], 1.0);
+        assert_eq!(fetch_with(&ctx, &d, [0, 1, 0], &blocks).unwrap()[0], 0.0);
+        assert_eq!(fetch_with(&ctx, &d, [2, 0, 0], &blocks).unwrap(), [0.0; 4]);
+        assert_eq!(fetch_with(&ctx, &d, [0, 2, 0], &blocks).unwrap(), [0.0; 4]);
+        assert_eq!(fetch_with(&ctx, &d, [0, 0, 1], &blocks).unwrap(), [0.0; 4]);
+    }
+
+    #[test]
+    fn a_fetch_reads_the_array_layer_or_volume_slice_it_names() {
+        const ARRAY_2D: u32 = 5 << 23;
+        const VOLUME: u32 = 2 << 23;
+        let (mut mem, vmm, base) = harness();
+        let (tic_addr, tsc_addr, tex_addr) = (base, base + 0x100, base + 0x400);
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        for kind in [ARRAY_2D, VOLUME] {
+            vmm.write_u32(&mem, tic_addr, 0x0F | (7 << 7) | IDENTITY_SWIZZLE)
+                .unwrap();
+            vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+                .unwrap();
+            vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+                .unwrap();
+            vmm.write_u32(&mem, tic_addr + 12, 1).unwrap();
+            vmm.write_u32(&mem, tic_addr + 16, 1 | kind).unwrap();
+            // Two layers of 2x2.
+            vmm.write_u32(&mem, tic_addr + 20, 1 | 1 << 16).unwrap();
+            let ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                as_id: 0,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
+            let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(d.texture.layers, 2);
+            let stride = u64::from(d.texture.layer_stride);
+            for (layer, value) in [(0u64, 1.0f32), (1, 2.0)] {
+                for (x, y) in [(0u64, 0u64), (1, 1)] {
+                    let at = tex_addr + layer * stride + y * 32 + x * 4;
+                    ctx.vmm
+                        .write_u32(ctx.mem, at, (value + (x + y) as f32).to_bits())
+                        .unwrap();
+                }
+            }
+            let blocks = RefCell::new(BlockCache::default());
+            let fetch = |at| fetch_with(&ctx, &d, at, &blocks).unwrap()[0];
+            assert_eq!(fetch([0, 0, 0]), 1.0);
+            assert_eq!(fetch([1, 1, 0]), 3.0);
+            assert_eq!(fetch([0, 0, 1]), 2.0);
+            assert_eq!(fetch([1, 1, 1]), 4.0);
+            assert_eq!(fetch([0, 0, 2]), 0.0, "past the last layer");
+        }
+    }
+
+    /// An `RGBA32Uint` image is read at the nearest texel and gathered as raw words, whatever
+    /// filter its sampler asks for.
+    #[test]
+    fn an_integer_colour_image_is_never_blended_and_gathers_its_words() {
+        const UINT: u32 = 4;
+        let (mut mem, vmm, base) = harness();
+        let (tic_addr, tsc_addr, tex_addr) = (base, base + 0x100, base + 0x400);
+        vmm.write_u32(&mem, tic_addr, 0x01 | (UINT << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 12, 1).unwrap();
+        vmm.write_u32(&mem, tic_addr + 16, 1 | TYPE_2D).unwrap();
+        vmm.write_u32(&mem, tic_addr + 20, 0).unwrap();
+        for (i, word) in [1u32, 2, 3, 4, 5, 6, 7, 8].into_iter().enumerate() {
+            vmm.write_u32(&mem, tex_addr + 4 * i as u64, word).unwrap();
+        }
+        vmm.write_u32(&mem, tsc_addr, 2 | (2 << 3)).unwrap();
+        vmm.write_u32(&mem, tsc_addr + 4, 2 | (2 << 4)).unwrap();
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            as_id: 0,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0)
+            .unwrap()
+            .unwrap();
+        let blocks = RefCell::new(BlockCache::default());
+        let bits = |texel: [f32; 4]| texel.map(f32::to_bits);
+        let right = sample_with(&ctx, &d, 0.5, 0.5, 0, &blocks).unwrap();
+        assert_eq!(
+            bits(right),
+            [5, 6, 7, 8],
+            "a blend would sit between the texels"
+        );
+        for (component, words) in [(0, [1, 5, 5, 1]), (3, [4, 8, 8, 4])] {
+            let gathered = gather_with(&ctx, &d, 0.5, 0.5, 0, component, &blocks).unwrap();
+            assert_eq!(bits(gathered), words, "component {component}");
+        }
+    }
+
+    /// A cube gather picks its face from the direction, and a cube array's cube from its index.
+    #[test]
+    fn a_cube_gather_reads_the_footprint_of_the_face_the_direction_hits() {
+        const CUBE_ARRAY: u32 = 8 << 23;
+        let (mut mem, vmm, base) = harness();
+        let (tic_addr, tsc_addr, tex_addr) = (base, base + 0x100, base + 0x400);
+        vmm.write_u32(&mem, tic_addr, 0x0F | (7 << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 12, 1).unwrap();
+        // Two cubes of 2x2 faces.
+        vmm.write_u32(&mem, tic_addr + 16, 1 | CUBE_ARRAY).unwrap();
+        vmm.write_u32(&mem, tic_addr + 20, 1 | 1 << 16).unwrap();
+        // Clamped, nearest, and a shadow comparison that passes a reference below the depth.
+        vmm.write_u32(&mem, tsc_addr, 2 | (2 << 3) | 1 << 9 | (1 << 10))
+            .unwrap();
+        vmm.write_u32(&mem, tsc_addr + 4, 0).unwrap();
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            as_id: 0,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.texture.layers, 12);
+        let stride = u64::from(d.texture.layer_stride);
+        // Texel (x, y) of layer `l` holds `10 * l + 2 * y + x`.
+        for layer in 0..12u64 {
+            for (x, y) in [(0u64, 0u64), (1, 0), (0, 1), (1, 1)] {
+                let value = (layer * 10 + y * 2 + x) as f32;
+                ctx.vmm
+                    .write_u32(
+                        ctx.mem,
+                        tex_addr + layer * stride + y * 32 + x * 4,
+                        value.to_bits(),
+                    )
+                    .unwrap();
+            }
+        }
+        let blocks = RefCell::new(BlockCache::default());
+        let gather =
+            |direction, cube| gather_cube_with(&ctx, &d, direction, cube, 0, &blocks).unwrap();
+        // Lower left, lower right, upper right, upper left of the face's centre.
+        assert_eq!(gather([1.0, 0.0, 0.0], 0), [2.0, 3.0, 1.0, 0.0]);
+        assert_eq!(gather([0.0, -1.0, 0.0], 0), [32.0, 33.0, 31.0, 30.0]);
+        assert_eq!(gather([0.0, 0.0, -2.0], 0), [52.0, 53.0, 51.0, 50.0]);
+        assert_eq!(gather([-1.0, 0.0, 0.0], 1), [72.0, 73.0, 71.0, 70.0]);
+        assert_eq!(gather([0.0, 0.0, 0.0], 1), [62.0, 63.0, 61.0, 60.0]);
+
+        // `Less` passes where the reference is below the texel's depth.
+        let compared = |reference| {
+            gather_compare_cube_with(&ctx, &d, [-1.0, 0.0, 0.0], 1, reference, &blocks).unwrap()
+        };
+        assert_eq!(compared(62.5), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(compared(71.5), [1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(compared(80.0), [0.0, 0.0, 0.0, 0.0]);
     }
 }

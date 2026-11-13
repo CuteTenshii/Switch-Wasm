@@ -545,6 +545,383 @@ fn a_tex_texel_offset_moves_the_sample_by_one_texel() {
     }
 }
 
+/// `tlds` fetches by integer coordinates: an offset moves x and y, an array reads its layer from
+/// the low half of a register, a volume its third coordinate, and only level 0 is held.
+#[test]
+fn a_tlds_fetches_the_integer_texel_its_registers_and_offset_name() {
+    struct Probe(std::cell::Cell<[u32; 3]>);
+    impl TextureSource for Probe {
+        fn sample(&self, handle: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+            Err(fault(format!("no sample of {handle:#x} here")))
+        }
+        fn fetch(&self, handle: u32, at: [u32; 3]) -> ShaderResult<[f32; 4]> {
+            assert_eq!(handle, 0x1234, "the handle slot 8 names");
+            self.0.set(at);
+            Ok([0.25, 0.5, 0.75, 1.0])
+        }
+    }
+    let tlds = |dim, coords, layer, lod, offset| Op::Tlds {
+        dst: 0,
+        dst2: RZ,
+        coords,
+        layer,
+        lod,
+        offset,
+        handle: 8,
+        dim,
+        mask: [true, false, false, false],
+        f16: false,
+    };
+    let mut consts = no_consts();
+    consts.insert(
+        (crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x20),
+        f32::from_bits(0x1234),
+    );
+    let fetched = |op: Op, regs: &[(u8, u32)]| {
+        let probe = Probe(std::cell::Cell::new([u32::MAX; 3]));
+        let mut inv = Invocation::new();
+        for &(reg, value) in regs {
+            inv.set_reg(reg, value);
+        }
+        inv.execute(&prog(&[op, Op::Exit]), &Env::new(&consts, &probe))
+            .unwrap();
+        assert_eq!(inv.reg_f32(0), 0.25, "the texel lands in r0");
+        probe.0.get()
+    };
+
+    let plain = tlds(TexDim::T2d, [4, 5, RZ], None, None, None);
+    assert_eq!(fetched(plain, &[(4, 7), (5, 9)]), [7, 9, 0]);
+
+    // A level register holding 0 is level 0; any other level is not held.
+    let leveled = tlds(TexDim::T2d, [4, 5, RZ], None, Some(6), None);
+    assert_eq!(fetched(leveled, &[(4, 7), (5, 9), (6, 0)]), [7, 9, 0]);
+    let probe = Probe(std::cell::Cell::new([u32::MAX; 3]));
+    let mut inv = Invocation::new();
+    inv.set_reg(6, 3);
+    let error = inv
+        .execute(&prog(&[leveled, Op::Exit]), &Env::new(&consts, &probe))
+        .unwrap_err();
+    assert!(error.to_string().contains("level 3"), "{error}");
+    assert_eq!(probe.0.get(), [u32::MAX; 3], "nothing was fetched");
+
+    // 1D leaves y at RZ.
+    let line = tlds(TexDim::T2d, [4, RZ, RZ], None, None, None);
+    assert_eq!(fetched(line, &[(4, 7)]), [7, 0, 0]);
+
+    // +1 in x and -2 in y; stepping below zero wraps past any image.
+    let moved = tlds(TexDim::T2d, [4, 5, RZ], None, None, Some(6));
+    assert_eq!(fetched(moved, &[(4, 7), (5, 9), (6, 0xE1)]), [8, 7, 0]);
+    assert_eq!(
+        fetched(moved, &[(4, 0), (5, 0), (6, 0xFF)]),
+        [u32::MAX, u32::MAX, 0]
+    );
+
+    let layered = tlds(TexDim::T2dArray, [4, 5, RZ], Some(7), None, None);
+    assert_eq!(
+        fetched(layered, &[(4, 1), (5, 2), (7, 0xabcd_0003)]),
+        [1, 2, 3]
+    );
+
+    let volume = tlds(TexDim::T3d, [4, 5, 6], None, None, None);
+    assert_eq!(fetched(volume, &[(4, 1), (5, 2), (6, 5)]), [1, 2, 5]);
+}
+
+/// A gather's `.AOFFI` register holds signed six-bit texel offsets at bits 0 and 8.
+#[test]
+fn a_gather_offset_register_moves_the_footprint_by_six_bit_texel_offsets() {
+    struct Probe(std::cell::Cell<(f32, f32)>);
+    impl TextureSource for Probe {
+        fn sample(&self, handle: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+            Err(fault(format!("no sample of {handle:#x} here")))
+        }
+        fn gather(&self, _h: u32, u: f32, v: f32, _l: u32, _c: usize) -> ShaderResult<[f32; 4]> {
+            self.0.set((u, v));
+            Ok([0.25, 0.5, 0.75, 1.0])
+        }
+        fn texel_step(&self, _h: u32) -> ShaderResult<(f32, f32)> {
+            Ok((1.0 / 64.0, 1.0 / 32.0))
+        }
+    }
+    let tld4 = Op::Tld4 {
+        dst: 0,
+        coords: [4, 5, 5],
+        layer: None,
+        offset: Some(7),
+        ptp: None,
+        dref: None,
+        handle: 8,
+        handle_reg: None,
+        sparse: 7,
+        dim: TexDim::T2d,
+        component: 0,
+        mask: [true; 4],
+    };
+    let tld4s = Op::Tld4s {
+        dst: 0,
+        dst2: 4,
+        coords: [4, 5],
+        offset: Some(7),
+        dref: None,
+        handle: 8,
+        component: 0,
+        f16: false,
+    };
+    let consts = no_consts();
+    for (packed, (x, y)) in [
+        (0u32, (0.0, 0.0)),
+        (0x3f01, (1.0, -1.0)),
+        (0x1f20, (-32.0, 31.0)),
+        // The bits above each field are not part of it.
+        (0xc0c0_c0c1, (1.0, 0.0)),
+    ] {
+        for op in [tld4, tld4s] {
+            let probe = Probe(std::cell::Cell::new((0.0, 0.0)));
+            let mut inv = Invocation::new();
+            inv.set_reg_f32(4, 0.5);
+            inv.set_reg_f32(5, 0.5);
+            inv.set_reg(7, packed);
+            inv.execute(&prog(&[op, Op::Exit]), &Env::new(&consts, &probe))
+                .unwrap_or_else(|e| panic!("{op:?}: {e:?}"));
+            assert_eq!(
+                probe.0.get(),
+                (0.5 + x / 64.0, 0.5 + y / 32.0),
+                "{op:?} offset {packed:#x}"
+            );
+        }
+    }
+}
+
+/// `tld4`'s shadow, cube and per-texel forms reach the texture source with the coordinates,
+/// layer and reference the registers hold.
+#[test]
+fn a_tld4_gathers_the_form_its_registers_and_modifiers_name() {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Call {
+        Gather(f32, f32, u32, usize),
+        Compare(f32, f32, u32, f32),
+        Cube([f32; 3], u32, usize),
+        CubeCompare([f32; 3], u32, f32),
+    }
+    struct Probe(RefCell<Vec<Call>>);
+    impl TextureSource for Probe {
+        fn sample(&self, handle: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+            Err(fault(format!("no sample of {handle:#x} here")))
+        }
+        fn gather(&self, _h: u32, u: f32, v: f32, l: u32, c: usize) -> ShaderResult<[f32; 4]> {
+            self.0.borrow_mut().push(Call::Gather(u, v, l, c));
+            Ok([0.1, 0.2, 0.3, 0.4])
+        }
+        fn gather_compare(
+            &self,
+            _h: u32,
+            u: f32,
+            v: f32,
+            l: u32,
+            r: f32,
+        ) -> ShaderResult<[f32; 4]> {
+            self.0.borrow_mut().push(Call::Compare(u, v, l, r));
+            Ok([0.1, 0.2, 0.3, 0.4])
+        }
+        fn gather_cube(&self, _h: u32, d: [f32; 3], c: u32, k: usize) -> ShaderResult<[f32; 4]> {
+            self.0.borrow_mut().push(Call::Cube(d, c, k));
+            Ok([0.1, 0.2, 0.3, 0.4])
+        }
+        fn gather_compare_cube(
+            &self,
+            _h: u32,
+            d: [f32; 3],
+            c: u32,
+            r: f32,
+        ) -> ShaderResult<[f32; 4]> {
+            self.0.borrow_mut().push(Call::CubeCompare(d, c, r));
+            Ok([0.1, 0.2, 0.3, 0.4])
+        }
+        fn texel_step(&self, _h: u32) -> ShaderResult<(f32, f32)> {
+            Ok((1.0 / 64.0, 1.0 / 32.0))
+        }
+    }
+    let tld4 = |dim, layer, offset, ptp, dref, handle_reg| Op::Tld4 {
+        dst: 0,
+        coords: [4, 5, 6],
+        layer,
+        offset,
+        ptp,
+        dref,
+        handle: 8,
+        handle_reg,
+        sparse: 7,
+        dim,
+        component: 2,
+        mask: [true; 4],
+    };
+    let mut consts = no_consts();
+    consts.insert(
+        (crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x20),
+        f32::from_bits(0x1234),
+    );
+    let run = |op: Op, regs: &[(u8, u32)]| {
+        let probe = Probe(RefCell::new(Vec::new()));
+        let mut inv = Invocation::new();
+        for &(reg, value) in regs {
+            inv.set_reg(reg, value);
+        }
+        inv.set_reg_f32(4, 0.5);
+        inv.set_reg_f32(5, 0.25);
+        inv.set_reg_f32(6, -2.0);
+        inv.set_reg_f32(10, 0.75);
+        inv.execute(&prog(&[op, Op::Exit]), &Env::new(&consts, &probe))
+            .unwrap();
+        assert_eq!([0, 1, 2, 3].map(|r| inv.reg_f32(r)), [0.1, 0.2, 0.3, 0.4]);
+        probe.0.into_inner()
+    };
+
+    let shadow = tld4(TexDim::T2dArray, Some(7), None, None, Some(10), None);
+    assert_eq!(
+        run(shadow, &[(7, 0xabcd_0002)]),
+        [Call::Compare(0.5, 0.25, 2, 0.75)]
+    );
+    let cube = tld4(TexDim::TCube, None, None, None, None, None);
+    assert_eq!(run(cube, &[]), [Call::Cube([0.5, 0.25, -2.0], 0, 2)]);
+    let cube_array = tld4(TexDim::TCubeArray, Some(7), None, None, Some(10), None);
+    assert_eq!(
+        run(cube_array, &[(7, 3)]),
+        [Call::CubeCompare([0.5, 0.25, -2.0], 3, 0.75)]
+    );
+    // The handle of a bindless gather is the register's.
+    let bindless = tld4(TexDim::T2d, None, None, None, None, Some(8));
+    assert_eq!(
+        run(bindless, &[(8, 0x1234)]),
+        [Call::Gather(0.5, 0.25, 0, 2)]
+    );
+
+    // Texel `i` of the footprint comes from the gather its own offset moved: (+1, -1), (-2, 3),
+    // (0, 0), (31, -32).
+    let ptp = tld4(TexDim::T2d, None, None, Some([7, 8]), None, None);
+    let packed = [0x3f01u32 | 0x03fe << 16, 0x0000 | 0xe01f << 16];
+    let calls = run(ptp, &[(7, packed[0]), (8, packed[1])]);
+    let moved = |x: f32, y: f32| Call::Gather(0.5 + x / 64.0, 0.25 + y / 32.0, 0, 2);
+    assert_eq!(
+        calls,
+        [
+            moved(1.0, -1.0),
+            moved(-2.0, 3.0),
+            moved(0.0, 0.0),
+            moved(31.0, -32.0)
+        ]
+    );
+}
+
+/// The fixtures the device parity tests draw with encode the gathers they name.
+#[test]
+fn the_gather_fixture_shaders_decode_to_the_forms_they_name() {
+    use crate::gpu::testing;
+    let ops = |bytes: Vec<u8>| -> Vec<Op> {
+        decode_program(&bytes)
+            .unwrap()
+            .insns
+            .into_iter()
+            .map(|insn| insn.op)
+            .collect()
+    };
+    let tld4 = |ops: &[Op]| {
+        ops.iter()
+            .copied()
+            .find(|op| matches!(op, Op::Tld4 { .. }))
+            .expect("a tld4")
+    };
+
+    let ptp = ops(testing::gather_ptp_fragment_shader(1));
+    assert!(matches!(
+        tld4(&ptp),
+        Op::Tld4 {
+            ptp: Some([10, 11]),
+            dref: None,
+            dim: TexDim::T2d,
+            component: 1,
+            ..
+        }
+    ));
+    for (dst, imm) in [(10, 0x033e_3f01), (11, 0x003f_0200)] {
+        assert!(ptp.contains(&Op::Mov32i { dst, imm }), "r{dst} = {imm:#x}");
+    }
+
+    let shadow = ops(testing::gather_compare_fragment_shader());
+    assert!(matches!(
+        tld4(&shadow),
+        Op::Tld4 {
+            offset: None,
+            ptp: None,
+            dref: Some(2),
+            dim: TexDim::T2d,
+            ..
+        }
+    ));
+    assert!(shadow.contains(&Op::Mov32i {
+        dst: 2,
+        imm: 0.5f32.to_bits()
+    }));
+
+    let cube = ops(testing::gather_cube_fragment_shader(2));
+    assert!(matches!(
+        tld4(&cube),
+        Op::Tld4 {
+            coords: [0, 1, 2],
+            dim: TexDim::TCube,
+            component: 2,
+            ..
+        }
+    ));
+
+    let cube_shadow = ops(testing::gather_cube_compare_fragment_shader());
+    assert!(matches!(
+        tld4(&cube_shadow),
+        Op::Tld4 {
+            coords: [0, 1, 2],
+            dref: Some(4),
+            dim: TexDim::TCube,
+            ..
+        }
+    ));
+
+    let offset = ops(testing::gather_offset_fragment_shader(1));
+    assert!(matches!(
+        tld4(&offset),
+        Op::Tld4 {
+            offset: Some(10),
+            component: 1,
+            ..
+        }
+    ));
+    assert!(offset.contains(&Op::Mov32i {
+        dst: 10,
+        imm: 0x3f01
+    }));
+}
+
+/// Every texel of a gather is resident, so its sparse predicate is cleared.
+#[test]
+fn a_tld4_clears_its_sparse_predicate() {
+    struct Texels;
+    impl TextureSource for Texels {
+        fn sample(&self, _h: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+            Ok([0.0; 4])
+        }
+        fn gather(&self, _h: u32, _u: f32, _v: f32, _l: u32, _c: usize) -> ShaderResult<[f32; 4]> {
+            Ok([1.0; 4])
+        }
+    }
+    let base = 0xc83a0086aff70208u64;
+    let op = isa::decode(base & !(0b111 << 51) | 3 << 51).op;
+    let consts = no_consts();
+    let mut inv = Invocation::new();
+    inv.set_pred(3, true);
+    inv.set_pred(4, true);
+    inv.execute(&prog(&[op, Op::Exit]), &Env::new(&consts, &Texels))
+        .unwrap();
+    assert!(!inv.pred(3), "the named predicate");
+    assert!(inv.pred(4), "another");
+}
+
 /// `tex` of a cube array: direction after the cube, channels from `$r0`.
 #[test]
 fn a_cube_array_tex_samples_the_cube_its_layer_register_names() {

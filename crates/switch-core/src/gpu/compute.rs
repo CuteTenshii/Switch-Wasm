@@ -322,8 +322,28 @@ impl TextureSource for DispatchMemory<'_, '_> {
         self.textures(|t| t.gather(handle, u, v, layer, component))
     }
 
-    fn fetch(&self, handle: u32, x: u32, y: u32) -> ShaderResult<[f32; 4]> {
-        self.textures(|t| t.fetch(handle, x, y))
+    fn gather_cube(
+        &self,
+        handle: u32,
+        direction: [f32; 3],
+        cube: u32,
+        component: usize,
+    ) -> ShaderResult<[f32; 4]> {
+        self.textures(|t| t.gather_cube(handle, direction, cube, component))
+    }
+
+    fn gather_compare_cube(
+        &self,
+        handle: u32,
+        direction: [f32; 3],
+        cube: u32,
+        reference: f32,
+    ) -> ShaderResult<[f32; 4]> {
+        self.textures(|t| t.gather_compare_cube(handle, direction, cube, reference))
+    }
+
+    fn fetch(&self, handle: u32, at: [u32; 3]) -> ShaderResult<[f32; 4]> {
+        self.textures(|t| t.fetch(handle, at))
     }
 
     fn gather_compare(

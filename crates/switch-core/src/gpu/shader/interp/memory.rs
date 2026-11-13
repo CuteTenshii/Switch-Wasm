@@ -149,7 +149,8 @@ impl Invocation {
         Ok(())
     }
 
-    /// `tlds`: the texel at integer coordinates, landing as a `texs` does.
+    /// `tlds`: the texel at integer coordinates, landing as a `texs` does. The texture model
+    /// holds level 0 only, so a nonzero level is a fault.
     pub(super) fn run_tlds(
         &mut self,
         program: &Compiled,
@@ -158,15 +159,39 @@ impl Invocation {
         env: &Env,
         pending: &mut Vec<(usize, u8, u32)>,
     ) -> ShaderResult<()> {
-        let Op::Tlds { coords, handle, .. } = op else {
+        let Op::Tlds {
+            coords,
+            layer,
+            lod,
+            offset,
+            handle,
+            dim,
+            ..
+        } = op
+        else {
             unreachable!("run_tlds called with {op:?}");
         };
+        if let Some(level) = lod.map(|reg| self.reg(reg)).filter(|&level| level != 0) {
+            return Err(fault(format!(
+                "shader: tlds of level {level}, but only level 0 is held"
+            )));
+        }
         let handle = env
             .consts
             .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
-        let texel = env
-            .textures
-            .fetch(handle, self.reg(coords[0]), self.reg(coords[1]))?;
+        let mut at = [self.reg(coords[0]), self.reg(coords[1]), 0];
+        if let Some(reg) = offset {
+            let packed = self.reg(reg);
+            let axis = |shift: u32| (((packed >> shift) as i32) << 28 >> 28) as u32;
+            at[0] = at[0].wrapping_add(axis(0));
+            at[1] = at[1].wrapping_add(axis(4));
+        }
+        at[2] = match dim {
+            TexDim::T3d => self.reg(coords[2]),
+            TexDim::T2dArray => layer.map_or(0, |reg| self.reg(reg) & 0xffff),
+            _ => 0,
+        };
+        let texel = env.textures.fetch(handle, at)?;
         self.land_texture(program, pc, texel, pending);
         Ok(())
     }
@@ -261,7 +286,8 @@ impl Invocation {
         Ok(())
     }
 
-    /// `tld4`: one channel of a bilinear footprint, offset by `.AOFFI`.
+    /// `tld4`: one channel of a bilinear footprint, or each texel's comparison, offset by
+    /// `.AOFFI` or by `.PTP`'s offset per texel.
     pub(super) fn run_tld4(
         &mut self,
         program: &Compiled,
@@ -274,29 +300,62 @@ impl Invocation {
             coords,
             layer,
             offset,
+            ptp,
+            dref,
             handle,
+            handle_reg,
+            sparse,
+            dim,
             component,
             ..
         } = op
         else {
             unreachable!("run_tld4 called with {op:?}");
         };
-        let handle = env
-            .consts
-            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
-        let mut u = self.reg_f32(coords[0]);
-        let mut v = self.reg_f32(coords[1]);
-        if let Some(reg) = offset {
-            let packed = self.reg(reg);
-            let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
-            let (du, dv) = env.textures.texel_step(handle)?;
-            u += axis(0) as f32 * du;
-            v += axis(4) as f32 * dv;
-        }
+        let handle = match handle_reg {
+            Some(reg) => self.reg(reg),
+            None => env
+                .consts
+                .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?,
+        };
+        let (mut u, mut v) = (self.reg_f32(coords[0]), self.reg_f32(coords[1]));
         let layer = layer.map_or(0, |reg| self.reg(reg) & 0xffff);
-        let texels = env
-            .textures
-            .gather(handle, u, v, layer, usize::from(component))?;
+        let reference = dref.map(|reg| self.reg_f32(reg));
+        let component = usize::from(component);
+        let texels = if matches!(dim, TexDim::TCube | TexDim::TCubeArray) {
+            let r = self.reg_f32(coords[2]);
+            match reference {
+                Some(reference) => {
+                    env.textures
+                        .gather_compare_cube(handle, [u, v, r], layer, reference)?
+                }
+                None => env
+                    .textures
+                    .gather_cube(handle, [u, v, r], layer, component)?,
+            }
+        } else {
+            let gather = |u, v| match reference {
+                Some(reference) => env.textures.gather_compare(handle, u, v, layer, reference),
+                None => env.textures.gather(handle, u, v, layer, component),
+            };
+            if let Some(regs) = ptp {
+                // Texel `i` of the footprint comes from the gather moved by its own offset.
+                let step = env.textures.texel_step(handle)?;
+                let mut texels = [0.0; 4];
+                for (i, texel) in texels.iter_mut().enumerate() {
+                    let packed = self.reg(regs[i / 2]) >> (16 * (i % 2));
+                    let (u, v) = gather_offset(packed, (u, v), step);
+                    *texel = gather(u, v)?[i];
+                }
+                texels
+            } else {
+                if let Some(reg) = offset {
+                    (u, v) = gather_offset(self.reg(reg), (u, v), env.textures.texel_step(handle)?);
+                }
+                gather(u, v)?
+            }
+        };
+        self.set_pred(sparse, false);
         self.land_texture(program, pc, texels, pending);
         Ok(())
     }
@@ -327,11 +386,7 @@ impl Invocation {
         let mut u = self.reg_f32(coords[0]);
         let mut v = self.reg_f32(coords[1]);
         if let Some(reg) = offset {
-            let packed = self.reg(reg);
-            let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
-            let (du, dv) = env.textures.texel_step(handle)?;
-            u += axis(0) as f32 * du;
-            v += axis(4) as f32 * dv;
+            (u, v) = gather_offset(self.reg(reg), (u, v), env.textures.texel_step(handle)?);
         }
         let texels = match dref {
             Some(reg) => env
@@ -395,4 +450,11 @@ impl Invocation {
             pending.push((due, reg, raw));
         }
     }
+}
+
+/// `(u, v)` moved by a gather's `.AOFFI` register: signed six-bit texel offsets at bits 0 and 8,
+/// as Eden's `texture_gather.cpp` reads them. The last pair is one texel in normalized coordinates.
+fn gather_offset(packed: u32, (u, v): (f32, f32), (du, dv): (f32, f32)) -> (f32, f32) {
+    let axis = |shift: u32| ((packed >> shift) as i32) << 26 >> 26;
+    (u + axis(0) as f32 * du, v + axis(8) as f32 * dv)
 }

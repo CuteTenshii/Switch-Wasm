@@ -50,8 +50,6 @@ pub enum Unsupported {
     UntracedHandle { at: usize },
     /// Two bindless handles of one program that the sampling hooks would key alike.
     SharedHandleKey { at: usize },
-    /// An integer image read by a gather or an offset sample, which only float images have here.
-    IntegerTexture,
     /// A vertex shader's atomic, which WebGPU keeps out of the vertex stage.
     VertexWrite,
 }
@@ -64,9 +62,6 @@ impl fmt::Display for Unsupported {
             }
             Unsupported::VertexWrite => {
                 write!(f, "a vertex shader writing global memory")
-            }
-            Unsupported::IntegerTexture => {
-                write!(f, "a gather or offset sample of an integer image")
             }
             Unsupported::Quad { at } => {
                 write!(
@@ -128,13 +123,16 @@ fn texDims(imm: u32, lod: u32) -> vec4<u32> {
 fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
-fn texGather(imm: u32, component: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {
+fn texGather(imm: u32, component: u32, u: f32, v: f32, w: f32, layer: u32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
-fn texFetch(imm: u32, x: u32, y: u32) -> vec4<f32> {
+fn texStep(imm: u32) -> vec2<f32> {
+  return vec2<f32>(1.0, 1.0);
+}
+fn texFetch(imm: u32, x: u32, y: u32, z: u32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
-fn texGatherCompare(imm: u32, u: f32, v: f32, layer: u32, dref: f32) -> vec4<f32> {
+fn texGatherCompare(imm: u32, u: f32, v: f32, w: f32, layer: u32, dref: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 ";

@@ -216,7 +216,7 @@ fn an_integer_image_is_read_by_texel_and_an_integer_target_takes_raw_words() {
         "{source}"
     );
 
-    // A gather reads a float image's footprint, which an integer image has no filter for.
+    // A gather reads an integer image's footprint as raw words.
     let gather = program(&[
         (
             Op::Tld4s {
@@ -236,10 +236,49 @@ fn an_integer_image_is_read_by_texel_and_an_integer_target_takes_raw_words() {
     let translated = translate(&gather).unwrap();
     let mut layout = Layout::of(&translated, Stage::Fragment);
     layout.textures[0].uint = true;
-    assert!(matches!(
-        module(&translated, Stage::Fragment, &layout),
-        Err(Unsupported::IntegerTexture)
-    ));
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    for channel in 0..4 {
+        assert!(
+            source.contains(&format!(
+                "case {channel}u: {{ return bitcast<vec4<f32>>(textureGather({channel}, tex0, \
+                 smp0, vec2<f32>(u, v))); }}"
+            )),
+            "{source}"
+        );
+    }
+    assert!(source.contains("var tex0: texture_2d<u32>"), "{source}");
+
+    // An offset sample moves the nearest texel the way `interp` moves the coordinate.
+    let offset = program(&[
+        (Op::Mov32i { dst: 7, imm: 0xf1 }, ALWAYS),
+        (
+            Op::Tex {
+                dst: 0,
+                coords: [4, 5, RZ],
+                layer: None,
+                dref: None,
+                offset: Some(7),
+                lod: None,
+                handle: 8,
+                handle_reg: None,
+                dim: TexDim::T2d,
+                mask: [true; 4],
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    let translated = translate(&offset).unwrap();
+    let mut layout = Layout::of(&translated, Stage::Fragment);
+    layout.textures[0].uint = true;
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(
+        source.contains(
+            "vec2<f32>(u + f32(1) * (1.0 / f32(size.x)), v + f32(-1) * (1.0 / f32(size.y)))"
+        ),
+        "{source}"
+    );
+    assert!(source.contains("textureLoad(tex0, at, 0)"), "{source}");
 }
 
 #[test]
@@ -1102,14 +1141,108 @@ fn an_image_folds_into_as_few_overlapping_tiles_as_hold_it() {
 
 #[test]
 fn a_tlds_loads_the_texel_and_lands_it_like_texs() {
+    let tlds = |dim, coords, layer, offset| {
+        program(&[
+            (
+                Op::Tlds {
+                    dst: 4,
+                    dst2: RZ,
+                    coords,
+                    layer,
+                    lod: None,
+                    offset,
+                    handle: 10,
+                    dim,
+                    mask: [false, true, false, false],
+                    f16: false,
+                },
+                ALWAYS,
+            ),
+            (Op::Exit, ALWAYS),
+        ])
+    };
+    let source = |program: &Compiled| {
+        let translated = translate(program).unwrap();
+        let layout = Layout::of(&translated, Stage::Fragment);
+        module(&translated, Stage::Fragment, &layout).unwrap()
+    };
+
+    let plain = source(&tlds(TexDim::T2d, [2, 3, RZ], None, None));
+    assert!(plain.contains("texFetch(10u, r2, r3, 0u)"), "{plain}");
+    assert!(
+        plain.contains("textureLoad(tex0, vec2<u32>(x, y), 0)"),
+        "{plain}"
+    );
+
+    let offset = source(&tlds(TexDim::T2d, [2, 3, RZ], None, Some(6)));
+    assert!(
+        offset.contains(
+            "texFetch(10u, (r2 + bitcast<u32>(extractBits(bitcast<i32>(r6), 0u, 4u))), \
+             (r3 + bitcast<u32>(extractBits(bitcast<i32>(r6), 4u, 4u))), 0u)"
+        ),
+        "{offset}"
+    );
+
+    let array = source(&tlds(TexDim::T2dArray, [5, 6, RZ], Some(2), None));
+    assert!(
+        array.contains("texFetch(10u, r5, r6, (r2 & 0xffffu))"),
+        "{array}"
+    );
+    assert!(
+        array.contains("textureLoad(tex0, vec2<u32>(x, y), z, 0)"),
+        "{array}"
+    );
+    assert!(array.contains("textureNumLayers(tex0)"), "{array}");
+
+    let volume = source(&tlds(TexDim::T3d, [2, 3, 4], None, None));
+    assert!(volume.contains("texFetch(10u, r2, r3, r4)"), "{volume}");
+    assert!(
+        volume.contains("textureLoad(tex0, vec3<u32>(x, y, z), 0)"),
+        "{volume}"
+    );
+}
+
+#[test]
+fn a_tlds_of_a_level_register_is_refused_unless_it_is_rz() {
+    let tlds = |lod| {
+        program(&[
+            (
+                Op::Tlds {
+                    dst: 4,
+                    dst2: RZ,
+                    coords: [2, 3, RZ],
+                    layer: None,
+                    lod,
+                    offset: None,
+                    handle: 10,
+                    dim: TexDim::T2d,
+                    mask: [true, false, false, false],
+                    f16: false,
+                },
+                ALWAYS,
+            ),
+            (Op::Exit, ALWAYS),
+        ])
+    };
+    assert!(translate(&tlds(Some(RZ))).is_ok());
+    assert!(matches!(
+        translate(&tlds(Some(6))),
+        Err(Unsupported::Op { at: 0, .. })
+    ));
+}
+
+#[test]
+fn a_gather_offset_register_moves_the_coordinates_before_the_gather() {
     let p = program(&[
         (
-            Op::Tlds {
-                dst: 4,
-                dst2: RZ,
-                coords: [2, 3],
-                handle: 10,
-                mask: [false, true, false, false],
+            Op::Tld4s {
+                dst: 0,
+                dst2: 2,
+                coords: [4, 5],
+                offset: Some(7),
+                dref: None,
+                handle: 8,
+                component: 0,
                 f16: false,
             },
             ALWAYS,
@@ -1119,9 +1252,223 @@ fn a_tlds_loads_the_texel_and_lands_it_like_texs() {
     let translated = translate(&p).unwrap();
     let layout = Layout::of(&translated, Stage::Fragment);
     let source = module(&translated, Stage::Fragment, &layout).unwrap();
-    assert!(source.contains("texFetch(10u, r2, r3)"), "{source}");
+    assert!(source.contains("= texStep(8u);"), "{source}");
     assert!(
-        source.contains("textureLoad(tex0, vec2<u32>(x, y), 0)"),
+        source.contains("f32(extractBits(bitcast<i32>(r7), 0u, 6u)) *"),
         "{source}"
     );
+    assert!(
+        source.contains("f32(extractBits(bitcast<i32>(r7), 8u, 6u)) *"),
+        "{source}"
+    );
+    assert!(source.contains("texGather(8u, 0u, "), "{source}");
+    assert!(
+        source.contains("return vec2<f32>(1.0 / f32(textureDimensions(tex0).x)"),
+        "{source}"
+    );
+}
+
+fn gather(
+    dim: TexDim,
+    layer: Option<u8>,
+    ptp: Option<[u8; 2]>,
+    dref: Option<u8>,
+    handle_reg: Option<u8>,
+) -> Op {
+    Op::Tld4 {
+        dst: 0,
+        coords: [4, 5, 6],
+        layer,
+        offset: None,
+        ptp,
+        dref,
+        handle: 8,
+        handle_reg,
+        sparse: 7,
+        dim,
+        component: 1,
+        mask: [true; 4],
+    }
+}
+
+fn gather_module(ops: &[Op]) -> String {
+    let entries: Vec<(Op, Pred)> = ops
+        .iter()
+        .copied()
+        .chain([Op::Exit])
+        .map(|op| (op, ALWAYS))
+        .collect();
+    let translated = translate(&program(&entries)).unwrap();
+    let layout = Layout::of(&translated, Stage::Fragment);
+    module(&translated, Stage::Fragment, &layout).unwrap()
+}
+
+#[test]
+fn a_cube_gathers_through_the_direction_and_a_cube_array_through_its_cube() {
+    let source = gather_module(&[gather(TexDim::TCube, None, None, None, None)]);
+    assert!(source.contains("var tex0: texture_cube<f32>"), "{source}");
+    assert!(source.contains("texGather(8u, 1u, "), "{source}");
+    assert!(
+        source.contains("textureGather(1, tex0, smp0, vec3<f32>(u, v, w))"),
+        "{source}"
+    );
+
+    let source = gather_module(&[gather(TexDim::TCubeArray, Some(2), None, None, None)]);
+    assert!(
+        source.contains("textureGather(1, tex0, smp0, vec3<f32>(u, v, w), layer)"),
+        "{source}"
+    );
+}
+
+#[test]
+fn a_shadow_gather_compares_through_a_depth_texture_of_its_dimension() {
+    for (dim, layer, texture, call) in [
+        (
+            TexDim::T2dArray,
+            Some(2),
+            "texture_depth_2d_array",
+            "textureGatherCompare(tex0, smp0, vec2<f32>(u, v), layer, dref)",
+        ),
+        (
+            TexDim::TCube,
+            None,
+            "texture_depth_cube",
+            "textureGatherCompare(tex0, smp0, vec3<f32>(u, v, w), dref)",
+        ),
+        (
+            TexDim::TCubeArray,
+            Some(2),
+            "texture_depth_cube_array",
+            "textureGatherCompare(tex0, smp0, vec3<f32>(u, v, w), layer, dref)",
+        ),
+    ] {
+        let source = gather_module(&[gather(dim, layer, None, Some(10), None)]);
+        assert!(source.contains(&format!("var tex0: {texture}")), "{source}");
+        assert!(source.contains(call), "{source}");
+        assert!(source.contains("texGatherCompare(8u, "), "{source}");
+    }
+}
+
+#[test]
+fn a_cube_sample_cannot_compare() {
+    let p = program(&[
+        (
+            Op::Texs {
+                dst: 0,
+                dst2: 2,
+                coords: [4, 5, 6],
+                dref: Some(7),
+                handle: 8,
+                dim: TexDim::TCube,
+                mask: [true; 4],
+                f16: false,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    assert!(matches!(
+        translate(&p),
+        Err(Unsupported::TextureDimension { dim: TexDim::TCube })
+    ));
+}
+
+#[test]
+fn a_ptp_gather_keeps_each_texel_of_the_gather_its_own_offset_moved() {
+    let source = gather_module(&[gather(TexDim::T2d, None, Some([7, 8]), None, None)]);
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    let line_of = |name: &str| {
+        let head = format!("let {name} = ");
+        *lines
+            .iter()
+            .find(|line| line.starts_with(&head))
+            .unwrap_or_else(|| panic!("no {name}: {source}"))
+    };
+    let gathers: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| line.contains("= texGather(8u, 1u, "))
+        .collect();
+    assert_eq!(gathers.len(), 4, "{source}");
+    // Gather `i` moves by the offsets in `[7, 8][i / 2]`, `16 * (i % 2)` bits up, `y` a byte
+    // above `x`, and the result keeps lane `i` of it.
+    let mut names = Vec::new();
+    for (i, gather) in gathers.iter().enumerate() {
+        let (reg, shift) = (7 + i / 2, 16 * (i % 2));
+        let name = gather["let ".len()..].split(' ').next().unwrap();
+        let args: Vec<&str> = gather
+            .split("texGather(8u, 1u, ")
+            .nth(1)
+            .unwrap()
+            .split(", ")
+            .collect();
+        for (arg, bits) in [(args[0], shift), (args[1], shift + 8)] {
+            let moved = format!("extractBits(bitcast<i32>(r{reg}), {bits}u, 6u)");
+            assert!(line_of(arg).contains(&moved), "gather {i}: {source}");
+        }
+        names.push(name);
+    }
+    let kept = format!(
+        "vec4<f32>({}.x, {}.y, {}.z, {}.w)",
+        names[0], names[1], names[2], names[3]
+    );
+    assert!(source.contains(&kept), "{source}");
+}
+
+#[test]
+fn a_bindless_gather_keys_its_slot_by_the_constant_the_handle_came_from() {
+    let p = program(&[
+        (
+            Op::Mov {
+                dst: 12,
+                src: Operand::Const {
+                    bank: 3,
+                    offset: 0x20,
+                },
+            },
+            ALWAYS,
+        ),
+        (gather(TexDim::T2d, None, None, None, Some(12)), ALWAYS),
+        (Op::Exit, ALWAYS),
+    ]);
+    let translated = translate(&p).unwrap();
+    let slot = TextureSlot::Bindless {
+        bank: 3,
+        offset: 0x20,
+    };
+    assert_eq!(translated.textures, [(slot, TexDim::T2d, false)]);
+    let layout = Layout::of(&translated, Stage::Fragment);
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(
+        source.contains(&format!("texGather({}u, 1u, ", slot.key())),
+        "{source}"
+    );
+}
+
+#[test]
+fn a_tld4_clears_the_predicate_its_sparse_field_names() {
+    let tld4 = |sparse| Op::Tld4 {
+        dst: 0,
+        coords: [4, 5, 6],
+        layer: None,
+        offset: None,
+        ptp: None,
+        dref: None,
+        handle: 8,
+        handle_reg: None,
+        sparse,
+        dim: TexDim::T2d,
+        component: 1,
+        mask: [true; 4],
+    };
+    assert!(gather_module(&[tld4(3)]).contains("p3 = false;"));
+    let other = gather_module(&[tld4(7)]);
+    let cleared = |source: &str| {
+        source
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('p') && line.ends_with(" = false;"))
+            .count()
+    };
+    assert_eq!(cleared(&other), 0, "{other}");
 }

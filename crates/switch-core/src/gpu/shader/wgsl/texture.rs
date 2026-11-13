@@ -7,6 +7,20 @@ use crate::gpu::texture::TextureSlot;
 
 const COMPONENT: [&str; 4] = ["x", "y", "z", "w"];
 
+/// A gather's operands.
+pub(super) struct Gather {
+    pub slot: TextureSlot,
+    pub dim: TexDim,
+    pub coords: [u8; 3],
+    pub layer: Option<u8>,
+    /// `.AOFFI`'s register.
+    pub offset: Option<u8>,
+    /// `.PTP`'s two registers.
+    pub ptp: Option<[u8; 2]>,
+    pub dref: Option<u8>,
+    pub component: u8,
+}
+
 impl Emitter<'_> {
     /// Record that the program samples `slot` as `dim`, a shadow map or not.
     fn bind_texture(
@@ -84,17 +98,30 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// `tlds`: the texel at integer coordinates, as `textureLoad`.
+    /// `tlds`: the texel at integer coordinates, as `textureLoad` of level 0.
     pub(super) fn fetch_texture(
         &mut self,
         at: usize,
         slot: TextureSlot,
-        coords: [u8; 2],
+        dim: TexDim,
+        coords: [u8; 3],
+        layer: Option<u8>,
+        offset: Option<u8>,
     ) -> Result<(), Unsupported> {
-        self.bind_texture(at, slot, TexDim::T2d, false)?;
-        let x = self.r(coords[0]);
-        let y = self.r(coords[1]);
-        let texel = self.bind(&format!("texFetch({}u, {x}, {y})", slot.key()));
+        self.bind_texture(at, slot, dim, false)?;
+        let mut x = self.r(coords[0]);
+        let mut y = self.r(coords[1]);
+        if let Some(reg) = offset {
+            let packed = format!("bitcast<i32>({})", self.r(reg));
+            x = format!("({x} + bitcast<u32>(extractBits({packed}, 0u, 4u)))");
+            y = format!("({y} + bitcast<u32>(extractBits({packed}, 4u, 4u)))");
+        }
+        let z = match (dim, layer) {
+            (TexDim::T3d, _) => self.r(coords[2]),
+            (TexDim::T2dArray, Some(reg)) => format!("({} & 0xffffu)", self.r(reg)),
+            _ => "0u".to_string(),
+        };
+        let texel = self.bind(&format!("texFetch({}u, {x}, {y}, {z})", slot.key()));
         self.store_channels(at, &texel);
         Ok(())
     }
@@ -111,20 +138,29 @@ impl Emitter<'_> {
         }
     }
 
-    /// `tld4`: one channel of the four bilinear texels, as `textureGather`; with `dref`, each compared.
-    pub(super) fn gather_texture(
-        &mut self,
-        at: usize,
-        slot: TextureSlot,
-        dim: TexDim,
-        coords: [u8; 3],
-        layer: Option<u8>,
-        component: u8,
-        dref: Option<u8>,
-    ) -> Result<(), Unsupported> {
+    /// `tld4`: one channel of the four bilinear texels, as `textureGather`; with `dref`, each
+    /// compared. An offset moves the coordinates by whole texels first, as `interp` does, since
+    /// `textureGather` takes only a constant one. `.PTP` gathers four times, each moved by its
+    /// own offset, and keeps the texel that offset belongs to.
+    pub(super) fn gather_texture(&mut self, at: usize, gather: Gather) -> Result<(), Unsupported> {
+        let Gather {
+            slot,
+            dim,
+            coords,
+            layer,
+            offset,
+            ptp,
+            dref,
+            component,
+        } = gather;
         self.bind_texture(at, slot, dim, dref.is_some())?;
+        let key = slot.key();
         let u = self.f(coords[0]);
         let v = self.f(coords[1]);
+        let w = match dim {
+            TexDim::TCube | TexDim::TCubeArray => self.f(coords[2]),
+            _ => "0.0".to_string(),
+        };
         let layer = match layer {
             Some(reg) => {
                 let reg = self.r(reg);
@@ -132,18 +168,45 @@ impl Emitter<'_> {
             }
             None => "0u".to_string(),
         };
-        let texels = match dref {
-            Some(reg) => {
-                let reference = self.f(reg);
-                self.bind(&format!(
-                    "texGatherCompare({}u, {u}, {v}, {layer}, {reference})",
-                    slot.key()
-                ))
+        let reference = dref.map(|reg| self.f(reg));
+        let call = |u: &str, v: &str| match &reference {
+            Some(reference) => {
+                format!("texGatherCompare({key}u, {u}, {v}, {w}, {layer}, {reference})")
             }
-            None => self.bind(&format!(
-                "texGather({}u, {component}u, {u}, {v}, {layer})",
-                slot.key()
-            )),
+            None => format!("texGather({key}u, {component}u, {u}, {v}, {w}, {layer})"),
+        };
+        let texels = if let Some(regs) = ptp {
+            let step = self.bind(&format!("texStep({key}u)"));
+            let mut gathered = Vec::new();
+            for i in 0..4u32 {
+                let packed = format!("bitcast<i32>({})", self.r(regs[i as usize / 2]));
+                let shift = 16 * (i % 2);
+                let (pu, pv) = (
+                    format!("{u} + f32(extractBits({packed}, {shift}u, 6u)) * {step}.x"),
+                    format!(
+                        "{v} + f32(extractBits({packed}, {}u, 6u)) * {step}.y",
+                        shift + 8
+                    ),
+                );
+                let (pu, pv) = (self.bind(&pu), self.bind(&pv));
+                gathered.push(self.bind(&call(&pu, &pv)));
+            }
+            self.bind(&format!(
+                "vec4<f32>({}.x, {}.y, {}.z, {}.w)",
+                gathered[0], gathered[1], gathered[2], gathered[3]
+            ))
+        } else if let Some(reg) = offset {
+            let step = self.bind(&format!("texStep({key}u)"));
+            let packed = format!("bitcast<i32>({})", self.r(reg));
+            let pu = self.bind(&format!(
+                "{u} + f32(extractBits({packed}, 0u, 6u)) * {step}.x"
+            ));
+            let pv = self.bind(&format!(
+                "{v} + f32(extractBits({packed}, 8u, 6u)) * {step}.y"
+            ));
+            self.bind(&call(&pu, &pv))
+        } else {
+            self.bind(&call(&u, &v))
         };
         self.store_channels(at, &texels);
         Ok(())
@@ -160,6 +223,10 @@ impl Emitter<'_> {
         layer: Option<u8>,
     ) -> Result<(), Unsupported> {
         let compare = dref.is_some();
+        // Only a cube's gather compares; there is no sample of one.
+        if compare && matches!(dim, TexDim::TCube | TexDim::TCubeArray) {
+            return Err(Unsupported::TextureDimension { dim });
+        }
         self.bind_texture(at, slot, dim, compare)?;
         let key = slot.key();
         let u = self.f(coords[0]);

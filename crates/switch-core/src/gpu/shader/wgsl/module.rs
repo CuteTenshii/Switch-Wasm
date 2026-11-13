@@ -185,12 +185,6 @@ pub fn module(
         ));
     }
 
-    // Neither reads an integer image here.
-    if layout.textures.iter().any(|texture| texture.uint)
-        && (!layout.texture_offsets.is_empty() || translated.source.contains("texGather("))
-    {
-        return Err(Unsupported::IntegerTexture);
-    }
     // `dim` is unused here but part of `HOST_INTERFACE`.
     out.push_str(
         "fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {\n\
@@ -201,7 +195,7 @@ pub fn module(
             continue;
         }
         if texture.uint {
-            let (key, load) = (texture.slot.key(), uint_load(index, texture.dim)?);
+            let (key, load) = (texture.slot.key(), uint_load(index, texture.dim, (0, 0))?);
             out.push_str(&format!(
                 "    case {key}u: {{ {load} return bitcast<vec4<f32>>(texel); }}\n"
             ));
@@ -248,6 +242,8 @@ pub fn module(
         let coords = match texture.dim {
             TexDim::T2d => "vec2<f32>(u, v)",
             TexDim::T2dArray => "vec2<f32>(u, v), layer",
+            // A cube's depth image is only gathered.
+            TexDim::TCube | TexDim::TCubeArray => continue,
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
         let key = texture.slot.key();
@@ -264,9 +260,6 @@ pub fn module(
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
-        if texture.uint {
-            continue;
-        }
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, false) => "vec2<f32>(u, v), 0.0",
             (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer, 0.0",
@@ -274,12 +267,19 @@ pub fn module(
         };
         let key = texture.slot.key();
         out.push_str(&format!("    case {key}u: {{\n      switch (offset) {{\n"));
-        for (n, (x, y)) in layout.texture_offsets.iter().enumerate() {
+        for (n, &(x, y)) in layout.texture_offsets.iter().enumerate() {
+            if texture.uint {
+                let load = uint_load(index, texture.dim, (x, y))?;
+                out.push_str(&format!(
+                    "        case {n}u: {{ {load} return bitcast<vec4<f32>>(texel); }}\n"
+                ));
+                continue;
+            }
             // A folded image takes the row offset before choosing its tile.
             let body = match texture.fold {
                 Some(fold) => format!(
                     "{} {}",
-                    folded_coords(fold, *y),
+                    folded_coords(fold, y),
                     return_swizzled(
                         &format!(
                             "textureSampleLevel(tex{index}, smp{index}, vec2<f32>(u, fv), fk, \
@@ -326,24 +326,49 @@ pub fn module(
     }
     out.push_str("    default: { return vec4<u32>(1u, 1u, 1u, 1u); }\n  }\n}\n\n");
 
+    // One texel in normalized coordinates, as `TextureSource::texel_step` answers.
+    out.push_str("fn texStep(imm: u32) -> vec2<f32> {\n  switch (imm) {\n");
+    for (index, texture) in layout.textures.iter().enumerate() {
+        let height = match texture.fold {
+            Some(fold) => format!("{}u", fold.height),
+            None => format!("textureDimensions(tex{index}).y"),
+        };
+        out.push_str(&format!(
+            "    case {}u: {{ return vec2<f32>(1.0 / f32(textureDimensions(tex{index}).x), \
+             1.0 / f32({height})); }}\n",
+            texture.slot.key()
+        ));
+    }
+    out.push_str("    default: { return vec2<f32>(1.0, 1.0); }\n  }\n}\n\n");
+
     // One call per gather channel, through the descriptor's swizzle.
     out.push_str(
-        "fn texGather(imm: u32, component: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {\n  \
+        "fn texGather(imm: u32, component: u32, u: f32, v: f32, w: f32, layer: u32) -> vec4<f32> {\n  \
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
-        if texture.uint {
-            continue;
-        }
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, false) => "vec2<f32>(u, v)",
             (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer",
+            (TexDim::TCube, false) => "vec3<f32>(u, v, w)",
+            (TexDim::TCubeArray, false) => "vec3<f32>(u, v, w), layer",
             _ => continue,
         };
         let key = texture.slot.key();
         out.push_str(&format!(
             "    case {key}u: {{\n      switch (component) {{\n"
         ));
+        if texture.uint {
+            // The raw words, whatever the descriptor says.
+            for channel in 0..4 {
+                out.push_str(&format!(
+                    "        case {channel}u: {{ return bitcast<vec4<f32>>(textureGather({channel}, \
+                     tex{index}, smp{index}, {coords})); }}\n"
+                ));
+            }
+            out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
+            continue;
+        }
         let (prelude, coords) = match texture.fold {
             Some(fold) => (folded_coords(fold, 0), "vec2<f32>(u, fv), fk"),
             None => (String::new(), coords),
@@ -366,29 +391,41 @@ pub fn module(
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
 
     // `tlds`: the texel at integer coordinates, zero outside the image.
-    out.push_str("fn texFetch(imm: u32, x: u32, y: u32) -> vec4<f32> {\n  switch (imm) {\n");
+    out.push_str(
+        "fn texFetch(imm: u32, x: u32, y: u32, z: u32) -> vec4<f32> {\n  switch (imm) {\n",
+    );
     for (index, texture) in layout.textures.iter().enumerate() {
-        if texture.compare || texture.dim != TexDim::T2d {
+        if texture.compare || !matches!(texture.dim, TexDim::T2d | TexDim::T2dArray | TexDim::T3d) {
             continue;
         }
         let key = texture.slot.key();
-        let size = match texture.fold {
-            Some(fold) => format!(
-                "vec2<u32>(textureDimensions(tex{index}).x, {}u)",
-                fold.height
-            ),
-            None => format!("textureDimensions(tex{index})"),
-        };
-        let load = match texture.fold {
-            Some(fold) => {
+        let (size, load) = match (texture.fold, texture.dim) {
+            (Some(fold), _) => {
                 let stride = fold.tile_rows - 1;
                 let last = fold.tiles() - 1;
-                format!(
-                    "let fk = min(y / {stride}u, {last}u); \
-                     let texel = textureLoad(tex{index}, vec2<u32>(x, y - fk * {stride}u), fk, 0);"
+                (
+                    format!(
+                        "vec3<u32>(textureDimensions(tex{index}).x, {}u, 1u)",
+                        fold.height
+                    ),
+                    format!(
+                        "let fk = min(y / {stride}u, {last}u); let texel = \
+                         textureLoad(tex{index}, vec2<u32>(x, y - fk * {stride}u), fk, 0);"
+                    ),
                 )
             }
-            None => format!("let texel = textureLoad(tex{index}, vec2<u32>(x, y), 0);"),
+            (None, TexDim::T2dArray) => (
+                format!("vec3<u32>(textureDimensions(tex{index}), textureNumLayers(tex{index}))"),
+                format!("let texel = textureLoad(tex{index}, vec2<u32>(x, y), z, 0);"),
+            ),
+            (None, TexDim::T3d) => (
+                format!("textureDimensions(tex{index})"),
+                format!("let texel = textureLoad(tex{index}, vec3<u32>(x, y, z), 0);"),
+            ),
+            (None, _) => (
+                format!("vec3<u32>(textureDimensions(tex{index}), 1u)"),
+                format!("let texel = textureLoad(tex{index}, vec2<u32>(x, y), 0);"),
+            ),
         };
         let result = if texture.uint {
             format!("{load} return bitcast<vec4<f32>>(texel);")
@@ -397,20 +434,22 @@ pub fn module(
         };
         out.push_str(&format!(
             "    case {key}u: {{\n      let size = {size};\n      \
-             if (x >= size.x || y >= size.y) {{ return vec4<f32>(0.0); }}\n      {result}\n    }}\n"
+             if (x >= size.x || y >= size.y || z >= size.z) {{ return vec4<f32>(0.0); }}\n      {result}\n    }}\n"
         ));
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
 
     // A shadow gather: each texel's comparison, unswizzled like `texSampleCompare`.
     out.push_str(
-        "fn texGatherCompare(imm: u32, u: f32, v: f32, layer: u32, dref: f32) -> vec4<f32> {\n  \
+        "fn texGatherCompare(imm: u32, u: f32, v: f32, w: f32, layer: u32, dref: f32) -> vec4<f32> {\n  \
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, true) => "vec2<f32>(u, v)",
             (TexDim::T2dArray, true) => "vec2<f32>(u, v), layer",
+            (TexDim::TCube, true) => "vec3<f32>(u, v, w)",
+            (TexDim::TCubeArray, true) => "vec3<f32>(u, v, w), layer",
             _ => continue,
         };
         let key = texture.slot.key();
@@ -429,17 +468,24 @@ pub fn module(
     Ok(out)
 }
 
-/// Statements binding `texel`, the raw words of the integer image's texel under `(u, v)`:
-/// no filtering, the nearest texel, clamped to the edge.
-fn uint_load(index: usize, dim: TexDim) -> Result<String, Unsupported> {
+/// Statements binding `texel`, the raw words of the integer image's texel under `(u, v)` moved
+/// by `offset` texels: no filtering, the nearest texel, clamped to the edge.
+fn uint_load(index: usize, dim: TexDim, offset: (i32, i32)) -> Result<String, Unsupported> {
     let layer = match dim {
         TexDim::T2d => "",
         TexDim::T2dArray => ", i32(layer)",
         dim => return Err(Unsupported::TextureDimension { dim }),
     };
+    // Moved as `interp` moves it, by whole texels of normalized coordinates.
+    let uv = match offset {
+        (0, 0) => "vec2<f32>(u, v)".to_string(),
+        (x, y) => format!(
+            "vec2<f32>(u + f32({x}) * (1.0 / f32(size.x)), v + f32({y}) * (1.0 / f32(size.y)))"
+        ),
+    };
     Ok(format!(
         "let size = vec2<i32>(textureDimensions(tex{index})); \
-         let at = clamp(vec2<i32>(floor(vec2<f32>(u, v) * vec2<f32>(size))), vec2<i32>(0), size - vec2<i32>(1)); \
+         let at = clamp(vec2<i32>(floor({uv} * vec2<f32>(size))), vec2<i32>(0), size - vec2<i32>(1)); \
          let texel = textureLoad(tex{index}, at{layer}, 0);"
     ))
 }
@@ -520,6 +566,8 @@ fn texture_type(dim: TexDim, compare: bool) -> Result<&'static str, Unsupported>
         (TexDim::TCubeArray, false) => Ok("texture_cube_array<f32>"),
         (TexDim::T2d, true) => Ok("texture_depth_2d"),
         (TexDim::T2dArray, true) => Ok("texture_depth_2d_array"),
+        (TexDim::TCube, true) => Ok("texture_depth_cube"),
+        (TexDim::TCubeArray, true) => Ok("texture_depth_cube_array"),
         (dim, _) => Err(Unsupported::TextureDimension { dim }),
     }
 }

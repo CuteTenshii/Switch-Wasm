@@ -176,6 +176,8 @@ impl Gpu {
                 visibility: own,
                 ty: wgpu::BindingType::Sampler(if compare {
                     wgpu::SamplerBindingType::Comparison
+                } else if uint {
+                    wgpu::SamplerBindingType::NonFiltering
                 } else {
                     wgpu::SamplerBindingType::Filtering
                 }),
@@ -231,7 +233,7 @@ impl Gpu {
             resources.push(Resource::Texture(binding, texture, view_dimension));
             resources.push(Resource::Sampler(
                 binding + 1,
-                self.sampler(upload, compare, fold.is_some()),
+                self.sampler(upload, compare, uint, fold.is_some()),
             ));
         }
 
@@ -1270,11 +1272,13 @@ impl Gpu {
     }
 
     /// `compare` is the binding's question, not the descriptor's.
-    /// A folded image wraps in the shader, so its tiles are clamped here.
+    /// A folded image wraps in the shader, so its tiles are clamped here, and an integer
+    /// image's sampler only addresses, since its texels cannot be filtered.
     fn sampler(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         compare: bool,
+        integer: bool,
         folded: bool,
     ) -> wgpu::Sampler {
         use switch_core::gpu::texture::Wrap;
@@ -1313,8 +1317,8 @@ impl Gpu {
             } else {
                 wrap(upload.sampler.wrap_v)
             },
-            mag: filter(upload.sampler.mag_linear),
-            min: filter(upload.sampler.min_linear),
+            mag: filter(upload.sampler.mag_linear && !integer),
+            min: filter(upload.sampler.min_linear && !integer),
         };
         let device = &self.device;
         self.samplers

@@ -703,6 +703,219 @@ fn a_gather_reads_the_texels_the_rasterizer_reads() {
     }
 }
 
+/// A `tld4.aoffi` whose offset sits in a register moves the gather by the same texels on both
+/// renderers.
+#[test]
+fn a_register_gather_offset_reads_the_texels_the_rasterizer_reads() {
+    let set_up = |h: &mut Harness| {
+        h.bindless_texture();
+        h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+    };
+    for component in [0, 1] {
+        let plain = {
+            let mut h = Harness::with_fragment_shader(testing::gather_fragment_shader(component));
+            set_up(&mut h);
+            h.draw_with(&mut Software).expect("the draw");
+            h.target()
+        };
+        let new = move || {
+            Harness::with_fragment_shader(testing::gather_offset_fragment_shader(component))
+        };
+        let mut h = new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        assert_ne!(
+            h.target(),
+            plain,
+            "component {component}: the offset moved nothing"
+        );
+
+        agrees_shading(new, |_| {}, set_up);
+    }
+}
+
+/// The bindless fixture's triangle with `corners` as the colour attribute each vertex carries.
+fn colour_triangle(h: &mut Harness, corners: [[f32; 4]; 3]) {
+    h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+    h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], corners[0]);
+    h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], corners[1]);
+    h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], corners[2]);
+}
+
+/// `tlds` forms with integer coordinates: a plain fetch, one moved by an offset register, an array
+/// layer, a volume slice and a fetch outside the image read what the rasterizer reads.
+#[test]
+fn a_tlds_fetches_the_texel_the_rasterizer_fetches() {
+    use testing::{bindless_texel, tlds_fragment_shader};
+    type SetUp = fn(&mut Harness);
+    type Form<'a> = (&'a str, u64, &'a [(u8, u32)], SetUp, u32);
+    // The packed offset `0xe1` is +1 in x and -2 in y; a layer sits in its register's low half.
+    let forms: [Form; 5] = [
+        (
+            "plain",
+            2,
+            &[(4, 3), (6, 5)],
+            Harness::bindless_texture,
+            bindless_texel(3, 5),
+        ),
+        (
+            "offset",
+            4,
+            &[(4, 2), (5, 6), (6, 0xe1)],
+            Harness::bindless_texture,
+            bindless_texel(3, 4),
+        ),
+        (
+            "array layer",
+            8,
+            &[(4, 0xabcd_0002), (6, 4), (7, 1)],
+            Harness::bindless_array_texture,
+            bindless_texel(6, 1),
+        ),
+        (
+            "volume slice",
+            7,
+            &[(4, 1), (5, 2), (6, 2)],
+            Harness::bindless_volume_texture,
+            bindless_texel(3, 2),
+        ),
+        (
+            "outside the image",
+            4,
+            &[(4, 0), (5, 3), (6, 0xf)],
+            Harness::bindless_texture,
+            0,
+        ),
+    ];
+    for (name, encoding, set, image, texel) in forms {
+        let set_up = move |h: &mut Harness| {
+            image(h);
+            colour_triangle(h, [[0.0; 4]; 3]);
+        };
+        let new = || Harness::with_fragment_shader(tlds_fragment_shader(encoding, set));
+        let mut h = new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        let drawn: std::collections::BTreeSet<u32> = h.target().into_iter().collect();
+        let want: std::collections::BTreeSet<u32> = [0, texel].into();
+        assert_eq!(drawn, want, "{name}: the texel the registers name");
+
+        agrees_shading(new, |_| {}, set_up);
+    }
+}
+
+/// `tld4` forms beyond the plain gather: a shadow gather, a gather with an offset per texel and a
+/// cube gather read what the rasterizer reads.
+#[test]
+fn the_other_gather_forms_read_the_texels_the_rasterizer_reads() {
+    // Texture coordinates over the image, and a direction `(x, y, 1)` that stays in the +z
+    // face, clear of its edges and of the 0.125 steps where a footprint changes texel.
+    const UV: [[f32; 4]; 3] = [
+        [0.0, 0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, 1.0],
+    ];
+    const DIRECTION: [[f32; 4]; 3] = [
+        [-0.43, -0.43, 1.0, 1.0],
+        [0.43, -0.43, 1.0, 1.0],
+        [-0.43, 0.43, 1.0, 1.0],
+    ];
+    // Directions `(x, y, 1)` whose gather footprint runs over the +z face's left and right edges
+    // onto -x and +x, short of a corner.
+    const SEAM: [[f32; 4]; 3] = [
+        [-0.95, -0.43, 1.0, 1.0],
+        [0.95, -0.43, 1.0, 1.0],
+        [-0.95, 0.43, 1.0, 1.0],
+    ];
+    type Shader = fn() -> Vec<u8>;
+    type SetUp = fn(&mut Harness);
+    let forms: [(&str, Shader, SetUp, Option<Shader>); 7] = [
+        (
+            "shadow gather",
+            testing::gather_compare_fragment_shader,
+            |h| {
+                h.bindless_depth_texture();
+                colour_triangle(h, UV);
+            },
+            None,
+        ),
+        (
+            "per-texel offsets",
+            || testing::gather_ptp_fragment_shader(1),
+            |h| {
+                h.bindless_texture();
+                colour_triangle(h, UV);
+            },
+            Some(|| testing::gather_fragment_shader(1)),
+        ),
+        (
+            "cube shadow gather",
+            testing::gather_cube_compare_fragment_shader,
+            |h| {
+                h.bindless_depth_cube_texture();
+                colour_triangle(h, DIRECTION);
+            },
+            None,
+        ),
+        (
+            "cube gather",
+            || testing::gather_cube_fragment_shader(2),
+            |h| {
+                h.bindless_cube_texture();
+                colour_triangle(h, DIRECTION);
+            },
+            None,
+        ),
+        (
+            "cube gather over a seam",
+            || testing::gather_cube_fragment_shader(2),
+            |h| {
+                h.bindless_cube_texture();
+                colour_triangle(h, SEAM);
+            },
+            Some(|| testing::gather_cube_fragment_shader(1)),
+        ),
+        (
+            "cube shadow gather over a seam",
+            testing::gather_cube_compare_fragment_shader,
+            |h| {
+                h.bindless_depth_cube_texture();
+                colour_triangle(h, SEAM);
+            },
+            None,
+        ),
+        (
+            "cube array gather of the second cube",
+            || testing::gather_cube_array_fragment_shader(2, 1),
+            |h| {
+                h.bindless_cube_array_texture();
+                colour_triangle(h, DIRECTION);
+            },
+            Some(|| testing::gather_cube_array_fragment_shader(2, 0)),
+        ),
+    ];
+    for (name, shader, set_up, plain) in forms {
+        let software = |shader: Shader| {
+            let mut h = Harness::with_fragment_shader(shader());
+            set_up(&mut h);
+            h.draw_with(&mut Software).expect("the draw");
+            h.target()
+        };
+        let drawn = software(shader);
+        let distinct: std::collections::BTreeSet<u32> =
+            drawn.iter().copied().filter(|&c| c != 0).collect();
+        assert!(distinct.len() >= 4, "{name}: only {distinct:x?} was drawn");
+        if let Some(plain) = plain {
+            assert_ne!(drawn, software(plain), "{name}: the variant drew the same");
+        }
+
+        agrees_shading(|| Harness::with_fragment_shader(shader()), |_| {}, set_up);
+    }
+}
+
 /// A `tex.aoffi` with an immediate offset samples the same texel on both renderers.
 #[test]
 fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
@@ -728,6 +941,50 @@ fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
     assert!(drawn.iter().all(|c| texels.contains(c)), "{drawn:x?}");
 
     agrees_shading(new, |_| {}, set_up);
+}
+
+/// An integer image's words, gathered and offset-sampled, reach the same pixels on both renderers
+/// and the pixels its float twin draws.
+#[test]
+fn an_integer_image_gathers_and_offset_samples_the_words_the_rasterizer_reads() {
+    let set_up = |integer: bool| {
+        move |h: &mut Harness| {
+            if integer {
+                h.bindless_uint_texture();
+            } else {
+                h.bindless_texture();
+            }
+            h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        }
+    };
+    type Shader = fn() -> Vec<u8>;
+    let shaders: [(&str, Shader); 3] = [
+        ("gather", || testing::gather_fragment_shader(1)),
+        ("register gather offset", || {
+            testing::gather_offset_fragment_shader(2)
+        }),
+        ("constant sample offset", testing::offset_fragment_shader),
+    ];
+    for (name, shader) in shaders {
+        let software = |integer: bool| {
+            let mut h = Harness::with_fragment_shader(shader());
+            set_up(integer)(&mut h);
+            h.draw_with(&mut Software).expect("the draw");
+            h.target()
+        };
+        let (float, integer) = (software(false), software(true));
+        assert!(integer.iter().any(|&c| c != 0), "{name}: nothing was drawn");
+        assert_eq!(integer, float, "{name}: the words are not the texels");
+
+        agrees_shading(
+            || Harness::with_fragment_shader(shader()),
+            |_| {},
+            set_up(true),
+        );
+    }
 }
 
 /// Vertex arrays past the device's buffer count are interleaved into one buffer and draw alike.

@@ -416,17 +416,147 @@ fn decodes_a_txq_and_a_tld4() {
             coords: [2, 3, 4],
             layer: None,
             offset: None,
+            ptp: None,
+            dref: None,
             handle: 8,
+            handle_reg: None,
+            sparse: 7,
             dim: TexDim::T2d,
             component: 0,
             mask: [true, false, true, true],
         }
     );
-    // The green channel, and a shadow gather, which is not decoded.
     let green = 0xc83a0086aff70208u64 | 1 << 56;
     assert!(matches!(decode(green).op, Op::Tld4 { component: 1, .. }));
-    let shadow = 0xc83a0086aff70208u64 | 1 << 50;
-    assert!(matches!(decode(shadow).op, Op::Unimplemented { .. }));
+}
+
+/// `tld4`'s forms as Eden's `texture_gather.cpp` reads them: `base` gathers a 2D image with r6
+/// where the handle, offsets and reference chain starts.
+#[test]
+fn a_tld4_reads_its_offsets_and_reference_from_the_register_chain() {
+    let base = 0xc83a0086aff70208u64 & !(0xff << 20) | 6 << 20;
+    let gather = |insn: u64| match decode(insn).op {
+        Op::Tld4 {
+            coords,
+            layer,
+            offset,
+            ptp,
+            dref,
+            handle_reg,
+            sparse: 7,
+            dim,
+            ..
+        } => (dim, coords, layer, offset, ptp, dref, handle_reg),
+        other => panic!("{insn:#x}: {other:?}"),
+    };
+    let dim = |dim: u64| base & !(0b111 << 28) | dim << 28;
+    let offsets = |insn: u64, kind: u64| insn & !(0b11 << 54) | kind << 54;
+    let dc = 1 << 50;
+
+    assert_eq!(
+        gather(base | dc),
+        (TexDim::T2d, [2, 3, 4], None, None, None, Some(6), None)
+    );
+    assert_eq!(
+        gather(offsets(base, 1)),
+        (TexDim::T2d, [2, 3, 4], None, Some(6), None, None, None)
+    );
+    assert_eq!(
+        gather(offsets(base, 1) | dc),
+        (TexDim::T2d, [2, 3, 4], None, Some(6), None, Some(7), None)
+    );
+    assert_eq!(
+        gather(offsets(base, 2) | dc),
+        (
+            TexDim::T2d,
+            [2, 3, 4],
+            None,
+            None,
+            Some([6, 7]),
+            Some(8),
+            None
+        )
+    );
+    // An array's layer comes first; a cube's three coordinates are a direction.
+    assert_eq!(
+        gather(dim(3)),
+        (TexDim::T2dArray, [3, 4, 5], Some(2), None, None, None, None)
+    );
+    assert_eq!(
+        gather(dim(6) | dc),
+        (TexDim::TCube, [2, 3, 4], None, None, None, Some(6), None)
+    );
+    assert_eq!(
+        gather(dim(7) | dc),
+        (
+            TexDim::TCubeArray,
+            [3, 4, 5],
+            Some(2),
+            None,
+            None,
+            Some(6),
+            None
+        )
+    );
+    // A cube takes no offset, offset kind 3 is not one, and 1D and 3D have no gather.
+    for refused in [
+        offsets(dim(6), 1),
+        offsets(dim(7), 2),
+        offsets(base, 3),
+        dim(0),
+        dim(1),
+        dim(4),
+        dim(5),
+    ] {
+        assert!(
+            matches!(decode(refused).op, Op::Unimplemented { .. }),
+            "{refused:#x}"
+        );
+    }
+}
+
+/// A gather's sparse predicate is the three bits above its channel mask; `PT` is none.
+#[test]
+fn a_tld4_names_the_predicate_it_clears_for_a_resident_texel() {
+    let base = 0xc83a0086aff70208u64;
+    let sparse = |insn: u64| match decode(insn).op {
+        Op::Tld4 { sparse, .. } => sparse,
+        other => panic!("{insn:#x}: {other:?}"),
+    };
+    assert_eq!(sparse(base), 7);
+    assert_eq!(sparse(base & !(0b111 << 51) | 3 << 51), 3);
+}
+
+/// `tld4.b` has the handle in the first register of the chain and its fields lower down.
+#[test]
+fn a_bindless_tld4_takes_its_handle_from_a_register() {
+    let insn = 0xdec0_0000_0000_0000u64
+        | 0b111 << 51
+        | 0b1101 << 31
+        | 2 << 28
+        | 6 << 20
+        | 2 << 8
+        | 8
+        | 1 << 36
+        | 2 << 38
+        | 1 << 50;
+    assert_eq!(
+        decode(insn).op,
+        Op::Tld4 {
+            dst: 8,
+            coords: [2, 3, 4],
+            layer: None,
+            offset: Some(7),
+            ptp: None,
+            dref: Some(8),
+            handle: 0,
+            handle_reg: Some(6),
+            sparse: 7,
+            dim: TexDim::T2d,
+            component: 2,
+            mask: [true, false, true, true],
+        }
+    );
 }
 
 #[test]
@@ -697,20 +827,109 @@ fn unrecognised_bits_are_unimplemented_not_a_panic() {
 #[test]
 fn decodes_a_tlds_fetch_into_texss_registers() {
     // Persona 5 Royal: the green channel of the texel at (r4, r13), the plain 2D form.
+    let plain = 0xda4600aff0d70404u64;
     assert_eq!(
-        decode(0xda4600aff0d70404).op,
+        decode(plain).op,
         Op::Tlds {
             dst: 4,
             dst2: RZ,
-            coords: [4, 13],
+            coords: [4, 13, RZ],
+            layer: None,
+            lod: None,
+            offset: None,
             handle: 10,
+            dim: TexDim::T2d,
             mask: [false, true, false, false],
             f16: false,
         }
     );
-    // The forms with a level, an offset or a sample index are not decoded.
-    assert!(matches!(
-        decode(0xda4600aff0d70404 & !(0xf << 53) | 5 << 53).op,
-        Op::Unimplemented { .. }
-    ));
+}
+
+#[test]
+fn a_tlds_encoding_picks_where_its_registers_go() {
+    // The same word with each encoding of Eden's `texture_load_swizzled.cpp`; a is r4, b is r12.
+    let with = |encoding: u64| match decode(0xda4600aff0c70404 & !(0xf << 53) | encoding << 53).op {
+        Op::Tlds {
+            dim,
+            coords,
+            layer,
+            lod,
+            offset,
+            ..
+        } => (dim, coords, layer, lod, offset),
+        other => panic!("encoding {encoding}: {other:?}"),
+    };
+    assert_eq!(with(0), (TexDim::T2d, [4, RZ, RZ], None, None, None));
+    assert_eq!(with(1), (TexDim::T2d, [4, RZ, RZ], None, Some(12), None));
+    assert_eq!(with(4), (TexDim::T2d, [4, 5, RZ], None, None, Some(12)));
+    assert_eq!(with(5), (TexDim::T2d, [4, 5, RZ], None, Some(12), None));
+    assert_eq!(with(7), (TexDim::T3d, [4, 5, 12], None, None, None));
+    assert_eq!(
+        with(8),
+        (TexDim::T2dArray, [12, 13, RZ], Some(4), None, None)
+    );
+    assert_eq!(
+        with(12),
+        (TexDim::T2d, [4, 5, RZ], None, Some(12), Some(13))
+    );
+    // 6 reads a multisample index, and 3 and the rest are not encodings.
+    for encoding in [3, 6, 9, 10, 11, 13, 14, 15] {
+        assert!(
+            matches!(
+                decode(0xda4600aff0c70404 & !(0xf << 53) | encoding << 53).op,
+                Op::Unimplemented { .. }
+            ),
+            "encoding {encoding}"
+        );
+    }
+}
+
+/// Eden throws on a register pair that starts on an odd register, so the decoder refuses it.
+#[test]
+fn a_tlds_pair_on_an_odd_register_is_unimplemented() {
+    const BASE: u64 = 0xda4600aff0c70404;
+    let decoded = |encoding: u64, a: u64, b: u64| {
+        let insn = BASE & !(0xf << 53) & !(0xff << 8) & !(0xff << 20);
+        !matches!(
+            decode(insn | encoding << 53 | a << 8 | b << 20).op,
+            Op::Unimplemented { .. }
+        )
+    };
+    // reg_a pairs: encodings 4, 5, 7 and 12.
+    for encoding in [4, 5, 7, 12] {
+        assert!(decoded(encoding, 4, 12), "encoding {encoding}");
+        assert!(!decoded(encoding, 5, 12), "encoding {encoding}");
+    }
+    // 8 pairs reg_b and reads the layer from reg_a, which may be odd.
+    assert!(decoded(8, 5, 12));
+    assert!(!decoded(8, 4, 13));
+    assert!(!decoded(12, 4, 13));
+    // The unpaired forms take any register, and RZ counts as aligned.
+    for encoding in [0, 1, 2] {
+        assert!(decoded(encoding, 5, 13), "encoding {encoding}");
+    }
+    assert!(decoded(8, 4, RZ.into()));
+}
+
+/// Two or more f32 channels span a pair from `dst`, and four a second pair from `dst2`.
+#[test]
+fn a_tlds_destination_pair_on_an_odd_register_is_unimplemented() {
+    const BASE: u64 = 0xda4600aff0c70404 & !(0x7 << 50) & !(0xff << 28) & !0xff & !(1 << 59);
+    let decoded = |swizzle: u64, dst: u64, dst2: u64, f16: bool| {
+        let precision = if f16 { 0 } else { 1 << 59 };
+        let insn = BASE | precision | swizzle << 50 | dst2 << 28 | dst;
+        !matches!(decode(insn).op, Op::Unimplemented { .. })
+    };
+    let rz = u64::from(RZ);
+    assert!(decoded(0, 5, rz, false), "one channel takes any register");
+    assert!(decoded(4, 4, rz, false), "two channels, red and green");
+    assert!(!decoded(4, 5, rz, false));
+    assert!(
+        decoded(0, 4, 7, false),
+        "three channels, the second pair is unused"
+    );
+    assert!(!decoded(0, 5, 7, false));
+    assert!(decoded(4, 4, 6, false), "four channels");
+    assert!(!decoded(4, 4, 7, false));
+    assert!(decoded(4, 5, 7, true), "halves pack, so there is no pair");
 }

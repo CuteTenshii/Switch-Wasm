@@ -126,7 +126,8 @@ fn the_quad_swap_a_browser_gets_is_wgsl_naga_accepts() {
     assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
 }
 
-/// Mario Kart 8 Deluxe's `tld4s`, and an integer image read into an integer target, are valid WGSL.
+/// Mario Kart 8 Deluxe's `tld4s`, on a float or an integer image, and an integer image read into
+/// an integer target, are valid WGSL.
 #[test]
 fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
@@ -150,12 +151,7 @@ fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
         .expect("a tld4s translates");
     for uint in [false, true] {
         let mut layout = Layout::of(&translated, Stage::Fragment);
-        if uint {
-            // A gather has no integer form here.
-            layout.textures[0].uint = true;
-            assert!(wgsl::module(&translated, Stage::Fragment, &layout).is_err());
-            continue;
-        }
+        layout.textures[0].uint = uint;
         let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
         let _ = gpu
             .device
@@ -245,6 +241,205 @@ fn persona_5_royals_tlds_and_shadow_tld4s_are_wgsl_naga_accepts() {
         let _ = gpu.device.poll(wgpu::PollType::Poll);
         let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
         assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    }
+}
+
+/// `ops` as a fragment module with `tweak` applied to its layout, which the device validates.
+fn validated_module(
+    gpu: &super::Gpu,
+    label: &str,
+    ops: &[switch_core::gpu::shader::Op],
+    tweak: impl FnOnce(&mut super::Layout),
+) -> String {
+    use super::{wgpu, wgsl, Compiled, Layout, Stage};
+    use switch_core::gpu::shader::isa::{Instruction, Pred};
+    use switch_core::gpu::shader::{Op, Program};
+
+    let mut program = Program::default();
+    for (index, op) in ops.iter().copied().chain([Op::Exit]).enumerate() {
+        assert!(!matches!(op, Op::Unimplemented { .. }), "{op:?}");
+        program.insns.push(Instruction {
+            pred: Pred::ALWAYS,
+            op,
+        });
+        program.offsets.push(index as u32 * 8);
+    }
+    let translated = wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE)
+        .unwrap_or_else(|e| panic!("{label} translates: {e}"));
+    let mut layout = Layout::of(&translated, Stage::Fragment);
+    tweak(&mut layout);
+    let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+    let _ = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+        });
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+    assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    source
+}
+
+/// Every `tlds` shape: an offset, an array layer, a volume slice, and a folded image's rows.
+#[test]
+fn every_tlds_shape_is_wgsl_naga_accepts() {
+    use switch_core::gpu::shader::isa::{TexDim, RZ};
+    use switch_core::gpu::shader::Op;
+
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    let tlds = |dim, coords, layer, offset, handle| Op::Tlds {
+        dst: 0,
+        dst2: RZ,
+        coords,
+        layer,
+        lod: None,
+        offset,
+        handle,
+        dim,
+        mask: [true, true, false, false],
+        f16: false,
+    };
+    let ops = [
+        tlds(TexDim::T2d, [4, 5, RZ], None, Some(6), 8),
+        tlds(TexDim::T2dArray, [4, 5, RZ], Some(7), None, 9),
+        tlds(TexDim::T3d, [4, 5, 6], None, None, 10),
+    ];
+    let source = validated_module(&gpu, "tlds shapes", &ops, |_| {});
+    assert!(
+        source.contains("textureLoad(tex2, vec3<u32>(x, y, z), 0)"),
+        "{source}"
+    );
+
+    let folded = validated_module(&gpu, "folded tlds", &ops[..1], |layout| {
+        layout.textures[0].fold = super::wgsl::Fold::of(100, 16, 64, false);
+        assert!(layout.textures[0].fold.is_some());
+    });
+    assert!(folded.contains("fk"), "{folded}");
+}
+
+/// A gather whose offset is in a register, folded images included, is valid WGSL.
+#[test]
+fn a_gather_with_a_register_offset_is_wgsl_naga_accepts() {
+    use switch_core::gpu::shader::isa::{TexDim, RZ};
+    use switch_core::gpu::shader::Op;
+
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    let ops = [
+        Op::Tld4 {
+            dst: 0,
+            coords: [4, 5, 5],
+            layer: None,
+            offset: Some(7),
+            ptp: None,
+            dref: None,
+            handle: 8,
+            handle_reg: None,
+            sparse: 7,
+            dim: TexDim::T2d,
+            component: 1,
+            mask: [true; 4],
+        },
+        Op::Tld4s {
+            dst: 10,
+            dst2: 12,
+            coords: [4, 5],
+            offset: Some(7),
+            dref: None,
+            handle: 9,
+            component: 0,
+            f16: false,
+        },
+        Op::Tld4 {
+            dst: 20,
+            coords: [4, 5, 5],
+            layer: Some(RZ),
+            offset: Some(7),
+            ptp: None,
+            dref: None,
+            handle: 10,
+            handle_reg: None,
+            sparse: 7,
+            dim: TexDim::T2dArray,
+            component: 0,
+            mask: [true; 4],
+        },
+    ];
+    let source = validated_module(&gpu, "register gather offsets", &ops, |_| {});
+    assert_eq!(
+        source
+            .matches("extractBits(bitcast<i32>(r7), 8u, 6u)")
+            .count(),
+        3
+    );
+
+    let folded = validated_module(&gpu, "folded gather offset", &ops[..1], |layout| {
+        layout.textures[0].fold = super::wgsl::Fold::of(100, 16, 64, false);
+        assert!(layout.textures[0].fold.is_some());
+    });
+    assert!(
+        folded.contains("return vec2<f32>(1.0 / f32(textureDimensions(tex0).x), 1.0 / f32(100u))"),
+        "{folded}"
+    );
+}
+
+/// Every `tld4` form, shadow, cube and per-texel offsets included, is valid WGSL.
+#[test]
+fn every_tld4_form_is_wgsl_naga_accepts() {
+    use switch_core::gpu::shader::isa::{Operand, TexDim};
+    use switch_core::gpu::shader::Op;
+
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    let tld4 = |dim, layer, ptp, dref, handle, handle_reg, sparse| Op::Tld4 {
+        dst: 0,
+        coords: [4, 5, 6],
+        layer,
+        offset: None,
+        ptp,
+        dref,
+        handle,
+        handle_reg,
+        sparse,
+        dim,
+        component: 1,
+        mask: [true; 4],
+    };
+    let ops = [
+        tld4(TexDim::T2d, None, None, Some(10), 8, None, 7),
+        tld4(TexDim::T2dArray, Some(2), None, Some(10), 9, None, 7),
+        tld4(TexDim::TCube, None, None, None, 10, None, 7),
+        tld4(TexDim::TCube, None, None, Some(10), 11, None, 7),
+        tld4(TexDim::TCubeArray, Some(2), None, None, 12, None, 7),
+        tld4(TexDim::TCubeArray, Some(2), None, Some(10), 13, None, 7),
+        tld4(TexDim::T2d, None, Some([7, 8]), None, 14, None, 7),
+        tld4(TexDim::T2d, None, Some([7, 8]), Some(10), 15, None, 7),
+        Op::Mov {
+            dst: 20,
+            src: Operand::Const {
+                bank: 3,
+                offset: 0x20,
+            },
+        },
+        tld4(TexDim::T2d, None, None, None, 0, Some(20), 7),
+        // Its sparse predicate is cleared.
+        tld4(TexDim::T2d, None, None, None, 16, None, 3),
+    ];
+    let source = validated_module(&gpu, "tld4 forms", &ops, |_| {});
+    for texture in [
+        "texture_depth_2d;",
+        "texture_depth_2d_array",
+        "texture_cube<f32>",
+        "texture_depth_cube;",
+        "texture_cube_array<f32>",
+        "texture_depth_cube_array",
+    ] {
+        assert!(source.contains(texture), "{texture}: {source}");
     }
 }
 

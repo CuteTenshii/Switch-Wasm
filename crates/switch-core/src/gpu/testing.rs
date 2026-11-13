@@ -142,6 +142,188 @@ pub fn gather_fragment_shader(component: u32) -> Vec<u8> {
     bytes
 }
 
+/// `oColor = textureGather(texture, vColor.xy + texel * ivec2(1, -1), component)` from slot 4,
+/// the offset in a register.
+pub fn gather_offset_fragment_shader(component: u32) -> Vec<u8> {
+    let tld4_high = 0xc83a0047 | (component & 3) << 24 | 1 << 22;
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0xf017000a, 0x01000003), // mov32i $r10 0x3f01: x +1, y -1
+        (0xa0a70000, tld4_high),  // tld4.aoffi r|g nodep $r0 $r0 $r10 0x4 t2d 0xf
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
+/// `oColor = textureGather(texture, vColor.xy, component)` with each of the four texels moved
+/// by its own offset (`tld4.ptp`), from slot 4.
+pub fn gather_ptp_fragment_shader(component: u32) -> Vec<u8> {
+    let tld4_high = 0xc83a0047 | (component & 3) << 24 | 2 << 22;
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0xf017000a, 0x010033e3), // mov32i $r10 0x033e3f01: (+1, -1) and (-2, +3)
+        (0x2007000b, 0x010003f0), // mov32i $r11 0x003f0200: (0, +2) and (-1, 0)
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0xa0a70000, tld4_high), // tld4.ptp r|g nodep $r0 $r0 $r10 0x4 t2d 0xf
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+    ));
+    bytes
+}
+
+/// `oColor = textureGather(shadowMap, vColor.xy, 0.5)` from slot 4: each texel compared.
+pub fn gather_compare_fragment_shader() -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88),           // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0x0007f002, 0x0103f000),           // mov32i $r2 0x3f000000: 0.5
+        (0xa0270000, 0xc83a0047 | 1 << 18), // tld4.dc nodep $r0 $r0 $r2 0x4 t2d 0xf
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
+/// `oColor = textureGather(shadowCube, vColor.xyz, 0.5)` from slot 4: each texel compared.
+pub fn gather_cube_compare_fragment_shader() -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
+        (0x0007f004, 0x0103f000), // mov32i $r4 0x3f000000: 0.5
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0xe0470000, 0xc83a0047 | 1 << 18), // tld4.dc nodep $r0 $r0 $r4 0x4 cube 0xf
+        (0x0007000f, 0xe3000000),           // exit
+        (0xff87000f, 0xe2400fff),           // bra (padding, never reached)
+    ));
+    bytes
+}
+
+/// `oColor = textureGather(cube, vColor.xyz, component)` from slot 4.
+pub fn gather_cube_fragment_shader(component: u32) -> Vec<u8> {
+    let tld4_high = 0xc83a0047 | (component & 3) << 24;
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
+        (0xeff70000, tld4_high),  // tld4 r|g nodep $r0 $r0 0x0 0x4 cube 0xf
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
+/// `mov32i $reg, imm`.
+fn mov32i(reg: u8, imm: u32) -> (u32, u32) {
+    (
+        (imm & 0xfff) << 20 | 0x0007_f000 | u32::from(reg),
+        0x0100_0000 | imm >> 12,
+    )
+}
+
+/// `oColor = texelFetch(...)` from slot 4: a `tlds` of the given `encoding` of Eden's
+/// `texture_load_swizzled.cpp`, reading `a` as r4 and `b` as r6, after each `(register, value)`
+/// of `set` (at most three) is loaded.
+pub fn tlds_fragment_shader(encoding: u64, set: &[(u8, u32)]) -> Vec<u8> {
+    const NOP: (u32, u32) = (0x00070f00, 0x50b00000);
+    let tlds = (0xda46_00af_f0d7_0404u64
+        & !(0xff | 0xff << 8 | 0xff << 20 | 0xff << 28 | 0x1fff << 36 | 0x7 << 50 | 0xf << 53))
+        | 2 << 28
+        | 4 << 8
+        | 6 << 20
+        | 4 << 36
+        | 4 << 50
+        | encoding << 53;
+    let mut loads = set.iter().map(|&(reg, value)| mov32i(reg, value));
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        loads.next().unwrap_or(NOP),
+        loads.next().unwrap_or(NOP),
+        loads.next().unwrap_or(NOP),
+    );
+    assert!(loads.next().is_none(), "three registers at most");
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (tlds as u32, (tlds >> 32) as u32), // tlds nodep $r0 $r2 $r4 $r6 0x4 0xf
+        (0x0007000f, 0xe3000000),           // exit
+        (0xff87000f, 0xe2400fff),           // bra (padding, never reached)
+    ));
+    bytes
+}
+
+/// `oColor = textureGather(cubeArray, vec4(vColor.xyz, layer), component)` from slot 4.
+pub fn gather_cube_array_fragment_shader(component: u32, layer: u32) -> Vec<u8> {
+    let tld4_high = 0xc83a0047 | (component & 3) << 24;
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff05, 0xe043ff88), // ipa $r5 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff06, 0xe043ff88), // ipa $r6 a[0x84] $r3 0x0 0x1
+        (0x8037ff07, 0xe043ff88), // ipa $r7 a[0x88] $r3 0x0 0x1
+        mov32i(4, layer),
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0xfff70400, tld4_high), // tld4 r|g nodep $r0 $r4 0x0 0x4 cube array 0xf
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+    ));
+    bytes
+}
+
 /// `oColor = textureOffset(texture, vColor.xy, ivec2(1, -1))` from slot 4.
 pub fn offset_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
@@ -192,6 +374,27 @@ pub const BINDLESS_HANDLE_BANK: u32 = 3;
 pub const BINDLESS_HANDLE_OFFSET: u32 = 0x10;
 
 pub const BINDLESS_TEXTURE_SIZE: u32 = 8;
+
+pub const BINDLESS_LAYERS: u32 = 3;
+
+/// What `Harness::bindless_image` binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindlessImage {
+    Rgba8,
+    Uint,
+    Depth,
+    Cube,
+    DepthCube,
+    CubeArray,
+    Array,
+    Volume,
+}
+
+/// Depth at `(x, y)` of `Harness::bindless_depth_texture`: eight values in `(0, 1)` that
+/// neighbouring texels rarely share, so a shadow gather of 0.5 sees every pattern of four.
+pub fn bindless_depth(x: u32, y: u32) -> f32 {
+    (((x * 3 + y * 5) % 8) as f32 + 0.5) / 8.0
+}
 
 /// Distinct RGBA8 texel at `(x, y)` of [`Harness::bindless_texture`].
 pub fn bindless_texel(x: u32, y: u32) -> u32 {
@@ -552,30 +755,114 @@ impl Harness {
     /// Bind an 8x8 RGBA8 image for [`bindless_fragment_shader`] as image 1 and sampler 1,
     /// so a backend reading a zero handle samples the wrong descriptor.
     pub fn bindless_texture(&mut self) {
+        self.bindless_image(BindlessImage::Rgba8);
+    }
+
+    /// [`Harness::bindless_texture`] as an `RGBA32Uint` image whose words are the bits of
+    /// each RGBA8 texel's channels as floats, so a shader that passes them on draws the same colours.
+    pub fn bindless_uint_texture(&mut self) {
+        self.bindless_image(BindlessImage::Uint);
+    }
+
+    /// [`Harness::bindless_texture`] as a shadow map: `ZF32` depths [`bindless_depth`] under a
+    /// `Less` comparison.
+    pub fn bindless_depth_texture(&mut self) {
+        self.bindless_image(BindlessImage::Depth);
+    }
+
+    /// [`Harness::bindless_texture`] as a cubemap whose face `f` holds [`bindless_texel`]
+    /// shifted `f` texels along.
+    pub fn bindless_cube_texture(&mut self) {
+        self.bindless_image(BindlessImage::Cube);
+    }
+
+    /// [`Harness::bindless_depth_texture`] as a cubemap whose face `f` holds [`bindless_depth`]
+    /// shifted `f` texels along.
+    pub fn bindless_depth_cube_texture(&mut self) {
+        self.bindless_image(BindlessImage::DepthCube);
+    }
+
+    /// [`Harness::bindless_texture`] as a cubemap array of two cubes: layer `l` holds
+    /// [`bindless_texel`] shifted `l` texels along.
+    pub fn bindless_cube_array_texture(&mut self) {
+        self.bindless_image(BindlessImage::CubeArray);
+    }
+
+    /// [`Harness::bindless_texture`] as a 2D array of [`BINDLESS_LAYERS`] layers, layer `l`
+    /// holding [`bindless_texel`] shifted `l` texels along.
+    pub fn bindless_array_texture(&mut self) {
+        self.bindless_image(BindlessImage::Array);
+    }
+
+    /// [`Harness::bindless_array_texture`] as a 3D image of [`BINDLESS_LAYERS`] slices.
+    pub fn bindless_volume_texture(&mut self) {
+        self.bindless_image(BindlessImage::Volume);
+    }
+
+    fn bindless_image(&mut self, kind: BindlessImage) {
         let header_pool = self.base + 0x1400;
         let sampler_pool = self.base + 0x1480;
         let constants = self.base + 0x1500;
         let image = self.base + 0x1800;
         let size = BINDLESS_TEXTURE_SIZE;
+        let texel_bytes = if kind == BindlessImage::Uint { 16 } else { 4 };
+        let depth = matches!(kind, BindlessImage::Depth | BindlessImage::DepthCube);
+        // TIC `TextureType`, the layers stored, and `DEPTH_MINUS_ONE`.
+        let (texture_type, faces, depth_minus_one) = match kind {
+            BindlessImage::Cube | BindlessImage::DepthCube => (3, 6, 0),
+            BindlessImage::CubeArray => (8, 12, 1),
+            BindlessImage::Array => (5, BINDLESS_LAYERS, BINDLESS_LAYERS - 1),
+            BindlessImage::Volume => (2, BINDLESS_LAYERS, BINDLESS_LAYERS - 1),
+            _ => (1, 1, 0),
+        };
+        let layer_bytes = size * size * texel_bytes;
         let mut ctx = self.ctx();
-        for y in 0..size {
-            for x in 0..size {
-                ctx.write_u32(image + u64::from((y * size + x) * 4), bindless_texel(x, y))
-                    .unwrap();
+        for face in 0..faces {
+            for y in 0..size {
+                for x in 0..size {
+                    let at = image + u64::from(face * layer_bytes + (y * size + x) * texel_bytes);
+                    let texel = bindless_texel((x + face) % size, y);
+                    match kind {
+                        BindlessImage::Uint => {
+                            for channel in 0..4u32 {
+                                let value = ((texel >> (8 * channel)) & 0xff) as f32 / 255.0;
+                                ctx.write_u32(at + 4 * u64::from(channel), value.to_bits())
+                                    .unwrap();
+                            }
+                        }
+                        BindlessImage::Depth | BindlessImage::DepthCube => {
+                            let depth = bindless_depth((x + face) % size, y);
+                            ctx.write_u32(at, depth.to_bits()).unwrap();
+                        }
+                        _ => {
+                            ctx.write_u32(at, texel).unwrap();
+                        }
+                    }
+                }
             }
         }
-        // TIC 1: A8B8G8R8 UNORM, the identity swizzle, pitch-linear, 2D.
+        // TIC 1, pitch-linear with the identity swizzle: A8B8G8R8 UNORM, R32_G32_B32_A32 UINT,
+        // ZF32 or a cube of A8B8G8R8.
         let tic = header_pool + 32;
         let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
-        ctx.write_u32(tic, 0x08 | (2 << 7) | identity).unwrap();
+        let format = match kind {
+            BindlessImage::Uint => 0x01 | (4 << 7),
+            BindlessImage::Depth | BindlessImage::DepthCube => 0x2f | (7 << 7),
+            _ => 0x08 | (2 << 7),
+        };
+        ctx.write_u32(tic, format | identity).unwrap();
         ctx.write_u32(tic + 4, image as u32).unwrap();
         ctx.write_u32(tic + 8, (image >> 32) as u32 | (2 << 21))
             .unwrap();
-        ctx.write_u32(tic + 12, size * 4 / 32).unwrap();
-        ctx.write_u32(tic + 16, (size - 1) | (1 << 23)).unwrap();
-        ctx.write_u32(tic + 20, size - 1).unwrap();
-        // TSC 1: ClampToEdge on all three axes, nearest filtering.
-        ctx.write_u32(sampler_pool + 32, 2 | (2 << 3) | (2 << 6))
+        ctx.write_u32(tic + 12, size * texel_bytes / 32).unwrap();
+        ctx.write_u32(tic + 16, (size - 1) | (texture_type << 23))
+            .unwrap();
+        ctx.write_u32(tic + 20, (size - 1) | (depth_minus_one << 16))
+            .unwrap();
+        // TSC 1: ClampToEdge on all three axes, nearest filtering, and a `Less` comparison
+        // for a shadow map.
+        let compare = if depth { 1 << 9 | 1 << 10 } else { 0 };
+        ctx.write_u32(sampler_pool + 32, 2 | (2 << 3) | (2 << 6) | compare)
             .unwrap();
         let handle = 1 | (1 << 20);
         ctx.write_u32(constants + u64::from(BINDLESS_HANDLE_OFFSET), handle)

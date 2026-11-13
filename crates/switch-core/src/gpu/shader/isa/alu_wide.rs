@@ -548,9 +548,13 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
     if insn >> 56 == 0xdf && field(insn, 54, 1) == 0 {
         return decode_tld4s(insn);
     }
-    // tld4: the gather, `110010` at the top and `111` at [51, 54).
-    if insn >> 58 == 0b11_0010 && field(insn, 51, 3) == 0b111 {
-        return decode_tld4(insn);
+    // tld4.b: the bindless gather, 0xdec0/0xffc0.
+    if insn >> 54 == 0b11_0111_1011 {
+        return decode_tld4(insn, true);
+    }
+    // tld4: the gather, `110010` at the top.
+    if insn >> 58 == 0b11_0010 {
+        return decode_tld4(insn, false);
     }
     // tex.
     if insn & 0xf800_0000_0000_0000 == 0xc000_0000_0000_0000 {

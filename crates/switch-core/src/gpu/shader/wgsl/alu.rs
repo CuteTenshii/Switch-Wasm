@@ -2,6 +2,7 @@
 
 use super::emitter::Emitter;
 use super::layout::{generic_slot, ATOMS};
+use super::texture::Gather;
 use super::Unsupported;
 use crate::gpu::shader::isa::{
     AtomSpace, AtomType, MemSize, Op, Operand, ShflMode, TexDim, VoteMode, RZ,
@@ -148,8 +149,19 @@ impl Emitter<'_> {
                 let slot = TextureSlot::Bound(handle);
                 self.sample_texture(at, slot, dim, dref, coords, layer)?;
             }
-            Op::Tlds { coords, handle, .. } => {
-                self.fetch_texture(at, TextureSlot::Bound(handle), coords)?;
+            Op::Tlds {
+                coords,
+                layer,
+                lod,
+                offset,
+                handle,
+                dim,
+                ..
+            } => {
+                if lod.is_some_and(|reg| reg != RZ) {
+                    return Err(Unsupported::Op { at, op });
+                }
+                self.fetch_texture(at, TextureSlot::Bound(handle), dim, coords, layer, offset)?;
             }
             // `tex` keeps the layer before the coordinates; `.LL`/`.LB` sample the one level.
             Op::Tex {
@@ -178,40 +190,60 @@ impl Emitter<'_> {
             Op::Txq { lod, handle, .. } => {
                 self.query_texture(at, TextureSlot::Bound(handle), lod);
             }
-            // WGSL needs a constant gather offset.
             Op::Tld4 {
                 coords,
                 layer,
-                offset: None,
+                offset,
+                ptp,
+                dref,
                 handle,
+                handle_reg,
+                sparse,
                 dim,
                 component,
                 ..
-            } => self.gather_texture(
-                at,
-                TextureSlot::Bound(handle),
-                dim,
-                coords,
-                layer,
-                component,
-                None,
-            )?,
+            } => {
+                let slot = match handle_reg {
+                    None => TextureSlot::Bound(handle),
+                    Some(reg) => self
+                        .bindless_slot(at, reg)
+                        .ok_or(Unsupported::UntracedHandle { at })?,
+                };
+                self.set_p(sparse, "false");
+                self.gather_texture(
+                    at,
+                    Gather {
+                        slot,
+                        dim,
+                        coords,
+                        layer,
+                        offset,
+                        ptp,
+                        dref,
+                        component,
+                    },
+                )?;
+            }
 
             Op::Tld4s {
                 coords,
-                offset: None,
+                offset,
                 dref,
                 handle,
                 component,
                 ..
             } => self.gather_texture(
                 at,
-                TextureSlot::Bound(handle),
-                TexDim::T2d,
-                [coords[0], coords[1], coords[1]],
-                None,
-                component,
-                dref,
+                Gather {
+                    slot: TextureSlot::Bound(handle),
+                    dim: TexDim::T2d,
+                    coords: [coords[0], coords[1], coords[1]],
+                    layer: None,
+                    offset,
+                    ptp: None,
+                    dref,
+                    component,
+                },
             )?,
 
             // `shfl` maps onto `quadSwapX`/`Y`/`Diagonal`, mirroring `interp::shuffle_source`.
@@ -455,8 +487,6 @@ impl Emitter<'_> {
             | Op::Cont
             | Op::Exit
             | Op::Kil => unreachable!("control flow is emitted by emit_instruction"),
-            // `tex.aoffi` with a non-constant offset is the rasterizer's.
-            Op::Tld4 { .. } | Op::Tld4s { .. } => return Err(Unsupported::Op { at, op }),
         }
         Ok(())
     }

@@ -498,6 +498,11 @@ impl ColorFormat {
         }
     }
 
+    /// Whether the channels are integers, which no filter can blend.
+    pub fn is_integer(&self) -> bool {
+        self.packing().is_some_and(|p| p.numeric.is_integer())
+    }
+
     pub fn is_srgb(&self) -> bool {
         matches!(self.raw, 0xD0 | 0xD6 | 0xE7 | 0xFA)
     }

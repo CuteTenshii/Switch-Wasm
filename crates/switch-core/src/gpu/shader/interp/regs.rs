@@ -165,7 +165,17 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Texs { coords, .. } => coords.to_vec(),
-        Op::Tlds { coords, .. } => coords.to_vec(),
+        Op::Tlds {
+            coords,
+            layer,
+            lod,
+            offset,
+            ..
+        } => {
+            let mut v = coords.to_vec();
+            v.extend([layer, lod, offset].into_iter().flatten());
+            v
+        }
         // Every operand register, so earlier queued samples land first.
         Op::Tex {
             coords,
@@ -202,10 +212,19 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             coords,
             layer,
             offset,
+            ptp,
+            dref,
+            handle_reg,
+            dim,
             ..
         } => {
-            let mut v = coords[..2].to_vec();
-            v.extend([layer, offset].into_iter().flatten());
+            let used = match dim {
+                TexDim::TCube | TexDim::TCubeArray => 3,
+                _ => 2,
+            };
+            let mut v = coords[..used].to_vec();
+            v.extend([layer, offset, dref, handle_reg].into_iter().flatten());
+            v.extend(ptp.into_iter().flatten());
             v
         }
         Op::Shfl {

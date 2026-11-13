@@ -195,18 +195,22 @@ pub(super) fn decode_txq(insn: u64) -> Op {
     }
 }
 
-/// `tld4`, bound, of a 2D image or array.
-pub(super) fn decode_tld4(insn: u64) -> Op {
+/// `tld4`, bound or bindless, as Eden's `texture_gather.cpp` reads it, of a 2D image, array,
+/// cube or cube array. The 1D and 3D types decode there but no gather of them exists in WebGPU
+/// or in the texture model, and a cube takes no offset.
+pub(super) fn decode_tld4(insn: u64, bindless: bool) -> Op {
     let un = Op::Unimplemented { raw: insn };
-    // A cube's gather picks its face out of a direction first, which the gather here does not do.
+    let (offset_at, component_at) = if bindless { (36, 38) } else { (54, 56) };
     let dim = match field(insn, 28, 3) {
         2 => TexDim::T2d,
         3 => TexDim::T2dArray,
+        6 => TexDim::TCube,
+        7 => TexDim::TCubeArray,
         _ => return un,
     };
     let dst = reg(insn, 0, 8);
     let mask = texture_mask(insn);
-    if dst == RZ || mask == [false; 4] || field(insn, 50, 1) != 0 {
+    if dst == RZ || mask == [false; 4] {
         return un;
     }
     let coord = reg(insn, 8, 8);
@@ -214,19 +218,38 @@ pub(super) fn decode_tld4(insn: u64) -> Op {
         TexDim::T2dArray | TexDim::TCubeArray => (Some(coord), coord.wrapping_add(1)),
         _ => (None, coord),
     };
-    let offset = match field(insn, 54, 2) {
-        0 => None,
-        1 => Some(reg(insn, 20, 8)),
+    let mut meta = reg(insn, 20, 8);
+    let mut take = || {
+        let r = meta;
+        meta = meta.wrapping_add(1);
+        r
+    };
+    // The handle comes first, ahead of the offsets and the reference.
+    let handle_reg = bindless.then(&mut take);
+    let cube = matches!(dim, TexDim::TCube | TexDim::TCubeArray);
+    let (offset, ptp) = match (field(insn, offset_at, 2), cube) {
+        (0, _) => (None, None),
+        (1, false) => (Some(take()), None),
+        (2, false) => (None, Some([take(), take()])),
         _ => return un,
     };
+    let dref = (field(insn, 50, 1) != 0).then(&mut take);
     Op::Tld4 {
         dst,
         coords: [first, first.wrapping_add(1), first.wrapping_add(2)],
         layer,
         offset,
-        handle: field(insn, 36, 13) as u16,
+        ptp,
+        dref,
+        handle: if bindless {
+            0
+        } else {
+            field(insn, 36, 13) as u16
+        },
+        handle_reg,
+        sparse: field(insn, 51, 3) as u8,
         dim,
-        component: field(insn, 56, 2) as u8,
+        component: field(insn, component_at, 2) as u8,
         mask,
     }
 }
@@ -259,24 +282,63 @@ pub(super) fn decode_tld4s(insn: u64) -> Op {
     }
 }
 
-/// `tlds`: a texel fetch with `texs`'s layout. Only the 2D form with no level, offset or
-/// sample index, which is encoding 2.
+/// `tlds`: a texel fetch with `texs`'s layout, the encodings at `[53, 57)` of Eden's
+/// `texture_load_swizzled.cpp` but 6, which reads a multisample index and has no
+/// multisampled image to read. Register pairs that Eden refuses as unaligned are not decoded.
 pub(super) fn decode_tlds(insn: u64) -> Op {
-    const PLAIN_2D: u64 = 2;
+    let un = Op::Unimplemented { raw: insn };
     let (dst, dst2) = (reg(insn, 0, 8), reg(insn, 28, 8));
     let Some(mask) = decode_tex_mask(field(insn, 50, 3), dst, dst2) else {
-        return Op::Unimplemented { raw: insn };
+        return un;
     };
-    if field(insn, 53, 4) != PLAIN_2D {
-        return Op::Unimplemented { raw: insn };
+    let (a, b) = (reg(insn, 8, 8), reg(insn, 20, 8));
+    let next = a.wrapping_add(1);
+    let (dim, coords, layer, lod, offset) = match field(insn, 53, 4) {
+        0 => (TexDim::T2d, [a, RZ, RZ], None, None, None),
+        1 => (TexDim::T2d, [a, RZ, RZ], None, Some(b), None),
+        2 => (TexDim::T2d, [a, b, RZ], None, None, None),
+        4 => (TexDim::T2d, [a, next, RZ], None, None, Some(b)),
+        5 => (TexDim::T2d, [a, next, RZ], None, Some(b), None),
+        7 => (TexDim::T3d, [a, next, b], None, None, None),
+        8 => (
+            TexDim::T2dArray,
+            [b, b.wrapping_add(1), RZ],
+            Some(a),
+            None,
+            None,
+        ),
+        12 => (
+            TexDim::T2d,
+            [a, next, RZ],
+            None,
+            Some(b),
+            Some(b.wrapping_add(1)),
+        ),
+        _ => return un,
+    };
+    let aligned = |r: u8| r.is_multiple_of(2) || r == RZ;
+    let pair_a = matches!(field(insn, 53, 4), 4 | 5 | 7 | 12);
+    let pair_b = matches!(field(insn, 53, 4), 8 | 12);
+    let f16 = field(insn, 59, 1) == 0;
+    let enabled = mask.iter().filter(|&&on| on).count();
+    if (pair_a && !aligned(a))
+        || (pair_b && !aligned(b))
+        || (!f16 && enabled >= 2 && !aligned(dst))
+        || (!f16 && enabled == 4 && !aligned(dst2))
+    {
+        return un;
     }
     Op::Tlds {
         dst,
         dst2,
-        coords: [reg(insn, 8, 8), reg(insn, 20, 8)],
+        coords,
+        layer,
+        lod,
+        offset,
         handle: field(insn, 36, 13) as u16,
+        dim,
         mask,
-        f16: field(insn, 59, 1) == 0,
+        f16,
     }
 }
 
