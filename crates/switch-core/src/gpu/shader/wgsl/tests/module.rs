@@ -122,6 +122,35 @@ fn a_layout_names_every_binding_the_text_calls_through() {
 }
 
 #[test]
+fn a_shadow_tld4s_gathers_comparisons_through_the_comparison_sampler() {
+    let p = program(&[
+        (
+            Op::Tld4s {
+                dst: 2,
+                dst2: 4,
+                coords: [2, 3],
+                offset: None,
+                dref: Some(4),
+                handle: 8,
+                component: 0,
+                f16: false,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    let translated = translate(&p).unwrap();
+    let layout = Layout::of(&translated, Stage::Fragment);
+    assert!(layout.textures[0].compare);
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(source.contains("texGatherCompare(8u, "), "{source}");
+    assert!(
+        source.contains("textureGatherCompare(tex0, smp0"),
+        "{source}"
+    );
+}
+
+#[test]
 fn a_tld4s_gathers_into_texss_registers() {
     let p = program(&[
         (
@@ -130,6 +159,7 @@ fn a_tld4s_gathers_into_texss_registers() {
                 dst2: 6,
                 coords: [7, 8],
                 offset: None,
+                dref: None,
                 handle: 8,
                 component: 2,
                 f16: false,
@@ -194,6 +224,7 @@ fn an_integer_image_is_read_by_texel_and_an_integer_target_takes_raw_words() {
                 dst2: 2,
                 coords: [4, 5],
                 offset: None,
+                dref: None,
                 handle: 8,
                 component: 0,
                 f16: false,
@@ -1066,5 +1097,31 @@ fn an_image_folds_into_as_few_overlapping_tiles_as_hold_it() {
         Fold::of(32768, 8192, 5, true),
         None,
         "more tiles than layers"
+    );
+}
+
+#[test]
+fn a_tlds_loads_the_texel_and_lands_it_like_texs() {
+    let p = program(&[
+        (
+            Op::Tlds {
+                dst: 4,
+                dst2: RZ,
+                coords: [2, 3],
+                handle: 10,
+                mask: [false, true, false, false],
+                f16: false,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    let translated = translate(&p).unwrap();
+    let layout = Layout::of(&translated, Stage::Fragment);
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(source.contains("texFetch(10u, r2, r3)"), "{source}");
+    assert!(
+        source.contains("textureLoad(tex0, vec2<u32>(x, y), 0)"),
+        "{source}"
     );
 }

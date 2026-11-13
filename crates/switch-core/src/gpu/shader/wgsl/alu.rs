@@ -148,6 +148,9 @@ impl Emitter<'_> {
                 let slot = TextureSlot::Bound(handle);
                 self.sample_texture(at, slot, dim, dref, coords, layer)?;
             }
+            Op::Tlds { coords, handle, .. } => {
+                self.fetch_texture(at, TextureSlot::Bound(handle), coords)?;
+            }
             // `tex` keeps the layer before the coordinates; `.LL`/`.LB` sample the one level.
             Op::Tex {
                 coords,
@@ -191,11 +194,13 @@ impl Emitter<'_> {
                 coords,
                 layer,
                 component,
+                None,
             )?,
 
             Op::Tld4s {
                 coords,
                 offset: None,
+                dref,
                 handle,
                 component,
                 ..
@@ -206,6 +211,7 @@ impl Emitter<'_> {
                 [coords[0], coords[1], coords[1]],
                 None,
                 component,
+                dref,
             )?,
 
             // `shfl` maps onto `quadSwapX`/`Y`/`Diagonal`, mirroring `interp::shuffle_source`.

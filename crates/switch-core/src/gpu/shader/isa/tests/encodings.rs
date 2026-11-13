@@ -439,6 +439,7 @@ fn decodes_a_tld4s_into_texss_registers() {
             dst2: 12,
             coords: [1, 10],
             offset: None,
+            dref: None,
             handle: 8,
             component: 0,
             f16: false,
@@ -463,9 +464,40 @@ fn decodes_a_tld4s_into_texss_registers() {
             ..
         }
     ));
-    // A shadow gather is not decoded, and `txq` keeps its own encoding.
+    // `.DC` takes its reference from the other register, or after the offset with `.AOFFI`.
     let shadow = 0xdf020080c0a7010eu64 | 1 << 50;
-    assert!(matches!(decode(shadow).op, Op::Unimplemented { .. }));
+    assert!(matches!(
+        decode(shadow).op,
+        Op::Tld4s {
+            coords: [1, 2],
+            offset: None,
+            dref: Some(10),
+            ..
+        }
+    ));
+    assert!(matches!(
+        decode(shadow | 1 << 51).op,
+        Op::Tld4s {
+            coords: [1, 2],
+            offset: Some(10),
+            dref: Some(11),
+            ..
+        }
+    ));
+    // Persona 5 Royal's shadow gather.
+    assert_eq!(
+        decode(0xdf0601e040480202).op,
+        Op::Tld4s {
+            dst: 2,
+            dst2: 4,
+            coords: [2, 3],
+            offset: None,
+            dref: Some(4),
+            handle: 30,
+            component: 0,
+            f16: false,
+        }
+    );
     assert!(matches!(decode(0xdf48008180470800).op, Op::Txq { .. }));
 }
 
@@ -660,4 +692,25 @@ fn a_two_channel_texs_fills_only_the_first_destination() {
 fn unrecognised_bits_are_unimplemented_not_a_panic() {
     assert_eq!(op(0), Op::Unimplemented { raw: 0 });
     assert_eq!(op(u64::MAX), Op::Unimplemented { raw: u64::MAX });
+}
+
+#[test]
+fn decodes_a_tlds_fetch_into_texss_registers() {
+    // Persona 5 Royal: the green channel of the texel at (r4, r13), the plain 2D form.
+    assert_eq!(
+        decode(0xda4600aff0d70404).op,
+        Op::Tlds {
+            dst: 4,
+            dst2: RZ,
+            coords: [4, 13],
+            handle: 10,
+            mask: [false, true, false, false],
+            f16: false,
+        }
+    );
+    // The forms with a level, an offset or a sample index are not decoded.
+    assert!(matches!(
+        decode(0xda4600aff0d70404 & !(0xf << 53) | 5 << 53).op,
+        Op::Unimplemented { .. }
+    ));
 }

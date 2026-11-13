@@ -928,6 +928,54 @@ pub fn gather_with(
     ])
 }
 
+/// `tlds`: the texel at integer `(x, y)` of the first layer, through the descriptor's swizzle.
+/// Outside the image it is zero.
+pub fn fetch_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    x: u32,
+    y: u32,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let texture = &d.texture;
+    if x >= texture.width || y >= texture.height {
+        return Ok([0.0; 4]);
+    }
+    Ok(apply_swizzle(
+        texture.swizzle,
+        texture.texel(x, y, 0, ctx, blocks)?,
+    ))
+}
+
+/// A shadow gather: [`gather_with`]'s footprint, each texel's depth compared against
+/// `reference` as 1.0 or 0.0.
+pub fn gather_compare_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    u: f64,
+    v: f64,
+    layer: u32,
+    reference: f32,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let (texture, sampler) = (&d.texture, d.sampler);
+    let compare = sampler.compare.unwrap_or(Compare::Always);
+    let x0 = (wrap_coord(sampler.wrap_u, u, texture.width) - 0.5).floor() as i64;
+    let y0 = (wrap_coord(sampler.wrap_v, v, texture.height) - 0.5).floor() as i64;
+    let at = |x: i64, y: i64| -> Result<f32> {
+        let x = wrap_index(sampler.wrap_u, x, texture.width);
+        let y = wrap_index(sampler.wrap_v, y, texture.height);
+        let depth = texture.texel(x, y, layer, ctx, blocks)?[0];
+        Ok(f32::from(u8::from(compare.passes(reference, depth))))
+    };
+    Ok([
+        at(x0, y0 + 1)?,
+        at(x0 + 1, y0 + 1)?,
+        at(x0 + 1, y0)?,
+        at(x0, y0)?,
+    ])
+}
+
 /// The texel index `i` reads under `mode` when outside `0..size`.
 fn wrap_index(mode: Wrap, i: i64, size: u32) -> u32 {
     let size = i64::from(size.max(1));
@@ -1828,5 +1876,51 @@ mod tests {
             half[..3].iter().all(|&c| (c - 0.5).abs() < 1e-6),
             "a filtered comparison, not a filtered depth: {half:?}"
         );
+    }
+
+    #[test]
+    fn a_shadow_gather_and_a_fetch_read_the_footprint_texel_by_texel() {
+        let (mut mem, vmm, base) = harness();
+        let (tic_addr, tsc_addr, tex_addr) = (base, base + 0x100, base + 0x400);
+        vmm.write_u32(&mem, tic_addr, 0x0F | (7 << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
+        vmm.write_u32(&mem, tic_addr + 12, 1).unwrap();
+        vmm.write_u32(&mem, tic_addr + 16, 1 | TYPE_2D).unwrap();
+        vmm.write_u32(&mem, tic_addr + 20, 1).unwrap();
+        for (offset, depth) in [(0, 0.0f32), (4, 1.0), (32, 0.0), (36, 1.0)] {
+            vmm.write_u32(&mem, tex_addr + offset, depth.to_bits())
+                .unwrap();
+        }
+        vmm.write_u32(&mem, tsc_addr, 2 | (2 << 3) | 1 << 9 | (1 << 10))
+            .unwrap();
+        vmm.write_u32(&mem, tsc_addr + 4, 1 | (1 << 4)).unwrap();
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            as_id: 0,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0)
+            .unwrap()
+            .unwrap();
+        let blocks = RefCell::new(BlockCache::default());
+
+        // Lower left, lower right, upper right, upper left of the footprint, as `gather_with`.
+        let compared = gather_compare_with(&ctx, &d, 0.5, 0.5, 0, 0.5, &blocks).unwrap();
+        assert_eq!(compared, [0.0, 1.0, 1.0, 0.0]);
+
+        assert_eq!(fetch_with(&ctx, &d, 1, 0, &blocks).unwrap()[0], 1.0);
+        assert_eq!(fetch_with(&ctx, &d, 0, 1, &blocks).unwrap()[0], 0.0);
+        assert_eq!(fetch_with(&ctx, &d, 2, 0, &blocks).unwrap(), [0.0; 4]);
+        assert_eq!(fetch_with(&ctx, &d, 0, 2, &blocks).unwrap(), [0.0; 4]);
     }
 }

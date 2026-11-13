@@ -131,6 +131,12 @@ fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32) -> vec4<f3
 fn texGather(imm: u32, component: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
+fn texFetch(imm: u32, x: u32, y: u32) -> vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+fn texGatherCompare(imm: u32, u: f32, v: f32, layer: u32, dref: f32) -> vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
 ";
 
 /// Emitted reconvergence stack depth, Maxwell's own.

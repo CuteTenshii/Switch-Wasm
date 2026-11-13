@@ -165,6 +165,7 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Texs { coords, .. } => coords.to_vec(),
+        Op::Tlds { coords, .. } => coords.to_vec(),
         // Every operand register, so earlier queued samples land first.
         Op::Tex {
             coords,
@@ -186,9 +187,15 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Txq { lod, .. } => vec![lod],
-        Op::Tld4s { coords, offset, .. } => {
+        Op::Tld4s {
+            coords,
+            offset,
+            dref,
+            ..
+        } => {
             let mut v = coords.to_vec();
             v.extend(offset);
+            v.extend(dref);
             v
         }
         Op::Tld4 {

@@ -557,6 +557,17 @@ pub enum Op {
         f16: bool,
     },
 
+    /// `tlds dst, dst2, x, y, handle, mask`: the texel at integer `(x, y)` of level 0 of a
+    /// 2D image, landing as `texs` lands it.
+    Tlds {
+        dst: u8,
+        dst2: u8,
+        coords: [u8; 2],
+        handle: u16,
+        mask: [bool; 4],
+        f16: bool,
+    },
+
     /// `tex dst, coords.., handle, dim, mask`, the general texture sample.
     Tex {
         dst: u8,
@@ -604,6 +615,8 @@ pub enum Op {
         coords: [u8; 2],
         /// `.AOFFI`'s register, as in [`Op::Tex`].
         offset: Option<u8>,
+        /// `.DC`'s reference: each texel comes back compared against it, 1.0 or 0.0.
+        dref: Option<u8>,
         handle: u16,
         component: u8,
         f16: bool,

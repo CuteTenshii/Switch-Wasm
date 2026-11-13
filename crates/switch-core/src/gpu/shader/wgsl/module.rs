@@ -365,6 +365,61 @@ pub fn module(
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
 
+    // `tlds`: the texel at integer coordinates, zero outside the image.
+    out.push_str("fn texFetch(imm: u32, x: u32, y: u32) -> vec4<f32> {\n  switch (imm) {\n");
+    for (index, texture) in layout.textures.iter().enumerate() {
+        if texture.compare || texture.dim != TexDim::T2d {
+            continue;
+        }
+        let key = texture.slot.key();
+        let size = match texture.fold {
+            Some(fold) => format!(
+                "vec2<u32>(textureDimensions(tex{index}).x, {}u)",
+                fold.height
+            ),
+            None => format!("textureDimensions(tex{index})"),
+        };
+        let load = match texture.fold {
+            Some(fold) => {
+                let stride = fold.tile_rows - 1;
+                let last = fold.tiles() - 1;
+                format!(
+                    "let fk = min(y / {stride}u, {last}u); \
+                     let texel = textureLoad(tex{index}, vec2<u32>(x, y - fk * {stride}u), fk, 0);"
+                )
+            }
+            None => format!("let texel = textureLoad(tex{index}, vec2<u32>(x, y), 0);"),
+        };
+        let result = if texture.uint {
+            format!("{load} return bitcast<vec4<f32>>(texel);")
+        } else {
+            format!("{load} {}", return_swizzled("texel", texture.swizzle))
+        };
+        out.push_str(&format!(
+            "    case {key}u: {{\n      let size = {size};\n      \
+             if (x >= size.x || y >= size.y) {{ return vec4<f32>(0.0); }}\n      {result}\n    }}\n"
+        ));
+    }
+    out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+
+    // A shadow gather: each texel's comparison, unswizzled like `texSampleCompare`.
+    out.push_str(
+        "fn texGatherCompare(imm: u32, u: f32, v: f32, layer: u32, dref: f32) -> vec4<f32> {\n  \
+         switch (imm) {\n",
+    );
+    for (index, texture) in layout.textures.iter().enumerate() {
+        let coords = match (texture.dim, texture.compare) {
+            (TexDim::T2d, true) => "vec2<f32>(u, v)",
+            (TexDim::T2dArray, true) => "vec2<f32>(u, v), layer",
+            _ => continue,
+        };
+        let key = texture.slot.key();
+        out.push_str(&format!(
+            "    case {key}u: {{ return textureGatherCompare(tex{index}, smp{index}, {coords}, dref); }}\n"
+        ));
+    }
+    out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+
     out.push_str(&translated.source);
     out.push('\n');
     out.push_str(&match stage {

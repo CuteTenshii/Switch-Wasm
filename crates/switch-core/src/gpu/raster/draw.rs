@@ -132,6 +132,7 @@ pub fn only_shades_vertices(engine: &Engine3D, ctx: &ExecCtx) -> Result<bool> {
         matches!(
             insn.op,
             Op::Texs { .. }
+                | Op::Tlds { .. }
                 | Op::Tex { .. }
                 | Op::Txq { .. }
                 | Op::Tld4 { .. }

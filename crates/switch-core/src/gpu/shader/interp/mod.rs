@@ -526,6 +526,9 @@ impl Invocation {
                 Op::Texs { .. } => {
                     self.run_texs(program, pc, op, env, pending)?;
                 }
+                Op::Tlds { .. } => {
+                    self.run_tlds(program, pc, op, env, pending)?;
+                }
                 Op::Tex { .. } => {
                     self.run_tex(program, pc, op, env, pending)?;
                 }
@@ -591,6 +594,13 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
                 ..
             } => isa::texs_destinations(dst, dst2, mask, f16),
             Op::Tld4s { dst, dst2, f16, .. } => isa::texs_destinations(dst, dst2, [true; 4], f16),
+            Op::Tlds {
+                dst,
+                dst2,
+                mask,
+                f16,
+                ..
+            } => isa::texs_destinations(dst, dst2, mask, f16),
             // `tex` channels land in consecutive registers from `dst`, one per mask bit.
             Op::Tex { dst, mask, .. } | Op::Txq { dst, mask, .. } | Op::Tld4 { dst, mask, .. } => {
                 consecutive_destinations(dst, mask)
@@ -671,6 +681,16 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
             .map(|(reg, _)| reg)
             .collect(),
         Op::Tld4s { dst, dst2, f16, .. } => isa::texs_destinations(dst, dst2, [true; 4], f16)
+            .into_iter()
+            .map(|(reg, _)| reg)
+            .collect(),
+        Op::Tlds {
+            dst,
+            dst2,
+            mask,
+            f16,
+            ..
+        } => isa::texs_destinations(dst, dst2, mask, f16)
             .into_iter()
             .map(|(reg, _)| reg)
             .collect(),

@@ -210,6 +210,47 @@ fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
     assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
 }
 
+/// Persona 5 Royal's `tlds` and shadow `tld4s` are valid WGSL, folded images included.
+#[test]
+fn persona_5_royals_tlds_and_shadow_tld4s_are_wgsl_naga_accepts() {
+    use super::{wgpu, wgsl, Compiled, Layout, Stage};
+    use switch_core::gpu::shader::isa::{self, Instruction, Pred};
+    use switch_core::gpu::shader::{Op, Program};
+
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    for words in [[0xda4600aff0d70404u64], [0xdf0601e040480202]] {
+        let mut program = Program::default();
+        for (index, op) in words
+            .map(|word| isa::decode(word).op)
+            .into_iter()
+            .chain([Op::Exit])
+            .enumerate()
+        {
+            assert!(!matches!(op, Op::Unimplemented { .. }), "{op:?}");
+            program.insns.push(Instruction {
+                pred: Pred::ALWAYS,
+                op,
+            });
+            program.offsets.push(index as u32 * 8);
+        }
+        let translated =
+            wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE).expect("translates");
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+        let _ = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("persona"),
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+        assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    }
+}
+
 /// Tomodachi Life's cube-array `tex` forms and its `vmnmx` translate to valid WGSL.
 #[test]
 fn tomodachi_lifes_cube_array_and_video_min_are_wgsl_naga_accepts() {

@@ -322,6 +322,21 @@ impl TextureSource for DispatchMemory<'_, '_> {
         self.textures(|t| t.gather(handle, u, v, layer, component))
     }
 
+    fn fetch(&self, handle: u32, x: u32, y: u32) -> ShaderResult<[f32; 4]> {
+        self.textures(|t| t.fetch(handle, x, y))
+    }
+
+    fn gather_compare(
+        &self,
+        handle: u32,
+        u: f32,
+        v: f32,
+        layer: u32,
+        reference: f32,
+    ) -> ShaderResult<[f32; 4]> {
+        self.textures(|t| t.gather_compare(handle, u, v, layer, reference))
+    }
+
     fn sample_compare(
         &self,
         handle: u32,

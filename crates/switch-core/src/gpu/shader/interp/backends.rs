@@ -177,6 +177,27 @@ pub trait TextureSource {
         )))
     }
 
+    /// The texel at integer `(x, y)` of level 0, through the descriptor's swizzle; zero outside.
+    fn fetch(&self, handle: u32, _x: u32, _y: u32) -> ShaderResult<[f32; 4]> {
+        Err(fault(format!(
+            "shader: texel fetch of handle {handle:#x} with no texture source bound"
+        )))
+    }
+
+    /// The four texels of a gather, each compared against `reference` as 1.0 or 0.0.
+    fn gather_compare(
+        &self,
+        handle: u32,
+        _u: f32,
+        _v: f32,
+        _layer: u32,
+        _reference: f32,
+    ) -> ShaderResult<[f32; 4]> {
+        Err(fault(format!(
+            "shader: shadow gather of handle {handle:#x} with no depth source bound"
+        )))
+    }
+
     /// A shadow sample as `[c, c, c, 1.0]`.
     fn sample_compare(
         &self,
@@ -362,6 +383,41 @@ impl TextureSource for MemoryTextures<'_, '_> {
             t as f64,
             r as f64,
             cube,
+            self.blocks,
+        )?)
+    }
+
+    fn fetch(&self, handle: u32, x: u32, y: u32) -> ShaderResult<[f32; 4]> {
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
+        Ok(crate::gpu::texture::fetch_with(
+            self.ctx,
+            &descriptors,
+            x,
+            y,
+            self.blocks,
+        )?)
+    }
+
+    fn gather_compare(
+        &self,
+        handle: u32,
+        u: f32,
+        v: f32,
+        layer: u32,
+        reference: f32,
+    ) -> ShaderResult<[f32; 4]> {
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
+        Ok(crate::gpu::texture::gather_compare_with(
+            self.ctx,
+            &descriptors,
+            u as f64,
+            v as f64,
+            layer,
+            reference,
             self.blocks,
         )?)
     }

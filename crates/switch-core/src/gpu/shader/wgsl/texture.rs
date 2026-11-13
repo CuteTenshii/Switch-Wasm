@@ -84,6 +84,21 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// `tlds`: the texel at integer coordinates, as `textureLoad`.
+    pub(super) fn fetch_texture(
+        &mut self,
+        at: usize,
+        slot: TextureSlot,
+        coords: [u8; 2],
+    ) -> Result<(), Unsupported> {
+        self.bind_texture(at, slot, TexDim::T2d, false)?;
+        let x = self.r(coords[0]);
+        let y = self.r(coords[1]);
+        let texel = self.bind(&format!("texFetch({}u, {x}, {y})", slot.key()));
+        self.store_channels(at, &texel);
+        Ok(())
+    }
+
     /// `txq`: texture size as integers.
     pub(super) fn query_texture(&mut self, at: usize, slot: TextureSlot, lod: u8) {
         self.queried.push(slot);
@@ -96,7 +111,7 @@ impl Emitter<'_> {
         }
     }
 
-    /// `tld4`: one channel of the four bilinear texels, as `textureGather`.
+    /// `tld4`: one channel of the four bilinear texels, as `textureGather`; with `dref`, each compared.
     pub(super) fn gather_texture(
         &mut self,
         at: usize,
@@ -105,8 +120,9 @@ impl Emitter<'_> {
         coords: [u8; 3],
         layer: Option<u8>,
         component: u8,
+        dref: Option<u8>,
     ) -> Result<(), Unsupported> {
-        self.bind_texture(at, slot, dim, false)?;
+        self.bind_texture(at, slot, dim, dref.is_some())?;
         let u = self.f(coords[0]);
         let v = self.f(coords[1]);
         let layer = match layer {
@@ -116,10 +132,19 @@ impl Emitter<'_> {
             }
             None => "0u".to_string(),
         };
-        let texels = self.bind(&format!(
-            "texGather({}u, {component}u, {u}, {v}, {layer})",
-            slot.key()
-        ));
+        let texels = match dref {
+            Some(reg) => {
+                let reference = self.f(reg);
+                self.bind(&format!(
+                    "texGatherCompare({}u, {u}, {v}, {layer}, {reference})",
+                    slot.key()
+                ))
+            }
+            None => self.bind(&format!(
+                "texGather({}u, {component}u, {u}, {v}, {layer})",
+                slot.key()
+            )),
+        };
         self.store_channels(at, &texels);
         Ok(())
     }

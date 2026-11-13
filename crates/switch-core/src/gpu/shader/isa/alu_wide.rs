@@ -531,6 +531,11 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
         return un;
     }
 
+    // tlds, `texs`'s neighbour in the opcode space.
+    if insn & 0xf600_0000_0000_0000 == 0xd200_0000_0000_0000 {
+        return decode_tlds(insn);
+    }
+
     // tex.b: the bindless sample, 0xdeb8/0xfff8.
     if insn & 0xfff8_0000_0000_0000 == 0xdeb8_0000_0000_0000 {
         return decode_tex(insn, true);

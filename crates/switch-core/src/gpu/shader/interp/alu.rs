@@ -1046,6 +1046,7 @@ impl Invocation {
             | Op::Shfl { .. }
             | Op::Vote { .. }
             | Op::Texs { .. }
+            | Op::Tlds { .. }
             | Op::Tex { .. }
             | Op::Txq { .. }
             | Op::Tld4 { .. }

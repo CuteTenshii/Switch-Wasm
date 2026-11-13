@@ -149,6 +149,28 @@ impl Invocation {
         Ok(())
     }
 
+    /// `tlds`: the texel at integer coordinates, landing as a `texs` does.
+    pub(super) fn run_tlds(
+        &mut self,
+        program: &Compiled,
+        pc: usize,
+        op: Op,
+        env: &Env,
+        pending: &mut Vec<(usize, u8, u32)>,
+    ) -> ShaderResult<()> {
+        let Op::Tlds { coords, handle, .. } = op else {
+            unreachable!("run_tlds called with {op:?}");
+        };
+        let handle = env
+            .consts
+            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
+        let texel = env
+            .textures
+            .fetch(handle, self.reg(coords[0]), self.reg(coords[1]))?;
+        self.land_texture(program, pc, texel, pending);
+        Ok(())
+    }
+
     /// The general `tex`: LOD, offset and shadow reference share one register, and
     /// an array's layer comes before the coordinates.
     pub(super) fn run_tex(
@@ -291,6 +313,7 @@ impl Invocation {
         let Op::Tld4s {
             coords,
             offset,
+            dref,
             handle,
             component,
             ..
@@ -310,9 +333,14 @@ impl Invocation {
             u += axis(0) as f32 * du;
             v += axis(4) as f32 * dv;
         }
-        let texels = env
-            .textures
-            .gather(handle, u, v, 0, usize::from(component))?;
+        let texels = match dref {
+            Some(reg) => env
+                .textures
+                .gather_compare(handle, u, v, 0, self.reg_f32(reg))?,
+            None => env
+                .textures
+                .gather(handle, u, v, 0, usize::from(component))?,
+        };
         self.land_texture(program, pc, texels, pending);
         Ok(())
     }
