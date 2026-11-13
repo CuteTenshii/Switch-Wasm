@@ -1,11 +1,10 @@
-// The SD card, saves, profiles and NAND as stored in IndexedDB, read and written here so the page stays free.
+// The SD card, saves, profiles and NAND as stored, read and written here so the page stays free.
 
 import type { Bytes, CommandHandlers, NandTitle, StorageInfo, StorageVolume } from '../shared/protocol';
 import {
   idbApply,
   idbGet,
   idbGetAll,
-  NAND_CONTENT,
   NAND_SAVES,
   NAND_TITLES,
   NAND_USERS,
@@ -16,7 +15,8 @@ import {
   type StoredEntry,
 } from '../shared/db';
 import {
-  switch_flush_storage, switch_fs_create_dir, switch_fs_remove, switch_fs_write,
+  switch_flush_storage, switch_fs_create_dir, switch_fs_remove, switch_fs_write, switch_nand_content,
+  switch_nand_content_size, switch_nand_erase, switch_nand_install, switch_nand_remove,
 } from '@core/switch_wasm.js';
 import { workerErrorText } from '../shared/workererror';
 import { coreLoaded } from './wasm';
@@ -128,18 +128,6 @@ async function apply(place: Place, changes: [string, StoredEntry | null][]): Pro
     if (value?.kind === 'dir') place.mkdir(path);
     else if (value) place.write(path, value.data ?? new Uint8Array(0));
   }
-}
-
-// Content stored by older builds as an ArrayBuffer is rewritten as a Blob on read.
-export async function nandContent(name: string): Promise<Blob | undefined> {
-  const stored = await idbGet<Blob | ArrayBuffer>(await nandIdb(), NAND_CONTENT, name);
-  if (!stored) return undefined;
-  if (stored instanceof Blob) return stored;
-  const blob = new Blob([stored]);
-  try {
-    await idbApply(await nandIdb(), NAND_CONTENT, [[name, blob]]);
-  } catch { /* it is readable either way; the next session pays the same again */ }
-  return blob;
 }
 
 async function nandTitles(): Promise<[string, NandEntry][]> {
@@ -260,37 +248,18 @@ export const STORAGE = {
     await idbApply(await nandIdb(), NAND_USERS, entries);
   },
 
-  nandTitles: nandTitles,
+  nandTitles,
   async nandList() {
     const out: NandTitle[] = [];
     for (const [id, entry] of await nandTitles()) {
-      const content = await nandContent(entry.name).catch(() => undefined);
-      out.push({ id, name: entry.name, kind: entry.kind, size: content?.size ?? 0 });
+      const size = await switch_nand_content_size(entry.name).catch(() => undefined);
+      out.push({ id, name: entry.name, kind: entry.kind, size: size ?? 0 });
     }
     return out;
   },
-  nandContent: nandContent,
-  // Content and index entry go in one transaction so the index never names missing content.
-  async nandInstall(content, name, id, kind) {
-    const tx = (await nandIdb()).transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
-    tx.objectStore(NAND_CONTENT).put(content, name);
-    tx.objectStore(NAND_TITLES).put({ name, kind }, id);
-    await committed(tx);
-  },
-  // Content and index entry go together; a registered archive stays until the session is replaced.
-  async nandRemove(id) {
-    const db = await nandIdb();
-    const entry = await idbGet<NandEntry>(db, NAND_TITLES, id);
-    if (!entry) return;
-    const tx = db.transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
-    tx.objectStore(NAND_CONTENT).delete(entry.name);
-    tx.objectStore(NAND_TITLES).delete(id);
-    await committed(tx);
-  },
-  async nandErase() {
-    const tx = (await nandIdb()).transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
-    tx.objectStore(NAND_CONTENT).clear();
-    tx.objectStore(NAND_TITLES).clear();
-    await committed(tx);
-  },
+  // Content lives in OPFS, or IndexedDB without it; `crates/switch-wasm/src/idb/content.rs` owns both.
+  nandContent: switch_nand_content,
+  nandInstall: switch_nand_install,
+  nandRemove: switch_nand_remove,
+  nandErase: switch_nand_erase,
 } satisfies Partial<CommandHandlers>;

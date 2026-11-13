@@ -1,5 +1,6 @@
 //! IndexedDB from the worker, as futures.
 
+pub(crate) mod content;
 pub(crate) mod controls;
 pub(crate) mod nand;
 pub(crate) mod persist;
@@ -105,6 +106,62 @@ pub(crate) async fn apply(
             Some(value) => store.put_with_key(value, &key)?,
             None => store.delete(&key)?,
         };
+    }
+    finish(&tx).await
+}
+
+/// The value of `key` in `store`, `undefined` if there is none.
+pub(crate) async fn get(db: &IdbDatabase, store: &str, key: &str) -> Result<JsValue, JsValue> {
+    let tx = db.transaction_with_str(store)?;
+    let request = tx.object_store(store)?.get(&JsValue::from_str(key))?;
+    finish(&tx).await?;
+    request.result()
+}
+
+/// Every key of `store`, without reading the values.
+pub(crate) async fn keys(db: &IdbDatabase, store: &str) -> Result<Vec<String>, JsValue> {
+    let tx = db.transaction_with_str(store)?;
+    let request = tx.object_store(store)?.get_all_keys()?;
+    finish(&tx).await?;
+    let keys: Array = request.result()?.unchecked_into();
+    Ok(keys.iter().filter_map(|key| key.as_string()).collect())
+}
+
+/// One change of [`write`].
+pub(crate) enum Write<'a> {
+    Put(&'a str, &'a str, JsValue),
+    Delete(&'a str, &'a str),
+    Clear(&'a str),
+}
+
+/// Apply `writes` across their stores in one transaction.
+pub(crate) async fn write(db: &IdbDatabase, writes: &[Write<'_>]) -> Result<(), JsValue> {
+    let mut stores: Vec<&str> = writes
+        .iter()
+        .map(|w| match w {
+            Write::Put(store, ..) | Write::Delete(store, _) | Write::Clear(store) => *store,
+        })
+        .collect();
+    stores.sort_unstable();
+    stores.dedup();
+    let names = Array::new();
+    for store in &stores {
+        names.push(&JsValue::from_str(store));
+    }
+    let tx = db.transaction_with_str_sequence_and_mode(&names, IdbTransactionMode::Readwrite)?;
+    for change in writes {
+        match change {
+            Write::Put(store, key, value) => {
+                tx.object_store(store)?
+                    .put_with_key(value, &JsValue::from_str(key))?;
+            }
+            Write::Delete(store, key) => {
+                tx.object_store(store)?.delete(&JsValue::from_str(key))?;
+            }
+            Write::Clear(store) => {
+                tx.object_store(store)?.clear()?;
+            }
+        }
     }
     finish(&tx).await
 }

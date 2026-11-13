@@ -46,6 +46,8 @@ mod log;
 mod nand;
 mod net;
 #[cfg(target_arch = "wasm32")]
+mod opfs;
+#[cfg(target_arch = "wasm32")]
 mod post;
 mod run;
 mod stats;

@@ -11,7 +11,8 @@ import {
   switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
   switch_load_keys, switch_load_nca, switch_load_nca_from_nsp, switch_load_program,
-  switch_load_sd, switch_memory_json, switch_nand_identify, switch_nand_launch, switch_net_connect,
+  switch_load_sd, switch_memory_json, switch_nand_content, switch_nand_identify, switch_nand_launch,
+  switch_net_connect,
   switch_net_connections_json, switch_net_disconnect, switch_net_status_json, switch_next_load,
   switch_open_nca,
   switch_open_nsp, switch_parse_nca, switch_program_nca_index, switch_read_file, switch_reg_dump,
@@ -21,7 +22,7 @@ import {
   switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
 import { pauseLoop, startLoop, stopLoop } from './loop';
-import { nandContent, STORAGE } from './storage';
+import { STORAGE } from './storage';
 import { core, parseOr } from './wasm';
 
 export const CMD = {
@@ -77,7 +78,7 @@ export const CMD = {
   },
   // The content stays in the browser's copy and the core reads it by range.
   async nandLaunch(name) {
-    const content = await nandContent(name);
+    const content = await switch_nand_content(name);
     if (!content) throw new Error(name + ' is indexed but its content is missing.');
     return switch_nand_launch(content);
   },

@@ -1,4 +1,4 @@
-// The NAND in IndexedDB: NCA content as Blobs by file name, and an index of titles by id.
+// The NAND: NCA content by file name (OPFS, or IndexedDB without it) and an index of titles by id.
 
 import type { NandEntry } from '../shared/db';
 import { $, el } from './dom';

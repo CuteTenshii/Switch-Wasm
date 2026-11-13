@@ -3,12 +3,12 @@
 
 use std::collections::HashMap;
 
-use js_sys::{Array, ArrayBuffer, Reflect};
+use js_sys::{Array, Reflect};
 use switch_core::trace::Level;
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, File};
 
-use super::{self as idb, NAND_CONTENT, NAND_DB, NAND_STORES, NAND_TITLES, NAND_VERSION};
+use super::{self as idb, content, NAND_DB, NAND_STORES, NAND_TITLES, NAND_VERSION};
 use crate::hostfiles::add as add_host_file;
 use crate::post::post;
 use crate::{applets, container, session_if_live, HostSource};
@@ -73,7 +73,6 @@ pub async fn switch_restore_nand() -> u32 {
 async fn restore() -> Result<u32, JsValue> {
     let db = idb::open(NAND_DB, NAND_VERSION, &NAND_STORES).await?;
     let titles = idb::get_all(&db, NAND_TITLES).await;
-    let content = idb::get_all(&db, NAND_CONTENT).await;
     db.close();
     let titles: Vec<Title> = titles?
         .into_iter()
@@ -85,7 +84,28 @@ async fn restore() -> Result<u32, JsValue> {
             })
         })
         .collect();
-    let content: HashMap<String, JsValue> = content?.into_iter().collect();
+    let mut content: HashMap<String, Blob> = HashMap::new();
+    for title in &titles {
+        if content.contains_key(&title.name) {
+            continue;
+        }
+        match content::lend(&title.name).await {
+            Ok(Some(blob)) => {
+                if let Some(file) = as_file(&blob, &title.name) {
+                    content.insert(title.name.clone(), file);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                if let Some(s) = session_if_live() {
+                    s.cpu.log(
+                        Level::Warn,
+                        &format!("[io] NAND content \"{}\": unreadable ({err:?})", title.name),
+                    );
+                }
+            }
+        }
+    }
     let Some(s) = session_if_live() else {
         return Ok(0);
     };
@@ -93,15 +113,12 @@ async fn restore() -> Result<u32, JsValue> {
     // One host file per stored NCA, shared by whatever is registered from it.
     let mut hosts: HashMap<&str, HostSource> = HashMap::new();
     for title in &titles {
-        if let Some(blob) = content
-            .get(&title.name)
-            .and_then(|c| as_file(c, &title.name))
-        {
+        if let Some(blob) = content.get(&title.name) {
             let len = blob.size() as u64;
             hosts.insert(
                 &title.name,
                 HostSource {
-                    file: add_host_file(&blob),
+                    file: add_host_file(blob),
                     len,
                 },
             );
@@ -171,16 +188,12 @@ fn post_progress(done: usize, total: usize) {
     );
 }
 
-/// Stored content as a `File` named `name`: a `Blob`, or an `ArrayBuffer` from older builds.
-fn as_file(content: &JsValue, name: &str) -> Option<Blob> {
-    if let Some(file) = content.dyn_ref::<File>() {
-        return Some(file.clone().into());
+/// Stored content as a `File` named `name`, so host file reports name it.
+fn as_file(content: &Blob, name: &str) -> Option<Blob> {
+    if content.is_instance_of::<File>() {
+        return Some(content.clone());
     }
-    let parts = Array::of1(content);
-    if content.is_instance_of::<Blob>() || content.is_instance_of::<ArrayBuffer>() {
-        return File::new_with_blob_sequence(&parts, name)
-            .ok()
-            .map(Into::into);
-    }
-    None
+    File::new_with_blob_sequence(&Array::of1(content), name)
+        .ok()
+        .map(Into::into)
 }

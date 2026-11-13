@@ -67,6 +67,14 @@ declare module '@core/switch_wasm.js' {
   export function switch_flush_storage(): Promise<number>;
   // `idb/nand.rs`: registers the stored firmware; the system data archives it took.
   export function switch_restore_nand(): Promise<number>;
+  // `idb/content.rs`: NAND content in OPFS, or IndexedDB without it. Content read from stays on
+  // disk until the next start, even once removed.
+  export function switch_nand_content(name: string): Promise<Blob | undefined>;
+  export function switch_nand_content_size(name: string): Promise<number | undefined>;
+  export function switch_nand_install(
+    content: Blob, name: string, id: string, kind: number): Promise<void>;
+  export function switch_nand_remove(id: string): Promise<void>;
+  export function switch_nand_erase(): Promise<void>;
   // `idb/controls.rs`: stores the control data the session has just read.
   export function switch_remember_control(): Promise<void>;
   // `idb/users.rs`: stores the guest's profile edits; whether there were any.

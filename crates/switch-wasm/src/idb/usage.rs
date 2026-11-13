@@ -1,4 +1,4 @@
-//! What IndexedDB holds and the origin has left, reported to the core for the
+//! What IndexedDB and OPFS hold and the origin has left, reported to the core for the
 //! filesystem space queries (which cannot wait on a promise themselves).
 
 use std::cell::{Cell, RefCell};
@@ -12,6 +12,7 @@ use web_sys::{
     Blob, IdbCursorWithValue, IdbDatabase, IdbFactory, StorageEstimate, WorkerGlobalScope,
 };
 
+use super::content::NAND_OPFS_DIR;
 use super::{drive, NAND_CONTENT, NAND_DB, NAND_SAVES, SD_DB, SD_STORE};
 use crate::session_if_live;
 
@@ -64,13 +65,21 @@ async fn measure() -> Result<StorageUsage, JsValue> {
     let present = databases(&factory).await?;
     let mut usage = StorageUsage {
         free: (quota - used).max(0.0) as u64,
+        system: match crate::opfs::dir(NAND_OPFS_DIR, false).await {
+            Some(dir) => crate::opfs::files(&dir)
+                .await?
+                .iter()
+                .map(|(_, size)| size)
+                .sum(),
+            None => 0,
+        },
         ..StorageUsage::default()
     };
     if present.iter().any(|name| name == SD_DB) {
         usage.sd = store_bytes(&factory, SD_DB, SD_STORE, entry_bytes).await?;
     }
     if present.iter().any(|name| name == NAND_DB) {
-        usage.system = store_bytes(&factory, NAND_DB, NAND_CONTENT, content_bytes).await?;
+        usage.system += store_bytes(&factory, NAND_DB, NAND_CONTENT, content_bytes).await?;
         usage.user = store_bytes(&factory, NAND_DB, NAND_SAVES, entry_bytes).await?;
     }
     Ok(usage)
