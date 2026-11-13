@@ -238,8 +238,8 @@ impl Cpu {
                     "pc={:#010x}  sp={:#018x}  nzcv=N:{n} Z:{z} C:{c} V:{v}",
                     self.pc, self.regs[SP_SLOT]
                 );
-                for i in 0..31 {
-                    let _ = write!(s, "x{:<2}={:#018x}  ", i, self.regs[i]);
+                for (i, reg) in self.regs.iter().enumerate().take(31) {
+                    let _ = write!(s, "x{:<2}={:#018x}  ", i, reg);
                     if i % 4 == 3 {
                         let _ = writeln!(s);
                     }
@@ -253,13 +253,13 @@ impl Cpu {
                     u8::from(self.cpsr_q),
                     self.cpsr_ge
                 );
-                for i in 0..15 {
+                for (i, reg) in self.regs.iter().enumerate().take(15) {
                     let name = match i {
                         13 => "sp".to_string(),
                         14 => "lr".to_string(),
                         _ => format!("r{i}"),
                     };
-                    let _ = write!(s, "{name:<3}={:#010x}  ", self.regs[i] as u32);
+                    let _ = write!(s, "{name:<3}={:#010x}  ", *reg as u32);
                     if i % 4 == 3 {
                         let _ = writeln!(s);
                     }

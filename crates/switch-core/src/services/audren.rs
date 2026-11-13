@@ -665,10 +665,10 @@ impl Cpu {
     fn audren_parse_mempools(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
         let count = (size / MEMPOOL_IN_SZ) as usize;
         renderer.mempool_states = vec![0; count];
-        for i in 0..count {
+        for (i, pool) in renderer.mempool_states.iter_mut().enumerate() {
             let at = addr.wrapping_add(i as u32 * MEMPOOL_IN_SZ);
             let state = self.mem.read_u32(at.wrapping_add(0x10)).unwrap_or(0);
-            renderer.mempool_states[i] = match state {
+            *pool = match state {
                 MEMPOOL_REQUEST_ATTACH => MEMPOOL_ATTACHED,
                 MEMPOOL_REQUEST_DETACH => MEMPOOL_DETACHED,
                 _ => 0,
@@ -680,16 +680,15 @@ impl Cpu {
     fn audren_parse_channels(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
         let count = (size / CHANNEL_IN_SZ) as usize;
         renderer.channels.resize(count, ChannelResource::default());
-        for i in 0..count {
+        for (i, channel) in renderer.channels.iter_mut().enumerate() {
             let at = addr.wrapping_add(i as u32 * CHANNEL_IN_SZ);
-            let channel = &mut renderer.channels[i];
-            for slot in 0..MAX_MIX_BUFFERS {
+            for (slot, mix) in channel.mix.iter_mut().enumerate().take(MAX_MIX_BUFFERS) {
                 let raw = self
                     .mem
                     .read_u32(at.wrapping_add(4 + slot as u32 * 4))
                     .unwrap_or(0);
                 let gain = f32::from_bits(raw);
-                channel.mix[slot] = if gain.is_finite() { gain } else { 0.0 };
+                *mix = if gain.is_finite() { gain } else { 0.0 };
             }
             channel.is_used = self.mem.read_u8(at.wrapping_add(0x64)).unwrap_or(0) != 0;
         }
@@ -736,31 +735,30 @@ impl Cpu {
             voice.volume = if volume.is_finite() { volume } else { 0.0 };
             voice.dest_mix_id = dest_mix_id;
 
-            for filter in 0..2 {
+            for (filter, biquad) in voice.biquads.iter_mut().enumerate().take(2) {
                 let base = at.wrapping_add(0x24 + filter as u32 * 0x0c);
-                let biquad = &mut voice.biquads[filter];
                 biquad.enabled = self.mem.read_u8(base).unwrap_or(0) != 0;
-                for n in 0..3 {
+                for (n, num) in biquad.numerator.iter_mut().enumerate().take(3) {
                     let raw = self
                         .mem
                         .read_u16(base.wrapping_add(2 + n as u32 * 2))
                         .unwrap_or(0);
-                    biquad.numerator[n] = raw as i16;
+                    *num = raw as i16;
                 }
-                for n in 0..2 {
+                for (n, den) in biquad.denominator.iter_mut().enumerate().take(2) {
                     let raw = self
                         .mem
                         .read_u16(base.wrapping_add(8 + n as u32 * 2))
                         .unwrap_or(0);
-                    biquad.denominator[n] = raw as i16;
+                    *den = raw as i16;
                 }
             }
 
-            for slot in 0..WAVE_BUFFERS {
+            for (slot, wavebuf) in voice.wavebufs.iter_mut().enumerate().take(WAVE_BUFFERS) {
                 let base = at.wrapping_add(0x60 + slot as u32 * WAVE_BUF_IN_SZ);
                 let start = self.mem.read_u32(base.wrapping_add(0x10)).unwrap_or(0);
                 let end = self.mem.read_u32(base.wrapping_add(0x14)).unwrap_or(0);
-                voice.wavebufs[slot] = WaveBuf {
+                *wavebuf = WaveBuf {
                     address: self.mem.read_u32(base).unwrap_or(0),
                     size: self.mem.read_u32(base.wrapping_add(0x08)).unwrap_or(0),
                     start,
@@ -771,18 +769,23 @@ impl Cpu {
                 };
             }
 
-            for channel in 0..MAX_VOICE_CHANNELS {
+            for (channel, id) in voice
+                .channel_ids
+                .iter_mut()
+                .enumerate()
+                .take(MAX_VOICE_CHANNELS)
+            {
                 let raw = self
                     .mem
                     .read_u32(at.wrapping_add(0x140 + channel as u32 * 4));
-                voice.channel_ids[channel] = raw.unwrap_or(0);
+                *id = raw.unwrap_or(0);
             }
 
             // ADPCM coefficients: sixteen s16 in the voice's extra parameters.
             if format == PCM_ADPCM && extra_params != 0 {
-                for n in 0..16 {
+                for (n, coef) in voice.adpcm_coefficients.iter_mut().enumerate().take(16) {
                     let raw = self.mem.read_u16(extra_params.wrapping_add(n as u32 * 2));
-                    voice.adpcm_coefficients[n] = raw.unwrap_or(0) as i16;
+                    *coef = raw.unwrap_or(0) as i16;
                 }
             }
 
@@ -794,10 +797,9 @@ impl Cpu {
     /// `EffectInfo::InParameter[]`: type, is_new, is_enabled, then the mix id at 4.
     fn audren_parse_effects(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
         let count = ((size / EFFECT_IN_SZ) as usize).min(renderer.effects.len());
-        for i in 0..count {
+        for (i, effect) in renderer.effects.iter_mut().enumerate().take(count) {
             let at = addr.wrapping_add(i as u32 * EFFECT_IN_SZ);
             let kind = self.mem.read_u8(at).unwrap_or(0);
-            let effect = &mut renderer.effects[i];
             // A new type is a new effect in the slot, with no usage yet.
             if kind != effect.kind {
                 *effect = Effect {
@@ -1160,8 +1162,8 @@ fn render_frame(mem: &Memory, renderer: &mut AudioRenderer, out: &mut Vec<i16>) 
     });
     let base = final_mix.map(|mix| mix.buffer_offset as usize).unwrap_or(0);
     for sample in 0..frames {
-        for channel in 0..sink.channels as usize {
-            let index = base + usize::from(sink.inputs[channel]);
+        for input in sink.inputs.iter().take(sink.channels as usize) {
+            let index = base + usize::from(*input);
             let value = buffers.get(index).map(|buf| buf[sample]).unwrap_or(0.0) * final_volume;
             // 32768 matches the decoders' divisor, so unity-gain 16-bit passes bit-exact.
             out.push((value * 32768.0).clamp(-32768.0, 32767.0) as i16);
@@ -1190,12 +1192,11 @@ fn render_voice(
     }
     let channel_count = voice.channel_count as usize;
     let mut routing: Vec<Vec<(usize, f32)>> = Vec::with_capacity(channel_count);
-    for channel in 0..channel_count {
-        let id = voice.channel_ids[channel] as usize;
+    for channel_id in voice.channel_ids.iter().take(channel_count) {
+        let id = *channel_id as usize;
         let mut gains = Vec::new();
         if let Some(resource) = renderer.channels.get(id) {
-            for dest in 0..MAX_MIX_BUFFERS {
-                let gain = resource.mix[dest];
+            for (dest, &gain) in resource.mix.iter().enumerate().take(MAX_MIX_BUFFERS) {
                 if gain == 0.0 {
                     continue;
                 }
@@ -1377,8 +1378,8 @@ fn pull_source(mem: &Memory, voice: &mut Voice) -> bool {
                 decode_adpcm_from_frame_start(mem, voice, wavebuf, index);
             }
             let sample = decode_adpcm(mem, voice, wavebuf, index);
-            for channel in 0..channels {
-                voice.cur[channel] = sample;
+            for cur in voice.cur.iter_mut().take(channels) {
+                *cur = sample;
             }
         } else {
             for channel in 0..channels {

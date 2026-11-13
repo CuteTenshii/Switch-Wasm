@@ -82,9 +82,10 @@ impl Host1x {
     }
 
     pub fn allocate(&mut self) -> Result<u32> {
-        for id in FIRST_ALLOCATABLE as usize..SYNCPT_COUNT {
-            if !self.points[id].allocated {
-                self.points[id].allocated = true;
+        let free = self.points.iter_mut().enumerate().take(SYNCPT_COUNT);
+        for (id, point) in free.skip(FIRST_ALLOCATABLE as usize) {
+            if !point.allocated {
+                point.allocated = true;
                 return Ok(id as u32);
             }
         }

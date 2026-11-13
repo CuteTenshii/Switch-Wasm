@@ -373,8 +373,8 @@ impl AddressSpace {
 
     /// a cached entry outliving its mapping would hand out a stale address.
     fn forget_translations(&self) {
-        for way in 0..TRANSLATION_WAYS {
-            self.recent_size[way].set(0);
+        for size in self.recent_size.iter().take(TRANSLATION_WAYS) {
+            size.set(0);
         }
     }
 
