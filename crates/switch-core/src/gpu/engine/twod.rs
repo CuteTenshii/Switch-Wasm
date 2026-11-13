@@ -429,7 +429,8 @@ impl Engine2D {
         let columns: Vec<(u32, u32, f32)> = (0..dst_w)
             .map(|x| {
                 let (x0, fx) = taps(src_x0 + du_dx * x as f64);
-                (x0.min(last_x), x0.saturating_add(1).min(last_x), fx)
+                let next = if fx == 0.0 { x0 } else { x0.saturating_add(1) };
+                (x0.min(last_x), next.min(last_x), fx)
             })
             .collect();
         let Some(lo) = columns.iter().map(|c| c.0).min() else {
@@ -438,6 +439,13 @@ impl Engine2D {
         let hi = columns.iter().map(|c| c.1).max().unwrap_or(lo);
         let (src_bpp, dst_bpp) = (src.format.bytes_per_pixel, dst.format.bytes_per_pixel);
         let (source, target) = (src.format.codec(), dst.format.codec());
+        // Only the columns a tap lands on are decoded.
+        let mut used: Vec<usize> = columns
+            .iter()
+            .flat_map(|&(a, b, _)| [(a - lo) as usize, (b - lo) as usize])
+            .collect();
+        used.sort_unstable();
+        used.dedup();
 
         let mut from = std::mem::take(&mut self.source);
         let mut to = std::mem::take(&mut self.target);
@@ -468,10 +476,10 @@ impl Engine2D {
             && {
                 let (src_bpp, dst_bpp) = (src_bpp as usize, dst_bpp as usize);
                 let decode_row = |y: u32, row: &mut Vec<[f32; 4]>| -> Result<()> {
-                    row.clear();
+                    row.resize(in_bytes / src_bpp, [0.0; 4]);
                     let at = y as usize * in_bytes;
-                    for texel in rows_in[at..at + in_bytes].chunks_exact(src_bpp) {
-                        row.push(source.decode(le(texel))?);
+                    for &i in &used {
+                        row[i] = source.decode(le(&rows_in[at + i * src_bpp..][..src_bpp]))?;
                     }
                     Ok(())
                 };

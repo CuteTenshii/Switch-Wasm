@@ -574,13 +574,7 @@ impl ColorFormat {
         if let Some(order) = Self::order8_of(&packing) {
             return Ok(encode_order8(order, alpha, rgba));
         }
-        let mut stored = 0u128;
-        for (i, channel) in packing.channels.iter().enumerate() {
-            // An unused alpha slot stores one, so readers see it as opaque.
-            let value = if i == 3 && !alpha { 1.0 } else { rgba[i] };
-            stored |= encode_channel(*channel, packing.numeric, value);
-        }
-        Ok(stored)
+        Ok(encode_packed(&packing, alpha, rgba))
     }
 
     /// The host word for a stored pixel when the format is a byte shuffle of it; `None` otherwise.
@@ -659,15 +653,29 @@ impl ColorFormat {
         if let Some(order) = Self::order8_of(&packing) {
             return Ok(decode_order8(order, alpha, raw));
         }
-        let mut rgba = [0.0f32; 4];
-        for (i, out) in rgba.iter_mut().enumerate() {
-            *out = decode_channel(packing.channels[i], packing.numeric, raw);
-        }
-        if !alpha {
-            rgba[3] = 1.0;
-        }
-        Ok(rgba)
+        Ok(decode_packed(&packing, alpha, raw))
     }
+}
+
+fn encode_packed(packing: &Packing, alpha: bool, rgba: [f32; 4]) -> u128 {
+    let mut stored = 0u128;
+    for (i, channel) in packing.channels.iter().enumerate() {
+        // An unused alpha slot stores one, so readers see it as opaque.
+        let value = if i == 3 && !alpha { 1.0 } else { rgba[i] };
+        stored |= encode_channel(*channel, packing.numeric, value);
+    }
+    stored
+}
+
+fn decode_packed(packing: &Packing, alpha: bool, raw: u128) -> [f32; 4] {
+    let mut rgba = [0.0f32; 4];
+    for (i, out) in rgba.iter_mut().enumerate() {
+        *out = decode_channel(packing.channels[i], packing.numeric, raw);
+    }
+    if !alpha {
+        rgba[3] = 1.0;
+    }
+    rgba
 }
 
 impl ColorFormat {
@@ -677,9 +685,16 @@ impl ColorFormat {
             true => None,
             false => self.order8().map(|order| (order, self.has_alpha())),
         };
+        let packed = match self.is_srgb() {
+            true => None,
+            false => self
+                .packing()
+                .map(|packing| (packing, self.has_alpha_with(Some(&packing)))),
+        };
         Codec {
             format: *self,
             plain8,
+            packed,
         }
     }
 }
@@ -690,22 +705,26 @@ pub struct Codec {
     format: ColorFormat,
     /// Channel order and whether alpha is stored, for a linear 8-bit UNORM format.
     plain8: Option<(Order8, bool)>,
+    /// Packing and whether alpha is stored, for any other linear format.
+    packed: Option<(Packing, bool)>,
 }
 
 impl Codec {
     #[inline]
     pub fn decode(&self, raw: u128) -> Result<[f32; 4]> {
-        match self.plain8 {
-            Some((order, alpha)) => Ok(decode_order8(order, alpha, raw)),
-            None => self.format.decode(raw),
+        match (self.plain8, &self.packed) {
+            (Some((order, alpha)), _) => Ok(decode_order8(order, alpha, raw)),
+            (None, Some((packing, alpha))) => Ok(decode_packed(packing, *alpha, raw)),
+            (None, None) => self.format.decode(raw),
         }
     }
 
     #[inline]
     pub fn encode(&self, rgba: [f32; 4]) -> Result<u128> {
-        match self.plain8 {
-            Some((order, alpha)) => Ok(encode_order8(order, alpha, rgba)),
-            None => self.format.encode(rgba),
+        match (self.plain8, &self.packed) {
+            (Some((order, alpha)), _) => Ok(encode_order8(order, alpha, rgba)),
+            (None, Some((packing, alpha))) => Ok(encode_packed(packing, *alpha, rgba)),
+            (None, None) => self.format.encode(rgba),
         }
     }
 }
@@ -1052,14 +1071,14 @@ mod tests {
 
     #[test]
     fn a_codec_converts_as_its_format_does() {
-        // RGBA8, BGRA8, sRGB RGBA8, BGRX8 and B5G6R5.
-        for raw in [0xD5, 0xCF, 0xD6, 0xE6, 0xE8] {
+        // RGBA8, BGRA8, sRGB RGBA8, BGRX8, B5G6R5 and RGBA16F.
+        for raw in [0xD5, 0xCF, 0xD6, 0xE6, 0xE8, 0xCA] {
             let format = ColorFormat::from_raw(raw).unwrap();
             let codec = format.codec();
             for word in [0u128, 0x8040_20FF, 0xFFFF_FFFF, 0x1234_5678] {
                 assert_eq!(
-                    codec.decode(word).unwrap(),
-                    format.decode(word).unwrap(),
+                    codec.decode(word).unwrap().map(f32::to_bits),
+                    format.decode(word).unwrap().map(f32::to_bits),
                     "{raw:#x}"
                 );
             }
