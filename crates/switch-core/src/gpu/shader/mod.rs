@@ -668,6 +668,7 @@ mod tests {
                 },
                 bm: FMod::NONE,
                 ftz: true,
+                fmz: false,
                 sat: false,
                 scale: FmulScale::None,
             }
@@ -685,6 +686,7 @@ mod tests {
                 c: Operand::Reg(4),
                 cneg: false,
                 ftz: true,
+                fmz: false,
                 sat: false
             }
         );

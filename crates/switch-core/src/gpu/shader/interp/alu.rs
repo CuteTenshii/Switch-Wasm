@@ -75,13 +75,19 @@ impl Invocation {
                 b,
                 bm,
                 ftz,
+                fmz,
                 sat,
                 scale,
             } => {
                 // The pre-scale applies to the first operand.
                 let x = flush(self.reg_f32(a), ftz) * scale.factor();
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
-                self.set_reg_f32(dst, saturate(x * y, sat));
+                let product = if fmz && !sat && (x == 0.0 || y == 0.0) {
+                    0.0
+                } else {
+                    x * y
+                };
+                self.set_reg_f32(dst, saturate(product, sat));
             }
             Op::Ffma {
                 dst,
@@ -91,12 +97,18 @@ impl Invocation {
                 c,
                 cneg,
                 ftz,
+                fmz,
                 sat,
             } => {
                 let x = flush(self.reg_f32(a), ftz);
                 let y = neg_if(flush(self.operand_f32(b, env)?, ftz), bneg);
                 let z = neg_if(flush(self.operand_f32(c, env)?, ftz), cneg);
-                self.set_reg_f32(dst, saturate(x.mul_add(y, z), sat));
+                let fused = if fmz && !sat && (x == 0.0 || y == 0.0) {
+                    z
+                } else {
+                    x.mul_add(y, z)
+                };
+                self.set_reg_f32(dst, saturate(fused, sat));
             }
             Op::Fmnmx {
                 dst,
@@ -174,11 +186,16 @@ impl Invocation {
                 bop,
                 src,
                 bf,
+                cc,
             } => {
                 let x = am.apply(self.reg_f32(a));
                 let y = bm.apply(self.operand_f32(b, env)?);
                 let r = combine(bop, float_compare(cmp, x, y), self.holds(src));
-                self.set_reg(dst, set_result(r, bf));
+                let v = set_result(r, bf);
+                self.set_reg(dst, v);
+                if cc {
+                    self.set_flags(v);
+                }
             }
 
             // ---- half-precision ----
@@ -343,8 +360,10 @@ impl Invocation {
                 // so subtraction carries when it doesn't borrow, as `iadd.x` expects.
                 let sum = u64::from(x) + u64::from(y) + u64::from(cin && self.carry);
                 self.set_reg(dst, sum as u32);
-                if cout {
+                if cout && cin {
                     self.carry = sum > u64::from(u32::MAX);
+                } else if cout {
+                    self.set_add_flags(x, y);
                 }
             }
             Op::Iadd3 {
@@ -355,11 +374,23 @@ impl Invocation {
                 bneg,
                 c,
                 cneg,
+                x: extended,
+                cc,
             } => {
                 let x = ineg_if(self.reg(a), aneg);
                 let y = ineg_if(self.operand(b, env)?, bneg);
                 let z = ineg_if(self.operand(c, env)?, cneg);
-                self.set_reg(dst, x.wrapping_add(y).wrapping_add(z));
+                let (sum, first_carry) = x.overflowing_add(y);
+                let lhs = sum.wrapping_add(u32::from(extended && self.carry));
+                let (result, carry) = lhs.overflowing_add(z);
+                self.set_reg(dst, result);
+                if cc {
+                    self.zero = result == 0;
+                    self.sign = (result as i32) < 0;
+                    self.carry = carry;
+                    let (_, signed_overflow) = (lhs as i32).overflowing_add(z as i32);
+                    self.overflow = signed_overflow || first_carry;
+                }
             }
             Op::Iscadd {
                 dst,
@@ -372,10 +403,9 @@ impl Invocation {
             } => {
                 let x = ineg_if(self.reg(a), aneg).wrapping_shl(shift as u32);
                 let y = ineg_if(self.operand(b, env)?, bneg);
-                let sum = u64::from(x) + u64::from(y);
-                self.set_reg(dst, sum as u32);
+                self.set_reg(dst, x.wrapping_add(y));
                 if cout {
-                    self.carry = sum > u64::from(u32::MAX);
+                    self.set_add_flags(x, y);
                 }
             }
             Op::Lea {
@@ -495,8 +525,14 @@ impl Invocation {
                 signed,
                 bop,
                 src,
+                x,
             } => {
-                let r = int_compare(cmp, self.reg(a), self.operand(b, env)?, signed);
+                let rhs = self.operand(b, env)?;
+                let r = if x {
+                    self.extended_compare(cmp, self.reg(a), rhs, signed)
+                } else {
+                    int_compare(cmp, self.reg(a), rhs, signed)
+                };
                 let s = self.holds(src);
                 self.set_pred(p0, combine(bop, r, s));
                 self.set_pred(p1, combine(bop, !r, s));
@@ -510,10 +546,21 @@ impl Invocation {
                 bop,
                 src,
                 bf,
+                x,
+                cc,
             } => {
-                let r = int_compare(cmp, self.reg(a), self.operand(b, env)?, signed);
+                let rhs = self.operand(b, env)?;
+                let r = if x {
+                    self.extended_compare(cmp, self.reg(a), rhs, signed)
+                } else {
+                    int_compare(cmp, self.reg(a), rhs, signed)
+                };
                 let r = combine(bop, r, self.holds(src));
-                self.set_reg(dst, set_result(r, bf));
+                let v = set_result(r, bf);
+                self.set_reg(dst, v);
+                if cc {
+                    self.set_flags(v);
+                }
             }
             Op::Icmp {
                 dst,
@@ -572,12 +619,24 @@ impl Invocation {
                 };
                 self.set_reg(dst, v);
             }
-            Op::R2p { src, mask, byte } => {
+            Op::R2p {
+                src,
+                mask,
+                byte,
+                flags,
+            } => {
                 let bits = self.reg(src) >> (u32::from(byte) * 8);
                 let mask = self.operand(mask, env)?;
-                for index in 0..7u8 {
+                for index in 0..if flags { 4 } else { 7u8 } {
                     if mask & (1 << index) != 0 {
-                        self.set_pred(index, bits & (1 << index) != 0);
+                        let bit = bits & (1 << index) != 0;
+                        match (flags, index) {
+                            (false, _) => self.set_pred(index, bit),
+                            (true, 0) => self.zero = bit,
+                            (true, 1) => self.sign = bit,
+                            (true, 2) => self.carry = bit,
+                            (true, _) => self.overflow = bit,
+                        }
                     }
                 }
             }
@@ -589,6 +648,7 @@ impl Invocation {
                 binv,
                 op,
                 pred,
+                cc,
             } => {
                 let x = inv_if(self.reg(a), ainv);
                 let y = inv_if(self.operand(b, env)?, binv);
@@ -600,19 +660,28 @@ impl Invocation {
                 };
                 self.set_reg(dst, v);
                 if let Some((p, test)) = pred {
-                    let bit = match test {
-                        LopTest::True => true,
-                        LopTest::Zero => v == 0,
-                        LopTest::NonZero => v != 0,
-                    };
-                    self.set_pred(p, bit);
+                    self.set_pred(p, test.holds(v));
+                }
+                if cc {
+                    self.set_flags(v);
                 }
             }
-            Op::Lop3 { dst, a, b, c, lut } => {
+            Op::Lop3 {
+                dst,
+                a,
+                b,
+                c,
+                lut,
+                pred,
+            } => {
                 let x = self.reg(a);
                 let y = self.operand(b, env)?;
                 let z = self.operand(c, env)?;
-                self.set_reg(dst, lop3(x, y, z, lut));
+                let v = lop3(x, y, z, lut);
+                self.set_reg(dst, v);
+                if let Some((p, test)) = pred {
+                    self.set_pred(p, test.holds(v));
+                }
             }
             Op::Shl { dst, a, b, wrap } => {
                 let n = self.operand(b, env)?;
@@ -625,10 +694,15 @@ impl Invocation {
                 b,
                 signed,
                 wrap,
+                brev,
             } => {
                 let n = self.operand(b, env)?;
                 let n = if wrap { n & 31 } else { n };
-                let x = self.reg(a);
+                let x = if brev {
+                    self.reg(a).reverse_bits()
+                } else {
+                    self.reg(a)
+                };
                 let v = if signed {
                     if n >= 32 {
                         ((x as i32) >> 31) as u32
@@ -674,6 +748,7 @@ impl Invocation {
                 b,
                 signed,
                 brev,
+                cc,
             } => {
                 let desc = self.operand(b, env)?;
                 let start = desc & 0xff;
@@ -683,7 +758,11 @@ impl Invocation {
                 } else {
                     self.reg(a)
                 };
-                self.set_reg(dst, bitfield_extract(source, start, width, signed));
+                let v = bitfield_extract(source, start, width, signed);
+                self.set_reg(dst, v);
+                if cc {
+                    self.set_flags(v);
+                }
             }
             Op::Popc { dst, b, inv } => {
                 let v = inv_if(self.operand(b, env)?, inv);
@@ -723,6 +802,7 @@ impl Invocation {
                 src_bytes,
                 src_signed,
                 sel,
+                dst_bits,
             } => {
                 let raw = self.operand(src, env)?;
                 let raw = raw >> (sel as u32 * 8);
@@ -731,7 +811,12 @@ impl Invocation {
                 } else {
                     truncate(raw, src_bytes) as f32
                 };
-                self.set_reg_f32(dst, sm.apply(v));
+                let v = sm.apply(v);
+                if dst_bits == 16 {
+                    self.set_reg(dst, u32::from(f32_to_f16(v)));
+                } else {
+                    self.set_reg_f32(dst, v);
+                }
             }
             Op::F2i {
                 dst,
@@ -828,10 +913,7 @@ impl Invocation {
                 }
                 self.set_reg(dst, v);
                 if cc {
-                    self.zero = v == 0;
-                    self.sign = (v as i32) < 0;
-                    self.carry = false;
-                    self.overflow = false;
+                    self.set_flags(v);
                 }
             }
 
@@ -873,17 +955,14 @@ impl Invocation {
                 op1,
                 op2,
                 float,
+                cc,
             } => {
                 let first = combine(op1, self.holds(a), self.holds(b));
-                let on = if float { 1f32.to_bits() } else { u32::MAX };
-                self.set_reg(
-                    dst,
-                    if combine(op2, first, self.holds(c)) {
-                        on
-                    } else {
-                        0
-                    },
-                );
+                let v = set_result(combine(op2, first, self.holds(c)), float);
+                self.set_reg(dst, v);
+                if cc {
+                    self.set_flags(v);
+                }
             }
             Op::Csetp {
                 p0,

@@ -171,6 +171,7 @@ fn decodes_isetp_and_its_predicate_destinations() {
             signed: true,
             bop: BoolOp::And,
             src: Pred::ALWAYS,
+            x: false,
         }
     );
 }
@@ -406,7 +407,7 @@ fn decodes_integer_alu() {
     );
     // lop.and r0, r1, r2
     assert_eq!(
-        op(asm(0x5c40, &[(0, 8, 0), (8, 8, 1), (20, 8, 2)])),
+        op(asm(0x5c40, &[(0, 8, 0), (8, 8, 1), (20, 8, 2), (48, 3, 7)])),
         Op::Lop {
             dst: 0,
             a: 1,
@@ -415,6 +416,7 @@ fn decodes_integer_alu() {
             binv: false,
             op: LogicOp::And,
             pred: None,
+            cc: false,
         }
     );
     // mov r5, r6: the byte-enable mask must be "all four".
@@ -442,6 +444,7 @@ fn decodes_conversions() {
             src_bytes: 4,
             src_signed: true,
             sel: 0,
+            dst_bits: 32,
         }
     );
     // f2i.s32.f32.trunc r2, r3
@@ -853,7 +856,7 @@ fn pset_keeps_its_three_predicates_and_picks_the_true_value() {
     ));
     assert!(matches!(
         crate::gpu::shader::isa::decode(0x5088_0380_e007_1006 | 1 << 47).op,
-        Op::Unimplemented { .. }
+        Op::Pset { cc: true, .. }
     ));
 }
 
@@ -874,4 +877,285 @@ fn fcmp_immediate_selects_between_a_register_and_the_immediate() {
     assert_eq!((dst, a, ftz), (8, 3, true));
     assert_eq!(b, Operand::Imm(0x3f80_0000));
     assert_eq!(test, Operand::Reg(3));
+}
+
+fn unimplemented(word: u64) -> bool {
+    matches!(op(word), Op::Unimplemented { .. })
+}
+
+#[test]
+fn iadd3_decodes_its_extended_and_condition_code_bits() {
+    let word = |extra: u64| asm(0x5cc0, &[(0, 8, 4), (8, 8, 1), (20, 8, 2), (39, 8, 3)]) | extra;
+    let flags = |word| match op(word) {
+        Op::Iadd3 { x, cc, .. } => (x, cc),
+        other => panic!("not iadd3: {other:?}"),
+    };
+    assert_eq!(flags(word(0)), (false, false));
+    assert_eq!(flags(word(1 << 48)), (true, false));
+    assert_eq!(flags(word(1 << 47)), (false, true));
+    // Eden leaves the flags of an extended add unimplemented.
+    assert!(unimplemented(word(1 << 48 | 1 << 47)));
+}
+
+#[test]
+fn isetp_and_iset_decode_the_extended_bit_and_iset_its_flags() {
+    let isetp = |extra: u64| asm(0x5b60, &[(0, 3, 1), (3, 3, 0), (8, 8, 1), (20, 8, 2)]) | extra;
+    assert!(matches!(op(isetp(0)), Op::Isetp { x: false, .. }));
+    assert!(matches!(op(isetp(1 << 43)), Op::Isetp { x: true, .. }));
+
+    let iset = |extra: u64| asm(0x5b50, &[(0, 8, 3), (8, 8, 1), (20, 8, 2)]) | extra;
+    assert!(matches!(
+        op(iset(0)),
+        Op::Iset {
+            x: false,
+            cc: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        op(iset(1 << 43)),
+        Op::Iset {
+            x: true,
+            cc: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        op(iset(1 << 47)),
+        Op::Iset {
+            x: false,
+            cc: true,
+            ..
+        }
+    ));
+    assert!(unimplemented(iset(1 << 43 | 1 << 47)));
+}
+
+#[test]
+fn the_logic_and_field_ops_decode_their_condition_code_bit() {
+    let lop = asm(0x5c40, &[(0, 8, 3), (8, 8, 1), (20, 8, 2)]);
+    assert!(matches!(op(lop), Op::Lop { cc: false, .. }));
+    assert!(matches!(op(lop | 1 << 47), Op::Lop { cc: true, .. }));
+    // `.x` stays unimplemented, as in Eden.
+    assert!(unimplemented(lop | 1 << 43));
+
+    let lop32i = asm(0x0400, &[(0, 8, 3), (8, 8, 1), (20, 32, 0xff)]);
+    assert!(matches!(op(lop32i), Op::Lop { cc: false, .. }));
+    assert!(matches!(op(lop32i | 1 << 52), Op::Lop { cc: true, .. }));
+
+    let bfe = asm(0x5c00, &[(0, 8, 3), (8, 8, 1), (20, 8, 2)]);
+    assert!(matches!(op(bfe), Op::Bfe { cc: false, .. }));
+    assert!(matches!(op(bfe | 1 << 47), Op::Bfe { cc: true, .. }));
+
+    let fset = asm(0x5800, &[(0, 8, 3), (8, 8, 1), (20, 8, 2)]);
+    assert!(matches!(op(fset), Op::Fset { cc: false, .. }));
+    assert!(matches!(op(fset | 1 << 47), Op::Fset { cc: true, .. }));
+}
+
+#[test]
+fn lop3_decodes_the_predicate_its_register_form_writes() {
+    let lop3 = |extra: u64| {
+        asm(
+            0x5be0,
+            &[(0, 8, 4), (8, 8, 1), (20, 8, 2), (39, 8, 3), (28, 8, 0xc0)],
+        ) | extra
+    };
+    let pred = |word| match op(word) {
+        Op::Lop3 { pred, .. } => pred,
+        other => panic!("not lop3: {other:?}"),
+    };
+    assert_eq!(pred(lop3(5 << 48)), Some((5, LopTest::False)));
+    assert_eq!(pred(lop3(7 << 48)), None);
+    assert_eq!(pred(lop3(1 << 36 | 5 << 48)), Some((5, LopTest::True)));
+    assert_eq!(pred(lop3(2 << 36 | 5 << 48)), Some((5, LopTest::Zero)));
+    assert_eq!(pred(lop3(3 << 36 | 2 << 48)), Some((2, LopTest::NonZero)));
+    assert!(unimplemented(lop3(1 << 38)));
+    assert!(unimplemented(lop3(1 << 47)));
+}
+
+#[test]
+fn r2p_decodes_whether_it_writes_predicates_or_flags() {
+    let r2p = asm(0x5cf0, &[(8, 8, 1), (20, 8, 2), (41, 2, 1)]);
+    assert!(matches!(
+        op(r2p),
+        Op::R2p {
+            byte: 1,
+            flags: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        op(r2p | 1 << 40),
+        Op::R2p {
+            byte: 1,
+            flags: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn shr_decodes_bit_reverse_and_still_rejects_the_extended_forms() {
+    let shr = asm(0x5c28, &[(0, 8, 3), (8, 8, 1), (20, 8, 2)]);
+    assert!(matches!(op(shr), Op::Shr { brev: false, .. }));
+    assert!(matches!(op(shr | 1 << 40), Op::Shr { brev: true, .. }));
+    assert!(unimplemented(shr | 1 << 43));
+}
+
+#[test]
+fn ffma_refuses_an_explicit_rounding_mode_and_the_condition_codes() {
+    let ffma = asm(0x5980, &[(0, 8, 3), (8, 8, 1), (20, 8, 2), (39, 8, 4)]);
+    assert!(matches!(op(ffma), Op::Ffma { .. }));
+    for rounding in 1..4u64 {
+        assert!(unimplemented(ffma | rounding << 51), "rounding {rounding}");
+    }
+    assert!(unimplemented(ffma | 1 << 47));
+    assert!(unimplemented(ffma | 3 << 53));
+}
+
+#[test]
+fn lop3_decodes_its_constant_bank_form() {
+    // lop3.lut r4, r1, c[0x3][0x10], r5, 0xc0
+    let word = asm(
+        0x0200,
+        &[
+            (0, 8, 4),
+            (8, 8, 1),
+            (20, 14, 4),
+            (34, 5, 3),
+            (39, 8, 5),
+            (48, 8, 0xc0),
+        ],
+    );
+    assert_eq!(
+        op(word),
+        Op::Lop3 {
+            dst: 4,
+            a: 1,
+            b: Operand::Const {
+                bank: 3,
+                offset: 0x10
+            },
+            c: Operand::Reg(5),
+            lut: 0xc0,
+            pred: None,
+        }
+    );
+}
+
+#[test]
+fn iscadd32i_decodes_its_scale_and_carry_out() {
+    // iscadd32i r4, r1, 0x1234, 3
+    let word = asm(
+        0x1400,
+        &[(0, 8, 4), (8, 8, 1), (20, 32, 0x1234), (53, 5, 3)],
+    );
+    assert_eq!(
+        op(word),
+        Op::Iscadd {
+            dst: 4,
+            a: 1,
+            aneg: false,
+            b: Operand::Imm(0x1234),
+            bneg: false,
+            shift: 3,
+            cout: false,
+        }
+    );
+    assert!(matches!(op(word | 1 << 52), Op::Iscadd { cout: true, .. }));
+}
+
+#[test]
+fn i2f_decodes_a_half_destination_and_rejects_a_double() {
+    // i2f.f16.s32 r0, r1
+    let word = |float_format| {
+        asm(
+            0x5cb8,
+            &[
+                (0, 8, 0),
+                (20, 8, 1),
+                (8, 2, float_format),
+                (10, 2, 2),
+                (13, 1, 1),
+            ],
+        )
+    };
+    assert!(matches!(op(word(1)), Op::I2f { dst_bits: 16, .. }));
+    assert!(matches!(op(word(2)), Op::I2f { dst_bits: 32, .. }));
+    assert!(unimplemented(word(3)));
+}
+
+/// Eden throws on `.cc` for each of these, so a decode must not ignore the bit.
+#[test]
+fn the_condition_code_forms_eden_leaves_unimplemented_are_refused() {
+    let regs = &[(0, 8, 3), (8, 8, 1), (20, 8, 2)];
+    let conversion = &[(0, 8, 3), (8, 2, 2), (10, 2, 2), (20, 8, 2)];
+    let forms: [(&str, u64, u32); 14] = [
+        ("fadd", asm(0x5c58, regs), 47),
+        ("fmul", asm(0x5c68, regs), 47),
+        ("fmnmx", asm(0x5c60, regs), 47),
+        ("imnmx", asm(0x5c20, regs), 47),
+        ("shr", asm(0x5c28, regs), 47),
+        ("shl", asm(0x5c48, regs), 47),
+        ("i2f", asm(0x5cb8, conversion), 47),
+        ("f2i", asm(0x5cb0, conversion), 47),
+        ("f2f", asm(0x5ca8, conversion), 47),
+        ("lop3 immediate", asm(0x3c00, regs), 47),
+        ("lop3 constant bank", asm(0x0200, regs), 47),
+        ("ffma", asm(0x5980, regs), 47),
+        ("fadd32i", asm(0x0800, regs), 52),
+        ("fmul32i", asm(0x1e00, regs), 52),
+    ];
+    for (name, word, cc) in forms {
+        assert!(!unimplemented(word), "{name} decodes without .cc");
+        assert!(unimplemented(word | 1 << cc), "{name} with .cc");
+    }
+}
+
+#[test]
+fn fmul32i_keeps_its_mode_at_53_and_saturation_at_55() {
+    let word = asm(0x1e00, &[(0, 8, 3), (8, 8, 1), (20, 32, 0x3f80_0000)]);
+    let flags = |word| match op(word) {
+        Op::Fmul { ftz, fmz, sat, .. } => (ftz, fmz, sat),
+        other => panic!("not fmul: {other:?}"),
+    };
+    assert_eq!(flags(word), (false, false, false));
+    assert_eq!(flags(word | 1 << 53), (true, false, false));
+    assert_eq!(flags(word | 2 << 53), (false, true, false));
+    assert_eq!(flags(word | 1 << 55), (false, false, true));
+    assert_eq!(flags(word | 2 << 53 | 1 << 55), (false, true, true));
+    assert!(unimplemented(word | 3 << 53));
+}
+
+#[test]
+fn fadd32i_reads_the_negation_and_absolute_value_of_its_immediate() {
+    let word = asm(0x0800, &[(0, 8, 3), (8, 8, 1), (20, 32, 0x3f80_0000)]);
+    let modifier = |word| match op(word) {
+        Op::Fadd { bm, .. } => bm,
+        other => panic!("not fadd: {other:?}"),
+    };
+    assert_eq!(modifier(word), FMod::NONE);
+    assert_eq!(
+        modifier(word | 1 << 53),
+        FMod {
+            neg: true,
+            abs: false
+        }
+    );
+    assert_eq!(
+        modifier(word | 1 << 57),
+        FMod {
+            neg: false,
+            abs: true
+        }
+    );
+}
+
+#[test]
+fn iadd3_refuses_the_register_form_half_selects_and_shift() {
+    let word = asm(0x5cc0, &[(0, 8, 4), (8, 8, 1), (20, 8, 2), (39, 8, 3)]);
+    assert!(!unimplemented(word));
+    for bit in [31, 32, 33, 34, 35, 36, 37, 38] {
+        assert!(unimplemented(word | 1 << bit), "bit {bit}");
+    }
 }

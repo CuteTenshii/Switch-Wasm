@@ -1,4 +1,5 @@
 use super::*;
+use crate::gpu::shader::isa::LopTest;
 
 #[test]
 fn a_hand_written_alu_program_produces_the_expected_registers() {
@@ -10,6 +11,7 @@ fn a_hand_written_alu_program_produces_the_expected_registers() {
             b: Operand::Reg(1),
             bm: FMod::NONE,
             ftz: true,
+            fmz: false,
             sat: false,
             scale: FmulScale::None,
         },
@@ -21,6 +23,7 @@ fn a_hand_written_alu_program_produces_the_expected_registers() {
             c: Operand::Reg(0),
             cneg: false,
             ftz: true,
+            fmz: false,
             sat: false,
         },
         Op::Exit,
@@ -121,6 +124,7 @@ fn isetp_then_a_predicated_branch_takes_the_right_path() {
                 signed: true,
                 bop: BoolOp::And,
                 src: Pred::ALWAYS,
+                x: false,
             },
             Pred::ALWAYS,
         ),
@@ -186,6 +190,7 @@ fn a_backward_branch_runs_a_real_loop() {
                 signed: true,
                 bop: BoolOp::And,
                 src: Pred::ALWAYS,
+                x: false,
             },
             Pred::ALWAYS,
         ),
@@ -258,6 +263,7 @@ fn integer_ops_use_the_registers_as_integers_not_floats() {
                 b: Operand::Imm(16),
                 signed: false,
                 wrap: false,
+                brev: false,
             },
             Pred::ALWAYS,
         ),
@@ -270,6 +276,7 @@ fn integer_ops_use_the_registers_as_integers_not_floats() {
                 binv: false,
                 op: LogicOp::And,
                 pred: None,
+                cc: false,
             },
             Pred::ALWAYS,
         ),
@@ -348,6 +355,7 @@ fn f2i_pset_and_fcmp_run_the_way_just_dance_2023_uses_them() {
                 op1: BoolOp::And,
                 op2: BoolOp::And,
                 float: false,
+                cc: false,
             },
             Pred::ALWAYS,
         ),
@@ -360,6 +368,7 @@ fn f2i_pset_and_fcmp_run_the_way_just_dance_2023_uses_them() {
                 op1: BoolOp::And,
                 op2: BoolOp::And,
                 float: true,
+                cc: false,
             },
             Pred::ALWAYS,
         ),
@@ -443,6 +452,7 @@ fn conversions_round_the_way_the_instruction_asks() {
                 src_bytes: 4,
                 src_signed: true,
                 sel: 0,
+                dst_bits: 32,
             },
             Pred::ALWAYS,
         ),
@@ -465,6 +475,7 @@ fn rz_reads_as_zero_and_discards_writes() {
             b: Operand::Reg(1),
             bm: FMod::NONE,
             ftz: true,
+            fmz: false,
             sat: false,
             scale: FmulScale::None,
         },
@@ -476,6 +487,7 @@ fn rz_reads_as_zero_and_discards_writes() {
             c: Operand::Reg(5),
             cneg: false,
             ftz: true,
+            fmz: false,
             sat: false,
         },
         Op::Exit,
@@ -735,4 +747,464 @@ fn lea_adds_a_shifted_and_optionally_negated_register() {
     let run = |word: u64| run_half(&[(1, 3), (2, 0x100)], &[isa::decode(word).op]).reg(4);
     assert_eq!(run(word), 0x130);
     assert_eq!(run(word | 1 << 45), 0xd0);
+}
+
+fn run_fmz(fmz: bool, sat: bool, a: f32, b: f32, c: f32) -> (f32, f32) {
+    let program = prog(&[
+        Op::Fmul {
+            dst: 3,
+            a: 0,
+            b: Operand::Reg(1),
+            bm: FMod::NONE,
+            ftz: false,
+            fmz,
+            sat,
+            scale: FmulScale::None,
+        },
+        Op::Ffma {
+            dst: 4,
+            a: 0,
+            b: Operand::Reg(1),
+            bneg: false,
+            c: Operand::Reg(2),
+            cneg: false,
+            ftz: false,
+            fmz,
+            sat,
+        },
+        Op::Exit,
+    ]);
+    let mut inv = Invocation::new();
+    inv.set_reg_f32(0, a);
+    inv.set_reg_f32(1, b);
+    inv.set_reg_f32(2, c);
+    inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+        .unwrap();
+    (inv.reg_f32(3), inv.reg_f32(4))
+}
+
+/// `.fmz` on `fmul` and `ffma`: a zero operand beats infinity and NaN, and `ffma` keeps its addend.
+#[test]
+fn fmz_floats_zero_the_product_of_a_zero_operand() {
+    let (mul, fma) = run_fmz(false, false, 0.0, f32::INFINITY, 5.0);
+    assert!(mul.is_nan() && fma.is_nan());
+    let (mul, fma) = run_fmz(true, false, 0.0, f32::INFINITY, 5.0);
+    assert_eq!((mul, fma), (0.0, 5.0));
+    let (mul, fma) = run_fmz(true, false, f32::NAN, -0.0, 5.0);
+    assert_eq!((mul, fma), (0.0, 5.0));
+    let (mul, fma) = run_fmz(true, false, 2.0, 3.0, 5.0);
+    assert_eq!((mul, fma), (6.0, 11.0));
+}
+
+/// Eden skips `.fmz` under `.sat`: `0 * inf + 0.25` is NaN, which saturates to 0, not the addend.
+#[test]
+fn fmz_with_sat_is_the_saturated_plain_operation() {
+    let (mul, fma) = run_fmz(true, true, 0.0, f32::INFINITY, 0.25);
+    assert_eq!((mul, fma), (0.0, 0.0));
+    let (mul, fma) = run_fmz(true, false, 0.0, f32::INFINITY, 0.25);
+    assert_eq!((mul, fma), (0.0, 0.25));
+    let (mul, fma) = run_fmz(true, true, 2.0, 3.0, 0.25);
+    assert_eq!((mul, fma), (1.0, 1.0));
+}
+
+const Z: u32 = 1;
+const S: u32 = 2;
+const C: u32 = 4;
+const O: u32 = 8;
+
+/// Seeds the flags from `bits` (Z, S, C, O from bit 0) with `r2p.cc` from r9, then runs `ops`.
+fn run_with_flags(bits: u32, setup: &[(u8, u32)], ops: &[Op]) -> Invocation {
+    let mut program = vec![Op::R2p {
+        src: 9,
+        mask: Operand::Imm(0xf),
+        byte: 0,
+        flags: true,
+    }];
+    program.extend_from_slice(ops);
+    let mut regs = vec![(9, bits)];
+    regs.extend_from_slice(setup);
+    run_half(&regs, &program)
+}
+
+fn flags_of(inv: &Invocation) -> u32 {
+    [
+        (inv.zero, Z),
+        (inv.sign, S),
+        (inv.carry, C),
+        (inv.overflow, O),
+    ]
+    .into_iter()
+    .filter(|&(set, _)| set)
+    .fold(0, |bits, (_, flag)| bits | flag)
+}
+
+#[test]
+fn r2p_cc_writes_only_the_flags_its_mask_names() {
+    let r2p = |mask, byte| Op::R2p {
+        src: 1,
+        mask: Operand::Imm(mask),
+        byte,
+        flags: true,
+    };
+    let from = |start: u32, mask, byte, bits: u32| {
+        flags_of(&run_with_flags(start, &[(1, bits)], &[r2p(mask, byte)]))
+    };
+    assert_eq!(from(0, 0xf, 0, 0b0101), Z | C);
+    assert_eq!(from(Z | S | C | O, 0xf, 0, 0), 0);
+    assert_eq!(from(Z | O, 0b0110, 0, 0b0110), Z | S | C | O);
+    assert_eq!(from(0, 0xf, 2, 0x0003_0000), Z | S);
+    assert_eq!(from(C, 0b0011, 0, 0b1111), Z | S | C);
+    // Bits 4 and up of the mask name predicates, which `.cc` leaves alone.
+    let inv = run_with_flags(0, &[(1, 0xff)], &[r2p(0x70, 0)]);
+    assert_eq!((flags_of(&inv), inv.pred(4)), (0, false));
+}
+
+#[test]
+fn lop_cc_takes_z_and_s_from_the_result_and_clears_c_and_o() {
+    let lop = |op, cc| Op::Lop {
+        dst: 3,
+        a: 1,
+        ainv: false,
+        b: Operand::Reg(2),
+        binv: false,
+        op,
+        pred: None,
+        cc,
+    };
+    let run = |op, a, b| flags_of(&run_with_flags(C | O, &[(1, a), (2, b)], &[lop(op, true)]));
+    assert_eq!(run(LogicOp::And, 0xf0, 0x0f), Z);
+    assert_eq!(run(LogicOp::Or, 0x8000_0000, 1), S);
+    assert_eq!(run(LogicOp::Xor, 3, 1), 0);
+    assert_eq!(run(LogicOp::PassB, 9, 0), Z);
+    // Without `.cc` the flags are left as they were.
+    let plain = lop(LogicOp::And, false);
+    let inv = run_with_flags(S | C, &[(1, 1), (2, 1)], &[plain]);
+    assert_eq!(flags_of(&inv), S | C);
+}
+
+#[test]
+fn iadd_cc_writes_all_four_flags_of_the_sum() {
+    let iadd = |cin, cout| Op::Iadd {
+        dst: 3,
+        a: 1,
+        aneg: false,
+        b: Operand::Reg(2),
+        bneg: false,
+        cin,
+        cout,
+    };
+    let run = |a, b, op| flags_of(&run_with_flags(Z | S | O, &[(1, a), (2, b)], &[op]));
+    assert_eq!(run(1, 2, iadd(false, true)), 0);
+    assert_eq!(run(u32::MAX, 1, iadd(false, true)), Z | C);
+    assert_eq!(run(0x7fff_ffff, 1, iadd(false, true)), S | O);
+    assert_eq!(run(0x8000_0000, 0x8000_0000, iadd(false, true)), Z | C | O);
+    // Without `.cc` the flags stay as they were.
+    assert_eq!(run(u32::MAX, 1, iadd(false, false)), Z | S | O);
+    // `.x.cc` is Eden's TODO: only the carry is written.
+    assert_eq!(run(u32::MAX, 1, iadd(true, true)), Z | S | C | O);
+}
+
+#[test]
+fn iscadd_cc_writes_all_four_flags_of_the_scaled_sum() {
+    let iscadd = |aneg, shift| Op::Iscadd {
+        dst: 3,
+        a: 1,
+        aneg,
+        b: Operand::Reg(2),
+        bneg: false,
+        shift,
+        cout: true,
+    };
+    let run = |a, b, op| flags_of(&run_with_flags(S | O, &[(1, a), (2, b)], &[op]));
+    assert_eq!(run(1, 2, iscadd(false, 2)), 0);
+    assert_eq!(run(1, 0xffff_fffc, iscadd(false, 2)), Z | C);
+    assert_eq!(run(0x4000_0000, 0x8000_0000, iscadd(false, 1)), Z | C | O);
+    assert_eq!(run(1, 0x7fff_ffff, iscadd(false, 0)), S | O);
+    assert_eq!(run(3, 12, iscadd(true, 2)), Z | C);
+    // iscadd32i.cc r3, r1, 0x80000000, 1
+    let wide =
+        isa::decode(0x1400u64 << 48 | 7 << 16 | 3 | 1 << 8 | 0x8000_0000 << 20 | 1 << 52 | 1 << 53)
+            .op;
+    assert_eq!(run(0x4000_0000, 0, wide), Z | C | O);
+}
+
+#[test]
+fn lop3_clears_its_predicate_for_the_false_test() {
+    let op = Op::Lop3 {
+        dst: 4,
+        a: 1,
+        b: Operand::Reg(2),
+        c: Operand::Reg(3),
+        lut: 0xf0,
+        pred: Some((2, LopTest::False)),
+    };
+    let mut program = vec![Op::Isetp {
+        p0: 2,
+        p1: 7,
+        a: 0,
+        b: Operand::Reg(0),
+        cmp: ICmp::Eq,
+        signed: false,
+        bop: BoolOp::And,
+        src: Pred::ALWAYS,
+        x: false,
+    }];
+    program.push(op);
+    let inv = run_half(&[(1, 5), (2, 0), (3, 0)], &program);
+    assert!(!inv.pred(2));
+    assert_eq!(inv.reg(4), 5);
+}
+
+#[test]
+fn lop3_writes_its_predicate_from_the_result() {
+    let run = |test, lut, a| {
+        let op = Op::Lop3 {
+            dst: 4,
+            a: 1,
+            b: Operand::Reg(2),
+            c: Operand::Reg(3),
+            lut,
+            pred: Some((2, test)),
+        };
+        run_half(&[(1, a), (2, 0xf0f0), (3, 0)], &[op])
+    };
+    // lut 0xf0 is `a`.
+    let inv = run(LopTest::Zero, 0xf0, 0);
+    assert_eq!((inv.reg(4), inv.pred(2)), (0, true));
+    let inv = run(LopTest::Zero, 0xf0, 5);
+    assert_eq!((inv.reg(4), inv.pred(2)), (5, false));
+    let inv = run(LopTest::NonZero, 0xf0, 5);
+    assert!(inv.pred(2));
+    let inv = run(LopTest::NonZero, 0xf0, 0);
+    assert!(!inv.pred(2));
+    let inv = run(LopTest::True, 0xf0, 0);
+    assert!(inv.pred(2));
+}
+
+#[test]
+fn bfe_cc_flags_follow_the_extracted_field() {
+    let bfe = Op::Bfe {
+        dst: 3,
+        a: 1,
+        b: Operand::Imm(8 << 8 | 4),
+        signed: true,
+        brev: false,
+        cc: true,
+    };
+    let run = |a| {
+        let inv = run_with_flags(C | O, &[(1, a)], &[bfe]);
+        (inv.reg(3), flags_of(&inv))
+    };
+    assert_eq!(run(0x0000_0ff0), (0xffff_ffff, S));
+    assert_eq!(run(0x0000_0070), (0x7, 0));
+    assert_eq!(run(0x0000_000f), (0, Z));
+}
+
+#[test]
+fn iset_pset_and_fset_cc_flag_the_value_they_write() {
+    let iset = |bf| Op::Iset {
+        dst: 3,
+        a: 1,
+        b: Operand::Reg(2),
+        cmp: ICmp::Eq,
+        signed: true,
+        bop: BoolOp::And,
+        src: Pred::ALWAYS,
+        bf,
+        x: false,
+        cc: true,
+    };
+    let run = |op, setup: &[(u8, u32)]| {
+        let inv = run_with_flags(C | O, setup, &[op]);
+        (inv.reg(3), flags_of(&inv))
+    };
+    assert_eq!(run(iset(false), &[(1, 4), (2, 4)]), (u32::MAX, S));
+    assert_eq!(run(iset(false), &[(1, 4), (2, 5)]), (0, Z));
+    assert_eq!(run(iset(true), &[(1, 4), (2, 4)]), (1f32.to_bits(), 0));
+
+    let pset = |float| Op::Pset {
+        dst: 3,
+        a: Pred::ALWAYS,
+        b: Pred::ALWAYS,
+        c: Pred::ALWAYS,
+        op1: BoolOp::And,
+        op2: BoolOp::And,
+        float,
+        cc: true,
+    };
+    assert_eq!(run(pset(false), &[]), (u32::MAX, S));
+    assert_eq!(run(pset(true), &[]), (1f32.to_bits(), 0));
+
+    let fset = |cmp| Op::Fset {
+        dst: 3,
+        a: 1,
+        am: FMod::NONE,
+        b: Operand::Reg(2),
+        bm: FMod::NONE,
+        cmp,
+        bop: BoolOp::And,
+        src: Pred::ALWAYS,
+        bf: false,
+        cc: true,
+    };
+    let (one, two) = (1f32.to_bits(), 2f32.to_bits());
+    assert_eq!(run(fset(FCmp::Lt), &[(1, one), (2, two)]), (u32::MAX, S));
+    assert_eq!(run(fset(FCmp::Gt), &[(1, one), (2, two)]), (0, Z));
+}
+
+#[test]
+fn iadd3_cc_derives_its_flags_as_eden_does() {
+    let iadd3 = |cc, x| Op::Iadd3 {
+        dst: 4,
+        a: 1,
+        aneg: false,
+        b: Operand::Reg(2),
+        bneg: false,
+        c: Operand::Reg(3),
+        cneg: false,
+        x,
+        cc,
+    };
+    let run = |a, b, c| {
+        let inv = run_half(&[(1, a), (2, b), (3, c)], &[iadd3(true, false)]);
+        (inv.reg(4), flags_of(&inv))
+    };
+    // C is the carry of the final add only; the carry of `a + b` lands in O.
+    assert_eq!(run(u32::MAX, 1, 0), (0, Z | O));
+    assert_eq!(run(u32::MAX, 0, 1), (0, Z | C));
+    // Signed overflow of the final add sets O and the sign.
+    assert_eq!(run(0x7fff_ffff, 0, 1), (0x8000_0000, S | O));
+    assert_eq!(run(1, 2, 3), (6, 0));
+    // Without `.cc` the flags stay as they were.
+    let inv = run_with_flags(C, &[(1, 1), (2, 2), (3, 3)], &[iadd3(false, false)]);
+    assert_eq!((inv.reg(4), flags_of(&inv)), (6, C));
+}
+
+#[test]
+fn iadd3_x_adds_the_carry_into_the_first_sum() {
+    let iadd3 = Op::Iadd3 {
+        dst: 4,
+        a: 1,
+        aneg: false,
+        b: Operand::Reg(2),
+        bneg: false,
+        c: Operand::Reg(3),
+        cneg: false,
+        x: true,
+        cc: false,
+    };
+    let run = |bits| run_with_flags(bits, &[(1, 10), (2, 20), (3, 100)], &[iadd3]).reg(4);
+    assert_eq!(run(0), 130);
+    assert_eq!(run(C), 131);
+    assert_eq!(run(Z | S | O), 130);
+}
+
+/// Eden's `ExtendedIntegerCompare`: the hi-word compare of a 64-bit compare whose low word set C and Z.
+#[test]
+fn isetp_x_continues_a_compare_through_the_carry_and_zero_flags() {
+    let run = |cmp, signed, a, b, bits| {
+        let isetp = Op::Isetp {
+            p0: 0,
+            p1: 1,
+            a: 1,
+            b: Operand::Reg(2),
+            cmp,
+            signed,
+            bop: BoolOp::And,
+            src: Pred::ALWAYS,
+            x: true,
+        };
+        let inv = run_with_flags(bits, &[(1, a), (2, b)], &[isetp]);
+        assert_eq!(inv.pred(0), !inv.pred(1), "{cmp:?}");
+        inv.pred(0)
+    };
+    let all = [ICmp::Lt, ICmp::Eq, ICmp::Le, ICmp::Gt, ICmp::Ne, ICmp::Ge];
+    let row = |signed, a, b, bits| all.map(|cmp| run(cmp, signed, a, b, bits));
+    // Equal high words: the low-word compare (Z, and C as "no borrow") decides.
+    assert_eq!(
+        row(true, 5, 5, C | Z),
+        [false, true, true, false, false, true]
+    );
+    assert_eq!(row(true, 5, 5, C), [false, false, false, true, true, true]);
+    assert_eq!(row(true, 5, 5, 0), [true, false, true, false, true, false]);
+    // Different high words decide alone.
+    assert_eq!(
+        row(true, 3, 5, C | Z),
+        [true, false, true, false, true, false]
+    );
+    assert_eq!(row(true, 7, 5, 0), [false, false, false, true, true, true]);
+    // Unsigned, with the sign bits differing.
+    assert_eq!(
+        row(false, 0xffff_ffff, 1, C),
+        [false, false, false, true, true, true]
+    );
+    assert_eq!(
+        row(false, 1, 0xffff_ffff, C),
+        [true, false, true, false, true, false]
+    );
+    assert!(run(ICmp::Always, true, 1, 2, 0) && !run(ICmp::Never, true, 1, 2, 0));
+}
+
+#[test]
+fn iset_x_materialises_the_extended_compare() {
+    let iset = Op::Iset {
+        dst: 3,
+        a: 1,
+        b: Operand::Reg(2),
+        cmp: ICmp::Eq,
+        signed: false,
+        bop: BoolOp::And,
+        src: Pred::ALWAYS,
+        bf: false,
+        x: true,
+        cc: false,
+    };
+    let run = |bits| run_with_flags(bits, &[(1, 8), (2, 8)], &[iset]).reg(3);
+    assert_eq!(run(C | Z), u32::MAX);
+    assert_eq!(run(C), 0);
+}
+
+#[test]
+fn shr_brev_shifts_the_bit_reversed_source() {
+    let shr = |signed| Op::Shr {
+        dst: 3,
+        a: 1,
+        b: Operand::Imm(4),
+        signed,
+        wrap: false,
+        brev: true,
+    };
+    let run = |signed, a| run_half(&[(1, a)], &[shr(signed)]).reg(3);
+    assert_eq!(run(false, 1), 0x0800_0000);
+    assert_eq!(run(true, 1), 0xf800_0000);
+    assert_eq!(run(true, 0xffff_fffe), 0x07ff_ffff);
+}
+
+#[test]
+fn i2f_to_half_leaves_the_rounded_half_in_the_low_bits() {
+    let i2f = |sm| Op::I2f {
+        dst: 3,
+        src: Operand::Reg(1),
+        sm,
+        src_bytes: 4,
+        src_signed: true,
+        sel: 0,
+        dst_bits: 16,
+    };
+    let run = |sm, v: i32| run_half(&[(1, v as u32), (3, 0xdead_beef)], &[i2f(sm)]).reg(3);
+    assert_eq!(run(FMod::NONE, 3), 0x4200);
+    assert_eq!(run(FMod::NONE, -3), 0xc200);
+    assert_eq!(
+        run(
+            FMod {
+                neg: true,
+                abs: false
+            },
+            3
+        ),
+        0xc200
+    );
+    // 2049 is not representable in half precision and rounds to even.
+    assert_eq!(run(FMod::NONE, 2049), 0x6800);
+    assert_eq!(run(FMod::NONE, 100_000), 0x7c00);
 }

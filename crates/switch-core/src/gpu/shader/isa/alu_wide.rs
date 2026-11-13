@@ -53,9 +53,6 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             let Some(bop) = bool_op(field(insn, 45, 2)) else {
                 return un;
             };
-            if field(insn, 43, 1) != 0 {
-                return un; // extended-carry compare
-            }
             return Op::Isetp {
                 p0: reg(insn, 3, 3),
                 p1: reg(insn, 0, 3),
@@ -65,6 +62,7 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 signed: field(insn, 48, 1) != 0,
                 bop,
                 src: src_pred(insn, 39, 42),
+                x: field(insn, 43, 1) != 0,
             };
         }
         // iset, the register-writing form of isetp.
@@ -77,6 +75,10 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             let Some(bop) = bool_op(field(insn, 45, 2)) else {
                 return un;
             };
+            // Eden leaves the flags of an extended compare unimplemented.
+            if field(insn, 43, 1) != 0 && field(insn, 47, 1) != 0 {
+                return un;
+            }
             return Op::Iset {
                 dst: reg(insn, 0, 8),
                 a: reg(insn, 8, 8),
@@ -86,6 +88,8 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 bop,
                 src: src_pred(insn, 39, 42),
                 bf: field(insn, 44, 1) != 0,
+                x: field(insn, 43, 1) != 0,
+                cc: field(insn, 47, 1) != 0,
             };
         }
         // fcmp: ftz 47, cmp 48..52.
@@ -150,8 +154,12 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 0x4 => (const_operand(insn), Operand::Reg(reg(insn, 39, 8))),
                 _ => (Operand::Imm(imm20(insn)), Operand::Reg(reg(insn, 39, 8))),
             };
-            if field(insn, 48, 1) != 0 {
-                return un; // extended-carry
+            // Eden leaves the flags of an extended add unimplemented; the register form's
+            // half selects and shift at 31..39 are not modelled.
+            if field(insn, 48, 1) != 0 && field(insn, 47, 1) != 0
+                || form >> 12 == 0x5 && field(insn, 31, 8) != 0
+            {
+                return un;
             }
             return Op::Iadd3 {
                 dst: reg(insn, 0, 8),
@@ -161,6 +169,8 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 bneg: field(insn, 50, 1) != 0,
                 c,
                 cneg: field(insn, 49, 1) != 0,
+                x: field(insn, 48, 1) != 0,
+                cc: field(insn, 47, 1) != 0,
             };
         }
         // lea, 0x5bd0/0xfff0 (bit 51 picks `.hi`), 0x4bd0 and the `.lo`-only immediate.
@@ -229,10 +239,6 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
         else {
             return un;
         };
-        // Bit 47 writes the condition codes, which this form does not model.
-        if field(insn, 47, 1) != 0 {
-            return un;
-        }
         return Op::Pset {
             dst: reg(insn, 0, 8),
             a: src_pred(insn, 12, 15),
@@ -241,6 +247,7 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             op1,
             op2,
             float: field(insn, 44, 1) != 0,
+            cc: field(insn, 47, 1) != 0,
         };
     }
 
@@ -287,7 +294,7 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
     // fswzadd.
     if insn & 0xfff8_0000_0000_0000 == 0x50f8_0000_0000_0000 {
         if field(insn, 47, 1) != 0 || field(insn, 39, 2) != 0 {
-            return un;
+            return un; // `.cc`, or an explicit rounding mode
         }
         return Op::Fswzadd {
             dst: reg(insn, 0, 8),
@@ -324,8 +331,8 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
 
     // lop3: the LUT byte sits in a different field in each form.
     if insn & 0xfff8_0000_0000_0000 == 0x5be0_0000_0000_0000 {
-        if field(insn, 38, 1) != 0 || field(insn, 36, 2) != 0 {
-            return un;
+        if field(insn, 38, 1) != 0 || field(insn, 47, 1) != 0 {
+            return un; // `.x` or `.cc`
         }
         return Op::Lop3 {
             dst: reg(insn, 0, 8),
@@ -333,6 +340,7 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             b: Operand::Reg(reg(insn, 20, 8)),
             c: Operand::Reg(reg(insn, 39, 8)),
             lut: field(insn, 28, 8) as u8,
+            pred: lop_pred(insn, 36),
         };
     }
     // vmnmx, 0x3a00/0xfe00.
@@ -364,12 +372,43 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
         };
     }
     if insn & 0xfc00_0000_0000_0000 == 0x3c00_0000_0000_0000 {
+        if field(insn, 47, 1) != 0 {
+            return Op::Unimplemented { raw: insn }; // `.cc`
+        }
         return Op::Lop3 {
             dst: reg(insn, 0, 8),
             a: reg(insn, 8, 8),
             b: Operand::Imm(imm20(insn)),
             c: Operand::Reg(RZ),
             lut: field(insn, 48, 8) as u8,
+            pred: None,
+        };
+    }
+
+    // lop3 with a constant-bank `b`, 0x0200/0xfe00; the LUT is at 48 as in the immediate form.
+    if insn >> 57 == 0b000_0001 {
+        if field(insn, 47, 1) != 0 {
+            return Op::Unimplemented { raw: insn }; // `.cc`
+        }
+        return Op::Lop3 {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: const_operand(insn),
+            c: Operand::Reg(reg(insn, 39, 8)),
+            lut: field(insn, 48, 8) as u8,
+            pred: None,
+        };
+    }
+    // iscadd32i, 0x1400/0xfc00.
+    if insn >> 58 == 0b0001_01 {
+        return Op::Iscadd {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            aneg: false,
+            b: Operand::Imm(field(insn, 20, 32) as u32),
+            bneg: false,
+            shift: field(insn, 53, 5) as u8,
+            cout: field(insn, 52, 1) != 0,
         };
     }
 
@@ -485,6 +524,7 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             bop,
             src: src_pred(insn, 39, 42),
             bf: field(insn, 52, 1) != 0,
+            cc: field(insn, 47, 1) != 0,
         };
     }
 
@@ -570,6 +610,9 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
     }
     if insn & 0xfc00_0000_0000_0000 == 0x0800_0000_0000_0000 {
         // fadd32i
+        if field(insn, 52, 1) != 0 {
+            return Op::Unimplemented { raw: insn }; // `.cc`
+        }
         return Op::Fadd {
             dst: reg(insn, 0, 8),
             a: reg(insn, 8, 8),
@@ -578,15 +621,18 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 abs: field(insn, 54, 1) != 0,
             },
             b: Operand::Imm(field(insn, 20, 32) as u32),
-            bm: FMod::NONE,
+            bm: FMod {
+                neg: field(insn, 53, 1) != 0,
+                abs: field(insn, 57, 1) != 0,
+            },
             ftz: field(insn, 55, 1) != 0,
             sat: false,
         };
     }
     if insn & 0xfc00_0000_0000_0000 == 0x0c00_0000_0000_0000 {
         // ffma32i: the destination is also the addend.
-        if field(insn, 52, 1) != 0 || field(insn, 53, 2) > 1 {
-            return Op::Unimplemented { raw: insn }; // `.cc`, or `.fmz`, which `Ffma` has no form for
+        if field(insn, 52, 1) != 0 || field(insn, 53, 2) == 3 {
+            return Op::Unimplemented { raw: insn }; // `.cc` (Eden: unimplemented) or an invalid mode
         }
         let dst = reg(insn, 0, 8);
         return Op::Ffma {
@@ -597,18 +643,23 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             c: Operand::Reg(dst),
             cneg: field(insn, 57, 1) != 0,
             ftz: field(insn, 53, 2) == 1,
+            fmz: field(insn, 53, 2) == 2,
             sat: field(insn, 55, 1) != 0,
         };
     }
     if insn & 0xff00_0000_0000_0000 == 0x1e00_0000_0000_0000 {
         // fmul32i
+        if field(insn, 52, 1) != 0 || field(insn, 53, 2) == 3 {
+            return Op::Unimplemented { raw: insn }; // `.cc` or an invalid mode
+        }
         return Op::Fmul {
             dst: reg(insn, 0, 8),
             a: reg(insn, 8, 8),
             b: Operand::Imm(field(insn, 20, 32) as u32),
             bm: FMod::NONE,
-            ftz: field(insn, 55, 1) != 0,
-            sat: field(insn, 54, 1) != 0,
+            ftz: field(insn, 53, 2) == 1,
+            fmz: field(insn, 53, 2) == 2,
+            sat: field(insn, 55, 1) != 0,
             scale: FmulScale::None,
         };
     }
@@ -641,6 +692,7 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             binv: field(insn, 56, 1) != 0,
             op,
             pred: None,
+            cc: field(insn, 52, 1) != 0,
         };
     }
 
@@ -663,8 +715,8 @@ fn decode_lea(insn: u64, b: Operand, hi: Option<u8>, shift: u64, neg: u32) -> Op
 }
 
 fn decode_ffma(insn: u64, b: Operand, c: Operand) -> Op {
-    if field(insn, 51, 2) != 0 {
-        return Op::Unimplemented { raw: insn }; // explicit rounding modes
+    if field(insn, 47, 1) != 0 || field(insn, 51, 2) != 0 || field(insn, 53, 2) == 3 {
+        return Op::Unimplemented { raw: insn }; // `.cc`, an explicit rounding mode or an invalid mode
     }
     Op::Ffma {
         dst: reg(insn, 0, 8),
@@ -674,6 +726,7 @@ fn decode_ffma(insn: u64, b: Operand, c: Operand) -> Op {
         c,
         cneg: field(insn, 49, 1) != 0,
         ftz: field(insn, 53, 2) == 1,
+        fmz: field(insn, 53, 2) == 2,
         sat: field(insn, 50, 1) != 0,
     }
 }

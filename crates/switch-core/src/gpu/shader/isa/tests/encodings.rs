@@ -72,6 +72,7 @@ fn decodes_fset_against_an_immediate() {
                 negate: false
             },
             bf: true,
+            cc: false,
         }
     );
     // The same instruction in its register and constant-bank forms.
@@ -185,6 +186,7 @@ fn decodes_fmul_constant_bank_and_register_forms() {
             },
             bm: FMod::NONE,
             ftz: true,
+            fmz: false,
             sat: false,
         }
     );
@@ -201,6 +203,7 @@ fn decodes_fmul_constant_bank_and_register_forms() {
             },
             bm: FMod::NONE,
             ftz: true,
+            fmz: false,
             sat: false,
         }
     );
@@ -213,6 +216,7 @@ fn decodes_fmul_constant_bank_and_register_forms() {
             b: Operand::Reg(5),
             bm: FMod::NONE,
             ftz: true,
+            fmz: false,
             sat: false,
             scale: FmulScale::None,
         }
@@ -266,6 +270,7 @@ fn decodes_ffma_constant_bank_chain() {
             c: Operand::Reg(4),
             cneg: false,
             ftz: true,
+            fmz: false,
             sat: false,
         }
     );
@@ -283,6 +288,7 @@ fn decodes_ffma_constant_bank_chain() {
             c: Operand::Reg(1),
             cneg: false,
             ftz: true,
+            fmz: false,
             sat: false,
         }
     );
@@ -301,6 +307,7 @@ fn decodes_ffma32i_into_its_own_destination() {
             c: Operand::Reg(34),
             cneg: false,
             ftz: true,
+            fmz: false,
             sat: false,
         }
     );
@@ -315,11 +322,11 @@ fn decodes_ffma32i_into_its_own_destination() {
             c: Operand::Reg(34),
             cneg: true,
             ftz: false,
+            fmz: false,
             sat: true,
         }
     );
-    // `.fmz` and `.cc` have no `Ffma` form.
-    assert!(matches!(op(0x0c43d707f8771e22), Op::Unimplemented { .. }));
+    // `.cc` has no `Ffma` form; Eden leaves it unimplemented.
     assert!(matches!(op(0x0c13d707f8771e22), Op::Unimplemented { .. }));
 }
 
@@ -932,4 +939,31 @@ fn a_tlds_destination_pair_on_an_odd_register_is_unimplemented() {
     assert!(decoded(4, 4, 6, false), "four channels");
     assert!(!decoded(4, 4, 7, false));
     assert!(decoded(4, 5, 7, true), "halves pack, so there is no pair");
+}
+
+/// `.fmz` is mode 2 of the two-bit float mode: at 44 for `fmul`, at 53 for `ffma` and `ffma32i`.
+#[test]
+fn decodes_fmz_on_fmul_ffma_and_ffma32i() {
+    let modes = |word: u64| match op(word) {
+        Op::Fmul { ftz, fmz, .. } | Op::Ffma { ftz, fmz, .. } => (ftz, fmz),
+        other => panic!("not a float multiply: {other:?}"),
+    };
+    for (base, at) in [
+        (0x5c68_0000_0000_0000u64, 44),
+        (0x4c68_0000_0000_0000, 44),
+        (0x5980_0000_0000_0000, 53),
+        (0x0c00_0000_0000_0000, 53),
+    ] {
+        assert_eq!(modes(base), (false, false), "{base:#x}");
+        assert_eq!(modes(base | 1 << at), (true, false), "{base:#x}");
+        assert_eq!(modes(base | 2 << at), (false, true), "{base:#x}");
+    }
+    assert!(matches!(
+        op(0x0c00_0000_0000_0000 | 3 << 53),
+        Op::Unimplemented { .. }
+    ));
+    assert!(matches!(
+        op(0x0c00_0000_0000_0000 | 1 << 52),
+        Op::Unimplemented { .. }
+    ));
 }

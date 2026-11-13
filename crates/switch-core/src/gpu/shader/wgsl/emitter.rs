@@ -226,6 +226,7 @@ impl<'a> Emitter<'a> {
                 binv: false,
                 op: LogicOp::Or,
                 pred: None,
+                ..
             } if dst == reg => match self.bindless_slot(writer, a)? {
                 TextureSlot::Bindless { bank, offset } => Some(TextureSlot::BindlessPair {
                     bank,
@@ -620,6 +621,45 @@ impl<'a> Emitter<'a> {
             ICmp::Ge => format!("(({a}) >= ({b}))"),
             ICmp::Always => "true".to_string(),
         }
+    }
+
+    /// Eden's `ExtendedIntegerCompare`, as [`Invocation::extended_compare`](crate::gpu::shader::interp) does.
+    pub(super) fn extended_compare(&mut self, cmp: ICmp, a: &str, b: &str, signed: bool) -> String {
+        self.uses_carry = true;
+        self.uses_flags = true;
+        let (a, b) = (self.bind(a), self.bind(b));
+        let middle = self.bind(&format!("bitcast<i32>({a} + ~{b} + select(0u, 1u, carry))"));
+        let flip = if signed {
+            "false".to_string()
+        } else {
+            format!("((bitcast<i32>({a}) < 0) != (bitcast<i32>({b}) < 0))")
+        };
+        let tied = format!("({middle} == 0 && ccZ)");
+        match cmp {
+            ICmp::Never => "false".to_string(),
+            ICmp::Lt => format!("(({middle} < 0) != {flip})"),
+            ICmp::Eq => tied,
+            ICmp::Le => format!("((({middle} < 0) != {flip}) || {tied})"),
+            ICmp::Gt => format!("((({middle} > 0) != {flip}) || ({middle} == 0 && !ccZ))"),
+            ICmp::Ne => format!("({middle} != 0 || !ccZ)"),
+            ICmp::Ge => format!("((({middle} >= 0) != {flip}) || {tied})"),
+            ICmp::Always => "true".to_string(),
+        }
+    }
+
+    /// Z and S from `value`, which must be bound.
+    pub(super) fn set_zero_sign(&mut self, value: &str) {
+        self.uses_carry = true;
+        self.uses_flags = true;
+        self.line(&format!("ccZ = ({value} == 0u);"));
+        self.line(&format!("ccS = (bitcast<i32>({value}) < 0);"));
+    }
+
+    /// A `.cc` write: Z and S from `value`, C and O cleared. `value` must be bound.
+    pub(super) fn set_flags(&mut self, value: &str) {
+        self.set_zero_sign(value);
+        self.line("carry = false;");
+        self.line("ccO = false;");
     }
 
     pub(super) fn combine(&mut self, op: BoolOp, a: &str, b: &str) -> String {

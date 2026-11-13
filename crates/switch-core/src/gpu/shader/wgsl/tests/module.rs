@@ -826,6 +826,7 @@ fn split_handle(second: Operand) -> Vec<(Op, Pred)> {
                 binv: false,
                 op: LogicOp::Or,
                 pred: None,
+                cc: false,
             },
             ALWAYS,
         ),

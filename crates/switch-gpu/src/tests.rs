@@ -203,6 +203,186 @@ fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
     assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
 }
 
+/// The `.fmz`, `.cc`, `.x`, `.brev` and `lop3` predicate forms are valid WGSL.
+#[test]
+fn condition_code_extended_and_fmz_forms_are_wgsl_naga_accepts() {
+    use super::{wgpu, wgsl, Compiled, Layout, Stage};
+    use switch_core::gpu::shader::isa::{
+        BoolOp, FCmp, FMod, FmulScale, ICmp, Instruction, LogicOp, LopTest, Operand, Pred,
+    };
+    use switch_core::gpu::shader::{Op, Program};
+
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    let reg = Operand::Reg;
+    let none = FMod::NONE;
+    let ops = [
+        Op::Fmul {
+            dst: 1,
+            a: 2,
+            b: reg(3),
+            bm: none,
+            ftz: false,
+            fmz: true,
+            sat: false,
+            scale: FmulScale::None,
+        },
+        Op::Ffma {
+            dst: 1,
+            a: 2,
+            b: reg(3),
+            bneg: false,
+            c: reg(4),
+            cneg: false,
+            ftz: false,
+            fmz: true,
+            sat: false,
+        },
+        Op::Iadd3 {
+            dst: 1,
+            a: 2,
+            aneg: false,
+            b: reg(3),
+            bneg: false,
+            c: reg(4),
+            cneg: false,
+            x: false,
+            cc: true,
+        },
+        Op::Iadd3 {
+            dst: 1,
+            a: 2,
+            aneg: false,
+            b: reg(3),
+            bneg: false,
+            c: reg(4),
+            cneg: false,
+            x: true,
+            cc: false,
+        },
+        Op::Isetp {
+            p0: 0,
+            p1: 1,
+            a: 2,
+            b: reg(3),
+            cmp: ICmp::Gt,
+            signed: false,
+            bop: BoolOp::And,
+            src: Pred::ALWAYS,
+            x: true,
+        },
+        Op::Iset {
+            dst: 1,
+            a: 2,
+            b: reg(3),
+            cmp: ICmp::Le,
+            signed: true,
+            bop: BoolOp::Or,
+            src: Pred::ALWAYS,
+            bf: true,
+            x: true,
+            cc: false,
+        },
+        Op::Iset {
+            dst: 1,
+            a: 2,
+            b: reg(3),
+            cmp: ICmp::Eq,
+            signed: true,
+            bop: BoolOp::And,
+            src: Pred::ALWAYS,
+            bf: false,
+            x: false,
+            cc: true,
+        },
+        Op::Lop {
+            dst: 1,
+            a: 2,
+            ainv: false,
+            b: reg(3),
+            binv: false,
+            op: LogicOp::Xor,
+            pred: Some((2, LopTest::Zero)),
+            cc: true,
+        },
+        Op::Lop3 {
+            dst: 1,
+            a: 2,
+            b: reg(3),
+            c: reg(4),
+            lut: 0xe8,
+            pred: Some((3, LopTest::NonZero)),
+        },
+        Op::Bfe {
+            dst: 1,
+            a: 2,
+            b: reg(3),
+            signed: true,
+            brev: false,
+            cc: true,
+        },
+        Op::Pset {
+            dst: 1,
+            a: Pred::ALWAYS,
+            b: Pred::ALWAYS,
+            c: Pred::ALWAYS,
+            op1: BoolOp::And,
+            op2: BoolOp::Or,
+            float: true,
+            cc: true,
+        },
+        Op::Fset {
+            dst: 1,
+            a: 2,
+            am: none,
+            b: reg(3),
+            bm: none,
+            cmp: FCmp::Lt,
+            bop: BoolOp::And,
+            src: Pred::ALWAYS,
+            bf: false,
+            cc: true,
+        },
+        Op::R2p {
+            src: 1,
+            mask: Operand::Imm(0xf),
+            byte: 0,
+            flags: true,
+        },
+        Op::Shr {
+            dst: 1,
+            a: 2,
+            b: reg(3),
+            signed: true,
+            wrap: false,
+            brev: true,
+        },
+        Op::Exit,
+    ];
+    let mut program = Program::default();
+    for (index, op) in ops.into_iter().enumerate() {
+        program.insns.push(Instruction {
+            pred: Pred::ALWAYS,
+            op,
+        });
+        program.offsets.push(index as u32 * 8);
+    }
+    let translated =
+        wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE).expect("translates");
+    let layout = Layout::of(&translated, Stage::Fragment);
+    let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+    let _ = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flags"),
+            source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+        });
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+    assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+}
+
 /// Persona 5 Royal's `tlds` and shadow `tld4s` are valid WGSL, folded images included.
 #[test]
 fn persona_5_royals_tlds_and_shadow_tld4s_are_wgsl_naga_accepts() {

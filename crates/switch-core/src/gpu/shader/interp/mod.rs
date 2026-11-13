@@ -23,8 +23,8 @@ use std::collections::HashMap;
 
 use super::isa::{
     self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FMod, FRound, HMerge, HPrecision,
-    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, ShflMode, SurfaceData,
-    SurfaceDim, TexDim, VoteMode, XmadC, RZ,
+    HSwizzle, ICmp, LogicOp, MemSize, MufuOp, Op, Operand, Pred, ShflMode, SurfaceData, SurfaceDim,
+    TexDim, VoteMode, XmadC, RZ,
 };
 use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 
@@ -309,6 +309,40 @@ impl Invocation {
     fn set_pred(&mut self, p: u8, v: bool) {
         if p < 7 {
             self.pred[p as usize] = v;
+        }
+    }
+
+    /// A `.cc` write: Z and S from `v`, C and O cleared.
+    fn set_flags(&mut self, v: u32) {
+        self.zero = v == 0;
+        self.sign = (v as i32) < 0;
+        self.carry = false;
+        self.overflow = false;
+    }
+
+    /// A `.cc` add: Z, S, C and O of `x + y`.
+    fn set_add_flags(&mut self, x: u32, y: u32) {
+        let (sum, carry) = x.overflowing_add(y);
+        self.zero = sum == 0;
+        self.sign = (sum as i32) < 0;
+        self.carry = carry;
+        self.overflow = (x as i32).overflowing_add(y as i32).1;
+    }
+
+    /// Eden's `ExtendedIntegerCompare`: `a - b` with the carry flag as the borrow, and Z for equality.
+    fn extended_compare(&self, cmp: ICmp, a: u32, b: u32, signed: bool) -> bool {
+        let middle = a.wrapping_add(!b).wrapping_add(u32::from(self.carry)) as i32;
+        let flip = !signed && ((a as i32) < 0) != ((b as i32) < 0);
+        let tied = middle == 0 && self.zero;
+        match cmp {
+            ICmp::Never => false,
+            ICmp::Lt => (middle < 0) != flip,
+            ICmp::Eq => tied,
+            ICmp::Le => (middle < 0) != flip || tied,
+            ICmp::Gt => (middle > 0) != flip || middle == 0 && !self.zero,
+            ICmp::Ne => middle != 0 || !self.zero,
+            ICmp::Ge => (middle >= 0) != flip || tied,
+            ICmp::Always => true,
         }
     }
 

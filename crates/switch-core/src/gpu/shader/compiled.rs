@@ -202,6 +202,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             b,
             bm,
             ftz,
+            fmz,
             sat,
             scale,
         } => Op::Fmul {
@@ -210,6 +211,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             b: f(b),
             bm,
             ftz,
+            fmz,
             sat,
             scale,
         },
@@ -221,6 +223,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             c,
             cneg,
             ftz,
+            fmz,
             sat,
         } => Op::Ffma {
             dst,
@@ -230,6 +233,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             c: f(c),
             cneg,
             ftz,
+            fmz,
             sat,
         },
         Op::Fmnmx {
@@ -280,6 +284,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             bop,
             src,
             bf,
+            cc,
         } => Op::Fset {
             dst,
             a,
@@ -290,6 +295,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             bop,
             src,
             bf,
+            cc,
         },
 
         // ---- half-precision ----
@@ -449,6 +455,8 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             bneg,
             c,
             cneg,
+            x,
+            cc,
         } => Op::Iadd3 {
             dst,
             a,
@@ -457,6 +465,8 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             bneg,
             c: f(c),
             cneg,
+            x,
+            cc,
         },
         Op::Imnmx {
             dst,
@@ -512,6 +522,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             signed,
             bop,
             src,
+            x,
         } => Op::Isetp {
             p0,
             p1,
@@ -521,6 +532,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             signed,
             bop,
             src,
+            x,
         },
         Op::Iset {
             dst,
@@ -531,6 +543,8 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             bop,
             src,
             bf,
+            x,
+            cc,
         } => Op::Iset {
             dst,
             a,
@@ -540,6 +554,8 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             bop,
             src,
             bf,
+            x,
+            cc,
         },
         Op::Icmp {
             dst,
@@ -597,10 +613,16 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             src: f(src),
             base: f(base),
         },
-        Op::R2p { src, mask, byte } => Op::R2p {
+        Op::R2p {
+            src,
+            mask,
+            byte,
+            flags,
+        } => Op::R2p {
             src,
             mask: f(mask),
             byte,
+            flags,
         },
         Op::Lop {
             dst,
@@ -610,6 +632,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             binv,
             op,
             pred,
+            cc,
         } => Op::Lop {
             dst,
             a,
@@ -618,13 +641,22 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             binv,
             op,
             pred,
+            cc,
         },
-        Op::Lop3 { dst, a, b, c, lut } => Op::Lop3 {
+        Op::Lop3 {
+            dst,
+            a,
+            b,
+            c,
+            lut,
+            pred,
+        } => Op::Lop3 {
             dst,
             a,
             b: f(b),
             c: f(c),
             lut,
+            pred,
         },
         Op::Shl { dst, a, b, wrap } => Op::Shl {
             dst,
@@ -638,12 +670,14 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             b,
             signed,
             wrap,
+            brev,
         } => Op::Shr {
             dst,
             a,
             b: f(b),
             signed,
             wrap,
+            brev,
         },
         Op::Shf {
             dst,
@@ -668,12 +702,14 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             b,
             signed,
             brev,
+            cc,
         } => Op::Bfe {
             dst,
             a,
             b: f(b),
             signed,
             brev,
+            cc,
         },
         Op::Popc { dst, b, inv } => Op::Popc { dst, b: f(b), inv },
         Op::Flo {
@@ -705,6 +741,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             src_bytes,
             src_signed,
             sel,
+            dst_bits,
         } => Op::I2f {
             dst,
             src: f(src),
@@ -712,6 +749,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             src_bytes,
             src_signed,
             sel,
+            dst_bits,
         },
         Op::F2i {
             dst,
@@ -839,6 +877,7 @@ mod tests {
                 b: Operand::Const { bank: 0, offset: 0 },
                 bm: FMod::NONE,
                 ftz: false,
+                fmz: false,
                 sat: false,
                 scale: super::super::isa::FmulScale::None,
             },

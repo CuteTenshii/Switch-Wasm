@@ -95,6 +95,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             c: Operand::Imm(0),
             cneg: false,
             ftz: true,
+            fmz: false,
             sat: false,
         },
         Op::Fadd {
@@ -112,6 +113,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             b: Operand::Reg(3),
             bm: NO_MOD,
             ftz: true,
+            fmz: false,
             sat: false,
             scale: FmulScale::None,
         },
@@ -139,6 +141,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             signed: true,
             bop: BoolOp::And,
             src: ALWAYS,
+            x: false,
         },
         Op::Mov32i {
             dst: 1,
@@ -161,6 +164,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             binv: false,
             op: LogicOp::And,
             pred: Some((1, LopTest::NonZero)),
+            cc: false,
         },
         Op::Mufu {
             dst: 1,
@@ -175,6 +179,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             b: Operand::Imm(4),
             signed: false,
             wrap: false,
+            brev: false,
         },
         Op::F2i {
             dst: 1,
@@ -205,6 +210,8 @@ fn home_menu_opcodes() -> Vec<Op> {
             bop: BoolOp::And,
             src: ALWAYS,
             bf: false,
+            x: false,
+            cc: false,
         },
         Op::Ipa {
             dst: 1,
@@ -243,6 +250,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             src_bytes: 4,
             src_signed: true,
             sel: 0,
+            dst_bits: 32,
         },
         Op::Shl {
             dst: 1,
@@ -273,11 +281,13 @@ fn home_menu_opcodes() -> Vec<Op> {
             bop: BoolOp::And,
             src: ALWAYS,
             bf: true,
+            cc: false,
         },
         Op::R2p {
             src: 1,
             mask: Operand::Imm(0x7f),
             byte: 0,
+            flags: false,
         },
         Op::Ld {
             offset: 0x80,
@@ -311,6 +321,8 @@ fn home_menu_opcodes() -> Vec<Op> {
             bneg: false,
             c: Operand::Reg(4),
             cneg: false,
+            x: false,
+            cc: false,
         },
         Op::Bfe {
             dst: 1,
@@ -318,6 +330,7 @@ fn home_menu_opcodes() -> Vec<Op> {
             b: Operand::Imm(0x0810),
             signed: false,
             brev: false,
+            cc: false,
         },
     ]
 }
@@ -786,4 +799,240 @@ fn the_host_interface_is_what_the_emitted_text_calls() {
             "{hook} is not in HOST_INTERFACE"
         );
     }
+}
+
+fn body(op: Op) -> String {
+    translate(&program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]))
+        .unwrap()
+        .source
+}
+
+/// `.fmz` selects zero (`fmul`) or the addend (`ffma`) when an operand is zero; `.sat` leaves the plain op.
+#[test]
+fn fmz_selects_around_the_product_unless_it_saturates() {
+    let fmul = |fmz, sat| Op::Fmul {
+        dst: 1,
+        a: 2,
+        b: Operand::Reg(3),
+        bm: NO_MOD,
+        ftz: false,
+        fmz,
+        sat,
+        scale: FmulScale::None,
+    };
+    let ffma = |fmz, sat| Op::Ffma {
+        dst: 1,
+        a: 2,
+        b: Operand::Reg(3),
+        bneg: false,
+        c: Operand::Reg(4),
+        cneg: false,
+        ftz: false,
+        fmz,
+        sat,
+    };
+    let plain = body(fmul(false, false));
+    assert!(!plain.contains("== 0.0"), "{plain}");
+    let mul = body(fmul(true, false));
+    assert!(mul.contains(", 0.0, ") && mul.contains("== 0.0"), "{mul}");
+    let fma = body(ffma(true, false));
+    assert!(
+        fma.contains("select(fma(") && fma.contains("== 0.0"),
+        "{fma}"
+    );
+    for saturated in [body(fmul(true, true)), body(ffma(true, true))] {
+        assert!(!saturated.contains("== 0.0"), "{saturated}");
+    }
+}
+
+fn iadd3(x: bool, cc: bool) -> Op {
+    Op::Iadd3 {
+        dst: 1,
+        a: 2,
+        aneg: false,
+        b: Operand::Reg(3),
+        bneg: false,
+        c: Operand::Reg(4),
+        cneg: false,
+        x,
+        cc,
+    }
+}
+
+#[test]
+fn iadd3_writes_flags_and_reads_the_carry_only_when_asked() {
+    let plain = body(iadd3(false, false));
+    assert!(
+        !plain.contains("ccZ") && !plain.contains("carry"),
+        "{plain}"
+    );
+
+    let flagged = body(iadd3(false, true));
+    for flag in ["ccZ = ", "ccS = ", "carry = ", "ccO = "] {
+        assert!(flagged.contains(flag), "{flag} in {flagged}");
+    }
+    assert!(!flagged.contains("select(0u, 1u, carry)"), "{flagged}");
+
+    let extended = body(iadd3(true, false));
+    assert!(extended.contains("select(0u, 1u, carry)"), "{extended}");
+    assert!(!extended.contains("ccZ = "), "{extended}");
+}
+
+#[test]
+fn an_extended_compare_reads_the_carry_and_zero_flags() {
+    let isetp = |x| Op::Isetp {
+        p0: 0,
+        p1: 1,
+        a: 2,
+        b: Operand::Reg(3),
+        cmp: ICmp::Lt,
+        signed: false,
+        bop: BoolOp::And,
+        src: ALWAYS,
+        x,
+    };
+    let plain = body(isetp(false));
+    assert!(
+        !plain.contains("carry") && !plain.contains("ccZ"),
+        "{plain}"
+    );
+    let extended = body(isetp(true));
+    assert!(
+        extended.contains("select(0u, 1u, carry)") && extended.contains("var ccZ"),
+        "{extended}"
+    );
+    assert!(extended.contains("var carry"), "{extended}");
+}
+
+#[test]
+fn cc_forms_write_z_and_s_from_the_result_and_clear_c_and_o() {
+    let lop = Op::Lop {
+        dst: 1,
+        a: 2,
+        ainv: false,
+        b: Operand::Reg(3),
+        binv: false,
+        op: LogicOp::And,
+        pred: None,
+        cc: true,
+    };
+    let bfe = Op::Bfe {
+        dst: 1,
+        a: 2,
+        b: Operand::Reg(3),
+        signed: false,
+        brev: false,
+        cc: true,
+    };
+    let iset = Op::Iset {
+        dst: 1,
+        a: 2,
+        b: Operand::Reg(3),
+        cmp: ICmp::Eq,
+        signed: false,
+        bop: BoolOp::And,
+        src: ALWAYS,
+        bf: false,
+        x: false,
+        cc: true,
+    };
+    let pset = Op::Pset {
+        dst: 1,
+        a: ALWAYS,
+        b: ALWAYS,
+        c: ALWAYS,
+        op1: BoolOp::And,
+        op2: BoolOp::And,
+        float: false,
+        cc: true,
+    };
+    let fset = Op::Fset {
+        dst: 1,
+        a: 2,
+        am: NO_MOD,
+        b: Operand::Reg(3),
+        bm: NO_MOD,
+        cmp: FCmp::Lt,
+        bop: BoolOp::And,
+        src: ALWAYS,
+        bf: false,
+        cc: true,
+    };
+    for op in [lop, bfe, iset, pset, fset] {
+        let source = body(op);
+        for line in [
+            "ccZ = (t",
+            "ccS = (bitcast<i32>(t",
+            "carry = false;",
+            "ccO = false;",
+        ] {
+            assert!(source.contains(line), "{line} in {source}");
+        }
+    }
+}
+
+#[test]
+fn lop3_and_lop_test_the_result_for_their_predicate() {
+    let lop3 = |test| Op::Lop3 {
+        dst: 1,
+        a: 2,
+        b: Operand::Reg(3),
+        c: Operand::Reg(4),
+        lut: 0xc0,
+        pred: Some((2, test)),
+    };
+    let zero = body(lop3(LopTest::Zero));
+    assert!(zero.contains("p2 = (t1 == 0u);"), "{zero}");
+    let nonzero = body(lop3(LopTest::NonZero));
+    assert!(nonzero.contains("p2 = (t1 != 0u);"), "{nonzero}");
+    let always = body(lop3(LopTest::True));
+    assert!(always.contains("p2 = true;"), "{always}");
+}
+
+#[test]
+fn r2p_cc_assigns_the_flags_its_mask_names() {
+    let source = body(Op::R2p {
+        src: 1,
+        mask: Operand::Imm(0xf),
+        byte: 0,
+        flags: true,
+    });
+    for flag in ["ccZ = ", "ccS = ", "carry = ", "ccO = "] {
+        assert!(source.contains(flag), "{flag} in {source}");
+    }
+    assert!(!source.contains("p3 = "), "{source}");
+}
+
+#[test]
+fn shr_brev_reverses_the_source_before_shifting() {
+    let shr = |brev| Op::Shr {
+        dst: 1,
+        a: 2,
+        b: Operand::Imm(4),
+        signed: false,
+        wrap: false,
+        brev,
+    };
+    assert!(!body(shr(false)).contains("reverseBits"));
+    assert!(body(shr(true)).contains("shr32(reverseBits(r2)"));
+}
+
+#[test]
+fn i2f_to_half_packs_the_converted_value_into_the_low_lane() {
+    let i2f = |dst_bits| Op::I2f {
+        dst: 1,
+        src: Operand::Reg(2),
+        sm: NO_MOD,
+        src_bytes: 4,
+        src_signed: true,
+        sel: 0,
+        dst_bits,
+    };
+    let half = body(i2f(16));
+    assert!(
+        half.contains("pack2x16float(vec2<f32>(f32(bitcast<i32>("),
+        "{half}"
+    );
+    let single = body(i2f(32));
+    assert!(!single.contains("pack2x16float"), "{single}");
 }

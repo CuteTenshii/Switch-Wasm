@@ -68,6 +68,8 @@ pub enum Op {
         b: Operand,
         bm: FMod,
         ftz: bool,
+        /// `.fmz`: a zero operand makes the product zero, even against infinity or NaN.
+        fmz: bool,
         sat: bool,
         scale: FmulScale,
     },
@@ -79,6 +81,8 @@ pub enum Op {
         c: Operand,
         cneg: bool,
         ftz: bool,
+        /// `.fmz`: a zero in `a` or `b` returns `c`, even against infinity or NaN.
+        fmz: bool,
         sat: bool,
     },
     Fmnmx {
@@ -111,6 +115,8 @@ pub enum Op {
         bop: BoolOp,
         src: Pred,
         bf: bool,
+        /// `.cc`: Z and S from the result, C and O cleared.
+        cc: bool,
     },
     Mufu {
         dst: u8,
@@ -198,6 +204,7 @@ pub enum Op {
         b: Operand,
         bneg: bool,
         cin: bool,
+        /// `.cc`: Z, S, C and O of the sum; with `cin` only the carry, which Eden leaves unimplemented.
         cout: bool,
     },
     Iadd3 {
@@ -208,6 +215,10 @@ pub enum Op {
         bneg: bool,
         c: Operand,
         cneg: bool,
+        /// `.x`: the carry flag joins the `a + b` sum.
+        x: bool,
+        /// `.cc`: all four flags, as Eden derives them from the sum.
+        cc: bool,
     },
     Imnmx {
         dst: u8,
@@ -238,7 +249,7 @@ pub enum Op {
         b: Operand,
         bneg: bool,
         shift: u8,
-        /// `.cc`: the carry out of the add, which `iadd.x` reads.
+        /// `.cc`: Z, S, C and O of the sum.
         cout: bool,
     },
     /// `lea`: `b + (a << shift)`. With `hi`, `b` plus the low word of the 64-bit
@@ -260,6 +271,8 @@ pub enum Op {
         signed: bool,
         bop: BoolOp,
         src: Pred,
+        /// `.x`: the compare continues one that set the carry and zero flags.
+        x: bool,
     },
     Iset {
         dst: u8,
@@ -270,6 +283,10 @@ pub enum Op {
         bop: BoolOp,
         src: Pred,
         bf: bool,
+        /// `.x`: as on [`Op::Isetp`].
+        x: bool,
+        /// `.cc`: Z and S from the result, C and O cleared.
+        cc: bool,
     },
     Icmp {
         dst: u8,
@@ -301,6 +318,8 @@ pub enum Op {
         src: u8,
         mask: Operand,
         byte: u8,
+        /// `.cc`: the four low bits go to the Z, S, C and O flags instead of the predicates.
+        flags: bool,
     },
     Imul {
         dst: u8,
@@ -330,6 +349,8 @@ pub enum Op {
         binv: bool,
         op: LogicOp,
         pred: Option<(u8, LopTest)>,
+        /// `.cc`: Z and S from the result, C and O cleared.
+        cc: bool,
     },
     Lop3 {
         dst: u8,
@@ -337,6 +358,8 @@ pub enum Op {
         b: Operand,
         c: Operand,
         lut: u8,
+        /// The register form's predicate output, tested as `lop`'s is.
+        pred: Option<(u8, LopTest)>,
     },
     Shl {
         dst: u8,
@@ -350,6 +373,8 @@ pub enum Op {
         b: Operand,
         signed: bool,
         wrap: bool,
+        /// `.brev`: the source's bits are reversed before the shift.
+        brev: bool,
     },
     Shf {
         dst: u8,
@@ -367,6 +392,8 @@ pub enum Op {
         signed: bool,
         /// `.brev`: the source's bits are reversed before the extract.
         brev: bool,
+        /// `.cc`: Z and S from the result, C and O cleared.
+        cc: bool,
     },
     Popc {
         dst: u8,
@@ -396,6 +423,8 @@ pub enum Op {
         src_bytes: u8,
         src_signed: bool,
         sel: u8,
+        /// 16 or 32; a half result sits in the low half of `dst`, the high half zero.
+        dst_bits: u8,
     },
     /// Float -> integer, with an explicit rounding mode.
     F2i {
@@ -471,6 +500,8 @@ pub enum Op {
         op1: BoolOp,
         op2: BoolOp,
         float: bool,
+        /// `.cc`: Z and S from the result, C and O cleared.
+        cc: bool,
     },
     /// `csetp.<test>.<op> p0, p1, cc, src`.
     Csetp {

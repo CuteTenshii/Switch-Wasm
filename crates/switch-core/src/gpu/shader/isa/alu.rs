@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// The predicate a `lop` form writes at 48, from the two-bit test at `test_at`; `PT` writes nothing.
+pub(super) fn lop_pred(insn: u64, test_at: u32) -> Option<(u8, LopTest)> {
+    let p = reg(insn, 48, 3);
+    if p == 7 {
+        return None;
+    }
+    let test = match field(insn, test_at, 2) {
+        0 => LopTest::False,
+        1 => LopTest::True,
+        2 => LopTest::Zero,
+        _ => LopTest::NonZero,
+    };
+    Some((p, test))
+}
+
 pub(super) fn decode_alu(insn: u64) -> Op {
     let un = Op::Unimplemented { raw: insn };
 
@@ -19,6 +34,14 @@ pub(super) fn decode_alu(insn: u64) -> Op {
     let rhs_int = Some(rhs_int);
     let rhs_float = Some(rhs_float);
     let sub = form & 0x00f8;
+    // Eden throws on `.cc` for these; a decode that ignored it would leave the flags unwritten.
+    if matches!(
+        sub,
+        0x58 | 0x68 | 0x60 | 0x20 | 0x28 | 0x48 | 0xb8 | 0xb0 | 0xa8
+    ) && field(insn, 47, 1) != 0
+    {
+        return un;
+    }
 
     match sub {
         // ---- float ----
@@ -56,6 +79,7 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                     abs: false,
                 },
                 ftz: field(insn, 44, 2) == 1,
+                fmz: field(insn, 44, 2) == 2,
                 sat: field(insn, 50, 1) != 0,
                 scale,
             }
@@ -82,13 +106,11 @@ pub(super) fn decode_alu(insn: u64) -> Op {
         // r2p.
         0xf0 => {
             let Some(mask) = rhs_int else { return un };
-            if field(insn, 40, 1) != 0 {
-                return un; // the CC form
-            }
             Op::R2p {
                 src: reg(insn, 8, 8),
                 mask,
                 byte: field(insn, 41, 2) as u8,
+                flags: field(insn, 40, 1) != 0,
             }
         }
         // ---- integer ----
@@ -138,8 +160,8 @@ pub(super) fn decode_alu(insn: u64) -> Op {
         // shr, signed 48, wrap 39, brev 40, x 44.
         0x28 => {
             let Some(b) = rhs_int else { return un };
-            if field(insn, 40, 1) != 0 || field(insn, 44, 1) != 0 {
-                return un; // bit-reverse / extended
+            if field(insn, 43, 1) != 0 || field(insn, 44, 1) != 0 {
+                return un; // extended
             }
             Op::Shr {
                 dst: reg(insn, 0, 8),
@@ -147,6 +169,7 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                 b,
                 signed: field(insn, 48, 1) != 0,
                 wrap: field(insn, 39, 1) != 0,
+                brev: field(insn, 40, 1) != 0,
             }
         }
         // flo, signed 48, shift 41, inv 40.
@@ -183,12 +206,6 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                 2 => LogicOp::Xor,
                 _ => LogicOp::PassB,
             };
-            let pred = match field(insn, 44, 2) {
-                0 => None,
-                1 => Some((reg(insn, 48, 3), LopTest::True)),
-                2 => Some((reg(insn, 48, 3), LopTest::Zero)),
-                _ => Some((reg(insn, 48, 3), LopTest::NonZero)),
-            };
             Op::Lop {
                 dst: reg(insn, 0, 8),
                 a: reg(insn, 8, 8),
@@ -196,7 +213,8 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                 b,
                 binv: field(insn, 40, 1) != 0,
                 op,
-                pred,
+                pred: lop_pred(insn, 44),
+                cc: field(insn, 47, 1) != 0,
             }
         }
         // shl, wrap 39, x 43.
@@ -221,6 +239,7 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                 b,
                 signed: field(insn, 48, 1) != 0,
                 brev: field(insn, 40, 1) != 0,
+                cc: field(insn, 47, 1) != 0,
             }
         }
         // popc, inv 40.
@@ -273,9 +292,11 @@ pub(super) fn decode_alu(insn: u64) -> Op {
         // i2f.
         0xb8 => {
             let Some(src) = rhs_int else { return un };
-            if field(insn, 8, 2) != 2 {
-                return un; // only f32 destinations
-            }
+            let dst_bits = match field(insn, 8, 2) {
+                1 => 16,
+                2 => 32,
+                _ => return un, // f64, which nothing here models
+            };
             let bits = field(insn, 10, 2) | (field(insn, 13, 1) << 2);
             let Some((src_bytes, src_signed)) = int_type(bits) else {
                 return un;
@@ -290,6 +311,7 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                 src_bytes,
                 src_signed,
                 sel: field(insn, 41, 2) as u8,
+                dst_bits,
             }
         }
         // f2i.

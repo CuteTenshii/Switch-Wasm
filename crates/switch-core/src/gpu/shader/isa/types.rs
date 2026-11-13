@@ -257,12 +257,25 @@ impl HPrecision {
 /// What `lop`'s test form asks of the result before it writes its predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LopTest {
+    /// `.F`: the predicate is cleared.
+    False,
     /// `.T`: the predicate is set unconditionally.
     True,
     /// `.Z`: set when the result is zero.
     Zero,
     /// `.NZ`: set when any bit of the result is set.
     NonZero,
+}
+
+impl LopTest {
+    pub fn holds(self, result: u32) -> bool {
+        match self {
+            LopTest::False => false,
+            LopTest::True => true,
+            LopTest::Zero => result == 0,
+            LopTest::NonZero => result != 0,
+        }
+    }
 }
 
 /// `mufu`'s sub-operation (`tab5080_0`).

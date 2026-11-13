@@ -2590,3 +2590,229 @@ fn an_integer_target_takes_the_shader_words_on_both_renderers() {
     // The top-left texel is the colour's own words, not integers made of them.
     assert_eq!(got[..4], colour.map(f32::to_bits));
 }
+
+mod condition_codes {
+    use super::*;
+    use testing::{alu_fragment_shader, encode};
+
+    const RZ: u64 = 255;
+    const ALWAYS: u64 = 7;
+    const LT: u64 = 1;
+    const EQ: u64 = 2;
+    const LE: u64 = 3;
+    const GT: u64 = 4;
+    const NE: u64 = 5;
+    const GE: u64 = 6;
+    /// `csetp` tests that read one flag: EQU is Z, SFT is S, HS is C and OFT is O.
+    const FLAG_TESTS: [u64; 4] = [10, 21, 22, 23];
+
+    /// `iadd3 dst, a, b, c` with the flags written when `cc`, the carry read when `x`, and `c` negated when `neg_c`.
+    fn iadd3(dst: u64, [a, b, c]: [u64; 3], cc: bool, x: bool, neg_c: bool) -> u64 {
+        encode(
+            0x5cc0,
+            &[
+                (0, 8, dst),
+                (8, 8, a),
+                (20, 8, b),
+                (39, 8, c),
+                (47, 1, u64::from(cc)),
+                (48, 1, u64::from(x)),
+                (49, 1, u64::from(neg_c)),
+            ],
+        )
+    }
+
+    /// `iset.bf dst, a, b` under `cmp`, 1.0 or 0.0 by the compare and the predicate `src`.
+    fn iset(dst: u64, a: u64, b: u64, cmp: u64, signed: bool, x: bool, src: u64) -> u64 {
+        encode(
+            0x5b50,
+            &[
+                (0, 8, dst),
+                (8, 8, a),
+                (20, 8, b),
+                (39, 3, src),
+                (43, 1, u64::from(x)),
+                (44, 1, 1),
+                (48, 1, u64::from(signed)),
+                (49, 3, cmp),
+            ],
+        )
+    }
+
+    fn csetp(p: u64, test: u64) -> u64 {
+        encode(0x50a0, &[(0, 3, 7), (3, 3, p), (8, 5, test), (39, 3, 7)])
+    }
+
+    /// r0 to r3 take Z, S, C and O, as `csetp` reads them into p0 to p3.
+    fn read_flags() -> Vec<u64> {
+        let mut ops: Vec<u64> = (0..4).map(|p| csetp(p, FLAG_TESTS[p as usize])).collect();
+        ops.extend((0..4).map(|p| iset(p, RZ, RZ, ALWAYS, false, false, p)));
+        ops
+    }
+
+    /// Pixel (1, 1)'s channels from the rasterizer, after checking the device draws the same.
+    fn channels(set: &[(u8, u32)], ops: &[u64]) -> [u8; 4] {
+        let shader = alu_fragment_shader(set, ops);
+        let new = || Harness::with_fragment_shader(shader.clone());
+        let set_up = |h: &mut Harness| h.triangle([0.0; 4]);
+        agrees_shading(new, |_| {}, set_up);
+        let mut h = new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        h.texel(1, 1).to_le_bytes()
+    }
+
+    fn lit(held: bool) -> u8 {
+        if held {
+            255
+        } else {
+            0
+        }
+    }
+
+    /// A 64-bit compare done as `iadd3.cc` on the low words and `iset.x` on the high ones.
+    #[test]
+    fn an_extended_compare_matches_the_64_bit_compare_on_both_renderers() {
+        let compares = [LT, EQ, LE, GT, NE, GE]
+            .into_iter()
+            .flat_map(|cmp| [(cmp, false), (cmp, true)])
+            .collect::<Vec<_>>();
+        // The high words differ by less than half the range: Eden reads the sign of their 32-bit
+        // difference. Low words never zero: `iadd3` negates `b` as `!b + 1`, which carries wrongly for zero.
+        let words = [
+            (5, 5, 7, 7),
+            (1, 2, 7, 7),
+            (2, 1, 7, 7),
+            (5, 5, 1, 2),
+            (5, 5, 0xffff_fffe, 1),
+            (1, 2, 1, 0xffff_fffe),
+            (1, 2, 0xffff_ffff, 0),
+            (u32::MAX, 1, 3, 3),
+            (1, u32::MAX, 3, 3),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for (lo_a, lo_b, hi_a, hi_b) in words {
+            let set = [(4, lo_a), (5, lo_b), (6, hi_a), (7, hi_b)];
+            let a = u64::from(hi_a) << 32 | u64::from(lo_a);
+            let b = u64::from(hi_b) << 32 | u64::from(lo_b);
+            for group in compares.chunks(4) {
+                let mut ops = vec![iadd3(10, [RZ, 4, 5], true, false, true)];
+                ops.extend(
+                    group
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(cmp, signed))| iset(i as u64, 6, 7, cmp, signed, true, 7)),
+                );
+                let got = channels(&set, &ops);
+                for (i, &(cmp, signed)) in group.iter().enumerate() {
+                    let order = if signed {
+                        (a as i64).cmp(&(b as i64))
+                    } else {
+                        a.cmp(&b)
+                    };
+                    let held = match cmp {
+                        LT => order.is_lt(),
+                        EQ => order.is_eq(),
+                        LE => order.is_le(),
+                        GT => order.is_gt(),
+                        NE => order.is_ne(),
+                        _ => order.is_ge(),
+                    };
+                    assert_eq!(
+                        got[i],
+                        lit(held),
+                        "{a:#x} vs {b:#x}, cmp {cmp}, signed {signed}"
+                    );
+                    seen.insert((cmp, held));
+                }
+            }
+        }
+        assert!(seen.iter().any(|&(_, held)| held) && seen.iter().any(|&(_, held)| !held));
+    }
+
+    /// `iadd3.cc` then `csetp` on each flag; Z, S and C have an independent answer, O the interpreter's.
+    #[test]
+    fn iadd3_cc_flags_read_the_same_on_both_renderers() {
+        let triples = [
+            [1, 2, 3],
+            [u32::MAX, 1, 0],
+            [0, 0, 0],
+            [0x7fff_ffff, 1, 0],
+            [0x8000_0000, 0x8000_0000, 0],
+            [u32::MAX, 0, 1],
+            [3, u32::MAX, 5],
+        ];
+        for [a, b, c] in triples {
+            let set = [(4, a), (5, b), (6, c)];
+            let mut ops = vec![iadd3(10, [4, 5, 6], true, false, false)];
+            ops.extend(read_flags());
+            let got = channels(&set, &ops);
+            let lhs = a.wrapping_add(b);
+            let (sum, carry) = lhs.overflowing_add(c);
+            let want = [lit(sum == 0), lit((sum as i32) < 0), lit(carry)];
+            assert_eq!(got[..3], want, "{a:#x} + {b:#x} + {c:#x}");
+        }
+    }
+
+    /// `iadd.cc` and `iscadd.cc` write Z, S and C of their sum, and O as the interpreter does.
+    #[test]
+    fn iadd_cc_and_iscadd_cc_flags_read_the_same_on_both_renderers() {
+        let cases = [
+            (1, 2),
+            (u32::MAX, 1),
+            (0x7fff_ffff, 1),
+            (0x8000_0000, 0x8000_0000),
+            (0, 0),
+        ];
+        for (a, b) in cases {
+            let set = [(4, a), (5, b)];
+            let iadd = encode(0x5c10, &[(0, 8, 10), (8, 8, 4), (20, 8, 5), (47, 1, 1)]);
+            let iscadd = encode(
+                0x5c18,
+                &[(0, 8, 10), (8, 8, 4), (20, 8, 5), (39, 5, 3), (47, 1, 1)],
+            );
+            for (op, scaled) in [(iadd, a), (iscadd, a << 3)] {
+                let mut ops = vec![op];
+                ops.extend(read_flags());
+                let got = channels(&set, &ops);
+                let (sum, carry) = scaled.overflowing_add(b);
+                let want = [lit(sum == 0), lit((sum as i32) < 0), lit(carry)];
+                assert_eq!(got[..3], want, "{scaled:#x} + {b:#x}");
+            }
+        }
+    }
+
+    /// `iadd3.x` adds the carry an earlier `iadd3.cc` left.
+    #[test]
+    fn iadd3_x_adds_the_carry_the_flags_hold() {
+        for (a, b, carry) in [
+            (u32::MAX, 1, true),
+            (1, 2, false),
+            (0x8000_0000, 0x8000_0000, true),
+        ] {
+            let (hi_a, hi_b) = (40, 2);
+            let want = hi_a + hi_b + u32::from(carry);
+            let set = [(4, a), (5, b), (6, hi_a), (7, hi_b), (8, want)];
+            let ops = [
+                iadd3(10, [RZ, 4, 5], true, false, false),
+                iadd3(11, [6, 7, RZ], false, true, false),
+                iset(0, 11, 8, EQ, false, false, 7),
+            ];
+            let got = channels(&set, &ops);
+            assert_eq!(got[0], 255, "{a:#x} + {b:#x} carries {carry}");
+        }
+    }
+
+    /// `r2p.cc` writes the flags from the low nibble, as `csetp` reads them back.
+    #[test]
+    fn r2p_cc_loads_the_flags_the_same_on_both_renderers() {
+        for bits in [0b0101u32, 0b1010, 0b1111, 0b0001, 0b1000, 0b0110] {
+            let r2p = encode(0x38f0, &[(8, 8, 4), (20, 19, 0xf), (40, 1, 1), (41, 2, 0)]);
+            let mut ops = vec![r2p];
+            ops.extend(read_flags());
+            let got = channels(&[(4, bits)], &ops);
+            let want: Vec<u8> = (0..4).map(|i| lit(bits >> i & 1 != 0)).collect();
+            assert_eq!(got.to_vec(), want, "{bits:#06b}");
+        }
+    }
+}

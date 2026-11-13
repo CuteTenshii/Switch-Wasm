@@ -22,6 +22,7 @@ impl Emitter<'_> {
                 let x = self.bind(&x);
                 let y = self.operand(b);
                 let y = self.ineg(bneg, y);
+                let y = if cout && !cin { self.bind(&y) } else { y };
                 // Two adds: the carry is whether either wrapped.
                 let sum = self.bind(&format!("{x} + ({y})"));
                 let carry_in = if cin {
@@ -34,6 +35,12 @@ impl Emitter<'_> {
                 self.set_r(dst, &total);
                 if cout {
                     self.uses_carry = true;
+                    if !cin {
+                        self.set_zero_sign(&total);
+                        self.line(&format!(
+                            "ccO = bitcast<i32>(({x} ^ {total}) & ({y} ^ {total})) < 0;"
+                        ));
+                    }
                     self.line(&format!("carry = ({sum} < {x}) || ({total} < {sum});"));
                 }
             }
@@ -45,14 +52,37 @@ impl Emitter<'_> {
                 bneg,
                 c,
                 cneg,
+                x: extended,
+                cc,
             } => {
                 let x = self.r(a);
                 let x = self.ineg(aneg, x);
+                let x = self.bind(&x);
                 let y = self.operand(b);
                 let y = self.ineg(bneg, y);
                 let z = self.operand(c);
                 let z = self.ineg(cneg, z);
-                self.set_r(dst, &format!("{x} + ({y}) + ({z})"));
+                if extended || cc {
+                    let z = self.bind(&z);
+                    let first = self.bind(&format!("{x} + ({y})"));
+                    let lhs = if extended {
+                        self.uses_carry = true;
+                        self.bind(&format!("{first} + select(0u, 1u, carry)"))
+                    } else {
+                        first.clone()
+                    };
+                    let total = self.bind(&format!("{lhs} + {z}"));
+                    self.set_r(dst, &total);
+                    if cc {
+                        self.set_zero_sign(&total);
+                        self.line(&format!("carry = {total} < {lhs};"));
+                        let overflow =
+                            format!("bitcast<i32>(({lhs} ^ {total}) & ({z} ^ {total})) < 0");
+                        self.line(&format!("ccO = ({first} < {x}) || ({overflow});"));
+                    }
+                } else {
+                    self.set_r(dst, &format!("{x} + ({y}) + ({z})"));
+                }
             }
             Op::Iscadd {
                 dst,
@@ -67,13 +97,17 @@ impl Emitter<'_> {
                 let x = self.ineg(aneg, x);
                 let y = self.operand(b);
                 let y = self.ineg(bneg, y);
+                let y = if cout { self.bind(&y) } else { y };
                 let shift = u32::from(shift) & 31;
                 let scaled = self.bind(&format!("({x}) << {shift}u"));
                 let sum = self.bind(&format!("{scaled} + ({y})"));
                 self.set_r(dst, &sum);
                 if cout {
-                    self.uses_carry = true;
+                    self.set_zero_sign(&sum);
                     self.line(&format!("carry = {sum} < {scaled};"));
+                    self.line(&format!(
+                        "ccO = bitcast<i32>(({scaled} ^ {sum}) & ({y} ^ {sum})) < 0;"
+                    ));
                 }
             }
             Op::Lea {
@@ -226,10 +260,15 @@ impl Emitter<'_> {
                 signed,
                 bop,
                 src,
+                x: extended,
             } => {
                 let x = self.r(a);
                 let y = self.operand(b);
-                let taken = self.int_compare(cmp, &x, &y, signed);
+                let taken = if extended {
+                    self.extended_compare(cmp, &x, &y, signed)
+                } else {
+                    self.int_compare(cmp, &x, &y, signed)
+                };
                 let taken = self.bind(&taken);
                 let guard = self.holds(src);
                 let guard = self.bind(&guard);
@@ -247,14 +286,24 @@ impl Emitter<'_> {
                 bop,
                 src,
                 bf,
+                x: extended,
+                cc,
             } => {
                 let x = self.r(a);
                 let y = self.operand(b);
-                let taken = self.int_compare(cmp, &x, &y, signed);
+                let taken = if extended {
+                    self.extended_compare(cmp, &x, &y, signed)
+                } else {
+                    self.int_compare(cmp, &x, &y, signed)
+                };
                 let guard = self.holds(src);
                 let taken = self.combine(bop, &taken, &guard);
                 let value = self.set_result(&taken, bf);
+                let value = self.bind(&value);
                 self.set_r(dst, &value);
+                if cc {
+                    self.set_flags(&value);
+                }
             }
             Op::Icmp {
                 dst,
@@ -283,18 +332,32 @@ impl Emitter<'_> {
                 let base = self.operand(base);
                 self.set_r(dst, &format!("bfi({insert}, {src}, {base})"));
             }
-            Op::R2p { src, mask, byte } => {
+            Op::R2p {
+                src,
+                mask,
+                byte,
+                flags,
+            } => {
                 let bits = self.r(src);
                 let shift = u32::from(byte) * 8;
                 let bits = self.bind(&format!("{bits} >> {shift}u"));
                 let mask = self.operand(mask);
                 let mask = self.bind(&mask);
-                for index in 0..7u8 {
+                if flags {
+                    self.uses_carry = true;
+                    self.uses_flags = true;
+                }
+                for index in 0..if flags { 4 } else { 7u8 } {
                     let bit = 1u32 << index;
                     let value = format!("(({bits} & {bit}u) != 0u)");
                     self.line(&format!("if (({mask} & {bit}u) != 0u) {{"));
                     self.indent += 1;
-                    self.set_p(index, &value);
+                    if flags {
+                        let flag = ["ccZ", "ccS", "carry", "ccO"][usize::from(index)];
+                        self.line(&format!("{flag} = {value};"));
+                    } else {
+                        self.set_p(index, &value);
+                    }
                     self.indent -= 1;
                     self.line("}");
                 }
@@ -307,6 +370,7 @@ impl Emitter<'_> {
                 binv,
                 op: logic,
                 pred,
+                cc,
             } => {
                 let x = self.r(a);
                 let x = self.inv(ainv, x);
@@ -321,20 +385,29 @@ impl Emitter<'_> {
                 let value = self.bind(&value);
                 self.set_r(dst, &value);
                 if let Some((p, test)) = pred {
-                    let bit = match test {
-                        LopTest::True => "true".to_string(),
-                        LopTest::Zero => format!("({value} == 0u)"),
-                        LopTest::NonZero => format!("({value} != 0u)"),
-                    };
-                    self.set_p(p, &bit);
+                    self.set_p(p, &lop_test(test, &value));
+                }
+                if cc {
+                    self.set_flags(&value);
                 }
             }
-            Op::Lop3 { dst, a, b, c, lut } => {
+            Op::Lop3 {
+                dst,
+                a,
+                b,
+                c,
+                lut,
+                pred,
+            } => {
                 self.need("lop3");
                 let x = self.r(a);
                 let y = self.operand(b);
                 let z = self.operand(c);
-                self.set_r(dst, &format!("lop3({x}, {y}, {z}, {lut}u)"));
+                let value = self.bind(&format!("lop3({x}, {y}, {z}, {lut}u)"));
+                self.set_r(dst, &value);
+                if let Some((p, test)) = pred {
+                    self.set_p(p, &lop_test(test, &value));
+                }
             }
             Op::Shl { dst, a, b, wrap } => {
                 self.need("shl32");
@@ -348,8 +421,10 @@ impl Emitter<'_> {
                 b,
                 signed,
                 wrap,
+                brev,
             } => {
                 let x = self.r(a);
+                let x = if brev { format!("reverseBits({x})") } else { x };
                 let n = self.shift_count(b, wrap);
                 if signed {
                     self.need("sar32");
@@ -388,16 +463,20 @@ impl Emitter<'_> {
                 b,
                 signed,
                 brev,
+                cc,
             } => {
                 self.need("bfe");
                 let x = self.r(a);
                 let x = if brev { format!("reverseBits({x})") } else { x };
                 let desc = self.operand(b);
                 let desc = self.bind(&desc);
-                self.set_r(
-                    dst,
-                    &format!("bfe({x}, {desc} & 0xffu, ({desc} >> 8u) & 0xffu, {signed})"),
-                );
+                let value = self.bind(&format!(
+                    "bfe({x}, {desc} & 0xffu, ({desc} >> 8u) & 0xffu, {signed})"
+                ));
+                self.set_r(dst, &value);
+                if cc {
+                    self.set_flags(&value);
+                }
             }
             Op::Popc { dst, b, inv } => {
                 let value = self.operand(b);
@@ -425,5 +504,14 @@ impl Emitter<'_> {
             _ => unreachable!("emit_alu sorts ops by group"),
         }
         Ok(())
+    }
+}
+
+fn lop_test(test: LopTest, value: &str) -> String {
+    match test {
+        LopTest::False => "false".to_string(),
+        LopTest::True => "true".to_string(),
+        LopTest::Zero => format!("({value} == 0u)"),
+        LopTest::NonZero => format!("({value} != 0u)"),
     }
 }

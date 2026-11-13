@@ -270,6 +270,38 @@ fn mov32i(reg: u8, imm: u32) -> (u32, u32) {
     )
 }
 
+/// One instruction: `opcode` in the top 16 bits, predicate `PT`, and `(position, width, value)` fields.
+pub fn encode(opcode: u16, fields: &[(u32, u32, u64)]) -> u64 {
+    let mut word = u64::from(opcode) << 48 | 0x7 << 16;
+    for &(position, width, value) in fields {
+        word |= (value & ((1u64 << width) - 1)) << position;
+    }
+    word
+}
+
+/// A fragment shader that loads each `(register, value)` of `set`, runs `ops` and exits;
+/// its colour is r0 to r3.
+pub fn alu_fragment_shader(set: &[(u8, u32)], ops: &[u64]) -> Vec<u8> {
+    const NOP: (u32, u32) = (0x00070f00, 0x50b00000);
+    const EXIT: (u32, u32) = (0x0007000f, 0xe3000000);
+    let mut words: Vec<(u32, u32)> = set.iter().map(|&(reg, value)| mov32i(reg, value)).collect();
+    words.extend(ops.iter().map(|&op| (op as u32, (op >> 32) as u32)));
+    words.push(EXIT);
+    while !words.len().is_multiple_of(3) {
+        words.push(NOP);
+    }
+    let mut bytes = Vec::new();
+    for group in words.as_chunks::<3>().0 {
+        bytes.extend(block(
+            (0xe1a0070f, 0x00240401),
+            group[0],
+            group[1],
+            group[2],
+        ));
+    }
+    bytes
+}
+
 /// `oColor = texelFetch(...)` from slot 4: a `tlds` of the given `encoding` of Eden's
 /// `texture_load_swizzled.cpp`, reading `a` as r4 and `b` as r6, after each `(register, value)`
 /// of `set` (at most three) is loaded.

@@ -15,6 +15,7 @@ impl Emitter<'_> {
                 src_bytes,
                 src_signed,
                 sel,
+                dst_bits,
             } => {
                 let raw = self.operand(src);
                 let raw = self.narrow(&raw, sel, src_bytes, src_signed);
@@ -24,7 +25,11 @@ impl Emitter<'_> {
                     format!("f32({raw})")
                 };
                 let value = self.fmod(sm, value);
-                self.set_f(dst, &value);
+                if dst_bits == 16 {
+                    self.set_r(dst, &format!("pack2x16float(vec2<f32>({value}, 0.0))"));
+                } else {
+                    self.set_f(dst, &value);
+                }
             }
             Op::F2i {
                 dst,
@@ -123,12 +128,7 @@ impl Emitter<'_> {
                 let value = self.bind(&value);
                 self.set_r(dst, &value);
                 if cc {
-                    self.uses_carry = true;
-                    self.uses_flags = true;
-                    self.line(&format!("ccZ = ({value} == 0u);"));
-                    self.line(&format!("ccS = (bitcast<i32>({value}) < 0);"));
-                    self.line("carry = false;");
-                    self.line("ccO = false;");
+                    self.set_flags(&value);
                 }
             }
 
@@ -168,14 +168,19 @@ impl Emitter<'_> {
                 op1,
                 op2,
                 float,
+                cc,
             } => {
                 let x = self.holds(a);
                 let y = self.holds(b);
                 let first = self.combine(op1, &x, &y);
                 let z = self.holds(c);
                 let value = self.combine(op2, &first, &z);
-                let on = if float { "0x3f800000u" } else { "0xffffffffu" };
-                self.set_r(dst, &format!("select(0u, {on}, {value})"));
+                let value = self.set_result(&value, float);
+                let value = self.bind(&value);
+                self.set_r(dst, &value);
+                if cc {
+                    self.set_flags(&value);
+                }
             }
             Op::Csetp {
                 p0,

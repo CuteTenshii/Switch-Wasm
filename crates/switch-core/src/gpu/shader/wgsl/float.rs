@@ -37,6 +37,7 @@ impl Emitter<'_> {
                 b,
                 bm,
                 ftz,
+                fmz,
                 sat,
                 scale,
             } => {
@@ -52,7 +53,13 @@ impl Emitter<'_> {
                 let y = self.operand_f(b);
                 let y = self.flush(ftz, y);
                 let y = self.fmod(bm, y);
-                let value = self.saturate(sat, format!("({x} * {y})"));
+                let product = if fmz && !sat {
+                    let (x, y) = (self.bind(&x), self.bind(&y));
+                    format!("select({x} * {y}, 0.0, {x} == 0.0 || {y} == 0.0)")
+                } else {
+                    format!("({x} * {y})")
+                };
+                let value = self.saturate(sat, product);
                 self.set_f(dst, &value);
             }
             Op::Ffma {
@@ -63,6 +70,7 @@ impl Emitter<'_> {
                 c,
                 cneg,
                 ftz,
+                fmz,
                 sat,
             } => {
                 let x = self.f(a);
@@ -73,7 +81,13 @@ impl Emitter<'_> {
                 let z = self.operand_f(c);
                 let z = self.flush(ftz, z);
                 let z = if cneg { format!("-({z})") } else { z };
-                let value = self.saturate(sat, format!("fma({x}, {y}, {z})"));
+                let fused = if fmz && !sat {
+                    let (x, y, z) = (self.bind(&x), self.bind(&y), self.bind(&z));
+                    format!("select(fma({x}, {y}, {z}), {z}, {x} == 0.0 || {y} == 0.0)")
+                } else {
+                    format!("fma({x}, {y}, {z})")
+                };
+                let value = self.saturate(sat, fused);
                 self.set_f(dst, &value);
             }
             Op::Fmnmx {
@@ -314,6 +328,7 @@ impl Emitter<'_> {
                 bop,
                 src,
                 bf,
+                cc,
             } => {
                 let x = self.f(a);
                 let x = self.fmod(am, x);
@@ -323,7 +338,11 @@ impl Emitter<'_> {
                 let guard = self.holds(src);
                 let taken = self.combine(bop, &taken, &guard);
                 let value = self.set_result(&taken, bf);
+                let value = self.bind(&value);
                 self.set_r(dst, &value);
+                if cc {
+                    self.set_flags(&value);
+                }
             }
             _ => unreachable!("emit_alu sorts ops by group"),
         }
