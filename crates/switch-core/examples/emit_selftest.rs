@@ -136,14 +136,22 @@ fn main() {
     let mut pinned = 0usize;
     let all_flags: Vec<u8> = (0u8..16).collect();
 
-    for (form, encodings) in &buckets {
-        // Instructions that can hand back get their own block.
-        let bucket_hands_back = encodings.iter().copied().any(defers);
-        let bodies: Vec<&[u32]> = if bucket_hands_back {
-            encodings.iter().map(std::slice::from_ref).collect()
-        } else {
-            vec![encodings.as_slice()]
-        };
+    let mut groups: Vec<(String, Vec<Vec<u32>>)> = buckets
+        .into_iter()
+        .map(|(form, encodings)| {
+            // Instructions that can hand back get their own block.
+            let bodies = if encodings.iter().copied().any(defers) {
+                encodings.iter().map(|&e| vec![e]).collect()
+            } else {
+                vec![encodings]
+            };
+            (form, bodies)
+        })
+        .collect();
+    groups.extend(fused_sequences());
+
+    for (form, bodies) in &groups {
+        let bucket_hands_back = bodies.iter().flatten().copied().any(defers);
         // NZCV does not affect memory accesses, so those run under one setting.
         let flags: &[u8] = if bucket_hands_back {
             &all_flags[..1]
@@ -193,7 +201,7 @@ fn main() {
                         refused += 1;
                         continue;
                     };
-                    let ops = path.len() - 1;
+                    let mut ops = path.len() - 1;
 
                     // Reset the window through `map` (ignoring read-only ranges) and re-arm the
                     // cached page before each block.
@@ -207,9 +215,16 @@ fn main() {
                     arm_monitor(&mut cpu, body[0], set);
                     let monitor_before = cpu.exclusive_state();
                     let mut fault = false;
-                    for _ in 0..ops {
+                    // A branch taken before the end leaves the block there.
+                    let mut took = false;
+                    for i in 0..ops {
                         if cpu.step().is_err() {
                             fault = true;
+                            break;
+                        }
+                        if path[i + 1] != u32::MAX && cpu.get_pc() != path[i + 1] {
+                            took = true;
+                            ops = i + 1;
                             break;
                         }
                     }
@@ -218,8 +233,9 @@ fn main() {
                         continue;
                     }
                     // A store over the block's own terminator; real code pages hand back.
-                    let left = path.last() == Some(&u32::MAX);
-                    if left && cpu.mem.read_u32(path[ops - 1]).ok() != Some(RET) {
+                    let ended = path.last() == Some(&u32::MAX);
+                    let left = took || ended;
+                    if ended && !took && cpu.mem.read_u32(path[ops - 1]).ok() != Some(RET) {
                         rewrote += 1;
                         continue;
                     }
@@ -296,8 +312,8 @@ fn main() {
         }
         println!(
             "  {form:<34} {:>3} encodings   {}",
-            encodings.len(),
-            disassemble(encodings[0])
+            bodies.iter().map(Vec::len).sum::<usize>(),
+            disassemble(bodies[0][0])
         );
     }
 
@@ -327,7 +343,7 @@ fn main() {
          {pinned} cases where it has to, \
          {refused} blocks the emitter refused, {faulted} that faulted, \
          {rewrote} that stored over their terminator)",
-        buckets.len()
+        groups.len()
     );
     println!("now run: node tools/emit_difftest.mjs --out={out_dir}");
 }
@@ -489,6 +505,74 @@ fn survey() -> BTreeMap<String, Vec<u32>> {
         }
     }
     buckets
+}
+
+const SUBS_IMM: u32 = 0x7100_0000;
+const SUBS_REG: u32 = 0x6B00_0000;
+const ADDS_REG: u32 = 0x2B00_0000;
+const ADD_REG: u32 = 0x0B00_0000;
+const ANDS_REG: u32 = 0x6A00_0000;
+const CSEL: u32 = 0x9A80_0000;
+const B_COND: u32 = 0x5400_0000;
+const NOP: u32 = 0xD503_201F;
+
+/// How many compare-and-branch sequences are drawn from the full space.
+const SEQUENCES: usize = 600;
+
+/// `cmp` and `b.cond` pairs with something between them, each leaving at a taken branch to the
+/// final `RET`. The pair is what the translator fuses; what follows decides whether its flags
+/// are held back or built at once.
+fn fused_sequences() -> Vec<(String, Vec<Vec<u32>>)> {
+    let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+    let mut pick = |n: u64| (next(&mut rng) % n) as u32;
+    let mut groups = Vec::new();
+    for _ in 0..SEQUENCES {
+        let sf = pick(2) << 31;
+        let compare = |kind: u32, rn: u32, rm: u32, imm: u32| match kind {
+            0 => sf | SUBS_IMM | imm << 10 | rn << 5 | 31,
+            _ => sf | SUBS_REG | rm << 16 | rn << 5 | 31,
+        };
+        let mut seq = vec![];
+        let kind = pick(2);
+        let rn = 1 + pick(4);
+        let rm = if pick(3) == 0 { rn } else { 1 + pick(4) };
+        seq.push(compare(kind, rn, rm, [0, 1, 0xFFF, 0x7F][pick(4) as usize]));
+        let first = seq.len();
+        seq.push(B_COND | pick(16));
+        let middle = pick(4);
+        match middle {
+            1 => seq.push(sf | ADD_REG | 3 << 16 | 2 << 5 | 2),
+            2 => seq.push(CSEL | 3 << 16 | pick(16) << 12 | 2 << 5 | 5),
+            3 => seq.push(sf | ANDS_REG | 3 << 16 | 2 << 5 | 5),
+            _ => {}
+        }
+        let tail = pick(4);
+        let second = seq.len();
+        match tail {
+            0 => seq.push(compare(0, 2, 0, [0, 1, 0xFFF][pick(3) as usize])),
+            1 => seq.push(compare(1, 2, if pick(2) == 0 { 2 } else { 3 }, 0)),
+            2 => seq.push(sf | ADDS_REG | 3 << 16 | 2 << 5 | 6),
+            _ => {}
+        }
+        if tail < 2 {
+            seq.push(B_COND | pick(16));
+        }
+        // A branch to the next instruction would be taken and not taken at once.
+        seq.push(NOP);
+        let end = 1 + seq.len();
+        for at in [first, second] {
+            if seq.get(at).is_some_and(|w| w & 0xFF00_0010 == B_COND) {
+                let offset = (end - (1 + at)) as u32;
+                seq[at] |= offset << 5;
+            }
+        }
+        let form = format!(
+            "fused compare sf {} kind {kind} middle {middle} tail {tail}",
+            sf >> 31
+        );
+        groups.push((form, vec![seq]));
+    }
+    groups
 }
 
 /// How many register-content sets each block is run under.
