@@ -3,7 +3,7 @@
 ## Multi-process kernel
 
 Library applets must run as processes beside their caller, in one kernel with one set of console services.
-Each stage builds, passes `cargo test --workspace` and clippy, keeps every title in `docs/progress.md` booting to the same frames, and is committed on its own.
+Each stage builds, passes `cargo test --workspace` and clippy, keeps every title in `docs/compat.md` booting to the same frames, and is committed on its own.
 
 1. nvmap handles are console-wide and name a CPU address in the allocating process; a handle another process maps or presents is read from that process's memory at the same address.
 
