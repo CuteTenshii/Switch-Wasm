@@ -245,6 +245,29 @@ impl Gpu {
         self.ask_for(held);
     }
 
+    /// Ask for a surface back and keep it held, clean: it is what guest memory will say once the
+    /// readback lands, so the next draw into it uploads nothing. A swap chain's buffers come back
+    /// round to round.
+    fn send_back_kept(&mut self, addr: u64) {
+        let Some(held) = self.space.held.get(&addr) else {
+            return;
+        };
+        if held.companion.is_some() || held.other.is_some() || held.target.depth_kind().is_some() {
+            self.flush_one(addr);
+            return;
+        }
+        let (target, texture, dirty) = (held.target, held.texture.clone(), held.dirty);
+        if dirty {
+            self.submit_batch();
+            let pending = self.start_read_back(&target, &texture);
+            self.space.pending.push(pending);
+        }
+        if let Some(held) = self.space.held.get_mut(&addr) {
+            held.dirty = false;
+            held.watched.clear();
+        }
+    }
+
     /// Ask for a surface back without waiting; [`Gpu::flush`] collects it.
     fn ask_for(&mut self, held: Held) {
         self.submit_batch();
@@ -678,6 +701,7 @@ impl Gpu {
     /// surfaces whose watched pages were written, which only the guest can have done.
     pub(super) fn watch_held(&mut self, ctx: &ExecCtx, written: &[u32]) {
         if !written.is_empty() {
+            let written: std::collections::HashSet<u32> = written.iter().copied().collect();
             let hit: Vec<u64> = self
                 .space
                 .held
@@ -716,7 +740,7 @@ impl Gpu {
                 self.ask_for(held);
             }
             if let Some(addr) = scanout {
-                self.flush_one(addr);
+                self.send_back_kept(addr);
             }
             for addr in std::mem::take(&mut self.space.aliased) {
                 self.flush_one(addr);
