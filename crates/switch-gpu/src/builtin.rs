@@ -3,6 +3,34 @@
 
 use switch_core::gpu::surface::{SampleGrid, MAX_SAMPLES};
 
+/// A scan-out surface onto the canvas, one texel to a pixel: the queued window, flipped as the
+/// producer asked, with alpha ignored.
+pub(crate) const SCAN_OUT_WGSL: &str = "\
+struct Parameters {
+  crop: vec2<i32>,
+  size: vec2<i32>,
+  flip: vec2<u32>,
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> p: Parameters;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+  let x = i32(at.x);
+  let y = i32(at.y);
+  let sx = p.crop.x + select(x, p.size.x - 1 - x, p.flip.x != 0u);
+  let sy = p.crop.y + select(y, p.size.y - 1 - y, p.flip.y != 0u);
+  return vec4<f32>(textureLoad(src, vec2<i32>(sx, sy), 0).rgb, 1.0);
+}
+";
+
 /// A 2D engine blit, computing what `Engine2D` does per texel: `taps` and `blend` when
 /// filtered, a clamped truncation when not.
 pub(crate) const BLIT_WGSL: &str = "\

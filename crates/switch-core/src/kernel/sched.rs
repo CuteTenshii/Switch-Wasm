@@ -52,6 +52,31 @@ impl Cpu {
     ) -> crate::Result<()> {
         use crate::gpu::renderer::Submit;
         self.complete_pending_present();
+        // A layer over one the device showed needs that one's pixels: bring its frame back first.
+        for (pid, shown) in self.machine.nv.gpu.take_device_shown_below(self.pid) {
+            let Some(mem) = self.machine.processes.get(&pid).map(|p| p.mem.clone()) else {
+                continue;
+            };
+            match self.machine.nv.gpu.submit_frame(pid, &mem, &shown)? {
+                Submit::Done => self.machine.nv.gpu.present(pid, &mem, &shown)?,
+                Submit::Queued(generation) => {
+                    self.pending_present.push_back((pid, shown, generation));
+                }
+                Submit::Full => {}
+            }
+        }
+        if self.pending_present.is_empty()
+            && self
+                .machine
+                .nv
+                .gpu
+                .present_on_device(self.pid, &self.mem, &buffer)?
+        {
+            if crate::trace::enabled(crate::trace::Trace::Nv) {
+                crate::traceln!("[vi] presented frame {} on the device", self.nv.gpu.frames);
+            }
+            return Ok(());
+        }
         match self
             .machine
             .nv

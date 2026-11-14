@@ -270,6 +270,15 @@ impl Engine3D {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.submit_frame(ctx, scanout))
     }
 
+    /// See [`Renderer::scan_out`].
+    pub fn scan_out(
+        &mut self,
+        ctx: &mut ExecCtx,
+        shot: &crate::gpu::renderer::ScanOut,
+    ) -> Result<bool> {
+        self.with_renderer(ctx, |renderer, _, ctx| renderer.scan_out(ctx, shot))
+    }
+
     /// See [`Renderer::frames_landed`].
     pub fn frames_landed(&mut self, ctx: &mut ExecCtx) -> Result<u64> {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.frames_landed(ctx))

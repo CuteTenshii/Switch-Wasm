@@ -1388,3 +1388,155 @@ fn same_bytes_agrees_with_slice_equality() {
         assert!(!same_bytes(&base, &other), "a difference at byte {at}");
     }
 }
+
+/// `width` x `height` RGBA8 texels of `image`, without the row padding a copy needs.
+fn read_rgba8(gpu: &super::Gpu, image: &wgpu::Texture, width: u32, height: u32) -> Vec<u8> {
+    let padded = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(padded * height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    encoder.copy_texture_to_buffer(
+        image.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &out,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    out.slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.expect("the readback"));
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("the device");
+    let mapped = out
+        .slice(..)
+        .get_mapped_range()
+        .expect("the mapped readback");
+    let mut rows = Vec::new();
+    for row in 0..height {
+        let at = (row * padded) as usize;
+        rows.extend_from_slice(&mapped[at..at + (width * 4) as usize]);
+    }
+    rows
+}
+
+#[test]
+fn the_scan_out_pass_crops_flips_and_drops_alpha_without_touching_the_bytes() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = (7u32, 5u32);
+    let size = |w, h| wgpu::Extent3d {
+        width: w,
+        height: h,
+        depth_or_array_layers: 1,
+    };
+    fn texture(
+        gpu: &super::Gpu,
+        format: wgpu::TextureFormat,
+        w: u32,
+        h: u32,
+        usage: wgpu::TextureUsages,
+    ) -> wgpu::Texture {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    }
+    // Every byte differs, and alpha is not opaque.
+    let texels: Vec<u8> = (0..width * height)
+        .flat_map(|i| {
+            [
+                (i * 3 + 1) as u8,
+                (i * 7 + 90) as u8,
+                (i * 11 + 200) as u8,
+                (i * 5) as u8,
+            ]
+        })
+        .collect();
+    for (source_format, target_format) in [
+        (
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ),
+        (
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ),
+    ] {
+        let source = texture(
+            &gpu,
+            source_format,
+            width,
+            height,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        );
+        gpu.queue.write_texture(
+            source.as_image_copy(),
+            &texels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            size(width, height),
+        );
+        for (flip_h, flip_v) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (x, y, w, h) = (2u32, 1u32, 4u32, 3u32);
+            let target = texture(
+                &gpu,
+                target_format,
+                w,
+                h,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            );
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            gpu.scan_out_pass(
+                &source,
+                (x, y, w, h),
+                (flip_h, flip_v),
+                &view,
+                target_format,
+            );
+            let mut expected = Vec::new();
+            for row in 0..h {
+                for column in 0..w {
+                    let sx = x + if flip_h { w - 1 - column } else { column };
+                    let sy = y + if flip_v { h - 1 - row } else { row };
+                    let at = ((sy * width + sx) * 4) as usize;
+                    expected.extend_from_slice(&[texels[at], texels[at + 1], texels[at + 2], 255]);
+                }
+            }
+            assert_eq!(
+                read_rgba8(&gpu, &target, w, h),
+                expected,
+                "{source_format:?} flipped h {flip_h} v {flip_v}"
+            );
+        }
+    }
+}

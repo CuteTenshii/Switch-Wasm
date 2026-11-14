@@ -136,6 +136,9 @@ pub struct Gpu {
     /// Each presenting process's last frame by layer, lowest first. A layer alone on
     /// screen keeps its pixels in `framebuffer` and an empty entry here.
     layers: std::collections::BTreeMap<u64, Framebuffer>,
+    /// The buffer each layer's last frame was shown from, for layers whose frame the backend
+    /// showed straight from the device and so has no pixels on the CPU.
+    device_shown: HashMap<u64, DisplayBuffer>,
     /// Reused between frames to avoid a per-frame allocation.
     scan_out: Vec<u8>,
     pub frames: u64,
@@ -162,6 +165,7 @@ impl Gpu {
             stats: GpuStats::default(),
             framebuffer: Framebuffer::default(),
             layers: std::collections::BTreeMap::new(),
+            device_shown: HashMap::new(),
             scan_out: Vec::new(),
             frames: 0,
             next_as_id: 1,
@@ -430,20 +434,7 @@ impl Gpu {
             );
         }
         let format = display_color_format(buffer.color_format)?;
-        let layout = match buffer.layout {
-            NV_LAYOUT_PITCH => Layout::Pitch {
-                pitch: buffer.pitch,
-            },
-            NV_LAYOUT_BLOCK_LINEAR => Layout::BlockLinear {
-                block_height_gobs: 1 << buffer.block_height_log2,
-            },
-            other => {
-                return Err(Error::Gpu(format!(
-                    "present: unsupported NvLayout {}",
-                    other
-                )))
-            }
-        };
+        let layout = buffer_layout(buffer)?;
         let bpp = format.bytes_per_pixel;
         let width_bytes = match layout {
             Layout::Pitch { pitch } => pitch,
@@ -568,6 +559,7 @@ impl Gpu {
             }
         }
         self.scan_out = raw_bytes;
+        self.device_shown.remove(&layer);
         self.show(
             layer,
             Framebuffer {
@@ -578,6 +570,93 @@ impl Gpu {
         );
         self.frames += 1;
         Ok(())
+    }
+
+    /// Present `buffer` straight from the backend when it owns the screen and holds the surface,
+    /// so the frame never goes through guest memory. `false`: it has to be read from there.
+    pub fn present_on_device(
+        &mut self,
+        layer: u64,
+        mem: &Memory,
+        buffer: &DisplayBuffer,
+    ) -> Result<bool> {
+        if !self.renderer.has_screen()
+            || !self.layers.keys().all(|&other| other == layer)
+            || buffer.transform & TRANSFORM_ROT_90 != 0
+        {
+            return Ok(false);
+        }
+        let Some(handle) = self.nvmap.by_id(buffer.nvmap_id).filter(|h| h.allocated) else {
+            return Ok(false);
+        };
+        let (Ok(color), Ok(layout)) = (
+            display_color_format(buffer.color_format),
+            buffer_layout(buffer),
+        ) else {
+            return Ok(false);
+        };
+        let Ok(format) = pipeline::color_format(color) else {
+            return Ok(false);
+        };
+        let crop = buffer.crop.window(buffer.width, buffer.height);
+        let shot = renderer::ScanOut {
+            addr: handle.cpu_addr.wrapping_add(buffer.offset),
+            format,
+            layout,
+            width: buffer.width,
+            height: buffer.height,
+            crop,
+            flip_h: buffer.transform & TRANSFORM_FLIP_H != 0,
+            flip_v: buffer.transform & TRANSFORM_FLIP_V != 0,
+        };
+        if !self.on_flush_channel(layer, mem, false, |three_d, ctx| {
+            three_d.scan_out(ctx, &shot)
+        })? {
+            return Ok(false);
+        }
+        self.layers.insert(layer, Framebuffer::default());
+        self.device_shown.insert(layer, *buffer);
+        self.framebuffer = Framebuffer {
+            width: crop.2,
+            height: crop.3,
+            pixels: Vec::new(),
+        };
+        self.frames += 1;
+        Ok(true)
+    }
+
+    /// Takes the layers other than `layer` whose last frame only the device has, with the
+    /// buffer each was shown from: a layer drawn over them has to blend with their pixels.
+    pub fn take_device_shown_below(&mut self, layer: u64) -> Vec<(u64, DisplayBuffer)> {
+        let below: Vec<u64> = self
+            .device_shown
+            .keys()
+            .copied()
+            .filter(|other| *other != layer)
+            .collect();
+        below
+            .into_iter()
+            .filter_map(|other| Some((other, self.device_shown.remove(&other)?)))
+            .collect()
+    }
+
+    /// Show the composited frame on the backend's screen, when it has one.
+    pub fn show_on_device(&mut self) -> bool {
+        self.renderer.show_pixels(&self.framebuffer)
+    }
+
+    /// Blank the backend's screen, when it has one.
+    pub fn blank_device_screen(&mut self) -> bool {
+        self.renderer.show_pixels(&Framebuffer {
+            width: 1,
+            height: 1,
+            pixels: vec![0xFF00_0000],
+        })
+    }
+
+    /// Whether the backend owns the screen.
+    pub fn device_has_screen(&self) -> bool {
+        self.renderer.has_screen()
     }
 
     /// Put `frame` on `layer` and composite the screen.
@@ -592,7 +671,12 @@ impl Gpu {
             .values_mut()
             .find(|other| other.pixels.is_empty())
         {
-            *alone = std::mem::take(&mut self.framebuffer);
+            let mut below = std::mem::take(&mut self.framebuffer);
+            // A frame the backend showed from the device has no pixels here to blend over.
+            below
+                .pixels
+                .resize((below.width * below.height) as usize, 0xFF00_0000);
+            *alone = below;
         }
         self.layers.insert(layer, frame);
         self.composite();
@@ -600,6 +684,7 @@ impl Gpu {
 
     /// Take `layer` off the screen, as when its process ends.
     pub fn remove_layer(&mut self, layer: u64) {
+        self.device_shown.remove(&layer);
         if self.layers.remove(&layer).is_none() {
             return;
         }
@@ -651,6 +736,19 @@ fn blend_over(src: u32, dst: u32) -> u32 {
             let out_alpha = alpha + (dst >> 24) * (255 - alpha) / 255;
             channel(0) | channel(8) | channel(16) | (out_alpha << 24)
         }
+    }
+}
+
+/// How `buffer`'s texels are laid out in memory.
+fn buffer_layout(buffer: &DisplayBuffer) -> Result<Layout> {
+    match buffer.layout {
+        NV_LAYOUT_PITCH => Ok(Layout::Pitch {
+            pitch: buffer.pitch,
+        }),
+        NV_LAYOUT_BLOCK_LINEAR => Ok(Layout::BlockLinear {
+            block_height_gobs: 1 << buffer.block_height_log2,
+        }),
+        other => Err(Error::Gpu(format!("present: unsupported NvLayout {other}"))),
     }
 }
 
@@ -762,6 +860,100 @@ mod tests {
             gpu.renderer_report(),
             "{\"backend\":\"stub\"}",
             "closing the channel it was installed on does not take it away"
+        );
+    }
+
+    /// A backend that owns the screen and shows whatever it is asked to.
+    #[derive(Debug)]
+    struct ScreenStub;
+
+    impl renderer::Renderer for ScreenStub {
+        fn draw(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_color(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+            _target: u32,
+            _layer: u32,
+            _channels: [bool; 4],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_depth_stencil(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+            _depth: bool,
+            _stencil: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn has_screen(&self) -> bool {
+            true
+        }
+
+        fn scan_out(&mut self, _ctx: &mut ExecCtx, _shot: &renderer::ScanOut) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    /// A frame the backend shows itself is not in guest memory, so a layer drawn over it has to
+    /// ask for it, once; a frame read from guest memory is nobody's to ask for.
+    #[test]
+    fn a_layer_shown_from_the_device_is_handed_over_once_and_forgotten_by_a_cpu_present() {
+        let mut gpu = Gpu::new();
+        gpu.set_renderer(Box::new(ScreenStub));
+        let as_id = gpu.create_address_space();
+        let channel = gpu.create_channel(1).unwrap();
+        gpu.channel_mut(channel).unwrap().as_id = Some(as_id);
+        let handle = gpu.nvmap.create(0x1000);
+        gpu.nvmap
+            .alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000)
+            .unwrap();
+        let buffer = DisplayBuffer {
+            nvmap_id: gpu.nvmap.get(handle).unwrap().id,
+            offset: 0,
+            width: 16,
+            height: 8,
+            pitch: 64,
+            layout: NV_LAYOUT_BLOCK_LINEAR,
+            block_height_log2: 0,
+            color_format: 0x0100_5321_20,
+            transform: 0,
+            crop: Crop::ALL,
+        };
+        let mem = Memory::new();
+        mem.write_u32(0x4000_0000, 0).unwrap();
+
+        assert!(gpu.present_on_device(1, &mem, &buffer).unwrap());
+        assert_eq!((gpu.framebuffer.width, gpu.framebuffer.height), (16, 8));
+        assert!(gpu.framebuffer.pixels.is_empty());
+        assert_eq!(gpu.frames, 1);
+
+        assert!(
+            gpu.take_device_shown_below(1).is_empty(),
+            "not below itself"
+        );
+        assert_eq!(gpu.take_device_shown_below(2), vec![(1, buffer)]);
+        assert!(
+            gpu.take_device_shown_below(2).is_empty(),
+            "handed over once"
+        );
+
+        assert!(gpu.present_on_device(1, &mem, &buffer).unwrap());
+        gpu.present(1, &mem, &buffer).unwrap();
+        assert!(
+            gpu.take_device_shown_below(2).is_empty(),
+            "a CPU present puts the pixels on the CPU"
         );
     }
 
@@ -884,6 +1076,47 @@ mod tests {
         assert_eq!(gpu.framebuffer.pixels[1], 0xFF00_0000);
         assert_eq!(gpu.framebuffer.pixels[16], 0x0000_00FF);
         assert_eq!(gpu.frames, 1);
+    }
+
+    /// A frame the backend showed itself leaves a layer with dimensions and no pixels, and a
+    /// second layer has to blend over something.
+    #[test]
+    fn a_layer_over_a_frame_shown_from_the_device_blends_over_black() {
+        const RED: u32 = 0xFF00_00FF;
+        let mut gpu = Gpu::new();
+        gpu.layers.insert(1, Framebuffer::default());
+        gpu.framebuffer = Framebuffer {
+            width: 16,
+            height: 8,
+            pixels: Vec::new(),
+        };
+        let mem = Memory::new();
+        let handle = gpu.nvmap.create(0x1000);
+        gpu.nvmap
+            .alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000)
+            .unwrap();
+        let id = gpu.nvmap.get(handle).unwrap().id;
+        for y in 0..8 {
+            for x in 0..16 {
+                let at = 0x4000_0000 + surface::gob_offset(x * 4, y);
+                mem.write_u32(at, RED).unwrap();
+            }
+        }
+        let buffer = DisplayBuffer {
+            nvmap_id: id,
+            offset: 0,
+            width: 16,
+            height: 8,
+            pitch: 64,
+            layout: NV_LAYOUT_BLOCK_LINEAR,
+            block_height_log2: 0,
+            color_format: 0x0100_5321_20,
+            transform: 0,
+            crop: Crop::ALL,
+        };
+        gpu.present(2, &mem, &buffer).unwrap();
+        assert_eq!(gpu.framebuffer.pixels.len(), 16 * 8);
+        assert!(gpu.framebuffer.pixels.iter().all(|&p| p == RED));
     }
 
     /// Each process's frame is a layer; the screen is them blended in layer order.

@@ -4,7 +4,9 @@
 
 use crate::gpu::engine::threed::Engine3D;
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::surface::Surface;
+use crate::gpu::pipeline::Format;
+use crate::gpu::surface::{Layout, Surface};
+use crate::gpu::Framebuffer;
 use crate::Result;
 use std::ops::Range;
 
@@ -21,6 +23,21 @@ pub struct Blit {
     pub step: (f64, f64),
     /// Four taps blended, rather than one texel read.
     pub filtered: bool,
+}
+
+/// A display buffer to show, as the producer queued it.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanOut {
+    /// The CPU address of the buffer's first pixel.
+    pub addr: u32,
+    pub format: Format,
+    pub layout: Layout,
+    pub width: u32,
+    pub height: u32,
+    /// The window the producer queued, in texels: x, y, width and height.
+    pub crop: (u32, u32, u32, u32),
+    pub flip_h: bool,
+    pub flip_v: bool,
 }
 
 /// What [`Renderer::blit`] did.
@@ -86,6 +103,26 @@ pub trait Renderer: std::fmt::Debug {
     fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u32>) -> Result<Submit> {
         let _ = (ctx, scanout);
         Ok(Submit::Done)
+    }
+
+    /// Whether the backend owns the screen: it shows frames itself, from [`Renderer::scan_out`]
+    /// and [`Renderer::show_pixels`], and nothing else can paint there.
+    fn has_screen(&self) -> bool {
+        false
+    }
+
+    /// Show a presented buffer on the backend's screen straight from where the backend holds
+    /// it, so the frame never goes through guest memory. `false`: it does not hold the buffer,
+    /// or has no screen, and the frame has to be read from guest memory.
+    fn scan_out(&mut self, ctx: &mut ExecCtx, shot: &ScanOut) -> Result<bool> {
+        let _ = (ctx, shot);
+        Ok(false)
+    }
+
+    /// Show a frame the engine composited on the CPU on the backend's screen. `false`: no screen.
+    fn show_pixels(&mut self, frame: &Framebuffer) -> bool {
+        let _ = frame;
+        false
     }
 
     /// The newest [`Submit::Queued`] generation whose surfaces are all in guest memory.

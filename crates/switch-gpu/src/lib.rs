@@ -56,7 +56,7 @@ pub use wgpu;
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state, Pipeline};
-use switch_core::gpu::renderer::{Blit, BlitRoute, Flush, Renderer, Software, Submit};
+use switch_core::gpu::renderer::{Blit, BlitRoute, Flush, Renderer, ScanOut, Software, Submit};
 #[cfg(test)]
 use switch_core::gpu::shader::compiled::Compiled;
 #[cfg(test)]
@@ -64,6 +64,7 @@ use switch_core::gpu::shader::wgsl::{self, Stage};
 use switch_core::gpu::shader::wgsl::{Layout, Translation};
 use switch_core::gpu::surface::{Layout as SurfaceLayout, GOB_WIDTH};
 use switch_core::gpu::upload::{Target, TextureKey, Uploads};
+use switch_core::gpu::Framebuffer;
 use switch_core::json;
 use switch_core::Result;
 
@@ -464,6 +465,9 @@ pub struct Gpu {
     /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
     clear_pipelines: std::collections::HashMap<ClearKey, wgpu::RenderPipeline>,
     blit_pipelines: std::collections::HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
+    /// The canvas, once the page has handed one over. See [`Gpu::set_screen`].
+    screen: Option<screen::Screen>,
+    scan_pipelines: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     /// Every present brings every surface back, to compare against keeping them.
     sync_every_present: bool,
     /// Multisample resampling pipelines. See [`resample_wgsl`].
@@ -661,6 +665,7 @@ mod multisample;
 mod prepare;
 mod render;
 mod resources;
+mod screen;
 
 #[cfg(test)]
 mod parity_tests;
@@ -990,6 +995,24 @@ impl Renderer for Gpu {
     fn frames_landed(&mut self, ctx: &mut ExecCtx) -> Result<u64> {
         self.enter_space(ctx.as_id);
         self.frames_landed_inner(ctx)
+    }
+
+    fn has_screen(&self) -> bool {
+        self.screen.is_some()
+    }
+
+    fn scan_out(&mut self, ctx: &mut ExecCtx, shot: &ScanOut) -> Result<bool> {
+        self.enter_space(ctx.as_id);
+        if self.screen.is_none() || self.give_up() || self.software_frame {
+            return Ok(false);
+        }
+        // A write since the last draw has to count before the held surface is shown.
+        self.evict_written(ctx);
+        Ok(self.scan_out_held(ctx, shot))
+    }
+
+    fn show_pixels(&mut self, frame: &Framebuffer) -> bool {
+        self.show_frame(frame)
     }
 
     fn address_space_closed(&mut self, as_id: u32) {

@@ -182,7 +182,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 ## `renderer.rs`
 
 - The `Renderer` trait lets a GPU backend sit beside the software rasterizer, which stays the bit-exact reference to check it against (most of a Home Menu frame is rasterization, so only a GPU backend makes it fast).
-- A backend that keeps surfaces GPU-side owns when render targets go back to guest memory; `present` deswizzles straight out of guest memory.
+- A backend that keeps surfaces GPU-side owns when render targets go back to guest memory; `present` deswizzles straight out of guest memory, unless the backend owns the screen and shows the surface itself (`Renderer::scan_out`, `Gpu::present_on_device`).
 - Clears are on the trait too: on a GPU they are a render pass load op, and draws on a GPU surface would disagree with clears in guest memory.
 - `lost()`: a browser can drop the device (driver reset, GPU process restart, memory pressure). Falling back to the rasterizer for the rest of the session is far slower, while a lost device can just be requested again (the worker does so a bounded number of times); `lost()` is cheap enough to poll once a slice.
 - `Flush::Pending` must not be ignored: landing a readback one flush late produced black frames, since a double-buffered title presents the surface whose readback was just requested.

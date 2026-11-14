@@ -51,6 +51,8 @@ impl Gpu {
             packed_depth: std::collections::HashMap::new(),
             clear_pipelines: std::collections::HashMap::new(),
             blit_pipelines: std::collections::HashMap::new(),
+            screen: None,
+            scan_pipelines: std::collections::HashMap::new(),
             sync_every_present: false,
             resample_pipelines: std::collections::HashMap::new(),
             failed,
