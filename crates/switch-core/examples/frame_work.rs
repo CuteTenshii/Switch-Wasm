@@ -171,7 +171,7 @@ fn main() {
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    program.boot(&mut cpu);
+    program.boot(&mut cpu, None);
     common::start_play(&mut cpu);
 
     let Some(boot) = common::reach_frame(&mut cpu, WARMUP_FRAMES, FRAME_BUDGET) else {

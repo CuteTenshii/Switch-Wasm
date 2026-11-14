@@ -34,7 +34,7 @@ fn boot(program: &common::Program, jit: bool) -> Cpu {
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     cpu.set_jit_enabled(jit);
-    program.boot(&mut cpu);
+    program.boot(&mut cpu, None);
     cpu
 }
 

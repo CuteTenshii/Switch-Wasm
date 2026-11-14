@@ -343,14 +343,14 @@ impl Program {
         matches!(self.form, Form::Homebrew(_))
     }
 
-    /// Boot into an already bootstrapped `cpu`.
-    pub fn boot(&self, cpu: &mut Cpu) -> Booted {
+    /// Boot into an already bootstrapped `cpu`; `sd_path` is where a homebrew launches from.
+    pub fn boot(&self, cpu: &mut Cpu, sd_path: Option<&str>) -> Booted {
         match &self.form {
             Form::Retail(title) => title.boot_with_font(cpu, self.font.as_deref()),
             Form::Homebrew(image) => {
                 apply_docked(cpu);
                 load_font(cpu, self.font.as_deref());
-                cpu.boot_homebrew(image, None)
+                cpu.boot_homebrew(image, sd_path)
                     .unwrap_or_else(|e| die(&format!("booting the NRO: {e:?}")));
                 Booted {
                     modules: Vec::new(),
@@ -1630,7 +1630,7 @@ fn program_window(
         .unwrap_or_else(|e| die(&format!("window over the program nca: {e}")))
 }
 
-fn die(message: &str) -> ! {
+pub fn die(message: &str) -> ! {
     eprintln!("{message}");
     std::process::exit(1)
 }

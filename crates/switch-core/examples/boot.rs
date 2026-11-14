@@ -1,11 +1,14 @@
-//! Boot an `.nsp`, `.xci` or Program `.nca` from the command line.
+//! Boot an `.nro`, `.nsp`, `.xci` or Program `.nca` from the command line.
 //!
-//! Usage: cargo run -p switch-core --example boot_nsp -- <container> --keys <prod.keys> [flags]
+//! Usage: cargo run -p switch-core --example boot -- <target> [--keys <prod.keys>] [flags]
 mod common;
+
+use std::path::Path;
 
 use clap::Parser;
 use common::profile::Profile;
 use common::Flow;
+use switch_core::cpu::Cpu;
 
 #[derive(Parser)]
 struct Cli {
@@ -21,9 +24,16 @@ struct Cli {
     play: common::Play,
     #[command(flatten)]
     probe: common::Probe,
-    /// Instructions to run.
-    #[arg(long, default_value_t = 2_000_000)]
-    max_steps: u64,
+    /// Instructions to run (default: unlimited for an `.nro`, 2 million for a title).
+    #[arg(long)]
+    max_steps: Option<u64>,
+    /// Copy this host directory onto the SD card; an NRO inside it is launched from its SD path,
+    /// as the page's Files dialog does, so it finds the files beside it.
+    #[arg(long, value_name = "DIR")]
+    sd: Option<String>,
+    /// Print this SD card file when the run ends (a homebrew's own log).
+    #[arg(long, value_name = "SD PATH")]
+    show: Option<String>,
     /// Sample the pc by thread, page and caller every this many instructions.
     #[arg(long, default_value_t = 0, value_name = "INTERVAL")]
     profile: u64,
@@ -44,16 +54,23 @@ fn main() {
             .with(&cli.play)
             .with(&cli.probe)
     });
-    let title = cli.target.open();
-    println!(
-        "program {:016x}: {} file(s) in the ExeFS",
-        title.nca.program_id,
-        title.exefs_pfs0.files.len()
-    );
+    let program = cli.target.open_program();
+    if cli.sd.is_some() && !program.is_homebrew() {
+        common::die("--sd needs an .nro");
+    }
+    let max_steps = cli.max_steps.unwrap_or(if program.is_homebrew() {
+        u64::MAX
+    } else {
+        2_000_000
+    });
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    let booted = title.boot(&mut cpu);
+    let sd_path = cli
+        .sd
+        .as_ref()
+        .and_then(|dir| copy_to_sd(&mut cpu, Path::new(dir), Path::new(&cli.target.target)));
+    let booted = program.boot(&mut cpu, sd_path.as_deref());
     if let Some(quota) = booted.quota {
         println!(
             "save data: {} bytes (+{} journal), extendable to {} (+{}); \
@@ -86,7 +103,7 @@ fn main() {
     let cores = common::start_cores(&mut cpu);
     let started = std::time::Instant::now();
     let mut frames_seen = 0;
-    let run = common::drive(&mut cpu, pace, cli.max_steps, |cpu, done| {
+    let run = common::drive(&mut cpu, pace, max_steps, |cpu, done| {
         debug.tick(cpu, done);
         if let Some(gate) = draw_gate.as_mut() {
             gate.tick(cpu);
@@ -137,4 +154,46 @@ fn main() {
     }
     profile.report();
     common::print_console(&cpu, 80);
+    if let Some(show) = &cli.show {
+        match cpu.fs.file(show) {
+            Some(bytes) => {
+                println!("--- {show} ({} bytes) ---", bytes.len());
+                print!("{}", String::from_utf8_lossy(bytes));
+            }
+            None => println!("--- {show}: not on the SD card ---"),
+        }
+    }
+}
+
+/// Copy `dir` onto the SD card root. Returns the NRO's SD path when it lies inside `dir`.
+fn copy_to_sd(cpu: &mut Cpu, dir: &Path, nro: &Path) -> Option<String> {
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        let entries = std::fs::read_dir(&at)
+            .unwrap_or_else(|e| panic!("SD: cannot list {}: {e}", at.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| panic!("SD: {}: {e}", at.display()));
+            let host = entry.path();
+            let sd = sd_name(dir, &host);
+            if host.is_dir() {
+                cpu.fs.create_dir(&sd);
+                pending.push(host);
+            } else {
+                cpu.fs.write_file(&sd, common::read(&host));
+            }
+        }
+    }
+    // Absolute without resolving links, so a directory linked into `dir` still counts as inside.
+    let (root, nro) = (
+        std::path::absolute(dir).ok()?,
+        std::path::absolute(nro).ok()?,
+    );
+    nro.starts_with(&root).then(|| sd_name(&root, &nro))
+}
+
+fn sd_name(root: &Path, host: &Path) -> String {
+    let relative = host
+        .strip_prefix(root)
+        .expect("a path under the SD directory");
+    format!("/{}", relative.to_string_lossy().replace('\\', "/"))
 }

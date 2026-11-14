@@ -100,7 +100,7 @@ fn main() {
     let program = cli.target.open_program();
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    program.boot(&mut cpu);
+    program.boot(&mut cpu, None);
     common::start_play(&mut cpu);
 
     let Some((seen, total)) = sample_frame(&mut cpu) else {

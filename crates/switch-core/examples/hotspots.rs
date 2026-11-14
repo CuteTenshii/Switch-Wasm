@@ -52,7 +52,7 @@ fn main() {
     let program = cli.target.open_program();
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    let booted = program.boot(&mut cpu);
+    let booted = program.boot(&mut cpu, None);
     common::start_play(&mut cpu);
 
     // Two frames of startup, so what follows is a steady-state frame.

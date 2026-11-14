@@ -57,7 +57,7 @@ fn main() {
     let program = cli.target.open_program();
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    program.boot(&mut cpu);
+    program.boot(&mut cpu, None);
     common::start_play(&mut cpu);
 
     if let Some(frame) = cli.from_frame {

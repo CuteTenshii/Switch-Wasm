@@ -159,7 +159,7 @@ fn main() {
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    program.boot(&mut cpu);
+    program.boot(&mut cpu, None);
 
     let mut last_shot = 0;
     let mut draw_gate = common::DrawGate::install(&mut cpu, renderer);
