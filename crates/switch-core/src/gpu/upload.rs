@@ -731,7 +731,7 @@ fn read_texture(
             let (unit, keep) = match copy {
                 Copy::Raw { unit } => (unit, unit),
                 Copy::FloatDepth => (8, 4),
-                Copy::Decode { .. } => {
+                Copy::Expand565 | Copy::Decode { .. } => {
                     return Err(Error::Gpu(
                         "upload: a compressed 3D image is not decoded".into(),
                     ))
@@ -775,6 +775,31 @@ fn read_texture(
                 )?;
                 for texel in texels.as_chunks::<8>().0 {
                     bytes.extend_from_slice(&texel[..4]);
+                }
+            }
+            Copy::Expand565 => {
+                let mut texels = Vec::with_capacity(source_row_bytes as usize * rows as usize);
+                deswizzle(
+                    ctx,
+                    base,
+                    image.layout,
+                    source_row_bytes,
+                    rows,
+                    2,
+                    &mut texels,
+                )?;
+                for texel in texels.as_chunks::<2>().0 {
+                    let packed = u16::from_le_bytes(*texel);
+                    let expand = |value: u16, bits: u32| {
+                        let max = (1u32 << bits) - 1;
+                        ((u32::from(value) * 255 + max / 2) / max) as u8
+                    };
+                    bytes.extend_from_slice(&[
+                        expand(packed >> 11, 5),
+                        expand((packed >> 5) & 0x3f, 6),
+                        expand(packed & 0x1f, 5),
+                        255,
+                    ]);
                 }
             }
             Copy::Decode { codec } => decode_blocks(ctx, &image, base, codec, &mut bytes)?,
@@ -847,6 +872,8 @@ enum Copy {
     Raw { unit: u32 },
     /// Decoded to `Rgba8Unorm`, for codecs WebGPU cannot name.
     Decode { codec: Codec },
+    /// 16-bit 565, which WebGPU cannot name, expanded to `Rgba8Unorm`.
+    Expand565,
     /// `ZF32_X24S8`'s depth, the low half of each 8-byte texel, as `R32Float`.
     FloatDepth,
 }
@@ -856,6 +883,7 @@ impl Copy {
     fn source_row_bytes(self, row_bytes: u32) -> u32 {
         match self {
             Copy::FloatDepth => row_bytes * 2,
+            Copy::Expand565 => row_bytes / 2,
             Copy::Raw { .. } | Copy::Decode { .. } => row_bytes,
         }
     }
@@ -893,12 +921,14 @@ impl Copy {
                 (format, image.width * 4, image.height)
             }
             Copy::FloatDepth => (Format::R32Float, image.width * 4, image.height),
+            Copy::Expand565 => (Format::Rgba8Unorm, image.width * 4, image.height),
         }
     }
 }
 
 fn image_copy(image: &Texture) -> Result<Copy> {
     Ok(match image.kind {
+        TexelKind::Plain(plain) if plain.raw == 0xE8 => Copy::Expand565,
         TexelKind::Plain(plain) => {
             crate::gpu::pipeline::color_format(plain)
                 .map_err(|e| Error::Gpu(format!("upload: texture format: {e}")))?;
@@ -1364,12 +1394,26 @@ mod tests {
     #[test]
     fn a_texture_format_nothing_can_sample_is_reported() {
         let unknown = image(
+            TexelKind::Plain(ColorFormat::from_raw(0xE9).unwrap()),
+            8,
+            8,
+            false,
+        );
+        assert!(image_copy(&unknown).is_err(), "BGR5A1 has no WebGPU format");
+    }
+
+    #[test]
+    fn a_565_texture_is_expanded_to_rgba8_rows_twice_as_wide() {
+        let packed = image(
             TexelKind::Plain(ColorFormat::from_raw(0xE8).unwrap()),
             8,
             8,
             false,
         );
-        assert!(image_copy(&unknown).is_err(), "B5G6R5 has no WebGPU format");
+        let copy = image_copy(&packed).unwrap();
+        assert!(matches!(copy, Copy::Expand565), "{copy:?}");
+        assert_eq!(copy.shape(&packed), (Format::Rgba8Unorm, 32, 8));
+        assert_eq!(copy.source_row_bytes(32), 16);
     }
 
     #[test]

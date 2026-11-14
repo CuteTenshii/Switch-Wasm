@@ -495,6 +495,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x1B, FLOAT) => 0xF2, // R16               -> R16Float
         (0x1B, UNORM) => 0xEE, // R16               -> R16Unorm
         (0x21, FLOAT) => 0xE0, // B10G11R11         -> B10G11R11Float
+        (0x15, UNORM) => 0xE8, // B5G6R5            -> 16-bit 565, red in the high bits
         // `ZF32` sampled as a colour is exactly an `R32` texel.
         (0x2F, FLOAT) => 0xE5, // ZF32              -> R32Float
         // `Z16` sampled as a colour is an unsigned-normalized `R16` texel.
