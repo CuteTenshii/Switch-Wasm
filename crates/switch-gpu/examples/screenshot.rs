@@ -1,12 +1,17 @@
 //! Boot a program and write its Nth presented frame to a PPM:
-//! `screenshot_title <target> --out <out.ppm> [--keys <prod.keys>] [--frame <n>]`.
+//! `screenshot <target> --out <out.ppm> [--keys <prod.keys>] [--frame <n>] [--software]`.
 //!
-//! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
+//! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys). Draws go to
+//! the GPU backend, as in the browser, falling back to the rasterizer where it does; without an
+//! adapter, or with `--software`, every draw is the rasterizer's. `cmp` a `--software` frame with
+//! a device frame to check the backend against that reference.
+#[path = "../../switch-core/examples/common/mod.rs"]
 mod common;
 
 use clap::Parser;
 use common::profile::Profile;
 use common::Flow;
+use switch_core::gpu::renderer::{Renderer, Software};
 
 #[derive(Parser)]
 struct Cli {
@@ -33,6 +38,58 @@ struct Cli {
     /// Instructions to run; unlimited for a retail title, 200 million for an `.nro`.
     #[arg(long)]
     steps: Option<u64>,
+    /// Dock after this presented frame, like a real dock mid-run (`--docked` docks at boot).
+    #[arg(long, value_name = "FRAME")]
+    dock_at: Option<u64>,
+    /// Draw everything with the software rasterizer, the reference the device is checked against.
+    #[arg(long, conflicts_with_all = DEVICE_FLAGS)]
+    software: bool,
+    #[command(flatten)]
+    device: Device,
+    #[command(flatten)]
+    memory: Memory,
+}
+
+/// The ids of [`Device`]'s flags, which `--software` leaves nothing to apply to.
+const DEVICE_FLAGS: [&str; 7] = [
+    "defer_readbacks",
+    "sync_every_present",
+    "interleave",
+    "web_limits",
+    "device_msaa",
+    "times",
+    "only",
+];
+
+/// The device's diagnostic switches.
+#[derive(clap::Args)]
+struct Device {
+    /// Never wait for readbacks, as in a browser.
+    #[arg(long)]
+    defer_readbacks: bool,
+    /// Bring every surface back at every present, to compare against keeping them held.
+    #[arg(long)]
+    sync_every_present: bool,
+    /// Interleave fallback draws into device frames even with late readbacks.
+    #[arg(long)]
+    interleave: bool,
+    /// Hide native-only features, so a native run takes the browser's routes.
+    #[arg(long)]
+    web_limits: bool,
+    /// Let the device multisample where it can.
+    #[arg(long)]
+    device_msaa: bool,
+    /// Print phase timings.
+    #[arg(long)]
+    times: bool,
+    /// Draw only this draw index, or the half-open range `a..b`.
+    #[arg(long, value_parser = draw_range, value_name = "N|A..B")]
+    only: Option<std::ops::Range<u32>>,
+}
+
+/// Probes of guest memory and execution, read while the title runs or once it stops.
+#[derive(clap::Args)]
+struct Memory {
     /// Sample the pc every this many instructions.
     #[arg(long, default_value_t = 0, value_name = "INTERVAL")]
     profile: u64,
@@ -74,6 +131,10 @@ const DEFAULT_INTERVAL: u64 = 4096;
 /// The default `--steps` for an `.nro`.
 const HOMEBREW_STEPS: u64 = 200_000_000;
 
+fn draw_range(spec: &str) -> Result<std::ops::Range<u32>, String> {
+    switch_gpu::draw_range(spec).ok_or_else(|| format!("{spec:?} is not N or A..B"))
+}
+
 /// A hex `<lo>:<hi>` pair.
 fn bounds(text: &str) -> Result<(u32, u32), String> {
     let (lo, hi) = text
@@ -94,34 +155,29 @@ fn main() {
     });
     let program = cli.target.open_program();
     let (out, want) = (&cli.out, cli.frame);
+    let renderer = open_renderer(cli.software, &cli.device);
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
     program.boot(&mut cpu);
 
     let mut last_shot = 0;
-    let mut draw_gate =
-        common::DrawGate::install(&mut cpu, Box::new(switch_core::gpu::renderer::Software));
+    let mut draw_gate = common::DrawGate::install(&mut cpu, renderer);
     let mut debug = common::Debug::from_flags();
     debug.arm(&mut cpu);
     let mut press = common::Press::from_flags();
 
-    let stacks = cli.stacks;
-    let interval = match (cli.profile, stacks) {
+    let memory = &cli.memory;
+    let interval = match (memory.profile, memory.stacks) {
         (0, true) => DEFAULT_INTERVAL,
         (given, _) => given,
     };
-    let mut profile = Profile::new(interval, u64::from(stacks));
-
-    let cover = cli.cover;
-    let mut covered: Vec<bool> = cover
+    let mut profile = Profile::new(interval, u64::from(memory.stacks));
+    let mut covered: Vec<bool> = memory
+        .cover
         .map(|(lo, hi)| vec![false; ((hi - lo) / 4) as usize])
         .unwrap_or_default();
-    let watch_mem = cli.watch_mem;
     let mut seen_nonzero = false;
-    let poke = cli.poke_u32;
-    let poke_at = cli.poke_at;
-    let gate_sniff = cli.gate_sniff;
     let mut gate: Option<u32> = None;
 
     // Homebrew that never presents the frame stops; a retail title needs billions of steps.
@@ -130,7 +186,9 @@ fn main() {
     } else {
         u64::MAX
     };
-    let pace = debug.pace(profile.is_on() || cover.is_some() || poke.is_some() || gate_sniff);
+    let pace = debug.pace(
+        profile.is_on() || memory.cover.is_some() || memory.poke_u32.is_some() || memory.gate_sniff,
+    );
     let cores = common::start_cores(&mut cpu);
     let run = common::drive(
         &mut cpu,
@@ -148,8 +206,11 @@ fn main() {
             if let Some(press) = press.as_mut() {
                 press.tick(cpu, done);
             }
+            if cli.dock_at.is_some_and(|at| cpu.nv.gpu.frames >= at) {
+                cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
+            }
             profile.tick(cpu, done);
-            if let Some(at) = watch_mem {
+            if let Some(at) = memory.watch_mem {
                 if !seen_nonzero
                     && done % DEFAULT_INTERVAL == 0
                     && (0..0x1000u32)
@@ -160,8 +221,8 @@ fn main() {
                     seen_nonzero = true;
                 }
             }
-            if let Some((addr, value)) = poke {
-                match poke_at {
+            if let Some((addr, value)) = memory.poke_u32 {
+                match memory.poke_at {
                     Some(at) if done == at => {
                         let _ = cpu.mem.write_u32(addr, value);
                         println!("[poke] {addr:#x} = {value:#x} at step {done}");
@@ -172,13 +233,13 @@ fn main() {
                     _ => {}
                 }
             }
-            if let Some((lo, hi)) = cover {
+            if let Some((lo, hi)) = memory.cover {
                 let pc = cpu.get_pc();
                 if pc >= lo && pc < hi {
                     covered[((pc - lo) / 4) as usize] = true;
                 }
             }
-            if gate_sniff && gate.is_none() {
+            if memory.gate_sniff && gate.is_none() {
                 let pc = cpu.get_pc();
                 if let Ok(insn) = cpu.mem.read_u32(pc) {
                     if insn & 0xFFFF_FC1F == 0xB943_E808 {
@@ -198,68 +259,19 @@ fn main() {
         },
     );
 
-    if let Some((lo, _)) = cover {
-        let mut span: Option<u32> = None;
-        for (i, &hit) in covered.iter().enumerate() {
-            let at = lo + i as u32 * 4;
-            match (hit, span) {
-                (true, None) => span = Some(at),
-                (false, Some(start)) => {
-                    println!("[cover] {start:#x}..{at:#x}");
-                    span = None;
-                }
-                _ => {}
-            }
-        }
-        if let Some(start) = span {
-            println!("[cover] {start:#x}..end");
-        }
+    if let Some((lo, _)) = memory.cover {
+        report_cover(lo, &covered);
     }
-    if watch_mem.is_some() && !seen_nonzero {
+    if memory.watch_mem.is_some() && !seen_nonzero {
         println!("[watch-mem] never non-zero");
     }
-    if let Some(magic) = &cli.find_magic {
-        let wanted = u32::from_le_bytes(
-            magic
-                .as_bytes()
-                .first_chunk::<4>()
-                .copied()
-                .unwrap_or([0; 4]),
-        );
-        let mut hits = 0u32;
-        let mut at = 0u32;
-        while at < 0x8000_0000 && hits < 12 {
-            if cpu.mem.read_u32(at) == Ok(wanted) {
-                println!("[find] {magic} at {at:#x}");
-                hits += 1;
-            }
-            at += 4;
-        }
-        println!("[find] {magic}: {hits} hit(s)");
+    if let Some(magic) = &memory.find_magic {
+        find_magic(&cpu, magic);
     }
-    for &(lo, hi) in &cli.scan_mem {
-        let mut spans = Vec::new();
-        let mut span: Option<u32> = None;
-        for at in (lo..hi).step_by(4) {
-            let nonzero = cpu.mem.read_u32(at).unwrap_or(0) != 0;
-            match (nonzero, span) {
-                (true, None) => span = Some(at),
-                (false, Some(start)) => {
-                    spans.push((start, at - start));
-                    span = None;
-                }
-                _ => {}
-            }
-        }
-        if let Some(start) = span {
-            spans.push((start, hi - start));
-        }
-        println!("  {} non-zero spans in {lo:#x}+{:#x}", spans.len(), hi - lo);
-        for (at, len) in spans.iter().take(40) {
-            println!("    {at:#x} .. +{len:#x}");
-        }
+    for &(lo, hi) in &memory.scan_mem {
+        scan_mem(&cpu, lo, hi);
     }
-    for &at in &cli.dump_verts {
+    for &at in &memory.dump_verts {
         let f: Vec<f32> = (0..45u32)
             .map(|k| f32::from_bits(cpu.mem.read_u32(at + k * 4).unwrap_or(0)))
             .collect();
@@ -275,8 +287,10 @@ fn main() {
     common::report(&cpu, &run);
     debug.report();
     debug.stop_state(&cpu);
+    // The browser's Rendering panel: device draws and fallbacks.
+    println!("rendering: {}", cpu.nv.gpu.renderer_report());
 
-    for spec in &cli.dump_surface {
+    for spec in &memory.dump_surface {
         dump_surface(&cpu, spec, out);
     }
 
@@ -286,6 +300,95 @@ fn main() {
         return;
     }
     common::write_ppm(out, fb);
+}
+
+/// The GPU backend configured from `device`, or the rasterizer when asked for or when no adapter opens.
+fn open_renderer(software: bool, device: &Device) -> Box<dyn Renderer> {
+    if software {
+        println!("[gpu] software");
+        return Box::new(Software);
+    }
+    match switch_gpu::Gpu::open() {
+        Ok(mut gpu) => {
+            gpu.set_defer_readbacks(device.defer_readbacks);
+            gpu.set_sync_every_present(device.sync_every_present);
+            gpu.set_interleave(device.interleave);
+            gpu.set_web_limits(device.web_limits);
+            gpu.set_device_msaa(device.device_msaa);
+            gpu.set_times(device.times);
+            gpu.set_only(device.only.clone());
+            println!("[gpu] installed");
+            Box::new(gpu)
+        }
+        Err(why) => {
+            eprintln!("no GPU backend ({why}): drawing in software");
+            Box::new(Software)
+        }
+    }
+}
+
+/// Print the `--cover` range's runs of executed instructions.
+fn report_cover(lo: u32, covered: &[bool]) {
+    let mut span: Option<u32> = None;
+    for (i, &hit) in covered.iter().enumerate() {
+        let at = lo + i as u32 * 4;
+        match (hit, span) {
+            (true, None) => span = Some(at),
+            (false, Some(start)) => {
+                println!("[cover] {start:#x}..{at:#x}");
+                span = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(start) = span {
+        println!("[cover] {start:#x}..end");
+    }
+}
+
+/// Print up to 12 word-aligned places in the low 2 GiB holding `magic`'s first four bytes.
+fn find_magic(cpu: &switch_core::cpu::Cpu, magic: &str) {
+    let wanted = u32::from_le_bytes(
+        magic
+            .as_bytes()
+            .first_chunk::<4>()
+            .copied()
+            .unwrap_or([0; 4]),
+    );
+    let mut hits = 0u32;
+    let mut at = 0u32;
+    while at < 0x8000_0000 && hits < 12 {
+        if cpu.mem.read_u32(at) == Ok(wanted) {
+            println!("[find] {magic} at {at:#x}");
+            hits += 1;
+        }
+        at += 4;
+    }
+    println!("[find] {magic}: {hits} hit(s)");
+}
+
+/// Print the non-zero spans of `lo..hi`.
+fn scan_mem(cpu: &switch_core::cpu::Cpu, lo: u32, hi: u32) {
+    let mut spans = Vec::new();
+    let mut span: Option<u32> = None;
+    for at in (lo..hi).step_by(4) {
+        let nonzero = cpu.mem.read_u32(at).unwrap_or(0) != 0;
+        match (nonzero, span) {
+            (true, None) => span = Some(at),
+            (false, Some(start)) => {
+                spans.push((start, at - start));
+                span = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(start) = span {
+        spans.push((start, hi - start));
+    }
+    println!("  {} non-zero spans in {lo:#x}+{:#x}", spans.len(), hi - lo);
+    for (at, len) in spans.iter().take(40) {
+        println!("    {at:#x} .. +{len:#x}");
+    }
 }
 
 /// One `--dump-surface` entry: `<addr>:<w>x<h>:<format>[:<block height>]`.

@@ -18,7 +18,7 @@ Section headings are paths under `crates/switch-gpu/src/`; a heading that starts
 
 **2D blits run where their surfaces are.** `Renderer::blit` answers before `Engine2D::LAUNCHES_BLIT` runs: `Done` when the source is, or can be, held as the surface the registers name and the destination takes the same colour format (`blit.rs`, the engine's per-texel arithmetic in a shader, byte-identical with it in the parity tests); `GuestMemory` when neither surface overlaps anything held or on its way back, so no flush is needed; `Flush` otherwise. A blit whose surfaces overlap nothing held still goes to the device when it covers at least 256x256 texels (`UPLOAD_BLIT_TEXELS`): Minecraft's menus filter a 2560x720 image nothing draws to, which took 60% of the emulator thread on the CPU every frame. Guest writes are checked first, so a changed source goes through a flush instead of being read stale. Routing a resolve through guest memory was most of a frame in A Short Hike.
 
-**A present brings back only what the display reads.** `submit_frame` reads back the scan-out surface and whatever the guest rebound; every other surface stays held and dirty across the present. Reading all of them back, destroying them and re-uploading them next frame was most of what remained. `Space::sync_all` requests the old full sync at the next present when something else depends on guest memory: a guest write to a held surface's pages, a texture upload overlapping a dirty surface, or a new surface aliasing a held one. Holding more than `MAX_HELD_BYTES` does the same. **A guest reading a render target's memory directly, with no copy, is not seen.** `--sync-every-present` on `screenshot_gpu` restores the full sync, to compare frames byte for byte.
+**A present brings back only what the display reads.** `submit_frame` reads back the scan-out surface and whatever the guest rebound; every other surface stays held and dirty across the present. Reading all of them back, destroying them and re-uploading them next frame was most of what remained. `Space::sync_all` requests the old full sync at the next present when something else depends on guest memory: a guest write to a held surface's pages, a texture upload overlapping a dirty surface, or a new surface aliasing a held one. Holding more than `MAX_HELD_BYTES` does the same. **A guest reading a render target's memory directly, with no copy, is not seen.** `--sync-every-present` on `screenshot` restores the full sync, to compare frames byte for byte.
 
 **An attribute past its stride reads from a later buffer.** Maxwell takes any offset and WebGPU wants it inside the stride, so `within_stride` binds such an attribute's array whole strides later (appstore's offset 32 on stride 8).
 
@@ -28,7 +28,7 @@ Section headings are paths under `crates/switch-gpu/src/`; a heading that starts
 
 **Two renderers disagree by a 255th where a channel lands on a half**: `ColorFormat::encode` rounds `127.5` up and a device's unorm conversion rounds it down, so a test wanting byte-identity picks values off the eight-bit half-way points.
 
-**Checking the backend** means running `screenshot_title` and `screenshot_gpu` over the same frame and `cmp`ing the PPMs; a byte-identical pair is the only evidence it renders what the rasterizer does, and `--only <i>` (or `<a>..<b>`) narrows a difference to one draw. `gpu::testing::Harness` is the faster half: a drawable `Engine3D` that both renderers are driven over, so a route can be checked without booting a title. hbmenu is not a shader-core test: its command list is `dkCmdBufCopyBufferToImage` plus a fence.
+**Checking the backend** means running `screenshot` with and without `--software` over the same frame and `cmp`ing the PPMs; a byte-identical pair is the only evidence it renders what the rasterizer does, and `--only <i>` (or `<a>..<b>`) narrows a difference to one draw. `gpu::testing::Harness` is the faster half: a drawable `Engine3D` that both renderers are driven over, so a route can be checked without booting a title. hbmenu is not a shader-core test: its command list is `dkCmdBufCopyBufferToImage` plus a fence.
 
 ## `convert.rs`
 
@@ -79,7 +79,3 @@ Section headings are paths under `crates/switch-gpu/src/`; a heading that starts
 ## `tests.rs`
 
 - `shader::wgsl` dispatch keeps an unreachable trailing `return false;` because naga requires it (Tint warns); a test fails once naga stops requiring it.
-
-## `crates/switch-gpu/examples/screenshot_gpu.rs`
-
-- Includes `switch-core`'s `examples/common` by path to avoid drifting copies. `--docked` docks before boot; `--dock-at <frame>` docks mid-run like a real dock, telling the running title through AM messages. The GPU backend reaches late faults much faster, so it suits `--trap-write`/`--watch-pc` debugging.

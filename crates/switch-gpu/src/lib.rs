@@ -451,9 +451,9 @@ pub struct Gpu {
     sync_every_present: bool,
     /// Multisample resampling pipelines. See [`resample_wgsl`].
     resample_pipelines: std::collections::HashMap<ResampleKey, wgpu::RenderPipeline>,
-    /// `--web-limits` on `screenshot_gpu`: hide native-only features so a native run takes the browser's routes.
+    /// `--web-limits` on `screenshot`: hide native-only features so a native run takes the browser's routes.
     web_limits: bool,
-    /// `--device-msaa` on `screenshot_gpu`: let the device multisample where it can. Off: see [`Gpu::route`].
+    /// `--device-msaa` on `screenshot`: let the device multisample where it can. Off: see [`Gpu::route`].
     device_msaa: bool,
     /// Device rejections, written by the uncaptured-error callback.
     failed: std::sync::Arc<std::sync::Mutex<DeviceErrors>>,
@@ -469,9 +469,9 @@ pub struct Gpu {
     batched_draws: u32,
     /// Depth surfaces switched between sizes on the device. See [`Gpu::switch_crop`].
     crop_switches: u64,
-    /// `--defer-readbacks` on `screenshot_gpu`: never wait for readbacks, to reproduce a browser natively.
+    /// `--defer-readbacks` on `screenshot`: never wait for readbacks, to reproduce a browser natively.
     defer_readbacks: bool,
-    /// `--interleave` on `screenshot_gpu`: interleave fallback draws into device frames even with late readbacks.
+    /// `--interleave` on `screenshot`: interleave fallback draws into device frames even with late readbacks.
     /// Slightly wrong frames for speed; off by default.
     interleave: bool,
     /// Whether the rasterizer has the whole frame. Latches; released after
@@ -512,7 +512,7 @@ pub struct Gpu {
     pub per_pixel: u64,
     /// Which draw of the current frame this is; only `--only` reads it.
     in_frame: u32,
-    /// Phase timings; always on under wasm, `--times` on `screenshot_gpu`.
+    /// Phase timings; always on under wasm, `--times` on `screenshot`.
     times: Option<Times>,
     /// What every draw's `Uploads::of` read, by category.
     uploaded: UploadBytes,
