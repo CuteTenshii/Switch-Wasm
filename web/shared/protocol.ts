@@ -413,6 +413,8 @@ export type WorkerMessage =
   | ({ type: 'keyboard' } & KeyboardRequest)
   // The guest's profile edits are stored; the page reloads them.
   | { type: 'profiles_edited' }
+  // Once at startup: another tab holds the stored card, saves and NAND, so this one keeps no changes.
+  | { type: 'storage_read_only' }
   // The link to the relay changed: `unreachable` is a socket that failed or closed.
   | { type: 'net_state'; state: NetState }
   | { id: number; ok: true; result: unknown }

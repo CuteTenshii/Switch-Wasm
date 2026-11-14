@@ -7,6 +7,7 @@ import { workerErrorText } from '../shared/workererror';
 import { setAudioFormat, setAudioRing } from './audio';
 import { log } from './log';
 import { setMailbox } from './mailbox';
+import { showReadOnly } from './readonly';
 
 let worker: Worker | null = null;
 let ready = false;
@@ -123,6 +124,9 @@ export function initWorker(): void {
         break;
       case 'profiles_edited':
         loopEvents?.profilesEdited();
+        break;
+      case 'storage_read_only':
+        showReadOnly();
         break;
       case 'input_mailbox':
         setMailbox(d.buffer, d.at);

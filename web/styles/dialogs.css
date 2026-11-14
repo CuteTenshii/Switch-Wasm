@@ -1,4 +1,4 @@
-/* Keyboard dialog: text the running title asked for. The error dialog uses its frame. */
+/* Keyboard dialog: text the running title asked for. The error and read-only dialogs use its frame. */
 .keyboard {
   width: min(420px, calc(100vw - 32px));
   padding: 16px;

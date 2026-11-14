@@ -233,6 +233,18 @@
     </form>
   </dialog>
 
+  <dialog class="keyboard" id="read-only" aria-labelledby="read-only-title" aria-describedby="read-only-text">
+    <form method="dialog">
+      <h2 id="read-only-title">Already open in another tab</h2>
+      <p id="read-only-text">Another tab is using your SD card, saves and installed firmware. This tab can still run games and show your files, but it can't change them: game progress made here is lost when the tab closes.</p>
+      <p>To play with saving, close the other tab, then reload this one.</p>
+      <div class="keyboard-actions">
+        <button type="button" class="btn" id="btn-read-only-reload">Reload</button>
+        <button type="submit" class="btn primary">Continue without saving</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="files" id="files" aria-labelledby="files-title">
     <header class="files-head">
       <h2 id="files-title">Storage</h2>

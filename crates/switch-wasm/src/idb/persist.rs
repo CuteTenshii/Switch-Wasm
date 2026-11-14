@@ -1,5 +1,6 @@
-//! The SD card and saves in IndexedDB: restored into the session when it starts, and
-//! written as the guest changes them, without a trip through the page.
+//! The SD card and saves: restored into the session when it starts and stored as the guest
+//! changes them, without a trip through the page. They live in OPFS
+//! (`opfs/volumes.rs`) where it can be written, and in IndexedDB here otherwise.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -13,9 +14,10 @@ use wasm_bindgen_futures::JsFuture;
 use super::{
     self as idb, NAND_DB, NAND_SAVES, NAND_STORES, NAND_VERSION, SD_DB, SD_STORE, SD_VERSION,
 };
+use crate::opfs::volumes;
 use crate::post::post;
 use crate::session_if_live;
-use crate::storage::parse_save_key;
+use crate::storage::{parse_save_key, writable};
 
 /// Stored entries by key; `None` deletes the key.
 type Backlog = BTreeMap<String, Option<JsValue>>;
@@ -53,7 +55,7 @@ pub(crate) fn tick() {
     *running = true;
     wasm_bindgen_futures::spawn_local(async {
         switch_flush_storage().await;
-        if super::users::switch_store_profile_edits().await {
+        if writable() && super::users::switch_store_profile_edits().await {
             post("profiles_edited", &[]);
         }
         unsafe { *TICK_RUNNING.get() = false };
@@ -75,6 +77,22 @@ fn log(level: Level, line: &str) {
 /// Load the stored card and saves through the host's restore path, which is not a guest change.
 #[wasm_bindgen]
 pub async fn switch_restore_storage() -> u32 {
+    match volumes::restore().await {
+        Some(Ok((card, saves))) => {
+            log(
+                Level::Debug,
+                &format!("Storage: {card} SD card and {saves} save entries in OPFS"),
+            );
+            super::controls::restore().await;
+            super::usage::refresh().await;
+            return 0;
+        }
+        Some(Err(err)) => log(
+            Level::Error,
+            &format!("Storage: OPFS could not be read ({err:?}); using IndexedDB this session"),
+        ),
+        None => {}
+    }
     match restore_sd().await {
         Ok(0) => {}
         Ok(n) => log(Level::Debug, &format!("SD card: restored {n} entries")),
@@ -93,7 +111,7 @@ pub async fn switch_restore_storage() -> u32 {
     0
 }
 
-async fn stored(
+pub(crate) async fn stored(
     db: &str,
     version: u32,
     stores: &[&str],
@@ -112,9 +130,9 @@ async fn stored(
 }
 
 /// One stored `{ kind, data? }`; `data` is `None` for a directory.
-struct Stored {
-    key: String,
-    data: Option<Vec<u8>>,
+pub(crate) struct Stored {
+    pub(crate) key: String,
+    pub(crate) data: Option<Vec<u8>>,
 }
 
 impl Stored {
@@ -174,7 +192,19 @@ async fn restore_saves() -> Result<usize, JsValue> {
 /// has failed to be and is kept for the next flush.
 #[wasm_bindgen]
 pub async fn switch_flush_storage() -> u32 {
+    if volumes::active() {
+        volumes::flush().await;
+        return 0;
+    }
     take_changes();
+    // A read-only tab keeps the guest's changes in its session and stores none of them.
+    if !writable() {
+        FLUSH.with_borrow_mut(|f| {
+            f.sd.clear();
+            f.saves.clear();
+        });
+        return 0;
+    }
     if FLUSH.with_borrow(|f| f.running) {
         let waiting = Promise::new(&mut |resolve: Function, _| {
             FLUSH.with_borrow_mut(|f| f.waiters.push(resolve));

@@ -204,7 +204,7 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
     let key = SaveKey::from_halves(SAVE, USER_LO, USER_HI);
     let _host = new_session();
 
-    // Restores are not reported as changes.
+    // A page edit is a change, so the next flush stores it.
     let path = "/settings.dat";
     let body = b"saved";
     switch_fs_write(
@@ -213,7 +213,8 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
         body,
     )
     .unwrap();
-    assert_eq!(session().cpu.save_data_mut(key).pending_changes(), 0);
+    assert_eq!(session().cpu.save_data_mut(key).pending_changes(), 1);
+    session().cpu.save_data_mut(key).take_changes();
 
     // A save with only a directory is listed; the shared save is a separate one.
     switch_fs_create_dir("0100000000001000", "/").unwrap();
@@ -314,10 +315,12 @@ fn users_are_staged_committed_and_read_back() {
 fn the_sd_card_round_trips_through_the_host_entry_points() {
     let _host = new_session();
 
-    // Restores are not reported as changes.
+    // A page edit is a change, so the next flush stores it.
     put("sdmc:/switch/restored.txt", b"hello");
-    assert_eq!(session().cpu.fs.pending_changes(), 0);
-    assert!(session().cpu.fs.take_changes().is_empty());
+    assert_eq!(
+        session().cpu.fs.take_changes(),
+        [change("/switch/restored.txt", Some(ENTRY_TYPE_FILE), 5)]
+    );
 
     // A guest write is: `IFile::Write` at offset 0 of a new file.
     {

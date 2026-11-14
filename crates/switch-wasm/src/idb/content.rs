@@ -15,6 +15,7 @@ use web_sys::{Blob, FileSystemDirectoryHandle, IdbDatabase};
 use super::{self as idb, NAND_CONTENT, NAND_DB, NAND_STORES, NAND_TITLES, NAND_VERSION};
 use crate::opfs::{self, PART};
 use crate::session_if_live;
+use crate::storage::{claimed, READ_ONLY};
 
 /// The OPFS directory holding NAND content, a file per NCA.
 pub(crate) const NAND_OPFS_DIR: &str = "nand";
@@ -57,13 +58,18 @@ async fn ready() -> Option<FileSystemDirectoryHandle> {
 }
 
 async fn start() -> Option<FileSystemDirectoryHandle> {
-    let Some(dir) = opfs::dir(NAND_OPFS_DIR, true).await else {
+    let writable = claimed().await;
+    let Some(dir) = opfs::dir(NAND_OPFS_DIR, writable).await else {
         log(
             Level::Debug,
             "[nand] content is kept in IndexedDB: there is no OPFS to write to",
         );
         return None;
     };
+    // Another tab may be reading what a sweep would remove.
+    if !writable {
+        return Some(dir);
+    }
     if let Err(err) = sweep(&dir).await {
         log(
             Level::Warn,
@@ -82,6 +88,9 @@ where
     F: FnOnce(Option<FileSystemDirectoryHandle>) -> Fut + 'static,
     Fut: Future<Output = Result<JsValue, JsValue>> + 'static,
 {
+    if !claimed().await {
+        return Err(READ_ONLY.into());
+    }
     let previous = TAIL.with(|tail| tail.borrow().clone());
     let run = future_to_promise(async move {
         if let Some(previous) = previous {

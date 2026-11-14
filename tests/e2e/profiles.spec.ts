@@ -52,24 +52,47 @@ async function submitUid(page: Page, name: string, uid: string): Promise<void> {
   await input.press('Enter');
 }
 
-// Every key in the NAND's saves store, after putting `seed` there.
-async function saveKeys(page: Page, seed: string[] = []): Promise<string[]> {
-  return page.evaluate(async (keys) => {
+// Stores `keys` (`<save id>/<path>`) the way older builds did, in IndexedDB, and reloads so the
+// startup move to OPFS brings them into the session.
+async function seedSaves(page: Page, keys: string[]): Promise<void> {
+  await page.evaluate(async (seed) => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       const req = indexedDB.open('switch-wasm-nand');
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error ?? new Error('open failed'));
     });
     const tx = db.transaction('saves', 'readwrite');
-    const store = tx.objectStore('saves');
-    for (const key of keys) store.put({ kind: 'file', data: new Uint8Array([1, 2, 3]) }, key);
-    const all = store.getAllKeys();
+    for (const key of seed) tx.objectStore('saves').put({ kind: 'file', data: new Uint8Array([1, 2, 3]) }, key);
     await new Promise((resolve) => {
       tx.oncomplete = resolve;
     });
     db.close();
-    return (all.result as string[]).sort();
-  }, seed);
+  }, keys);
+  await reloadPage(page);
+  await openProfiles(page);
+}
+
+// Every stored save file as `<save id>/<path>`, read from OPFS.
+async function saveKeys(page: Page): Promise<string[]> {
+  return page.evaluate(async () => {
+    const out: string[] = [];
+    let saves: FileSystemDirectoryHandle;
+    try {
+      saves = await (await navigator.storage.getDirectory()).getDirectoryHandle('saves');
+    } catch {
+      return out;
+    }
+    const walk = async (dir: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
+      for await (const [name, handle] of dir.entries()) {
+        if (handle.kind === 'file') out.push(prefix + '/' + name);
+        else await walk(handle, prefix + '/' + name);
+      }
+    };
+    for await (const [name, handle] of saves.entries()) {
+      if (handle.kind === 'directory') await walk(handle, name);
+    }
+    return out.sort();
+  });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -134,7 +157,7 @@ test('a bad UID is refused with the reason, and Escape leaves it unchanged', asy
 test('a new UID takes the profile\'s saves along and survives a reload', async ({ page }) => {
   const old = await uidOf(page, 'Player');
   const fresh = '0123456789abcdef0123456789abcdef';
-  await saveKeys(page, [`0100000000001000@${old}/save.bin`, '0100000000002000/shared.bin']);
+  await seedSaves(page, [`0100000000001000@${old}/save.bin`, '0100000000002000/shared.bin']);
 
   await submitUid(page, 'Player', fresh.toUpperCase());
   await expect(row(page, 'Player').locator('.profile-uid')).toHaveText(fresh);
@@ -150,7 +173,7 @@ test('a UID change is refused when both UIDs hold a save of the same title', asy
   const old = await uidOf(page, 'Player');
   const other = 'fedcba9876543210fedcba9876543210';
   const seeded = [`0100000000001000@${old}/a.bin`, `0100000000001000@${other}/b.bin`].sort();
-  await saveKeys(page, seeded);
+  await seedSaves(page, seeded);
   await submitUid(page, 'Player', other);
   await expect(page.locator('.profile-error')).toContainText('already has saves for title 0100000000001000');
   await expect(page.locator('.profile-uid-form')).toBeVisible();

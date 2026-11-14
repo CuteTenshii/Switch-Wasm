@@ -202,6 +202,7 @@ pub fn switch_init() {
     {
         audio::announce_ring();
         input::announce_mailbox();
+        storage::start_claim();
     }
 }
 

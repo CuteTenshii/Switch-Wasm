@@ -121,11 +121,21 @@ declare module '@core/switch_wasm.js' {
   export function switch_user_stage(
     uid: string, nickname: string, editedAt: number, picture: Uint8Array | null): void;
   export function switch_users_commit(current: string): number;
-  // `storage.rs`: the running session's files. `storage` is `sd`, or a save's id,
-  // `<16 hex digits>` or `<id>@<32 hex digits of the owner's uid>`.
+  // `storage.rs`: the session's files, which the next flush stores. `storage` is `sd`, or a
+  // save's id, `<16 hex digits>` or `<id>@<32 hex digits of the owner's uid>`.
+  // Whether this tab stores anything: another tab holding the storage makes it read-only.
+  export function switch_storage_writable(): Promise<boolean>;
   export function switch_fs_write(storage: string, path: string, data: Uint8Array): void;
   export function switch_fs_create_dir(storage: string, path: string): void;
   export function switch_fs_remove(storage: string, path: string): void;
+  // `[path, kind, size]`, kind 0 for a directory and 1 for a file.
+  export function switch_fs_entries(storage: string): [string, number, number][];
+  // A file's bytes; undefined for a directory or a missing path.
+  export function switch_fs_read(storage: string, path: string): Uint8Array<ArrayBuffer> | undefined;
+  // The saves holding anything.
+  export function switch_saves(): string[];
+  // `opfs/volumes.rs`: copied into OPFS by range where it holds the card.
+  export function switch_fs_upload(storage: string, path: string, file: Blob): Promise<void>;
 }
 
 // The commit the site was built from; see `vite.config.ts`.

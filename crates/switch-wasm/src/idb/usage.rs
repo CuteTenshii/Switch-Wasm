@@ -1,10 +1,10 @@
-//! What IndexedDB and OPFS hold and the origin has left, reported to the core for the
+//! What the SD card, saves and NAND hold and the origin has left, reported to the core for the
 //! filesystem space queries (which cannot wait on a promise themselves).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use js_sys::{Array, ArrayBuffer, Function, Promise, Reflect, Uint8Array};
+use js_sys::{Array, ArrayBuffer, Function, Promise, Reflect};
 use switch_core::cpu::StorageUsage;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
@@ -13,7 +13,7 @@ use web_sys::{
 };
 
 use super::content::NAND_OPFS_DIR;
-use super::{drive, NAND_CONTENT, NAND_DB, NAND_SAVES, SD_DB, SD_STORE};
+use super::{drive, NAND_CONTENT, NAND_DB};
 use crate::session_if_live;
 
 /// Least time between two scans.
@@ -75,12 +75,18 @@ async fn measure() -> Result<StorageUsage, JsValue> {
         },
         ..StorageUsage::default()
     };
-    if present.iter().any(|name| name == SD_DB) {
-        usage.sd = store_bytes(&factory, SD_DB, SD_STORE, entry_bytes).await?;
-    }
     if present.iter().any(|name| name == NAND_DB) {
         usage.system += store_bytes(&factory, NAND_DB, NAND_CONTENT, content_bytes).await?;
-        usage.user = store_bytes(&factory, NAND_DB, NAND_SAVES, entry_bytes).await?;
+    }
+    // The session holds the whole card and every save, whichever store keeps them.
+    if let Some(s) = session_if_live() {
+        usage.sd = s.cpu.fs.bytes();
+        usage.user = s
+            .cpu
+            .save_keys()
+            .into_iter()
+            .filter_map(|key| s.cpu.save_data(key).map(|vfs| vfs.bytes()))
+            .sum();
     }
     Ok(usage)
 }
@@ -137,14 +143,6 @@ async fn store_bytes(
     };
     db.close();
     outcome.map(|()| total.get())
-}
-
-/// An SD card or save entry: `{ kind, data? }`.
-fn entry_bytes(entry: &JsValue) -> u64 {
-    Reflect::get(entry, &"data".into())
-        .ok()
-        .and_then(|data| data.dyn_into::<Uint8Array>().ok())
-        .map_or(0, |data| u64::from(data.byte_length()))
 }
 
 /// A NAND content file, stored as a `Blob` (an `ArrayBuffer` in older stores).
