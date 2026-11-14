@@ -516,13 +516,20 @@ impl Gpu {
             {
                 return Err(format!(
                     "samples a {}x{} image out of a {}x{} surface held on the device \
-                     that lays its rows out differently (layer {layer} of {} at {:#x})",
+                     that lays its rows out differently (layer {layer} of {} at {:#x}): \
+                     sampled {:?} {:?} stride {:#x}, held {:?} {:?} dirty {}",
                     upload.width,
                     upload.height,
                     size.width,
                     size.height,
                     upload.layers,
-                    upload.key.addr
+                    upload.key.addr,
+                    upload.format,
+                    upload.key.layout,
+                    upload.key.layer_stride,
+                    held.texture.format(),
+                    held.target.layout,
+                    held.dirty
                 ));
             }
             let (format, widening) = sampled_texture_format(self.features(), upload.format)
