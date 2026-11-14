@@ -6,7 +6,7 @@ Goal: get real homebrew and real retail titles to **run**, and put what they ren
 
 Per-title status lives in [compat.md](compat.md).
 
-A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` → `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its graphics stack, opens its audio device, and runs on into its own loop. Almost every service command it asks for has a real implementation: of the retail titles in compat.md, only Asphalt 9 logs an `unimplemented` line (`acc:manager` 150).
+A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` → `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its graphics stack, opens its audio device, and runs on into its own loop. Almost every service command it asks for has a real implementation; `acc:manager` 150, which Asphalt 9 calls, is one that does not.
 
 ## Method, which is the part that generalises
 
