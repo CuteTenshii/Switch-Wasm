@@ -1131,6 +1131,54 @@ impl Cpu {
         }
     }
 
+    /// `nfp:sys` and its `ISystem`, the amiibo service: no reader attached.
+    pub(crate) fn nfp_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        /// `nn::nfc::State`.
+        const STATE_NON_INITIALIZED: u32 = 0;
+        const STATE_INITIALIZED: u32 = 1;
+        if self.ipc_answer_control(tls, handle, "nfp:sys", cmd_id)? {
+            return Ok(());
+        }
+        let iface = self.ipc_interface(tls, handle, "nfp:sys");
+        match iface.as_str() {
+            "nfp:system" => match cmd_id {
+                Some(0) => {
+                    self.nfp_initialized = true;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(1) => {
+                    self.nfp_initialized = false;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // ListDevices: none.
+                Some(2) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+                Some(19) => {
+                    let state = if self.nfp_initialized {
+                        STATE_INITIALIZED
+                    } else {
+                        STATE_NON_INITIALIZED
+                    };
+                    self.write_ipc_response(tls, 0, &[], &state.to_le_bytes(), &[])
+                }
+                // GetAvailabilityChangeEventHandle: never signalled.
+                Some(23) => {
+                    let event = self.kept_event("nfp:availability", handle);
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                }
+                // Everything else names a device, and there are none.
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // ISystemManager: CreateSystemInterface.
+            _ => match cmd_id {
+                Some(0) => {
+                    self.reply_with_interface(tls, handle, "nfp:system")?;
+                    Ok(())
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+        }
+    }
+
     /// `ngc:u` and `ngct:u`, the profanity filter: nothing is profane.
     pub(crate) fn ngc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         /// Nonzero, though there is no word list.
@@ -1745,6 +1793,36 @@ mod tests {
             "GetLastNotifiedTime result"
         );
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "never notified");
+    }
+
+    #[test]
+    fn nfp_lists_no_devices_and_reports_its_state() {
+        let mut cpu = request(false, 2, &[]);
+        cpu.register_service_handle(9, "nfp:system");
+        cpu.nfp_request(TLS, 9, Some(2)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "ListDevices result"
+        );
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "no devices");
+
+        write_request(&mut cpu, 19, &[]);
+        cpu.nfp_request(TLS, 9, Some(19)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "not initialized");
+        write_request(&mut cpu, 0, &[]);
+        cpu.nfp_request(TLS, 9, Some(0)).unwrap();
+        write_request(&mut cpu, 19, &[]);
+        cpu.nfp_request(TLS, 9, Some(19)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "initialized");
+
+        write_request(&mut cpu, 21, &[]);
+        cpu.nfp_request(TLS, 9, Some(21)).unwrap();
+        assert_ne!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "no device to name"
+        );
     }
 
     #[test]

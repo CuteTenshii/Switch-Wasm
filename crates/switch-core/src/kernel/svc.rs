@@ -1006,6 +1006,8 @@ impl Cpu {
                         "audctl" => self.audctl_request(tls, handle, cmd_id)?,
                         // nfc:sys; no reader attached.
                         "nfc:sys" | "nfc:system" => self.nfc_request(tls, handle, cmd_id)?,
+                        // nfp:sys, amiibo; no reader attached.
+                        "nfp:sys" | "nfp:system" => self.nfp_request(tls, handle, cmd_id)?,
                         // btm:sys, the Bluetooth manager.
                         "btm:sys" | "btm:core" => self.btm_request(tls, handle, cmd_id)?,
                         // ngc, the profanity filter.
