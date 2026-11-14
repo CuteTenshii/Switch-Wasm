@@ -1374,3 +1374,17 @@ fn a_stride_off_a_word_is_widened_to_one() {
     let (same, stride) = super::aligned_stride(std::borrow::Cow::Borrowed(&bytes[..4]), 4);
     assert_eq!((same.as_ref(), stride), (&bytes[..4], 4));
 }
+
+#[test]
+fn same_bytes_agrees_with_slice_equality() {
+    use super::bind::same_bytes;
+    let base: Vec<u8> = (0..200u32).map(|i| (i * 7 + 3) as u8).collect();
+    assert!(same_bytes(&base, &base.clone()));
+    assert!(same_bytes(&[], &[]));
+    assert!(!same_bytes(&base, &base[..199]));
+    for at in 0..base.len() {
+        let mut other = base.clone();
+        other[at] ^= 0x40;
+        assert!(!same_bytes(&base, &other), "a difference at byte {at}");
+    }
+}

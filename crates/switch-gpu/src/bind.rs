@@ -17,6 +17,26 @@ use switch_core::gpu::surface::{
 use switch_core::gpu::upload::TextureKey;
 use switch_core::gpu::upload::{ConstantUpload, Uploads};
 
+/// `a == b` for byte slices, a word at a time: wasm's `memcmp` goes a byte at a time, and a cache
+/// hit compares tens of kilobytes of constants.
+pub(super) fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (a_blocks, a_rest) = a.as_chunks::<32>();
+    let (b_blocks, b_rest) = b.as_chunks::<32>();
+    let word = |block: &[u8; 32], at: usize| {
+        u64::from_ne_bytes(block[at..at + 8].try_into().expect("eight bytes"))
+    };
+    a_blocks.iter().zip(b_blocks).all(|(x, y)| {
+        (word(x, 0) ^ word(y, 0))
+            | (word(x, 8) ^ word(y, 8))
+            | (word(x, 16) ^ word(y, 16))
+            | (word(x, 24) ^ word(y, 24))
+            == 0
+    }) && a_rest.iter().zip(b_rest).all(|(x, y)| x == y)
+}
+
 /// A fast fingerprint of what a stage binds. Constants run to tens of kilobytes a draw, which
 /// the default hasher is too slow for; four lanes keep the multiplies from waiting on each other.
 fn fingerprint(entries: &[wgpu::BindGroupLayoutEntry], resources: &[Resource]) -> u64 {

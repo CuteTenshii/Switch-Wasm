@@ -647,14 +647,17 @@ impl Gpu {
     /// guest memory, which has to catch up.
     pub(super) fn note_aliases(&mut self, target: &Target) {
         let new = surface_span(target);
-        if self
+        let overlapped: Vec<u64> = self
             .space
             .held
             .values()
-            .any(|held| held.target.addr != target.addr && spans_overlap(&held_span(held), &new))
-        {
+            .filter(|held| held.target.addr != target.addr && spans_overlap(&held_span(held), &new))
+            .map(|held| held.target.addr)
+            .collect();
+        if !overlapped.is_empty() {
             self.syncs[3] += 1;
-            self.space.sync_all = true;
+            self.space.aliased.extend(overlapped);
+            self.space.aliased.push(target.addr);
         }
     }
 
@@ -671,18 +674,21 @@ impl Gpu {
         }
     }
 
-    /// Start watching the pages of surfaces no readback is about to write, and ask for a full
-    /// sync when a page already watched was written, which only the guest can have done.
+    /// Start watching the pages of surfaces no readback is about to write, and send back the
+    /// surfaces whose watched pages were written, which only the guest can have done.
     pub(super) fn watch_held(&mut self, ctx: &ExecCtx, written: &[u32]) {
-        if !written.is_empty()
-            && self
+        if !written.is_empty() {
+            let hit: Vec<u64> = self
                 .space
                 .held
                 .values()
-                .any(|held| held.watched.iter().any(|page| written.contains(page)))
-        {
-            self.syncs[5] += 1;
-            self.space.sync_all = true;
+                .filter(|held| held.watched.iter().any(|page| written.contains(page)))
+                .map(|held| held.target.addr)
+                .collect();
+            if !hit.is_empty() {
+                self.syncs[5] += 1;
+                self.space.aliased.extend(hit);
+            }
         }
         let pending: Vec<_> = self
             .space
@@ -712,6 +718,9 @@ impl Gpu {
             if let Some(addr) = scanout {
                 self.flush_one(addr);
             }
+            for addr in std::mem::take(&mut self.space.aliased) {
+                self.flush_one(addr);
+            }
             self.ask_for_globals();
         });
     }
@@ -720,6 +729,7 @@ impl Gpu {
     fn ask_for_all(&mut self) {
         timed!(self, flush_ask, {
             self.space.sync_all = false;
+            self.space.aliased.clear();
             self.space.asked += 1;
             for held in std::mem::take(&mut self.space.evicted) {
                 self.ask_for(held);
@@ -817,6 +827,11 @@ impl Gpu {
                 !self.space.held.is_empty()
             } else {
                 shown.is_some()
+                    || self
+                        .space
+                        .aliased
+                        .iter()
+                        .any(|addr| self.space.held.contains_key(addr))
             };
         if owed || !self.space.evicted.is_empty() {
             let mut asks: Vec<u64> = self.space.pending.iter().map(|p| p.generation).collect();
@@ -830,6 +845,7 @@ impl Gpu {
                 self.ask_for_scanout(shown);
             }
         }
+        self.space.aliased.clear();
         timed!(self, flush_wait, self.land_ready(ctx))?;
         if self.space.pending.is_empty() {
             return Ok(Submit::Done);

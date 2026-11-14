@@ -156,7 +156,9 @@ struct ClearKey {
 }
 
 /// A binding and what fills it, held until the bind group is built.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// `PartialEq` only changes how the bytes compare, so equal values still hash alike.
+#[allow(clippy::derived_hash_with_manual_eq)]
+#[derive(Debug, Clone, Eq, Hash)]
 enum Resource {
     /// A buffer something else holds on the device.
     Buffer(u32, wgpu::Buffer),
@@ -164,6 +166,18 @@ enum Resource {
     Bytes(u32, Vec<u8>),
     Texture(u32, wgpu::Texture, wgpu::TextureViewDimension),
     Sampler(u32, wgpu::Sampler),
+}
+
+impl PartialEq for Resource {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Buffer(a, x), Self::Buffer(b, y)) => a == b && x == y,
+            (Self::Bytes(a, x), Self::Bytes(b, y)) => a == b && bind::same_bytes(x, y),
+            (Self::Texture(a, x, p), Self::Texture(b, y, q)) => a == b && x == y && p == q,
+            (Self::Sampler(a, x), Self::Sampler(b, y)) => a == b && x == y,
+            _ => false,
+        }
+    }
 }
 
 /// Hand a draw's two WGSL modules to the dump sink, named by hash.
@@ -398,6 +412,9 @@ struct Space {
     /// Guest memory has to catch up with every surface at the next present: something
     /// other than a device surface is about to depend on it. See [`Gpu::submit_frame_inner`].
     sync_all: bool,
+    /// Surfaces that overlap another held at a different address: they go back at the next
+    /// present, and a blit touching held memory waits for that.
+    aliased: Vec<u64>,
     /// Asks made for a whole frame's surfaces; each readback carries its ask's number.
     asked: u64,
     /// Deswizzled texture bytes, evicted when the guest writes their pages.
@@ -931,7 +948,10 @@ impl Renderer for Gpu {
         if in_guest_memory && !blit::worth_uploading(blit) {
             return Ok(BlitRoute::GuestMemory);
         }
-        let route = if self.space.sync_all && !in_guest_memory && self.blit_aliases_held(blit) {
+        let route = if (self.space.sync_all || !self.space.aliased.is_empty())
+            && !in_guest_memory
+            && self.blit_aliases_held(blit)
+        {
             BlitRoute::Flush
         } else {
             self.blit_on_device(blit, ctx)
