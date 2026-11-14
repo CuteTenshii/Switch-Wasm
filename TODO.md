@@ -28,6 +28,10 @@ Each stage builds, passes `cargo test --workspace` and clippy, keeps every title
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
 - Compute dispatches, and copy-engine transfers that are not one plain run or that overlap a held surface, still send every held surface back; a per-surface flush would keep the rest on the device.
 - Minecraft's Terms and Conditions page panics in the `web` applet (`010000000000100a`): `Heap::allocate` fails for `0x2c000` bytes (2048 elements of `0x58`, built at `0x0818039c` in the 21.2.0 applet, count read from a config struct at `+0x9c`) from a heap object at `0x3004d000` in the applet's `SetHeapSize` region. Neither the applet heap size nor any `GetInfo` answer explains it; find where that heap's capacity is set.
+- Tomodachi Life: Living the Dream stays on its loading screen through frame 1500 (19.3B steps; `docs/compat.md`).
+- A host run that draws in software (`screenshot --software`) cannot take Minecraft past frame 7: it opens the error applet (code 0x208) and faults on a null read at 19.5B steps, though the browser plays it. On 2026-10-13 the same run reached frame 20.
+- `ncm` has no implementation. Homebrew also still opens a service under an empty name (Checkpoint does), and `sm` hands out a working handle instead of failing as real `sm` would.
+- Hinted fonts render 1-3px wide. The guest's own FreeType, running on the emulated CPU, gives glyphs from a font with hinting programs (`fpgm`/`prep`/`cvt`) correct heights and advances but collapsed bitmaps, as if untouched points never get interpolated; the same subset built with `tools/make_font.py --no-hinting` renders perfectly, so something the emulator runs under the hinting interpreter is wrong. The stand-in `web/font.ttf` has no hinting; whether the firmware fonts `pl:u` serves do is unchecked, and the bug has not been retested since many decode fixes landed.
 
 ## Video
 
