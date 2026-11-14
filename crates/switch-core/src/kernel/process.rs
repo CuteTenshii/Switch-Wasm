@@ -354,6 +354,9 @@ impl Cpu {
         // Frames count the title's presents; the host waits for its first.
         self.nv.gpu.frames = 0;
         self.last_vsync_frame = 0;
+        self.steps = 0;
+        self.switched_in_at = 0;
+        self.machine.lent_steps = 0;
         self.npad_style_set = 0;
         self.npad_id_types.clear();
         self.npad_joy_hold_type = 0;
@@ -527,6 +530,7 @@ mod tests {
         );
         assert_eq!(cpu.root, applet + 1);
         assert_eq!(cpu.nv.gpu.frames, 0, "the frame count carried over");
+        assert_eq!(cpu.steps, 0, "the instruction count carried over");
         assert_eq!(
             cpu.service_name(session),
             None,
