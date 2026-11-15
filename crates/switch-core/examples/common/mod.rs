@@ -385,6 +385,54 @@ fn load_font(cpu: &mut Cpu, font: Option<&[u8]>) {
     }
 }
 
+/// `--sd`: copy `dir` onto the SD card before `program` boots. Returns the path to launch the NRO
+/// from when it lies inside `dir`, as the page's Files dialog does.
+pub fn copy_sd(
+    cpu: &mut Cpu,
+    program: &Program,
+    dir: Option<&str>,
+    target: &Target,
+) -> Option<String> {
+    let dir = dir?;
+    if !program.is_homebrew() {
+        die("--sd needs an .nro");
+    }
+    copy_to_sd(cpu, Path::new(dir), Path::new(&target.target))
+}
+
+/// Copy `dir` onto the SD card root. Returns the NRO's SD path when it lies inside `dir`.
+fn copy_to_sd(cpu: &mut Cpu, dir: &Path, nro: &Path) -> Option<String> {
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        let entries = std::fs::read_dir(&at)
+            .unwrap_or_else(|e| panic!("SD: cannot list {}: {e}", at.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| panic!("SD: {}: {e}", at.display()));
+            let host = entry.path();
+            let sd = sd_name(dir, &host);
+            if host.is_dir() {
+                cpu.fs.create_dir(&sd);
+                pending.push(host);
+            } else {
+                cpu.fs.write_file(&sd, read(&host));
+            }
+        }
+    }
+    // Absolute without resolving links, so a directory linked into `dir` still counts as inside.
+    let (root, nro) = (
+        std::path::absolute(dir).ok()?,
+        std::path::absolute(nro).ok()?,
+    );
+    nro.starts_with(&root).then(|| sd_name(&root, &nro))
+}
+
+fn sd_name(root: &Path, host: &Path) -> String {
+    let relative = host
+        .strip_prefix(root)
+        .expect("a path under the SD directory");
+    format!("/{}", relative.to_string_lossy().replace('\\', "/"))
+}
+
 impl Target {
     /// The keys path a retail container needs.
     fn prod(&self) -> &str {

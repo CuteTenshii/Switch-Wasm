@@ -35,6 +35,10 @@ struct Cli {
     /// The presented frame to write.
     #[arg(long, default_value_t = 1)]
     frame: u64,
+    /// Copy this host directory onto the SD card; an NRO inside it is launched from its SD path,
+    /// as the page's Files dialog does, so it finds the files beside it.
+    #[arg(long, value_name = "DIR")]
+    sd: Option<String>,
     /// Instructions to run; unlimited for a retail title, 200 million for an `.nro`.
     #[arg(long)]
     steps: Option<u64>,
@@ -163,7 +167,8 @@ fn main() {
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    program.boot(&mut cpu, None);
+    let sd_path = common::copy_sd(&mut cpu, &program, cli.sd.as_deref(), &cli.target);
+    program.boot(&mut cpu, sd_path.as_deref());
 
     let mut last_shot = 0;
     let mut draw_gate = common::DrawGate::install(&mut cpu, renderer);

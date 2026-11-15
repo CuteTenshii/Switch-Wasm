@@ -3,12 +3,9 @@
 //! Usage: cargo run -p switch-core --example boot -- <target> [--keys <prod.keys>] [flags]
 mod common;
 
-use std::path::Path;
-
 use clap::Parser;
 use common::profile::Profile;
 use common::Flow;
-use switch_core::cpu::Cpu;
 
 #[derive(Parser)]
 struct Cli {
@@ -55,9 +52,6 @@ fn main() {
             .with(&cli.probe)
     });
     let program = cli.target.open_program();
-    if cli.sd.is_some() && !program.is_homebrew() {
-        common::die("--sd needs an .nro");
-    }
     let max_steps = cli.max_steps.unwrap_or(if program.is_homebrew() {
         u64::MAX
     } else {
@@ -66,10 +60,7 @@ fn main() {
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();
-    let sd_path = cli
-        .sd
-        .as_ref()
-        .and_then(|dir| copy_to_sd(&mut cpu, Path::new(dir), Path::new(&cli.target.target)));
+    let sd_path = common::copy_sd(&mut cpu, &program, cli.sd.as_deref(), &cli.target);
     let booted = program.boot(&mut cpu, sd_path.as_deref());
     if let Some(quota) = booted.quota {
         println!(
@@ -163,37 +154,4 @@ fn main() {
             None => println!("--- {show}: not on the SD card ---"),
         }
     }
-}
-
-/// Copy `dir` onto the SD card root. Returns the NRO's SD path when it lies inside `dir`.
-fn copy_to_sd(cpu: &mut Cpu, dir: &Path, nro: &Path) -> Option<String> {
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(at) = pending.pop() {
-        let entries = std::fs::read_dir(&at)
-            .unwrap_or_else(|e| panic!("SD: cannot list {}: {e}", at.display()));
-        for entry in entries {
-            let entry = entry.unwrap_or_else(|e| panic!("SD: {}: {e}", at.display()));
-            let host = entry.path();
-            let sd = sd_name(dir, &host);
-            if host.is_dir() {
-                cpu.fs.create_dir(&sd);
-                pending.push(host);
-            } else {
-                cpu.fs.write_file(&sd, common::read(&host));
-            }
-        }
-    }
-    // Absolute without resolving links, so a directory linked into `dir` still counts as inside.
-    let (root, nro) = (
-        std::path::absolute(dir).ok()?,
-        std::path::absolute(nro).ok()?,
-    );
-    nro.starts_with(&root).then(|| sd_name(&root, &nro))
-}
-
-fn sd_name(root: &Path, host: &Path) -> String {
-    let relative = host
-        .strip_prefix(root)
-        .expect("a path under the SD directory");
-    format!("/{}", relative.to_string_lossy().replace('\\', "/"))
 }
