@@ -572,6 +572,8 @@ impl Cpu {
                 }
                 // SetCpuBoostRequestPriority.
                 Some(70) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // SetApplicationCoreUsageMode: guest cores are not pinned to host cores.
+                Some(100) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // 20.0.0+, unnamed: one u16 out (per Eden).
                 Some(350) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),

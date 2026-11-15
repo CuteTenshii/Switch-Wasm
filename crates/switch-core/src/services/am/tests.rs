@@ -231,6 +231,14 @@ fn the_home_button_double_click_setting_reads_back_what_was_set() {
 }
 
 #[test]
+fn the_application_core_usage_mode_is_accepted() {
+    let mut cpu = request(false, 100, &1u32.to_le_bytes());
+    cpu.register_service_handle(9, "am:applet-common-functions");
+    cpu.applet_request(TLS, 9, Some(100)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+}
+
+#[test]
 fn every_button_lock_accessor_hands_back_a_lock() {
     const HOME_BUTTON: u32 = 0;
     for cmd in [30u32, 31, 32] {
