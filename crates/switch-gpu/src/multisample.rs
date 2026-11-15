@@ -161,6 +161,7 @@ impl Gpu {
         let Some(companion) = held.companion.take() else {
             return Ok(());
         };
+        held.writes += 1;
         let surface = held.texture.clone();
         let depth = held.target.depth_kind().is_some();
         self.resolve_into(&surface, &companion, depth)

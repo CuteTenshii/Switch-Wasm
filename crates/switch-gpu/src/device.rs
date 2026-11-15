@@ -98,6 +98,8 @@ impl Gpu {
             bind_misses: 0,
             bind_uncached: 0,
             bind_uncached_why: [0; 4],
+            held_copies_made: 0,
+            held_copies_reused: 0,
             texture_misses: 0,
             gpu_texture_bytes: 0,
             to_remember: Vec::new(),

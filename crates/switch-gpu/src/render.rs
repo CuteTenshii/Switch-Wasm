@@ -535,6 +535,7 @@ impl Gpu {
             .get_mut(&addr)
             .ok_or("the surface was not held")?;
         held.dirty |= writes;
+        held.writes += u64::from(writes);
         let texture = match &held.companion {
             Some(companion) => &companion.texture,
             None => &held.texture,

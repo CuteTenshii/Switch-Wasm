@@ -429,7 +429,23 @@ struct Space {
     /// Device copies of cached textures; only keys `texture_cache` also holds.
     gpu_textures:
         std::collections::HashMap<TextureKey, Vec<(wgpu::TextureViewDimension, wgpu::Texture)>>,
+    /// Textures made from held surfaces alone, kept until one of those surfaces is written.
+    held_copies: std::collections::HashMap<HeldCopyKey, HeldCopy>,
 }
+
+/// A sampled texture, the view it is sampled through, and whether it is compared.
+type HeldCopyKey = (TextureKey, wgpu::TextureViewDimension, bool);
+
+/// A texture every layer of which was copied from a held surface; see [`Gpu::texture_over_held`].
+#[derive(Debug)]
+struct HeldCopy {
+    texture: wgpu::Texture,
+    /// Each layer's source and its [`Held::writes`] when copied.
+    sources: Vec<(u32, wgpu::Texture, u64)>,
+}
+
+/// Past this many, every kept copy is dropped: a title's set of sampled held surfaces is small.
+const MAX_HELD_COPIES: usize = 64;
 
 #[derive(Debug)]
 pub struct Gpu {
@@ -552,6 +568,9 @@ pub struct Gpu {
     /// Of those, how many bound a held surface, a shadow map, a texture the cache does not
     /// keep, or a global; one that did several counts in each.
     pub bind_uncached_why: [u64; 4],
+    /// Textures made from held surfaces, and draws that reused one still current.
+    pub held_copies_made: u64,
+    pub held_copies_reused: u64,
     gpu_texture_bytes: u64,
     /// Textures `prepare` read and has not watched yet.
     to_remember: Vec<(TextureKey, std::sync::Arc<[u8]>, u64)>,
@@ -598,7 +617,8 @@ impl Drop for Gpu {
         );
         eprintln!(
             "[gpu] {} stage bind groups reused, {} built and kept, {} built for one draw \
-             (held surface {}, shadow map {}, texture not kept {}, global {})",
+             (held surface {}, shadow map {}, texture not kept {}, global {}); \
+             {} copies of held surfaces made, {} reused",
             self.bind_hits,
             self.bind_misses,
             self.bind_uncached,
@@ -606,6 +626,8 @@ impl Drop for Gpu {
             self.bind_uncached_why[1],
             self.bind_uncached_why[2],
             self.bind_uncached_why[3],
+            self.held_copies_made,
+            self.held_copies_reused,
         );
         if let Some(t) = self.times {
             let ms = |v: u128| v as f64 / 1000.0;
@@ -729,6 +751,18 @@ enum HeldLayer {
     Shadow(wgpu::Texture),
     /// A larger `depth32float` whose corner is drawn into a shadow map layer.
     ShadowCorner(wgpu::Texture),
+}
+
+impl HeldLayer {
+    fn surface(&self) -> &wgpu::Texture {
+        match self {
+            HeldLayer::Colour(surface)
+            | HeldLayer::Depth(surface)
+            | HeldLayer::PackedDepth(surface)
+            | HeldLayer::Shadow(surface)
+            | HeldLayer::ShadowCorner(surface) => surface,
+        }
+    }
 }
 
 /// What [`Gpu::check`] settled; fields mean what [`Prepared`]'s do.
@@ -1069,6 +1103,8 @@ impl Renderer for Gpu {
             .field("bindUncachedShadow", self.bind_uncached_why[1])
             .field("bindUncachedTexture", self.bind_uncached_why[2])
             .field("bindUncachedGlobal", self.bind_uncached_why[3])
+            .field("heldCopiesMade", self.held_copies_made)
+            .field("heldCopiesReused", self.held_copies_reused)
             .field("syncNoScanout", self.syncs[0])
             .field("syncOverBytes", self.syncs[1])
             .field("syncAll", self.syncs[2])

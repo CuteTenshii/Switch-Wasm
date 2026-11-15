@@ -74,6 +74,9 @@ impl Gpu {
         for pending in space.pending {
             pending.staging.destroy();
         }
+        for copy in space.held_copies.into_values() {
+            copy.texture.destroy();
+        }
         for held in space.globals.into_values() {
             held.buffer.destroy();
         }
@@ -112,6 +115,7 @@ impl Gpu {
                 texture,
                 target: *target,
                 dirty: false,
+                writes: 0,
                 companion: None,
                 watched: Vec::new(),
                 other: None,
@@ -146,6 +150,7 @@ impl Gpu {
                     texture: self.blank_target(target)?,
                     target: *target,
                     dirty: false,
+                    writes: 0,
                     companion: None,
                     watched: Vec::new(),
                     other: None,
@@ -154,6 +159,7 @@ impl Gpu {
         };
         if keep_contents {
             self.copy_depth(&old.texture, &new.texture);
+            new.writes += 1;
         }
         self.crop_switches += 1;
         new.dirty |= old.dirty;

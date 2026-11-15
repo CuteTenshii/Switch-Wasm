@@ -70,6 +70,8 @@ pub(crate) struct Held {
     pub(crate) target: Target,
     /// Drawn into since upload; clean surfaces need no write-back.
     pub(crate) dirty: bool,
+    /// Bumped by every write, so a copy taken from the texture can tell it is still current.
+    pub(crate) writes: u64,
     /// What draws render into when coverage is not measured in the surface's texels.
     /// See [`Shape`].
     pub(crate) companion: Option<Companion>,

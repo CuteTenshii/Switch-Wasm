@@ -5,8 +5,8 @@ use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
 use crate::held::spans_overlap;
 use crate::readback::{HeldGlobal, Scratch};
 use crate::{
-    same_rows, CachedBinding, GlobalUpload, Gpu, HeldLayer, Prepared, Red, Resource, SamplerKey,
-    MAX_GLOBAL, TEXTURE_BINDING,
+    same_rows, CachedBinding, GlobalUpload, Gpu, HeldCopy, HeldLayer, Prepared, Red, Resource,
+    SamplerKey, MAX_GLOBAL, TEXTURE_BINDING,
 };
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
@@ -16,6 +16,9 @@ use switch_core::gpu::surface::{
 };
 use switch_core::gpu::upload::TextureKey;
 use switch_core::gpu::upload::{ConstantUpload, Uploads};
+
+/// A sampled texture's held layers, and each one's surface's write count.
+type HeldLayers = (Vec<(u32, HeldLayer)>, Vec<u64>);
 
 /// `a == b` for byte slices, a word at a time: wasm's `memcmp` goes a byte at a time, and a cache
 /// hit compares tens of kilobytes of constants.
@@ -224,8 +227,8 @@ impl Gpu {
                 ));
             }
             // Nothing the device holds is as tall as an image that needs folding.
-            let held = match fold {
-                Some(_) => Vec::new(),
+            let (held, writes) = match fold {
+                Some(_) => (Vec::new(), Vec::new()),
                 None => self.held_layers(upload, compare, view_dimension)?,
             };
             let direct = self.directly_sampled(p, upload, view_dimension, compare, &held)?;
@@ -234,7 +237,7 @@ impl Gpu {
             } else if !held.is_empty() {
                 persistent = false;
                 why[0] = true;
-                self.texture_over_held(upload, view_dimension, &held, compare)?
+                self.texture_over_held(upload, view_dimension, &held, &writes, compare)?
             } else if compare {
                 persistent = false;
                 why[1] = true;
@@ -388,14 +391,16 @@ impl Gpu {
     }
 
     /// Layers of a sampled texture that are surfaces still held on the device, whose guest
-    /// memory is stale. One that cannot be copied is refused.
+    /// memory is stale, each with its surface's [`Held::writes`](crate::readback::Held). One that
+    /// cannot be copied is refused.
     fn held_layers(
         &self,
         upload: &switch_core::gpu::upload::TextureUpload,
         compare: bool,
         view: wgpu::TextureViewDimension,
-    ) -> std::result::Result<Vec<(u32, HeldLayer)>, String> {
+    ) -> std::result::Result<HeldLayers, String> {
         let mut layers = Vec::new();
+        let mut writes = Vec::new();
         // A deep-block volume's slices interleave inside each block.
         let deep_volume = view == wgpu::TextureViewDimension::D3 && upload.key.block_depth_gobs > 1;
         for layer in 0..upload.layers.max(1) {
@@ -407,6 +412,7 @@ impl Gpu {
             let Some(held) = self.space.held.get(&addr) else {
                 continue;
             };
+            writes.push(held.writes);
             // A held `ZF32` or `ZF32_X24S8` is copied through a buffer into an `R32` view; a depth
             // texture cannot copy to colour. `S8` is the other zero-bit depth, and has no depth.
             if let Some(depth) = held.target.depth {
@@ -545,7 +551,7 @@ impl Gpu {
             }
             layers.push((layer, HeldLayer::Colour(held.texture.clone())));
         }
-        Ok(layers)
+        Ok((layers, writes))
     }
 
     /// The held colour surface itself, when sampling it is the same as sampling the copy that
@@ -592,14 +598,37 @@ impl Gpu {
         Ok(Some(surface.clone()))
     }
 
-    /// Upload a texture, then copy the held layers over it; never cached.
+    /// Upload a texture, then copy the held layers over it. When the held layers are the whole
+    /// texture, guest memory is not read and the copy is kept until a source is written: a
+    /// title samples one shadow map in hundreds of draws.
     fn texture_over_held(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
         held: &[(u32, HeldLayer)],
+        writes: &[u64],
         compare: bool,
     ) -> std::result::Result<wgpu::Texture, String> {
+        // Packed depth keeps its stencil from guest memory.
+        let covered = held.len() == upload.layers.max(1) as usize
+            && !held
+                .iter()
+                .any(|(_, surface)| matches!(surface, HeldLayer::PackedDepth(_)));
+        let key = (upload.key, view, compare);
+        let sources: Vec<(u32, wgpu::Texture, u64)> = held
+            .iter()
+            .zip(writes)
+            .map(|((layer, surface), &writes)| (*layer, surface.surface().clone(), writes))
+            .collect();
+        if covered {
+            if let Some(copy) = self.space.held_copies.get(&key) {
+                if copy.sources == sources {
+                    self.held_copies_reused += 1;
+                    return Ok(copy.texture.clone());
+                }
+            }
+        }
+        self.held_copies_made += 1;
         let depths: Vec<(u32, wgpu::Texture)> = held
             .iter()
             .filter_map(|(layer, surface)| match surface {
@@ -621,7 +650,7 @@ impl Gpu {
                         "samples a 16-bit depth surface held on the device beside others".into(),
                     );
                 }
-                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("held 16-bit shadow map"),
                     size: wgpu::Extent3d {
                         width: upload.width.max(1),
@@ -634,20 +663,23 @@ impl Gpu {
                     format: wgpu::TextureFormat::Depth16Unorm,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
-                });
-                self.scratch.push(Scratch::Texture(texture.clone()));
-                texture
+                })
+            } else if covered {
+                self.blank_shadow_texture(upload)
             } else {
-                self.shadow_texture(upload)?
+                self.unkept_shadow_texture(upload)?
             }
+        } else if covered {
+            self.blank_texture(upload, view)?
         } else {
-            let (texture, _) = self.upload_texture(upload, view, None, &depths)?;
-            self.scratch.push(Scratch::Texture(texture.clone()));
-            texture
+            self.upload_texture(upload, view, None, &depths)?.0
         };
         for (layer, surface) in held {
             if let HeldLayer::ShadowCorner(surface) = surface {
-                self.draw_shadow_corner(&texture, *layer, surface)?;
+                if let Err(why) = self.draw_shadow_corner(&texture, *layer, surface) {
+                    self.scratch.push(Scratch::Texture(texture));
+                    return Err(why);
+                }
             }
         }
         let mut encoder = self
@@ -724,7 +756,57 @@ impl Gpu {
             }
         }
         self.submit_with_batch(encoder);
+        if !covered {
+            self.scratch.push(Scratch::Texture(texture.clone()));
+            return Ok(texture);
+        }
+        if self.space.held_copies.len() >= crate::MAX_HELD_COPIES {
+            let stale: Vec<HeldCopy> = self
+                .space
+                .held_copies
+                .drain()
+                .map(|(_, copy)| copy)
+                .collect();
+            self.scratch
+                .extend(stale.into_iter().map(|copy| Scratch::Texture(copy.texture)));
+        }
+        let copy = HeldCopy {
+            texture: texture.clone(),
+            sources,
+        };
+        if let Some(stale) = self.space.held_copies.insert(key, copy) {
+            // A draw recorded before this one may still sample it.
+            self.scratch.push(Scratch::Texture(stale.texture));
+        }
         Ok(texture)
+    }
+
+    /// What [`Gpu::upload_texture`] would make for this image, with nothing written into it.
+    fn blank_texture(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        view: wgpu::TextureViewDimension,
+    ) -> std::result::Result<wgpu::Texture, String> {
+        let (format, _) =
+            sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
+        let dimension = match view {
+            wgpu::TextureViewDimension::D3 => wgpu::TextureDimension::D3,
+            _ => wgpu::TextureDimension::D2,
+        };
+        Ok(self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("held copy"),
+            size: wgpu::Extent3d {
+                width: upload.width.max(1),
+                height: upload.height.max(1),
+                depth_or_array_layers: upload.layers.max(1),
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        }))
     }
 
     /// Convert every layer of an `S8D24` image's `words` into `into`; a layer in `depths` takes its
@@ -1203,8 +1285,43 @@ impl Gpu {
         buffer
     }
 
-    /// A sampled depth image, drawn through [`Gpu::load_depth`] since it cannot be copied in.
+    /// A sampled depth image, drawn through [`Gpu::load_depth`] since it cannot be copied in;
+    /// destroyed after the draw.
     fn shadow_texture(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+    ) -> std::result::Result<wgpu::Texture, String> {
+        let texture = self.unkept_shadow_texture(upload)?;
+        self.scratch.push(Scratch::Texture(texture.clone()));
+        Ok(texture)
+    }
+
+    /// The `depth32float` a shadow map is sampled from, with nothing in it.
+    fn blank_shadow_texture(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+    ) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow map"),
+            size: wgpu::Extent3d {
+                width: upload.width.max(1),
+                height: upload.height.max(1),
+                depth_or_array_layers: upload.layers.max(1),
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            // Copied into as well as drawn into.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
+    /// [`Gpu::shadow_texture`] without handing it to the scratch list.
+    fn unkept_shadow_texture(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
     ) -> std::result::Result<wgpu::Texture, String> {
@@ -1214,19 +1331,7 @@ impl Gpu {
             depth_or_array_layers: upload.layers.max(1),
         };
         let format = wgpu::TextureFormat::Depth32Float;
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow map"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            // Copied into as well as drawn into.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let texture = self.blank_shadow_texture(upload);
         // The staging image `load_depth` reads: `r32float`.
         let depths = self.shadow_depths(upload)?;
         let staging = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1257,7 +1362,6 @@ impl Gpu {
         self.load_depth(&texture, &staging, format)
             .map_err(|e| format!("{e:?}"))?;
         staging.destroy();
-        self.scratch.push(Scratch::Texture(texture.clone()));
         Ok(texture)
     }
 

@@ -169,6 +169,7 @@ impl Gpu {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let held = self.space.held.get_mut(&target.addr)?;
         held.dirty = true;
+        held.writes += 1;
         let target_view = held
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
