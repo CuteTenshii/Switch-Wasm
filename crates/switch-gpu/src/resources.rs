@@ -345,6 +345,7 @@ impl Gpu {
     /// Submit the draws recorded so far. A queue submit costs over a millisecond in a browser,
     /// so draws share one; anything else that submits, or destroys what they use, goes first.
     pub(super) fn submit_batch(&mut self) {
+        self.end_pass();
         if let Some(batch) = self.batch.take() {
             self.batched_draws = 0;
             timed!(self, encode, self.queue.submit([batch.finish()]));
@@ -353,6 +354,7 @@ impl Gpu {
 
     /// Submit an encoder after the draws recorded before it.
     pub(super) fn submit_with_batch(&mut self, encoder: wgpu::CommandEncoder) {
+        self.end_pass();
         let batch = self.batch.take().map(|batch| batch.finish());
         self.batched_draws = 0;
         timed!(

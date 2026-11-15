@@ -223,6 +223,7 @@ impl Gpu {
             entries: &bindings,
         });
 
+        self.end_pass();
         let mut encoder = self.batch.take().unwrap_or_else(|| {
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {

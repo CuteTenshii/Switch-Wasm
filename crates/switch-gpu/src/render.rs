@@ -363,7 +363,7 @@ impl Gpu {
         ctx: &mut ExecCtx,
     ) -> std::result::Result<(), String> {
         // Held across the frame.
-        let colour_view = match p.color {
+        let colour_target = match p.color {
             Some(color) => {
                 self.hold(&color, ctx).map_err(|e| format!("{e:?}"))?;
                 Some(self.attachment(p, color.addr, true)?)
@@ -412,13 +412,11 @@ impl Gpu {
             }
             _ => None,
         };
-        let colour_view = match &scratch {
-            Some((_, texture, _)) => {
-                Some(texture.create_view(&wgpu::TextureViewDescriptor::default()))
-            }
-            None => colour_view,
+        let colour_target = match &scratch {
+            Some((_, texture, _)) => Some(texture.clone()),
+            None => colour_target,
         };
-        let depth_view = match p.depth {
+        let depth_target = match p.depth {
             Some(depth) => {
                 self.hold(&depth, ctx).map_err(|e| format!("{e:?}"))?;
                 // A depth test without writes leaves the surface clean.
@@ -446,24 +444,40 @@ impl Gpu {
             }),
         };
 
-        let mut encoder = self.batch.take().unwrap_or_else(|| {
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("draws"),
-                })
-        });
-        for b in bound {
-            for patch in &b.patches {
-                encoder.copy_buffer_to_buffer(
-                    &patch.source,
-                    patch.from,
-                    &b.buffer,
-                    patch.to,
-                    patch.len,
-                );
+        // Copies cannot be recorded inside a pass, so a draw needing one opens its own.
+        let patched = bound.iter().any(|b| !b.patches.is_empty());
+        let joins = !patched
+            && scratch.is_none()
+            && self
+                .pass
+                .as_ref()
+                .is_some_and(|open| open.colour == colour_target && open.depth == depth_target);
+        if joins {
+            self.passes_joined += 1;
+        } else {
+            self.end_pass();
+            let mut encoder = self.batch.take().unwrap_or_else(|| {
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("draws"),
+                    })
+            });
+            for b in bound {
+                for patch in &b.patches {
+                    encoder.copy_buffer_to_buffer(
+                        &patch.source,
+                        patch.from,
+                        &b.buffer,
+                        patch.to,
+                        patch.len,
+                    );
+                }
             }
-        }
-        {
+            let view = |texture: &wgpu::Texture| {
+                texture.create_view(&wgpu::TextureViewDescriptor::default())
+            };
+            let colour_view = colour_target.as_ref().map(view);
+            let depth_view = depth_target.as_ref().map(view);
             let colour: Vec<Option<wgpu::RenderPassColorAttachment>> = colour_view
                 .as_ref()
                 .map(|view| {
@@ -480,8 +494,8 @@ impl Gpu {
                 })
                 .into_iter()
                 .collect();
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("draw"),
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("draws"),
                 color_attachments: &colour,
                 depth_stencil_attachment: depth_view.as_ref().map(|view| {
                     wgpu::RenderPassDepthStencilAttachment {
@@ -497,6 +511,21 @@ impl Gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // Kept open beside its encoder, which stays locked until `end_pass`.
+            let pass = pass.forget_lifetime();
+            self.batch = Some(encoder);
+            self.pass = Some(crate::OpenPass {
+                pass,
+                colour: colour_target,
+                depth: depth_target,
+            });
+        }
+        {
+            let pass = &mut self
+                .pass
+                .as_mut()
+                .expect("a pass was opened or joined")
+                .pass;
             pass.set_bind_group(0, vs_group, &[]);
             pass.set_bind_group(1, fs_group, &[]);
             for (slot, b) in bound.iter().enumerate() {
@@ -553,10 +582,16 @@ impl Gpu {
             }
         }
         if let Some((held, texture, size)) = &scratch {
-            encoder.copy_texture_to_texture(texture.as_image_copy(), held.as_image_copy(), *size);
+            self.end_pass();
+            if let Some(encoder) = self.batch.as_mut() {
+                encoder.copy_texture_to_texture(
+                    texture.as_image_copy(),
+                    held.as_image_copy(),
+                    *size,
+                );
+            }
             self.scratch.push(Scratch::Texture(texture.clone()));
         }
-        self.batch = Some(encoder);
         self.batched_draws += 1;
         if self.batched_draws >= crate::MAX_BATCHED_DRAWS {
             self.submit_batch();
@@ -570,7 +605,7 @@ impl Gpu {
         p: &Prepared,
         addr: u64,
         writes: bool,
-    ) -> std::result::Result<wgpu::TextureView, String> {
+    ) -> std::result::Result<wgpu::Texture, String> {
         match p.render {
             Render::Companion(shape) => self.companion(addr, shape, p.state.grid)?,
             // Put back whatever a companion holds first.
@@ -583,10 +618,14 @@ impl Gpu {
             .ok_or("the surface was not held")?;
         held.dirty |= writes;
         held.writes += u64::from(writes);
-        let texture = match &held.companion {
-            Some(companion) => &companion.texture,
-            None => &held.texture,
-        };
-        Ok(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+        Ok(match &held.companion {
+            Some(companion) => companion.texture.clone(),
+            None => held.texture.clone(),
+        })
+    }
+
+    /// End the render pass draws share, so the encoder can record something else.
+    pub(super) fn end_pass(&mut self) {
+        self.pass = None;
     }
 }

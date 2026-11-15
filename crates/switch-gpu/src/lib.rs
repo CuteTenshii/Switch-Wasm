@@ -423,6 +423,14 @@ struct CachedShader {
     serial: u64,
 }
 
+/// A render pass left open for the next draw, with the surfaces it renders into.
+#[derive(Debug)]
+struct OpenPass {
+    pass: wgpu::RenderPass<'static>,
+    colour: Option<wgpu::Texture>,
+    depth: Option<wgpu::Texture>,
+}
+
 /// A buffer's bytes and the device buffer holding them; see [`Gpu::shared_buffer`].
 type SharedBuffer = (Vec<u8>, wgpu::Buffer);
 
@@ -568,6 +576,9 @@ pub struct Gpu {
     deferred_readbacks: bool,
     /// Tests share a device, which one test ending must not destroy.
     device_is_shared: bool,
+    /// The render pass consecutive draws to the same surfaces share, recording into `batch`.
+    /// Declared first so it ends before the encoder is dropped.
+    pass: Option<OpenPass>,
     /// Draws recorded and not yet submitted. See [`Gpu::submit_batch`].
     batch: Option<wgpu::CommandEncoder>,
     batched_draws: u32,
@@ -642,6 +653,8 @@ pub struct Gpu {
     pub cropped_binds: u64,
     /// Compute launches run on the device, and why others went to the software dispatch.
     pub compute_dispatched: u64,
+    /// Draws recorded into the pass the draw before them opened.
+    pub passes_joined: u64,
     /// Vertex and index buffers uploaded, and draws that bound one already on the device.
     pub buffers_uploaded: u64,
     pub buffers_reused: u64,
@@ -667,11 +680,13 @@ const PAGE_BITS: u32 = 12;
 impl Drop for Gpu {
     fn drop(&mut self) {
         eprintln!(
-            "[gpu] {} draws rendered, {} fell back, from {} pipelines and {} modules",
+            "[gpu] {} draws rendered, {} fell back, from {} pipelines and {} modules; {} joined \
+             the pass before them",
             self.drawn,
             self.fallbacks,
             self.pipelines.len(),
-            self.modules.len()
+            self.modules.len(),
+            self.passes_joined,
         );
         if self.expanded + self.multisampled + self.per_pixel > 0 {
             eprintln!(
@@ -1215,6 +1230,7 @@ impl Renderer for Gpu {
             .field("heldCopiesMade", self.held_copies_made)
             .field("heldCopiesReused", self.held_copies_reused)
             .field("croppedBinds", self.cropped_binds)
+            .field("passesJoined", self.passes_joined)
             .field("buffersUploaded", self.buffers_uploaded)
             .field("buffersReused", self.buffers_reused)
             .field("computeDispatched", self.compute_dispatched)
