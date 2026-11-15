@@ -496,6 +496,10 @@ pub struct Gpu {
     _instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
+    /// The device's features and limits, read once: in a browser each query rebuilds them
+    /// from JavaScript, and draws ask several times each.
+    device_features: wgpu::Features,
+    device_limits: wgpu::Limits,
     queue: wgpu::Queue,
     /// The device's vertex buffer count; a draw with more is folded by [`fit_vertex_buffers`].
     vertex_buffer_limit: u32,

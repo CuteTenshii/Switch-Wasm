@@ -53,7 +53,7 @@ impl Gpu {
     /// Whether this adapter will render `samples` samples into `format`.
     pub(super) fn samples_supported(&self, format: wgpu::TextureFormat, samples: u32) -> bool {
         // The adapter's answer applies only with `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`.
-        let features = self.device.features();
+        let features = self.device_features;
         let flags = if features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
             self.adapter.get_texture_format_features(format).flags
         } else {

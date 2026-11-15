@@ -31,11 +31,14 @@ impl Gpu {
                 slot.get_or_insert(format!("{reason:?}: {message}"));
             }
         });
-        let vertex_buffer_limit = device.limits().max_vertex_buffers;
+        let (device_features, device_limits) = (device.features(), device.limits());
+        let vertex_buffer_limit = device_limits.max_vertex_buffers;
         Gpu {
             _instance: instance,
             adapter,
             device,
+            device_features,
+            device_limits,
             queue,
             vertex_buffer_limit,
             space_id: 0,
@@ -134,7 +137,7 @@ impl Gpu {
     }
 
     pub fn describe(&self) -> String {
-        format!("{:?}", self.device.limits().max_texture_dimension_2d)
+        format!("{:?}", self.device_limits.max_texture_dimension_2d)
     }
 
     pub(super) fn fall_back(&mut self, why: String) {
@@ -220,7 +223,7 @@ impl Gpu {
 
     /// What this device may be asked for; see [`Gpu::web_limits`].
     pub(super) fn features(&self) -> wgpu::Features {
-        let features = self.device.features();
+        let features = self.device_features;
         if self.web_limits {
             features - wgpu::Features::SUBGROUP - wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
         } else {

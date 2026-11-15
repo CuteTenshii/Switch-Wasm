@@ -1142,7 +1142,7 @@ impl Gpu {
             _ => wgpu::TextureDimension::D2,
         };
         // Past a limit the device makes an invalid texture that poisons every bind group using it.
-        let limits = self.device.limits();
+        let limits = self.device_limits.clone();
         let (largest, deepest) = match dimension {
             wgpu::TextureDimension::D3 => (
                 limits.max_texture_dimension_3d,

@@ -52,7 +52,7 @@ impl Gpu {
         ctx: &ExecCtx,
     ) -> std::result::Result<(), String> {
         let qmd = &launch.qmd;
-        let limits = self.device.limits();
+        let limits = self.device_limits.clone();
         let [x, y, z] = qmd.cta_threads;
         if x > limits.max_compute_workgroup_size_x
             || y > limits.max_compute_workgroup_size_y

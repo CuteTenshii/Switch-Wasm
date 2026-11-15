@@ -100,8 +100,8 @@ impl Gpu {
 
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
         let mut fs_layout = Layout::of(&fs, Stage::Fragment);
-        let storage_limit = self.device.limits().max_storage_buffers_per_shader_stage as usize;
-        let limits = self.device.limits();
+        let storage_limit = self.device_limits.max_storage_buffers_per_shader_stage as usize;
+        let limits = self.device_limits.clone();
         for (stage, layout) in [("vertex", &vs_layout), ("fragment", &fs_layout)] {
             if layout.textures.len() > limits.max_sampled_textures_per_shader_stage as usize
                 || layout.textures.len() > limits.max_samplers_per_shader_stage as usize
@@ -442,7 +442,7 @@ impl Gpu {
     ) -> std::result::Result<Option<wgsl::Fold>, String> {
         use switch_core::gpu::shader::isa::TexDim;
         use switch_core::gpu::texture::Wrap;
-        let limits = self.device.limits();
+        let limits = self.device_limits.clone();
         let plain_2d = matches!(binding.dim, TexDim::T2d | TexDim::T2dArray)
             && !binding.compare
             && upload.layers <= 1
