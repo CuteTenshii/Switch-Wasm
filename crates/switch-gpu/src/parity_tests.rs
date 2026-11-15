@@ -2485,23 +2485,32 @@ fn presented_frames_land_in_the_order_they_were_submitted() {
     };
     let first = submit(&mut h, &mut gpu, [1.0, 0.0, 0.0, 1.0]);
     let second = submit(&mut h, &mut gpu, [0.0, 0.0, 1.0, 1.0]);
+    // `Done` landed within the call, as a fast device's readback can.
     let generation = |s| match s {
-        Submit::Queued(g) => g,
-        _ => 0,
+        Submit::Queued(g) => Some(g),
+        Submit::Done => None,
+        Submit::Full => panic!("two frames filled the readback queue"),
     };
-    assert!(generation(second) >= generation(first));
+    let (first, second) = (generation(first), generation(second));
+    if let (Some(first), Some(second)) = (first, second) {
+        assert!(
+            second >= first,
+            "the second frame was queued before the first"
+        );
+    }
+    let wanted = first.max(second).unwrap_or(0);
 
     let mut landed = 0;
     for _ in 0..10_000 {
         let now = gpu.frames_landed(&mut h.ctx()).expect("the landing");
         assert!(now >= landed, "a landed generation went back");
         landed = now;
-        if landed >= generation(second) && landed > 0 {
+        if landed >= wanted {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(landed >= generation(second), "the readbacks never landed");
+    assert!(landed >= wanted, "the readbacks never landed");
     let mut want = Harness::new();
     want.triangle([0.0, 0.0, 1.0, 1.0]);
     want.clear_with(&mut Software, [true; 4])
