@@ -280,6 +280,16 @@ impl Cpu {
         for thread in &mut self.machine.process_mut(pid).threads {
             thread.state = ThreadState::Finished;
         }
+        // Applets it started end with it, as they would otherwise answer to a caller that is gone.
+        let started: Vec<u64> = self
+            .processes
+            .iter()
+            .filter(|(_, process)| process.caller.is_some_and(|(by, _)| by == pid))
+            .map(|(&child, _)| child)
+            .collect();
+        for child in started {
+            self.end_process(child, Ending::Terminated);
+        }
         if let Some((caller, accessor)) = caller {
             let exited = matches!(ending, Ending::Exited);
             self.in_process(caller, |cpu| cpu.finish_library_applet(accessor, exited));
@@ -507,6 +517,25 @@ mod tests {
     #[test]
     fn translated_code_stays_with_its_process() {
         two_processes_storing(true);
+    }
+
+    #[test]
+    fn an_applet_that_ends_takes_the_applets_it_started_with_it() {
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        let root = cpu.pid;
+        let web = cpu.create_process();
+        cpu.processes.get_mut(&web).unwrap().caller = Some((root, 0x10));
+        let keyboard = cpu.create_process();
+        cpu.processes.get_mut(&keyboard).unwrap().caller = Some((web, 0x20));
+
+        cpu.end_process(web, Ending::Faulted("test".to_owned()));
+
+        assert_eq!(
+            cpu.pids(),
+            vec![root],
+            "the keyboard outlived the web applet"
+        );
     }
 
     #[test]
