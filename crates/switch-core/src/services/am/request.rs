@@ -423,9 +423,10 @@ impl Cpu {
             },
             // ISelfController.
             "am:self-controller" => match cmd_id {
-                // Setters and notifiers whose whole reply is a Result.
-                Some(0..=4) | Some(10..=16) | Some(19) | Some(51) | Some(60) | Some(64)
-                | Some(65) | Some(72) | Some(100) | Some(110) | Some(130) => {
+                // Setters and notifiers whose whole reply is a Result; 61 is
+                // SetMediaPlaybackState, and nothing here dims or sleeps.
+                Some(0..=4) | Some(10..=16) | Some(19) | Some(51) | Some(60) | Some(61)
+                | Some(64) | Some(65) | Some(72) | Some(100) | Some(110) | Some(130) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // Set/GetIdleTimeDetectionExtension, SetAutoSleepDisabled / IsAutoSleepDisabled.
