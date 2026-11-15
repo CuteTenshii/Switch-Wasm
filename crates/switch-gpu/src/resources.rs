@@ -1,7 +1,7 @@
 //! Shader modules, scratch buffers, device errors, and cache eviction.
 
 use crate::readback::Scratch;
-use crate::{Gpu, PAGE_BITS, TEXTURE_CACHE_BYTES};
+use crate::{Gpu, Input, INPUT_CACHE_BYTES, PAGE_BITS, TEXTURE_CACHE_BYTES};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Software;
 use switch_core::gpu::upload::TextureKey;
@@ -127,6 +127,11 @@ impl Gpu {
 
     fn evict_pages(&mut self, dirty: Vec<u32>) {
         self.evict_shaders(&dirty);
+        for page in &dirty {
+            for key in self.space.input_pages.remove(page).unwrap_or_default() {
+                self.forget_input(key);
+            }
+        }
         for page in dirty {
             let Some(keys) = self.space.page_owners.remove(&page) else {
                 continue;
@@ -138,6 +143,74 @@ impl Gpu {
                 }
             }
         }
+    }
+
+    /// The device copy of `len` bytes at `addr` that a compute launch only reads, uploaded
+    /// on first use and kept until the guest writes them.
+    pub(super) fn compute_input(
+        &mut self,
+        addr: u64,
+        len: usize,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<wgpu::Buffer, String> {
+        let key = (addr, len as u64);
+        let pages = guest_pages(ctx, addr, len as u64);
+        if let Some(kept) = self.space.inputs.get(&key) {
+            if kept.pages == pages {
+                self.inputs_reused += 1;
+                return Ok(kept.buffer.clone());
+            }
+        }
+        self.forget_input(key);
+        // Watched before the read, so a store racing it is reported.
+        for &page in &pages {
+            ctx.mem.mark_gpu_page(page << PAGE_BITS);
+        }
+        let mut bytes = vec![0u8; len];
+        ctx.vmm
+            .read_into(ctx.mem, addr, &mut bytes)
+            .map_err(|e| format!("{e:?}"))?;
+        let buffer = self.kept_buffer("compute input", &bytes, wgpu::BufferUsages::STORAGE);
+        self.inputs_uploaded += 1;
+        if pages.is_empty() {
+            self.scratch.push(Scratch::Buffer(buffer.clone()));
+            return Ok(buffer);
+        }
+        if self.space.input_bytes + buffer.size() > INPUT_CACHE_BYTES {
+            let keys: Vec<_> = self.space.inputs.keys().copied().collect();
+            for key in keys {
+                self.forget_input(key);
+            }
+        }
+        for &page in &pages {
+            self.space.input_pages.entry(page).or_default().push(key);
+        }
+        self.space.input_bytes += buffer.size();
+        self.space.inputs.insert(
+            key,
+            Input {
+                buffer: buffer.clone(),
+                pages,
+            },
+        );
+        Ok(buffer)
+    }
+
+    /// Drop a kept compute input; launches recorded but not yet submitted may still bind it.
+    fn forget_input(&mut self, key: (u64, u64)) {
+        let Some(input) = self.space.inputs.remove(&key) else {
+            return;
+        };
+        for page in &input.pages {
+            if let Some(keys) = self.space.input_pages.get_mut(page) {
+                keys.retain(|k| *k != key);
+                if keys.is_empty() {
+                    self.space.input_pages.remove(page);
+                }
+            }
+        }
+        self.space.input_bytes -= input.buffer.size();
+        self.scratch.push(Scratch::Buffer(input.buffer));
     }
 
     /// Destroy a cached texture's device copy.

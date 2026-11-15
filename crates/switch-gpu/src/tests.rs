@@ -1585,6 +1585,63 @@ fn a_compute_launch_on_the_device_writes_what_the_software_dispatch_writes() {
     assert_eq!(device.output(12), expected);
 }
 
+/// What a compute launch only reads stays on the device for the next launch, until the guest
+/// writes over it.
+#[test]
+fn a_compute_input_is_uploaded_again_only_after_the_guest_writes_it() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{copy_program, write_launch, ComputeHarness};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    const WORDS: u32 = 4;
+    let mut h = ComputeHarness::new(&copy_program(), [1, 1, 1], [WORDS, 1, 1], WORDS);
+    let (base, output) = (h.base, h.output_addr());
+    // Beside the bank, which is laid out once, so only the guest's own stores write its page.
+    let input = base + 0x3800;
+    let engine = write_launch(
+        &mut h.ctx(),
+        base,
+        &copy_program(),
+        [1, 1, 1],
+        [WORDS, 1, 1],
+        &[
+            (0x40, output as u32),
+            (0x44, (output >> 32) as u32),
+            (0x48, WORDS * 4),
+            (0x60, input as u32),
+            (0x64, (input >> 32) as u32),
+            (0x68, WORDS * 4),
+        ],
+    );
+    let run = |h: &mut ComputeHarness, gpu: &mut crate::Gpu, words: [u32; 4]| {
+        let mut ctx = h.ctx();
+        for (i, word) in words.iter().enumerate() {
+            if ctx.read_u32(input + i as u64 * 4).unwrap() != *word {
+                ctx.write_u32(input + i as u64 * 4, *word).unwrap();
+            }
+        }
+        assert!(
+            gpu.dispatch(&engine, &mut ctx).unwrap(),
+            "refused: {:?}",
+            gpu.compute_refusals
+        );
+        let mut flushes = 0;
+        while gpu.flush(&mut ctx).unwrap() == Flush::Pending {
+            flushes += 1;
+            assert!(flushes < 100, "the readback never landed");
+        }
+        assert_eq!(h.output(WORDS as usize), words);
+    };
+
+    run(&mut h, &mut gpu, [1, 2, 3, 4]);
+    run(&mut h, &mut gpu, [1, 2, 3, 4]);
+    assert_eq!((gpu.inputs_uploaded, gpu.inputs_reused), (1, 1));
+    run(&mut h, &mut gpu, [5, 6, 7, 8]);
+    assert_eq!((gpu.inputs_uploaded, gpu.inputs_reused), (2, 1));
+}
+
 /// A draw reads vertices a compute launch wrote on the device from where the launch left them,
 /// before guest memory has them, and draws what it would have drawn from guest memory.
 #[test]

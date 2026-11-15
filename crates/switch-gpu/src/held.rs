@@ -80,6 +80,9 @@ impl Gpu {
         for held in space.globals.into_values() {
             held.buffer.destroy();
         }
+        for input in space.inputs.into_values() {
+            input.buffer.destroy();
+        }
         for (key, made) in space.gpu_textures {
             let bytes = space.texture_cache.get(&key).map_or(0, |b| b.len() as u64);
             for (_, texture) in made {

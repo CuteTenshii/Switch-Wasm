@@ -102,6 +102,8 @@ impl Gpu {
             held_copies_reused: 0,
             cropped_binds: 0,
             compute_dispatched: 0,
+            inputs_uploaded: 0,
+            inputs_reused: 0,
             software_compute: false,
             compute_refusals: std::collections::BTreeMap::new(),
             compute_pipelines: std::collections::HashMap::new(),

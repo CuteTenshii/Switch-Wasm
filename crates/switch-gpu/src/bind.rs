@@ -1337,6 +1337,18 @@ impl Gpu {
                     held.join(", ")
                 ));
             }
+            if stage.is_none() && !global.written {
+                out.push(GlobalUpload {
+                    stage,
+                    slot: slot as u32,
+                    addr: address,
+                    len: len as u64,
+                    bytes: Vec::new(),
+                    held: Some(self.compute_input(address, len, ctx)?),
+                    writes: false,
+                });
+                continue;
+            }
             let mut bytes = vec![0u8; len];
             ctx.vmm
                 .read_into(ctx.mem, address, &mut bytes)

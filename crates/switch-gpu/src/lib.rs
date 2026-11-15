@@ -83,7 +83,8 @@ struct GlobalUpload {
     addr: u64,
     len: u64,
     bytes: Vec<u8>,
-    /// The buffer held on the device when the shader writes it, which `bytes` then lacks.
+    /// The buffer on the device when the shader writes it or a compute launch only reads it,
+    /// which `bytes` then lacks.
     held: Option<wgpu::Buffer>,
     /// Whether this shader writes it.
     writes: bool,
@@ -454,7 +455,23 @@ struct Space {
         std::collections::HashMap<TextureKey, Vec<(wgpu::TextureViewDimension, wgpu::Texture)>>,
     /// Textures made from held surfaces alone, kept until one of those surfaces is written.
     held_copies: std::collections::HashMap<HeldCopyKey, HeldCopy>,
+    /// What compute launches only read, by address and length, kept until the guest writes it.
+    inputs: std::collections::HashMap<(u64, u64), Input>,
+    /// Which kept inputs a guest page holds bytes for.
+    input_pages: std::collections::HashMap<u32, Vec<(u64, u64)>>,
+    input_bytes: u64,
 }
+
+/// A device copy of guest memory a compute launch reads and never writes.
+#[derive(Debug)]
+struct Input {
+    buffer: wgpu::Buffer,
+    /// The CPU pages it was read from, which a remapped address no longer matches.
+    pages: Vec<u32>,
+}
+
+/// Past this, every kept input of the address space is dropped.
+const INPUT_CACHE_BYTES: u64 = 256 << 20;
 
 /// A program's address and the draw stage it runs in; `None` is a compute launch.
 type ShaderKey = (u64, Option<ShaderStage>);
@@ -601,6 +618,9 @@ pub struct Gpu {
     pub cropped_binds: u64,
     /// Compute launches run on the device, and why others went to the software dispatch.
     pub compute_dispatched: u64,
+    /// Read-only compute inputs uploaded, and launches that bound one already on the device.
+    pub inputs_uploaded: u64,
+    pub inputs_reused: u64,
     /// `--software-compute` on `screenshot`: every launch goes to the software dispatch.
     software_compute: bool,
     pub compute_refusals: std::collections::BTreeMap<String, u64>,
@@ -665,9 +685,12 @@ impl Drop for Gpu {
             self.cropped_binds,
         );
         eprintln!(
-            "[gpu] {} compute launches on the device, {} in software{}",
+            "[gpu] {} compute launches on the device, {} in software; {} inputs uploaded, \
+             {} reused{}",
             self.compute_dispatched,
             self.compute_refusals.values().sum::<u64>(),
+            self.inputs_uploaded,
+            self.inputs_reused,
             self.compute_refusals
                 .iter()
                 .map(|(why, n)| format!("\n[gpu]   {n}: {why}"))
@@ -1160,6 +1183,8 @@ impl Renderer for Gpu {
             .field("heldCopiesReused", self.held_copies_reused)
             .field("croppedBinds", self.cropped_binds)
             .field("computeDispatched", self.compute_dispatched)
+            .field("inputsUploaded", self.inputs_uploaded)
+            .field("inputsReused", self.inputs_reused)
             .field(
                 "computeRefused",
                 self.compute_refusals.values().sum::<u64>(),
