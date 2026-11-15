@@ -27,10 +27,10 @@ export function commandLine() {
 }
 
 // Imported here so that tools with no browser do not need Playwright.
-export async function launchChromium({ headed = true, webGpu = true, args = [] } = {}) {
+export async function launchChromium({ webGpu = true, args = [] } = {}) {
   const { chromium } = await import('playwright');
   return chromium.launch({
-    headless: !headed,
+    headless: false,
     args: [...(webGpu ? ['--enable-unsafe-webgpu'] : []), ...args],
   });
 }

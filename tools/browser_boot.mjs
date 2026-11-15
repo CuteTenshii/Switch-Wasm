@@ -22,8 +22,7 @@
 // a device frame is compared against.
 // `--trace-from` switches the console to trace once a line contains the text: trace from
 // the start floods the log long before the moment worth reading.
-// A window opens by default, whose browser gets the machine's GPU instead of a software adapter;
-// `--headless` runs without one, on a software adapter.
+// A window opens, so the browser gets the machine's GPU instead of a software adapter.
 // `--jit-stats` records the cumulative block stats with every sample.
 // `--press` taps keyboard keys, as `web/main/input.ts` maps them (z is A, x is B, the arrows
 // are the d-pad), that long after the title starts and again every `every` seconds. A tap
@@ -41,7 +40,7 @@ import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
 import { hookSource, parseSpec, readTextures, writeTextures } from './texture_dump.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
-  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headless] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
+  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
   [--relay=ws://127.0.0.1:18787] [--port=N]
   [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
@@ -69,7 +68,6 @@ const seconds = Number(flag('seconds') ?? 60);
 const screenshotEvery = Number(flag('screenshot-every') ?? 0);
 const jitStats = hasFlag('jit-stats');
 const noWebGpu = hasFlag('no-webgpu');
-const headed = !hasFlag('headless');
 const docked = hasFlag('docked');
 const dockAt = flag('dock-at');
 const softwareAt = flag('software-at');
@@ -119,7 +117,7 @@ const say = (text) => {
   console.log(text);
 };
 
-const browser = await launchChromium({ headed, webGpu: !noWebGpu, args: browserArgs });
+const browser = await launchChromium({ webGpu: !noWebGpu, args: browserArgs });
 try {
   const page = await browser.newPage();
   // Chromium has no switch that takes WebGPU away, so the property goes before any

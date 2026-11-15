@@ -30,7 +30,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 ## `tools/browser_boot.mjs`
 
 - Samples the run state (`body[data-state]`) and the page's console every 5 s so stalls are observed, then saves the Debug panel's Rendering and Display sections and the full console, periodic activity and thread reports included. `--jit-stats` adds the Translation section's block stats to every sample; only the browser build can measure them.
-- WebGPU is force-enabled (headless Chromium leaves it off). A window opens by default so the browser gets the machine's GPU; `--headless` runs without one, on an adapter that is usually SwiftShader: valid for draw-path coverage, not speed. Each run uses a fresh profile so stored keys, SD card, saves and NAND do not leak between runs.
+- WebGPU is force-enabled. A window opens so the browser gets the machine's GPU; without one Chromium falls back to SwiftShader, where readbacks never land and no device frame is presented. Each run uses a fresh profile so stored keys, SD card, saves and NAND do not leak between runs.
 - A fresh profile has an empty NAND, so library applets report themselves cancelled; `--firmware=<dir>` installs a firmware directory's NCAs first.
 - The run fails at once, with the console's last lines and exit code 1, when the title is not running within 2 minutes or the page logs an error. Before this check, a boot that never started sampled an idle page for the whole run.
 - The console comes from the page's Save download, because the view keeps only the newest 2000 lines. Trace from the start floods the log and can leave the page too busy for the Rendering section, so `--trace-from=<text>` switches to trace once a line contains the text.
@@ -70,7 +70,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 ## `crates/switch-core/examples/frame_work.rs`
 
-- Work counts (instructions, blocks, interpreter fallbacks, draws, pixels) are identical under native and V8. Use them to decide what to fix and to prove a fix landed, and a headed `tools/browser_boot.mjs` or `tools/profile_ingame.mjs` run for what it was worth. A change that moves no count but looks faster on the host only made the host faster.
+- Work counts (instructions, blocks, interpreter fallbacks, draws, pixels) are identical under native and V8. Use them to decide what to fix and to prove a fix landed, and a `tools/browser_boot.mjs` or `tools/profile_ingame.mjs` run for what it was worth. A change that moves no count but looks faster on the host only made the host faster.
 - Host timings are not a scaled version of browser timings: removing a libcall only wasm pays for was about 1.15x natively and 1.44x in the browser.
 - Takes the `Play` flags ([repro.md](repro.md#arguments)); with `--no-draw` a run times the CPU as it is with a GPU doing the drawing.
 - Startup frames (loader, allocator, first upload) are skipped so they don't skew the steady-state mean.
