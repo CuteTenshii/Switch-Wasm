@@ -101,15 +101,43 @@ fn serialize_addrinfo(out: &mut Vec<u8>, socktype: u32, protocol: u32, ip: [u8; 
     out.push(0);
 }
 
-/// A lookup's reply words, errno always 0. The plain requests answer `{ error, errno, size }`,
-/// as libnx's `sfdnsres` calls read them; the WithOptions forms answer `{ size, error, errno }`.
-/// Asphalt 9's `GetHostByNameRequestWithOptions` took the first order as a failure every time
-/// and retried, and connected with the second.
-fn results(with_options: bool, error: u32, size: u32) -> [u8; 12] {
-    let words = if with_options {
-        [size, error, 0]
-    } else {
-        [error, 0, size]
+/// The order of a lookup's three reply words, which depends on the request.
+#[derive(Clone, Copy)]
+enum Reply {
+    /// `GetHostByName`/`GetHostByAddr`: `{ h_errno, errno, size }`.
+    Host,
+    /// `GetAddrInfo`/`GetNameInfo`: `{ errno, gai error, size }`. Minecraft's SDK reads word 1
+    /// as the result, so an error in word 0 read as success with an empty list.
+    AddrInfo,
+    /// The WithOptions forms: `{ size, error, errno }`. Asphalt 9's
+    /// `GetHostByNameRequestWithOptions` took a plain order as a failure every time and retried.
+    WithOptions,
+}
+
+impl Reply {
+    fn host(with_options: bool) -> Reply {
+        if with_options {
+            Reply::WithOptions
+        } else {
+            Reply::Host
+        }
+    }
+
+    fn addr_info(with_options: bool) -> Reply {
+        if with_options {
+            Reply::WithOptions
+        } else {
+            Reply::AddrInfo
+        }
+    }
+}
+
+/// A lookup's reply words, errno always 0.
+fn results(reply: Reply, error: u32, size: u32) -> [u8; 12] {
+    let words = match reply {
+        Reply::Host => [error, 0, size],
+        Reply::AddrInfo => [0, error, size],
+        Reply::WithOptions => [size, error, 0],
     };
     let mut out = [0u8; 12];
     for (slot, word) in out.chunks_mut(4).zip(words) {
@@ -136,7 +164,7 @@ impl Cpu {
             }
             Some(2) | Some(3) | Some(10) | Some(11) => {
                 let with_options = matches!(cmd_id, Some(10 | 11));
-                self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND, with_options)
+                self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND, Reply::host(with_options))
             }
             // GetAddrInfoRequest and its WithOptions form, once the host carries traffic.
             Some(6) | Some(12) if self.net.enabled => {
@@ -145,7 +173,7 @@ impl Cpu {
             // GetAddrInfoRequest / GetNameInfoRequest and WithOptions forms (`gai` error).
             Some(6) | Some(7) | Some(12) | Some(13) => {
                 let with_options = matches!(cmd_id, Some(12 | 13));
-                self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, with_options)
+                self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, Reply::addr_info(with_options))
             }
             // GetHostStringErrorRequest / GetGaiStringErrorRequest.
             Some(4) | Some(5) => {
@@ -222,11 +250,15 @@ impl Cpu {
                 Level::Info,
                 &format!("[net] getaddrinfo {asked}: unknown service"),
             );
-            return self.sfdnsres_failure(tls, SFDNSRES_EAI_SERVICE, with_options);
+            return self.sfdnsres_failure(
+                tls,
+                SFDNSRES_EAI_SERVICE,
+                Reply::addr_info(with_options),
+            );
         };
         if hints.family != 0 && hints.family != u32::from(BSD_AF_INET) {
             self.log(Level::Info, &format!("[net] getaddrinfo {asked}: not IPv4"));
-            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, with_options);
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, Reply::addr_info(with_options));
         }
         let literal = host
             .parse::<std::net::Ipv4Addr>()
@@ -242,7 +274,7 @@ impl Cpu {
                 Level::Info,
                 &format!("[net] getaddrinfo {asked}: not a name"),
             );
-            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, with_options);
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, Reply::addr_info(with_options));
         };
         let [a, b, c, d] = address;
         self.log(
@@ -261,10 +293,10 @@ impl Cpu {
             .ipc_output_buffer(tls, 0)
             .is_some_and(|(_, size)| serialized.len() <= size as usize);
         if !fits {
-            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, with_options);
+            return self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME, Reply::addr_info(with_options));
         }
         self.write_output_buffer(tls, 0, &serialized);
-        let results = results(with_options, 0, serialized.len() as u32);
+        let results = results(Reply::addr_info(with_options), 0, serialized.len() as u32);
         self.write_ipc_response(tls, 0, &[], &results, &[])
     }
 
@@ -344,17 +376,17 @@ impl Cpu {
             return self.sfdnsres_host_failure(tls, with_options);
         }
         self.write_output_buffer(tls, 0, &serialized);
-        let results = results(with_options, 0, serialized.len() as u32);
+        let results = results(Reply::host(with_options), 0, serialized.len() as u32);
         self.write_ipc_response(tls, 0, &[], &results, &[])
     }
 
     fn sfdnsres_host_failure(&mut self, tls: u32, with_options: bool) -> Result<()> {
-        self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND, with_options)
+        self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND, Reply::host(with_options))
     }
 
     /// A failed lookup: the error in its word, errno 0, nothing written. See [`results`].
-    fn sfdnsres_failure(&mut self, tls: u32, error: i32, with_options: bool) -> Result<()> {
-        let results = results(with_options, error as u32, 0);
+    fn sfdnsres_failure(&mut self, tls: u32, error: i32, reply: Reply) -> Result<()> {
+        let results = results(reply, error as u32, 0);
         self.write_ipc_response(tls, 0, &[], &results, &[])
     }
 }
@@ -382,15 +414,26 @@ mod tests {
 
     #[test]
     fn sfdnsres_fails_every_lookup_definitively() {
-        // getaddrinfo: EAI_NONAME, not EAI_AGAIN.
-        let mut cpu = request(false, 6, &[]);
-        cpu.sfdnsres_request(TLS, Some(6)).unwrap();
+        // getaddrinfo: EAI_NONAME, not EAI_AGAIN, in the second word; a zero there with an empty
+        // list is success with no addresses, which Minecraft's resolve handler dereferences.
+        for cmd in [6, 7] {
+            let mut cpu = request(false, cmd, &[]);
+            cpu.sfdnsres_request(TLS, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "errno");
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x24).unwrap() as i32,
+                super::SFDNSRES_EAI_NONAME
+            );
+            assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "serialized size");
+        }
+
+        let mut cpu = request(false, 12, &[]);
+        cpu.sfdnsres_request(TLS, Some(12)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "serialized size");
         assert_eq!(
-            cpu.mem.read_u32(TLS + 0x20).unwrap() as i32,
+            cpu.mem.read_u32(TLS + 0x24).unwrap() as i32,
             super::SFDNSRES_EAI_NONAME
         );
-        assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 0, "errno");
-        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "serialized size");
 
         // gethostbyname reports through h_errno, which has its own numbering.
         let mut cpu = request(false, 2, &[]);
@@ -444,7 +487,8 @@ mod tests {
         ];
         write_buffer_request(&mut cpu, 6, &[0; 16], &send, &[(LOOKUP_OUT, 0x1000)]);
         cpu.sfdnsres_request(TLS, Some(6)).unwrap();
-        let ret = cpu.mem.read_u32(TLS + 0x20).unwrap() as i32;
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "errno");
+        let ret = cpu.mem.read_u32(TLS + 0x24).unwrap() as i32;
         let len = cpu.mem.read_u32(TLS + 0x28).unwrap();
         ((ret, len), cpu.read_bytes(LOOKUP_OUT, len))
     }
