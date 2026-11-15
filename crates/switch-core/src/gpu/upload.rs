@@ -1101,15 +1101,22 @@ fn read_indices(
         )));
     }
 
+    // Read as one range: an address translation per index was most of a draw's upload time.
+    let read = read_range(
+        ctx,
+        base + u64::from(first) * width,
+        u64::from(count) * width,
+        "index array",
+    )?;
     let mut bytes = Vec::with_capacity(count as usize * out_width as usize);
     let mut lowest = u32::MAX;
     let mut highest = 0u32;
-    for ordinal in 0..count {
-        let at = base + u64::from(first + ordinal) * width;
-        let value = match width {
-            1 => u32::from(ctx.vmm_read_u8(at)?),
-            2 => u32::from(ctx.vmm_read_u8(at)?) | (u32::from(ctx.vmm_read_u8(at + 1)?) << 8),
-            _ => ctx.read_u32(at)?,
+    for index in read.chunks_exact(width as usize) {
+        let value = match *index {
+            [a] => u32::from(a),
+            [a, b] => u32::from(u16::from_le_bytes([a, b])),
+            [a, b, c, d] => u32::from_le_bytes([a, b, c, d]),
+            _ => unreachable!("index widths are 1, 2 and 4"),
         };
         lowest = lowest.min(value);
         highest = highest.max(value);
