@@ -1753,3 +1753,54 @@ fn a_global_load_store_or_atomic_outside_its_buffer_reads_zero_and_changes_nothi
     );
     assert!(atom.contains("if (word < arrayLength(&g0))"), "{atom}");
 }
+
+/// Persona 5 Royal's skinning builds each address into other registers and copies the pair
+/// into place; only an unconditional copy of an unchanged source counts.
+#[test]
+fn an_address_copied_into_place_still_reads_its_descriptor() {
+    let iadd = |dst, a, offset, cin, cout| Op::Iadd {
+        dst,
+        a,
+        aneg: false,
+        b: Operand::Const { bank: 0, offset },
+        bneg: false,
+        cin,
+        cout,
+    };
+    let mov = |dst, src| Op::Mov {
+        dst,
+        src: Operand::Reg(src),
+    };
+    let ldg = Op::Ldg {
+        dst: 23,
+        addr: 28,
+        offset: 0,
+        size: MemSize::B32,
+    };
+    let copied = |mov_pred: Pred, clobber: bool| {
+        let mut entries = vec![
+            (iadd(23, 23, 0x330, false, true), ALWAYS),
+            (iadd(14, RZ, 0x334, true, false), ALWAYS),
+            (mov(29, 14), ALWAYS),
+            (mov(28, 23), mov_pred),
+        ];
+        if clobber {
+            entries.insert(2, (Op::Mov32i { dst: 23, imm: 0x40 }, ALWAYS));
+        }
+        entries.extend([(ldg, ALWAYS), (Op::Exit, ALWAYS)]);
+        translate(&program(&entries))
+    };
+    assert_eq!(
+        copied(ALWAYS, false).unwrap().globals,
+        vec![Global {
+            bank: 0,
+            offset: 0x330,
+            written: false
+        }]
+    );
+    assert!(copied(IF_P0, false).is_err(), "a copy that may not happen");
+    assert!(
+        copied(ALWAYS, true).is_err(),
+        "a source rewritten before the copy"
+    );
+}

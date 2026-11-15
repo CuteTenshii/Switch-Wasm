@@ -144,10 +144,22 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// The indexed form of [`Emitter::global_base`].
+    /// The indexed form of [`Emitter::global_base`]. Either half may have been computed into
+    /// another register and copied in, as Persona 5 Royal's skinning does:
+    ///
+    /// ```text
+    /// iadd.cc r23, r23, c0[0x330]
+    /// iadd.x  r14, RZ, c0[0x334]
+    /// mov     r29, r14
+    /// mov     r28, r23
+    /// ldg     r23, [r28]
+    /// ```
     fn indexed_global_base(&self, at: usize, addr: u8) -> Option<(u8, u16)> {
         let (mut lo, mut hi) = (None, None);
+        // The registers holding each half before the copies seen so far.
+        let (mut lo_reg, mut hi_reg) = (addr, addr.wrapping_add(1));
         for i in (0..at).rev() {
+            let always = self.program.pred(i) == Pred::ALWAYS;
             match self.program.op(i) {
                 Op::Iadd {
                     dst,
@@ -156,7 +168,7 @@ impl<'a> Emitter<'a> {
                     bneg: false,
                     cout: true,
                     ..
-                } if dst == addr && lo.is_none() => lo = Some((bank, offset)),
+                } if dst == lo_reg && lo.is_none() => lo = Some((bank, offset)),
                 // The scaled form, `iscadd.cc r0, r1, c0[0x510], 2`.
                 Op::Iscadd {
                     dst,
@@ -165,7 +177,7 @@ impl<'a> Emitter<'a> {
                     bneg: false,
                     cout: true,
                     ..
-                } if dst == addr && lo.is_none() => lo = Some((bank, offset)),
+                } if dst == lo_reg && lo.is_none() => lo = Some((bank, offset)),
                 // The high half adds only the carry.
                 Op::Iadd {
                     dst,
@@ -175,14 +187,25 @@ impl<'a> Emitter<'a> {
                     bneg: false,
                     cin: true,
                     ..
-                } if dst == addr.wrapping_add(1) && hi.is_none() => hi = Some((bank, offset)),
+                } if dst == hi_reg && hi.is_none() => hi = Some((bank, offset)),
+                Op::Mov {
+                    dst,
+                    src: Operand::Reg(src),
+                } if always && src != RZ && (dst == lo_reg || dst == hi_reg) => {
+                    if dst == lo_reg && lo.is_none() {
+                        lo_reg = src;
+                    }
+                    if dst == hi_reg && hi.is_none() {
+                        hi_reg = src;
+                    }
+                }
                 // Any other write breaks the pattern.
                 other => {
                     let writes = super::interp::writes(&other);
-                    if writes.contains(&addr) && lo.is_none() {
+                    if writes.contains(&lo_reg) && lo.is_none() {
                         return None;
                     }
-                    if writes.contains(&addr.wrapping_add(1)) && hi.is_none() {
+                    if writes.contains(&hi_reg) && hi.is_none() {
                         return None;
                     }
                 }
