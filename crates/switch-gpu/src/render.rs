@@ -108,12 +108,18 @@ impl Gpu {
                 state::StepMode::Instance => wgpu::VertexStepMode::Instance,
                 state::StepMode::Vertex => wgpu::VertexStepMode::Vertex,
             };
-            for (bytes, attributes) in crate::within_stride(bytes, attributes, stride)? {
-                let (bytes, stride) = crate::aligned_stride(bytes, stride);
+            let read = upload.addr..upload.addr + upload.inside;
+            for (bytes, attributes, shift) in crate::within_stride(bytes, attributes, stride)? {
+                let (bytes, widened) = crate::aligned_stride(bytes, stride);
+                // Widening moves every element but the first.
+                let origin = (widened == stride || bytes.len() <= stride as usize)
+                    .then(|| (upload.addr + shift, upload.inside.saturating_sub(shift)));
                 feeds.push(Feed {
                     bytes,
+                    origin,
+                    read: read.clone(),
                     attributes,
-                    stride,
+                    stride: widened,
                     step,
                 });
             }
@@ -141,15 +147,31 @@ impl Gpu {
         if !unfed.is_empty() {
             feeds.push(Feed {
                 bytes: std::borrow::Cow::Borrowed(&ATTRIBUTE_DEFAULTS),
+                origin: None,
+                read: 0..0,
                 attributes: unfed,
                 stride: 0,
                 step: wgpu::VertexStepMode::Vertex,
             });
         }
+        // What compute launches wrote on the device is copied over the stale guest bytes.
+        let mut patches: Vec<Vec<crate::Patch>> = feeds
+            .iter()
+            .map(|feed| self.vertex_patches(feed))
+            .collect::<std::result::Result<_, String>>()?;
+        let folding = feeds.len() > self.vertex_buffer_limit as usize;
+        if folding && patches.iter().any(|p| !p.is_empty()) {
+            return Err("folds a vertex array a compute launch wrote on the device".into());
+        }
+        if folding {
+            patches.clear();
+        }
+        let mut patches = patches.into_iter();
         let bound: Vec<Bound> = fit_vertex_buffers(feeds, self.vertex_buffer_limit)
             .into_iter()
             .map(|f| Bound {
                 buffer: self.buffer("vertex", &f.bytes, wgpu::BufferUsages::VERTEX),
+                patches: patches.next().unwrap_or_default(),
                 attributes: f.attributes,
                 stride: f.stride,
                 step: f.step,
@@ -416,6 +438,17 @@ impl Gpu {
                     label: Some("draws"),
                 })
         });
+        for b in bound {
+            for patch in &b.patches {
+                encoder.copy_buffer_to_buffer(
+                    &patch.source,
+                    patch.from,
+                    &b.buffer,
+                    patch.to,
+                    patch.len,
+                );
+            }
+        }
         {
             let colour: Vec<Option<wgpu::RenderPassColorAttachment>> = colour_view
                 .as_ref()

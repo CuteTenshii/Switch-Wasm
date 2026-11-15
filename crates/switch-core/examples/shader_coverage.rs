@@ -63,6 +63,7 @@ fn blocker(why: Unsupported) -> String {
         Unsupported::UntracedHandle { .. } => "bindless handle not from a constant bank".into(),
         Unsupported::SharedHandleKey { .. } => "two bindless handles keyed alike".into(),
         Unsupported::VertexWrite => "vertex shader writing global memory".into(),
+        Unsupported::PackedSpecialRegister { sr } => format!("packed special register {sr:#x}"),
     }
 }
 
@@ -83,7 +84,9 @@ fn blocked_at(why: &Unsupported) -> Option<usize> {
         | Unsupported::DepthCompare { at }
         | Unsupported::UntracedHandle { at }
         | Unsupported::SharedHandleKey { at } => Some(at),
-        Unsupported::TextureDimension { .. } | Unsupported::VertexWrite => None,
+        Unsupported::TextureDimension { .. }
+        | Unsupported::VertexWrite
+        | Unsupported::PackedSpecialRegister { .. } => None,
     }
 }
 

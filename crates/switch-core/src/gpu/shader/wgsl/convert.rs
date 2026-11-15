@@ -138,9 +138,9 @@ impl Emitter<'_> {
                 self.set_r(dst, &value);
             }
             Op::Mov32i { dst, imm } => self.set_r(dst, &format!("{imm}u")),
-            Op::S2r { dst, .. } => {
-                // Lane and thread identities are zero, as in the interpreter.
-                self.set_r(dst, "0u");
+            Op::S2r { dst, sr } => {
+                self.special.insert(sr);
+                self.set_r(dst, &format!("sreg({sr}u)"));
             }
             Op::Psetp {
                 p0,

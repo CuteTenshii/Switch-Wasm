@@ -72,7 +72,7 @@ impl Gpu {
             }
         }
         for pending in space.pending {
-            pending.staging.destroy();
+            pending.destroy();
         }
         for copy in space.held_copies.into_values() {
             copy.texture.destroy();
@@ -601,7 +601,6 @@ impl Gpu {
                 });
             encoder.copy_buffer_to_buffer(&held.buffer, 0, &staging, 0, held.original.len() as u64);
             self.submit_with_batch(encoder);
-            held.buffer.destroy();
             let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(MAP_WAITING));
             let sink = state.clone();
             staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -613,6 +612,7 @@ impl Gpu {
                 what: Readback::Global {
                     addr,
                     original: held.original,
+                    source: held.buffer,
                 },
                 generation: self.space.asked,
                 state,
@@ -645,7 +645,7 @@ impl Gpu {
                     Self::land_depth(target, &rows, ctx)
                 }
             },
-            Readback::Global { addr, original } => {
+            Readback::Global { addr, original, .. } => {
                 let words = mapped
                     .as_chunks::<4>()
                     .0
@@ -663,7 +663,7 @@ impl Gpu {
         drop(mapped);
         pending.staging.unmap();
         // Destroyed rather than dropped; see [`Gpu::scratch`].
-        pending.staging.destroy();
+        pending.destroy();
         outcome
     }
 
@@ -788,7 +788,7 @@ impl Gpu {
             match first.state.load(Ordering::Acquire) {
                 MAP_WAITING => break,
                 MAP_FAILED => {
-                    self.space.pending.remove(0);
+                    self.space.pending.remove(0).destroy();
                     return Err(Error::Gpu(match self.device_error() {
                         Some(e) => format!("the readback was not mapped: {e}"),
                         None => "the readback was not mapped".into(),
@@ -938,6 +938,7 @@ impl Gpu {
         timed!(self, flush_land, {
             for pending in std::mem::take(&mut self.space.pending) {
                 if pending.state.load(Ordering::Acquire) == MAP_FAILED {
+                    pending.destroy();
                     // Include the device's reason if it left one.
                     return Err(Error::Gpu(match self.device_error() {
                         Some(e) => format!("the readback was not mapped: {e}"),

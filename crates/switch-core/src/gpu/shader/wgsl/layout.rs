@@ -19,6 +19,16 @@ pub struct Global {
 pub enum Stage {
     Vertex,
     Fragment,
+    Compute,
+}
+
+/// What a compute module is built for: one workgroup's shape and the QMD's memory sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ComputeShape {
+    pub block: [u32; 3],
+    /// What `s2r` of `0x32` and `0x36` read, as the interpreter answers them.
+    pub shared_size: u32,
+    pub local_size: u32,
 }
 
 /// Module wiring as slot and bank numbers, mostly read off the program.
@@ -62,6 +72,8 @@ pub struct Layout {
     pub packed_attributes: Vec<(usize, Packed1010102)>,
     /// Coverage for a backend rendering multisampled surfaces per texel.
     pub coverage: Option<Coverage>,
+    /// Set by the backend for a compute module.
+    pub compute: Option<ComputeShape>,
 }
 
 /// Per-sample coverage for an expanded multisample surface: sample mask and
@@ -231,6 +243,7 @@ impl Layout {
             Stage::Vertex => (translated.loads.clone(), translated.stores.clone()),
             // Fragment `a[]` stores go nowhere.
             Stage::Fragment => (Vec::new(), translated.loads.clone()),
+            Stage::Compute => (Vec::new(), Vec::new()),
         };
         Layout {
             attributes,
@@ -238,7 +251,7 @@ impl Layout {
             varyings,
             // Copied from the fragment stage by the backend.
             centroid_varyings: match stage {
-                Stage::Vertex => Vec::new(),
+                Stage::Vertex | Stage::Compute => Vec::new(),
                 Stage::Fragment => translated.centroid_loads.clone(),
             },
             const_banks: translated.const_banks.clone(),
@@ -266,6 +279,7 @@ impl Layout {
             bgra_attributes: Vec::new(),
             packed_attributes: Vec::new(),
             coverage: None,
+            compute: None,
         }
     }
 

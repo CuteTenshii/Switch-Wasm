@@ -61,12 +61,14 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - A compute launch is the QMD address (>> 8) written to `SEND_PCAS_A`, then `SEND_SIGNALING_PCAS_B`; the QMD holds everything about the grid. The program region and texture pools sit at the 3D class's methods, so `gpu::texture` serves both.
 - Compute class inline upload (0x60..0x6D) is needed: Zelda: Echoes of Wisdom uploads every QMD this way.
 - Refused dispatches are counted, not propagated, as refused draws are.
+- `write` only records a launch; the channel offers it to the renderer (`Renderer::dispatch`) and runs it in software, after a flush, when the renderer declines. Both routes write the QMD's release semaphores (`compute::release`).
 
 ## `compute.rs`
 
 - The software dispatch is scalar: CTA threads run one after another. This is exact except at barriers and warp instructions (`shfl`, `vote`), where threads suspend until the whole CTA or warp arrives. Atomics need no locking and races cannot be observed (a racy kernel gets a valid answer that differs from hardware's).
 - Programs without barriers or warp instructions reuse one invocation serially (cheaper); otherwise every thread keeps a live invocation.
 - `MAX_DISPATCH_THREADS` (1<<20) is a liveness guard: the GPU stack runs on one browser worker thread.
+- The WGSL translator's compute stage (`Stage::Compute`) is one invocation per thread and one workgroup per CTA, its shape (`ComputeShape`) baked into the module. `s2r` reads go through `sreg`, which a compute module answers with the lane (`local_invocation_index % 32`), thread and CTA ids and the QMD's shared and local sizes; the graphics stages still read zero, as before.
 
 ## `surface.rs`
 

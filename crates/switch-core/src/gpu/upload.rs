@@ -49,6 +49,10 @@ fn vertex_span(count: u32, buffer: &VertexBuffer) -> u64 {
 pub struct VertexUpload {
     /// Matches [`crate::gpu::pipeline::VertexBuffer::index`].
     pub array: u32,
+    /// The GPU address of `bytes[0]`.
+    pub addr: u64,
+    /// How many of `bytes` came from memory; past the array's limit they are zero.
+    pub inside: u64,
     /// The element these bytes start at; a backend must offset by it.
     pub first: u32,
     pub stride: u32,
@@ -219,6 +223,8 @@ impl Uploads {
             bytes.resize(length as usize, 0);
             vertex.push(VertexUpload {
                 array: buffer.index,
+                addr: start,
+                inside,
                 first,
                 stride: buffer.stride,
                 bytes,
@@ -1763,6 +1769,8 @@ mod tests {
         let uploads = Uploads {
             vertex: vec![VertexUpload {
                 array: 0,
+                addr: 0,
+                inside: 32,
                 first: 0,
                 stride: 8,
                 bytes: vec![0; 32],

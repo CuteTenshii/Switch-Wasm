@@ -29,7 +29,12 @@ pub(crate) enum Readback {
         padded: u32,
     },
     /// A buffer shaders wrote through, put back as the words that changed since `original`.
-    Global { addr: u64, original: Vec<u8> },
+    /// `source` is what was written, kept until it lands for draws that read it meanwhile.
+    Global {
+        addr: u64,
+        original: Vec<u8>,
+        source: wgpu::Buffer,
+    },
 }
 
 impl Pending {
@@ -38,6 +43,22 @@ impl Pending {
         match &self.what {
             Readback::Surface { target, .. } => Some(target),
             Readback::Global { .. } => None,
+        }
+    }
+
+    /// Destroy what the readback holds on the device; see [`Gpu::scratch`](crate::Gpu).
+    pub(crate) fn destroy(&self) {
+        self.staging.destroy();
+        if let Readback::Global { source, .. } = &self.what {
+            source.destroy();
+        }
+    }
+
+    /// The guest memory a buffer readback writes, if it is one.
+    pub(crate) fn global_span(&self) -> Option<std::ops::Range<u64>> {
+        match &self.what {
+            Readback::Surface { .. } => None,
+            Readback::Global { addr, original, .. } => Some(*addr..*addr + original.len() as u64),
         }
     }
 }

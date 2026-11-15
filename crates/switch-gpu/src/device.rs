@@ -100,6 +100,10 @@ impl Gpu {
             bind_uncached_why: [0; 4],
             held_copies_made: 0,
             held_copies_reused: 0,
+            compute_dispatched: 0,
+            software_compute: false,
+            compute_refusals: std::collections::BTreeMap::new(),
+            compute_pipelines: std::collections::HashMap::new(),
             texture_misses: 0,
             gpu_texture_bytes: 0,
             to_remember: Vec::new(),
@@ -194,6 +198,11 @@ impl Gpu {
              it has the frames again",
             self.clean_frames_needed
         );
+    }
+
+    /// The `--software-compute` flag: leave every compute launch to the software dispatch.
+    pub fn set_software_compute(&mut self, software: bool) {
+        self.software_compute = software;
     }
 
     /// The `--interleave` flag. See [`Gpu::interleave`].

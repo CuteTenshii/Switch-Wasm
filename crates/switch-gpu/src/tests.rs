@@ -1054,6 +1054,8 @@ fn vertex_arrays_past_the_limit_fold_into_one_interleaved_buffer_and_one_shared_
         // Two vertices of a 12-byte position in a 16-byte stride.
         Feed {
             bytes: Cow::Owned((0..32).collect()),
+            origin: None,
+            read: 0..0,
             attributes: vec![attribute(wgpu::VertexFormat::Float32x3, 0, 0)],
             stride: 16,
             step: wgpu::VertexStepMode::Vertex,
@@ -1061,6 +1063,8 @@ fn vertex_arrays_past_the_limit_fold_into_one_interleaved_buffer_and_one_shared_
         // Two vertices of a byte pair at offset 2 of a 4-byte stride.
         Feed {
             bytes: Cow::Owned(vec![0, 0, 0xa0, 0xa1, 0, 0, 0xb0, 0xb1]),
+            origin: None,
+            read: 0..0,
             attributes: vec![attribute(wgpu::VertexFormat::Unorm8x2, 2, 1)],
             stride: 4,
             step: wgpu::VertexStepMode::Vertex,
@@ -1068,6 +1072,8 @@ fn vertex_arrays_past_the_limit_fold_into_one_interleaved_buffer_and_one_shared_
         // One instance's element.
         Feed {
             bytes: Cow::Owned(vec![0xc0, 0xc1, 0xc2, 0xc3]),
+            origin: None,
+            read: 0..0,
             attributes: vec![attribute(wgpu::VertexFormat::Uint32, 0, 2)],
             stride: 0,
             step: wgpu::VertexStepMode::Instance,
@@ -1105,6 +1111,8 @@ fn vertex_arrays_past_the_limit_fold_into_one_interleaved_buffer_and_one_shared_
     let within = fit_vertex_buffers(
         vec![Feed {
             bytes: Cow::Owned(vec![0; 16]),
+            origin: None,
+            read: 0..0,
             attributes: vec![attribute(wgpu::VertexFormat::Float32x4, 0, 0)],
             stride: 16,
             step: wgpu::VertexStepMode::Vertex,
@@ -1539,4 +1547,112 @@ fn the_scan_out_pass_crops_flips_and_drops_alpha_without_touching_the_bytes() {
             );
         }
     }
+}
+
+/// A compute launch run on the device leaves guest memory alone until a flush, which then
+/// writes what the software dispatch writes.
+#[test]
+fn a_compute_launch_on_the_device_writes_what_the_software_dispatch_writes() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{indexed_store_program, ComputeHarness};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let program = indexed_store_program();
+    let (grid, block) = ([3, 1, 1], [4, 1, 1]);
+
+    let mut software = ComputeHarness::new(&program, grid, block, 12);
+    let engine = software.engine();
+    switch_core::gpu::compute::dispatch(&engine, &mut software.ctx()).unwrap();
+    let expected = software.output(12);
+    assert_eq!(expected, (0..12).map(|i| i * 4 + 7).collect::<Vec<u32>>());
+
+    let mut device = ComputeHarness::new(&program, grid, block, 12);
+    let engine = device.engine();
+    let ran = gpu.dispatch(&engine, &mut device.ctx()).unwrap();
+    assert!(ran, "refused: {:?}", gpu.compute_refusals);
+    assert_eq!(
+        device.output(12),
+        vec![0; 12],
+        "held on the device until a flush"
+    );
+    let mut flushes = 0;
+    while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
+        flushes += 1;
+        assert!(flushes < 100, "the readback never landed");
+    }
+    assert_eq!(device.output(12), expected);
+}
+
+/// A draw reads vertices a compute launch wrote on the device from where the launch left them,
+/// before guest memory has them, and draws what it would have drawn from guest memory.
+#[test]
+fn a_draw_reads_vertices_a_compute_launch_wrote_on_the_device() {
+    use switch_core::gpu::renderer::Renderer;
+    use switch_core::gpu::testing::{copy_program, write_launch, Harness};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let colour = [0.25, 0.5, 1.0, 1.0];
+
+    let mut direct = Harness::new();
+    direct.as_id = 1;
+    direct.triangle(colour);
+    direct.draw_with(&mut gpu).unwrap();
+    direct.flush_with(&mut gpu);
+    let expected = direct.target();
+    assert!(
+        expected.iter().any(|&texel| texel != 0),
+        "the reference drew"
+    );
+
+    let mut h = Harness::new();
+    h.as_id = 2;
+    h.triangle(colour);
+    let (vertices, staged, launch) = (h.base + 0x400, h.base + 0x1000, h.base + 0x800);
+    const WORDS: u32 = 3 * 8;
+    let mut ctx = h.ctx();
+    for word in 0..u64::from(WORDS) {
+        let value = ctx.read_u32(vertices + word * 4).unwrap();
+        ctx.write_u32(staged + word * 4, value).unwrap();
+        ctx.write_u32(vertices + word * 4, 0).unwrap();
+    }
+    let engine = write_launch(
+        &mut ctx,
+        launch,
+        &copy_program(),
+        [1, 1, 1],
+        [WORDS, 1, 1],
+        &[
+            (0x40, vertices as u32),
+            (0x44, (vertices >> 32) as u32),
+            (0x48, WORDS * 4),
+            (0x60, staged as u32),
+            (0x64, (staged >> 32) as u32),
+            (0x68, WORDS * 4),
+        ],
+    );
+    assert!(
+        gpu.dispatch(&engine, &mut ctx).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    assert_eq!(
+        ctx.read_u32(vertices).unwrap(),
+        0,
+        "the copy is still on the device"
+    );
+
+    h.draw_with(&mut gpu).unwrap();
+    assert!(gpu.reasons.is_empty(), "fell back: {:?}", gpu.reasons);
+    h.flush_with(&mut gpu);
+    assert_eq!(h.target(), expected);
+    let ctx = h.ctx();
+    assert_eq!(
+        ctx.read_u32(vertices).unwrap(),
+        ctx.read_u32(staged).unwrap(),
+        "the flush put the copy back"
+    );
 }

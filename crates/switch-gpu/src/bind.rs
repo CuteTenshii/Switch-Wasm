@@ -83,7 +83,7 @@ fn fingerprint(entries: &[wgpu::BindGroupLayoutEntry], resources: &[Resource]) -
 }
 
 /// A stage's banks as the table `cbRead` indexes, then the banks themselves, whole words.
-fn pack_banks<'a>(banks: impl Iterator<Item = &'a ConstantUpload>) -> Vec<u8> {
+pub(super) fn pack_banks<'a>(banks: impl Iterator<Item = &'a ConstantUpload>) -> Vec<u8> {
     let table = wgsl::CONSTANT_BANKS as usize * 2;
     let mut bytes = vec![0u8; table * 4];
     for bank in banks.filter(|b| b.bank < wgsl::CONSTANT_BANKS) {
@@ -260,7 +260,7 @@ impl Gpu {
             ));
         }
 
-        for global in p.globals.iter().filter(|g| g.stage == stage) {
+        for global in p.globals.iter().filter(|g| g.stage == Some(stage)) {
             let binding = wgsl::GLOBAL_BINDING + global.slot;
             let written = global.writes;
             entries.push(wgpu::BindGroupLayoutEntry {
@@ -1147,7 +1147,7 @@ impl Gpu {
         Ok((texture, bytes.len()))
     }
 
-    /// The buffers a stage's `ldg`s and atomics reach, one per descriptor traced back to a
+    /// The buffers a draw stage's `ldg`s and atomics reach, one per descriptor traced back to a
     /// constant bank. A written one stays on the device until the next flush.
     pub(super) fn global_uploads(
         &mut self,
@@ -1156,17 +1156,32 @@ impl Gpu {
         uploads: &Uploads,
         ctx: &ExecCtx,
     ) -> std::result::Result<Vec<GlobalUpload>, String> {
-        let mut out = Vec::new();
-        for (slot, global) in layout.globals.iter().enumerate() {
-            let (bank, offset) = (global.bank, global.offset);
-            let held = uploads
+        let bank = |bank: u8| {
+            uploads
                 .constants
                 .iter()
                 .find(|c| c.stage == stage && c.bank == u32::from(bank))
-                .ok_or("a `ldg` descriptor in a bank the draw never bound")?;
+                .map(|c| c.bytes.as_slice())
+        };
+        self.globals_through(layout, Some(stage), &bank, ctx)
+    }
+
+    /// [`Gpu::global_uploads`] for any program: `bank` gives a bound constant bank's bytes,
+    /// and `stage` is the draw stage, `None` for a compute launch.
+    pub(super) fn globals_through<'b>(
+        &mut self,
+        layout: &Layout,
+        stage: Option<ShaderStage>,
+        bank_bytes: &dyn Fn(u8) -> Option<&'b [u8]>,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<Vec<GlobalUpload>, String> {
+        let mut out = Vec::new();
+        for (slot, global) in layout.globals.iter().enumerate() {
+            let (bank, offset) = (global.bank, global.offset);
+            let held =
+                bank_bytes(bank).ok_or("a `ldg` descriptor in a bank the program never bound")?;
             let word = |at: usize| -> Option<u32> {
-                held.bytes
-                    .get(at..at + 4)
+                held.get(at..at + 4)
                     .map(|b| u32::from_le_bytes(b.try_into().expect("four bytes")))
             };
             let at = usize::from(offset);
@@ -1194,6 +1209,8 @@ impl Gpu {
                 out.push(GlobalUpload {
                     stage,
                     slot: slot as u32,
+                    addr: 0,
+                    len: 0,
                     bytes: Vec::new(),
                     held: None,
                     writes: false,
@@ -1203,7 +1220,13 @@ impl Gpu {
             let mapping = ctx.vmm.mapping_at(address).ok_or_else(|| {
                 format!("a `ldg` descriptor naming {address:#x}, which is unmapped")
             })?;
-            let len = (mapping.gpu_va + mapping.size - address).min(MAX_GLOBAL) as usize;
+            let mapped = (mapping.gpu_va + mapping.size - address).min(MAX_GLOBAL);
+            // NVN's descriptor carries the buffer's size after its address; without it the
+            // buffer runs to the end of its mapping.
+            let len = match word(at + 8) {
+                Some(size) if size != 0 => u64::from(size).min(mapped),
+                _ => mapped,
+            } as usize;
             // Atomics work on whole words.
             let len = if global.written { len & !3 } else { len };
             let span = address..address + len as u64;
@@ -1217,6 +1240,8 @@ impl Gpu {
                 out.push(GlobalUpload {
                     stage,
                     slot: slot as u32,
+                    addr: address,
+                    len: len as u64,
                     bytes: Vec::new(),
                     held: Some(held.buffer.clone()),
                     writes: global.written,
@@ -1256,6 +1281,8 @@ impl Gpu {
             out.push(GlobalUpload {
                 stage,
                 slot: slot as u32,
+                addr: address,
+                len: len as u64,
                 bytes,
                 held,
                 writes: global.written,

@@ -78,6 +78,11 @@ impl Gpu {
 
     /// Whether nothing held, rebound or on its way back shares memory with `ranges`.
     pub(super) fn touches_nothing_held(&self, ranges: &[Range<u64>]) -> bool {
+        self.touches_no_surface(ranges) && self.no_global_in(ranges)
+    }
+
+    /// Whether `ranges` miss every surface held on the device, evicted or on its way back.
+    pub(super) fn touches_no_surface(&self, ranges: &[Range<u64>]) -> bool {
         let clear = |target: &Target| {
             let held = span(target);
             !ranges.iter().any(|range| overlap(&held, range))
@@ -90,6 +95,21 @@ impl Gpu {
                 .pending
                 .iter()
                 .all(|pending| pending.target().is_none_or(clear))
+    }
+
+    /// Whether `ranges` miss every buffer shaders wrote on the device, held or on its way back.
+    pub(super) fn no_global_in(&self, ranges: &[Range<u64>]) -> bool {
+        let clear = |span: Range<u64>| !ranges.iter().any(|range| overlap(&span, range));
+        self.space
+            .globals
+            .iter()
+            .all(|(&at, global)| clear(at..at + global.original.len() as u64))
+            && self
+                .space
+                .pending
+                .iter()
+                .filter_map(|pending| pending.global_span())
+                .all(clear)
     }
 
     /// Run `blit` on the device if its source is, or can be held there as the plain colour

@@ -241,6 +241,15 @@ impl Engine3D {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.flush(ctx))
     }
 
+    /// See [`Renderer::dispatch`].
+    pub fn dispatch_on_device(
+        &mut self,
+        compute: &crate::gpu::engine::compute::EngineCompute,
+        ctx: &mut ExecCtx,
+    ) -> Result<bool> {
+        self.with_renderer(ctx, |renderer, _, ctx| renderer.dispatch(compute, ctx))
+    }
+
     /// See [`Renderer::guest_memory_is_current`].
     pub fn guest_memory_is_current(
         &mut self,

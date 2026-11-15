@@ -57,6 +57,17 @@ pub trait Renderer: std::fmt::Debug {
     /// render target alone.
     fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()>;
 
+    /// Run the compute launch [`EngineCompute::last_dispatch`] names, release included.
+    /// `Ok(false)` leaves it to the software dispatch, which reads guest memory, so the
+    /// engine flushes the backend first.
+    fn dispatch(
+        &mut self,
+        _engine: &crate::gpu::engine::compute::EngineCompute,
+        _ctx: &mut ExecCtx,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Clear the enabled `channels` of colour target `target`, layer `layer`,
     /// to the engine's clear colour and within its clear rectangle.
     fn clear_color(

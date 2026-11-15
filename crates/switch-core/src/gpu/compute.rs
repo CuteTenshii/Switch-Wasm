@@ -19,16 +19,32 @@ use std::cell::RefCell;
 /// The most threads one dispatch may run, a liveness guard for the browser worker.
 pub const MAX_DISPATCH_THREADS: u64 = 1 << 20;
 
-pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
+/// A launch as its QMD describes it, for a backend that runs it elsewhere.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    pub qmd: Qmd,
+    /// The program's GPU address.
+    pub program_addr: u64,
+}
+
+/// Read the QMD [`EngineCompute::last_dispatch`] names.
+pub fn read_launch(engine: &EngineCompute, ctx: &ExecCtx) -> Result<Launch> {
     let launch = engine
         .last_dispatch
         .ok_or_else(|| Error::Gpu("compute: a dispatch with no QMD address".into()))?;
-
     let mut words = [0u32; QMD_WORDS];
     for (i, word) in words.iter_mut().enumerate() {
         *word = ctx.read_u32(launch.qmd_addr + i as u64 * 4)?;
     }
     let qmd = Qmd::parse(&words)?;
+    Ok(Launch {
+        program_addr: engine.program_region() + u64::from(qmd.program_offset),
+        qmd,
+    })
+}
+
+pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
+    let Launch { qmd, program_addr } = read_launch(engine, ctx)?;
     if ctx.trace {
         crate::traceln!(
             "[gpu] compute grid {:?} block {:?} shared={:#x} program={:#x}",
@@ -51,7 +67,6 @@ pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
         )));
     }
 
-    let program_addr = engine.program_region() + u64::from(qmd.program_offset);
     let memory = DispatchMemory {
         ctx: RefCell::new(ctx),
         banks: qmd.constant_buffers,
@@ -172,7 +187,8 @@ fn tid(thread: u32, qmd: &Qmd) -> [u32; 3] {
     [thread % width, (thread / width) % height, thread / plane]
 }
 
-fn release(qmd: &Qmd, ctx: &mut ExecCtx) -> Result<()> {
+/// Write the QMD's release semaphores, once the launch's work is done or queued.
+pub fn release(qmd: &Qmd, ctx: &mut ExecCtx) -> Result<()> {
     for release in qmd.releases.into_iter().flatten() {
         let Release {
             addr,
@@ -743,6 +759,15 @@ mod tests {
         let engine = harness.engine();
         let mut ctx = harness.ctx();
         dispatch(&engine, &mut ctx)
+    }
+
+    #[test]
+    fn the_shared_harness_program_stores_through_its_descriptor() {
+        use crate::gpu::testing::{indexed_store_program, ComputeHarness};
+        let mut h = ComputeHarness::new(&indexed_store_program(), [2, 1, 1], [4, 1, 1], 8);
+        let engine = h.engine();
+        dispatch(&engine, &mut h.ctx()).unwrap();
+        assert_eq!(h.output(8), (0..8).map(|i| i * 4 + 7).collect::<Vec<u32>>());
     }
 
     #[test]

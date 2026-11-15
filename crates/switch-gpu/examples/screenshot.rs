@@ -51,8 +51,9 @@ struct Cli {
 }
 
 /// The ids of [`Device`]'s flags, which `--software` leaves nothing to apply to.
-const DEVICE_FLAGS: [&str; 7] = [
+const DEVICE_FLAGS: [&str; 8] = [
     "defer_readbacks",
+    "software_compute",
     "sync_every_present",
     "interleave",
     "web_limits",
@@ -67,6 +68,9 @@ struct Device {
     /// Never wait for readbacks, as in a browser.
     #[arg(long)]
     defer_readbacks: bool,
+    /// Run every compute launch in software, to compare against the device's.
+    #[arg(long)]
+    software_compute: bool,
     /// Bring every surface back at every present, to compare against keeping them held.
     #[arg(long)]
     sync_every_present: bool,
@@ -311,6 +315,7 @@ fn open_renderer(software: bool, device: &Device) -> Box<dyn Renderer> {
     match switch_gpu::Gpu::open() {
         Ok(mut gpu) => {
             gpu.set_defer_readbacks(device.defer_readbacks);
+            gpu.set_software_compute(device.software_compute);
             gpu.set_sync_every_present(device.sync_every_present);
             gpu.set_interleave(device.interleave);
             gpu.set_web_limits(device.web_limits);

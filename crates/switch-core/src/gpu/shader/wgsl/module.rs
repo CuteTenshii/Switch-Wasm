@@ -91,6 +91,19 @@ pub fn module(
     if stage == Stage::Vertex && layout.globals.iter().any(|g| g.written) {
         return Err(Unsupported::VertexWrite);
     }
+    if stage == Stage::Compute {
+        // Lanes of a warp exist only in a fragment quad here.
+        if let Some(at) = translated.quad.or(translated.quad_swap) {
+            return Err(Unsupported::Quad { at });
+        }
+        if let Some(&sr) = translated
+            .special
+            .iter()
+            .find(|sr| PACKED_SPECIAL_REGISTERS.contains(sr))
+        {
+            return Err(Unsupported::PackedSpecialRegister { sr });
+        }
+    }
     // Directives first, then the lane index.
     if translated.quad_swap.is_some() {
         if translated.subgroups {
@@ -514,13 +527,64 @@ pub fn module(
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
 
+    out.push_str(&special_registers(stage, layout));
+
     out.push_str(&translated.source);
     out.push('\n');
     out.push_str(&match stage {
         Stage::Vertex => vertex_entry(layout),
         Stage::Fragment => fragment_entry(translated, layout),
+        Stage::Compute => compute_entry(layout),
     });
     Ok(out)
+}
+
+/// `SR_TID` and `SR_NTID` read whole, refused as the interpreter refuses them.
+const PACKED_SPECIAL_REGISTERS: [u8; 2] = [0x20, 0x28];
+
+/// `sreg`, what `s2r` reads. Only a compute invocation has an identity; the graphics stages
+/// read zero, as they always have here.
+fn special_registers(stage: Stage, layout: &Layout) -> String {
+    let Some(shape) = layout.compute.filter(|_| stage == Stage::Compute) else {
+        return "fn sreg(sr: u32) -> u32 { return 0u; }\n\n".to_string();
+    };
+    format!(
+        "var<private> sr_lane: u32;\n\
+         var<private> sr_tid: vec3<u32>;\n\
+         var<private> sr_ctaid: vec3<u32>;\n\n\
+         fn sreg(sr: u32) -> u32 {{\n  switch (sr) {{\n\
+         \x20   case 0x00u: {{ return sr_lane; }}\n\
+         \x20   case 0x21u: {{ return sr_tid.x; }}\n\
+         \x20   case 0x22u: {{ return sr_tid.y; }}\n\
+         \x20   case 0x23u: {{ return sr_tid.z; }}\n\
+         \x20   case 0x25u: {{ return sr_ctaid.x; }}\n\
+         \x20   case 0x26u: {{ return sr_ctaid.y; }}\n\
+         \x20   case 0x27u: {{ return sr_ctaid.z; }}\n\
+         \x20   case 0x32u: {{ return {}u; }}\n\
+         \x20   case 0x36u: {{ return {}u; }}\n\
+         \x20   default: {{ return 0u; }}\n  }}\n}}\n\n",
+        shape.shared_size, shape.local_size
+    )
+}
+
+/// One invocation per thread of a CTA, a workgroup per CTA.
+fn compute_entry(layout: &Layout) -> String {
+    let [x, y, z] = layout
+        .compute
+        .expect("a compute module is built for a shape")
+        .block;
+    format!(
+        "@compute @workgroup_size({x}, {y}, {z})\n\
+         fn cs_main(\n\
+         \x20 @builtin(local_invocation_id) local: vec3<u32>,\n\
+         \x20 @builtin(local_invocation_index) index: u32,\n\
+         \x20 @builtin(workgroup_id) group: vec3<u32>,\n\
+         ) {{\n\
+         \x20 sr_lane = index % 32u;\n\
+         \x20 sr_tid = local;\n\
+         \x20 sr_ctaid = group;\n\
+         \x20 _ = run();\n}}\n"
+    )
 }
 
 /// Statements binding `texel`, the raw words of the integer image's texel under `(u, v)` moved

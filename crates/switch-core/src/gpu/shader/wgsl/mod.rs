@@ -26,8 +26,8 @@ mod texture;
 
 use emitter::Emitter;
 pub use layout::{
-    Coverage, Fold, Global, Layout, Stage, TextureBinding, CONSTANTS_BINDING, CONSTANT_BANKS,
-    GLOBAL_BINDING, IDENTITY_SWIZZLE,
+    ComputeShape, Coverage, Fold, Global, Layout, Stage, TextureBinding, CONSTANTS_BINDING,
+    CONSTANT_BANKS, GLOBAL_BINDING, IDENTITY_SWIZZLE,
 };
 pub use module::module;
 
@@ -52,6 +52,8 @@ pub enum Unsupported {
     SharedHandleKey { at: usize },
     /// A vertex shader's atomic, which WebGPU keeps out of the vertex stage.
     VertexWrite,
+    /// A compute program reading a packed special register, whose field layout is unconfirmed.
+    PackedSpecialRegister { sr: u8 },
 }
 
 impl fmt::Display for Unsupported {
@@ -62,6 +64,9 @@ impl fmt::Display for Unsupported {
             }
             Unsupported::VertexWrite => {
                 write!(f, "a vertex shader writing global memory")
+            }
+            Unsupported::PackedSpecialRegister { sr } => {
+                write!(f, "s2r of the packed special register {sr:#x}")
             }
             Unsupported::Quad { at } => {
                 write!(
@@ -109,6 +114,7 @@ pub const HOST_INTERFACE: &str = "\
 fn attrIn(offset: u32) -> f32 { return 0.0; }
 fn attrOut(offset: u32, value: f32) { }
 fn cbRead(bank: u32, offset: u32) -> u32 { return 0u; }
+fn sreg(sr: u32) -> u32 { return 0u; }
 fn gRead(slot: u32, offset: u32) -> u32 { return 0u; }
 fn gWrite(slot: u32, offset: u32, value: u32, mask: u32) { }
 fn gAtom(op: u32, slot: u32, offset: u32, value: u32, stored: u32) -> u32 { return 0u; }
@@ -182,6 +188,8 @@ pub struct Translation {
     pub subgroup_enable: bool,
     /// Each 64-bit `ldg` or atomic descriptor, in binding order.
     pub globals: Vec<Global>,
+    /// Special registers `s2r` reads, ascending.
+    pub special: Vec<u8>,
 }
 
 /// Translate into a WGSL function `run`, returning whether it hit `kil`.
@@ -230,6 +238,7 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         subgroups: caps.subgroups,
         subgroup_enable: caps.subgroup_enable,
         globals: emitter.globals.clone(),
+        special: emitter.special.iter().copied().collect(),
     })
 }
 

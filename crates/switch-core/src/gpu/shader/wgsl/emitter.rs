@@ -41,6 +41,8 @@ pub(super) struct Emitter<'a> {
     /// Textures only `txq`'d, bound as 2D.
     pub(super) queried: Vec<TextureSlot>,
     pub(super) texture_offsets: Vec<(i32, i32)>,
+    /// Special registers `s2r` reads.
+    pub(super) special: BTreeSet<u8>,
 }
 
 impl<'a> Emitter<'a> {
@@ -67,6 +69,7 @@ impl<'a> Emitter<'a> {
             before: Vec::new(),
             queried: Vec::new(),
             texture_offsets: Vec::new(),
+            special: BTreeSet::new(),
         }
     }
 

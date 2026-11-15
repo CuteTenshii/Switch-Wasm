@@ -61,26 +61,29 @@ impl EngineCompute {
         self.regs.field(SET_BINDLESS_TEXTURE, 0, 4) as u8
     }
 
-    pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
+    /// Answers whether the write launched a dispatch, which the caller runs: on a renderer, or
+    /// with [`EngineCompute::run_software`].
+    pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<bool> {
         self.regs.set(method, arg);
         if crate::gpu::engine::inline::METHOD_RANGE.contains(&method) {
-            return self.inline.write(method, arg, ctx);
+            self.inline.write(method, arg, ctx)?;
+            return Ok(false);
         }
-        if method == SEND_SIGNALING_PCAS_B {
-            let qmd_addr = (self.regs.get(SEND_PCAS_A) as u64) << 8;
-            self.last_dispatch = Some(Dispatch { qmd_addr });
-            self.dispatches += 1;
-            ctx.stats.dispatches += 1;
-            if ctx.trace {
-                crate::traceln!("[gpu] compute dispatch qmd={:#x}", qmd_addr);
-            }
-            self.dispatch_or_log(ctx);
+        if method != SEND_SIGNALING_PCAS_B {
+            return Ok(false);
         }
-        Ok(())
+        let qmd_addr = (self.regs.get(SEND_PCAS_A) as u64) << 8;
+        self.last_dispatch = Some(Dispatch { qmd_addr });
+        self.dispatches += 1;
+        ctx.stats.dispatches += 1;
+        if ctx.trace {
+            crate::traceln!("[gpu] compute dispatch qmd={:#x}", qmd_addr);
+        }
+        Ok(true)
     }
 
-    /// Run the launch, or count the refusal instead of failing the pushbuffer.
-    fn dispatch_or_log(&mut self, ctx: &mut ExecCtx) {
+    /// Run the launch on the CPU, or count the refusal instead of failing the pushbuffer.
+    pub fn run_software(&mut self, ctx: &mut ExecCtx) {
         if let Err(e) = crate::gpu::compute::dispatch(self, ctx) {
             ctx.stats.dispatches_skipped += 1;
             if ctx.trace {
@@ -155,7 +158,8 @@ mod tests {
 
         let mut engine = EngineCompute::new();
         engine.write(SEND_PCAS_A, 0x0012_3456, &mut ctx).unwrap();
-        engine.write(SEND_SIGNALING_PCAS_B, 0, &mut ctx).unwrap();
+        assert!(engine.write(SEND_SIGNALING_PCAS_B, 0, &mut ctx).unwrap());
+        engine.run_software(&mut ctx);
         assert_eq!(
             engine.last_dispatch,
             Some(Dispatch {

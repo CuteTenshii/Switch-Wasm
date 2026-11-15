@@ -942,3 +942,319 @@ impl Default for Harness {
         Harness::new()
     }
 }
+
+/// A compute launch in memory of its own: its QMD, its program, constant bank 0 holding an
+/// NVN storage-buffer descriptor for the output, and the output buffer.
+pub struct ComputeHarness {
+    pub mem: Memory,
+    pub vmm: AddressSpace,
+    pub host1x: Host1x,
+    pub stats: GpuStats,
+    pub base: u64,
+}
+
+const COMPUTE_QMD_AT: u64 = 0;
+const COMPUTE_PROGRAM_AT: u64 = 0x1000;
+const COMPUTE_OUTPUT_AT: u64 = 0x2000;
+const COMPUTE_BANK_AT: u64 = 0x3000;
+const COMPUTE_BANK_SIZE: u32 = 0x100;
+/// Where bank 0 holds the output's descriptor: address, then size.
+const COMPUTE_DESCRIPTOR: u32 = 0x40;
+/// Where bank 0 holds the constant [`indexed_store_program`] adds.
+const COMPUTE_ADDEND: u32 = 0x50;
+
+impl ComputeHarness {
+    /// `program` launched as `grid` CTAs of `block` threads, with an output of `output_words`.
+    pub fn new(program: &[u64], grid: [u32; 3], block: [u32; 3], output_words: u32) -> Self {
+        let mem = Memory::new();
+        mem.map_zero(0x7100_0000, 0x4000).unwrap();
+        let mut vmm = AddressSpace::new();
+        let base = vmm
+            .map(0x7100_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        let mut harness = ComputeHarness {
+            mem,
+            vmm,
+            host1x: Host1x::new(),
+            stats: GpuStats::default(),
+            base,
+        };
+        let output = base + COMPUTE_OUTPUT_AT;
+        let mut ctx = harness.ctx();
+        write_launch(
+            &mut ctx,
+            base + COMPUTE_QMD_AT,
+            program,
+            grid,
+            block,
+            &[
+                (COMPUTE_DESCRIPTOR, output as u32),
+                (COMPUTE_DESCRIPTOR + 4, (output >> 32) as u32),
+                (COMPUTE_DESCRIPTOR + 8, output_words * 4),
+                (COMPUTE_ADDEND, 7),
+            ],
+        );
+        harness
+    }
+
+    pub fn ctx(&mut self) -> ExecCtx<'_> {
+        ExecCtx {
+            mem: &self.mem,
+            vmm: &self.vmm,
+            as_id: 0,
+            host1x: &mut self.host1x,
+            stats: &mut self.stats,
+            trace: false,
+        }
+    }
+
+    /// The compute engine, its program region set and the launch recorded.
+    pub fn engine(&self) -> crate::gpu::engine::compute::EngineCompute {
+        let mut engine = crate::gpu::engine::compute::EngineCompute::new();
+        let program = self.base + COMPUTE_PROGRAM_AT;
+        engine.regs.set(0x582, (program >> 32) as u32);
+        engine.regs.set(0x583, program as u32);
+        engine.last_dispatch = Some(crate::gpu::engine::compute::Dispatch {
+            qmd_addr: self.base + COMPUTE_QMD_AT,
+        });
+        engine
+    }
+
+    pub fn output(&mut self, words: usize) -> Vec<u32> {
+        let at = self.base + COMPUTE_OUTPUT_AT;
+        let ctx = self.ctx();
+        (0..words)
+            .map(|i| ctx.read_u32(at + i as u64 * 4).unwrap())
+            .collect()
+    }
+
+    /// The output's GPU address.
+    pub fn output_addr(&self) -> u64 {
+        self.base + COMPUTE_OUTPUT_AT
+    }
+}
+
+/// Lay a launch out from `at`: its QMD, its program at `at + 0x1000` and constant bank 0 at
+/// `at + 0x3000` holding `bank_words` (byte offset, word). Answers the compute engine set to
+/// launch it.
+pub fn write_launch(
+    ctx: &mut ExecCtx,
+    at: u64,
+    program: &[u64],
+    grid: [u32; 3],
+    block: [u32; 3],
+    bank_words: &[(u32, u32)],
+) -> crate::gpu::engine::compute::EngineCompute {
+    let program_at = at + COMPUTE_PROGRAM_AT;
+    let bank_at = at + COMPUTE_BANK_AT;
+    let mut write = |from: u64, words: &[u32]| {
+        for (i, word) in words.iter().enumerate() {
+            ctx.write_u32(from + i as u64 * 4, *word).unwrap();
+        }
+    };
+    write(at, &qmd_words(grid, block, bank_at));
+    let laid_out: Vec<u32> = program
+        .chunks(3)
+        .flat_map(|chunk| std::iter::once(0).chain(chunk.iter().copied()))
+        .flat_map(|w: u64| [w as u32, (w >> 32) as u32])
+        .collect();
+    write(program_at, &laid_out);
+    for &(offset, word) in bank_words {
+        write(bank_at + u64::from(offset), &[word]);
+    }
+    let mut engine = crate::gpu::engine::compute::EngineCompute::new();
+    engine.regs.set(0x582, (program_at >> 32) as u32);
+    engine.regs.set(0x583, program_at as u32);
+    engine.last_dispatch = Some(crate::gpu::engine::compute::Dispatch { qmd_addr: at });
+    engine
+}
+
+/// A version 2.x QMD launching `grid` CTAs of `block` threads with bank 0 bound at `bank`.
+fn qmd_words(grid: [u32; 3], block: [u32; 3], bank: u64) -> Vec<u32> {
+    let mut words = [0u32; crate::gpu::qmd::QMD_WORDS];
+    let mut set = |lo: u32, hi: u32, value: u32| {
+        for bit in 0..=(hi - lo) {
+            let at = (lo + bit) as usize;
+            if value >> bit & 1 != 0 {
+                words[at / 32] |= 1 << (at % 32);
+            }
+        }
+    };
+    set(576, 579, 6);
+    set(384, 415, grid[0]);
+    set(416, 431, grid[1]);
+    set(432, 447, grid[2]);
+    set(592, 607, block[0]);
+    set(608, 623, block[1]);
+    set(624, 639, block[2]);
+    set(640, 640, 1);
+    set(928, 959, bank as u32);
+    set(960, 967, (bank >> 32) as u32);
+    set(975, 991, COMPUTE_BANK_SIZE);
+    words.to_vec()
+}
+
+/// Thread `tid` copies word `tid` of the buffer bank 0 describes at `0x60` into the one it
+/// describes at `0x40`.
+pub fn copy_program() -> Vec<u64> {
+    use crate::gpu::shader::isa::{self, MemSize, Operand, RZ};
+    use crate::gpu::shader::Op;
+    const PT: u64 = 7 << 16;
+    let check = |word: u64, expected: Op| {
+        assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");
+        word
+    };
+    let iadd = |dst: u8, a: u8, offset: u16, cin: bool, cout: bool| {
+        check(
+            0x4c10u64 << 48
+                | u64::from(offset >> 2) << 20
+                | u64::from(cin) << 43
+                | u64::from(cout) << 47
+                | PT
+                | u64::from(a) << 8
+                | u64::from(dst),
+            Op::Iadd {
+                dst,
+                a,
+                aneg: false,
+                b: Operand::Const { bank: 0, offset },
+                bneg: false,
+                cin,
+                cout,
+            },
+        )
+    };
+    let memory = |opcode: u64, data: u8, addr: u8| {
+        (opcode | 4) << 48 | PT | u64::from(addr) << 8 | u64::from(data)
+    };
+    vec![
+        check(
+            0xf0c8u64 << 48 | 0x21 << 20 | PT,
+            Op::S2r { dst: 0, sr: 0x21 },
+        ),
+        check(
+            0x5c18u64 << 48 | u64::from(RZ) << 20 | 2 << 39 | PT | 5,
+            Op::Iscadd {
+                dst: 5,
+                a: 0,
+                aneg: false,
+                b: Operand::Reg(RZ),
+                bneg: false,
+                shift: 2,
+                cout: false,
+            },
+        ),
+        iadd(6, 5, 0x60, false, true),
+        iadd(7, RZ, 0x64, true, false),
+        check(
+            memory(0xeed0, 8, 6),
+            Op::Ldg {
+                dst: 8,
+                addr: 6,
+                offset: 0,
+                size: MemSize::B32,
+            },
+        ),
+        iadd(10, 5, COMPUTE_DESCRIPTOR as u16, false, true),
+        iadd(11, RZ, COMPUTE_DESCRIPTOR as u16 + 4, true, false),
+        check(
+            memory(0xeed8, 8, 10),
+            Op::Stg {
+                addr: 10,
+                offset: 0,
+                src: 8,
+                size: MemSize::B32,
+            },
+        ),
+        check(0xe300_0000_0000_0000 | PT | 0xF, Op::Exit),
+    ]
+}
+
+/// Every thread of a launch of four-thread CTAs stores `index * 4 + c0[0x50]` at word
+/// `index`, `index` being its CTA's base plus its thread id, through bank 0's descriptor.
+pub fn indexed_store_program() -> Vec<u64> {
+    use crate::gpu::shader::isa::{self, MemSize, Operand, RZ};
+    use crate::gpu::shader::Op;
+    const PT: u64 = 7 << 16;
+    let check = |word: u64, expected: Op| {
+        assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");
+        word
+    };
+    let s2r = |dst: u8, sr: u8| {
+        check(
+            0xf0c8u64 << 48 | u64::from(sr) << 20 | PT | u64::from(dst),
+            Op::S2r { dst, sr },
+        )
+    };
+    // `(a << shift) + b`, `b` a register or a bank word.
+    let iscadd = |dst: u8, a: u8, b: Operand, shift: u8| {
+        let form = match b {
+            Operand::Reg(r) => 0x5c18u64 << 48 | u64::from(r) << 20,
+            Operand::Const { bank, offset } => {
+                0x4c18u64 << 48 | u64::from(bank) << 34 | u64::from(offset >> 2) << 20
+            }
+            Operand::Imm(_) => unreachable!("not used here"),
+        };
+        check(
+            form | u64::from(shift) << 39 | PT | u64::from(a) << 8 | u64::from(dst),
+            Op::Iscadd {
+                dst,
+                a,
+                aneg: false,
+                b,
+                bneg: false,
+                shift,
+                cout: false,
+            },
+        )
+    };
+    // `a + c0[offset]`, carrying out or in.
+    let iadd = |dst: u8, a: u8, offset: u16, cin: bool, cout: bool| {
+        check(
+            0x4c10u64 << 48
+                | u64::from(offset >> 2) << 20
+                | u64::from(cin) << 43
+                | u64::from(cout) << 47
+                | PT
+                | u64::from(a) << 8
+                | u64::from(dst),
+            Op::Iadd {
+                dst,
+                a,
+                aneg: false,
+                b: Operand::Const { bank: 0, offset },
+                bneg: false,
+                cin,
+                cout,
+            },
+        )
+    };
+    let descriptor = COMPUTE_DESCRIPTOR as u16;
+    vec![
+        s2r(0, 0x21),
+        s2r(1, 0x25),
+        iscadd(0, 1, Operand::Reg(0), 2),
+        iscadd(5, 0, Operand::Reg(RZ), 2),
+        iadd(6, 5, descriptor, false, true),
+        iadd(7, RZ, descriptor + 4, true, false),
+        iscadd(
+            8,
+            0,
+            Operand::Const {
+                bank: 0,
+                offset: COMPUTE_ADDEND as u16,
+            },
+            2,
+        ),
+        check(
+            (0xeed8u64 | 4) << 48 | PT | 6 << 8 | 8,
+            Op::Stg {
+                addr: 6,
+                offset: 0,
+                src: 8,
+                size: MemSize::B32,
+            },
+        ),
+        check(0xe300_0000_0000_0000 | PT | 0xF, Op::Exit),
+    ]
+}

@@ -218,6 +218,26 @@ impl Gpu {
         self.space.texture_cache = cache;
         self.texture_hits += hits;
         let uploads = uploads.map_err(|e| format!("{e:?}"))?;
+        // Only vertices are copied from where compute launches wrote them on the device.
+        let mut read = Vec::new();
+        if uploads.index.is_some() {
+            let call = engine.last_draw;
+            let width = match call.index_format {
+                0 => 1,
+                1 => 2,
+                _ => 4,
+            };
+            let start = engine.index_array_start() + u64::from(call.first) * width;
+            read.push(start..start + u64::from(call.count) * width);
+        }
+        for constants in &uploads.constants {
+            if let Some((addr, _)) = engine.bound_constbuf(constants.stage, constants.bank) {
+                read.push(addr..addr + constants.bytes.len() as u64);
+            }
+        }
+        if !self.no_global_in(&read) {
+            return Err("reads indices or constants a compute launch wrote on the device".into());
+        }
         self.uploaded.add_but_textures(&uploads);
         for upload in &uploads.textures {
             if !self.space.texture_cache.contains_key(&upload.key) {
@@ -448,7 +468,21 @@ impl Gpu {
             }
             return Err(format!("no {stage:?} program"));
         };
-        let key = (binding.addr, stage);
+        self.translate_program(
+            (binding.addr, Some(stage)),
+            &|bank: u8| engine.bound_constbuf(stage, u32::from(bank)),
+            ctx,
+        )
+    }
+
+    /// The program at `key`'s address, translated or from the cache; `bank` resolves the
+    /// constant banks a `brx` jump table is read from.
+    pub(super) fn translate_program(
+        &mut self,
+        key: crate::ShaderKey,
+        bank: &dyn Fn(u8) -> Option<(u64, u32)>,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<Translation, String> {
         // Validate hits: a `brx` jump table read from a constant buffer may have changed.
         if let Some(cached) = self.space.shader_cache.get(&key) {
             if cached.reads.constants_unchanged(ctx) {
@@ -457,12 +491,9 @@ impl Gpu {
             }
         }
         self.shader_misses += 1;
-        let (program, reads) = switch_core::gpu::shader::decode_program_from_memory_recording(
-            ctx,
-            binding.addr,
-            &|bank: u8| engine.bound_constbuf(stage, u32::from(bank)),
-        )
-        .map_err(|e| format!("{e:?}"))?;
+        let (program, reads) =
+            switch_core::gpu::shader::decode_program_from_memory_recording(ctx, key.0, bank)
+                .map_err(|e| format!("{e:?}"))?;
         let translation = wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps())
             .map_err(|e| e.to_string())?;
         // Watch the CPU page behind each virtual page the decode read.

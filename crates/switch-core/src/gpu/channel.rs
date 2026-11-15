@@ -361,11 +361,14 @@ impl Channel {
                 self.copy.write(method, arg, ctx)
             }
             CLASS_COMPUTE => {
-                // Flush device-resident render targets before a dispatch reads guest memory.
-                if method == crate::gpu::engine::compute::SEND_SIGNALING_PCAS_B {
+                if self.compute.write(method, arg, ctx)?
+                    && !self.three_d.dispatch_on_device(&self.compute, ctx)?
+                {
+                    // Device-resident memory goes back before the CPU reads guest memory.
                     self.three_d.flush_renderer(ctx)?;
+                    self.compute.run_software(ctx);
                 }
-                self.compute.write(method, arg, ctx)
+                Ok(())
             }
             CLASS_GPFIFO => {
                 self.gpfifo_regs.set(method, arg);

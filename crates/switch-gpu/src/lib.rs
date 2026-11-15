@@ -76,8 +76,12 @@ use stats::{DeviceErrors, Times, UploadBytes};
 
 /// The memory a `ldg` or atomic reaches, resolved from its descriptor.
 struct GlobalUpload {
-    stage: ShaderStage,
+    /// The draw stage reading it; `None` for a compute launch.
+    stage: Option<ShaderStage>,
     slot: u32,
+    /// Where it starts in guest memory, and how far; zero for a null descriptor.
+    addr: u64,
+    len: u64,
     bytes: Vec<u8>,
     /// The buffer held on the device when the shader writes it, which `bytes` then lacks.
     held: Option<wgpu::Buffer>,
@@ -240,14 +244,17 @@ type VertexBufferKey = (u32, bool, Vec<AttributeKey>);
 
 struct Bound {
     buffer: wgpu::Buffer,
+    /// Device copies over `buffer` of what compute launches wrote, in order, before the draw.
+    patches: Vec<Patch>,
     attributes: Vec<wgpu::VertexAttribute>,
     /// Zero for an instanced array and for the constant attribute: one element read by every vertex.
     stride: u64,
     step: wgpu::VertexStepMode,
 }
 
-/// A vertex buffer's bytes with the attributes that read them.
-type VertexPart<'a> = (std::borrow::Cow<'a, [u8]>, Vec<wgpu::VertexAttribute>);
+/// A vertex buffer's bytes with the attributes that read them, and how many bytes into the
+/// array they start.
+type VertexPart<'a> = (std::borrow::Cow<'a, [u8]>, Vec<wgpu::VertexAttribute>, u64);
 
 /// Split a vertex array so each attribute lies inside its stride, as WebGPU requires and
 /// Maxwell does not: one past it reads the same bytes from a buffer starting whole strides
@@ -258,7 +265,7 @@ fn within_stride<'a>(
     stride: u64,
 ) -> std::result::Result<Vec<VertexPart<'a>>, String> {
     if stride == 0 {
-        return Ok(vec![(bytes, attributes)]);
+        return Ok(vec![(bytes, attributes, 0)]);
     }
     let mut by_skip: std::collections::BTreeMap<u64, Vec<wgpu::VertexAttribute>> =
         std::collections::BTreeMap::new();
@@ -282,12 +289,12 @@ fn within_stride<'a>(
         .into_iter()
         .map(|(skip, attributes)| {
             if skip == 0 {
-                return (bytes.clone(), attributes);
+                return (bytes.clone(), attributes, 0);
             }
             let from = usize::try_from(skip * stride).map_or(bytes.len(), |at| at.min(bytes.len()));
             let mut moved = bytes[from..].to_vec();
             moved.resize(bytes.len(), 0);
-            (std::borrow::Cow::Owned(moved), attributes)
+            (std::borrow::Cow::Owned(moved), attributes, from as u64)
         })
         .collect())
 }
@@ -311,9 +318,23 @@ fn aligned_stride(
     (std::borrow::Cow::Owned(padded), wide)
 }
 
+/// Bytes a compute launch wrote on the device, copied over a buffer made from stale guest memory.
+#[derive(Debug, Clone)]
+struct Patch {
+    source: wgpu::Buffer,
+    from: u64,
+    to: u64,
+    len: u64,
+}
+
 /// A vertex buffer's bytes and layout, before it is created as a [`Bound`].
 struct Feed<'a> {
     bytes: std::borrow::Cow<'a, [u8]>,
+    /// Where `bytes` came from in guest memory and how many of them did, when they are the
+    /// array's own bytes in place; `None` when they were rearranged or made up.
+    origin: Option<(u64, u64)>,
+    /// The guest memory the bytes were read from, however they were arranged.
+    read: std::ops::Range<u64>,
     attributes: Vec<wgpu::VertexAttribute>,
     /// Zero when every vertex reads element 0.
     stride: u64,
@@ -375,6 +396,8 @@ fn interleave(feeds: &[Feed<'_>], elements: usize) -> Feed<'static> {
     }
     Feed {
         bytes: std::borrow::Cow::Owned(bytes),
+        origin: None,
+        read: 0..0,
         attributes: placed
             .iter()
             .map(|&(_, attribute, at)| wgpu::VertexAttribute {
@@ -421,9 +444,9 @@ struct Space {
     /// Deswizzled texture bytes, evicted when the guest writes their pages.
     texture_cache: std::collections::HashMap<TextureKey, std::sync::Arc<[u8]>>,
     /// Translated shaders by address and stage.
-    shader_cache: std::collections::HashMap<(u64, ShaderStage), CachedShader>,
+    shader_cache: std::collections::HashMap<ShaderKey, CachedShader>,
     /// Which cached translations a guest page holds program words for.
-    shader_pages: std::collections::HashMap<u32, Vec<(u64, ShaderStage)>>,
+    shader_pages: std::collections::HashMap<u32, Vec<ShaderKey>>,
     /// Which cached textures a guest page holds bytes for.
     page_owners: std::collections::HashMap<u32, Vec<TextureKey>>,
     /// Device copies of cached textures; only keys `texture_cache` also holds.
@@ -432,6 +455,9 @@ struct Space {
     /// Textures made from held surfaces alone, kept until one of those surfaces is written.
     held_copies: std::collections::HashMap<HeldCopyKey, HeldCopy>,
 }
+
+/// A program's address and the draw stage it runs in; `None` is a compute launch.
+type ShaderKey = (u64, Option<ShaderStage>);
 
 /// A sampled texture, the view it is sampled through, and whether it is compared.
 type HeldCopyKey = (TextureKey, wgpu::TextureViewDimension, bool);
@@ -554,7 +580,7 @@ pub struct Gpu {
     /// What every draw's `Uploads::of` read, by category.
     uploaded: UploadBytes,
     /// Pages to watch once a mutable `ExecCtx` is available.
-    shader_to_watch: Vec<(u32, (u64, ShaderStage))>,
+    shader_to_watch: Vec<(u32, ShaderKey)>,
     cached_bytes: u64,
     pub texture_hits: u64,
     pub texture_misses: u64,
@@ -571,6 +597,12 @@ pub struct Gpu {
     /// Textures made from held surfaces, and draws that reused one still current.
     pub held_copies_made: u64,
     pub held_copies_reused: u64,
+    /// Compute launches run on the device, and why others went to the software dispatch.
+    pub compute_dispatched: u64,
+    /// `--software-compute` on `screenshot`: every launch goes to the software dispatch.
+    software_compute: bool,
+    pub compute_refusals: std::collections::BTreeMap<String, u64>,
+    compute_pipelines: std::collections::HashMap<compute::ComputeKey, wgpu::ComputePipeline>,
     gpu_texture_bytes: u64,
     /// Textures `prepare` read and has not watched yet.
     to_remember: Vec<(TextureKey, std::sync::Arc<[u8]>, u64)>,
@@ -629,6 +661,15 @@ impl Drop for Gpu {
             self.held_copies_made,
             self.held_copies_reused,
         );
+        eprintln!(
+            "[gpu] {} compute launches on the device, {} in software{}",
+            self.compute_dispatched,
+            self.compute_refusals.values().sum::<u64>(),
+            self.compute_refusals
+                .iter()
+                .map(|(why, n)| format!("\n[gpu]   {n}: {why}"))
+                .collect::<String>()
+        );
         if let Some(t) = self.times {
             let ms = |v: u128| v as f64 / 1000.0;
             eprintln!(
@@ -681,6 +722,7 @@ macro_rules! timed {
 mod bind;
 mod blit;
 mod clear;
+mod compute;
 mod device;
 mod held;
 mod multisample;
@@ -810,6 +852,14 @@ impl Renderer for Gpu {
     fn force_software(&mut self, on: bool) {
         self.forced_software = on;
         self.software_frame = on;
+    }
+
+    fn dispatch(
+        &mut self,
+        engine: &switch_core::gpu::engine::compute::EngineCompute,
+        ctx: &mut ExecCtx,
+    ) -> Result<bool> {
+        self.dispatch_compute(engine, ctx)
     }
 
     fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
@@ -1105,6 +1155,11 @@ impl Renderer for Gpu {
             .field("bindUncachedGlobal", self.bind_uncached_why[3])
             .field("heldCopiesMade", self.held_copies_made)
             .field("heldCopiesReused", self.held_copies_reused)
+            .field("computeDispatched", self.compute_dispatched)
+            .field(
+                "computeRefused",
+                self.compute_refusals.values().sum::<u64>(),
+            )
             .field("syncNoScanout", self.syncs[0])
             .field("syncOverBytes", self.syncs[1])
             .field("syncAll", self.syncs[2])
