@@ -94,6 +94,8 @@ impl<'a> Emitter<'a> {
             }
         };
         self.globals[slot].written |= written;
+        // NVN's size word follows the address; without it the buffer runs to its mapping's end.
+        self.note_bank(bank, Some(u32::from(offset) + 12));
         slot
     }
 
