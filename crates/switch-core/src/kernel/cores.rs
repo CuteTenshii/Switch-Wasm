@@ -27,6 +27,9 @@ pub struct CoreSlot {
     held: AtomicU8,
     /// Core 0's [`Cpu::jit_enabled`] when the core was added.
     jit: bool,
+    /// Processes that ended since this core last took a thread. A new process can reuse a pid,
+    /// so their translations go before it runs anything else.
+    ended: Mutex<Vec<u64>>,
 }
 
 #[derive(Debug)]
@@ -64,6 +67,10 @@ pub fn serve(slot: Arc<CoreSlot>) {
                 }
             }
         };
+        let ended = std::mem::take(&mut *slot.ended.lock().unwrap_or_else(|e| e.into_inner()));
+        for pid in ended {
+            cpu.forget_translations(pid);
+        }
         let returned = cpu.run_lent(*lent);
         *slot.lock() = Slot::Returned(Box::new(returned));
         slot.changed.notify_all();
@@ -117,9 +124,20 @@ impl Cpu {
             clock: self.clock.clone(),
             held: AtomicU8::new(LOWEST_PRIORITY),
             jit: self.jit_enabled(),
+            ended: Mutex::default(),
         });
         self.machine.cores.push(slot.clone());
         slot
+    }
+
+    /// Tell every other core that process `pid` ended, so none runs its translations again.
+    pub(crate) fn tell_cores_process_ended(&self, pid: u64) {
+        for slot in &self.machine.cores {
+            slot.ended
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(pid);
+        }
     }
 
     /// Take every lent thread back and end each core's [`serve`].
@@ -397,6 +415,62 @@ mod tests {
 
     fn words(code: &[u32]) -> Vec<u8> {
         code.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    /// `movz x1, #<value>; str x1, [x0]; svc #1`: store `value` at X0, then need the kernel.
+    fn store_then_svc(value: u16) -> [u32; 3] {
+        [0xd2800001 | (u32::from(value) << 5), 0xf9000001, 0xd4000021]
+    }
+
+    /// A process's main thread at 0x1000 with X0 at the counter, lent as `pid`.
+    fn lent_program(pid: u64, code: &[u32]) -> (Cpu, Lent) {
+        let mut cpu = Cpu::new();
+        cpu.mem.map(0x1000, &words(code)).unwrap();
+        cpu.mem.map_zero(COUNTER, 0x1000).unwrap();
+        cpu.ensure_main_thread();
+        let mut thread = cpu.process().threads[0].clone();
+        thread.pc = 0x1000;
+        thread.regs[0] = u64::from(COUNTER);
+        let lent = Lent {
+            pid,
+            index: 0,
+            mem: cpu.mem.clone(),
+            thread,
+            quantum: 1_000,
+        };
+        (cpu, lent)
+    }
+
+    /// A process that reuses an ended one's pid runs its own code on a borrowing core, not
+    /// what the core translated for the ended one at the same addresses.
+    #[test]
+    fn a_reused_pid_runs_its_own_code_on_another_core() {
+        const PID: u64 = 2;
+        let mut core = Cpu::borrower(1);
+        core.set_jit_enabled(true);
+
+        let (ended, lent) = lent_program(PID, &store_then_svc(1));
+        assert_eq!(core.run_lent(lent).why, Handback::Svc);
+        assert_eq!(ended.mem.read_u64(COUNTER).unwrap(), 1);
+
+        core.forget_translations(PID);
+        let (reused, lent) = lent_program(PID, &store_then_svc(2));
+        assert_eq!(core.run_lent(lent).why, Handback::Svc);
+        assert_eq!(
+            reused.mem.read_u64(COUNTER).unwrap(),
+            2,
+            "the ended process's translation ran"
+        );
+    }
+
+    #[test]
+    fn every_core_hears_that_a_process_ended() {
+        let mut cpu = Cpu::new();
+        let slots = [cpu.add_core(), cpu.add_core()];
+        cpu.tell_cores_process_ended(2);
+        for slot in &slots {
+            assert_eq!(*slot.ended.lock().unwrap(), [2]);
+        }
     }
 
     /// A thread made for core 1 runs there, beside core 0's, and their

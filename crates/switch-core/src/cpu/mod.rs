@@ -426,9 +426,12 @@ impl Cpu {
         self.parked_jits.insert(self.pid, left);
     }
 
-    /// Drop the code this core translated for a process that ended.
+    /// Drop the code this core translated for a process that ended, parked or in use.
     pub(crate) fn forget_translations(&mut self, pid: u64) {
         self.parked_jits.remove(&pid);
+        if self.pid == pid {
+            self.jit = jit::Jit::default();
+        }
     }
 
     /// Run kernel bookkeeping in process `pid`'s address space, then come back.

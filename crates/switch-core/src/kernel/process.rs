@@ -315,6 +315,7 @@ impl Cpu {
         };
         self.release_handles(ended.handles.into_keys());
         self.forget_translations(pid);
+        self.tell_cores_process_ended(pid);
         self.machine.nv.close_process(pid);
         self.machine.nv.gpu.remove_layer(pid);
         self.pending_present.retain(|&(owner, ..)| owner != pid);
