@@ -302,6 +302,8 @@ pub struct Machine {
     pub(crate) nfc_initialized: bool,
     /// `nfp:sys` initialized flag; see [`Cpu::nfp_request`].
     pub(crate) nfp_initialized: bool,
+    /// `nfp:user` initialized flag; see [`Cpu::nfp_request`].
+    pub(crate) nfp_user_initialized: bool,
     /// `btm:sys`: whether controller pairing is running.
     pub(crate) bt_gamepad_pairing: bool,
     /// `usb:ds` string descriptor slots in use, one bit per index.
@@ -584,6 +586,7 @@ impl Cpu {
                 audio_control: audout::AudioControl::default(),
                 nfc_initialized: false,
                 nfp_initialized: false,
+                nfp_user_initialized: false,
                 bt_gamepad_pairing: false,
                 usb_ds_strings: 0,
                 notif_alarms: Vec::new(),

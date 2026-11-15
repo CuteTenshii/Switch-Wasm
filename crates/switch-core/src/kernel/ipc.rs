@@ -1134,51 +1134,67 @@ impl Cpu {
         }
     }
 
-    /// `nfp:sys` and its `ISystem`, the amiibo service: no reader attached.
+    /// `nfp:sys` and `nfp:user`, the amiibo service, and their `ISystem` and `IUser`:
+    /// no reader attached.
     pub(crate) fn nfp_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         /// `nn::nfc::State`.
         const STATE_NON_INITIALIZED: u32 = 0;
         const STATE_INITIALIZED: u32 = 1;
-        if self.ipc_answer_control(tls, handle, "nfp:sys", cmd_id)? {
+        /// `nfp` module 115, description 64.
+        const DEVICE_NOT_FOUND: u32 = 115 | (64 << 9);
+
+        let (root, session) = match self.service_name(handle) {
+            Some("nfp:user") | Some("nfp:iuser") => ("nfp:user", "nfp:iuser"),
+            _ => ("nfp:sys", "nfp:system"),
+        };
+        if self.ipc_answer_control(tls, handle, root, cmd_id)? {
             return Ok(());
         }
-        let iface = self.ipc_interface(tls, handle, "nfp:sys");
-        match iface.as_str() {
-            "nfp:system" => match cmd_id {
-                Some(0) => {
-                    self.nfp_initialized = true;
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
-                Some(1) => {
-                    self.nfp_initialized = false;
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
-                // ListDevices: none.
-                Some(2) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
-                Some(19) => {
-                    let state = if self.nfp_initialized {
-                        STATE_INITIALIZED
-                    } else {
-                        STATE_NON_INITIALIZED
-                    };
-                    self.write_ipc_response(tls, 0, &[], &state.to_le_bytes(), &[])
-                }
-                // GetAvailabilityChangeEventHandle: never signalled.
-                Some(23) => {
-                    let event = self.kept_event("nfp:availability", handle);
-                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
-                }
-                // Everything else names a device, and there are none.
+        let iface = self.ipc_interface(tls, handle, root);
+        if iface != session {
+            // ISystemManager::CreateSystemInterface / IUserManager::CreateUserInterface.
+            return match cmd_id {
+                Some(0) => self.reply_with_interface(tls, handle, session).map(drop),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
-            },
-            // ISystemManager: CreateSystemInterface.
-            _ => match cmd_id {
-                Some(0) => {
-                    self.reply_with_interface(tls, handle, "nfp:system")?;
-                    Ok(())
+            };
+        }
+        let user = session == "nfp:iuser";
+        match cmd_id {
+            // Initialize / Finalize, and ISystem's InitializeSystem / FinalizeSystem.
+            Some(0) | Some(1) => {
+                let on = cmd_id == Some(0);
+                if user {
+                    self.nfp_user_initialized = on;
+                } else {
+                    self.nfp_initialized = on;
                 }
-                _ => self.unimplemented_command(tls, &iface, cmd_id),
-            },
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // ListDevices: none.
+            Some(2) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+            Some(19) => {
+                let initialized = if user {
+                    self.nfp_user_initialized
+                } else {
+                    self.nfp_initialized
+                };
+                let state = if initialized {
+                    STATE_INITIALIZED
+                } else {
+                    STATE_NON_INITIALIZED
+                };
+                self.write_ipc_response(tls, 0, &[], &state.to_le_bytes(), &[])
+            }
+            // AttachAvailabilityChangeEvent: never signalled.
+            Some(23) => {
+                let event = self.kept_event("nfp:availability", handle);
+                self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+            }
+            // IUser's commands that name a device, and there are none.
+            Some(3..=18 | 20..=22 | 24) if user => {
+                self.write_ipc_response(tls, DEVICE_NOT_FOUND, &[], &[], &[])
+            }
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
         }
     }
 
@@ -1825,6 +1841,67 @@ mod tests {
             cpu.mem.read_u32(TLS + 0x18).unwrap(),
             0,
             "no device to name"
+        );
+    }
+
+    #[test]
+    fn nfp_user_hands_out_an_iuser_with_no_devices() {
+        let mut cpu = request(false, 0, &[]);
+        cpu.register_service_handle(9, "nfp:user");
+        cpu.nfp_request(TLS, 9, Some(0)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "CreateUserInterface result"
+        );
+        assert!(
+            cpu.service_handles.values().any(|name| name == "nfp:iuser"),
+            "an IUser session"
+        );
+
+        cpu.register_service_handle(10, "nfp:iuser");
+        write_request(&mut cpu, 19, &[]);
+        cpu.nfp_request(TLS, 10, Some(19)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "not initialized");
+        write_request(&mut cpu, 0, &[]);
+        cpu.nfp_request(TLS, 10, Some(0)).unwrap();
+        write_request(&mut cpu, 19, &[]);
+        cpu.nfp_request(TLS, 10, Some(19)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "initialized");
+        assert!(!cpu.nfp_initialized, "nfp:sys keeps its own state");
+
+        write_request(&mut cpu, 2, &[]);
+        cpu.nfp_request(TLS, 10, Some(2)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "ListDevices result"
+        );
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "no devices");
+    }
+
+    #[test]
+    fn nfp_user_device_commands_find_no_device() {
+        /// `nfp` module 115, description 64.
+        const DEVICE_NOT_FOUND: u32 = 115 | (64 << 9);
+        let mut cpu = request(false, 0, &[]);
+        cpu.register_service_handle(10, "nfp:iuser");
+        // GetNpadId, AttachActivateEvent, AttachDeactivateEvent, GetDeviceState, StartDetection.
+        for cmd in [21, 17, 18, 20, 3] {
+            write_request(&mut cpu, cmd, &0u64.to_le_bytes());
+            cpu.nfp_request(TLS, 10, Some(cmd)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                DEVICE_NOT_FOUND,
+                "command {cmd}"
+            );
+        }
+        write_request(&mut cpu, 23, &[]);
+        cpu.nfp_request(TLS, 10, Some(23)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "availability event"
         );
     }
 

@@ -35,6 +35,7 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - **`mii`** is a database with no user Miis and the six built-in faces `nn::mii` carries: `BuildDefault` and `BuildRandom` hand those out, `Get`, `Get1` and `GetCount` list them for the Default source (flag bit 1) and nothing for the database, and `Get2`/`Get3` report zero records rather than refusing.
 - **`mm:u`** holds the multimedia clock requests the video decoder makes before it runs. `Initialize` must hand out a request: NVIDIA's multimedia library calls `SetAndWait` through a client pointer only a successful `Initialize` fills in (Just Dance 2019 jumped to address 0 without it). `Get` reads back the floor a request asks for.
 - **`ldn:u`** is local wireless on a console alone in the room: it can host a network nobody joins, and its scans find nothing. See `ldn.rs` below.
+- **`nfp:user`** is amiibo on a console with no NFC reader, like `nfp:sys`: `ListDevices` finds none, and every `IUser` command that names a device fails with `ResultDeviceNotFound` (2115-0064).
 
 ## What the Home Menu opens that homebrew never does
 
