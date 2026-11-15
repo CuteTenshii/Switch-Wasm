@@ -71,7 +71,7 @@ impl Gpu {
             translate,
             self.translate(engine, ctx, ShaderStage::Fragment)
         );
-        let (vs, fs) = (vs?, fs?);
+        let ((vs, vs_serial), (fs, fs_serial)) = (vs?, fs?);
         Ok(Checked {
             state,
             render,
@@ -80,6 +80,7 @@ impl Gpu {
             depth,
             vs,
             fs,
+            serials: [vs_serial, fs_serial],
         })
     }
 
@@ -96,11 +97,15 @@ impl Gpu {
             depth,
             vs,
             fs,
+            serials,
         } = self.check(engine, ctx)?;
 
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
         let mut fs_layout = Layout::of(&fs, Stage::Fragment);
-        let storage_limit = self.device_limits.max_storage_buffers_per_shader_stage as usize;
+        let storage_limit = self
+            .device_limits
+            .clone()
+            .max_storage_buffers_per_shader_stage as usize;
         let limits = self.device_limits.clone();
         for (stage, layout) in [("vertex", &vs_layout), ("fragment", &fs_layout)] {
             if layout.textures.len() > limits.max_sampled_textures_per_shader_stage as usize
@@ -420,6 +425,7 @@ impl Gpu {
             depth,
             vs,
             fs,
+            serials,
             vs_layout,
             fs_layout,
             uploads,
@@ -475,11 +481,13 @@ impl Gpu {
         engine: &Engine3D,
         ctx: &ExecCtx,
         stage: ShaderStage,
-    ) -> std::result::Result<Translation, String> {
+    ) -> std::result::Result<(Translation, u64), String> {
         let Some(binding) = engine.program(stage) else {
             if stage == ShaderStage::Fragment {
                 let program = switch_core::gpu::shader::no_fragment_program();
+                // Always the same program, so always the same serial.
                 return wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps())
+                    .map(|translation| (translation, 0))
                     .map_err(|e| e.to_string());
             }
             return Err(format!("no {stage:?} program"));
@@ -498,12 +506,12 @@ impl Gpu {
         key: crate::ShaderKey,
         bank: &dyn Fn(u8) -> Option<(u64, u32)>,
         ctx: &ExecCtx,
-    ) -> std::result::Result<Translation, String> {
+    ) -> std::result::Result<(Translation, u64), String> {
         // Validate hits: a `brx` jump table read from a constant buffer may have changed.
         if let Some(cached) = self.space.shader_cache.get(&key) {
             if cached.reads.constants_unchanged(ctx) {
                 self.shader_hits += 1;
-                return Ok(cached.translation.clone());
+                return Ok((cached.translation.clone(), cached.serial));
             }
         }
         self.shader_misses += 1;
@@ -524,14 +532,17 @@ impl Gpu {
             self.space.shader_cache.clear();
             self.space.shader_pages.clear();
         }
+        self.translations += 1;
+        let serial = self.translations;
         self.space.shader_cache.insert(
             key,
             CachedShader {
                 translation: translation.clone(),
                 reads,
+                serial,
             },
         );
-        Ok(translation)
+        Ok((translation, serial))
     }
 
     fn wgsl_caps(&self) -> wgsl::Caps {

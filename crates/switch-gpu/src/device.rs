@@ -47,6 +47,8 @@ impl Gpu {
             scratch: Vec::new(),
             bind_groups: std::collections::HashMap::new(),
             modules: std::collections::HashMap::new(),
+            built_modules: std::collections::HashMap::new(),
+            translations: 0,
             pipelines: std::collections::HashMap::new(),
             samplers: std::collections::HashMap::new(),
             group_layouts: std::collections::HashMap::new(),

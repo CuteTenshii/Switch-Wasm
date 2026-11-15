@@ -82,7 +82,7 @@ impl Gpu {
                 .flatten()
                 .map(|cb| (cb.addr, cb.size))
         };
-        let translation = timed!(
+        let (translation, serial) = timed!(
             self,
             translate,
             self.translate_program((launch.program_addr, None), &bank_of, ctx)
@@ -146,9 +146,11 @@ impl Gpu {
             return Err("reads memory held on the device".into());
         }
 
-        let source = wgsl::module(&translation, Stage::Compute, &layout)
-            .map_err(|e| format!("module: {e}"))?;
-        let (module_key, module) = timed!(self, modules, self.module("compute", &source));
+        let (module_key, module) = timed!(
+            self,
+            modules,
+            self.built_module("compute", (&translation, serial), Stage::Compute, &layout)
+        )?;
 
         let entries = compute_entries(&layout, &globals);
         let group_layout = match self.group_layouts.get(&entries) {

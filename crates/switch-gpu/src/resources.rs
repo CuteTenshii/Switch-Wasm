@@ -4,7 +4,11 @@ use crate::readback::Scratch;
 use crate::{Gpu, Input, INPUT_CACHE_BYTES, PAGE_BITS, TEXTURE_CACHE_BYTES};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Software;
+use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
 use switch_core::gpu::upload::TextureKey;
+
+/// Bounds [`Gpu::built_modules`]; a title draws with far fewer program and layout pairs.
+const BUILT_MODULE_ENTRIES: usize = 4096;
 
 /// The CPU pages behind `len` bytes at `addr`, as far as the mapping goes.
 pub(super) fn guest_pages(ctx: &ExecCtx, addr: u64, len: u64) -> Vec<u32> {
@@ -45,6 +49,44 @@ impl Gpu {
             });
         self.modules.insert(key, module.clone());
         (key, module)
+    }
+
+    /// The module of `translation`, numbered `serial`, as `stage` with `layout`; written and
+    /// hashed only the first time.
+    pub(super) fn built_module(
+        &mut self,
+        what: &str,
+        (translation, serial): (&Translation, u64),
+        stage: Stage,
+        layout: &Layout,
+    ) -> std::result::Result<(u64, wgpu::ShaderModule), String> {
+        let key = (
+            serial,
+            match stage {
+                Stage::Vertex => 0,
+                Stage::Fragment => 1,
+                Stage::Compute => 2,
+            },
+        );
+        if let Some((_, hash, module)) = self
+            .built_modules
+            .get(&key)
+            .and_then(|built| built.iter().find(|(l, _, _)| l == layout))
+        {
+            return Ok((*hash, module.clone()));
+        }
+        let source =
+            wgsl::module(translation, stage, layout).map_err(|e| format!("module: {e}"))?;
+        let (hash, module) = self.module(what, &source);
+        // Translations replaced since leave entries no draw will ask for.
+        if self.built_modules.len() >= BUILT_MODULE_ENTRIES {
+            self.built_modules.clear();
+        }
+        self.built_modules
+            .entry(key)
+            .or_default()
+            .push((layout.clone(), hash, module.clone()));
+        Ok((hash, module))
     }
 
     /// Whatever the device rejected since this was last asked.

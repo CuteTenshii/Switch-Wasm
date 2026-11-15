@@ -58,17 +58,22 @@ impl Gpu {
             return Err(format!("the device rejected an earlier draw: {e}"));
         }
         let ((vs_key, vs_module), (fs_key, fs_module)) = timed!(self, modules, {
-            let vs_source = wgsl::module(&p.vs, Stage::Vertex, &p.vs_layout);
-            let fs_source = wgsl::module(&p.fs, Stage::Fragment, &p.fs_layout);
-            match (vs_source, fs_source) {
-                (Ok(vs), Ok(fs)) => {
-                    if switch_core::dump::wants(switch_core::dump::Artefact::DeviceWgsl) {
-                        dump_wgsl(&vs, &fs);
-                    }
-                    Ok((self.module("vertex", &vs), self.module("fragment", &fs)))
+            if switch_core::dump::wants(switch_core::dump::Artefact::DeviceWgsl) {
+                let vs_source = wgsl::module(&p.vs, Stage::Vertex, &p.vs_layout);
+                let fs_source = wgsl::module(&p.fs, Stage::Fragment, &p.fs_layout);
+                if let (Ok(vs), Ok(fs)) = (vs_source, fs_source) {
+                    dump_wgsl(&vs, &fs);
                 }
-                (Err(e), _) | (_, Err(e)) => Err(format!("module: {e}")),
             }
+            let [vs_serial, fs_serial] = p.serials;
+            let vs = self.built_module("vertex", (&p.vs, vs_serial), Stage::Vertex, &p.vs_layout);
+            let fs = self.built_module(
+                "fragment",
+                (&p.fs, fs_serial),
+                Stage::Fragment,
+                &p.fs_layout,
+            );
+            vs.and_then(|vs| fs.map(|fs| (vs, fs)))
         })?;
 
         // Vertex buffers the shader reads; the stride travels with each buffer.

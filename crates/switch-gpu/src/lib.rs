@@ -419,7 +419,12 @@ const SHADER_CACHE_ENTRIES: usize = 1024;
 struct CachedShader {
     translation: Translation,
     reads: switch_core::gpu::shader::DecodeReads,
+    /// Unique to this translation; see [`Gpu::built_modules`].
+    serial: u64,
 }
+
+/// A module built for one layout of a translation: the layout, the source's hash, the module.
+type BuiltModule = (Layout, u64, wgpu::ShaderModule);
 
 /// A device, and the rasterizer to fall back to.
 /// What the device holds for one GPU address space: a process's surfaces and caches,
@@ -514,6 +519,11 @@ pub struct Gpu {
     bind_groups: std::collections::HashMap<u64, CachedBinding>,
     /// Compiled shader modules, keyed by a hash of the WGSL source.
     modules: std::collections::HashMap<u64, wgpu::ShaderModule>,
+    /// Modules by the translation they were written from, its stage and its layout, so a
+    /// repeated draw neither writes nor hashes the WGSL again.
+    built_modules: std::collections::HashMap<(u64, u8), Vec<BuiltModule>>,
+    /// Translations made so far, which numbers the next.
+    translations: u64,
     /// Render pipelines, by everything they were built from.
     pipelines: std::collections::HashMap<PipelineKey, wgpu::RenderPipeline>,
     /// Samplers by their settings; `createSampler` is slow in browsers.
@@ -846,6 +856,8 @@ struct Checked {
     depth: Option<Target>,
     vs: Translation,
     fs: Translation,
+    /// Each translation's serial; see [`Gpu::built_modules`].
+    serials: [u64; 2],
 }
 
 /// One draw, resolved into everything a device needs.
@@ -860,6 +872,7 @@ struct Prepared {
     depth: Option<Target>,
     vs: Translation,
     fs: Translation,
+    serials: [u64; 2],
     vs_layout: Layout,
     fs_layout: Layout,
     uploads: Uploads,
