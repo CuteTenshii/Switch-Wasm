@@ -200,7 +200,11 @@ impl Uploads {
             let (first, count) = match buffer.step {
                 StepMode::Instance => (engine.instance_id(), 1),
                 StepMode::Vertex => match &index {
-                    Some(index) => (index.lowest, index.highest - index.lowest + 1),
+                    // The indices stay as read; the vertices start where the lowest one points.
+                    Some(index) => (
+                        call.vertex_of(index.lowest),
+                        index.highest - index.lowest + 1,
+                    ),
                     None => (call.first, call.count),
                 },
             };

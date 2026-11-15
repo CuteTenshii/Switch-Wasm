@@ -249,7 +249,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             let mut shaded = std::collections::BTreeSet::new();
             for ordinal in 0..call.count {
                 let index = if call.indexed {
-                    read_index(&*ctx, index_base, call.index_format, call.first + ordinal)?
+                    call.vertex_of(read_index(
+                        &*ctx,
+                        index_base,
+                        call.index_format,
+                        call.first + ordinal,
+                    )?)
                 } else {
                     call.first + ordinal
                 };
@@ -476,7 +481,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
         for &ordinal in &tri {
             let index = if call.indexed {
-                read_index(&*ctx, index_base, call.index_format, call.first + ordinal)?
+                call.vertex_of(read_index(
+                    &*ctx,
+                    index_base,
+                    call.index_format,
+                    call.first + ordinal,
+                )?)
             } else {
                 call.first + ordinal
             };

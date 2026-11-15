@@ -542,7 +542,8 @@ fn draw_arrays_records_the_call() {
             first: 6,
             count: 3,
             indexed: false,
-            index_format: 0
+            index_format: 0,
+            base_vertex: 0,
         }
     );
     assert_eq!(h.stats.draws, 1);

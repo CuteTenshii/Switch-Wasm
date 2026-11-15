@@ -560,6 +560,7 @@ impl Harness {
             count: 3,
             indexed: false,
             index_format: 0,
+            base_vertex: 0,
         };
         Harness {
             mem,

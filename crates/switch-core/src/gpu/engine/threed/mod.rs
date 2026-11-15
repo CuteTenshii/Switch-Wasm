@@ -51,6 +51,8 @@ const VERTEX_BEGIN_GL: u32 = 0x586;
 /// `VertexBeginGl.InstanceNext`: step the instance counter instead of resetting it.
 const VERTEX_BEGIN_INSTANCE_NEXT: u32 = 1 << 26;
 const DRAW_ELEMENTS_COUNT: u32 = 0x5F8;
+/// `SET_GLOBAL_BASE_VERTEX_INDEX` (method 0x1434): added to every index of an indexed draw.
+const GLOBAL_BASE_VERTEX_INDEX: u32 = 0x50D;
 const CLEAR_BUFFERS: u32 = 0x674;
 const REPORT_SEMAPHORE_OFFSET: u32 = 0x6C0;
 const REPORT_SEMAPHORE_PAYLOAD: u32 = 0x6C2;
@@ -298,6 +300,15 @@ pub struct DrawCall {
     pub indexed: bool,
     /// Index buffer format (0 = u8, 1 = u16, 2 = u32) for indexed draws.
     pub index_format: u32,
+    /// Added to each index of an indexed draw to find its vertex; zero otherwise.
+    pub base_vertex: i32,
+}
+
+impl DrawCall {
+    /// The vertex an index names.
+    pub fn vertex_of(&self, index: u32) -> u32 {
+        index.wrapping_add_signed(self.base_vertex)
+    }
 }
 
 /// A colour render target resolved from the register file.

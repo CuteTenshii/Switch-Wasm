@@ -418,6 +418,7 @@ fn an_indexed_draw_reads_its_vertices_through_the_index_buffer() {
         count: 3,
         indexed: true,
         index_format: 1,
+        base_vertex: 0,
     };
 
     let mut host1x = Host1x::new();
@@ -445,6 +446,78 @@ fn an_indexed_draw_reads_its_vertices_through_the_index_buffer() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn a_base_vertex_moves_every_index_along_the_vertex_buffer() {
+    // Indices [0, 1, 2] with a base of 3 name the half at vertices 3..6, not the point at 0..3.
+    let (mut mem, vmm, mut engine) = pipeline_harness();
+    let vbuf_addr = engine.vertex_array(0).start;
+    let color = [0.2f32, 0.4, 0.6, 1.0];
+    for i in 0..3 {
+        write_vertex(&mem, &vmm, vbuf_addr, i, [-1.0, -1.0, 0.0, 1.0], color);
+    }
+    write_vertex(&mem, &vmm, vbuf_addr, 3, [-1.0, -1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 4, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 5, [-1.0, 1.0, 0.0, 1.0], color);
+    // The harness's limit covers three vertices; this buffer holds six.
+    engine.regs.set(0x7C1, vbuf_addr as u32 + 6 * 32);
+
+    let ibuf_addr = vbuf_addr + 6 * 32;
+    {
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            as_id: 0,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        ctx.write_u32(ibuf_addr, 1 << 16).unwrap();
+        ctx.write_u32(ibuf_addr + 4, 2).unwrap();
+    }
+    engine.regs.set(0x5F2, (ibuf_addr >> 32) as u32);
+    engine.regs.set(0x5F3, ibuf_addr as u32);
+    engine.last_draw = DrawCall {
+        primitive: 4,
+        first: 0,
+        count: 3,
+        indexed: true,
+        index_format: 1,
+        base_vertex: 3,
+    };
+
+    let mut host1x = Host1x::new();
+    let mut stats = Default::default();
+    let mut ctx = ExecCtx {
+        mem: &mut mem,
+        vmm: &vmm,
+        as_id: 0,
+        host1x: &mut host1x,
+        stats: &mut stats,
+        trace: false,
+    };
+    draw(&engine, &mut ctx).unwrap();
+
+    let rt = engine.render_target(0).unwrap().unwrap();
+    let expected = rt.format.encode(color).unwrap();
+    assert_eq!(
+        ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64)
+            .unwrap() as u128,
+        expected,
+        "the half at vertices 3..6 was not drawn"
+    );
+}
+
+#[test]
+fn a_negative_base_vertex_counts_back_from_the_index() {
+    let call = DrawCall {
+        base_vertex: -2,
+        ..DrawCall::default()
+    };
+    assert_eq!(call.vertex_of(5), 3);
 }
 
 #[test]
@@ -576,6 +649,7 @@ fn a_points_draw_lands_what_its_vertex_shader_stores() {
         count: 3,
         indexed: false,
         index_format: 0,
+        base_vertex: 0,
     };
     {
         let ctx = ExecCtx {
