@@ -1013,8 +1013,11 @@ impl Cpu {
                         // ngc, the profanity filter.
                         "ngc:u" | "ngct:u" | "ngct:s" => self.ngc_request(tls, handle, cmd_id)?,
                         "npns:s" | "npns:u" => self.npns_request(tls, handle, cmd_id)?,
-                        // ldn:m and lp2p:m, local wireless monitors.
+                        // ldn:m and lp2p:m, local wireless monitors; ldn:u, local wireless itself.
                         "ldn:m" | "ldn:monitor" => self.ldn_monitor_request(tls, handle, cmd_id)?,
+                        "ldn:u" | "ldn:user" | "ldn:client-monitor" => {
+                            self.ldn_user_request(tls, handle, cmd_id)?
+                        }
                         "lp2p:m" | "lp2p:monitor" => {
                             self.lp2p_monitor_request(tls, handle, cmd_id)?
                         }

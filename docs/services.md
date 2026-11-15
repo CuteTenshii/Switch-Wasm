@@ -34,6 +34,7 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - **`pcv`/`clkrst`** are the same manager either side of 8.0.0, numbered by an offset: a `clkrst` device code is `0x40000000 + module + 1` (reading its low bits as the module put the GPU rate under "CPU" in NX-Fetch). A rate a guest sets reads back.
 - **`mii`** is a database with no user Miis and the six built-in faces `nn::mii` carries: `BuildDefault` and `BuildRandom` hand those out, `Get`, `Get1` and `GetCount` list them for the Default source (flag bit 1) and nothing for the database, and `Get2`/`Get3` report zero records rather than refusing.
 - **`mm:u`** holds the multimedia clock requests the video decoder makes before it runs. `Initialize` must hand out a request: NVIDIA's multimedia library calls `SetAndWait` through a client pointer only a successful `Initialize` fills in (Just Dance 2019 jumped to address 0 without it). `Get` reads back the floor a request asks for.
+- **`ldn:u`** is local wireless on a console alone in the room: it can host a network nobody joins, and its scans find nothing. See `ldn.rs` below.
 
 ## What the Home Menu opens that homebrew never does
 
@@ -200,6 +201,13 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - friend `GetUserPresenceView` (20600, 20601) and `LoadUserSetting` (20800, 20802) fill a zeroed struct: offline, every setting at zero.
 - friend `Pop`, bcat `GetImpl`, the news data service and the bcat file/directory services are refused rather than answered with zeroed data that callers would treat as real.
 - news: the five `news:*` names are permission levels; permissions are not modelled.
+
+## `ldn.rs`
+
+- The state machine is the real one (None, Initialized, AccessPoint, AccessPointCreated, Station; StationConnected is never reached), with switchbrew's per-command state requirements. A command in the wrong state gets 2203-0037 before `Initialize` and 2203-0039 after, so a title takes the same path it would on hardware rather than one an always-succeeding stub invents.
+- `GetStateChangeEvent` is auto-clear and fires only on a real transition, or when a hosted network's advertise data or accept policy changes. An event that never fires would leave a lobby waiting forever.
+- `CreateNetwork` keeps what the guest sent, checked as the service checks it (passphrase 0x10-0x40 bytes, 1-8 nodes, a non-negative version, a NUL-terminated user name). A LocalCommunicationId of -1 becomes the first one in the title's `control.nacp`, and any other id must be listed there. `NetworkInfo` lists this console as the only node, at 169.254.1.1/24 on channel 6.
+- `Scan` finds zero networks and `Connect` fails with 2203-0065 (network not found).
 
 ## `ns.rs`
 

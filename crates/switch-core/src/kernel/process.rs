@@ -141,6 +141,8 @@ pub(crate) struct Process {
     pub(crate) opus_decoders: IdMap<u64, hwopus::HwOpus>,
     /// Each `nifm` request: the events it handed out and whether it was submitted, by object key.
     pub(crate) nifm_requests: IdMap<u64, net::NifmRequest>,
+    /// Each `ldn:u` `IUserLocalCommunicationService`, by object key.
+    pub(crate) ldn_sessions: IdMap<u64, ldn::LdnSession>,
     /// The user each `IProfile`/`IProfileEditor` object was opened for.
     pub(crate) acc_profiles: IdMap<u64, [u8; 16]>,
     /// Program id for `pm:info`; defaults to the Album applet's, as hbmenu homebrew runs as.
@@ -230,6 +232,7 @@ impl Process {
             audio_outs: IdMap::default(),
             opus_decoders: IdMap::default(),
             nifm_requests: IdMap::default(),
+            ldn_sessions: IdMap::default(),
             acc_profiles: IdMap::default(),
             program_id: crate::kernel::ipc::DEFAULT_PROGRAM_ID,
             bsd_sockets: HashMap::new(),

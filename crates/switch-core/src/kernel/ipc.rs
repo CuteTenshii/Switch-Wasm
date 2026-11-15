@@ -572,6 +572,9 @@ impl Cpu {
         self.process_mut()
             .nifm_requests
             .retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.process_mut()
+            .ldn_sessions
+            .retain(|&key, _| key & !0xFFFF_FFFF != session);
         self.ssl_forget_session(session);
     }
 

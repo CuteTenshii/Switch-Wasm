@@ -11,6 +11,7 @@ pub(crate) mod fs;
 pub(crate) mod hid;
 pub(crate) mod hwopus;
 pub(crate) mod input;
+pub(crate) mod ldn;
 pub(crate) mod ldr;
 pub(crate) mod log;
 pub(crate) mod mii;
