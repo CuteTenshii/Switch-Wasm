@@ -278,6 +278,8 @@ impl Cpu {
     ) -> Result<()> {
         /// Module 121, description 15: notification queue empty.
         const NO_NOTIFICATIONS: u32 = 121 | (15 << 9);
+        /// Module 121, description 2.
+        const INVALID_ARGUMENT: u32 = 121 | (2 << 9);
         if self.ipc_answer_control(tls, handle, "friend:u", cmd_id)? {
             return Ok(());
         }
@@ -310,6 +312,26 @@ impl Cpu {
                 Some(10600) | Some(10601) | Some(10610) | Some(20103) | Some(20104)
                 | Some(20401) | Some(20801) | Some(20900) | Some(40100) | Some(40400)
                 | Some(49900) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // GetPlayHistoryRegistrationKey(bool local_play, Uid) and the
+                // (bool, NetworkServiceAccountId) form -> buffer<PlayHistoryRegistrationKey>.
+                Some(10700) | Some(10701) => {
+                    let local_play = self.ipc_arg_u8(tls, 0) & 1;
+                    let owner = [self.ipc_arg_u64(tls, 8), self.ipc_arg_u64(tls, 16)];
+                    let owner = if cmd_id == Some(10700) {
+                        owner
+                    } else {
+                        [owner[0], 0]
+                    };
+                    if owner == [0, 0] {
+                        return self.write_ipc_response(tls, INVALID_ARGUMENT, &[], &[], &[]);
+                    }
+                    self.write_output_buffer(
+                        tls,
+                        0,
+                        &play_history_registration_key(owner, local_play),
+                    );
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 // GetPlayHistoryStatistics(Uid) -> 0x10 bytes.
                 Some(20701) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
                 // GetUserPresenceView / LoadUserSetting (V1, V2) -> a zeroed struct: offline,
@@ -565,6 +587,29 @@ impl Cpu {
     }
 }
 
+/// A `PlayHistoryRegistrationKey`: type 0x101, a key index, the local-play flag and the
+/// owner's friends uuid, then an HMAC left zero since no console key signs it.
+fn play_history_registration_key(owner: [u64; 2], local_play: u8) -> [u8; 0x40] {
+    // The console keeps one uuid per user in its friends save; hashing the owner keeps ours stable.
+    let hash = |seed: u64| {
+        let mut h = 0xcbf2_9ce4_8422_2325 ^ seed;
+        for byte in owner.iter().flat_map(|word| word.to_le_bytes()) {
+            h ^= u64::from(byte);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    };
+    let mut random = [0u8; 16];
+    random[..8].copy_from_slice(&hash(0).to_le_bytes());
+    random[8..].copy_from_slice(&hash(1).to_le_bytes());
+    let mut key = [0u8; 0x40];
+    key[..2].copy_from_slice(&0x101u16.to_le_bytes());
+    key[2] = random[0] & 7;
+    key[4] = local_play;
+    key[0x10..0x20].copy_from_slice(&crate::uuid::v4(random));
+    key
+}
+
 #[cfg(test)]
 mod tests {
     use crate::kernel::ipc::testing::*;
@@ -591,5 +636,34 @@ mod tests {
                 "command {command} left stale bytes"
             );
         }
+    }
+
+    #[test]
+    fn a_play_history_key_is_stable_per_user_and_rejects_nobody() {
+        const BUFFER: u32 = 0x4000;
+        let uid = [0x11u8; 16];
+        let mut payload = [0u8; 24];
+        payload[0] = 1;
+        payload[8..].copy_from_slice(&uid);
+        let key = |payload: &[u8]| {
+            let mut cpu = request_with_recv_static(10700, payload, BUFFER, 0x40);
+            cpu.mem.map_zero(BUFFER, 0x1000).unwrap();
+            cpu.register_service_handle(9, "friend:service");
+            cpu.friend_request(TLS, 9, Some(10700)).unwrap();
+            (
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                cpu.read_bytes(BUFFER, 0x40),
+            )
+        };
+        let (result, first) = key(&payload);
+        assert_eq!(result, 0);
+        assert_eq!(first[..2], [0x01, 0x01], "type 0x101");
+        assert!(first[2] < 8, "key index");
+        assert_eq!(first[4], 1, "local play");
+        assert!(crate::uuid::is_valid(first[0x10..0x20].try_into().unwrap()));
+        assert_eq!(key(&payload).1, first, "same user, same key");
+
+        payload[8..].fill(0);
+        assert_ne!(key(&payload).0, 0, "a null uid is refused");
     }
 }
