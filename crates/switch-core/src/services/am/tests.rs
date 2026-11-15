@@ -110,7 +110,7 @@ fn the_applet_can_be_answered_by_the_host_that_started_it() {
     const PUSH_INTERACTIVE_OUT_DATA: u32 = 3;
     const POP_INTERACTIVE_IN_DATA: u32 = 2;
     const GET_POP_INTERACTIVE_IN_DATA_EVENT: u32 = 6;
-    const NO_DATA: u32 = 128 | (3 << 9);
+    const NO_DATA: u32 = 128 | (2 << 9);
     const STORAGE: u64 = 0x21;
 
     let mut cpu = Cpu::new();
@@ -567,7 +567,7 @@ fn library_applet(applet_id: u32) -> (Cpu, u64) {
 fn the_keyboard_and_the_controller_applet_pop_three_storages() {
     const SWKBD: u64 = 0x0100_0000_0000_1008;
     const CONTROLLER: u64 = 0x0100_0000_0000_1003;
-    const NO_DATA: u32 = 128 | (3 << 9);
+    const NO_DATA: u32 = 128 | (2 << 9);
 
     for program_id in [SWKBD, CONTROLLER] {
         let mut cpu = request(false, 0, &[]);
@@ -732,7 +732,7 @@ fn an_applet_that_never_ran_has_no_output_to_pop() {
     cpu.applet_request(TLS, accessor, Some(101)).unwrap();
     assert_eq!(
         cpu.mem.read_u32(TLS + 0x18).unwrap(),
-        128 | (3 << 9),
+        128 | (2 << 9),
         "no data"
     );
     assert_eq!(cpu.mem.read_u32(TLS + 0x0c).unwrap(), 0, "and no storage");
@@ -814,7 +814,7 @@ fn player_select_hands_back_the_current_user() {
     cpu.applet_request(TLS, accessor, Some(101)).unwrap();
     assert_eq!(
         cpu.mem.read_u32(TLS + 0x18).unwrap(),
-        128 | (3 << 9),
+        128 | (2 << 9),
         "popped once"
     );
 }

@@ -80,7 +80,7 @@ Section headings are paths under `crates/switch-core/src/`; a heading that start
 
 - Retail boot enters `rtld`, not `main`: `rtld` processes every module's relocations, and entering `main` directly leaves its GOT full of placeholders.
 - Entry ABI: X1 must be the main thread handle. `nnSdk` stores it in the main `ThreadType` (+0x1B0) and `SdkMutex` compares lock words against it; X1 = 0 made unlocked mutexes look owned and `nn::oe::Initialize` aborted.
-- A library applet booted directly gets `LibAppletCommonArguments` then its own launch structs (an applet started by `am` gets what its caller pushed); the keyboard and controller applets pop two, swkbd's second a 0x1000 work buffer (stopping after one aborted with `2128-0003`).
+- A library applet booted directly gets `LibAppletCommonArguments` then its own launch structs (an applet started by `am` gets what its caller pushed); the keyboard and controller applets pop two, swkbd's second a 0x1000 work buffer (stopping after one aborted with `2128-0002`).
 - Homebrew boot enters the crt0 at its entry, as HBL does; `__libnx_init` (the crt0's `bl` at entry+0xc0) sets up the heap and `ThreadVars`, then runs `.init_array`. The emulator once ran the constructors itself before that call, so they ran twice, the first time before the heap: newlib's `sbrk` latched the end of BSS and grew through the soft-mapped stack region, and Taisei's `memset` zeroed a thread's stack. x30 at entry is the trampoline, which the crt0 hands `__libnx_init` as the loader return for `__nx_exit`.
 
 ## `kernel/svc.rs`

@@ -574,7 +574,7 @@ impl Cpu {
         }
     }
 
-    /// Pop the front storage an applet pushed out, or 2128-0003 if there is none.
+    /// Pop the front storage an applet pushed out, or 2128-0002 if there is none.
     fn pop_library_applet_storage(
         &mut self,
         tls: u32,
@@ -582,7 +582,6 @@ impl Cpu {
         accessor: u64,
         interactive: bool,
     ) -> Result<()> {
-        const NO_DATA: u32 = 128 | (3 << 9);
         let slot = if interactive {
             POP_INTERACTIVE_OUT_DATA_EVENT
         } else {
@@ -603,7 +602,7 @@ impl Cpu {
                 Some((storage, applet.events[slot].filter(|_| queue.is_empty())))
             });
         let Some((storage, drained_event)) = popped else {
-            return self.write_ipc_response(tls, NO_DATA, &[], &[], &[]);
+            return self.write_ipc_response(tls, AM_NO_DATA_IN_CHANNEL, &[], &[], &[]);
         };
         if let Some(event) = drained_event {
             self.clear_event(event);
@@ -629,7 +628,7 @@ impl Cpu {
         event
     }
 
-    /// Pop the front of a library applet's queue as an `IStorage`, or 2128-0003 if empty.
+    /// Pop the front of a library applet's queue as an `IStorage`, or 2128-0002 if empty.
     fn pop_applet_storage(&mut self, tls: u32, handle: u64, queue: AppletQueue) -> Result<()> {
         let data = match queue {
             AppletQueue::InData => self.process_mut().am_in_data.pop_front(),
@@ -643,14 +642,13 @@ impl Cpu {
                 Ok(())
             }
             None => {
-                const NO_DATA: u32 = 128 | (3 << 9);
                 if self
                     .unimplemented_ipc
                     .insert((queue.event_name().to_string(), None))
                 {
                     self.log(Level::Warn, queue.empty_message());
                 }
-                self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
+                self.write_ipc_response(tls, AM_NO_DATA_IN_CHANNEL, &[], &[], &[])
             }
         }
     }
