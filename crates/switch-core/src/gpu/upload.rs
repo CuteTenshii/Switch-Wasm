@@ -257,7 +257,7 @@ impl Uploads {
                 constants.push(ConstantUpload {
                     stage,
                     bank,
-                    bytes: read_range(ctx, addr, u64::from(size), "constant bank")?,
+                    bytes: read_constant_bank(ctx, addr, u64::from(size))?,
                 });
             }
         }
@@ -1166,6 +1166,32 @@ fn read_range(ctx: &ExecCtx, gpu_va: u64, len: u64, what: &str) -> Result<Vec<u8
     Ok(out)
 }
 
+/// A constant bank's bytes, with unmapped pages read as zero. A bank is bound at its full size
+/// while only what its shaders read need be mapped, so the tail can run past the mapping.
+fn read_constant_bank(ctx: &ExecCtx, gpu_va: u64, len: u64) -> Result<Vec<u8>> {
+    const PAGE: u64 = 0x1000;
+    if len > MAX_UPLOAD {
+        return Err(Error::Gpu(format!(
+            "upload: constant bank at {gpu_va:#x} is {len} bytes, past the {MAX_UPLOAD}-byte cap"
+        )));
+    }
+    let mut out = vec![0; len as usize];
+    let mut at = 0;
+    while at < len {
+        let va = gpu_va + at;
+        match ctx.vmm.translate(va) {
+            Some((_, left)) => {
+                let end = len.min(at.saturating_add(left));
+                ctx.vmm
+                    .read_into(ctx.mem, va, &mut out[at as usize..end as usize])?;
+                at = end;
+            }
+            None => at = (va | (PAGE - 1)) + 1 - gpu_va,
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1319,6 +1345,17 @@ mod tests {
         );
         assert_eq!(read_range(&ctx, base + 3, 5, "test").unwrap(), bytes[3..8]);
         assert_eq!(read_range(&ctx, base, 0, "test").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn a_constant_bank_past_its_mapping_reads_zero_there() {
+        let mut h = Harness::new(0x1000);
+        let bytes: Vec<u8> = (1..=16u8).collect();
+        h.write(0xff0, &bytes);
+        let base = h.base;
+        let read = read_constant_bank(&h.ctx(), base + 0xff0, 0x20).unwrap();
+        assert_eq!(read[..16], bytes[..], "the mapped part");
+        assert_eq!(read[16..], [0; 16], "past the mapping");
     }
 
     fn image(kind: TexelKind, width: u32, height: u32, srgb: bool) -> Texture {
