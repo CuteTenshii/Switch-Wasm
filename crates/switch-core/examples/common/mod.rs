@@ -307,7 +307,7 @@ pub fn keys(prod: impl AsRef<Path>, title: Option<impl AsRef<Path>>) -> KeySet {
 pub struct Target {
     /// An `.nro`, or a retail container (`.nsp`, `.xci` or a program `.nca`).
     pub target: String,
-    /// `prod.keys`; a retail container needs it.
+    /// `prod.keys`; a retail container needs it, and so does `--firmware` with an `.nro`.
     #[arg(long, value_name = "FILE")]
     keys: Option<String>,
     /// `title.keys`.
@@ -325,7 +325,8 @@ pub struct Program {
 }
 
 enum Form {
-    Homebrew(Vec<u8>),
+    /// The NRO and, when `--keys` is given, the keys `--firmware` opens with.
+    Homebrew(Vec<u8>, Option<Box<KeySet>>),
     /// An `.nsp`, an `.xci`, or a bare Program `.nca`.
     Retail(Box<Title>),
 }
@@ -340,21 +341,28 @@ pub struct Booted {
 
 impl Program {
     pub fn is_homebrew(&self) -> bool {
-        matches!(self.form, Form::Homebrew(_))
+        matches!(self.form, Form::Homebrew(..))
     }
 
     /// Boot into an already bootstrapped `cpu`; `sd_path` is where a homebrew launches from.
     pub fn boot(&self, cpu: &mut Cpu, sd_path: Option<&str>) -> Booted {
         match &self.form {
             Form::Retail(title) => title.boot_with_font(cpu, self.font.as_deref()),
-            Form::Homebrew(image) => {
+            Form::Homebrew(image, keys) => {
                 apply_docked(cpu);
                 load_font(cpu, self.font.as_deref());
+                let archives = match keys {
+                    Some(keys) => register_firmware(cpu, keys),
+                    None if flags().boot.firmware.is_some() => {
+                        die("--firmware with an .nro needs --keys <prod.keys>")
+                    }
+                    None => 0,
+                };
                 cpu.boot_homebrew(image, sd_path)
                     .unwrap_or_else(|e| die(&format!("booting the NRO: {e:?}")));
                 Booted {
                     modules: Vec::new(),
-                    archives: 0,
+                    archives,
                     quota: None,
                 }
             }
@@ -392,7 +400,12 @@ impl Target {
 
     pub fn open_program(&self) -> Program {
         let form = match target_kind(Path::new(&self.target)) {
-            Kind::Nro => Form::Homebrew(read(&self.target)),
+            Kind::Nro => Form::Homebrew(
+                read(&self.target),
+                self.keys
+                    .as_ref()
+                    .map(|prod| Box::new(keys(prod, self.title_keys.as_ref()))),
+            ),
             _ => Form::Retail(Box::new(self.open())),
         };
         Program {
