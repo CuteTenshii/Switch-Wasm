@@ -16,6 +16,9 @@ pub(crate) use swkbd::PendingKeyboard;
 /// `am` 2, NoDataInChannel.
 const AM_NO_DATA_IN_CHANNEL: u32 = 128 | (2 << 9);
 
+/// `am` 511, InvalidStorageType.
+const AM_INVALID_STORAGE_TYPE: u32 = 128 | (511 << 9);
+
 /// `LaunchParameterKind::PreselectedUser`.
 pub(crate) const LAUNCH_PARAMETER_PRESELECTED_USER: u32 = 2;
 

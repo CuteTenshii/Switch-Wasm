@@ -768,6 +768,19 @@ fn created_storage_is_as_long_as_the_caller_asked_for() {
 }
 
 #[test]
+fn a_storage_of_bytes_is_no_transfer_storage() {
+    const INVALID_STORAGE_TYPE: u32 = 128 | (511 << 9);
+    let mut cpu = request(false, 10, &0x10u64.to_le_bytes());
+    cpu.register_service_handle(9, "am:library-applet-creator");
+    cpu.applet_request(TLS, 9, Some(10)).unwrap();
+    let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+
+    write_request(&mut cpu, 1, &[]);
+    cpu.applet_request(TLS, storage, Some(1)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), INVALID_STORAGE_TYPE);
+}
+
+#[test]
 fn an_applet_learns_the_mode_its_caller_created_it_with() {
     const PARTIAL_FOREGROUND: u32 = 1;
     let mut payload = [0u8; 8];

@@ -1082,6 +1082,9 @@ impl Cpu {
                     self.process_mut().am_storage_of.insert(accessor, storage);
                     Ok(())
                 }
+                // OpenTransferStorage: every storage here holds bytes, none a transfer memory;
+                // the inline keyboard tries this first and falls back on exactly this result.
+                Some(1) => self.write_ipc_response(tls, AM_INVALID_STORAGE_TYPE, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             "am:storage-accessor" => {
