@@ -1444,6 +1444,37 @@ impl Title {
         }
     }
 
+    /// Give the title its container's `HtmlDocument` RomFS, which its web applets open, as the
+    /// page does. A bare NCA has none.
+    fn mount_manual(&self, cpu: &mut Cpu) {
+        let path = self.base.as_ref().map_or(&self.path, |(base, ..)| base);
+        if !matches!(target_kind(path), Kind::Container) {
+            return;
+        }
+        let src = open_source(path);
+        let Ok(pfs0) = switch_core::xci::read_container(&src) else {
+            return;
+        };
+        let Some((index, nca)) =
+            switch_core::nca::find_html_document(&pfs0.files, &src, &self.keys)
+        else {
+            return;
+        };
+        let file = &pfs0.files[index];
+        let romfs =
+            switch_core::source::Window::new(open_source(path), file.offset, file.size, &file.name)
+                .and_then(|window| {
+                    let section = nca
+                        .romfs_section_index()
+                        .ok_or_else(|| switch_core::Error::Nca("no RomFS in this Manual".into()))?;
+                    nca.romfs_source(window, &self.keys, section)
+                });
+        match romfs {
+            Ok(romfs) => cpu.set_manual_source(Box::new(romfs)),
+            Err(e) => eprintln!("this title's Manual could not be opened: {e}"),
+        }
+    }
+
     /// The RomFS source [`Title::mount_romfs`] uses; `None` if the NCA has no
     /// RomFS section.
     pub fn romfs_source(&self) -> Option<Result<Box<dyn ByteSource>, switch_core::Error>> {
@@ -1505,6 +1536,7 @@ impl Title {
             }
         };
         self.mount_romfs(cpu);
+        self.mount_manual(cpu);
         load_font(cpu, font);
         // After the font (firmware fonts override it), before the modules.
         let archives = register_firmware(cpu, &self.keys);
