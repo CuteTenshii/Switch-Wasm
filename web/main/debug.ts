@@ -133,7 +133,7 @@ function renderState(g: GpuReport, fallback: boolean): RenderState {
   }
   return {
     badge: 'WebGPU',
-    status: fallback ? 'WebGPU draws, on a CPU fallback adapter.' : 'WebGPU draws.',
+    status: fallback ? 'WebGPU runs on a CPU fallback adapter.' : '',
     on: true,
     detail: 'A draw the device cannot take runs on the software rasterizer instead, and once enough '
       + 'have, the rasterizer keeps every frame after, however well the device is working.',
@@ -151,7 +151,9 @@ async function updateRenderDebug(): Promise<void> {
   const { badge, status, on, detail } = renderState(g, info?.isFallbackAdapter ?? false);
   setNote('render-debug-badge', badge, on);
   const unlatched = g.unlatched ? ` It has handed frames back to the device ${g.unlatched} time(s).` : '';
-  $('render-status').textContent = status + unlatched;
+  const line = (status + unlatched).trim();
+  $('render-status').textContent = line;
+  $('render-status').hidden = !line;
   $('render-tip').setAttribute('text', detail);
   $('render-debug-data').hidden = !g.backend;
   showList('render-reasons-block', 'render-reasons', g.reasons ?? []);
