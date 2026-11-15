@@ -428,7 +428,7 @@ impl Cpu {
                 &args[SECURITY_CONFIG_SIZE..SECURITY_CONFIG_SIZE + SECURITY_PARAMETER_SIZE],
             );
         } else {
-            for chunk in security_parameter.chunks_exact_mut(8) {
+            for chunk in security_parameter.as_chunks_mut::<8>().0 {
                 chunk.copy_from_slice(&self.next_random_u64().to_le_bytes());
             }
         }
@@ -449,9 +449,11 @@ impl Cpu {
             Some(nacp) => nacp
                 .get(NACP_LOCAL_COMMUNICATION_IDS..)
                 .unwrap_or_default()
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .take(NACP_LOCAL_COMMUNICATION_ID_COUNT)
-                .map(|id| i64::from_le_bytes(id.try_into().unwrap_or_default()))
+                .map(|id| i64::from_le_bytes(*id))
                 .collect(),
             None => return Some(if requested == -1 { 0 } else { requested }),
         };
