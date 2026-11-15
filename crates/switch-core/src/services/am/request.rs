@@ -704,10 +704,11 @@ impl Cpu {
             },
             // ILibraryAppletSelfAccessor.
             "am:library-applet-self-accessor" => match cmd_id {
-                // GetLibraryAppletInfo: AllForeground.
+                // GetLibraryAppletInfo: the mode the caller created it with.
                 Some(11) => {
                     let mut info = [0u8; 8];
                     info[..4].copy_from_slice(&applet_id_for(self.program_id()).to_le_bytes());
+                    info[4..].copy_from_slice(&super::library_applet_mode(self).to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &info, &[])
                 }
                 // ReportVisibleError / ReportVisibleErrorWithErrorContext(ErrorCode): the error

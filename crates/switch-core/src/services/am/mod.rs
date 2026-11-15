@@ -405,6 +405,15 @@ fn caller_identity(cpu: &Cpu) -> [u8; 16] {
     info
 }
 
+/// The `LibraryAppletMode` the running applet's caller created it with; AllForeground when
+/// nothing started it.
+pub(crate) fn library_applet_mode(cpu: &Cpu) -> u32 {
+    cpu.process()
+        .caller
+        .and_then(|(caller, accessor)| cpu.processes.get(&caller)?.am_applets.get(&accessor))
+        .map_or(0, |applet| applet.mode)
+}
+
 fn home_menu_identity() -> [u8; 16] {
     const QLAUNCH_TITLE_ID: u64 = 0x0100_0000_0000_1000;
     const SYSTEM_APPLET_MENU: u32 = 3;

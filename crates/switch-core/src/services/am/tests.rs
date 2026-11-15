@@ -768,6 +768,31 @@ fn created_storage_is_as_long_as_the_caller_asked_for() {
 }
 
 #[test]
+fn an_applet_learns_the_mode_its_caller_created_it_with() {
+    const PARTIAL_FOREGROUND: u32 = 1;
+    let mut payload = [0u8; 8];
+    payload[..4].copy_from_slice(&super::APPLET_SWKBD.to_le_bytes());
+    payload[4..].copy_from_slice(&PARTIAL_FOREGROUND.to_le_bytes());
+    let mut cpu = request(false, 0, &payload);
+    cpu.register_service_handle(9, "am:library-applet-creator");
+    cpu.applet_request(TLS, 9, Some(0)).unwrap();
+    let accessor = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+    // The caller and the applet share a process here; the mode is read through the caller.
+    let pid = cpu.pid;
+    cpu.process_mut().caller = Some((pid, Cpu::object_key(accessor, 0)));
+
+    write_request(&mut cpu, 11, &[]);
+    cpu.register_service_handle(10, "am:library-applet-self-accessor");
+    cpu.applet_request(TLS, 10, Some(11)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+    assert_eq!(
+        cpu.mem.read_u32(TLS + 0x24).unwrap(),
+        PARTIAL_FOREGROUND,
+        "mode"
+    );
+}
+
+#[test]
 fn the_ex_form_of_a_creation_is_the_same_creation() {
     const CALLER_THREAD: u64 = 0x2a;
     const FOREGROUND: u32 = 1;
