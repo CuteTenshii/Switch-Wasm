@@ -40,6 +40,18 @@ pub enum MemoryState {
     AliasCodeData = 9,
 }
 
+/// What a guest may do with a run of pages, as `svcQueryMemory` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Permission {
+    None = 0,
+    /// A module's `.rodata`.
+    Read = 0b001,
+    ReadWrite = 0b011,
+    /// A module's `.text`.
+    ReadExecute = 0b101,
+}
+
 /// A run of pages sharing a state, as `svcQueryMemory` describes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateRun {
@@ -48,8 +60,7 @@ pub struct StateRun {
     pub end: u32,
     /// Real storage, as opposed to untouched soft-mapped pages.
     pub mapped: bool,
-    /// Write-protected, in practice a module's `.text`.
-    pub readonly: bool,
+    pub perm: Permission,
     pub state: MemoryState,
 }
 
@@ -890,15 +901,26 @@ impl Memory {
         // A run ends when backing, protection, or reported state changes.
         let state = |a: u32| {
             let mapped = self.page_mapped(a);
-            let reported = self.module_state(a).unwrap_or(if mapped {
+            let module = self.module_state(a);
+            let reported = module.unwrap_or(if mapped {
                 MemoryState::Code
             } else {
                 MemoryState::Unmapped
             });
-            (mapped, self.is_readonly(a), reported)
+            // Write-protected pages are `.text`; the rest of a module's static half is `.rodata`.
+            let perm = if self.is_readonly(a) {
+                Permission::ReadExecute
+            } else if !mapped {
+                Permission::None
+            } else if matches!(module, Some(MemoryState::Code | MemoryState::AliasCode)) {
+                Permission::Read
+            } else {
+                Permission::ReadWrite
+            };
+            (mapped, perm, reported)
         };
         let page = addr & !(PAGE - 1);
-        let (mapped, readonly, reported) = state(page);
+        let (mapped, perm, reported) = state(page);
         let limit = limit & !(PAGE - 1);
         // Past the limit, describe only the named page; hbmenu probes there.
         if page >= limit {
@@ -906,12 +928,12 @@ impl Memory {
                 start: page,
                 end: page.saturating_add(PAGE),
                 mapped,
-                readonly,
+                perm,
                 state: reported,
             };
         }
         // Only untouched, unprotected, unclaimed runs can skip whole blocks.
-        let skippable = !mapped && !readonly && reported == MemoryState::Unmapped;
+        let skippable = !mapped && perm == Permission::None && reported == MemoryState::Unmapped;
         let empty = |block_start: u32| {
             self.block_mapped[(block_start >> PAGE_BITS) as usize / BLOCK_PAGES].load(Relaxed) == 0
                 && !self.readonly_intersects(block_start, block_start + BLOCK)
@@ -924,7 +946,7 @@ impl Memory {
                 start -= BLOCK;
                 continue;
             }
-            if state(start - PAGE) != (mapped, readonly, reported) {
+            if state(start - PAGE) != (mapped, perm, reported) {
                 break;
             }
             start -= PAGE;
@@ -935,7 +957,7 @@ impl Memory {
                 end += BLOCK;
                 continue;
             }
-            if state(end) != (mapped, readonly, reported) {
+            if state(end) != (mapped, perm, reported) {
                 break;
             }
             end += PAGE;
@@ -944,7 +966,7 @@ impl Memory {
             start,
             end,
             mapped,
-            readonly,
+            perm,
             state: reported,
         }
     }
@@ -1921,11 +1943,11 @@ mod tests {
 
         let run = m.state_run(0x0800_2000, LIMIT);
         assert_eq!((run.start, run.end), (0x0800_2000, 0x0800_4000));
-        assert!(run.mapped && run.readonly);
+        assert!(run.mapped && run.perm == Permission::ReadExecute);
 
         let run = m.state_run(0x0800_0000, LIMIT);
         assert_eq!((run.start, run.end), (0x0800_0000, 0x0800_2000));
-        assert!(run.mapped && !run.readonly);
+        assert!(run.mapped && run.perm == Permission::ReadWrite);
     }
 
     #[test]
@@ -1945,11 +1967,12 @@ mod tests {
         let run = m.state_run(0x0800_0000, LIMIT);
         assert_eq!((run.start, run.end), (0x0800_0000, 0x0800_2000), ".text");
         assert_eq!(run.state, MemoryState::Code);
-        assert!(run.readonly, ".text is the only part that is R-X");
+        assert_eq!(run.perm, Permission::ReadExecute, ".text");
 
         let run = m.state_run(0x0800_2000, LIMIT);
         assert_eq!((run.start, run.end), (0x0800_2000, 0x0800_4000), ".rodata");
         assert_eq!(run.state, MemoryState::Code);
+        assert_eq!(run.perm, Permission::Read, ".rodata");
 
         let run = m.state_run(0x0800_4000, LIMIT);
         assert_eq!(
@@ -1958,6 +1981,7 @@ mod tests {
             ".data + .bss"
         );
         assert_eq!(run.state, MemoryState::CodeData);
+        assert_eq!(run.perm, Permission::ReadWrite, ".data + .bss");
 
         // `ldr:ro` modules use the alias states and drop them on unload.
         m.map_zero(0x2900_0000, PAGE_SIZE * 4).unwrap();

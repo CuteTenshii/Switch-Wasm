@@ -5,7 +5,7 @@ use crate::cpu::{
     GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
 use crate::kernel::cores::Handback;
-use crate::mem::{MemoryState, StateRun};
+use crate::mem::{MemoryState, Permission, StateRun};
 use crate::{Error, Result};
 use std::fmt::Write;
 
@@ -173,7 +173,8 @@ impl Cpu {
             0x06 => {
                 // QueryMemory(info, pageInfo, addr): the run of pages in the queried page's
                 // state. Untouched soft-mapped pages read as unmapped. Only module `.text` is
-                // executable, since `rtld` finds modules by walking for executable `CodeStatic`.
+                // executable, since `rtld` finds modules by walking for executable `CodeStatic`,
+                // and `.rodata` is read-only, where `nn::diag` reads a module's name.
                 let out = self.read_zr(0) as u32;
                 let addr = self.read_zr(2) as u32;
                 // See [`crate::mem::Memory::state_run`].
@@ -186,7 +187,7 @@ impl Cpu {
                         start: heap.start,
                         end: heap.end,
                         mapped: true,
-                        readonly: false,
+                        perm: Permission::ReadWrite,
                         state: MemoryState::Normal,
                     };
                 } else if addr < heap.start {
@@ -194,20 +195,14 @@ impl Cpu {
                 } else if !heap.is_empty() {
                     run.start = run.start.max(heap.end);
                 }
-                let (base, end, mapped, text) = (run.start, run.end, run.mapped, run.readonly);
+                let (base, end) = (run.start, run.end);
                 let mut info = Vec::with_capacity(40);
                 info.extend_from_slice(&(base as u64).to_le_bytes());
                 info.extend_from_slice(&((end - base) as u64).to_le_bytes());
                 for v in [
                     run.state as u32, // type
                     0,
-                    if text {
-                        0b101
-                    } else if mapped {
-                        0b011
-                    } else {
-                        0
-                    }, // perm (R-X / RW- / none)
+                    run.perm as u32,
                     0,
                     0,
                     0,
@@ -218,7 +213,7 @@ impl Cpu {
                     self.mem.write_u8(out.wrapping_add(i as u32), b)?;
                 }
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, if mapped { 0x1000 } else { 0 }); // page info
+                self.write_zr(1, if run.mapped { 0x1000 } else { 0 }); // page info
                 Ok(())
             }
             0x07 => {
