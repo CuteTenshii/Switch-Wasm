@@ -178,6 +178,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - Depth-only passes (Just Dance 2017) return nothing from the fragment entry (an unbacked `@location(0)` fails pipeline creation) but still run for `kil` and alpha-to-coverage.
 - Expanded multisample (per-texel) rendering must apply the sample mask and alpha-to-coverage in the shader (`wgsl::Coverage`). Alpha-to-coverage keeps a prefix of `floor(alpha*count + 0.5)` samples (Rust `round` semantics, not WGSL's ties-to-even).
 - Integer vertex attributes are declared `vec4<i32>/<u32>` (WebGPU matches base types) and bitcast into `a[]`; BGRA attributes swap components 0 and 2 in the entry point, since WebGPU has no BGRA vertex format.
+- A draw whose fragment stage is disabled writes no colour (Persona 5 Royal's title screen): both renderers run `no_fragment_program`, a lone `exit`, as a depth-only pass, and skip the draw when it leaves depth alone (`writes_no_surface`). Refusing it latched every frame onto the rasterizer, which refused it too.
 
 ## `renderer.rs`
 

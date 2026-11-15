@@ -21,7 +21,7 @@ Status, lowest to highest:
 | Home Menu (`qlaunch`) | 0100000000001000 | 21.2.0 | Menus | Navigable: settings can be browsed and changed, and the album and profile pages open as applets. | 2026-11-14 |
 | A Short Hike | 01004890117B2000 | 1.0.0 | Menus | Its title screen at frame 1500 (11.9B steps), with the button glyph in "press … to start" missing. | 2026-11-14 |
 | Tomodachi Life: Living the Dream | 010051F0207B2000 | 1.0.0 | Boots | Its loading screen through frame 1500 (19.3B steps). | 2026-11-14 |
-| Persona 5 Royal | 01005CA01580E000 | 1.0.0 | | Falls back to the software rasterizer; how far it gets is not recorded. | 2026-11-14 |
+| Persona 5 Royal | 01005CA01580E000 | 1.0.0 | Menus | Its main menu at frame 3810 (pressing A past the system-data screen and the title), all on the device but about 6 s a frame from the title on. | 2026-11-14 |
 | Just Dance 2023 | 0100BEE017FC0000 | 1.0.0 | | Falls back to the software rasterizer; how far it gets is not recorded. | 2026-11-14 |
 
 ## Homebrew

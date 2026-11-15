@@ -18,7 +18,10 @@ impl Gpu {
     ) -> std::result::Result<Checked, String> {
         let mut state = Pipeline::of(engine).map_err(|e| e.to_string())?;
         let targets = Targets::of(engine).map_err(|e| format!("{e:?}"))?;
-        let color = targets.color;
+        // With its fragment stage disabled a draw writes no colour.
+        let color = targets
+            .color
+            .filter(|_| engine.program(ShaderStage::Fragment).is_some());
         // Attach depth only for draws that test or write it.
         let uses_depth = state
             .depth
@@ -437,9 +440,14 @@ impl Gpu {
         ctx: &ExecCtx,
         stage: ShaderStage,
     ) -> std::result::Result<Translation, String> {
-        let binding = engine
-            .program(stage)
-            .ok_or_else(|| format!("no {stage:?} program"))?;
+        let Some(binding) = engine.program(stage) else {
+            if stage == ShaderStage::Fragment {
+                let program = switch_core::gpu::shader::no_fragment_program();
+                return wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps())
+                    .map_err(|e| e.to_string());
+            }
+            return Err(format!("no {stage:?} program"));
+        };
         let key = (binding.addr, stage);
         // Validate hits: a `brx` jump table read from a constant buffer may have changed.
         if let Some(cached) = self.space.shader_cache.get(&key) {
@@ -455,13 +463,8 @@ impl Gpu {
             &|bank: u8| engine.bound_constbuf(stage, u32::from(bank)),
         )
         .map_err(|e| format!("{e:?}"))?;
-        let caps = wgsl::Caps {
-            subgroups: self.features().contains(wgpu::Features::SUBGROUP),
-            // A browser wants the directive; naga rejects it.
-            subgroup_enable: cfg!(target_arch = "wasm32"),
-        };
-        let translation =
-            wgsl::translate_for(&Compiled::new(&program), caps).map_err(|e| e.to_string())?;
+        let translation = wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps())
+            .map_err(|e| e.to_string())?;
         // Watch the CPU page behind each virtual page the decode read.
         for &page in &reads.pages {
             if let Some((cpu, _)) = ctx.vmm.translate(page << PAGE_BITS) {
@@ -482,6 +485,14 @@ impl Gpu {
             },
         );
         Ok(translation)
+    }
+
+    fn wgsl_caps(&self) -> wgsl::Caps {
+        wgsl::Caps {
+            subgroups: self.features().contains(wgpu::Features::SUBGROUP),
+            // A browser wants the directive; naga rejects it.
+            subgroup_enable: cfg!(target_arch = "wasm32"),
+        }
     }
 
     /// Drop every translation a written page held program words for.

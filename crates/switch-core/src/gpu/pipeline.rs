@@ -562,6 +562,16 @@ pub fn culls_every_triangle(engine: &Engine3D) -> bool {
         && Primitive::from_raw(engine.last_draw.primitive).is_ok_and(Primitive::is_rasterized)
 }
 
+/// Whether the draw's fragment stage is disabled and it leaves depth alone, so it changes
+/// nothing: with no fragment program the hardware writes no colour, and stencil is not emulated.
+pub fn writes_no_surface(engine: &Engine3D) -> bool {
+    engine
+        .program(crate::gpu::engine::threed::ShaderStage::Fragment)
+        .is_none()
+        && !(engine.depth_state().reaches_surface()
+            && engine.depth_target().is_ok_and(|d| d.is_some()))
+}
+
 /// WebGPU topology, and the primitive whose indices `raster::assemble` must
 /// rewrite first. Line loops, points and lines are drawn by neither renderer.
 fn topology(primitive: Primitive) -> Result<(Topology, Option<Primitive>), Unsupported> {

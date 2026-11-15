@@ -795,7 +795,9 @@ impl Renderer for Gpu {
             return self.software.draw(engine, ctx);
         }
         // It draws nothing, which no pipeline can say.
-        if switch_core::gpu::pipeline::culls_every_triangle(engine) {
+        if switch_core::gpu::pipeline::culls_every_triangle(engine)
+            || switch_core::gpu::pipeline::writes_no_surface(engine)
+        {
             return Ok(());
         }
         // See [`Gpu::software_frame`].

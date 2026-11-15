@@ -151,19 +151,26 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let vs_binding = engine
         .program(ShaderStage::VertexB)
         .ok_or_else(|| Error::Gpu("raster: draw with no bound vertex program".into()))?;
-    let fs_binding = engine
-        .program(ShaderStage::Fragment)
-        .ok_or_else(|| Error::Gpu("raster: draw with no bound fragment program".into()))?;
+    if crate::gpu::pipeline::writes_no_surface(engine) {
+        return Ok(());
+    }
+    let fs_binding = engine.program(ShaderStage::Fragment);
+    let fs_addr = fs_binding.map_or(0, |binding| binding.addr);
 
     let vs_decoded = decode_program_from_memory(&*ctx, vs_binding.addr, &|bank: u8| {
         engine.bound_constbuf(ShaderStage::VertexB, bank as u32)
     })?;
-    let fs_decoded = decode_program_from_memory(&*ctx, fs_binding.addr, &|bank: u8| {
-        engine.bound_constbuf(ShaderStage::Fragment, bank as u32)
-    })?;
+    let fs_decoded = match fs_binding {
+        Some(binding) => decode_program_from_memory(&*ctx, binding.addr, &|bank: u8| {
+            engine.bound_constbuf(ShaderStage::Fragment, bank as u32)
+        })?,
+        None => crate::gpu::shader::no_fragment_program(),
+    };
     // Only when a diagnostic asked; see `examples/shader_coverage.rs`.
     crate::gpu::shader::uses::note(wgsl::Stage::Vertex, vs_binding.addr, &vs_decoded);
-    crate::gpu::shader::uses::note(wgsl::Stage::Fragment, fs_binding.addr, &fs_decoded);
+    if fs_binding.is_some() {
+        crate::gpu::shader::uses::note(wgsl::Stage::Fragment, fs_addr, &fs_decoded);
+    }
     // `TRACE_WGSL`: whether each shader translates, and each module as
     // `<stage>_<addr>.wgsl` for `naga --validate` when a dump sink wants it.
     if crate::trace::enabled(crate::trace::Trace::Wgsl) {
@@ -173,7 +180,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         // operands a `ldg` descriptor is traced through into immediates.
         for (name, stage, addr, program) in [
             ("vs", Stage::Vertex, vs_binding.addr, &vs_decoded),
-            ("fs", Stage::Fragment, fs_binding.addr, &fs_decoded),
+            ("fs", Stage::Fragment, fs_addr, &fs_decoded),
         ] {
             let translated = match wgsl::translate(&Compiled::new(program)) {
                 Ok(translated) => translated,
@@ -311,8 +318,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let depth_state = engine.depth_state();
     let blend_target = engine.blend_target(0);
     let blend_constant = engine.blend_constant();
-    // A mask with nothing set writes depth only.
-    let color_mask = engine.color_mask(engine.render_target_slot(0));
+    // A mask with nothing set writes depth only, as a draw with no fragment program does.
+    let color_mask = if fs_binding.is_some() {
+        engine.color_mask(engine.render_target_slot(0))
+    } else {
+        [false; 4]
+    };
     let writes_all_channels = color_mask == [true; 4];
     let writes_any_channel = color_mask.iter().any(|&channel| channel);
     let cull = engine.cull_state();
@@ -450,7 +461,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     if crate::trace::enabled(crate::trace::Trace::Cfg) {
         for (stage, addr, program) in [
             ("vs", vs_binding.addr, &vs_program),
-            ("fs", fs_binding.addr, &fs_program),
+            ("fs", fs_addr, &fs_program),
         ] {
             crate::traceln!(
                 "[cfg] {stage}@{addr:#x} {}",

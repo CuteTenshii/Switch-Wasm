@@ -51,6 +51,16 @@ const MAX_INSTRUCTIONS: usize = 4096;
 /// First real instruction: slot 1 of the first block, after its `sched` word.
 pub const ENTRY_OFFSET: u32 = 8;
 
+/// What a draw with its fragment stage disabled runs: a lone `exit` with no output map, so
+/// the draw writes depth only.
+pub fn no_fragment_program() -> Program {
+    Program {
+        insns: vec![Instruction::always(Op::Exit)],
+        offsets: vec![ENTRY_OFFSET],
+        ..Program::default()
+    }
+}
+
 /// The generic varying slots `insns`' `ipa`s read, ascending.
 pub fn interpolated_slots(ops: &[Op]) -> Vec<usize> {
     let mut slots: Vec<usize> = ops
