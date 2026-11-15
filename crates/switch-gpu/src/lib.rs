@@ -423,6 +423,9 @@ struct CachedShader {
     serial: u64,
 }
 
+/// A buffer's bytes and the device buffer holding them; see [`Gpu::shared_buffer`].
+type SharedBuffer = (Vec<u8>, wgpu::Buffer);
+
 /// A module built for one layout of a translation: the layout, the source's hash, the module.
 type BuiltModule = (Layout, u64, wgpu::ShaderModule);
 
@@ -475,6 +478,9 @@ struct Input {
     pages: Vec<u32>,
 }
 
+/// Past this, every shared vertex and index buffer is dropped.
+const SHARED_BUFFER_BYTES: u64 = 64 << 20;
+
 /// Past this, every kept input of the address space is dropped.
 const INPUT_CACHE_BYTES: u64 = 256 << 20;
 
@@ -524,6 +530,10 @@ pub struct Gpu {
     built_modules: std::collections::HashMap<(u64, u8), Vec<BuiltModule>>,
     /// Translations made so far, which numbers the next.
     translations: u64,
+    /// Vertex and index buffers by usage and fingerprint, with the bytes they hold: most draws
+    /// repeat a mesh an earlier one uploaded. See [`Gpu::shared_buffer`].
+    shared_buffers: std::collections::HashMap<(u32, u64), Vec<SharedBuffer>>,
+    shared_bytes: u64,
     /// Render pipelines, by everything they were built from.
     pipelines: std::collections::HashMap<PipelineKey, wgpu::RenderPipeline>,
     /// Samplers by their settings; `createSampler` is slow in browsers.
@@ -632,6 +642,9 @@ pub struct Gpu {
     pub cropped_binds: u64,
     /// Compute launches run on the device, and why others went to the software dispatch.
     pub compute_dispatched: u64,
+    /// Vertex and index buffers uploaded, and draws that bound one already on the device.
+    pub buffers_uploaded: u64,
+    pub buffers_reused: u64,
     /// Read-only compute inputs uploaded, and launches that bound one already on the device.
     pub inputs_uploaded: u64,
     pub inputs_reused: u64,
@@ -671,13 +684,16 @@ impl Drop for Gpu {
         let u = self.uploaded;
         eprintln!(
             "[gpu] read {:.1} MiB of textures, {:.1} MiB of vertices, {:.1} MiB of constants, \
-             {:.1} MiB of indices; {} texture reads served from cache, {} not",
+             {:.1} MiB of indices; {} texture reads served from cache, {} not; {} vertex and \
+             index buffers uploaded, {} reused",
             mib(u.textures),
             mib(u.vertex),
             mib(u.constants),
             mib(u.index),
             self.texture_hits,
             self.texture_misses,
+            self.buffers_uploaded,
+            self.buffers_reused,
         );
         eprintln!(
             "[gpu] {} shader translations served from cache, {} not",
@@ -1199,6 +1215,8 @@ impl Renderer for Gpu {
             .field("heldCopiesMade", self.held_copies_made)
             .field("heldCopiesReused", self.held_copies_reused)
             .field("croppedBinds", self.cropped_binds)
+            .field("buffersUploaded", self.buffers_uploaded)
+            .field("buffersReused", self.buffers_reused)
             .field("computeDispatched", self.compute_dispatched)
             .field("inputsUploaded", self.inputs_uploaded)
             .field("inputsReused", self.inputs_reused)

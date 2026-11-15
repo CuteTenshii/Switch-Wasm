@@ -174,12 +174,21 @@ impl Gpu {
         let mut patches = patches.into_iter();
         let bound: Vec<Bound> = fit_vertex_buffers(feeds, self.vertex_buffer_limit)
             .into_iter()
-            .map(|f| Bound {
-                buffer: self.buffer("vertex", &f.bytes, wgpu::BufferUsages::VERTEX),
-                patches: patches.next().unwrap_or_default(),
-                attributes: f.attributes,
-                stride: f.stride,
-                step: f.step,
+            .map(|f| {
+                let patches = patches.next().unwrap_or_default();
+                // The patches are copied into it, so it is this draw's alone.
+                let buffer = if patches.is_empty() {
+                    self.shared_buffer("vertex", &f.bytes, wgpu::BufferUsages::VERTEX)
+                } else {
+                    self.buffer("vertex", &f.bytes, wgpu::BufferUsages::VERTEX)
+                };
+                Bound {
+                    buffer,
+                    patches,
+                    attributes: f.attributes,
+                    stride: f.stride,
+                    step: f.step,
+                }
             })
             .collect();
         let layouts: Vec<Option<wgpu::VertexBufferLayout>> = bound
@@ -423,14 +432,14 @@ impl Gpu {
             Some((indices, base)) => {
                 let bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
                 Some((
-                    self.buffer("assembled", &bytes, wgpu::BufferUsages::INDEX),
+                    self.shared_buffer("assembled", &bytes, wgpu::BufferUsages::INDEX),
                     wgpu::IndexFormat::Uint32,
                     *base,
                 ))
             }
             None => p.uploads.index.as_ref().map(|index| {
                 (
-                    self.buffer("index", &index.bytes, wgpu::BufferUsages::INDEX),
+                    self.shared_buffer("index", &index.bytes, wgpu::BufferUsages::INDEX),
                     index_format(index.format),
                     -(index.lowest as i32),
                 )

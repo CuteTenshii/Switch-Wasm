@@ -1,7 +1,8 @@
 //! Shader modules, scratch buffers, device errors, and cache eviction.
 
+use crate::bind::{bytes_fingerprint, same_bytes};
 use crate::readback::Scratch;
-use crate::{Gpu, Input, INPUT_CACHE_BYTES, PAGE_BITS, TEXTURE_CACHE_BYTES};
+use crate::{Gpu, Input, INPUT_CACHE_BYTES, PAGE_BITS, SHARED_BUFFER_BYTES, TEXTURE_CACHE_BYTES};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Software;
 use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
@@ -111,6 +112,40 @@ impl Gpu {
     ) -> wgpu::Buffer {
         let buffer = self.kept_buffer(what, bytes, usage);
         self.scratch.push(Scratch::Buffer(buffer.clone()));
+        buffer
+    }
+
+    /// A buffer of `bytes` the device may already hold from an earlier draw. Nothing may write
+    /// to it, since later draws share it.
+    pub(super) fn shared_buffer(
+        &mut self,
+        what: &str,
+        bytes: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
+        let key = (usage.bits(), bytes_fingerprint(bytes));
+        if let Some((_, buffer)) = self
+            .shared_buffers
+            .get(&key)
+            .and_then(|kept| kept.iter().find(|(held, _)| same_bytes(held, bytes)))
+        {
+            self.buffers_reused += 1;
+            return buffer.clone();
+        }
+        self.buffers_uploaded += 1;
+        let buffer = self.kept_buffer(what, bytes, usage);
+        if self.shared_bytes + bytes.len() as u64 > SHARED_BUFFER_BYTES {
+            // Recorded draws may still bind them, so they go when the scratch does.
+            for (_, buffer) in self.shared_buffers.drain().flat_map(|(_, kept)| kept) {
+                self.scratch.push(Scratch::Buffer(buffer));
+            }
+            self.shared_bytes = 0;
+        }
+        self.shared_bytes += bytes.len() as u64;
+        self.shared_buffers
+            .entry(key)
+            .or_default()
+            .push((bytes.to_vec(), buffer.clone()));
         buffer
     }
 

@@ -49,6 +49,10 @@ impl Gpu {
             modules: std::collections::HashMap::new(),
             built_modules: std::collections::HashMap::new(),
             translations: 0,
+            shared_buffers: std::collections::HashMap::new(),
+            shared_bytes: 0,
+            buffers_uploaded: 0,
+            buffers_reused: 0,
             pipelines: std::collections::HashMap::new(),
             samplers: std::collections::HashMap::new(),
             group_layouts: std::collections::HashMap::new(),
@@ -168,6 +172,7 @@ impl Gpu {
         self.parked.clear();
         self.scratch.clear();
         self.bind_groups.clear();
+        self.shared_buffers.clear();
         true
     }
 

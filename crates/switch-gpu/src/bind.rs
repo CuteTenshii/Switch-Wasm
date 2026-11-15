@@ -40,16 +40,45 @@ pub(super) fn same_bytes(a: &[u8], b: &[u8]) -> bool {
     }) && a_rest.iter().zip(b_rest).all(|(x, y)| x == y)
 }
 
+const K: [u64; 4] = [
+    0x9E37_79B9_7F4A_7C15,
+    0xC2B2_AE3D_27D4_EB4F,
+    0x1656_67B1_9E37_79F9,
+    0x27D4_EB2F_1656_67C5,
+];
+
+/// Mix `bytes` into four lanes; four keep the multiplies from waiting on each other.
+fn mix_bytes(lanes: &mut [u64; 4], bytes: &[u8]) {
+    let (blocks, rest) = bytes.as_chunks::<32>();
+    for block in blocks {
+        for (lane, word) in lanes.iter_mut().zip(block.as_chunks::<8>().0) {
+            *lane = (*lane ^ u64::from_le_bytes(*word))
+                .wrapping_mul(K[1])
+                .rotate_left(31);
+        }
+    }
+    for &byte in rest {
+        lanes[0] = (lanes[0] ^ u64::from(byte)).wrapping_mul(K[2]);
+    }
+}
+
+fn fold_lanes(lanes: [u64; 4]) -> u64 {
+    lanes.iter().zip(K).fold(0, |acc, (lane, k)| {
+        (acc ^ lane).wrapping_mul(k).rotate_left(27)
+    })
+}
+
+/// A fast fingerprint of a buffer's bytes; see [`fingerprint`].
+pub(super) fn bytes_fingerprint(bytes: &[u8]) -> u64 {
+    let mut lanes = [bytes.len() as u64, 1, 2, 3];
+    mix_bytes(&mut lanes, bytes);
+    fold_lanes(lanes)
+}
+
 /// A fast fingerprint of what a stage binds. Constants run to tens of kilobytes a draw, which
-/// the default hasher is too slow for; four lanes keep the multiplies from waiting on each other.
+/// the default hasher is too slow for.
 fn fingerprint(entries: &[wgpu::BindGroupLayoutEntry], resources: &[Resource]) -> u64 {
     use std::hash::{Hash, Hasher};
-    const K: [u64; 4] = [
-        0x9E37_79B9_7F4A_7C15,
-        0xC2B2_AE3D_27D4_EB4F,
-        0x1656_67B1_9E37_79F9,
-        0x27D4_EB2F_1656_67C5,
-    ];
     let mut small = std::collections::hash_map::DefaultHasher::new();
     entries.hash(&mut small);
     let mut lanes = [small.finish(), 1, 2, 3];
@@ -65,21 +94,9 @@ fn fingerprint(entries: &[wgpu::BindGroupLayoutEntry], resources: &[Resource]) -
         lanes[0] = (lanes[0] ^ u64::from(*binding) ^ (bytes.len() as u64) << 32)
             .wrapping_mul(K[0])
             .rotate_left(29);
-        let (blocks, rest) = bytes.as_chunks::<32>();
-        for block in blocks {
-            for (lane, word) in lanes.iter_mut().zip(block.as_chunks::<8>().0) {
-                *lane = (*lane ^ u64::from_le_bytes(*word))
-                    .wrapping_mul(K[1])
-                    .rotate_left(31);
-            }
-        }
-        for &byte in rest {
-            lanes[0] = (lanes[0] ^ u64::from(byte)).wrapping_mul(K[2]);
-        }
+        mix_bytes(&mut lanes, bytes);
     }
-    lanes.iter().zip(K).fold(0, |acc, (lane, k)| {
-        (acc ^ lane).wrapping_mul(k).rotate_left(27)
-    })
+    fold_lanes(lanes)
 }
 
 /// A stage's banks as the table `cbRead` indexes, then the banks themselves, whole words.
