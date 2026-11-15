@@ -12,12 +12,12 @@ Status, lowest to highest:
 
 | Title | Title ID | Version | Status | How far it gets | Measured |
 |---|---|---|---|---|---|
-| Minecraft | 0100D71004694000 | 1.0.0 | Playable | In-game at 15-20 fps. | 2026-11-14 |
-| Just Dance 2017 | 0100BCE000598000 | 1.0.0 | In-game | The menus navigate and songs play, at 10-20 fps. | 2026-11-14 |
-| Just Dance 2019 | 010075600AE96000 | 284652.419607 | In-game | The menus navigate and songs play, at 10-20 fps. | 2026-11-14 |
-| Just Dance 2022 | 0100EA6014BB8000 | 326704.600931 | In-game | The menus navigate and songs play, at 10-20 fps. | 2026-11-14 |
+| Minecraft | 0100D71004694000 | 1.0.0 | Playable | Fully playable at 30-40 fps. | 2026-11-15 |
+| Just Dance 2017 | 0100BCE000598000 | 1.0.0 | Playable | Fully playable at a stable 60 fps, no known issues. | 2026-11-15 |
+| Just Dance 2022 | 0100EA6014BB8000 | 326704.600931 | Playable | Fully playable at a stable 60 fps, no known issues. | 2026-11-15 |
+| Just Dance 2019 | 010075600AE96000 | 284652.419607 | Playable | Fully playable at 40-50 fps, with small audio stutters. | 2026-11-15 |
 | The Legend of Zelda: Echoes of Wisdom | 01008CF01BAAC000 | 1.0.0 | In-game | Falls back to the software rasterizer. The prologue's first scene by frame 125, but the right half of the screen is a 2x-zoomed copy of the left. | 2026-11-14 |
-| Mario Kart 8 Deluxe | 0100152000022000 | 1.0.0 | Menus | Its menus render, at a low frame rate. Races untested. | 2026-11-14 |
+| Mario Kart 8 Deluxe | 0100152000022000 | 1.0.0 | Menus | Its menus render, but from race selection on (character selection and later) the frame rate drops too low to play. | 2026-11-15 |
 | Home Menu (`qlaunch`) | 0100000000001000 | 21.2.0 | Menus | Navigable: settings can be browsed and changed, and the album and profile pages open as applets. | 2026-11-14 |
 | A Short Hike | 01004890117B2000 | 1.0.0 | Menus | Its title screen at frame 1500 (11.9B steps), with the button glyph in "press … to start" missing. | 2026-11-14 |
 | Tomodachi Life: Living the Dream | 010051F0207B2000 | 1.0.0 | Boots | Its loading screen through frame 1500 (19.3B steps). | 2026-11-14 |
