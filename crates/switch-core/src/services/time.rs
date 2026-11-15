@@ -223,6 +223,51 @@ impl Cpu {
         write(CONTINUOUS_ADJUSTMENT_AT, 8, &adjustment);
     }
 
+    /// `ntc` and its `IEnsureNetworkClockAvailabilityService`. The network clock is the host's
+    /// and already in sync, so a task to ensure it finishes as soon as it starts.
+    pub(crate) fn ntc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_answer_control(tls, handle, "ntc", cmd_id)? {
+            return Ok(());
+        }
+        let iface = self.ipc_interface(tls, handle, "ntc");
+        if iface == "ntc:ensure" {
+            let task = self.ipc_object_key(tls, handle);
+            return match cmd_id {
+                // StartTask, and Cancel of a task that is already done.
+                Some(0) | Some(3) => {
+                    let finished = self.kept_event("ntc:finished", task);
+                    self.signal_event(finished);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetFinishNotificationEvent.
+                Some(1) => {
+                    let finished = self.kept_event("ntc:finished", task);
+                    self.write_ipc_reply(tls, 0, &[finished], &[], &[], &[])
+                }
+                // GetResult.
+                Some(2) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // IsProcessing.
+                Some(4) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // GetServerTime -> POSIX seconds.
+                Some(5) => {
+                    let posix = self.unix_time();
+                    self.write_ipc_response(tls, 0, &[], &posix.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            };
+        }
+        match cmd_id {
+            // OpenEnsureNetworkClockAvailabilityService.
+            Some(0) => {
+                self.reply_with_interface(tls, handle, "ntc:ensure")?;
+                Ok(())
+            }
+            // SuspendAutonomicTimeCorrection / ResumeAutonomicTimeCorrection.
+            Some(100) | Some(101) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
     /// `ITimeZoneService`: every conversion uses the host's current offset from UTC (no
     /// DST history), and the zone name is the one `set:sys` stores.
     pub(crate) fn time_timezone_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
@@ -426,6 +471,46 @@ mod tests {
         let mut cpu = request(false, 0, &[]);
         cpu.set_unix_time(1_700_000_000);
         cpu.time_system_clock_request(TLS, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap() as i64, 1_700_000_000);
+    }
+
+    #[test]
+    fn ensuring_the_network_clock_finishes_at_once_with_the_host_time() {
+        let mut cpu = request(false, 0, &[0u32, 0].map(u32::to_le_bytes).concat());
+        cpu.set_unix_time(1_700_000_000);
+        cpu.register_service_handle(9, "ntc");
+        cpu.ntc_request(TLS, 9, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "open");
+        let ensure = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.service_name(ensure), Some("ntc:ensure"));
+
+        write_request(&mut cpu, 1, &[]);
+        cpu.ntc_request(TLS, ensure, Some(1)).unwrap();
+        let finished = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(
+            cpu.event_signaled(finished),
+            Some(false),
+            "done before it started"
+        );
+
+        write_request(&mut cpu, 0, &[]);
+        cpu.ntc_request(TLS, ensure, Some(0)).unwrap();
+        assert_eq!(
+            cpu.event_signaled(finished),
+            Some(true),
+            "the task finished"
+        );
+
+        write_request(&mut cpu, 2, &[]);
+        cpu.ntc_request(TLS, ensure, Some(2)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "the task's result"
+        );
+
+        write_request(&mut cpu, 5, &[]);
+        cpu.ntc_request(TLS, ensure, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap() as i64, 1_700_000_000);
     }
 

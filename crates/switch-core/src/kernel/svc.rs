@@ -1064,6 +1064,8 @@ impl Cpu {
                         "notif:a" | "notif:s" | "notif:event-accessor" => {
                             self.notif_request(tls, handle, cmd_id)?
                         }
+                        // ntc, the network clock's synchronisation.
+                        "ntc" | "ntc:ensure" => self.ntc_request(tls, handle, cmd_id)?,
                         // usb:ds and usb:hs, with nothing plugged in.
                         "usb:ds" | "usb:ds-service" | "usb:ds-interface" | "usb:ds-endpoint" => {
                             self.usb_ds_request(tls, handle, cmd_id)?
