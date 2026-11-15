@@ -94,7 +94,6 @@
 
 .crash-message {
   max-height: min(24vh, 180px);
-  margin: 0;
   overflow: auto;
   color: #ffb0b0;
   font: var(--text-sm)/1.55 var(--mono);

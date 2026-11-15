@@ -203,10 +203,7 @@ body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-stat
   gap: 10px; margin: 20px 0 18px;
 }
 
-.muted {
-  color: var(--muted);
-  margin: 0;
-}
+.muted { color: var(--muted); }
 .tiny {
   font-size: var(--text-xs);
   line-height: 1.55;
