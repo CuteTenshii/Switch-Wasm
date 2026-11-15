@@ -43,6 +43,8 @@ pub(super) struct Emitter<'a> {
     pub(super) texture_offsets: Vec<(i32, i32)>,
     /// Special registers `s2r` reads.
     pub(super) special: BTreeSet<u8>,
+    /// Texture keys read by anything but a plain sample: a fetch, a size query or a gather.
+    pub(super) read_otherwise: BTreeSet<u32>,
 }
 
 impl<'a> Emitter<'a> {
@@ -70,6 +72,7 @@ impl<'a> Emitter<'a> {
             queried: Vec::new(),
             texture_offsets: Vec::new(),
             special: BTreeSet::new(),
+            read_otherwise: BTreeSet::new(),
         }
     }
 

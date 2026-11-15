@@ -227,11 +227,28 @@ impl Gpu {
                 ));
             }
             // Nothing the device holds is as tall as an image that needs folding.
-            let (held, writes) = match fold {
-                Some(_) => (Vec::new(), Vec::new()),
-                None => self.held_layers(upload, compare, view_dimension)?,
+            // `prepare` settled that the held surface's corner is sampled in place.
+            let cropped = match declared_texture.crop {
+                Some(_) => Some(
+                    self.space
+                        .held
+                        .get(&upload.key.addr)
+                        .map(|held| held.texture.clone())
+                        .ok_or("a cropped surface that is no longer held")?,
+                ),
+                None => None,
             };
-            let direct = self.directly_sampled(p, upload, view_dimension, compare, &held)?;
+            let (held, writes) = match (fold, &cropped) {
+                (None, None) => self.held_layers(upload, compare, view_dimension)?,
+                _ => (Vec::new(), Vec::new()),
+            };
+            let direct = match cropped {
+                Some(surface) => {
+                    self.cropped_binds += 1;
+                    Some(surface)
+                }
+                None => self.directly_sampled(p, upload, view_dimension, compare, &held)?,
+            };
             let texture = if let Some(surface) = direct {
                 surface
             } else if !held.is_empty() {
@@ -552,6 +569,57 @@ impl Gpu {
             layers.push((layer, HeldLayer::Colour(held.texture.clone())));
         }
         Ok((layers, writes))
+    }
+
+    /// The corner of a held colour surface a padded image can be sampled from in place, when
+    /// that filters exactly as the copy [`Gpu::texture_over_held`] would make: clamped to the
+    /// edge on both axes, and only ever sampled, never gathered, fetched or measured.
+    pub(super) fn crop_of_held(
+        &self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        binding: &wgsl::TextureBinding,
+        read_otherwise: &[u32],
+        drawn: [Option<u64>; 2],
+    ) -> Option<wgsl::Crop> {
+        use switch_core::gpu::shader::isa::TexDim;
+        use switch_core::gpu::texture::Wrap;
+        let edge = |wrap: Wrap| matches!(wrap, Wrap::ClampToEdge | Wrap::ClampToBorder);
+        if binding.compare
+            || binding.uint
+            || binding.fold.is_some()
+            || binding.dim != TexDim::T2d
+            || upload.layers > 1
+            || read_otherwise.contains(&binding.slot.key())
+            || !edge(upload.sampler.wrap_u)
+            || !edge(upload.sampler.wrap_v)
+            || drawn.contains(&Some(upload.key.addr))
+        {
+            return None;
+        }
+        let held = self.space.held.get(&upload.key.addr)?;
+        let surface = &held.texture;
+        let (full_width, full_height) = (surface.width(), surface.height());
+        let padded = (full_width, full_height) != (upload.width, upload.height);
+        if held.target.depth.is_some()
+            || held.companion.is_some()
+            || !padded
+            || upload.width > full_width
+            || upload.height > full_height
+            || surface.sample_count() != 1
+            || surface.mip_level_count() != 1
+            || surface.dimension() != wgpu::TextureDimension::D2
+            || surface.depth_or_array_layers() != 1
+            || !same_rows(&held.target, &upload.key)
+        {
+            return None;
+        }
+        let (format, widening) = sampled_texture_format(self.features(), upload.format).ok()?;
+        (widening == Widen::None && format == surface.format()).then_some(wgsl::Crop {
+            width: upload.width,
+            height: upload.height,
+            full_width,
+            full_height,
+        })
     }
 
     /// The held colour surface itself, when sampling it is the same as sampling the copy that

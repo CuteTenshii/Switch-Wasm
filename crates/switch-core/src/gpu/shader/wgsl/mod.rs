@@ -26,7 +26,7 @@ mod texture;
 
 use emitter::Emitter;
 pub use layout::{
-    ComputeShape, Coverage, Fold, Global, Layout, Stage, TextureBinding, CONSTANTS_BINDING,
+    ComputeShape, Coverage, Crop, Fold, Global, Layout, Stage, TextureBinding, CONSTANTS_BINDING,
     CONSTANT_BANKS, GLOBAL_BINDING, IDENTITY_SWIZZLE,
 };
 pub use module::module;
@@ -190,6 +190,8 @@ pub struct Translation {
     pub globals: Vec<Global>,
     /// Special registers `s2r` reads, ascending.
     pub special: Vec<u8>,
+    /// [`TextureSlot::key`]s of textures read by anything but a plain sample, ascending.
+    pub read_otherwise: Vec<u32>,
 }
 
 /// Translate into a WGSL function `run`, returning whether it hit `kil`.
@@ -239,6 +241,7 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         subgroup_enable: caps.subgroup_enable,
         globals: emitter.globals.clone(),
         special: emitter.special.iter().copied().collect(),
+        read_otherwise: emitter.read_otherwise.iter().copied().collect(),
     })
 }
 

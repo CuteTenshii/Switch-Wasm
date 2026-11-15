@@ -104,6 +104,21 @@ pub struct TextureBinding {
     pub fold: Option<Fold>,
     /// An integer image, read a texel at a time as raw words; filled from the TIC.
     pub uint: bool,
+    /// Set by the backend when the image is the top-left corner of a larger texture it binds.
+    pub crop: Option<Crop>,
+}
+
+/// A 2D image sampled out of the top-left corner of a larger texture, clamped to its edge:
+/// coordinates are scaled to the texture and clamped to the image's outermost texel centres,
+/// which filters exactly as clamping a texture of the image's own size does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crop {
+    /// The image's size.
+    pub width: u32,
+    pub height: u32,
+    /// The bound texture's size.
+    pub full_width: u32,
+    pub full_height: u32,
 }
 
 /// A 2D image taller than the device allows, bound as array layers of overlapping
@@ -266,6 +281,7 @@ impl Layout {
                     swizzle: IDENTITY_SWIZZLE,
                     fold: None,
                     uint: false,
+                    crop: None,
                 })
                 .collect(),
             texture_offsets: translated.texture_offsets.clone(),

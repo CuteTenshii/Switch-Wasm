@@ -100,6 +100,7 @@ impl Gpu {
             bind_uncached_why: [0; 4],
             held_copies_made: 0,
             held_copies_reused: 0,
+            cropped_binds: 0,
             compute_dispatched: 0,
             software_compute: false,
             compute_refusals: std::collections::BTreeMap::new(),

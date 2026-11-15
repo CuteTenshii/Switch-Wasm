@@ -597,6 +597,8 @@ pub struct Gpu {
     /// Textures made from held surfaces, and draws that reused one still current.
     pub held_copies_made: u64,
     pub held_copies_reused: u64,
+    /// Bindings that sampled a padded held surface in place. See [`wgsl::Crop`].
+    pub cropped_binds: u64,
     /// Compute launches run on the device, and why others went to the software dispatch.
     pub compute_dispatched: u64,
     /// `--software-compute` on `screenshot`: every launch goes to the software dispatch.
@@ -650,7 +652,7 @@ impl Drop for Gpu {
         eprintln!(
             "[gpu] {} stage bind groups reused, {} built and kept, {} built for one draw \
              (held surface {}, shadow map {}, texture not kept {}, global {}); \
-             {} copies of held surfaces made, {} reused",
+             {} copies of held surfaces made, {} reused, {} corners sampled in place",
             self.bind_hits,
             self.bind_misses,
             self.bind_uncached,
@@ -660,6 +662,7 @@ impl Drop for Gpu {
             self.bind_uncached_why[3],
             self.held_copies_made,
             self.held_copies_reused,
+            self.cropped_binds,
         );
         eprintln!(
             "[gpu] {} compute launches on the device, {} in software{}",
@@ -1155,6 +1158,7 @@ impl Renderer for Gpu {
             .field("bindUncachedGlobal", self.bind_uncached_why[3])
             .field("heldCopiesMade", self.held_copies_made)
             .field("heldCopiesReused", self.held_copies_reused)
+            .field("croppedBinds", self.cropped_binds)
             .field("computeDispatched", self.compute_dispatched)
             .field(
                 "computeRefused",

@@ -273,6 +273,22 @@ impl Gpu {
                 }
             }
         }
+        let drawn = [color.map(|c| c.addr), depth.map(|d| d.addr)];
+        for (layout, stage, translation) in [
+            (&mut vs_layout, ShaderStage::VertexB, &vs),
+            (&mut fs_layout, ShaderStage::Fragment, &fs),
+        ] {
+            for binding in &mut layout.textures {
+                if let Some(upload) = uploads
+                    .textures
+                    .iter()
+                    .find(|t| t.stage == stage && t.slot == binding.slot)
+                {
+                    binding.crop =
+                        self.crop_of_held(upload, binding, &translation.read_otherwise, drawn);
+                }
+            }
+        }
 
         // Fans, quad strips and polygons become triangle lists.
         let assembled = match state.expand {

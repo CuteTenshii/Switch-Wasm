@@ -3053,3 +3053,71 @@ mod condition_codes {
         }
     }
 }
+
+/// A padded held surface sampled out of its corner, clamped to the edge, is sampled in place
+/// and filters exactly as its copy does, nearest or linear, inside and past the edges.
+#[test]
+fn a_padded_held_surface_is_sampled_in_place_as_its_copy_would_be() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    for linear in [false, true] {
+        let build = |mut gpu: Option<&mut super::Gpu>| {
+            let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+            h.bindless_texture();
+            let (first, second) = (h.base, h.base + 0x2000);
+            let mut renderer = |h: &mut Harness, flush: bool| match gpu.as_deref_mut() {
+                Some(gpu) => {
+                    h.draw_with(gpu).expect("the draw");
+                    if flush {
+                        h.flush_with(gpu);
+                    }
+                }
+                None => h.draw_with(&mut Software).expect("the draw"),
+            };
+            // The first surface, drawn from the fixture's image.
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [3.0, 1.0, 0.0, 1.0], [2.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -3.0, 0.0, 1.0], [0.0, 2.0, 0.0, 1.0]);
+            renderer(&mut h, false);
+            // The second samples the first's 12x6 corner, with the same rows.
+            h.engine.regs.set(0x200, (second >> 32) as u32);
+            h.engine.regs.set(0x201, second as u32);
+            let (tic, tsc) = (h.base + 0x1400 + 32, h.base + 0x1480 + 32);
+            let mut ctx = h.ctx();
+            ctx.write_u32(tic + 4, first as u32).unwrap();
+            ctx.write_u32(tic + 8, (first >> 32) as u32 | (2 << 21))
+                .unwrap();
+            ctx.write_u32(tic + 12, testing::TARGET_WIDTH * 4 / 32)
+                .unwrap();
+            let shape = ctx.read_u32(tic + 16).unwrap() & !0xffff;
+            ctx.write_u32(tic + 16, shape | (12 - 1)).unwrap();
+            let rows = ctx.read_u32(tic + 20).unwrap() & !0xffff;
+            ctx.write_u32(tic + 20, rows | (6 - 1)).unwrap();
+            let filter = if linear { 2 | (2 << 4) } else { 0 };
+            ctx.write_u32(tsc + 4, filter).unwrap();
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [-0.25, -0.25, 0.0, 1.0]);
+            h.write_vertex(1, [3.0, 1.0, 0.0, 1.0], [2.25, -0.25, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -3.0, 0.0, 1.0], [-0.25, 2.25, 0.0, 1.0]);
+            renderer(&mut h, true);
+            h.target()
+        };
+        let want = build(None);
+        let (fallbacks, drawn, cropped) = (gpu.fallbacks, gpu.drawn, gpu.cropped_binds);
+        let got = build(Some(&mut gpu));
+        assert_eq!(
+            gpu.fallbacks, fallbacks,
+            "linear {linear}: fell back: {:?}",
+            gpu.last_fallback
+        );
+        assert_eq!(gpu.drawn, drawn + 2, "linear {linear}: not on the device");
+        assert_eq!(
+            gpu.cropped_binds,
+            cropped + 1,
+            "linear {linear}: not sampled in place"
+        );
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        assert_eq!(gpu.device_error(), None, "linear {linear}: rejected");
+        assert_eq!(got, want, "linear {linear}: the sampled corner differs");
+    }
+}

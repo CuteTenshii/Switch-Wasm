@@ -1,7 +1,7 @@
 //! Wrapping a translation into a complete module with its entry points.
 
 use super::layout::{
-    attribute_scalar, unpack_1010102, Coverage, Fold, Layout, Stage, Update, ATOMS,
+    attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Layout, Stage, Update, ATOMS,
     ATTRIBUTE_WORDS, CONSTANTS_BINDING, CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE,
     GLOBAL_BINDING, IDENTITY_SWIZZLE, INSTANCE_ID, POSITION, TEXTURE_BINDING, VERTEX_ID,
 };
@@ -253,6 +253,10 @@ pub fn module(
         ));
     }
 
+    if layout.textures.iter().any(|t| t.crop.is_some()) {
+        out.push_str(CROPPED);
+    }
+
     // `dim` is unused here but part of `HOST_INTERFACE`.
     out.push_str(
         "fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {\n\
@@ -277,8 +281,8 @@ pub fn module(
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
         let key = texture.slot.key();
-        let body = match texture.fold {
-            Some(fold) => format!(
+        let body = match (texture.fold, texture.crop) {
+            (Some(fold), _) => format!(
                 "{} {}",
                 folded_coords(fold, 0),
                 return_swizzled(
@@ -288,7 +292,14 @@ pub fn module(
                     texture.swizzle
                 )
             ),
-            None => return_swizzled(
+            (None, Some(crop)) => return_swizzled(
+                &format!(
+                    "textureSampleLevel(tex{index}, smp{index}, {}, 0.0)",
+                    cropped(crop, (0, 0))
+                ),
+                texture.swizzle,
+            ),
+            (None, None) => return_swizzled(
                 &format!("textureSampleLevel(tex{index}, smp{index}, {coords})"),
                 texture.swizzle,
             ),
@@ -344,8 +355,8 @@ pub fn module(
                 continue;
             }
             // A folded image takes the row offset before choosing its tile.
-            let body = match texture.fold {
-                Some(fold) => format!(
+            let body = match (texture.fold, texture.crop) {
+                (Some(fold), _) => format!(
                     "{} {}",
                     folded_coords(fold, y),
                     return_swizzled(
@@ -356,7 +367,15 @@ pub fn module(
                         texture.swizzle
                     )
                 ),
-                None => return_swizzled(
+                // The offset moves the coordinates before they are clamped, as the sampler does.
+                (None, Some(crop)) => return_swizzled(
+                    &format!(
+                        "textureSampleLevel(tex{index}, smp{index}, {}, 0.0)",
+                        cropped(crop, (x, y))
+                    ),
+                    texture.swizzle,
+                ),
+                (None, None) => return_swizzled(
                     &format!(
                         "textureSampleLevel(tex{index}, smp{index}, {coords}, vec2<i32>({x}, {y}))"
                     ),
@@ -537,6 +556,23 @@ pub fn module(
         Stage::Compute => compute_entry(layout),
     });
     Ok(out)
+}
+
+/// Coordinates into a [`Crop`]'s image, moved by `offset` texels, as coordinates into the texture
+/// it is the corner of, clamped to the image's edge texel centres.
+const CROPPED: &str = "\
+fn cropped(u: f32, v: f32, size: vec2<f32>, full: vec2<f32>, offset: vec2<f32>) -> vec2<f32> {
+  return clamp(vec2<f32>(u, v) * size + offset, vec2<f32>(0.5), size - vec2<f32>(0.5)) / full;
+}
+
+";
+
+/// The `cropped` call for a binding's coordinates `u`, `v` and a constant texel offset.
+fn cropped(crop: Crop, (x, y): (i32, i32)) -> String {
+    format!(
+        "cropped(u, v, vec2<f32>({}.0, {}.0), vec2<f32>({}.0, {}.0), vec2<f32>({x}.0, {y}.0))",
+        crop.width, crop.height, crop.full_width, crop.full_height
+    )
 }
 
 /// `SR_TID` and `SR_NTID` read whole, refused as the interpreter refuses them.

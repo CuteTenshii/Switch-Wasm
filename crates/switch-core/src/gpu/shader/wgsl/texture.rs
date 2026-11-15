@@ -109,6 +109,7 @@ impl Emitter<'_> {
         offset: Option<u8>,
     ) -> Result<(), Unsupported> {
         self.bind_texture(at, slot, dim, false)?;
+        self.read_otherwise.insert(slot.key());
         let mut x = self.r(coords[0]);
         let mut y = self.r(coords[1]);
         if let Some(reg) = offset {
@@ -129,6 +130,7 @@ impl Emitter<'_> {
     /// `txq`: texture size as integers.
     pub(super) fn query_texture(&mut self, at: usize, slot: TextureSlot, lod: u8) {
         self.queried.push(slot);
+        self.read_otherwise.insert(slot.key());
         let lod = self.r(lod);
         let size = self.bind(&format!("texDims({}u, {lod})", slot.key()));
         for (reg, store, _) in self.program.texs_writes(at).to_vec() {
@@ -155,6 +157,7 @@ impl Emitter<'_> {
         } = gather;
         self.bind_texture(at, slot, dim, dref.is_some())?;
         let key = slot.key();
+        self.read_otherwise.insert(key);
         let u = self.f(coords[0]);
         let v = self.f(coords[1]);
         let w = match dim {
