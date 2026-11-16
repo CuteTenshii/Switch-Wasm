@@ -1718,3 +1718,96 @@ fn a_draw_reads_vertices_a_compute_launch_wrote_on_the_device() {
         "the flush put the copy back"
     );
 }
+
+/// A draw reads constants a compute launch wrote on the device from where the launch left
+/// them, before guest memory has them.
+#[test]
+fn a_draw_reads_constants_a_compute_launch_wrote_on_the_device() {
+    use switch_core::gpu::renderer::Renderer;
+    use switch_core::gpu::testing::{alu_fragment_shader, copy_program, write_launch, Harness};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    // mov rN, c0[N * 4], so the colour is the bank's first four words.
+    let mov_c0 = |dst: u64| 0x4c98u64 << 48 | 0xf << 39 | dst << 20 | 7 << 16 | dst;
+    let shader = || alu_fragment_shader(&[], &[mov_c0(0), mov_c0(1), mov_c0(2), mov_c0(3)]);
+    let colour = [0.25f32, 0.5, 1.0, 1.0].map(f32::to_bits);
+    const WORDS: u32 = 4;
+    let bind_bank = |h: &mut Harness, constants: u64| {
+        let mut ctx = switch_core::gpu::exec::ExecCtx {
+            mem: &h.mem,
+            vmm: &h.vmm,
+            as_id: h.as_id,
+            host1x: &mut h.host1x,
+            stats: &mut h.stats,
+            trace: false,
+        };
+        for (method, arg) in [
+            (0x8E0, 0x100),
+            (0x8E1, (constants >> 32) as u32),
+            (0x8E2, constants as u32),
+            // BindGroup[Fragment]: bank 0, valid.
+            (0x900 + 4 * 8 + 4, 1),
+        ] {
+            h.engine.write(method, arg, true, &mut ctx).unwrap();
+        }
+    };
+
+    let mut direct = Harness::with_fragment_shader(shader());
+    direct.as_id = 1;
+    direct.triangle([0.0; 4]);
+    let constants = direct.base + 0x1500;
+    let mut ctx = direct.ctx();
+    for (i, word) in colour.iter().enumerate() {
+        ctx.write_u32(constants + i as u64 * 4, *word).unwrap();
+    }
+    bind_bank(&mut direct, constants);
+    direct.draw_with(&mut gpu).unwrap();
+    direct.flush_with(&mut gpu);
+    let expected = direct.target();
+    assert!(
+        expected.iter().any(|&texel| texel != 0),
+        "the reference drew"
+    );
+
+    let mut h = Harness::with_fragment_shader(shader());
+    h.as_id = 2;
+    h.triangle([0.0; 4]);
+    let (constants, staged, launch) = (h.base + 0x1500, h.base + 0x1000, h.base + 0x800);
+    let mut ctx = h.ctx();
+    for (i, word) in colour.iter().enumerate() {
+        ctx.write_u32(staged + i as u64 * 4, *word).unwrap();
+    }
+    let engine = write_launch(
+        &mut ctx,
+        launch,
+        &copy_program(),
+        [1, 1, 1],
+        [WORDS, 1, 1],
+        &[
+            (0x40, constants as u32),
+            (0x44, (constants >> 32) as u32),
+            (0x48, WORDS * 4),
+            (0x60, staged as u32),
+            (0x64, (staged >> 32) as u32),
+            (0x68, WORDS * 4),
+        ],
+    );
+    assert!(
+        gpu.dispatch(&engine, &mut ctx).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    assert_eq!(
+        ctx.read_u32(constants).unwrap(),
+        0,
+        "the copy is still on the device"
+    );
+    bind_bank(&mut h, constants);
+
+    h.draw_with(&mut gpu).unwrap();
+    assert!(gpu.reasons.is_empty(), "fell back: {:?}", gpu.reasons);
+    h.flush_with(&mut gpu);
+    assert_eq!(h.target(), expected);
+}

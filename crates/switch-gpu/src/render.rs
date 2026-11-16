@@ -202,10 +202,15 @@ impl Gpu {
             })
             .collect();
 
-        let (vs_group_layout, vs_group) =
+        let (vs_group_layout, vs_group, vs_constants) =
             timed!(self, bind, self.bind_group(p, ShaderStage::VertexB, 0))?;
-        let (fs_group_layout, fs_group) =
+        let (fs_group_layout, fs_group, fs_constants) =
             timed!(self, bind, self.bind_group(p, ShaderStage::Fragment, 1))?;
+        let groups = Groups {
+            vs: vs_group,
+            fs: fs_group,
+            patched_constants: vs_constants.into_iter().chain(fs_constants).collect(),
+        };
         // An assembled topology is always `u32` indices.
         let draw_index_format = match &p.assembled {
             Some(_) => Some(wgpu::IndexFormat::Uint32),
@@ -349,7 +354,7 @@ impl Gpu {
             self.pipelines.insert(key, pipeline.clone());
             pipelines.push(pipeline);
         }
-        self.encode(p, &pipelines, &vs_group, &fs_group, &bound, ctx)
+        self.encode(p, &pipelines, &groups, &bound, ctx)
     }
 
     /// Record and submit one draw against a built pipeline.
@@ -357,8 +362,7 @@ impl Gpu {
         &mut self,
         p: &Prepared,
         pipelines: &[wgpu::RenderPipeline],
-        vs_group: &wgpu::BindGroup,
-        fs_group: &wgpu::BindGroup,
+        groups: &Groups,
         bound: &[Bound],
         ctx: &mut ExecCtx,
     ) -> std::result::Result<(), String> {
@@ -445,7 +449,8 @@ impl Gpu {
         };
 
         // Copies cannot be recorded inside a pass, so a draw needing one opens its own.
-        let patched = bound.iter().any(|b| !b.patches.is_empty());
+        let patched =
+            bound.iter().any(|b| !b.patches.is_empty()) || !groups.patched_constants.is_empty();
         let joins = !patched
             && scratch.is_none()
             && self
@@ -462,12 +467,14 @@ impl Gpu {
                         label: Some("draws"),
                     })
             });
-            for b in bound {
-                for patch in &b.patches {
+            let vertex_patches = bound.iter().map(|b| (&b.buffer, &b.patches));
+            let constant_patches = groups.patched_constants.iter().map(|(b, p)| (b, p));
+            for (buffer, patches) in vertex_patches.chain(constant_patches) {
+                for patch in patches {
                     encoder.copy_buffer_to_buffer(
                         &patch.source,
                         patch.from,
-                        &b.buffer,
+                        buffer,
                         patch.to,
                         patch.len,
                     );
@@ -526,8 +533,8 @@ impl Gpu {
                 .as_mut()
                 .expect("a pass was opened or joined")
                 .pass;
-            pass.set_bind_group(0, vs_group, &[]);
-            pass.set_bind_group(1, fs_group, &[]);
+            pass.set_bind_group(0, &groups.vs, &[]);
+            pass.set_bind_group(1, &groups.fs, &[]);
             for (slot, b) in bound.iter().enumerate() {
                 pass.set_vertex_buffer(slot as u32, b.buffer.slice(..));
             }
@@ -628,4 +635,11 @@ impl Gpu {
     pub(super) fn end_pass(&mut self) {
         self.pass = None;
     }
+}
+
+/// A draw's bind groups, and its constant buffers with what compute launches wrote over them.
+struct Groups {
+    vs: wgpu::BindGroup,
+    fs: wgpu::BindGroup,
+    patched_constants: Vec<(wgpu::Buffer, Vec<crate::Patch>)>,
 }

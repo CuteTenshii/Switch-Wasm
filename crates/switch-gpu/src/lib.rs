@@ -907,6 +907,8 @@ struct Prepared {
     vs_layout: Layout,
     fs_layout: Layout,
     uploads: Uploads,
+    /// Device copies over each of [`Uploads::constants`] of what compute launches wrote there.
+    constant_patches: Vec<Vec<Patch>>,
     /// The memory each stage's `ldg`s read, by descriptor.
     globals: Vec<GlobalUpload>,
     /// Vertices, indices, or the length of [`Prepared::assembled`].

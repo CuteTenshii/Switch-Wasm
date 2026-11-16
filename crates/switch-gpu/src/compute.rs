@@ -275,19 +275,28 @@ impl Gpu {
 
     /// The device copies that put what compute launches wrote over a vertex feed's bytes.
     pub(super) fn vertex_patches(&self, feed: &Feed) -> std::result::Result<Vec<Patch>, String> {
+        if self.no_global_in(std::slice::from_ref(&feed.read)) {
+            return Ok(Vec::new());
+        }
+        let Some((start, valid)) = feed.origin else {
+            return Err("rearranges a vertex array a compute launch wrote on the device".into());
+        };
+        self.patches_over(start..start + valid, "vertices")
+    }
+
+    /// The device copies that put what compute launches wrote over a buffer made from the
+    /// guest bytes at `wanted`, its offsets counted from `wanted.start`.
+    pub(super) fn patches_over(
+        &self,
+        wanted: std::ops::Range<u64>,
+        what: &str,
+    ) -> std::result::Result<Vec<Patch>, String> {
         if self.space.globals.is_empty() && self.space.pending.is_empty() {
             return Ok(Vec::new());
         }
         let written = self.written_on_device();
         let overlaps =
             |a: &std::ops::Range<u64>, b: &std::ops::Range<u64>| a.start < b.end && b.start < a.end;
-        if !written.iter().any(|(span, _)| overlaps(span, &feed.read)) {
-            return Ok(Vec::new());
-        }
-        let Some((start, valid)) = feed.origin else {
-            return Err("rearranges a vertex array a compute launch wrote on the device".into());
-        };
-        let wanted = start..start + valid;
         // Two held buffers over the same bytes leave no telling which wrote them last.
         let held = written.len() - self.space.globals.len();
         let current: Vec<_> = written[held..]
@@ -299,7 +308,7 @@ impl Gpu {
             .enumerate()
             .any(|(i, (a, _))| current[i + 1..].iter().any(|(b, _)| overlaps(a, b)))
         {
-            return Err("reads vertices two held buffers both cover".into());
+            return Err(format!("reads {what} two held buffers both cover"));
         }
         let mut patches = Vec::new();
         for (span, source) in &written {
@@ -310,11 +319,13 @@ impl Gpu {
             let patch = Patch {
                 source: (*source).clone(),
                 from: from - span.start,
-                to: from - start,
+                to: from - wanted.start,
                 len: to - from,
             };
             if !(patch.from | patch.to | patch.len).is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT) {
-                return Err("reads vertices a compute launch wrote off a word boundary".into());
+                return Err(format!(
+                    "reads {what} a compute launch wrote off a word boundary"
+                ));
             }
             patches.push(patch);
         }

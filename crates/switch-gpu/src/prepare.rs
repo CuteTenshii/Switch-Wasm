@@ -223,8 +223,8 @@ impl Gpu {
         self.space.texture_cache = cache;
         self.texture_hits += hits;
         let uploads = uploads.map_err(|e| format!("{e:?}"))?;
-        // Only vertices are copied from where compute launches wrote them on the device.
-        let mut read = Vec::new();
+        // Vertices and constants are copied from where compute launches wrote them on the
+        // device; indices also bound the vertices uploaded, which stale ones would get wrong.
         if uploads.index.is_some() {
             let call = engine.last_draw;
             let width = match call.index_format {
@@ -233,16 +233,23 @@ impl Gpu {
                 _ => 4,
             };
             let start = engine.index_array_start() + u64::from(call.first) * width;
-            read.push(start..start + u64::from(call.count) * width);
-        }
-        for constants in &uploads.constants {
-            if let Some((addr, _)) = engine.bound_constbuf(constants.stage, constants.bank) {
-                read.push(addr..addr + constants.bytes.len() as u64);
+            let indices = start..start + u64::from(call.count) * width;
+            if !self.no_global_in(std::slice::from_ref(&indices)) {
+                return Err("reads indices a compute launch wrote on the device".into());
             }
         }
-        if !self.no_global_in(&read) {
-            return Err("reads indices or constants a compute launch wrote on the device".into());
-        }
+        let constant_patches = uploads
+            .constants
+            .iter()
+            .map(|constants| {
+                let Some((addr, _)) = engine.bound_constbuf(constants.stage, constants.bank) else {
+                    return Ok(Vec::new());
+                };
+                // `pack_banks` keeps whole words.
+                let len = constants.bytes.len() as u64 & !3;
+                self.patches_over(addr..addr + len, "constants")
+            })
+            .collect::<std::result::Result<Vec<_>, String>>()?;
         self.uploaded.add_but_textures(&uploads);
         for upload in &uploads.textures {
             if !self.space.texture_cache.contains_key(&upload.key) {
@@ -429,6 +436,7 @@ impl Gpu {
             vs_layout,
             fs_layout,
             uploads,
+            constant_patches,
             globals,
             count: match &assembled {
                 Some((indices, _)) => indices.len() as u32,

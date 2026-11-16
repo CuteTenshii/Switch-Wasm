@@ -5,8 +5,8 @@ use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
 use crate::held::spans_overlap;
 use crate::readback::{HeldGlobal, Scratch};
 use crate::{
-    same_rows, CachedBinding, GlobalUpload, Gpu, HeldCopy, HeldLayer, Prepared, Red, Resource,
-    SamplerKey, MAX_GLOBAL, TEXTURE_BINDING,
+    same_rows, CachedBinding, GlobalUpload, Gpu, HeldCopy, HeldLayer, Patch, Prepared, Red,
+    Resource, SamplerKey, MAX_GLOBAL, TEXTURE_BINDING,
 };
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
@@ -101,27 +101,49 @@ fn fingerprint(entries: &[wgpu::BindGroupLayoutEntry], resources: &[Resource]) -
 
 /// A stage's banks as the table `cbRead` indexes, then the banks themselves, whole words.
 pub(super) fn pack_banks<'a>(banks: impl Iterator<Item = &'a ConstantUpload>) -> Vec<u8> {
+    pack_banks_at(banks).0
+}
+
+/// [`pack_banks`], and where each bank's bytes start in the result; `None` for one left out.
+fn pack_banks_at<'a>(
+    banks: impl Iterator<Item = &'a ConstantUpload>,
+) -> (Vec<u8>, Vec<Option<u64>>) {
     let table = wgsl::CONSTANT_BANKS as usize * 2;
     let mut bytes = vec![0u8; table * 4];
-    for bank in banks.filter(|b| b.bank < wgsl::CONSTANT_BANKS) {
+    let mut offsets = Vec::new();
+    for bank in banks {
+        if bank.bank >= wgsl::CONSTANT_BANKS {
+            offsets.push(None);
+            continue;
+        }
         let at = bank.bank as usize * 4 * 2;
         let words = bank.bytes.len() / 4;
         let start = (bytes.len() / 4) as u32;
         bytes[at..at + 4].copy_from_slice(&start.to_le_bytes());
         bytes[at + 4..at + 8].copy_from_slice(&(words as u32).to_le_bytes());
+        offsets.push(Some(bytes.len() as u64));
         bytes.extend_from_slice(&bank.bytes[..words * 4]);
     }
-    bytes
+    (bytes, offsets)
 }
 
+/// A stage's bind group and its layout, and its constant buffer when compute launches wrote
+/// over it, with the copies that put their bytes there.
+type StageBinding = (
+    wgpu::BindGroupLayout,
+    wgpu::BindGroup,
+    Option<(wgpu::Buffer, Vec<Patch>)>,
+);
+
 impl Gpu {
-    /// One stage's bindings: constant banks, and textures with their samplers.
+    /// One stage's bindings: constant banks, and textures with their samplers. With them, the
+    /// constant buffer and the copies of what compute launches wrote, to record before the draw.
     pub(super) fn bind_group(
         &mut self,
         p: &Prepared,
         stage: ShaderStage,
         group: u32,
-    ) -> std::result::Result<(wgpu::BindGroupLayout, wgpu::BindGroup), String> {
+    ) -> std::result::Result<StageBinding, String> {
         // The layout's dimensionality, as the module declared it.
         let declared = if stage == ShaderStage::VertexB {
             &p.vs_layout
@@ -134,6 +156,7 @@ impl Gpu {
         let mut persistent = true;
         // Why it is not: a held surface, a shadow map, a texture the cache does not keep, a global.
         let mut why = [false; 4];
+        let mut constant_patches = Vec::new();
         // Only its own stage reads a stage's buffers, and each stage has a storage buffer limit.
         let own = if stage == ShaderStage::VertexB {
             wgpu::ShaderStages::VERTEX
@@ -152,7 +175,25 @@ impl Gpu {
                 },
                 count: None,
             });
-            let packed = pack_banks(p.uploads.constants.iter().filter(|c| c.stage == stage));
+            let (banks, patches): (Vec<_>, Vec<_>) = p
+                .uploads
+                .constants
+                .iter()
+                .zip(&p.constant_patches)
+                .filter(|(c, _)| c.stage == stage)
+                .unzip();
+            let (packed, offsets) = pack_banks_at(banks.into_iter());
+            for (offset, patches) in offsets.into_iter().zip(patches) {
+                let Some(offset) = offset else {
+                    continue;
+                };
+                constant_patches.extend(patches.iter().map(|patch| Patch {
+                    to: patch.to + offset,
+                    ..patch.clone()
+                }));
+            }
+            // The copies land in it, so it is this draw's alone.
+            persistent &= constant_patches.is_empty();
             resources.push(Resource::Bytes(wgsl::CONSTANTS_BINDING, packed));
         }
 
@@ -325,7 +366,7 @@ impl Gpu {
             .filter(|cached| cached.entries == entries && cached.resources == resources)
         {
             self.bind_hits += 1;
-            return Ok((cached.layout.clone(), cached.group.clone()));
+            return Ok((cached.layout.clone(), cached.group.clone(), None));
         }
         let remembered = key.map(|key| (key, entries.clone(), resources.clone()));
         if key.is_some() {
@@ -350,6 +391,7 @@ impl Gpu {
             }
         };
         let mut owned = Vec::new();
+        let mut patched = None;
         let resources: Vec<Resource> = resources
             .into_iter()
             .map(|resource| match resource {
@@ -366,6 +408,9 @@ impl Gpu {
                     } else {
                         self.buffer(what, &bytes, wgpu::BufferUsages::STORAGE)
                     };
+                    if binding == wgsl::CONSTANTS_BINDING && !constant_patches.is_empty() {
+                        patched = Some((buffer.clone(), std::mem::take(&mut constant_patches)));
+                    }
                     Resource::Buffer(binding, buffer)
                 }
                 other => other,
@@ -421,7 +466,7 @@ impl Gpu {
                 },
             );
         }
-        Ok((layout, bind_group))
+        Ok((layout, bind_group, patched))
     }
 
     /// Layers of a sampled texture that are surfaces still held on the device, whose guest
