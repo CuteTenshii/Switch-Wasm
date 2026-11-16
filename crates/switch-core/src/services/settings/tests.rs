@@ -500,3 +500,16 @@ fn set_answers_the_pointer_buffer_size_and_not_its_language_count() {
         crate::kernel::ipc::POINTER_BUFFER_SIZE
     );
 }
+
+#[test]
+fn a_pairing_request_waits_for_a_server_that_never_answers() {
+    let mut cpu = request(false, 2001, &[]);
+    cpu.register_service_handle(9, "pctl:service");
+    cpu.pctl_request(TLS, 9, Some(2001)).unwrap();
+    // One copy handle, so the data area starts at 0x10.
+    assert_eq!(cpu.mem.read_u32(TLS + 8).unwrap(), 1 << 1);
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+    assert_ne!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "AsyncData");
+    let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+    assert!(!cpu.events[&event].signaled, "no pairing result arrives");
+}

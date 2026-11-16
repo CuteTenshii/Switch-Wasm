@@ -98,6 +98,13 @@ impl Cpu {
                     let h = self.alloc_event(name, true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
+                // RequestPairingAsync(pairing code) -> (AsyncData, event). The event never fires,
+                // so FinishRequestPairing (2002) is never due: no pairing result is documented.
+                Some(2001) => {
+                    const ASYNC_DATA: u64 = 1;
+                    let event = self.alloc_event("pctl:pairing", false);
+                    self.write_ipc_reply(tls, 0, &[event], &[], &ASYNC_DATA.to_le_bytes(), &[])
+                }
                 // GetPlayTimerRemainingTime -> s32; zero would mean time is up.
                 Some(1454) => self.write_ipc_response(tls, 0, &[], &i32::MAX.to_le_bytes(), &[]),
                 // GetPlayTimerRemainingTimeDisplayInfo -> 0x18 undocumented bytes.
