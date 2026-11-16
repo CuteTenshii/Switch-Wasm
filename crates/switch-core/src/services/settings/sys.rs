@@ -390,7 +390,8 @@ impl Cpu {
                 self.warn_stub(
                     "set:sys",
                     cmd_id,
-                    "an empty success, so the caller reads its own buffer as the answer",
+                    "not a stored setting: a value set through it is dropped and gone after a \
+                     reload, and a read leaves the caller's own buffer as the answer",
                 );
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }

@@ -357,9 +357,11 @@ fn settings_that_were_never_stored_keep_their_defaults() {
         ..Default::default()
     };
     let mut stored = settings.serialize();
-    // Drop the last record, as an older build would.
-    stored.truncate(stored.len() - 8);
-    let read = super::SystemSettings::parse(&stored).expect("a block this build wrote");
+    // Drop the last record (PanelCrcMode: tag, length, an i32), as an older build would.
+    stored.truncate(stored.len() - 12);
+    let parsed = super::SystemSettings::parse(&stored).expect("a block this build wrote");
+    assert!(parsed.fallbacks.is_empty(), "{:?}", parsed.fallbacks);
+    let read = parsed.settings;
     assert_eq!(read.color_set, 1, "what was stored");
     assert_eq!(
         read.panel_crc_mode,
@@ -368,8 +370,8 @@ fn settings_that_were_never_stored_keep_their_defaults() {
     );
 
     // Bytes this build did not write are not a settings block at all.
-    assert!(super::SystemSettings::parse(b"not a settings block").is_none());
-    assert!(super::SystemSettings::parse(&[]).is_none());
+    assert!(super::SystemSettings::parse(b"not a settings block").is_err());
+    assert!(super::SystemSettings::parse(&[]).is_err());
 }
 
 #[test]
@@ -528,7 +530,10 @@ fn data_deletion_settings_start_off_and_keep_what_they_are_given() {
 
     let stored = cpu.system_settings().serialize();
     let read = super::SystemSettings::parse(&stored).expect("a block this build wrote");
-    assert_eq!(read.data_deletion_settings, given, "kept in the save");
+    assert_eq!(
+        read.settings.data_deletion_settings, given,
+        "kept in the save"
+    );
 }
 
 #[test]
@@ -574,4 +579,97 @@ fn the_home_menu_theme_survives_a_reload() {
     write_request(&mut next, 177, &[]);
     next.set_sys_request(TLS, Some(177)).unwrap();
     assert_eq!(next.read_bytes(TLS + 0x20, 0x10), key, "ThemeKey");
+}
+
+/// A stored block with `records` after this build's header.
+fn block_with(records: &[(u32, &[u8])]) -> Vec<u8> {
+    let mut out = super::SYSTEM_SETTINGS_MAGIC.to_vec();
+    out.extend_from_slice(&super::SYSTEM_SETTINGS_VERSION.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for (tag, value) in records {
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(value);
+    }
+    out
+}
+
+/// What loading `stored` as the settings save logged.
+fn load_log(stored: Vec<u8>) -> (Cpu, String) {
+    let mut cpu = request(false, 23, &[]);
+    cpu.save_data_mut(super::SYSTEM_SETTINGS_SAVE)
+        .write_file(super::SYSTEM_SETTINGS_FILE, stored);
+    cpu.system_settings();
+    let log = String::from_utf8_lossy(&cpu.trace).into_owned();
+    (cpu, log)
+}
+
+#[test]
+fn a_stored_record_that_falls_back_to_its_default_is_named() {
+    let mut cut_short = block_with(&[(23, &1u32.to_le_bytes())]);
+    cut_short.extend_from_slice(&47u32.to_le_bytes());
+    cut_short.extend_from_slice(&4u32.to_le_bytes());
+    cut_short.push(1);
+    let (mut cpu, log) = load_log(cut_short);
+    assert!(
+        log.contains("record 47 is cut short (1 of 4 bytes)"),
+        "{log:?}"
+    );
+    assert_eq!(
+        cpu.system_settings().color_set,
+        1,
+        "the records before it stand"
+    );
+
+    let (mut cpu, log) = load_log(block_with(&[
+        (9999, &[1, 2, 3]),
+        (23, &[1, 0]),
+        (24, &1u32.to_le_bytes()),
+    ]));
+    assert!(
+        log.contains("record 9999 (3 bytes) is not a setting this build stores"),
+        "{log:?}"
+    );
+    assert!(
+        log.contains("record 23 is 2 bytes, not the width this build writes"),
+        "{log:?}"
+    );
+    assert!(
+        log.contains("record 24 (4 bytes) is not a setting"),
+        "the setter's id is no key: {log:?}"
+    );
+    assert_eq!(
+        cpu.system_settings().color_set,
+        0,
+        "the default, not half a value"
+    );
+
+    let (_, log) = load_log(b"not a settings block at all".to_vec());
+    assert!(
+        log.contains("not a settings block; every setting keeps its default"),
+        "{log:?}"
+    );
+    let mut other_version = block_with(&[]);
+    other_version[8..12].copy_from_slice(&(super::SYSTEM_SETTINGS_VERSION + 1).to_le_bytes());
+    let (_, log) = load_log(other_version);
+    assert!(
+        log.contains("a settings block of another version"),
+        "{log:?}"
+    );
+
+    // This build's own block reads back without a word.
+    let (_, log) = load_log(super::SystemSettings::default().serialize());
+    assert!(!log.contains("[set]"), "{log:?}");
+}
+
+#[test]
+fn a_value_set_through_a_command_the_store_does_not_know_is_reported_as_dropped() {
+    // An id past every stored setting, sent with a value to set.
+    let mut cpu = request(false, 9000, &1u32.to_le_bytes());
+    cpu.set_sys_request(TLS, Some(9000)).unwrap();
+    let log = String::from_utf8_lossy(&cpu.trace).into_owned();
+    assert!(
+        log.contains("[ipc] stub: set:sys cmd=Some(9000) (not a stored setting: a value set through it is dropped and gone after a reload"),
+        "{log:?}"
+    );
 }

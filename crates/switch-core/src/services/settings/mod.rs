@@ -3,6 +3,8 @@
 //! Settings are stored, not answered: [`SystemSettings`] persists in system
 //! save data ([`SYSTEM_SETTINGS_SAVE`]) so writes read back across sessions.
 
+use std::cell::Cell;
+
 use crate::cpu::Cpu;
 use crate::trace::Level;
 use crate::uuid::{self, Uuid};
@@ -376,59 +378,81 @@ impl SystemSettings {
         out
     }
 
-    /// `None` when the bytes are not a block this build wrote.
-    fn parse(stored: &[u8]) -> Option<SystemSettings> {
+    /// The settings in a stored block, with a note for each record that kept its default.
+    /// `Err` names why the block as a whole was not read.
+    fn parse(stored: &[u8]) -> std::result::Result<Parsed, &'static str> {
         const HEADER: usize = 0x10;
         if stored.len() < HEADER || &stored[..8] != SYSTEM_SETTINGS_MAGIC {
-            return None;
+            return Err("not a settings block");
         }
-        if u32::from_le_bytes(stored[8..12].try_into().ok()?) != SYSTEM_SETTINGS_VERSION {
-            return None;
+        if stored[8..12] != SYSTEM_SETTINGS_VERSION.to_le_bytes() {
+            return Err("a settings block of another version");
         }
-        let mut settings = SystemSettings::default();
+        let mut parsed = Parsed {
+            settings: SystemSettings::default(),
+            fallbacks: Vec::new(),
+        };
         let mut at = HEADER;
-        while at + 8 <= stored.len() {
-            let tag = u32::from_le_bytes(stored[at..at + 4].try_into().ok()?);
-            let len = u32::from_le_bytes(stored[at + 4..at + 8].try_into().ok()?) as usize;
+        while at < stored.len() {
+            let Some(header) = stored.get(at..at + 8) else {
+                parsed
+                    .fallbacks
+                    .push(format!("{} stray bytes at the end", stored.len() - at));
+                break;
+            };
+            let tag = le_u32(&header[..4]);
+            let len = le_u32(&header[4..]) as usize;
             at += 8;
             // A truncated record ends the read; earlier records stand.
             let Some(value) = stored.get(at..at + len) else {
+                parsed.fallbacks.push(format!(
+                    "record {tag} is cut short ({} of {len} bytes); it and anything after it keep their defaults",
+                    stored.len() - at
+                ));
                 break;
             };
             at += len;
-            settings.restore(tag, value);
+            match parsed.settings.restore(tag, value) {
+                Ok(()) => {}
+                Err(Fallback::UnknownTag) => parsed
+                    .fallbacks
+                    .push(format!("record {tag} ({len} bytes) is not a setting this build stores")),
+                Err(Fallback::WrongWidth) => parsed.fallbacks.push(format!(
+                    "record {tag} is {len} bytes, not the width this build writes; it keeps its default"
+                )),
+            }
         }
-        Some(settings)
+        Ok(parsed)
     }
 
-    /// A value of the wrong width is skipped, keeping the default.
-    fn restore(&mut self, tag: u32, value: &[u8]) {
-        fn u32_at(value: &[u8]) -> Option<u32> {
-            Some(u32::from_le_bytes(value.get(..4)?.try_into().ok()?))
-        }
-        fn u64_at(value: &[u8]) -> Option<u64> {
-            Some(u64::from_le_bytes(value.get(..8)?.try_into().ok()?))
-        }
-        fn flag(value: &[u8]) -> Option<bool> {
-            Some(value.first()? != &0)
-        }
-        fn block<const N: usize>(value: &[u8]) -> Option<[u8; N]> {
-            value.get(..N)?.try_into().ok()
-        }
-        fn list<const N: usize>(value: &[u8]) -> Vec<[u8; N]> {
-            value.as_chunks::<N>().0.to_vec()
-        }
+    /// Restore one record. A value of the wrong width, or a tag this build does not know,
+    /// keeps the default, and says which.
+    fn restore(&mut self, tag: u32, value: &[u8]) -> std::result::Result<(), Fallback> {
+        let fits = Cell::new(true);
+        let exact = |value: &[u8], width: usize| {
+            let fits_here = value.len() == width;
+            if !fits_here {
+                fits.set(false);
+            }
+            fits_here
+        };
+        let u32_at = |value: &[u8]| exact(value, 4).then(|| le_u32(value));
+        let u64_at = |value: &[u8]| {
+            exact(value, 8).then(|| u64::from_le_bytes(value.try_into().expect("checked width")))
+        };
+        let flag = |value: &[u8]| exact(value, 1).then(|| value[0] != 0);
+        let byte = |value: &[u8]| exact(value, 1).then(|| value[0]);
 
         match tag {
             0 => self.language_code = u64_at(value).unwrap_or(self.language_code),
             7 => self.lock_screen = flag(value).unwrap_or(self.lock_screen),
             13 => {
                 self.external_steady_clock_source_id =
-                    block(value).unwrap_or(self.external_steady_clock_source_id)
+                    block(value, &fits).unwrap_or(self.external_steady_clock_source_id)
             }
-            15 => self.user_clock_context = block(value).unwrap_or(self.user_clock_context),
+            15 => self.user_clock_context = block(value, &fits).unwrap_or(self.user_clock_context),
             17 => self.account_settings = u32_at(value).unwrap_or(self.account_settings),
-            21 => self.eula_versions = list(value),
+            21 => self.eula_versions = list(value, &fits),
             23 => self.color_set = u32_at(value).unwrap_or(self.color_set),
             25 => {
                 self.console_information_upload =
@@ -438,32 +462,41 @@ impl SystemSettings {
                 self.automatic_application_download =
                     flag(value).unwrap_or(self.automatic_application_download)
             }
-            29 => self.notification_settings = block(value).unwrap_or(self.notification_settings),
-            31 => self.account_notification_settings = list(value),
+            29 => {
+                self.notification_settings =
+                    block(value, &fits).unwrap_or(self.notification_settings)
+            }
+            31 => self.account_notification_settings = list(value, &fits),
             35 => {
                 self.vibration_master_volume = u32_at(value)
                     .map(f32::from_bits)
                     .unwrap_or(self.vibration_master_volume)
             }
-            39 => self.tv_settings = block(value).unwrap_or(self.tv_settings),
+            39 => self.tv_settings = block(value, &fits).unwrap_or(self.tv_settings),
             43 => {
-                for (target, mode) in value.as_chunks::<4>().0.iter().enumerate() {
-                    if let (Some(slot), Some(mode)) =
-                        (self.audio_output_mode.get_mut(target), u32_at(mode))
-                    {
-                        *slot = mode;
-                    }
+                let (modes, rest) = value.as_chunks::<4>();
+                if !rest.is_empty() || modes.len() > AUDIO_OUTPUT_TARGETS {
+                    return Err(Fallback::WrongWidth);
+                }
+                for (slot, mode) in self.audio_output_mode.iter_mut().zip(modes) {
+                    *slot = u32::from_le_bytes(*mode);
                 }
             }
             45 => self.speaker_auto_mute = flag(value).unwrap_or(self.speaker_auto_mute),
-            47 => self.quest_flag = value.first().copied().unwrap_or(self.quest_flag),
-            49 => self.data_deletion_settings = block(value).unwrap_or(self.data_deletion_settings),
+            47 => self.quest_flag = byte(value).unwrap_or(self.quest_flag),
+            49 => {
+                self.data_deletion_settings =
+                    block(value, &fits).unwrap_or(self.data_deletion_settings)
+            }
             53 => {
                 self.device_time_zone_location_name =
-                    block(value).unwrap_or(self.device_time_zone_location_name)
+                    block(value, &fits).unwrap_or(self.device_time_zone_location_name)
             }
             57 => self.region = u32_at(value).unwrap_or(self.region),
-            58 => self.network_clock_context = block(value).unwrap_or(self.network_clock_context),
+            58 => {
+                self.network_clock_context =
+                    block(value, &fits).unwrap_or(self.network_clock_context)
+            }
             60 => {
                 self.user_clock_automatic_correction =
                     flag(value).unwrap_or(self.user_clock_automatic_correction)
@@ -471,12 +504,13 @@ impl SystemSettings {
             63 => self.primary_album_storage = u32_at(value).unwrap_or(self.primary_album_storage),
             65 => self.usb30_enable = flag(value).unwrap_or(self.usb30_enable),
             69 => self.nfc_enable = flag(value).unwrap_or(self.nfc_enable),
-            71 => self.sleep_settings = block(value).unwrap_or(self.sleep_settings),
+            71 => self.sleep_settings = block(value, &fits).unwrap_or(self.sleep_settings),
             73 => self.wireless_lan_enable = flag(value).unwrap_or(self.wireless_lan_enable),
             75 => {
-                self.initial_launch_settings = block(value).unwrap_or(self.initial_launch_settings)
+                self.initial_launch_settings =
+                    block(value, &fits).unwrap_or(self.initial_launch_settings)
             }
-            77 => self.device_nick_name = block(value).unwrap_or(self.device_nick_name),
+            77 => self.device_nick_name = block(value, &fits).unwrap_or(self.device_nick_name),
             88 => self.bluetooth_enable = flag(value).unwrap_or(self.bluetooth_enable),
             95 => self.auto_update_enable = flag(value).unwrap_or(self.auto_update_enable),
             99 => self.battery_percentage = flag(value).unwrap_or(self.battery_percentage),
@@ -498,11 +532,11 @@ impl SystemSettings {
             136 => self.keyboard_layout = u32_at(value).unwrap_or(self.keyboard_layout),
             150 => {
                 self.device_time_zone_updated_time =
-                    block(value).unwrap_or(self.device_time_zone_updated_time)
+                    block(value, &fits).unwrap_or(self.device_time_zone_updated_time)
             }
             152 => {
                 self.user_clock_correction_updated_time =
-                    block(value).unwrap_or(self.user_clock_correction_updated_time)
+                    block(value, &fits).unwrap_or(self.user_clock_correction_updated_time)
             }
             170 => {
                 self.chinese_traditional_input_method =
@@ -513,8 +547,8 @@ impl SystemSettings {
                     .map(|raw| raw as i32)
                     .unwrap_or(self.platform_region)
             }
-            175 => self.theme_settings = block(value).unwrap_or(self.theme_settings),
-            177 => self.theme_key = block(value).unwrap_or(self.theme_key),
+            175 => self.theme_settings = block(value, &fits).unwrap_or(self.theme_settings),
+            177 => self.theme_key = block(value, &fits).unwrap_or(self.theme_key),
             187 => self.touch_screen_mode = u32_at(value).unwrap_or(self.touch_screen_mode),
             201 => self.field_testing = flag(value).unwrap_or(self.field_testing),
             203 => {
@@ -522,10 +556,52 @@ impl SystemSettings {
                     .map(|raw| raw as i32)
                     .unwrap_or(self.panel_crc_mode)
             }
-            // A setting from a newer build.
-            _ => {}
+            _ => return Err(Fallback::UnknownTag),
+        }
+        if fits.get() {
+            Ok(())
+        } else {
+            Err(Fallback::WrongWidth)
         }
     }
+}
+
+/// A stored settings block, read.
+struct Parsed {
+    settings: SystemSettings,
+    /// One line per record that left its setting at the default.
+    fallbacks: Vec<String>,
+}
+
+/// Why a stored record left its setting at the default.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Fallback {
+    /// A tag this build does not store, from a newer build or a damaged block.
+    UnknownTag,
+    /// A value of another width than this build writes for the tag.
+    WrongWidth,
+}
+
+fn le_u32(value: &[u8]) -> u32 {
+    u32::from_le_bytes(value.try_into().expect("checked width"))
+}
+
+/// A fixed-width block, or `None` (and `fits` cleared) for any other width.
+fn block<const N: usize>(value: &[u8], fits: &Cell<bool>) -> Option<[u8; N]> {
+    let block = value.try_into().ok();
+    if block.is_none() {
+        fits.set(false);
+    }
+    block
+}
+
+/// Whole entries of `N` bytes; a partial entry clears `fits` and is dropped.
+fn list<const N: usize>(value: &[u8], fits: &Cell<bool>) -> Vec<[u8; N]> {
+    let (entries, rest) = value.as_chunks::<N>();
+    if !rest.is_empty() {
+        fits.set(false);
+    }
+    entries.to_vec()
 }
 
 /// `lbl`'s backlight state. Nothing reaches a panel, but the settings must
@@ -668,11 +744,27 @@ impl Cpu {
     /// Loaded lazily, since the host restores saves after the session is built.
     pub(crate) fn system_settings(&mut self) -> &mut SystemSettings {
         if self.system_settings.is_none() {
-            let stored = self
+            let parsed = self
                 .save_data(SYSTEM_SETTINGS_SAVE)
                 .and_then(|save| save.file(SYSTEM_SETTINGS_FILE))
-                .and_then(SystemSettings::parse);
-            self.system_settings = Some(stored.unwrap_or_default());
+                .map(SystemSettings::parse);
+            let settings = match parsed {
+                None => SystemSettings::default(),
+                Some(Ok(parsed)) => {
+                    for fallback in &parsed.fallbacks {
+                        self.log(Level::Warn, &format!("[set] stored settings: {fallback}"));
+                    }
+                    parsed.settings
+                }
+                Some(Err(why)) => {
+                    self.log(
+                        Level::Warn,
+                        &format!("[set] stored settings: {why}; every setting keeps its default"),
+                    );
+                    SystemSettings::default()
+                }
+            };
+            self.system_settings = Some(settings);
         }
         self.system_settings
             .as_mut()
