@@ -374,6 +374,18 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &scheme, &[])
             }
             Some(185) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // Get/SetThemeSettings (8 bytes) and Get/SetThemeKey (16), as the Home Menu's client
+            // stubs send and read them.
+            Some(175) => {
+                let settings = self.system_settings().theme_settings;
+                self.write_ipc_response(tls, 0, &[], &settings, &[])
+            }
+            Some(176) => stored!(theme_settings = self.request_block(tls)),
+            Some(177) => {
+                let key = self.system_settings().theme_key;
+                self.write_ipc_response(tls, 0, &[], &key, &[])
+            }
+            Some(178) => stored!(theme_key = self.request_block(tls)),
             _ => {
                 self.warn_stub(
                     "set:sys",

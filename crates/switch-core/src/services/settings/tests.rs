@@ -543,3 +543,35 @@ fn a_pairing_request_waits_for_a_server_that_never_answers() {
     let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
     assert!(!cpu.events[&event].signaled, "no pairing result arrives");
 }
+
+#[test]
+fn the_home_menu_theme_survives_a_reload() {
+    let settings = 0x0102_0304_0506_0708u64.to_le_bytes();
+    let key: [u8; 0x10] = std::array::from_fn(|i| i as u8 + 1);
+
+    let mut cpu = request(false, 24, &1u32.to_le_bytes()); // SetColorSetId: Basic Black
+    cpu.set_sys_request(TLS, Some(24)).unwrap();
+    write_request(&mut cpu, 176, &settings);
+    cpu.set_sys_request(TLS, Some(176)).unwrap();
+    write_request(&mut cpu, 178, &key);
+    cpu.set_sys_request(TLS, Some(178)).unwrap();
+    assert!(cpu.stubbed_ipc().is_empty(), "a setter fell to the stub");
+    let stored = cpu
+        .save_data(super::SYSTEM_SETTINGS_SAVE)
+        .and_then(|save| save.file(super::SYSTEM_SETTINGS_FILE))
+        .expect("the settings are in their save")
+        .to_vec();
+
+    // The next page load: a new session, handed the save back.
+    let mut next = request(false, 23, &[]);
+    next.save_data_mut(super::SYSTEM_SETTINGS_SAVE)
+        .write_file(super::SYSTEM_SETTINGS_FILE, stored);
+    next.set_sys_request(TLS, Some(23)).unwrap();
+    assert_eq!(next.mem.read_u32(TLS + 0x20).unwrap(), 1, "ColorSetId");
+    write_request(&mut next, 175, &[]);
+    next.set_sys_request(TLS, Some(175)).unwrap();
+    assert_eq!(next.read_bytes(TLS + 0x20, 8), settings, "ThemeSettings");
+    write_request(&mut next, 177, &[]);
+    next.set_sys_request(TLS, Some(177)).unwrap();
+    assert_eq!(next.read_bytes(TLS + 0x20, 0x10), key, "ThemeKey");
+}

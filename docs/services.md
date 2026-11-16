@@ -271,6 +271,7 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - `HOME_MENU_SCHEME` is a stub, not measured. `MII_AUTHOR_ID` is fixed so Miis stay this console's across sessions.
 - Settings items exclude `hid_debug` (hid here is emulated, not the sysmodule).
 - `DataDeletionSettings` (49/50, `{ u32 flags; u32 use_count; }`) is stored like the rest; it starts with automatic archiving off.
+- The Home Menu's theme: `ColorSetId` (23/24) and the 7.0.0+ `ThemeSettings` (175/176, 8 bytes) and `ThemeKey` (177/178, 16 bytes), sizes from the 21.2.0 Home Menu's client stubs, are stored as raw bytes, zero by default. Through the empty-success stub, a theme picked there was dropped, and the getters handed back whatever the caller's buffer held.
 - `pctl` `RequestPairingAsync` (2001; the Home Menu's stub sends the code in a pointer buffer and reads `AsyncData` and an event back) never completes, so `FinishRequestPairing` (2002) is never due: no pairing result code is documented, and inventing one would put the Home Menu on an error path of our choosing.
 - `pctl`: the "is restricted" and "is allowed" queries read in opposite senses, and a blanket false reported free communication as unavailable. Refusing the event getters (synchronisation among them) took the Home Menu down. `GetPlayTimerRemainingTime` returns `i32::MAX`, since zero means time is up.
 - `lbl`: the settings applet sets a brightness and reads the applied value, so they must agree.

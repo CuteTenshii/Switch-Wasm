@@ -50,6 +50,8 @@ const TV_SETTINGS_SIZE: usize = 0x20;
 const NOTIFICATION_SETTINGS_SIZE: usize = 0x18;
 const SLEEP_SETTINGS_SIZE: usize = 0xc;
 const DATA_DELETION_SETTINGS_SIZE: usize = 0x8;
+const THEME_SETTINGS_SIZE: usize = 0x8;
+const THEME_KEY_SIZE: usize = 0x10;
 const INITIAL_LAUNCH_SETTINGS_SIZE: usize = 0x20;
 const DEVICE_NICK_NAME_SIZE: usize = 0x80;
 const LOCATION_NAME_SIZE: usize = 0x24;
@@ -104,6 +106,9 @@ pub(crate) struct SystemSettings {
     notification_settings: [u8; NOTIFICATION_SETTINGS_SIZE],
     sleep_settings: [u8; SLEEP_SETTINGS_SIZE],
     data_deletion_settings: [u8; DATA_DELETION_SETTINGS_SIZE],
+    /// The Home Menu's theme, beside `color_set`; neither layout is documented.
+    theme_settings: [u8; THEME_SETTINGS_SIZE],
+    theme_key: [u8; THEME_KEY_SIZE],
     initial_launch_settings: [u8; INITIAL_LAUNCH_SETTINGS_SIZE],
     device_nick_name: [u8; DEVICE_NICK_NAME_SIZE],
     pub(crate) device_time_zone_location_name: [u8; LOCATION_NAME_SIZE],
@@ -214,6 +219,8 @@ impl Default for SystemSettings {
             sleep_settings: sleep,
             // `DataDeletionSettings { flags; use_count; }`: automatic deletion off, never used.
             data_deletion_settings: [0; DATA_DELETION_SETTINGS_SIZE],
+            theme_settings: [0; THEME_SETTINGS_SIZE],
+            theme_key: [0; THEME_KEY_SIZE],
             initial_launch_settings: initial_launch,
             device_nick_name: nick_name,
             device_time_zone_location_name: location,
@@ -361,6 +368,8 @@ impl SystemSettings {
             &self.chinese_traditional_input_method.to_le_bytes(),
         );
         record(&mut out, 183, &self.platform_region.to_le_bytes());
+        record(&mut out, 175, &self.theme_settings);
+        record(&mut out, 177, &self.theme_key);
         record(&mut out, 187, &self.touch_screen_mode.to_le_bytes());
         record(&mut out, 201, &[u8::from(self.field_testing)]);
         record(&mut out, 203, &self.panel_crc_mode.to_le_bytes());
@@ -504,6 +513,8 @@ impl SystemSettings {
                     .map(|raw| raw as i32)
                     .unwrap_or(self.platform_region)
             }
+            175 => self.theme_settings = block(value).unwrap_or(self.theme_settings),
+            177 => self.theme_key = block(value).unwrap_or(self.theme_key),
             187 => self.touch_screen_mode = u32_at(value).unwrap_or(self.touch_screen_mode),
             201 => self.field_testing = flag(value).unwrap_or(self.field_testing),
             203 => {
