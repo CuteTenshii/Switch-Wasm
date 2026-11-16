@@ -221,6 +221,10 @@ impl Gpu {
         self.space.texture_cache = cache;
         self.texture_hits += hits;
         let uploads = uploads.map_err(|e| format!("{e:?}"))?;
+        for upload in &uploads.textures {
+            self.hold_at_sampled_size(upload, ctx)
+                .map_err(|e| format!("{e:?}"))?;
+        }
         // Vertices and constants are copied from where compute launches wrote them on the
         // device; indices also bound the vertices uploaded, which stale ones would get wrong.
         if uploads.index.is_some() {

@@ -178,6 +178,75 @@ impl Gpu {
         Ok(true)
     }
 
+    /// A depth surface held as crops narrower colour targets drew it at, sampled at a larger
+    /// size with the same rows, is held at that size instead: the crop already held at it, or
+    /// guest memory with the crops drawn over its corner, the current one last.
+    pub(super) fn hold_at_sampled_size(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        ctx: &ExecCtx,
+    ) -> Result<()> {
+        let Some(held) = self.space.held.get(&upload.key.addr) else {
+            return Ok(());
+        };
+        let sampled = (upload.width, upload.height);
+        let size = |target: &Target| (target.width, target.height);
+        if held.target.depth_kind().is_none()
+            || held.companion.is_some()
+            || upload.layers > 1
+            || size(&held.target) == sampled
+        {
+            return Ok(());
+        }
+        if let Some(other) = held.other.as_ref().filter(|o| size(&o.target) == sampled) {
+            let target = other.target;
+            return self.switch_crop(&target, true).map(|_| ());
+        }
+        let full = Target {
+            width: upload.width,
+            height: upload.height,
+            rows: upload.rows,
+            ..held.target
+        };
+        let within = |target: &Target| target.width <= full.width && target.height <= full.height;
+        if !crate::same_rows(&held.target, &upload.key)
+            || !crop_of_each_other(&full, &held.target)
+            || !within(&held.target)
+            || held.other.as_ref().is_some_and(|o| !within(&o.target))
+        {
+            return Ok(());
+        }
+        let texture = self.upload_target(&full, ctx)?;
+        let Some(mut crop) = self.space.held.remove(&upload.key.addr) else {
+            return Ok(());
+        };
+        let mut dirty = crop.dirty;
+        if let Some(other) = crop.other.take() {
+            self.copy_depth(&other.texture, &texture);
+            dirty |= other.dirty;
+            self.submit_batch();
+            other.texture.destroy();
+        }
+        self.copy_depth(&crop.texture, &texture);
+        self.submit_batch();
+        crop.texture.destroy();
+        self.crop_switches += 1;
+        self.space.held.insert(
+            full.addr,
+            Held {
+                texture,
+                target: full,
+                dirty,
+                writes: crop.writes + 1,
+                companion: None,
+                watched: Vec::new(),
+                other: None,
+                overwritten: Vec::new(),
+            },
+        );
+        Ok(())
+    }
+
     /// The whole surface for a readback, with what the crop holds in it.
     fn merge_crop(&mut self, mut held: Held) -> Held {
         let Some(other) = held.other.take() else {

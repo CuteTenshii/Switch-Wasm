@@ -575,11 +575,25 @@ impl Gpu {
                         && !same_rows(&held.target, &upload.key))
                 {
                     Some(format!(
-                        "held {}x{} and sampled {}x{}",
+                        "held {}x{} ({:?}, {}) and sampled {}x{} ({:?}, {})",
                         held.texture.width(),
                         held.texture.height(),
+                        held.target.layout,
+                        match &held.other {
+                            Some(other) => format!(
+                                "also held at {}x{}",
+                                other.target.width, other.target.height
+                            ),
+                            None => "at no other size".to_string(),
+                        },
                         upload.width,
-                        upload.height
+                        upload.height,
+                        upload.key.layout,
+                        if same_rows(&held.target, &upload.key) {
+                            "the same rows"
+                        } else {
+                            "other rows"
+                        }
                     ))
                 } else {
                     None

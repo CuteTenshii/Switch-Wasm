@@ -3,7 +3,7 @@
 use crate::tests::device;
 
 use switch_core::gpu::renderer::{Blit, BlitRoute, Renderer, Software, Submit};
-use switch_core::gpu::surface::{blend, taps, ColorFormat, Layout, Surface};
+use switch_core::gpu::surface::{self, blend, taps, ColorFormat, Layout, Surface};
 use switch_core::gpu::testing::{self, Harness};
 
 /// A solid white triangle over a multisample mode, by both renderers; only coverage can differ.
@@ -1406,6 +1406,109 @@ fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
         );
         assert_eq!(got, want, "{name}: the colour surface differs");
     }
+}
+
+/// A depth surface last drawn as a crop beside a narrower colour target samples whole: the
+/// crop's corner over the rest, which is the full surface the device holds or, when it never
+/// drew it, guest memory. Echoes of Wisdom samples its depth so after a quarter-size pass.
+#[test]
+fn a_depth_surface_held_as_a_crop_samples_at_its_full_size() {
+    for drawn_whole in [true, false] {
+        depth_held_as_a_crop_samples_at_its_full_size(drawn_whole);
+    }
+}
+
+fn depth_held_as_a_crop_samples_at_its_full_size(drawn_whole: bool) {
+    const COLOUR_ADDRESS_LOW: u32 = 0x201;
+    const COLOUR_PITCH: u32 = 0x202;
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+        h.bindless_texture();
+        h.depth_target(0x0207);
+        h.engine.regs.set(0x3FA, 0x0A); // ZF32
+        h.engine.regs.set(0x364, 0.25f32.to_bits());
+        let corners = |h: &mut Harness, z: f32| {
+            h.write_vertex(0, [-1.0, 1.0, z, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [1.0, 1.0, z, 1.0], [1.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -1.0, z, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        };
+        let (wide, narrow) = (h.base as u32, (h.base + 0x3000) as u32);
+        corners(&mut h, 0.75);
+        if drawn_whole {
+            h.clear_depth_with(renderer).expect("the depth clear");
+            h.draw_with(renderer).expect("the full draw");
+        } else {
+            // Guest memory's depth, which the device only ever holds a crop of.
+            let depth = h.base + 0x1000;
+            let mut ctx = h.ctx();
+            for y in 0..testing::TARGET_HEIGHT {
+                for x in 0..testing::TARGET_WIDTH {
+                    let at = depth + u64::from(surface::gob_offset(x * 4, y));
+                    ctx.write_u32(at, (0.125 * f32::from(x as u8 % 4)).to_bits())
+                        .unwrap();
+                }
+            }
+        }
+        // Half as wide: the depth surface is drawn as its left half.
+        h.engine.regs.set(COLOUR_ADDRESS_LOW, narrow);
+        h.engine.regs.set(COLOUR_PITCH, testing::TARGET_WIDTH * 2);
+        corners(&mut h, 0.5);
+        h.draw_with(renderer).expect("the cropped draw");
+        // Sampled whole, and neither tested nor written, so it is not attached.
+        h.engine.regs.set(COLOUR_ADDRESS_LOW, wide);
+        h.engine.regs.set(COLOUR_PITCH, testing::TARGET_WIDTH * 4);
+        h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
+        h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
+        let (tic, depth) = (h.base + 0x1400 + 32, h.base + 0x1000);
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        let mut ctx = h.ctx();
+        for (word, value) in [
+            (0, 0x2f | (7 << 7) | identity),
+            (1, depth as u32),
+            (2, (depth >> 32) as u32 | (3 << 21)),
+            (3, 0),
+            (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
+            (5, testing::TARGET_HEIGHT - 1),
+        ] {
+            ctx.write_u32(tic + word * 4, value).unwrap();
+        }
+        corners(&mut h, 0.0);
+        h.draw_with(renderer).expect("the draw sampling the depth");
+        h.flush_with(renderer);
+        h.target()
+    };
+    let want = build(&mut Software);
+    let reds: std::collections::BTreeSet<u32> = want.iter().map(|&texel| texel & 0xff).collect();
+    assert!(
+        reds.len() > 2,
+        "drawn whole {drawn_whole}: the reference did not sample both depths: {want:x?}"
+    );
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "drawn whole {drawn_whole}: a draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    let draws = if drawn_whole { 3 } else { 2 };
+    assert_eq!(
+        gpu.drawn,
+        drawn + draws,
+        "drawn whole {drawn_whole}: a draw did not run on the device"
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(
+        gpu.device_error(),
+        None,
+        "drawn whole {drawn_whole}: the device rejected a pass"
+    );
+    assert_eq!(
+        got, want,
+        "drawn whole {drawn_whole}: the colour surface differs"
+    );
 }
 
 /// A held `Z24S8` surface sampled as `S8D24` reads the device's depth as guest memory would hold it.
