@@ -930,7 +930,10 @@ impl Cpu {
                         | "ns:factory-reset"
                         | "ns:ecommerce"
                         | "ns:dynamic-rights"
-                        | "ns:document" => self.ns_request(tls, handle, cmd_id)?,
+                        | "ns:document"
+                        | "ns:request-server-stopper"
+                        | "ns:async-latest-update"
+                        | "ns:async-unnamed" => self.ns_request(tls, handle, cmd_id)?,
                         // aoc, add-on content.
                         "aoc:u" => self.aoc_request(tls, handle, cmd_id)?,
                         // ldr:ro, used by `nn::ro`.

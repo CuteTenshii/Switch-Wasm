@@ -11,6 +11,22 @@ const NACP_SIZE: usize = 0x4000;
 
 const ICON_SIZE_MAX: usize = 0x20000;
 
+/// `RequestCheckLatestUpdate`'s `IAsyncValue`.
+const ASYNC_LATEST_UPDATE: &str = "ns:async-latest-update";
+
+/// The async object of `ns:app-manager` 4042, whose interface is not known.
+const ASYNC_UNNAMED: &str = "ns:async-unnamed";
+
+/// The bytes a finished async object holds.
+fn ns_async_value(name: &str) -> &'static [u8] {
+    /// `NsLatestSystemUpdate_UpToDate`.
+    const UP_TO_DATE: u8 = 0;
+    match name {
+        ASYNC_LATEST_UPDATE => &[UP_TO_DATE],
+        _ => &[],
+    }
+}
+
 impl Cpu {
     /// `(free, total)` of the `ncm::StorageId` in the request: the built-in system and user
     /// storages and the SD card; any other storage is empty.
@@ -84,8 +100,11 @@ impl Cpu {
             "ns:system-update-control" => match cmd_id {
                 // HasDownloaded / HasPreparedCardUpdate / HasReceived -> false.
                 Some(0) | Some(7) | Some(15) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // RequestCheckLatestUpdate -> (event, IAsyncValue holding a u8 LatestSystemUpdate).
+                Some(1) => self.ns_reply_with_async(tls, handle, ASYNC_LATEST_UPDATE),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            ASYNC_LATEST_UPDATE | ASYNC_UNNAMED => self.ns_async_request(tls, &iface, cmd_id),
             // `IVulnerabilityManagerInterface::NeedsUpdateVulnerability` -> false.
             // The web applet aborts (2010-0221) without an answer.
             "ns:vm" if cmd_id == Some(1200) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
@@ -109,7 +128,9 @@ impl Cpu {
                 }
             }
             // `ns:am` is the pre-3.0.0 service, with no getter in between.
-            "ns:am" | "ns:app-manager" => self.ns_application_manager_request(tls, &iface, cmd_id),
+            "ns:am" | "ns:app-manager" => {
+                self.ns_application_manager_request(tls, handle, &iface, cmd_id)
+            }
             // `IContentManagementInterface`.
             "ns:content-management" => match cmd_id {
                 // CheckSdCardMountStatus: the emulated card is always mounted.
@@ -173,6 +194,46 @@ impl Cpu {
     fn ns_reply_with_interface(&mut self, tls: u32, handle: u64, name: &str) -> Result<()> {
         self.reply_with_interface(tls, handle, name)?;
         Ok(())
+    }
+
+    /// Answer an `…Async` command with its event, already signalled, and the finished
+    /// `IAsyncValue` or `IAsyncResult` filed under `name`.
+    fn ns_reply_with_async(&mut self, tls: u32, handle: u64, name: &str) -> Result<()> {
+        let event = self.alloc_event("ns:async", false);
+        self.signal_event(event);
+        if self.ipc_is_domain_request(tls) {
+            let object = self.alloc_domain_object();
+            self.record_domain_object(handle, object, name);
+            self.write_ipc_reply(tls, 0, &[event], &[], &[], &[object])
+        } else {
+            let session = self.alloc_handle();
+            self.record_handle(session, name);
+            self.write_ipc_reply(tls, 0, &[event], &[session], &[], &[])
+        }
+    }
+
+    /// `IAsyncValue` and `IAsyncResult`, finished with success. Their ids 0 to 2 mean different
+    /// things, and every answer here suits both, so an object of unknown kind is safe too.
+    fn ns_async_request(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
+        let value = ns_async_value(iface);
+        match cmd_id {
+            // IAsyncValue::GetSize -> u64; IAsyncResult::Get, whose answer is the result.
+            Some(0) => {
+                let size = value.len() as u64;
+                self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
+            }
+            // IAsyncValue::Get(out buffer); IAsyncResult::Cancel.
+            Some(1) => {
+                self.write_output_buffer(tls, 0, value);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // Cancel, and both GetErrorContexts: there is no error to describe.
+            Some(2) | Some(3) => {
+                self.zero_output_buffer(tls, 0);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            _ => self.unimplemented_command(tls, iface, cmd_id),
+        }
     }
 
     /// `aoc:u` (`IAddOnContentManager`): the add-on content registered through
@@ -273,6 +334,12 @@ impl Cpu {
             Some(5) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
             // GetAlbumMountResult(AlbumStorage) -> success.
             Some(16) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetAlbumUsage16(AlbumStorage, u64 flags): sixteen `AlbumContentsUsage`s of 0x18
+            // bytes in the buffer, each counting nothing. The Data Erase applet asks.
+            Some(17) => {
+                self.zero_output_buffer(tls, 0);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
             // Unnamed (Eden's `Unknown18`): a written length of zero. The Album
             // applet issues it first, with a 0x40-byte buffer.
             Some(18) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
@@ -288,6 +355,7 @@ impl Cpu {
     fn ns_application_manager_request(
         &mut self,
         tls: u32,
+        handle: u64,
         iface: &str,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -331,6 +399,9 @@ impl Cpu {
             }
             // ResumeAll: no download tasks.
             Some(70) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetRequestServerStopper -> IRequestServerStopper, which has no commands: holding it
+            // is the request. The Data Erase applet asks.
+            Some(65) => self.ns_reply_with_interface(tls, handle, "ns:request-server-stopper"),
             // The media events: never signalled, the same object every time.
             Some(cmd @ (44 | 45 | 49 | 52 | 505)) => {
                 let h = match self.ns_manager_events.get(&cmd) {
@@ -377,6 +448,9 @@ impl Cpu {
             Some(4023) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // 20.0.0+, unnamed: no input, no output; qlaunch panics if it fails.
             Some(4053) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // 20.0.0+, unnamed: 16 bytes in, an event and an async object out (qlaunch's client
+            // stub reads that shape); which async interface it is is unknown.
+            Some(4042) => self.ns_reply_with_async(tls, handle, ASYNC_UNNAMED),
             _ => self.unimplemented_command(tls, iface, cmd_id),
         }
     }
@@ -671,6 +745,94 @@ mod tests {
             0,
             "nothing downloaded"
         );
+    }
+
+    /// The copy-handle event and moved session of an `…Async` reply, after checking it succeeded.
+    fn async_reply(cpu: &Cpu) -> (u64, u64) {
+        // Header, handle descriptor, one copy and one move handle; the data area is at 0x20.
+        assert_eq!(cpu.mem.read_u32(TLS + 8).unwrap(), (1 << 1) | (1 << 5));
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        let session = u64::from(cpu.mem.read_u32(TLS + 0x10).unwrap());
+        (event, session)
+    }
+
+    #[test]
+    fn the_latest_update_check_finishes_at_once_and_finds_the_console_up_to_date() {
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request(false, 1, &[]);
+        cpu.register_service_handle(9, "ns:system-update-control");
+        cpu.ns_request(TLS, 9, Some(1)).unwrap();
+        let (event, session) = async_reply(&cpu);
+        assert!(cpu.events[&event].signaled, "the check is already done");
+        assert_eq!(cpu.service_name(session), Some("ns:async-latest-update"));
+
+        // GetSize: one byte, a LatestSystemUpdate.
+        write_request(&mut cpu, 0, &[]);
+        cpu.ns_request(TLS, session, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 1);
+
+        // Get: UpToDate, written over whatever the buffer held.
+        cpu.mem.map_zero(BUFFER, 0x10).unwrap();
+        cpu.mem.write_u8(BUFFER, 0xff).unwrap();
+        write_map_buffer_request(&mut cpu, 1, &[], BUFFER, 0x10, false);
+        cpu.ns_request(TLS, session, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u8(BUFFER).unwrap(), 0, "UpToDate");
+    }
+
+    #[test]
+    fn the_unnamed_async_command_finishes_with_success_and_nothing_to_read() {
+        let mut cpu = request(false, 4042, &[0u8; 0x10]);
+        cpu.register_service_handle(9, "ns:app-manager");
+        cpu.ns_request(TLS, 9, Some(4042)).unwrap();
+        let (event, session) = async_reply(&cpu);
+        assert!(cpu.events[&event].signaled);
+        assert_eq!(cpu.service_name(session), Some("ns:async-unnamed"));
+
+        // As IAsyncResult::Get, success; as IAsyncValue::GetSize, nothing to read.
+        for cmd in 0..=3 {
+            write_request(&mut cpu, cmd, &[]);
+            cpu.ns_request(TLS, session, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "cmd {cmd}");
+        }
+        write_request(&mut cpu, 0, &[]);
+        cpu.ns_request(TLS, session, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0);
+    }
+
+    #[test]
+    fn the_request_server_stopper_is_an_object_with_no_commands() {
+        let mut cpu = request(false, 65, &[]);
+        cpu.register_service_handle(9, "ns:app-manager");
+        cpu.ns_request(TLS, 9, Some(65)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let stopper = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.service_name(stopper), Some("ns:request-server-stopper"));
+
+        write_request(&mut cpu, 0, &[]);
+        cpu.ns_request(TLS, stopper, Some(0)).unwrap();
+        assert_ne!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "it has nothing to answer"
+        );
+    }
+
+    #[test]
+    fn the_album_usage_counts_nothing_in_any_of_its_sixteen_entries() {
+        const BUFFER: u32 = 0x4000;
+        const USAGE16: u32 = 16 * 0x18;
+        let mut cpu = request_with_recv_buffer(17, &[0u8; 0x10], BUFFER, USAGE16);
+        cpu.mem.map_zero(BUFFER, 0x1000).unwrap();
+        for at in 0..USAGE16 {
+            cpu.mem.write_u8(BUFFER + at, 0xaa).unwrap();
+        }
+        cpu.register_service_handle(9, "caps:a");
+        cpu.caps_album_accessor_request(TLS, 9, Some(17)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.read_bytes(BUFFER, USAGE16), vec![0u8; USAGE16 as usize]);
     }
 
     /// Drive one `aoc:u` command on a session opened under that service.
