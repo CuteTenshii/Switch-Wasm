@@ -864,6 +864,9 @@ enum HeldLayer {
     Shadow(wgpu::Texture),
     /// A larger `depth32float` whose corner is drawn into a shadow map layer.
     ShadowCorner(wgpu::Texture),
+    /// A colour surface whose bytes are another format's of the same size, copied through a
+    /// buffer; an `S8D24` image's words are converted after.
+    Bytes(wgpu::Texture),
 }
 
 impl HeldLayer {
@@ -873,7 +876,8 @@ impl HeldLayer {
             | HeldLayer::Depth(surface)
             | HeldLayer::PackedDepth(surface)
             | HeldLayer::Shadow(surface)
-            | HeldLayer::ShadowCorner(surface) => surface,
+            | HeldLayer::ShadowCorner(surface)
+            | HeldLayer::Bytes(surface) => surface,
         }
     }
 }

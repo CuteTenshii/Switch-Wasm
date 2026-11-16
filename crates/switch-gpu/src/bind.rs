@@ -623,9 +623,24 @@ impl Gpu {
             if widening != Widen::None
                 || format.remove_srgb_suffix() != held.texture.format().remove_srgb_suffix()
             {
+                if !compare && same_bytes_per_texel(held.texture.format(), format, widening, upload)
+                {
+                    layers.push((layer, HeldLayer::Bytes(held.texture.clone())));
+                    continue;
+                }
                 return Err(format!(
-                    "samples a {:?} surface held on the device as {format:?}",
-                    held.texture.format()
+                    "samples a {:?} surface held on the device as {format:?} \
+                     (layer {layer} of {} at {:#x}): sampled {}x{} {:?} {:?}, held {}x{} {:?}",
+                    held.texture.format(),
+                    upload.layers,
+                    upload.key.addr,
+                    upload.width,
+                    upload.height,
+                    upload.format,
+                    upload.key.layout,
+                    size.width,
+                    size.height,
+                    held.target.layout
                 ));
             }
             layers.push((layer, HeldLayer::Colour(held.texture.clone())));
@@ -766,6 +781,16 @@ impl Gpu {
                 _ => None,
             })
             .collect();
+        let (_, widening) =
+            sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
+        // `held_layers` lets these through only as the single layer of a 2D image.
+        let packed_words = match held {
+            [(0, HeldLayer::Bytes(surface))] if widening == Widen::PackedDepth => Some(surface),
+            _ => None,
+        };
+        if packed_words.is_some() && view == wgpu::TextureViewDimension::D3 {
+            return Err("samples a packed depth image as a volume".into());
+        }
         let texture = if compare {
             let sixteen = |surface: &HeldLayer| {
                 matches!(surface, HeldLayer::Shadow(t)
@@ -799,6 +824,8 @@ impl Gpu {
             } else {
                 self.unkept_shadow_texture(upload)?
             }
+        } else if let Some(surface) = packed_words {
+            self.packed_depth_from_held(upload, surface)?
         } else if covered {
             self.blank_texture(upload, view)?
         } else {
@@ -839,6 +866,10 @@ impl Gpu {
                 }
                 // Drawn above, before these copies were encoded.
                 HeldLayer::ShadowCorner(_) | HeldLayer::PackedDepth(_) => {}
+                HeldLayer::Bytes(_) if packed_words.is_some() => {}
+                HeldLayer::Bytes(surface) => {
+                    self.copy_through_buffer(&mut encoder, surface, into, extent);
+                }
                 HeldLayer::Depth(surface) => {
                     // A depth copy takes the whole surface; the sampled corner is taken from the buffer.
                     let (width, height) = (surface.width(), surface.height());
@@ -909,6 +940,92 @@ impl Gpu {
             self.scratch.push(Scratch::Texture(stale.texture));
         }
         Ok(texture)
+    }
+
+    /// Copy the top-left `extent` of a colour surface into `into` byte for byte, whatever the
+    /// two formats are, through a buffer; texture copies need matching formats.
+    fn copy_through_buffer(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        surface: &wgpu::Texture,
+        into: wgpu::TexelCopyTextureInfo,
+        extent: wgpu::Extent3d,
+    ) {
+        let texel = surface.format().block_copy_size(None).unwrap_or(4);
+        let row = (extent.width * texel).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("held bytes"),
+            size: u64::from(row) * u64::from(extent.height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let layout = wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(row),
+            rows_per_image: Some(extent.height),
+        };
+        encoder.copy_texture_to_buffer(
+            surface.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout,
+            },
+            extent,
+        );
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout,
+            },
+            into,
+            extent,
+        );
+        self.scratch.push(Scratch::Buffer(staging));
+    }
+
+    /// An `S8D24` image made of a held colour surface's bytes, converted as an upload of the
+    /// same words would be.
+    fn packed_depth_from_held(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        surface: &wgpu::Texture,
+    ) -> std::result::Result<wgpu::Texture, String> {
+        let (format, _) =
+            sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
+        let size = wgpu::Extent3d {
+            width: upload.width.max(1),
+            height: upload.height.max(1),
+            depth_or_array_layers: 1,
+        };
+        let texture = |label, format, usage| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | usage,
+                view_formats: &[],
+            })
+        };
+        let words = texture(
+            "held words",
+            wgpu::TextureFormat::R32Uint,
+            wgpu::TextureUsages::COPY_DST,
+        );
+        let converted = texture("held copy", format, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("held words"),
+            });
+        self.copy_through_buffer(&mut encoder, surface, words.as_image_copy(), size);
+        self.submit_with_batch(encoder);
+        self.convert_packed_depth(&words, &converted, &[]);
+        self.scratch.push(Scratch::Texture(words));
+        Ok(converted)
     }
 
     /// What [`Gpu::upload_texture`] would make for this image, with nothing written into it.
@@ -1661,4 +1778,29 @@ pub(crate) fn volume_slice_addr(key: &TextureKey, z: u32) -> u64 {
 /// plain surface's are, so a held surface can stand in for it.
 pub(crate) fn slice_fits_one_gob(key: &TextureKey) -> bool {
     key.row_bytes <= GOB_WIDTH && key.rows <= GOB_HEIGHT
+}
+
+/// Whether a held colour surface's texels are the sampled image's texels in another format of
+/// the same size, so a byte copy is exact: a 16-bit norm widening would need converting, and
+/// an `S8D24` image's words are converted only as the one layer of a 2D image.
+fn same_bytes_per_texel(
+    held: wgpu::TextureFormat,
+    sampled: wgpu::TextureFormat,
+    widening: Widen,
+    upload: &switch_core::gpu::upload::TextureUpload,
+) -> bool {
+    let stored = match widening {
+        Widen::None => sampled,
+        Widen::PackedDepth if upload.layers.max(1) == 1 => wgpu::TextureFormat::R32Uint,
+        _ => return false,
+    };
+    let plain = |format: wgpu::TextureFormat| {
+        format.block_dimensions() == (1, 1)
+            && format.has_color_aspect()
+            && !format.has_depth_aspect()
+    };
+    plain(held)
+        && plain(stored)
+        && held.block_copy_size(None).is_some()
+        && held.block_copy_size(None) == stored.block_copy_size(None)
 }

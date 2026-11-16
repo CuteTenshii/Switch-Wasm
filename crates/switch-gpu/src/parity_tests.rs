@@ -1729,6 +1729,70 @@ fn a_held_surface_stands_in_for_a_smaller_texture_laid_out_the_same_way() {
     assert_eq!(got, want, "the colour surface differs");
 }
 
+/// A held colour surface sampled as an `S8D24` image of the same size gives its bytes as the
+/// words, converted as guest memory's would be. Echoes of Wisdom reads a `B8G8R8A8` target so.
+#[test]
+fn a_held_colour_surface_samples_as_packed_depth_words_of_its_bytes() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+        h.bindless_texture();
+        let (tic, target) = (h.base + 0x1400 + 32, h.base);
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        let mut ctx = h.ctx();
+        for (word, value) in [
+            (
+                0,
+                0x29 | (4 << 7) | (4 << 10) | (4 << 13) | (4 << 16) | identity,
+            ),
+            (1, target as u32),
+            (2, (target >> 32) as u32 | (2 << 21)),
+            (3, testing::TARGET_WIDTH * 4 / 32),
+            (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
+            (5, testing::TARGET_HEIGHT - 1),
+        ] {
+            ctx.write_u32(tic + word * 4, value).unwrap();
+        }
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        // Each word is 0x99009966, a depth of 0x990099 / 0xffffff: 0x98 in green. No half anywhere.
+        for (i, value) in [0.4f32, 0.6, 0.0, 0.6].into_iter().enumerate() {
+            h.engine.regs.set(0x360 + i as u32, value.to_bits());
+        }
+        match gpu {
+            Some(gpu) => {
+                h.clear_with(gpu, [true; 4]).expect("the clear");
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => {
+                h.clear_with(&mut Software, [true; 4]).expect("the clear");
+                h.draw_with(&mut Software).expect("the draw");
+            }
+        }
+        h.target()
+    };
+    let want = build(None);
+    assert!(
+        want.iter().any(|&texel| texel & 0xff00 == 0x9800),
+        "the reference did not draw the words' depth in green: {want:x?}"
+    );
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// Culling matches on both renderers whether or not the viewport mirrors y.
 #[test]
 fn culling_keeps_the_faces_the_rasterizer_keeps() {
