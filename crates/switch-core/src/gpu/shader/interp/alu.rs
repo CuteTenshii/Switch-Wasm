@@ -376,12 +376,19 @@ impl Invocation {
                 cneg,
                 x: extended,
                 cc,
+                halves,
+                shift,
             } => {
-                let x = ineg_if(self.reg(a), aneg);
-                let y = ineg_if(self.operand(b, env)?, bneg);
-                let z = ineg_if(self.operand(c, env)?, cneg);
+                let x = ineg_if(half16(self.reg(a), halves[0]), aneg);
+                let y = ineg_if(half16(self.operand(b, env)?, halves[1]), bneg);
+                let z = ineg_if(half16(self.operand(c, env)?, halves[2]), cneg);
                 let (sum, first_carry) = x.overflowing_add(y);
                 let lhs = sum.wrapping_add(u32::from(extended && self.carry));
+                let lhs = match shift {
+                    Iadd3Shift::None => lhs,
+                    Iadd3Shift::Right => (lhs >> 16) | u32::from(first_carry) << 16,
+                    Iadd3Shift::Left => lhs << 16,
+                };
                 let (result, carry) = lhs.overflowing_add(z);
                 self.set_reg(dst, result);
                 if cc {

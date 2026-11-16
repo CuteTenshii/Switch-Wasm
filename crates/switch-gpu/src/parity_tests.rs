@@ -717,6 +717,64 @@ fn global_stores_and_narrow_loads_leave_the_same_words_on_both_renderers() {
     assert_eq!(loaded[3], 0x7f, "u8");
 }
 
+/// The register form of `iadd3` adds the same halves and shifts the same sums on both renderers.
+#[test]
+fn iadd3_half_selects_and_shifts_give_the_same_words_on_both_renderers() {
+    use switch_core::gpu::shader::isa::{self, Iadd3Shift};
+    use switch_core::gpu::shader::Op;
+    let (all, lower, upper) = (0, 1, 2);
+    let (none, right, left) = (0, 1, 2);
+    let iadd3 = |dst: u64, [a, b, c]: [u64; 3], halves: [u64; 3], shift: u64, aneg: u64| {
+        0x5cc0u64 << 48
+            | aneg << 51
+            | c << 39
+            | shift << 37
+            | halves[0] << 35
+            | halves[1] << 33
+            | halves[2] << 31
+            | b << 20
+            | PT
+            | a << 8
+            | dst
+    };
+    let stg = |word: u64, src: u64| 0xeedcu64 << 48 | (word * 4) << 20 | PT | 10 << 8 | src;
+    assert!(matches!(
+        isa::decode(iadd3(5, [2, 3, 4], [all; 3], right, 0)).op,
+        Op::Iadd3 {
+            shift: Iadd3Shift::Right,
+            ..
+        }
+    ));
+    let words = global_words_after_both(
+        &[
+            mov32i(2, 0xffff_0001),
+            mov32i(3, 0x0001_8000),
+            mov32i(4, 0x1234_5678),
+            iadd3(5, [2, 3, 4], [all; 3], right, 0),
+            stg(0, 5),
+            iadd3(5, [2, 3, 4], [all; 3], left, 0),
+            stg(1, 5),
+            iadd3(5, [2, 3, 4], [upper, lower, upper], none, 0),
+            stg(2, 5),
+            iadd3(5, [2, 3, 4], [lower; 3], right, 1),
+            stg(3, 5),
+            iadd3(5, [4, 3, 2], [all; 3], right, 0),
+            stg(4, 5),
+        ],
+        &[0; 5],
+    );
+    assert_eq!(
+        words,
+        [
+            0x1_0000 + 0x1234_5678,
+            0x8001_0000 + 0x1234_5678,
+            0xffff + 0x8000 + 0x1234,
+            0x1_0000 + 0x5678,
+            0x1235u32.wrapping_add(0xffff_0001),
+        ]
+    );
+}
+
 /// A shader reading its quad neighbour's register reads the same on both renderers,
 /// with native quad operations and with the browser's `QUAD_SWAP`.
 #[test]

@@ -154,11 +154,30 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 0x4 => (const_operand(insn), Operand::Reg(reg(insn, 39, 8))),
                 _ => (Operand::Imm(imm20(insn)), Operand::Reg(reg(insn, 39, 8))),
             };
-            // Eden leaves the flags of an extended add unimplemented; the register form's
-            // half selects and shift at 31..39 are not modelled.
-            if field(insn, 48, 1) != 0 && field(insn, 47, 1) != 0
-                || form >> 12 == 0x5 && field(insn, 31, 8) != 0
-            {
+            let half = |pos| match field(insn, pos, 2) {
+                0 => Some(Half16::All),
+                1 => Some(Half16::Lower),
+                2 => Some(Half16::Upper),
+                _ => None,
+            };
+            let register = form >> 12 == 0x5;
+            let (halves, shift) = if register {
+                let shift = match field(insn, 37, 2) {
+                    0 => Iadd3Shift::None,
+                    1 => Iadd3Shift::Right,
+                    2 => Iadd3Shift::Left,
+                    _ => return un,
+                };
+                let (Some(a), Some(b), Some(c)) = (half(35), half(33), half(31)) else {
+                    return un;
+                };
+                ([a, b, c], shift)
+            } else {
+                ([Half16::All; 3], Iadd3Shift::None)
+            };
+            let extended = field(insn, 48, 1) != 0;
+            // Eden leaves the flags of an extended add, and an extended right shift, unimplemented.
+            if extended && (field(insn, 47, 1) != 0 || shift == Iadd3Shift::Right) {
                 return un;
             }
             return Op::Iadd3 {
@@ -169,8 +188,10 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 bneg: field(insn, 50, 1) != 0,
                 c,
                 cneg: field(insn, 49, 1) != 0,
-                x: field(insn, 48, 1) != 0,
+                x: extended,
                 cc: field(insn, 47, 1) != 0,
+                halves,
+                shift,
             };
         }
         // lea, 0x5bd0/0xfff0 (bit 51 picks `.hi`), 0x4bd0 and the `.lo`-only immediate.

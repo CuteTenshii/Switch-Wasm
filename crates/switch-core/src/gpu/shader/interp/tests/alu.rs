@@ -1064,6 +1064,8 @@ fn iadd3_cc_derives_its_flags_as_eden_does() {
         cneg: false,
         x,
         cc,
+        halves: [Half16::All; 3],
+        shift: Iadd3Shift::None,
     };
     let run = |a, b, c| {
         let inv = run_half(&[(1, a), (2, b), (3, c)], &[iadd3(true, false)]);
@@ -1092,11 +1094,63 @@ fn iadd3_x_adds_the_carry_into_the_first_sum() {
         cneg: false,
         x: true,
         cc: false,
+        halves: [Half16::All; 3],
+        shift: Iadd3Shift::None,
     };
     let run = |bits| run_with_flags(bits, &[(1, 10), (2, 20), (3, 100)], &[iadd3]).reg(4);
     assert_eq!(run(0), 130);
     assert_eq!(run(C), 131);
     assert_eq!(run(Z | S | O), 130);
+}
+
+#[test]
+fn iadd3_picks_halves_before_negating_and_shifts_the_first_sum() {
+    use Half16::{All, Lower, Upper};
+    let run = |aneg, halves, shift, regs: [u32; 3]| {
+        let iadd3 = Op::Iadd3 {
+            dst: 4,
+            a: 1,
+            aneg,
+            b: Operand::Reg(2),
+            bneg: false,
+            c: Operand::Reg(3),
+            cneg: false,
+            x: false,
+            cc: false,
+            halves,
+            shift,
+        };
+        let setup = [(1, regs[0]), (2, regs[1]), (3, regs[2])];
+        run_half(&setup, &[iadd3]).reg(4)
+    };
+    let regs = [0xffff_0001, 0x0001_8000, 0x1234_5678];
+    assert_eq!(
+        run(false, [Upper, Lower, Upper], Iadd3Shift::None, regs),
+        0xffff + 0x8000 + 0x1234
+    );
+    // The carry out of `a + b` is the 33rd bit, and a right shift keeps it as bit 16.
+    assert_eq!(
+        run(false, [All; 3], Iadd3Shift::Right, regs),
+        0x1_0000 + 0x1234_5678
+    );
+    assert_eq!(
+        run(
+            false,
+            [All; 3],
+            Iadd3Shift::Right,
+            [0x1234_5678, 0x0001_8000, 1]
+        ),
+        0x1235 + 1
+    );
+    assert_eq!(
+        run(false, [All; 3], Iadd3Shift::Left, regs),
+        0x8001_0000 + 0x1234_5678
+    );
+    // The low half of 1, negated, is all ones: `-1 + 0x8000` carries.
+    assert_eq!(
+        run(true, [Lower, Lower, Lower], Iadd3Shift::Right, regs),
+        0x1_0000 + 0x5678
+    );
 }
 
 /// Eden's `ExtendedIntegerCompare`: the hi-word compare of a 64-bit compare whose low word set C and Z.

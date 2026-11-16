@@ -208,7 +208,8 @@ fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
 fn condition_code_extended_and_fmz_forms_are_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
     use switch_core::gpu::shader::isa::{
-        BoolOp, FCmp, FMod, FmulScale, ICmp, Instruction, LogicOp, LopTest, Operand, Pred,
+        BoolOp, FCmp, FMod, FmulScale, Half16, ICmp, Iadd3Shift, Instruction, LogicOp, LopTest,
+        Operand, Pred,
     };
     use switch_core::gpu::shader::{Op, Program};
 
@@ -249,6 +250,8 @@ fn condition_code_extended_and_fmz_forms_are_wgsl_naga_accepts() {
             cneg: false,
             x: false,
             cc: true,
+            halves: [Half16::All; 3],
+            shift: Iadd3Shift::None,
         },
         Op::Iadd3 {
             dst: 1,
@@ -260,6 +263,8 @@ fn condition_code_extended_and_fmz_forms_are_wgsl_naga_accepts() {
             cneg: false,
             x: true,
             cc: false,
+            halves: [Half16::All; 3],
+            shift: Iadd3Shift::None,
         },
         Op::Isetp {
             p0: 0,

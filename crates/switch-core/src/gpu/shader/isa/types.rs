@@ -308,6 +308,23 @@ pub enum XmadC {
     Bcc,
 }
 
+/// The part of a register-form `iadd3` source that is added, zero-extended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Half16 {
+    All,
+    Lower,
+    Upper,
+}
+
+/// What a register-form `iadd3` does to `a + b` before adding `c`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Iadd3Shift {
+    None,
+    /// Right by 16, keeping the sum's 33rd bit as bit 16.
+    Right,
+    Left,
+}
+
 /// `texs`'s sample dimensionality (envydis's `d000_1`/`d200_1` tables).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexDim {

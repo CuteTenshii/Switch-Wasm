@@ -1152,10 +1152,55 @@ fn fadd32i_reads_the_negation_and_absolute_value_of_its_immediate() {
 }
 
 #[test]
-fn iadd3_refuses_the_register_form_half_selects_and_shift() {
+fn iadd3_register_form_decodes_its_half_selects_and_shift() {
+    // The word Echoes of Wisdom draws with: iadd3.rs r3, r4, r6, r3.
+    assert_eq!(
+        op(0x5cc0_01a0_0067_0403),
+        Op::Iadd3 {
+            dst: 3,
+            a: 4,
+            aneg: false,
+            b: Operand::Reg(6),
+            bneg: false,
+            c: Operand::Reg(3),
+            cneg: false,
+            x: false,
+            cc: false,
+            halves: [Half16::All; 3],
+            shift: Iadd3Shift::Right,
+        }
+    );
     let word = asm(0x5cc0, &[(0, 8, 4), (8, 8, 1), (20, 8, 2), (39, 8, 3)]);
-    assert!(!unimplemented(word));
-    for bit in [31, 32, 33, 34, 35, 36, 37, 38] {
-        assert!(unimplemented(word | 1 << bit), "bit {bit}");
+    let modes = |extra: u64| match op(word | extra) {
+        Op::Iadd3 { halves, shift, .. } => (halves, shift),
+        other => panic!("not iadd3: {other:?}"),
+    };
+    use Half16::{All, Lower, Upper};
+    assert_eq!(
+        modes(1 << 35 | 2 << 33 | 1 << 31),
+        ([Lower, Upper, Lower], Iadd3Shift::None)
+    );
+    assert_eq!(modes(2 << 37), ([All; 3], Iadd3Shift::Left));
+    // Three is no half and no shift.
+    for extra in [3 << 31, 3 << 33, 3 << 35, 3 << 37] {
+        assert!(unimplemented(word | extra), "{extra:#x}");
+    }
+    // Eden leaves an extended right shift unimplemented; an extended left shift is defined.
+    assert!(unimplemented(word | 1 << 48 | 1 << 37));
+    assert!(!unimplemented(word | 1 << 48 | 2 << 37));
+}
+
+#[test]
+fn iadd3_immediate_and_constant_forms_read_bits_31_to_39_as_their_operand() {
+    for form in [0x38c0, 0x4cc0] {
+        let word = asm(form, &[(0, 8, 4), (8, 8, 1), (20, 19, 0x7ffff), (39, 8, 3)]);
+        let Op::Iadd3 { halves, shift, .. } = op(word) else {
+            panic!("{form:#x} is not iadd3");
+        };
+        assert_eq!(
+            (halves, shift),
+            ([Half16::All; 3], Iadd3Shift::None),
+            "{form:#x}"
+        );
     }
 }

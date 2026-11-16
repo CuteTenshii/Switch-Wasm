@@ -219,6 +219,10 @@ pub enum Op {
         x: bool,
         /// `.cc`: all four flags, as Eden derives them from the sum.
         cc: bool,
+        /// Register form only: the halves of `a`, `b` and `c` added, picked before negation.
+        halves: [Half16; 3],
+        /// Register form only: applied to `a + b`.
+        shift: Iadd3Shift,
     },
     Imnmx {
         dst: u8,

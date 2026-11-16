@@ -2,7 +2,7 @@ use super::*;
 use crate::gpu::shader::isa::{
     BoolOp, FCmp, FMod, FRound, ICmp, LogicOp, LopTest, MufuOp, Op, Operand, Pred, TexDim, RZ,
 };
-use crate::gpu::shader::isa::{FmulScale, Instruction, MemSize, ShflMode};
+use crate::gpu::shader::isa::{FmulScale, Half16, Iadd3Shift, Instruction, MemSize, ShflMode};
 use crate::gpu::shader::{next_slot, Program, ENTRY_OFFSET};
 use std::collections::BTreeMap;
 
@@ -323,6 +323,8 @@ fn home_menu_opcodes() -> Vec<Op> {
             cneg: false,
             x: false,
             cc: false,
+            halves: [Half16::All; 3],
+            shift: Iadd3Shift::None,
         },
         Op::Bfe {
             dst: 1,
@@ -856,6 +858,8 @@ fn iadd3(x: bool, cc: bool) -> Op {
         cneg: false,
         x,
         cc,
+        halves: [Half16::All; 3],
+        shift: Iadd3Shift::None,
     }
 }
 

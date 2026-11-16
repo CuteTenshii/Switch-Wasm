@@ -2,7 +2,7 @@
 
 use super::emitter::Emitter;
 use super::Unsupported;
-use crate::gpu::shader::isa::{LogicOp, LopTest, Op, XmadC};
+use crate::gpu::shader::isa::{Half16, Iadd3Shift, LogicOp, LopTest, Op, XmadC};
 
 impl Emitter<'_> {
     pub(super) fn emit_integer(&mut self, op: Op) -> Result<(), Unsupported> {
@@ -54,22 +54,31 @@ impl Emitter<'_> {
                 cneg,
                 x: extended,
                 cc,
+                halves,
+                shift,
             } => {
-                let x = self.r(a);
+                let x = half16(&self.r(a), halves[0]);
                 let x = self.ineg(aneg, x);
                 let x = self.bind(&x);
-                let y = self.operand(b);
+                let y = half16(&self.operand(b), halves[1]);
                 let y = self.ineg(bneg, y);
-                let z = self.operand(c);
+                let z = half16(&self.operand(c), halves[2]);
                 let z = self.ineg(cneg, z);
-                if extended || cc {
+                if extended || cc || shift != Iadd3Shift::None {
                     let z = self.bind(&z);
                     let first = self.bind(&format!("{x} + ({y})"));
-                    let lhs = if extended {
+                    let summed = if extended {
                         self.uses_carry = true;
                         self.bind(&format!("{first} + select(0u, 1u, carry)"))
                     } else {
                         first.clone()
+                    };
+                    let lhs = match shift {
+                        Iadd3Shift::None => summed,
+                        Iadd3Shift::Right => self.bind(&format!(
+                            "({summed} >> 16u) | select(0u, 0x10000u, {first} < {x})"
+                        )),
+                        Iadd3Shift::Left => self.bind(&format!("{summed} << 16u")),
                     };
                     let total = self.bind(&format!("{lhs} + {z}"));
                     self.set_r(dst, &total);
@@ -513,5 +522,14 @@ fn lop_test(test: LopTest, value: &str) -> String {
         LopTest::True => "true".to_string(),
         LopTest::Zero => format!("({value} == 0u)"),
         LopTest::NonZero => format!("({value} != 0u)"),
+    }
+}
+
+/// A register-form `iadd3` source's half, zero-extended.
+fn half16(value: &str, half: Half16) -> String {
+    match half {
+        Half16::All => value.to_string(),
+        Half16::Lower => format!("(({value}) & 0xffffu)"),
+        Half16::Upper => format!("(({value}) >> 16u)"),
     }
 }

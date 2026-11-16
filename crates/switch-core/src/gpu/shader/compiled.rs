@@ -457,6 +457,8 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             cneg,
             x,
             cc,
+            halves,
+            shift,
         } => Op::Iadd3 {
             dst,
             a,
@@ -467,6 +469,8 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             cneg,
             x,
             cc,
+            halves,
+            shift,
         },
         Op::Imnmx {
             dst,

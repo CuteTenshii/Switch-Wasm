@@ -109,6 +109,14 @@ pub(super) fn neg_if(v: f32, neg: bool) -> f32 {
     }
 }
 
+pub(super) fn half16(v: u32, half: Half16) -> u32 {
+    match half {
+        Half16::All => v,
+        Half16::Lower => v & 0xffff,
+        Half16::Upper => v >> 16,
+    }
+}
+
 pub(super) fn ineg_if(v: u32, neg: bool) -> u32 {
     if neg {
         (v as i32).wrapping_neg() as u32
