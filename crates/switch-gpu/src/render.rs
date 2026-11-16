@@ -625,6 +625,10 @@ impl Gpu {
             .ok_or("the surface was not held")?;
         held.dirty |= writes;
         held.writes += u64::from(writes);
+        // What the device draws now is newer than what the guest wrote over the surface.
+        if writes {
+            held.overwritten.clear();
+        }
         Ok(match &held.companion {
             Some(companion) => companion.texture.clone(),
             None => held.texture.clone(),

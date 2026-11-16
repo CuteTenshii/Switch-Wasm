@@ -121,6 +121,7 @@ impl Gpu {
                 writes: 0,
                 companion: None,
                 watched: Vec::new(),
+                overwritten: Vec::new(),
                 other: None,
             },
         );
@@ -156,6 +157,7 @@ impl Gpu {
                     writes: 0,
                     companion: None,
                     watched: Vec::new(),
+                    overwritten: Vec::new(),
                     other: None,
                 }
             }
@@ -170,6 +172,7 @@ impl Gpu {
         if old.watched.len() > new.watched.len() {
             new.watched = old.watched.clone();
         }
+        new.overwritten.extend(std::mem::take(&mut old.overwritten));
         new.other = Some(Box::new(old));
         self.space.held.insert(target.addr, new);
         Ok(true)
@@ -184,11 +187,13 @@ impl Gpu {
         self.submit_batch();
         if held.target.width >= other.target.width && held.target.height >= other.target.height {
             held.dirty |= other.dirty;
+            held.overwritten.append(&mut other.overwritten);
             other.texture.destroy();
             held
         } else {
             self.copy_depth(&held.texture, &other.texture);
             other.dirty |= held.dirty;
+            other.overwritten.append(&mut held.overwritten);
             held.texture.destroy();
             other
         }
@@ -266,14 +271,16 @@ impl Gpu {
             return;
         }
         let (target, texture, dirty) = (held.target, held.texture.clone(), held.dirty);
+        let kept = kept_pages(held);
         if dirty {
             self.submit_batch();
-            let pending = self.start_read_back(&target, &texture);
+            let pending = self.start_read_back(&target, &texture, kept);
             self.space.pending.push(pending);
         }
         if let Some(held) = self.space.held.get_mut(&addr) {
             held.dirty = false;
             held.watched.clear();
+            held.overwritten.clear();
         }
     }
 
@@ -290,7 +297,7 @@ impl Gpu {
         }
         // A surface nothing drew into is already what guest memory says.
         if held.dirty {
-            let pending = self.start_read_back(&held.target, &held.texture);
+            let pending = self.start_read_back(&held.target, &held.texture, kept_pages(&held));
             self.space.pending.push(pending);
         }
         // Destroyed rather than dropped, so a browser frees it without waiting for GC.
@@ -524,7 +531,12 @@ impl Gpu {
     }
 
     /// Start copying a surface off the device, with rows padded to 256 bytes.
-    fn start_read_back(&mut self, target: &Target, texture: &wgpu::Texture) -> Pending {
+    fn start_read_back(
+        &mut self,
+        target: &Target,
+        texture: &wgpu::Texture,
+        kept: Vec<u32>,
+    ) -> Pending {
         // Device row width, which for depth is not the guest's texel width.
         let row_bytes = match target.depth_kind() {
             Some(kind) => target.width * kind.unit(),
@@ -582,6 +594,7 @@ impl Gpu {
                 target: *target,
                 row_bytes,
                 padded,
+                kept,
             },
             generation: self.space.asked,
             state,
@@ -637,17 +650,31 @@ impl Gpu {
                 target,
                 row_bytes,
                 padded,
-            } => match target.depth_kind() {
-                None => target.write_strided(ctx, &mapped, *padded),
-                Some(_) => {
-                    let mut rows = Vec::with_capacity((row_bytes * target.rows) as usize);
-                    for y in 0..target.rows {
-                        let at = (y * padded) as usize;
-                        rows.extend_from_slice(&mapped[at..at + *row_bytes as usize]);
-                    }
-                    Self::land_depth(target, &rows, ctx)
+                kept,
+            } => {
+                let page = 1usize << PAGE_BITS;
+                let mut guest = vec![0u8; kept.len() * page];
+                for (bytes, &at) in guest.chunks_exact_mut(page).zip(kept) {
+                    ctx.mem.read_into(at << PAGE_BITS, bytes)?;
                 }
-            },
+                match target.depth_kind() {
+                    None => target.write_strided(ctx, &mapped, *padded),
+                    Some(_) => {
+                        let mut rows = Vec::with_capacity((row_bytes * target.rows) as usize);
+                        for y in 0..target.rows {
+                            let at = (y * padded) as usize;
+                            rows.extend_from_slice(&mapped[at..at + *row_bytes as usize]);
+                        }
+                        Self::land_depth(target, &rows, ctx)
+                    }
+                }
+                .and_then(|()| {
+                    guest
+                        .chunks_exact(page)
+                        .zip(kept)
+                        .try_for_each(|(bytes, &at)| ctx.mem.write_bytes(at << PAGE_BITS, bytes))
+                })
+            }
             Readback::Global { addr, original, .. } => {
                 let words = mapped
                     .as_chunks::<4>()
@@ -694,13 +721,11 @@ impl Gpu {
     }
 
     /// Whether a surface being drawn into shares memory with what is about to be read from it.
+    /// What the guest wrote over since is current in guest memory.
     pub(super) fn note_read_of(&mut self, read: std::ops::Range<u64>) {
-        if self
-            .space
-            .held
-            .values()
-            .any(|held| held.dirty && spans_overlap(&held_span(held), &read))
-        {
+        if self.space.held.values().any(|held| {
+            held.dirty && spans_overlap(&held_span(held), &read) && !overwritten(held, &read)
+        }) {
             self.syncs[4] += 1;
             self.space.sync_all = true;
         }
@@ -711,13 +736,25 @@ impl Gpu {
     pub(super) fn watch_held(&mut self, ctx: &ExecCtx, written: &[u32]) {
         if !written.is_empty() {
             let written: std::collections::HashSet<u32> = written.iter().copied().collect();
-            let hit: Vec<u64> = self
-                .space
-                .held
-                .values()
-                .filter(|held| held.watched.iter().any(|page| written.contains(page)))
-                .map(|held| held.target.addr)
-                .collect();
+            let mut hit = Vec::new();
+            for held in self.space.held.values_mut() {
+                if !held.watched.iter().any(|page| written.contains(page)) {
+                    continue;
+                }
+                hit.push(held.target.addr);
+                // Only pages wholly the surface's: other data shares the rest, and the guest
+                // writing that says nothing about the surface's texels.
+                let span = held_span(held);
+                for (range, page) in gpu_pages(ctx, span) {
+                    let whole = range.end - range.start == 1 << PAGE_BITS;
+                    if whole
+                        && written.contains(&page)
+                        && !held.overwritten.iter().any(|(_, p)| *p == page)
+                    {
+                        held.overwritten.push((range, page));
+                    }
+                }
+            }
             if !hit.is_empty() {
                 self.syncs[5] += 1;
                 self.space.aliased.extend(hit);
@@ -953,4 +990,48 @@ impl Gpu {
         });
         Ok(Flush::Done)
     }
+}
+
+/// The CPU pages a readback of `held` must leave as the guest wrote them.
+fn kept_pages(held: &Held) -> Vec<u32> {
+    held.overwritten.iter().map(|&(_, page)| page).collect()
+}
+
+/// Whether the guest wrote over every page of `read` that `held` covers since watching began.
+pub(super) fn overwritten(held: &Held, read: &std::ops::Range<u64>) -> bool {
+    let span = held_span(held);
+    let (start, end) = (read.start.max(span.start), read.end.min(span.end));
+    let mut at = start;
+    while at < end {
+        let Some((range, _)) = held
+            .overwritten
+            .iter()
+            .find(|(range, _)| range.contains(&at))
+        else {
+            return false;
+        };
+        at = range.end;
+    }
+    true
+}
+
+/// Each guest page under a GPU span, with the part of the span it backs.
+fn gpu_pages(ctx: &ExecCtx, span: std::ops::Range<u64>) -> Vec<(std::ops::Range<u64>, u32)> {
+    let page = 1u64 << PAGE_BITS;
+    let mut pages = Vec::new();
+    let mut at = span.start;
+    while at < span.end {
+        let Some((cpu, run)) = ctx.vmm.translate(at) else {
+            break;
+        };
+        // To the end of this CPU page, the mapped run, or the span, whichever is first.
+        let in_page = page - u64::from(cpu) % page;
+        let take = in_page.min(run).min(span.end - at);
+        if take == 0 {
+            break;
+        }
+        pages.push((at..at + take, cpu >> PAGE_BITS));
+        at += take;
+    }
+    pages
 }

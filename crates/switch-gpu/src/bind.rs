@@ -2,7 +2,7 @@
 
 use crate::builtin::PACKED_DEPTH_WGSL;
 use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
-use crate::held::spans_overlap;
+use crate::held::{overwritten, spans_overlap};
 use crate::readback::{HeldGlobal, Scratch};
 use crate::{
     same_rows, CachedBinding, GlobalUpload, Gpu, HeldCopy, HeldLayer, Patch, Prepared, Red,
@@ -491,6 +491,15 @@ impl Gpu {
             let Some(held) = self.space.held.get(&addr) else {
                 continue;
             };
+            // The guest wrote this layer over the surface since; guest memory has it.
+            let len = if upload.layers > 1 {
+                u64::from(upload.key.layer_stride)
+            } else {
+                upload.source_len
+            };
+            if overwritten(held, &(addr..addr + len)) {
+                continue;
+            }
             writes.push(held.writes);
             // A held `ZF32` or `ZF32_X24S8` is copied through a buffer into an `R32` view; a depth
             // texture cannot copy to colour. `S8` is the other zero-bit depth, and has no depth.
@@ -679,6 +688,7 @@ impl Gpu {
         let padded = (full_width, full_height) != (upload.width, upload.height);
         if held.target.depth.is_some()
             || held.companion.is_some()
+            || !held.overwritten.is_empty()
             || !padded
             || upload.width > full_width
             || upload.height > full_height

@@ -58,6 +58,7 @@ impl Gpu {
                 .ok_or("the surface was not held")?;
             held.dirty = true;
             held.writes += 1;
+            held.overwritten.clear();
             views.push(
                 held.texture
                     .create_view(&wgpu::TextureViewDescriptor::default()),
@@ -323,6 +324,7 @@ impl Gpu {
                 writes: 0,
                 companion: None,
                 watched: Vec::new(),
+                overwritten: Vec::new(),
                 other: None,
             },
         );

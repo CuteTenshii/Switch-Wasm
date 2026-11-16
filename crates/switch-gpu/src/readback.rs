@@ -27,6 +27,8 @@ pub(crate) enum Readback {
         row_bytes: u32,
         /// `row_bytes` rounded up to the 256 bytes `copyTextureToBuffer` wants.
         padded: u32,
+        /// CPU pages the guest wrote over, which keep what the guest wrote.
+        kept: Vec<u32>,
     },
     /// A buffer shaders wrote through, put back as the words that changed since `original`.
     /// `source` is what was written, kept until it lands for draws that read it meanwhile.
@@ -101,6 +103,10 @@ pub(crate) struct Held {
     pub(crate) watched: Vec<u32>,
     /// The same depth surface at its other size. See [`Gpu::switch_crop`](crate::Gpu).
     pub(crate) other: Option<Box<Held>>,
+    /// Pages wholly inside the surface that the guest wrote since watching began, by GPU range
+    /// and CPU page: newer than the device's texels there, so they are read from guest memory
+    /// and a readback skips them.
+    pub(crate) overwritten: Vec<(std::ops::Range<u64>, u32)>,
 }
 
 /// A surface's stand-in, and the grid it stands in for (kept until the flush).

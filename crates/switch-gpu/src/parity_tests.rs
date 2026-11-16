@@ -1793,6 +1793,74 @@ fn a_held_colour_surface_samples_as_packed_depth_words_of_its_bytes() {
     assert_eq!(got, want, "the colour surface differs");
 }
 
+/// A texture the guest writes over a held render target is sampled as the guest wrote it, and
+/// the target's readback leaves it so. Just Dance 2022 puts a `BC3` image where a target was.
+#[test]
+fn a_texture_the_guest_writes_over_a_held_target_is_what_draws_and_memory_keep() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    const IMAGE_WORDS: u64 = 0x200 / 4;
+    let word = |i: u64| (i as u32).wrapping_mul(0x0103_0507) | 0xff00_0000;
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+        h.bindless_texture();
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        // A 64x16 target filling a page of its own, as a title's surfaces fill theirs.
+        let (target, tic, elsewhere) = (h.base + 0x2000, h.base + 0x1400 + 32, h.base + 0x3000);
+        h.engine.regs.set(0x200, (target >> 32) as u32);
+        h.engine.regs.set(0x201, target as u32);
+        h.engine.regs.set(0x202, 64 * 4);
+        h.engine.regs.set(0x203, 16);
+        // Twice, so the second draw starts watching the target the first one held.
+        h.draw_with(renderer).expect("the first draw");
+        h.draw_with(renderer).expect("the second draw");
+        // An 8x8 block-linear image, one GOB, over the pitch-linear target's first rows.
+        let mut ctx = h.ctx();
+        for i in 0..IMAGE_WORDS {
+            ctx.write_u32(target + i * 4, word(i)).unwrap();
+        }
+        ctx.write_u32(tic + 4, target as u32).unwrap();
+        ctx.write_u32(tic + 8, (target >> 32) as u32 | (3 << 21))
+            .unwrap();
+        ctx.write_u32(tic + 12, 0).unwrap();
+        h.engine.regs.set(0x200, (elsewhere >> 32) as u32);
+        h.engine.regs.set(0x201, elsewhere as u32);
+        h.engine.regs.set(0x202, testing::TARGET_WIDTH * 4);
+        h.engine.regs.set(0x203, testing::TARGET_HEIGHT);
+        h.draw_with(renderer).expect("the draw sampling the image");
+        h.flush_with(renderer);
+        let ctx = h.ctx();
+        let read = |at: u64, words: u64| -> Vec<u32> {
+            (0..words)
+                .map(|i| ctx.read_u32(at + i * 4).unwrap())
+                .collect()
+        };
+        let drawn = u64::from(testing::TARGET_WIDTH * testing::TARGET_HEIGHT);
+        (read(elsewhere, drawn), read(target, IMAGE_WORDS))
+    };
+    let (want_drawn, want_image) = build(&mut Software);
+    assert_eq!(
+        want_image,
+        (0..IMAGE_WORDS).map(word).collect::<Vec<_>>(),
+        "the rasterizer kept the image"
+    );
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let (got_drawn, got_image) = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "a draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 3, "a draw did not run on the device");
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected a pass");
+    assert_eq!(got_image, want_image, "the readback wrote over the image");
+    assert_eq!(got_drawn, want_drawn, "the image drew differently");
+}
+
 /// Culling matches on both renderers whether or not the viewport mirrors y.
 #[test]
 fn culling_keeps_the_faces_the_rasterizer_keeps() {
