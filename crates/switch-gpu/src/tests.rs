@@ -1811,3 +1811,103 @@ fn a_draw_reads_constants_a_compute_launch_wrote_on_the_device() {
     h.flush_with(&mut gpu);
     assert_eq!(h.target(), expected);
 }
+
+/// Past the vertex buffer limit, an array a compute launch wrote keeps a buffer of its own
+/// for the copy and the others are folded.
+#[test]
+fn a_draw_folds_the_arrays_beside_one_a_compute_launch_wrote() {
+    use switch_core::gpu::renderer::Renderer;
+    use switch_core::gpu::testing::{block, copy_program, write_launch, Harness};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    // gl_Position = aPosition; vColor = vec4(aColor.rgb, aExtra.x).
+    let mut shader = block(
+        (0xfc20070f, 0x081f8441),
+        (0x0807ff00, 0xefd9ff80), // ld b128 $r0 a[0x80] 0x0  (aPosition)
+        (0x0707ff00, 0xeff1ff80), // st b128 a[0x70] $r0 0x0  (gl_Position)
+        (0x0907ff00, 0xefd9ff80), // ld b128 $r0 a[0x90] 0x0  (aColor)
+    );
+    shader.extend(block(
+        (0xfc2207e1, 0x001f8c40),
+        (0x0a07ff03, 0xefd87f80), // ld b32 $r3 a[0xa0] 0x0  (aExtra.x)
+        (0x0807ff00, 0xeff1ff80), // st b128 a[0x80] $r0 0x0  (vColor)
+        (0x0007000f, 0xe3000000), // exit
+    ));
+    let alphas = [0.2f32, 0.6, 0.4];
+    // Array 2, 16 bytes a vertex, holding each vertex's alpha.
+    let set_up = |h: &mut Harness| {
+        h.set_vertex_shader(&shader);
+        h.triangle([0.25, 0.5, 1.0, 1.0]);
+        let extra = h.base + 0x600;
+        h.engine.regs.set(0x458 + 2, 2 | (0x01 << 21) | (7 << 27));
+        h.engine.regs.set(0x708, 16 | (1 << 12));
+        h.engine.regs.set(0x709, (extra >> 32) as u32);
+        h.engine.regs.set(0x70a, extra as u32);
+        h.engine.regs.set(0x7C4, (extra >> 32) as u32);
+        h.engine.regs.set(0x7C5, extra as u32 + 3 * 16 - 1);
+        extra
+    };
+
+    // Read from guest memory, unfolded: interpolation rounds as the folded draw's does.
+    let mut direct = Harness::new();
+    direct.as_id = 2;
+    let extra = set_up(&mut direct);
+    let mut ctx = direct.ctx();
+    for (vertex, alpha) in alphas.iter().enumerate() {
+        ctx.write_u32(extra + vertex as u64 * 16, alpha.to_bits())
+            .unwrap();
+    }
+    direct.draw_with(&mut gpu).unwrap();
+    direct.flush_with(&mut gpu);
+    let expected = direct.target();
+    assert!(
+        expected
+            .iter()
+            .any(|&texel| texel >> 24 != 0 && texel >> 24 != 0xff),
+        "the reference drew the alphas: {expected:x?}"
+    );
+
+    let mut h = Harness::new();
+    h.as_id = 3;
+    let extra = set_up(&mut h);
+    let (staged, launch) = (h.base + 0x1000, h.base + 0x800);
+    const WORDS: u32 = 3 * 4;
+    let mut ctx = h.ctx();
+    for (vertex, alpha) in alphas.iter().enumerate() {
+        ctx.write_u32(staged + vertex as u64 * 16, alpha.to_bits())
+            .unwrap();
+    }
+    let engine = write_launch(
+        &mut ctx,
+        launch,
+        &copy_program(),
+        [1, 1, 1],
+        [WORDS, 1, 1],
+        &[
+            (0x40, extra as u32),
+            (0x44, (extra >> 32) as u32),
+            (0x48, WORDS * 4),
+            (0x60, staged as u32),
+            (0x64, (staged >> 32) as u32),
+            (0x68, WORDS * 4),
+        ],
+    );
+    assert!(
+        gpu.dispatch(&engine, &mut ctx).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    assert_eq!(
+        ctx.read_u32(extra).unwrap(),
+        0,
+        "the copy is still on the device"
+    );
+    // Three arrays against a limit of two: the copied one alone, the other two folded.
+    gpu.vertex_buffer_limit = 2;
+    h.draw_with(&mut gpu).unwrap();
+    assert!(gpu.reasons.is_empty(), "fell back: {:?}", gpu.reasons);
+    h.flush_with(&mut gpu);
+    assert_eq!(h.target(), expected);
+}

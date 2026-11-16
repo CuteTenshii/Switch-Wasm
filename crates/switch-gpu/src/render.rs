@@ -160,22 +160,27 @@ impl Gpu {
             });
         }
         // What compute launches wrote on the device is copied over the stale guest bytes.
-        let mut patches: Vec<Vec<crate::Patch>> = feeds
+        let patches: Vec<Vec<crate::Patch>> = feeds
             .iter()
             .map(|feed| self.vertex_patches(feed))
             .collect::<std::result::Result<_, String>>()?;
-        let folding = feeds.len() > self.vertex_buffer_limit as usize;
-        if folding && patches.iter().any(|p| !p.is_empty()) {
+        // Folding rearranges bytes on the CPU, so arrays with patches keep buffers of their own
+        // and only the rest are folded into what the limit leaves.
+        let (patched, plain): (Vec<_>, Vec<_>) = feeds
+            .into_iter()
+            .zip(patches)
+            .partition(|(_, patches)| !patches.is_empty());
+        let room = (self.vertex_buffer_limit as usize).saturating_sub(patched.len());
+        let plain: Vec<_> = plain.into_iter().map(|(feed, _)| feed).collect();
+        let folded = fit_vertex_buffers(plain, room as u32);
+        if patched.len() + folded.len() > self.vertex_buffer_limit as usize {
             return Err("folds a vertex array a compute launch wrote on the device".into());
         }
-        if folding {
-            patches.clear();
-        }
-        let mut patches = patches.into_iter();
-        let bound: Vec<Bound> = fit_vertex_buffers(feeds, self.vertex_buffer_limit)
+        let feeds = patched
             .into_iter()
-            .map(|f| {
-                let patches = patches.next().unwrap_or_default();
+            .chain(folded.into_iter().map(|feed| (feed, Vec::new())));
+        let bound: Vec<Bound> = feeds
+            .map(|(f, patches)| {
                 // The patches are copied into it, so it is this draw's alone.
                 let buffer = if patches.is_empty() {
                     self.shared_buffer("vertex", &f.bytes, wgpu::BufferUsages::VERTEX)
