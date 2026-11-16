@@ -270,6 +270,7 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - Pre-4.0.0 `GetAvailableLanguageCodes` (1) reports 15 codes, not 12: `MakeLanguageCode` indexes by `SetLanguage`, and capping at 12 aborted Minecraft on `fr-CA`. Answering command 1 with no data aborted Just Dance 2017.
 - `HOME_MENU_SCHEME` is a stub, not measured. `MII_AUTHOR_ID` is fixed so Miis stay this console's across sessions.
 - Settings items exclude `hid_debug` (hid here is emulated, not the sysmodule).
+- `DataDeletionSettings` (49/50, `{ u32 flags; u32 use_count; }`) is stored like the rest; it starts with automatic archiving off.
 - `pctl` `RequestPairingAsync` (2001; the Home Menu's stub sends the code in a pointer buffer and reads `AsyncData` and an event back) never completes, so `FinishRequestPairing` (2002) is never due: no pairing result code is documented, and inventing one would put the Home Menu on an error path of our choosing.
 - `pctl`: the "is restricted" and "is allowed" queries read in opposite senses, and a blanket false reported free communication as unavailable. Refusing the event getters (synchronisation among them) took the Home Menu down. `GetPlayTimerRemainingTime` returns `i32::MAX`, since zero means time is up.
 - `lbl`: the settings applet sets a brightness and reads the applied value, so they must agree.

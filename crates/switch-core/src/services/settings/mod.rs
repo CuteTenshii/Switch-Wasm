@@ -49,6 +49,7 @@ const SYSTEM_SETTINGS_VERSION: u32 = 1;
 const TV_SETTINGS_SIZE: usize = 0x20;
 const NOTIFICATION_SETTINGS_SIZE: usize = 0x18;
 const SLEEP_SETTINGS_SIZE: usize = 0xc;
+const DATA_DELETION_SETTINGS_SIZE: usize = 0x8;
 const INITIAL_LAUNCH_SETTINGS_SIZE: usize = 0x20;
 const DEVICE_NICK_NAME_SIZE: usize = 0x80;
 const LOCATION_NAME_SIZE: usize = 0x24;
@@ -102,6 +103,7 @@ pub(crate) struct SystemSettings {
     tv_settings: [u8; TV_SETTINGS_SIZE],
     notification_settings: [u8; NOTIFICATION_SETTINGS_SIZE],
     sleep_settings: [u8; SLEEP_SETTINGS_SIZE],
+    data_deletion_settings: [u8; DATA_DELETION_SETTINGS_SIZE],
     initial_launch_settings: [u8; INITIAL_LAUNCH_SETTINGS_SIZE],
     device_nick_name: [u8; DEVICE_NICK_NAME_SIZE],
     pub(crate) device_time_zone_location_name: [u8; LOCATION_NAME_SIZE],
@@ -210,6 +212,8 @@ impl Default for SystemSettings {
             tv_settings: tv,
             notification_settings: notification,
             sleep_settings: sleep,
+            // `DataDeletionSettings { flags; use_count; }`: automatic deletion off, never used.
+            data_deletion_settings: [0; DATA_DELETION_SETTINGS_SIZE],
             initial_launch_settings: initial_launch,
             device_nick_name: nick_name,
             device_time_zone_location_name: location,
@@ -313,6 +317,7 @@ impl SystemSettings {
         record(&mut out, 43, &modes);
         record(&mut out, 45, &[u8::from(self.speaker_auto_mute)]);
         record(&mut out, 47, &[self.quest_flag]);
+        record(&mut out, 49, &self.data_deletion_settings);
         record(&mut out, 53, &self.device_time_zone_location_name);
         record(&mut out, 57, &self.region.to_le_bytes());
         record(&mut out, 58, &self.network_clock_context);
@@ -443,6 +448,7 @@ impl SystemSettings {
             }
             45 => self.speaker_auto_mute = flag(value).unwrap_or(self.speaker_auto_mute),
             47 => self.quest_flag = value.first().copied().unwrap_or(self.quest_flag),
+            49 => self.data_deletion_settings = block(value).unwrap_or(self.data_deletion_settings),
             53 => {
                 self.device_time_zone_location_name =
                     block(value).unwrap_or(self.device_time_zone_location_name)

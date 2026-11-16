@@ -155,6 +155,12 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[flag], &[])
             }
             Some(48) => stored!(quest_flag = self.ipc_arg_u8(tls, 0)),
+            // Get/SetDataDeletionSettings: the Home Menu's automatic archiving of unused software.
+            Some(49) => {
+                let settings = self.system_settings().data_deletion_settings;
+                self.write_ipc_response(tls, 0, &[], &settings, &[])
+            }
+            Some(50) => stored!(data_deletion_settings = self.request_block(tls)),
             // Get/SetDeviceTimeZoneLocationName(LocationName); `time` reports the same field.
             Some(53) => {
                 let name = self.system_settings().device_time_zone_location_name;

@@ -502,6 +502,36 @@ fn set_answers_the_pointer_buffer_size_and_not_its_language_count() {
 }
 
 #[test]
+fn data_deletion_settings_start_off_and_keep_what_they_are_given() {
+    const GET: u32 = 49;
+    const SET: u32 = 50;
+
+    let mut cpu = request(false, GET, &[]);
+    cpu.set_sys_request(TLS, Some(GET)).unwrap();
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+    assert_eq!(
+        cpu.mem.read_u64(TLS + 0x20).unwrap(),
+        0,
+        "automatic deletion off, never used"
+    );
+    assert!(cpu.stubbed_ipc().is_empty(), "it fell to the stub");
+
+    // AutomaticDeletionFlag, used three times.
+    let mut given = [0u8; 8];
+    given[..4].copy_from_slice(&1u32.to_le_bytes());
+    given[4..].copy_from_slice(&3u32.to_le_bytes());
+    write_request(&mut cpu, SET, &given);
+    cpu.set_sys_request(TLS, Some(SET)).unwrap();
+    write_request(&mut cpu, GET, &[]);
+    cpu.set_sys_request(TLS, Some(GET)).unwrap();
+    assert_eq!(cpu.read_bytes(TLS + 0x20, 8), given);
+
+    let stored = cpu.system_settings().serialize();
+    let read = super::SystemSettings::parse(&stored).expect("a block this build wrote");
+    assert_eq!(read.data_deletion_settings, given, "kept in the save");
+}
+
+#[test]
 fn a_pairing_request_waits_for_a_server_that_never_answers() {
     let mut cpu = request(false, 2001, &[]);
     cpu.register_service_handle(9, "pctl:service");
