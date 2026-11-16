@@ -158,6 +158,18 @@ impl Cpu {
                 self.write_output_buffer(tls, 0, &network_profile_data());
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
+            // SetNetworkProfile(SfNetworkProfileData) -> Uuid. The console keeps its one saved
+            // network, so the profile is accepted and not kept, and its id is that network's.
+            Some(9) => self.write_ipc_response(tls, 0, &[], &WIFI_PROFILE_ID, &[]),
+            // GetScanData, in its three revisions (11, 35, 19.0.0+ 47) -> u32 count: nothing in
+            // range answers a scan. The entry layout is not documented, so none is invented.
+            Some(11) | Some(35) | Some(47) => {
+                self.zero_output_buffer(tls, 0);
+                self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+            }
+            // GetSsidListVersion: the console has never fetched the hotspot list. Its width is not
+            // documented, so a zeroed 16 bytes covers a u32 and a wider version alike.
+            Some(25) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
             // GetCurrentAccessPoint: the buffer must be written; its layout is not documented, so
             // it stays zero.
             Some(36) => {
@@ -439,5 +451,34 @@ mod tests {
         cpu.nifm_general_service_request(TLS, 9, Some(15)).unwrap();
         let config = cpu.read_bytes(TLS + 0x20, 0x16);
         assert_eq!(config, profile[..0x16], "IpAddressSetting then DnsSetting");
+    }
+
+    #[test]
+    fn a_saved_profile_becomes_the_one_saved_network() {
+        let mut cpu = console();
+        write_request(&mut cpu, 9, &[]);
+        cpu.nifm_general_service_request(TLS, 9, Some(9)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.read_bytes(TLS + 0x20, 0x10), WIFI_PROFILE_ID);
+    }
+
+    #[test]
+    fn a_scan_finds_nothing_in_any_revision_and_the_hotspot_list_was_never_fetched() {
+        let mut cpu = console();
+        for cmd in [11, 35, 47] {
+            cpu.mem.write_u8(OUT, 0xaa).unwrap();
+            ask(&mut cpu, cmd, &[], 0x100);
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "cmd {cmd} result");
+            assert_eq!(reply_word(&cpu), 0, "cmd {cmd}: no access point");
+            assert_eq!(
+                cpu.mem.read_u8(OUT).unwrap(),
+                0,
+                "cmd {cmd}: no stale entry"
+            );
+        }
+        write_request(&mut cpu, 25, &[]);
+        cpu.nifm_general_service_request(TLS, 9, Some(25)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.read_bytes(TLS + 0x20, 0x10), vec![0u8; 0x10]);
     }
 }
