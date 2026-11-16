@@ -1116,3 +1116,17 @@ fn an_applet_reporting_a_visible_error_is_answered() {
         );
     }
 }
+
+#[test]
+fn the_home_menus_migration_and_sleep_requests_are_accepted() {
+    for (iface, cmd) in [
+        ("am:common-state-getter", 400u32), // ActivateMigrationService
+        ("am:common-state-getter", 401),    // DeactivateMigrationService
+        ("am:global-state-controller", 2),  // StartSleepSequence(true)
+    ] {
+        let mut cpu = request(false, cmd, &[1, 0, 0, 0]);
+        cpu.register_service_handle(9, iface);
+        cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "{iface} {cmd}");
+    }
+}

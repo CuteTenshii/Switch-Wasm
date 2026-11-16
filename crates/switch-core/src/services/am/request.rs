@@ -275,6 +275,9 @@ impl Cpu {
                 }
                 // SetCpuBoostMode: no clock governor to move.
                 Some(66) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // ActivateMigrationService / DeactivateMigrationService: no data is waiting to
+                // move between consoles, so nothing launches the migration applet.
+                Some(400) | Some(401) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled.
                 Some(900) => {
                     self.warn_stub(&iface, cmd_id, "the exit-request latch is not recorded");
@@ -642,8 +645,12 @@ impl Cpu {
                 Some(4) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // IGlobalStateController. Sleep, shutdown and reboot (0-4) are not implemented.
+            // IGlobalStateController. Entering sleep (0, 1), shutdown and reboot (3, 4) are not
+            // implemented.
             "am:global-state-controller" => match cmd_id {
+                // StartSleepSequence(u8): accepted, and the console stays awake, as nothing
+                // here dims or sleeps.
+                Some(2) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // IsAutoPowerDownRequested.
                 Some(9) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 // Idle policy, CEC, HOME long press and display resolution settings.
