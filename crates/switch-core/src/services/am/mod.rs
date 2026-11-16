@@ -189,7 +189,7 @@ fn player_select_answer(user: [u8; 16]) -> Vec<u8> {
 }
 
 /// Whether a title id is one of the firmware's library applets.
-pub(crate) fn is_library_applet(program_id: u64) -> bool {
+pub fn is_library_applet(program_id: u64) -> bool {
     matches!(applet_id_for(program_id), 0x0A..=0x1A)
 }
 

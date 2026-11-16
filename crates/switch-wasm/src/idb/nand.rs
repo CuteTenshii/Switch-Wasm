@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use js_sys::{Array, Reflect};
+use switch_core::services::is_library_applet;
 use switch_core::trace::Level;
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, File};
@@ -12,25 +13,6 @@ use super::{self as idb, content, NAND_DB, NAND_STORES, NAND_TITLES, NAND_VERSIO
 use crate::hostfiles::add as add_host_file;
 use crate::post::post;
 use crate::{applets, container, session_if_live, HostSource};
-
-/// Program ids of the library applets a title or the Home Menu can start.
-const LIBRARY_APPLETS: [u64; 15] = [
-    0x0100_0000_0000_1001,
-    0x0100_0000_0000_1002,
-    0x0100_0000_0000_1003,
-    0x0100_0000_0000_1004,
-    0x0100_0000_0000_1005,
-    0x0100_0000_0000_1006,
-    0x0100_0000_0000_1007,
-    0x0100_0000_0000_1008,
-    0x0100_0000_0000_1009,
-    0x0100_0000_0000_100a,
-    0x0100_0000_0000_100b,
-    0x0100_0000_0000_100d,
-    0x0100_0000_0000_100f,
-    0x0100_0000_0000_1010,
-    0x0100_0000_0000_1011,
-];
 
 /// `NandEntry.kind`: a program, or a data archive.
 const KIND_PROGRAM: f64 = 0.0;
@@ -156,7 +138,7 @@ async fn restore() -> Result<u32, JsValue> {
     }
     for title in titles
         .iter()
-        .filter(|t| t.kind == KIND_PROGRAM && LIBRARY_APPLETS.contains(&t.id))
+        .filter(|t| t.kind == KIND_PROGRAM && is_library_applet(t.id))
     {
         let Some(&src) = hosts.get(title.name.as_str()) else {
             continue;

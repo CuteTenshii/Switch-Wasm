@@ -27,3 +27,5 @@ pub(crate) mod storage;
 pub(crate) mod time;
 pub(crate) mod usb;
 pub(crate) mod vi;
+
+pub use am::is_library_applet;
