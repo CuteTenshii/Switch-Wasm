@@ -112,6 +112,7 @@ fn a_layout_names_every_binding_the_text_calls_through() {
             fold: None,
             uint: false,
             crop: None,
+            sampler: None,
         }]
     );
     let source = module(&translated, Stage::Fragment, &layout).unwrap();

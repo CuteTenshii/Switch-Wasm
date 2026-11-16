@@ -130,6 +130,7 @@ pub fn module(
         ));
     }
     for (index, texture) in layout.textures.iter().enumerate() {
+        let smp = texture.sampler.unwrap_or(index as u32);
         let binding = TEXTURE_BINDING + 2 * index as u32;
         out.push_str(&format!(
             "@group({}) @binding({binding}) var tex{index}: {};\n",
@@ -140,16 +141,18 @@ pub fn module(
                 (false, None) => texture_type(texture.dim, texture.compare)?,
             }
         ));
-        out.push_str(&format!(
-            "@group({}) @binding({}) var smp{index}: {};\n",
-            layout.group,
-            binding + 1,
-            if texture.compare {
-                "sampler_comparison"
-            } else {
-                "sampler"
-            }
-        ));
+        if texture.sampler.is_none() {
+            out.push_str(&format!(
+                "@group({}) @binding({}) var smp{smp}: {};\n",
+                layout.group,
+                binding + 1,
+                if texture.compare {
+                    "sampler_comparison"
+                } else {
+                    "sampler"
+                }
+            ));
+        }
     }
     for (slot, global) in layout.globals.iter().enumerate() {
         let (access, word) = if global.written {
@@ -263,6 +266,7 @@ pub fn module(
          \x20 switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
+        let smp = texture.sampler.unwrap_or(index as u32);
         if texture.compare {
             continue;
         }
@@ -286,21 +290,19 @@ pub fn module(
                 "{} {}",
                 folded_coords(fold, 0),
                 return_swizzled(
-                    &format!(
-                        "textureSampleLevel(tex{index}, smp{index}, vec2<f32>(u, fv), fk, 0.0)"
-                    ),
+                    &format!("textureSampleLevel(tex{index}, smp{smp}, vec2<f32>(u, fv), fk, 0.0)"),
                     texture.swizzle
                 )
             ),
             (None, Some(crop)) => return_swizzled(
                 &format!(
-                    "textureSampleLevel(tex{index}, smp{index}, {}, 0.0)",
+                    "textureSampleLevel(tex{index}, smp{smp}, {}, 0.0)",
                     cropped(crop, (0, 0))
                 ),
                 texture.swizzle,
             ),
             (None, None) => return_swizzled(
-                &format!("textureSampleLevel(tex{index}, smp{index}, {coords})"),
+                &format!("textureSampleLevel(tex{index}, smp{smp}, {coords})"),
                 texture.swizzle,
             ),
         };
@@ -315,6 +317,7 @@ pub fn module(
          \x20 switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
+        let smp = texture.sampler.unwrap_or(index as u32);
         if !texture.compare {
             continue;
         }
@@ -328,7 +331,7 @@ pub fn module(
         let key = texture.slot.key();
         out.push_str(&format!(
             "    case {key}u: {{\n      let c = textureSampleCompareLevel(tex{index}, \
-             smp{index}, {coords}, dref);\n      return vec4<f32>(c, c, c, 1.0);\n    }}\n"
+             smp{smp}, {coords}, dref);\n      return vec4<f32>(c, c, c, 1.0);\n    }}\n"
         ));
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }\n  }\n}\n\n");
@@ -339,6 +342,7 @@ pub fn module(
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
+        let smp = texture.sampler.unwrap_or(index as u32);
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, false) => "vec2<f32>(u, v), 0.0",
             (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer, 0.0",
@@ -361,7 +365,7 @@ pub fn module(
                     folded_coords(fold, y),
                     return_swizzled(
                         &format!(
-                            "textureSampleLevel(tex{index}, smp{index}, vec2<f32>(u, fv), fk, \
+                            "textureSampleLevel(tex{index}, smp{smp}, vec2<f32>(u, fv), fk, \
                              0.0, vec2<i32>({x}, 0))"
                         ),
                         texture.swizzle
@@ -370,14 +374,14 @@ pub fn module(
                 // The offset moves the coordinates before they are clamped, as the sampler does.
                 (None, Some(crop)) => return_swizzled(
                     &format!(
-                        "textureSampleLevel(tex{index}, smp{index}, {}, 0.0)",
+                        "textureSampleLevel(tex{index}, smp{smp}, {}, 0.0)",
                         cropped(crop, (x, y))
                     ),
                     texture.swizzle,
                 ),
                 (None, None) => return_swizzled(
                     &format!(
-                        "textureSampleLevel(tex{index}, smp{index}, {coords}, vec2<i32>({x}, {y}))"
+                        "textureSampleLevel(tex{index}, smp{smp}, {coords}, vec2<i32>({x}, {y}))"
                     ),
                     texture.swizzle,
                 ),
@@ -434,6 +438,7 @@ pub fn module(
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
+        let smp = texture.sampler.unwrap_or(index as u32);
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, false) => "vec2<f32>(u, v)",
             (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer",
@@ -450,7 +455,7 @@ pub fn module(
             for channel in 0..4 {
                 out.push_str(&format!(
                     "        case {channel}u: {{ return bitcast<vec4<f32>>(textureGather({channel}, \
-                     tex{index}, smp{index}, {coords})); }}\n"
+                     tex{index}, smp{smp}, {coords})); }}\n"
                 ));
             }
             out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
@@ -462,10 +467,10 @@ pub fn module(
         };
         for (channel, source) in texture.swizzle.iter().enumerate() {
             let texels = match source {
-                SwizzleSource::R => format!("textureGather(0, tex{index}, smp{index}, {coords})"),
-                SwizzleSource::G => format!("textureGather(1, tex{index}, smp{index}, {coords})"),
-                SwizzleSource::B => format!("textureGather(2, tex{index}, smp{index}, {coords})"),
-                SwizzleSource::A => format!("textureGather(3, tex{index}, smp{index}, {coords})"),
+                SwizzleSource::R => format!("textureGather(0, tex{index}, smp{smp}, {coords})"),
+                SwizzleSource::G => format!("textureGather(1, tex{index}, smp{smp}, {coords})"),
+                SwizzleSource::B => format!("textureGather(2, tex{index}, smp{smp}, {coords})"),
+                SwizzleSource::A => format!("textureGather(3, tex{index}, smp{smp}, {coords})"),
                 SwizzleSource::Zero => "vec4<f32>(0.0)".to_string(),
                 SwizzleSource::One => "vec4<f32>(1.0)".to_string(),
             };
@@ -532,6 +537,7 @@ pub fn module(
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
+        let smp = texture.sampler.unwrap_or(index as u32);
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, true) => "vec2<f32>(u, v)",
             (TexDim::T2dArray, true) => "vec2<f32>(u, v), layer",
@@ -541,7 +547,7 @@ pub fn module(
         };
         let key = texture.slot.key();
         out.push_str(&format!(
-            "    case {key}u: {{ return textureGatherCompare(tex{index}, smp{index}, {coords}, dref); }}\n"
+            "    case {key}u: {{ return textureGatherCompare(tex{index}, smp{smp}, {coords}, dref); }}\n"
         ));
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");

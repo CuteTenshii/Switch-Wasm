@@ -32,12 +32,18 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         | wgpu::Features::RG11B10UFLOAT_RENDERABLE
         // Blending into 32-bit float targets.
         | wgpu::Features::FLOAT32_BLENDABLE;
-    // Raise the storage buffer limit to the adapter's: a shader may read more than the guaranteed eight banks.
+    // Raise the storage buffer limit to the adapter's: a shader may read more than the guaranteed
+    // eight banks. Sampled textures too, past 16; samplers stay at 16, which is all a browser
+    // gives, so textures share them past that (`Gpu::share_samplers`) natively as well.
+    let (default, offered) = (wgpu::Limits::default(), adapter.limits());
     let required_limits = wgpu::Limits {
-        max_storage_buffers_per_shader_stage: wgpu::Limits::default()
+        max_storage_buffers_per_shader_stage: default
             .max_storage_buffers_per_shader_stage
-            .max(adapter.limits().max_storage_buffers_per_shader_stage),
-        ..wgpu::Limits::default()
+            .max(offered.max_storage_buffers_per_shader_stage),
+        max_sampled_textures_per_shader_stage: default
+            .max_sampled_textures_per_shader_stage
+            .max(offered.max_sampled_textures_per_shader_stage),
+        ..default
     };
     wgpu::DeviceDescriptor {
         required_features: adapter.features() & wanted,

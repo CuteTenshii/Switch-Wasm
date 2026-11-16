@@ -1861,6 +1861,73 @@ fn a_texture_the_guest_writes_over_a_held_target_is_what_draws_and_memory_keep()
     assert_eq!(got_drawn, want_drawn, "the image drew differently");
 }
 
+/// A stage sampling more textures than the device has samplers binds each distinct sampler
+/// once. Echoes of Wisdom samples 19 textures in one fragment shader; a browser gives 16.
+#[test]
+fn textures_past_the_sampler_limit_share_their_samplers() {
+    use switch_core::gpu::testing::block;
+    const SLOTS: std::ops::Range<u32> = 4..21;
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    assert!(
+        SLOTS.len() > gpu.device_limits.max_samplers_per_shader_stage as usize,
+        "the device would bind every sampler"
+    );
+    let sched = (0xffe1ffef, 0x001f8000);
+    // tex nodep $rD $r0 0xS t2d 0xf: the last into r0, the colour.
+    let tex = |slot: u32, dst: u32| (0xaff7_0000 | dst, 0xc03a_0007 | slot << 4);
+    let mut words = vec![
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+    ];
+    words.extend(SLOTS.map(|slot| tex(slot, if slot + 1 == SLOTS.end { 0 } else { 4 })));
+    words.push((0x0007000f, 0xe3000000)); // exit
+    while !words.len().is_multiple_of(3) {
+        words.push((0x00070f00, 0x50b00000)); // nop
+    }
+    let shader: Vec<u8> = words
+        .chunks(3)
+        .flat_map(|w| block(sched, w[0], w[1], w[2]))
+        .collect();
+    assert!(shader.len() <= 0x100, "{} bytes", shader.len());
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::with_fragment_shader(shader.clone());
+        h.bindless_texture();
+        h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+        let constants = h.base + 0x1500;
+        let mut ctx = h.ctx();
+        let handle = ctx
+            .read_u32(constants + u64::from(testing::BINDLESS_HANDLE_OFFSET))
+            .unwrap();
+        for slot in SLOTS {
+            ctx.write_u32(constants + u64::from(slot * 4), handle)
+                .unwrap();
+        }
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        h.draw_with(renderer).expect("the draw");
+        h.flush_with(renderer);
+        h.target()
+    };
+    let want = build(&mut Software);
+    assert!(want.iter().any(|&texel| texel != 0), "the reference drew");
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// Culling matches on both renderers whether or not the viewport mirrors y.
 #[test]
 fn culling_keeps_the_faces_the_rasterizer_keeps() {

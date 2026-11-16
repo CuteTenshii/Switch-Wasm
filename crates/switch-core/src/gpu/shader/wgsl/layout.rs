@@ -106,6 +106,9 @@ pub struct TextureBinding {
     pub uint: bool,
     /// Set by the backend when the image is the top-left corner of a larger texture it binds.
     pub crop: Option<Crop>,
+    /// Set by the backend to an earlier binding whose sampler is the same, which this one
+    /// uses instead of binding its own; a stage may bind few samplers.
+    pub sampler: Option<u32>,
 }
 
 /// A 2D image sampled out of the top-left corner of a larger texture, clamped to its edge:
@@ -282,6 +285,7 @@ impl Layout {
                     fold: None,
                     uint: false,
                     crop: None,
+                    sampler: None,
                 })
                 .collect(),
             texture_offsets: translated.texture_offsets.clone(),

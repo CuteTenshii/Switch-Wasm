@@ -252,18 +252,22 @@ impl Gpu {
                 },
                 count: None,
             });
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: binding + 1,
-                visibility: own,
-                ty: wgpu::BindingType::Sampler(if compare {
-                    wgpu::SamplerBindingType::Comparison
-                } else if uint {
-                    wgpu::SamplerBindingType::NonFiltering
-                } else {
-                    wgpu::SamplerBindingType::Filtering
-                }),
-                count: None,
-            });
+            // A texture sharing an earlier one's sampler binds none of its own.
+            let own_sampler = declared_texture.sampler.is_none();
+            if own_sampler {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: binding + 1,
+                    visibility: own,
+                    ty: wgpu::BindingType::Sampler(if compare {
+                        wgpu::SamplerBindingType::Comparison
+                    } else if uint {
+                        wgpu::SamplerBindingType::NonFiltering
+                    } else {
+                        wgpu::SamplerBindingType::Filtering
+                    }),
+                    count: None,
+                });
+            }
             // A size-only query binds as 2D, and the device refuses a 2D view of a layered texture.
             if view_dimension == wgpu::TextureViewDimension::D2 && upload.layers > 1 {
                 return Err(format!(
@@ -329,10 +333,12 @@ impl Gpu {
                 texture
             };
             resources.push(Resource::Texture(binding, texture, view_dimension));
-            resources.push(Resource::Sampler(
-                binding + 1,
-                self.sampler(upload, compare, uint, fold.is_some()),
-            ));
+            if own_sampler {
+                resources.push(Resource::Sampler(
+                    binding + 1,
+                    self.sampler(upload, compare, uint, fold.is_some()),
+                ));
+            }
         }
 
         for global in p.globals.iter().filter(|g| g.stage == Some(stage)) {
@@ -1708,45 +1714,7 @@ impl Gpu {
         integer: bool,
         folded: bool,
     ) -> wgpu::Sampler {
-        use switch_core::gpu::texture::Wrap;
-        let wrap = |w: Wrap| match w {
-            Wrap::Repeat => wgpu::AddressMode::Repeat,
-            Wrap::Mirror => wgpu::AddressMode::MirrorRepeat,
-            Wrap::ClampToEdge => wgpu::AddressMode::ClampToEdge,
-            // WebGPU has no border mode, and the rasterizer also samples border as edge.
-            Wrap::ClampToBorder => wgpu::AddressMode::ClampToEdge,
-        };
-        let filter = |linear: bool| {
-            if linear {
-                wgpu::FilterMode::Linear
-            } else {
-                wgpu::FilterMode::Nearest
-            }
-        };
-        use switch_core::gpu::texture::Compare;
-        let compare = compare
-            .then(|| upload.sampler.compare.unwrap_or(Compare::Always))
-            .map(|c| match c {
-                Compare::Never => wgpu::CompareFunction::Never,
-                Compare::Less => wgpu::CompareFunction::Less,
-                Compare::Equal => wgpu::CompareFunction::Equal,
-                Compare::LessEqual => wgpu::CompareFunction::LessEqual,
-                Compare::Greater => wgpu::CompareFunction::Greater,
-                Compare::NotEqual => wgpu::CompareFunction::NotEqual,
-                Compare::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
-                Compare::Always => wgpu::CompareFunction::Always,
-            });
-        let key = SamplerKey {
-            compare,
-            wrap_u: wrap(upload.sampler.wrap_u),
-            wrap_v: if folded {
-                wgpu::AddressMode::ClampToEdge
-            } else {
-                wrap(upload.sampler.wrap_v)
-            },
-            mag: filter(upload.sampler.mag_linear && !integer),
-            min: filter(upload.sampler.min_linear && !integer),
-        };
+        let key = sampler_key(upload, compare, integer, folded);
         let device = &self.device;
         self.samplers
             .entry(key)
@@ -1813,4 +1781,52 @@ fn same_bytes_per_texel(
         && plain(stored)
         && held.block_copy_size(None).is_some()
         && held.block_copy_size(None) == stored.block_copy_size(None)
+}
+
+/// What [`Gpu::sampler`] makes for an image, and caches it by.
+pub(crate) fn sampler_key(
+    upload: &switch_core::gpu::upload::TextureUpload,
+    compare: bool,
+    integer: bool,
+    folded: bool,
+) -> SamplerKey {
+    use switch_core::gpu::texture::Wrap;
+    let wrap = |w: Wrap| match w {
+        Wrap::Repeat => wgpu::AddressMode::Repeat,
+        Wrap::Mirror => wgpu::AddressMode::MirrorRepeat,
+        Wrap::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+        // WebGPU has no border mode, and the rasterizer also samples border as edge.
+        Wrap::ClampToBorder => wgpu::AddressMode::ClampToEdge,
+    };
+    let filter = |linear: bool| {
+        if linear {
+            wgpu::FilterMode::Linear
+        } else {
+            wgpu::FilterMode::Nearest
+        }
+    };
+    use switch_core::gpu::texture::Compare;
+    let compare = compare
+        .then(|| upload.sampler.compare.unwrap_or(Compare::Always))
+        .map(|c| match c {
+            Compare::Never => wgpu::CompareFunction::Never,
+            Compare::Less => wgpu::CompareFunction::Less,
+            Compare::Equal => wgpu::CompareFunction::Equal,
+            Compare::LessEqual => wgpu::CompareFunction::LessEqual,
+            Compare::Greater => wgpu::CompareFunction::Greater,
+            Compare::NotEqual => wgpu::CompareFunction::NotEqual,
+            Compare::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+            Compare::Always => wgpu::CompareFunction::Always,
+        });
+    SamplerKey {
+        compare,
+        wrap_u: wrap(upload.sampler.wrap_u),
+        wrap_v: if folded {
+            wgpu::AddressMode::ClampToEdge
+        } else {
+            wrap(upload.sampler.wrap_v)
+        },
+        mag: filter(upload.sampler.mag_linear && !integer),
+        min: filter(upload.sampler.min_linear && !integer),
+    }
 }

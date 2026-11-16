@@ -108,9 +108,7 @@ impl Gpu {
             .max_storage_buffers_per_shader_stage as usize;
         let limits = self.device_limits.clone();
         for (stage, layout) in [("vertex", &vs_layout), ("fragment", &fs_layout)] {
-            if layout.textures.len() > limits.max_sampled_textures_per_shader_stage as usize
-                || layout.textures.len() > limits.max_samplers_per_shader_stage as usize
-            {
+            if layout.textures.len() > limits.max_sampled_textures_per_shader_stage as usize {
                 return Err(format!(
                     "{} textures in the {stage} stage, past the device's limit",
                     layout.textures.len()
@@ -301,6 +299,22 @@ impl Gpu {
                 }
             }
         }
+        for (layout, stage, name) in [
+            (&mut vs_layout, ShaderStage::VertexB, "vertex"),
+            (&mut fs_layout, ShaderStage::Fragment, "fragment"),
+        ] {
+            self.share_samplers(layout, stage, &uploads.textures);
+            let samplers = layout
+                .textures
+                .iter()
+                .filter(|b| b.sampler.is_none())
+                .count();
+            if samplers > limits.max_samplers_per_shader_stage as usize {
+                return Err(format!(
+                    "{samplers} distinct samplers in the {name} stage, past the device's limit"
+                ));
+            }
+        }
 
         // Fans, quad strips and polygons become triangle lists.
         let assembled = match state.expand {
@@ -445,6 +459,46 @@ impl Gpu {
             assembled,
             instance: engine.instance_id(),
         })
+    }
+
+    /// Past the device's sampler limit, point each texture at the first earlier one bound with
+    /// the same sampler, so only distinct samplers are bound. Under it nothing is shared, so a
+    /// module does not change with the samplers its draws happen to use.
+    fn share_samplers(
+        &self,
+        layout: &mut Layout,
+        stage: ShaderStage,
+        textures: &[switch_core::gpu::upload::TextureUpload],
+    ) {
+        if layout.textures.len() <= self.device_limits.max_samplers_per_shader_stage as usize {
+            return;
+        }
+        let keys: Vec<_> = layout
+            .textures
+            .iter()
+            .map(|binding| {
+                textures
+                    .iter()
+                    .find(|t| t.stage == stage && t.slot == binding.slot)
+                    .map(|upload| {
+                        let folded = binding.fold.is_some();
+                        let key =
+                            crate::bind::sampler_key(upload, binding.compare, binding.uint, folded);
+                        // The binding type follows from these, so they must agree too.
+                        (key, binding.compare, binding.uint)
+                    })
+            })
+            .collect();
+        for index in 0..layout.textures.len() {
+            let Some(key) = keys[index] else {
+                continue;
+            };
+            layout.textures[index].sampler = (0..index)
+                .find(|&earlier| {
+                    keys[earlier] == Some(key) && layout.textures[earlier].sampler.is_none()
+                })
+                .map(|earlier| earlier as u32);
+        }
     }
 
     /// How a 2D image taller than the device allows is folded into layers, if it is one.
