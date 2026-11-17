@@ -496,7 +496,8 @@ impl Gpu {
             reason = Some(1);
             self.shadow_texture(upload)?
         } else {
-            let texture = self.texture(upload, view_dimension, fold)?;
+            let texture =
+                self.texture(upload, view_dimension, fold, !declared_texture.sized_only)?;
             let kept = self
                 .space
                 .gpu_textures
@@ -1309,13 +1310,17 @@ impl Gpu {
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
         fold: Option<wgsl::Fold>,
+        reads_texels: bool,
     ) -> std::result::Result<wgpu::Texture, String> {
         if let Some(made) = self.space.gpu_textures.get(&upload.key) {
             if let Some((_, texture)) = made.iter().find(|(v, _)| *v == view) {
                 return Ok(texture.clone());
             }
         }
-        self.note_read_of(upload.key.addr..upload.key.addr + upload.bytes.len() as u64);
+        // Stale texels answer a size query as well as current ones.
+        if reads_texels {
+            self.note_read_of(upload.key.addr..upload.key.addr + upload.bytes.len() as u64);
+        }
         let (texture, len) = self.upload_texture(upload, view, fold, &[])?;
         // Kept only alongside its cached bytes, which a guest write evicts, or as a null image.
         if upload.is_null() || self.space.texture_cache.contains_key(&upload.key) {

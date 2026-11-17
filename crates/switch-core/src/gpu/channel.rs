@@ -339,7 +339,17 @@ impl Channel {
                             return Ok(());
                         }
                         (BlitRoute::GuestMemory, _) => {}
-                        _ => {
+                        (_, Some(blit)) => {
+                            let span = |s: &crate::gpu::surface::Surface| {
+                                s.addr..s.addr + u64::from(s.size())
+                            };
+                            self.three_d.sync_renderer_ranges(
+                                &[span(&blit.src)],
+                                &[span(&blit.dst)],
+                                ctx,
+                            )?;
+                        }
+                        (_, None) => {
                             self.three_d.flush_renderer(ctx)?;
                         }
                     }

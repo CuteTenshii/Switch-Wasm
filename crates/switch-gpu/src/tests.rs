@@ -1590,6 +1590,80 @@ fn a_compute_launch_on_the_device_writes_what_the_software_dispatch_writes() {
     assert_eq!(device.output(12), expected);
 }
 
+/// A sync for an engine's ranges sends back only the held surfaces over them: one it reads
+/// stays held, one it overwrites is let go, and one beside them stays on the device unsent.
+#[test]
+fn a_sync_for_ranges_sends_back_only_the_surfaces_over_them() {
+    use switch_core::gpu::pipeline::Format;
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::surface::Layout;
+    use switch_core::gpu::testing::ComputeHarness;
+    use switch_core::gpu::upload::Target;
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let mut h = ComputeHarness::new(&[], [1, 1, 1], [1, 1, 1], 0);
+    let surface = |offset: u64| Target {
+        format: Format::Rgba8Unorm,
+        addr: h.base + offset,
+        width: 8,
+        height: 4,
+        layout: Layout::Pitch { pitch: 32 },
+        row_bytes: 32,
+        rows: 4,
+        unit: 4,
+        depth: None,
+    };
+    let (read, written, beside) = (surface(0x2000), surface(0x2400), surface(0x2800));
+    let texels = |seed: u8| -> Vec<u8> { (0..128).map(|i| seed.wrapping_add(i)).collect() };
+    for (target, seed) in [(read, 1), (written, 2), (beside, 3)] {
+        gpu.hold(&target, &h.ctx()).unwrap();
+        let held = gpu.space.held.get_mut(&target.addr).unwrap();
+        held.dirty = true;
+        gpu.queue.write_texture(
+            held.texture.as_image_copy(),
+            &texels(seed),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(32),
+                rows_per_image: Some(4),
+            },
+            held.texture.size(),
+        );
+    }
+    let span = |t: &Target| t.addr..t.addr + t.len();
+    let mut synced = 0;
+    while gpu
+        .sync_ranges(&[span(&read)], &[span(&written)], &mut h.ctx())
+        .unwrap()
+        == Flush::Pending
+    {
+        synced += 1;
+        assert!(synced < 100, "the readback never landed");
+    }
+    let guest = |h: &mut ComputeHarness, t: &Target| -> Vec<u8> {
+        let ctx = h.ctx();
+        (0..128)
+            .map(|i| ctx.vmm_read_u8(t.addr + i).unwrap())
+            .collect()
+    };
+    assert_eq!(guest(&mut h, &read), texels(1));
+    assert_eq!(guest(&mut h, &written), texels(2));
+    assert_eq!(guest(&mut h, &beside), vec![0; 128], "sent back unasked");
+    assert!(gpu
+        .space
+        .held
+        .get(&read.addr)
+        .is_some_and(|held| !held.dirty));
+    assert!(!gpu.space.held.contains_key(&written.addr));
+    assert!(gpu
+        .space
+        .held
+        .get(&beside.addr)
+        .is_some_and(|held| held.dirty));
+}
+
 /// A launch that samples a texture and stores to an image runs on the device, and once
 /// flushed the image holds what the software dispatch stores.
 #[test]
@@ -1753,6 +1827,10 @@ fn a_size_query_of_an_image_held_on_the_device_copies_nothing() {
         );
     });
     assert_eq!(gpu.held_copies_made, 0);
+    assert_eq!(
+        gpu.syncs[4], 0,
+        "a size query counted as a read of the held image"
+    );
     let mut flushes = 0;
     while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
         flushes += 1;

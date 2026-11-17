@@ -672,7 +672,17 @@ impl Gpu {
 
     /// Ask for the buffers atomics wrote back, without waiting; [`Gpu::flush`] collects them.
     fn ask_for_globals(&mut self) {
-        for (addr, held) in std::mem::take(&mut self.space.globals) {
+        self.ask_for_globals_where(|_| true);
+    }
+
+    /// Send back the held buffers whose span `wanted` picks.
+    fn ask_for_globals_where(&mut self, wanted: impl Fn(&std::ops::Range<u64>) -> bool) {
+        let (now, later) = std::mem::take(&mut self.space.globals)
+            .into_iter()
+            .partition(|(addr, held)| wanted(&(*addr..*addr + held.original.len() as u64)));
+        self.space.globals = later;
+        let now: Vec<(u64, crate::readback::HeldGlobal)> = now.into_iter().collect();
+        for (addr, held) in now {
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("readback"),
                 size: held.original.len() as u64,
@@ -1020,6 +1030,65 @@ impl Gpu {
         // Only once per frame.
         if self.space.pending.is_empty() {
             self.ask_for_all();
+        }
+        self.wait_and_land(ctx)
+    }
+
+    /// [`Gpu::flush_inner`] for an engine about to read `read` and overwrite `written`: only what
+    /// is held there goes back. A surface only read stays held, as a scanned-out one does.
+    pub(super) fn sync_ranges_inner(
+        &mut self,
+        read: &[std::ops::Range<u64>],
+        written: &[std::ops::Range<u64>],
+        ctx: &mut ExecCtx,
+    ) -> Result<Flush> {
+        if self.give_up() {
+            return Ok(Flush::Done);
+        }
+        self.submit_batch();
+        self.release_scratch();
+        let touches = |span: &std::ops::Range<u64>, ranges: &[std::ops::Range<u64>]| {
+            ranges.iter().any(|range| spans_overlap(span, range))
+        };
+        timed!(self, flush_ask, {
+            self.space.asked += 1;
+            let (now, later): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.space.evicted)
+                .into_iter()
+                .partition(|held| {
+                    let span = held_span(held);
+                    touches(&span, read) || touches(&span, written)
+                });
+            self.space.evicted = later;
+            for held in now {
+                self.ask_for(held);
+            }
+            let mut owed: Vec<(u64, bool)> = self
+                .space
+                .held
+                .iter()
+                .filter_map(|(&addr, held)| {
+                    let span = held_span(held);
+                    let overwritten = touches(&span, written);
+                    (overwritten || touches(&span, read)).then_some((addr, overwritten))
+                })
+                .collect();
+            owed.sort_unstable();
+            for (addr, overwritten) in owed {
+                if overwritten {
+                    self.flush_one(addr);
+                } else {
+                    self.send_back_kept(addr);
+                }
+            }
+            self.ask_for_globals_where(|span| touches(span, read) || touches(span, written));
+        });
+        self.wait_and_land(ctx)
+    }
+
+    /// Wait for the readbacks asked for and put them in guest memory.
+    fn wait_and_land(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
+        if self.space.pending.is_empty() {
+            return Ok(Flush::Done);
         }
         // `Wait` blocks natively and does nothing on the web, where the present waits for a later slice.
         // `--defer-readbacks` skips it to reproduce the browser natively.

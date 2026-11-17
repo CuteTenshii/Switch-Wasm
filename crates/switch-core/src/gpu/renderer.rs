@@ -108,6 +108,18 @@ pub trait Renderer: std::fmt::Debug {
         Ok(Flush::Done)
     }
 
+    /// [`Renderer::flush`] for an engine about to read `read` and overwrite `written` in guest
+    /// memory: only what the backend holds there has to go back first.
+    fn sync_ranges(
+        &mut self,
+        read: &[Range<u64>],
+        written: &[Range<u64>],
+        ctx: &mut ExecCtx,
+    ) -> Result<Flush> {
+        let _ = (read, written);
+        self.flush(ctx)
+    }
+
     /// Start getting a presented frame back without waiting for the ones already on their
     /// way; see [`Submit`]. `scanout` is the CPU address the display reads, when known; a
     /// backend may keep every other surface for later.

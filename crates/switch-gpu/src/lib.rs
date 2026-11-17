@@ -1169,6 +1169,21 @@ impl Renderer for Gpu {
         result
     }
 
+    fn sync_ranges(
+        &mut self,
+        read: &[std::ops::Range<u64>],
+        written: &[std::ops::Range<u64>],
+        ctx: &mut ExecCtx,
+    ) -> Result<Flush> {
+        self.enter_space(ctx.as_id);
+        let at = self.times.map(|_| web_time::Instant::now());
+        let result = self.sync_ranges_inner(read, written, ctx);
+        if let (Some(at), Some(t)) = (at, self.times.as_mut()) {
+            t.flush += at.elapsed().as_micros();
+        }
+        result
+    }
+
     fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u32>) -> Result<Submit> {
         self.enter_space(ctx.as_id);
         self.submit_frame_inner(ctx, scanout)

@@ -241,6 +241,18 @@ impl Engine3D {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.flush(ctx))
     }
 
+    /// See [`Renderer::sync_ranges`].
+    pub fn sync_renderer_ranges(
+        &mut self,
+        read: &[std::ops::Range<u64>],
+        written: &[std::ops::Range<u64>],
+        ctx: &mut ExecCtx,
+    ) -> Result<crate::gpu::renderer::Flush> {
+        self.with_renderer(ctx, |renderer, _, ctx| {
+            renderer.sync_ranges(read, written, ctx)
+        })
+    }
+
     /// See [`Renderer::dispatch`].
     pub fn dispatch_on_device(
         &mut self,
