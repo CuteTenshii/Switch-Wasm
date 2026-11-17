@@ -440,6 +440,9 @@ impl Cpu {
                 };
                 self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
             }
+            // UnregisterNetworkServiceAccountWithUserSaveDataDeletion(Uid): no network account
+            // is registered, so there is nothing to unregister or delete.
+            Some(221) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // GetApplicationControlData(u8 source, u64 application_id) -> u32 size.
             Some(400) => self.ns_application_control_data(tls),
             // IsQualificationTransitionSupportedByProcessId(u64 process_id) -> bool.
@@ -800,6 +803,14 @@ mod tests {
         write_request(&mut cpu, 0, &[]);
         cpu.ns_request(TLS, session, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0);
+    }
+
+    #[test]
+    fn unregistering_a_network_service_account_succeeds() {
+        let mut cpu = request(false, 221, &[0u8; 0x10]);
+        cpu.register_service_handle(9, "ns:app-manager");
+        cpu.ns_request(TLS, 9, Some(221)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
     }
 
     #[test]
