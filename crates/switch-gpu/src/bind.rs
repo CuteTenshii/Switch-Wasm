@@ -832,12 +832,16 @@ impl Gpu {
             .zip(writes)
             .map(|((layer, surface), &writes)| (*layer, surface.surface().clone(), writes))
             .collect();
-        if covered {
-            if let Some(copy) = self.space.held_copies.get(&key) {
-                if copy.sources == sources {
-                    self.held_copies_reused += 1;
-                    return Ok(copy.texture.clone());
-                }
+        let guest = (!covered).then(|| upload.bytes.clone());
+        if let Some(copy) = self.space.held_copies.get(&key) {
+            let same_guest = match (&copy.guest, &guest) {
+                (None, None) => true,
+                (Some(was), Some(now)) => std::sync::Arc::ptr_eq(was, now),
+                _ => false,
+            };
+            if copy.sources == sources && same_guest {
+                self.held_copies_reused += 1;
+                return Ok(copy.texture.clone());
             }
         }
         self.held_copies_made += 1;
@@ -984,10 +988,6 @@ impl Gpu {
             }
         }
         self.submit_with_batch(encoder);
-        if !covered {
-            self.scratch.push(Scratch::Texture(texture.clone()));
-            return Ok(texture);
-        }
         if self.space.held_copies.len() >= crate::MAX_HELD_COPIES {
             let stale: Vec<HeldCopy> = self
                 .space
@@ -1001,6 +1001,7 @@ impl Gpu {
         let copy = HeldCopy {
             texture: texture.clone(),
             sources,
+            guest,
         };
         if let Some(stale) = self.space.held_copies.insert(key, copy) {
             // A draw recorded before this one may still sample it.

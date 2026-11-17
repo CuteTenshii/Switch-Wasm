@@ -514,6 +514,9 @@ struct HeldCopy {
     texture: wgpu::Texture,
     /// Each layer's source and its [`Held::writes`] when copied.
     sources: Vec<(u32, wgpu::Texture, u64)>,
+    /// The guest bytes the held layers were copied over, unless they cover the texture. The
+    /// texture cache hands out the same bytes until a guest write evicts them.
+    guest: Option<std::sync::Arc<[u8]>>,
 }
 
 /// Past this many, every kept copy is dropped: a title's set of sampled held surfaces is small.
