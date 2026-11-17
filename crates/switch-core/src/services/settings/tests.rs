@@ -663,6 +663,18 @@ fn a_stored_record_that_falls_back_to_its_default_is_named() {
 }
 
 #[test]
+fn the_wireless_certification_file_is_empty() {
+    for cmd in [55, 56] {
+        let mut cpu = request(false, cmd, &[]);
+        cpu.set_sys_request(TLS, Some(cmd)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "cmd {cmd} result");
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "cmd {cmd} size");
+        let log = String::from_utf8_lossy(&cpu.trace).into_owned();
+        assert!(!log.contains("stub"), "{log:?}");
+    }
+}
+
+#[test]
 fn a_value_set_through_a_command_the_store_does_not_know_is_reported_as_dropped() {
     // An id past every stored setting, sent with a value to set.
     let mut cpu = request(false, 9000, &1u32.to_le_bytes());

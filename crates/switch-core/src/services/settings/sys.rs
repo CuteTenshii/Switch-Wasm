@@ -374,6 +374,9 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &scheme, &[])
             }
             Some(185) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // GetWirelessCertificationFileSize / GetWirelessCertificationFile -> u64 size: the
+            // PRODINFOF file does not exist here, so it is empty and the buffer stays untouched.
+            Some(55) | Some(56) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // Get/SetThemeSettings (8 bytes) and Get/SetThemeKey (16), as the Home Menu's client
             // stubs send and read them.
             Some(175) => {
