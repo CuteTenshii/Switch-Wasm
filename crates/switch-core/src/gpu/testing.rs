@@ -1070,6 +1070,8 @@ impl ComputeHarness {
             (IMAGE_COPY_IMAGE, 2),
             (IMAGE_COPY_U, (1.0f32 / 128.0).to_bits()),
             (IMAGE_COPY_V, (1.0f32 / 8.0).to_bits()),
+            (IMAGE_SIZE_LEVEL, 1),
+            (IMAGE_SIZE_HANDLE, 2),
         ] {
             ctx.write_u32(bank + u64::from(offset), word).unwrap();
         }
@@ -1079,6 +1081,21 @@ impl ComputeHarness {
         engine.regs.set(0x557, (tsc >> 32) as u32);
         engine.regs.set(0x558, tsc as u32);
         engine
+    }
+
+    /// Point [`image_copy_program`]'s texture handle at TIC 3, which is all zero: a null image.
+    pub fn null_texture(&mut self) {
+        let at = self.base + COMPUTE_BANK_AT + u64::from(IMAGE_COPY_TEXTURE);
+        self.ctx().write_u32(at, 3 | (1 << 20)).unwrap();
+    }
+
+    /// Replace the launch's program, leaving the rest as it is.
+    pub fn set_program(&mut self, program: &[u64]) {
+        let at = self.base + COMPUTE_PROGRAM_AT;
+        let mut ctx = self.ctx();
+        for (i, word) in laid_out(program).iter().enumerate() {
+            ctx.write_u32(at + i as u64 * 4, *word).unwrap();
+        }
     }
 
     /// The image [`ComputeHarness::image_copy`] lays out.
@@ -1133,12 +1150,7 @@ pub fn write_launch(
         }
     };
     write(at, &qmd_words(grid, block, bank_at));
-    let laid_out: Vec<u32> = program
-        .chunks(3)
-        .flat_map(|chunk| std::iter::once(0).chain(chunk.iter().copied()))
-        .flat_map(|w: u64| [w as u32, (w >> 32) as u32])
-        .collect();
-    write(program_at, &laid_out);
+    write(program_at, &laid_out(program));
     for &(offset, word) in bank_words {
         write(bank_at + u64::from(offset), &[word]);
     }
@@ -1147,6 +1159,15 @@ pub fn write_launch(
     engine.regs.set(0x583, program_at as u32);
     engine.last_dispatch = Some(crate::gpu::engine::compute::Dispatch { qmd_addr: at });
     engine
+}
+
+/// A program's words as memory holds them: a scheduling word before every three.
+fn laid_out(program: &[u64]) -> Vec<u32> {
+    program
+        .chunks(3)
+        .flat_map(|chunk| std::iter::once(0).chain(chunk.iter().copied()))
+        .flat_map(|w: u64| [w as u32, (w >> 32) as u32])
+        .collect()
 }
 
 /// A version 2.x QMD launching `grid` CTAs of `block` threads with bank 0 bound at `bank`.
@@ -1346,18 +1367,69 @@ pub const IMAGE_COPY_IMAGE: u32 = 0x64;
 pub const IMAGE_COPY_U: u32 = 0x68;
 pub const IMAGE_COPY_V: u32 = 0x6c;
 
+/// Assert `word` decodes as `expected`.
+fn checked(word: u64, expected: crate::gpu::shader::Op) -> u64 {
+    assert_eq!(
+        crate::gpu::shader::isa::decode(word).op,
+        expected,
+        "encoded {word:#018x}"
+    );
+    word
+}
+
+const PT: u64 = 7 << 16;
+
+/// `ldc dst, c0[offset]`.
+fn ldc0(dst: u8, offset: u32) -> u64 {
+    use crate::gpu::shader::isa::{MemSize, RZ};
+    checked(
+        0xef94u64 << 48 | u64::from(offset) << 20 | PT | u64::from(RZ) << 8 | u64::from(dst),
+        crate::gpu::shader::Op::Ldc {
+            dst,
+            bank: 0,
+            offset: offset as i32,
+            idx: RZ,
+            size: MemSize::B32,
+        },
+    )
+}
+
+/// `sust.p.2d.rgba [coords], src, handle_reg`.
+fn sust_p_2d(src: u8, coords: u8, handle_reg: u8) -> u64 {
+    use crate::gpu::shader::isa::{SurfaceData, SurfaceDim};
+    checked(
+        0xeb20u64 << 48
+            | u64::from(handle_reg) << 39
+            | 3 << 33
+            | 0xf << 20
+            | PT
+            | u64::from(coords) << 8
+            | u64::from(src),
+        crate::gpu::shader::Op::Sust {
+            src,
+            coords,
+            handle: 0,
+            handle_reg: Some(handle_reg),
+            dim: SurfaceDim::D2,
+            data: SurfaceData::Formatted([true; 4]),
+        },
+    )
+}
+
+fn exit_word() -> u64 {
+    checked(
+        0xe300_0000_0000_0000 | PT | 0xF,
+        crate::gpu::shader::Op::Exit,
+    )
+}
+
 /// Thread `(x, y)` samples the bindless texture at `(2^x * u, 2^y * v)` and stores the texel
 /// to texel `(x, y)` of the bindless image.
 pub fn image_copy_program() -> Vec<u64> {
-    use crate::gpu::shader::isa::{self, MemSize, Operand, SurfaceData, SurfaceDim, TexDim, RZ};
+    use crate::gpu::shader::isa::{Operand, TexDim};
     use crate::gpu::shader::Op;
-    const PT: u64 = 7 << 16;
-    let check = |word: u64, expected: Op| {
-        assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");
-        word
-    };
     let s2r = |dst: u8, sr: u8| {
-        check(
+        checked(
             0xf0c8u64 << 48 | u64::from(sr) << 20 | PT | u64::from(dst),
             Op::S2r { dst, sr },
         )
@@ -1368,7 +1440,7 @@ pub fn image_copy_program() -> Vec<u64> {
             bank: 0,
             offset: offset as u16,
         };
-        check(
+        checked(
             0x4c18u64 << 48
                 | u64::from(offset >> 2) << 20
                 | 23 << 39
@@ -1386,25 +1458,13 @@ pub fn image_copy_program() -> Vec<u64> {
             },
         )
     };
-    let ldc = |dst: u8, offset: u32| {
-        check(
-            0xef94u64 << 48 | u64::from(offset) << 20 | PT | u64::from(RZ) << 8 | u64::from(dst),
-            Op::Ldc {
-                dst,
-                bank: 0,
-                offset: offset as i32,
-                idx: RZ,
-                size: MemSize::B32,
-            },
-        )
-    };
     vec![
         s2r(8, 0x21),
         s2r(9, 0x22),
         scale(0, 8, IMAGE_COPY_U),
         scale(1, 9, IMAGE_COPY_V),
-        ldc(2, IMAGE_COPY_TEXTURE),
-        check(
+        ldc0(2, IMAGE_COPY_TEXTURE),
+        checked(
             0xdeba_0007_a027_0000,
             Op::Tex {
                 dst: 0,
@@ -1419,21 +1479,42 @@ pub fn image_copy_program() -> Vec<u64> {
                 mask: [true; 4],
             },
         ),
-        ldc(39, IMAGE_COPY_IMAGE),
-        check(
-            0xeb20u64 << 48 | 39 << 39 | 3 << 33 | 0xf << 20 | PT | 8 << 8,
-            Op::Sust {
-                src: 0,
-                coords: 8,
-                handle: 0,
-                handle_reg: Some(39),
-                dim: SurfaceDim::D2,
-                data: SurfaceData::Formatted([true; 4]),
-            },
-        ),
-        check(0xe300_0000_0000_0000 | PT | 0xF, Op::Exit),
+        ldc0(39, IMAGE_COPY_IMAGE),
+        sust_p_2d(0, 8, 39),
+        exit_word(),
     ]
 }
+
+/// Each thread queries the image's size through bound texture 8, at the level bank word
+/// [`IMAGE_SIZE_LEVEL`] holds, as Echoes of Wisdom's cubemap filter does, and stores `u` in
+/// every channel to the texel at that size.
+pub fn image_size_program() -> Vec<u64> {
+    use crate::gpu::shader::Op;
+    vec![
+        ldc0(8, IMAGE_SIZE_LEVEL),
+        checked(
+            0xdf48_0081_8047_0800,
+            Op::Txq {
+                dst: 0,
+                lod: 8,
+                handle: 8,
+                mask: [true, true, false, false],
+            },
+        ),
+        ldc0(4, IMAGE_COPY_U),
+        ldc0(5, IMAGE_COPY_U),
+        ldc0(6, IMAGE_COPY_U),
+        ldc0(7, IMAGE_COPY_U),
+        ldc0(39, IMAGE_COPY_IMAGE),
+        sust_p_2d(4, 0, 39),
+        exit_word(),
+    ]
+}
+
+/// Bank 0's word holding the level [`image_size_program`] queries, and the word bound
+/// texture 8's handle is read from.
+pub const IMAGE_SIZE_LEVEL: u32 = 0x70;
+const IMAGE_SIZE_HANDLE: u32 = 8 * 4;
 
 /// The threads [`warp_program`] runs as: a full warp and four lanes of another.
 pub const WARP_THREADS: u32 = 36;

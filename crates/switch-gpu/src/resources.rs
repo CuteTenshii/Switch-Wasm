@@ -314,7 +314,8 @@ impl Gpu {
             self.texture_misses += 1;
             // `source_len` is an upper bound that can exceed the mapping, so stop where the mapping does.
             let pages = guest_pages(ctx, key.addr, source_len);
-            if pages.is_empty() {
+            // A null image's stand-in has no pages, and nothing can write it.
+            if pages.is_empty() && key.addr != 0 {
                 continue;
             }
             // Whole-cache eviction, every address space's: the limit is shared.

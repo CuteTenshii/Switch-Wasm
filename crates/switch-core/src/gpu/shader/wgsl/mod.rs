@@ -184,6 +184,8 @@ pub struct Translation {
     pub textures: Vec<(TextureSlot, TexDim, bool)>,
     /// 2D images stored to, in first-mention order.
     pub images: Vec<TextureSlot>,
+    /// The [`Translation::textures`] only `txq` reads, whose texels nothing reads.
+    pub sized_only: Vec<TextureSlot>,
     /// Distinct `tex.aoffi` offsets `(x, y)`, named by index since WGSL needs constants.
     pub texture_offsets: Vec<(i32, i32)>,
     /// The first instruction asking which quad lane it is.
@@ -234,9 +236,11 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
     emitter.warp_caps = caps.warp;
     emitter.emit_blocks(&leaders)?;
     // Nintendo Switch Sports queries texture sizes without sampling.
+    let mut sized_only = Vec::new();
     for &slot in &emitter.queried {
         if !emitter.textures.iter().any(|&(seen, _, _)| seen == slot) {
             emitter.textures.push((slot, TexDim::T2d, false));
+            sized_only.push(slot);
         }
     }
     Ok(Translation {
@@ -249,6 +253,7 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         const_extents: emitter.banks.values().copied().collect(),
         textures: emitter.textures.clone(),
         images: emitter.images.clone(),
+        sized_only,
         texture_offsets: emitter.texture_offsets.clone(),
         quad: emitter.quad,
         quad_swap: emitter.quad_swap,

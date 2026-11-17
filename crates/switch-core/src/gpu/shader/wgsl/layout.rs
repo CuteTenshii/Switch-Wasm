@@ -110,6 +110,8 @@ pub struct TextureBinding {
     /// Set by the backend to an earlier binding whose sampler is the same, which this one
     /// uses instead of binding its own; a stage may bind few samplers.
     pub sampler: Option<u32>,
+    /// Only its size is read; see [`Translation::sized_only`].
+    pub sized_only: bool,
 }
 
 /// A 2D image a program stores to, bound as a write-only storage texture.
@@ -312,6 +314,7 @@ impl Layout {
                     uint: false,
                     crop: None,
                     sampler: None,
+                    sized_only: translated.sized_only.contains(&slot),
                 })
                 .collect(),
             images: translated

@@ -113,6 +113,7 @@ fn a_layout_names_every_binding_the_text_calls_through() {
             uint: false,
             crop: None,
             sampler: None,
+            sized_only: false,
         }]
     );
     let source = module(&translated, Stage::Fragment, &layout).unwrap();

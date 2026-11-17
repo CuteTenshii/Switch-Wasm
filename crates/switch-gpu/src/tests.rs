@@ -1713,6 +1713,78 @@ fn subgroup_sizes(gpu: &super::Gpu) -> Vec<u32> {
     seen
 }
 
+/// A launch that only asks an image's size binds it without copying it off the device, even
+/// while it stores to that image, and stores where the software dispatch does.
+#[test]
+fn a_size_query_of_an_image_held_on_the_device_copies_nothing() {
+    use switch_core::gpu::engine::compute::EngineCompute;
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{
+        image_copy_program, image_size_program, ComputeHarness, IMAGE_COPY_SIZE,
+    };
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = IMAGE_COPY_SIZE;
+    let block = [width, height, 1];
+    type Run<'a> = dyn FnMut(&mut ComputeHarness, &EngineCompute) + 'a;
+    let run_both = |h: &mut ComputeHarness, run: &mut Run| {
+        let engine = h.image_copy();
+        run(h, &engine);
+        h.set_program(&image_size_program());
+        run(h, &engine);
+    };
+
+    let mut software = ComputeHarness::new(&image_copy_program(), [1, 1, 1], block, 0);
+    run_both(&mut software, &mut |h, engine| {
+        switch_core::gpu::compute::dispatch(engine, &mut h.ctx()).unwrap();
+    });
+    let expected = software.image();
+    // Level 1 of 8x4 is 4x2, and 1/128 of full scale rounds to 2.
+    assert_eq!(expected[(2 * width + 4) as usize], 0x0202_0202);
+
+    let mut device = ComputeHarness::new(&image_copy_program(), [1, 1, 1], block, 0);
+    run_both(&mut device, &mut |h, engine| {
+        assert!(
+            gpu.dispatch(engine, &mut h.ctx()).unwrap(),
+            "refused: {:?}",
+            gpu.compute_refusals
+        );
+    });
+    assert_eq!(gpu.held_copies_made, 0);
+    let mut flushes = 0;
+    while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
+        flushes += 1;
+        assert!(flushes < 100, "the readback never landed");
+    }
+    assert_eq!(device.image(), expected);
+}
+
+/// A null image's stand-in is kept like any texture, so launches after the first that sample
+/// one find it.
+#[test]
+fn a_null_texture_is_read_once_across_launches() {
+    use switch_core::gpu::renderer::Renderer;
+    use switch_core::gpu::testing::{image_copy_program, ComputeHarness, IMAGE_COPY_SIZE};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = IMAGE_COPY_SIZE;
+    let mut h = ComputeHarness::new(&image_copy_program(), [1, 1, 1], [width, height, 1], 0);
+    let engine = h.image_copy();
+    h.null_texture();
+    for _ in 0..3 {
+        assert!(
+            gpu.dispatch(&engine, &mut h.ctx()).unwrap(),
+            "refused: {:?}",
+            gpu.compute_refusals
+        );
+    }
+    assert_eq!(gpu.texture_misses, 1);
+}
+
 /// Warp instructions in a launch run on 32-lane subgroups where the device has them, and
 /// write what the software dispatch writes.
 #[test]

@@ -472,8 +472,11 @@ impl Gpu {
             ),
             None => None,
         };
+        // A size query reads no texels, so guest memory's serve however stale.
         let (held, writes) = match (fold, &cropped) {
-            (None, None) => self.held_layers(upload, compare, view_dimension)?,
+            (None, None) if !declared_texture.sized_only => {
+                self.held_layers(upload, compare, view_dimension)?
+            }
             _ => (Vec::new(), Vec::new()),
         };
         let direct = match cropped {
@@ -1313,8 +1316,8 @@ impl Gpu {
         }
         self.note_read_of(upload.key.addr..upload.key.addr + upload.bytes.len() as u64);
         let (texture, len) = self.upload_texture(upload, view, fold, &[])?;
-        // Kept only alongside its cached bytes, which a guest write evicts.
-        if self.space.texture_cache.contains_key(&upload.key) {
+        // Kept only alongside its cached bytes, which a guest write evicts, or as a null image.
+        if upload.is_null() || self.space.texture_cache.contains_key(&upload.key) {
             self.gpu_texture_bytes += len as u64;
             self.space
                 .gpu_textures
