@@ -64,6 +64,7 @@ fn blocker(why: Unsupported) -> String {
         Unsupported::SharedHandleKey { .. } => "two bindless handles keyed alike".into(),
         Unsupported::VertexWrite => "vertex shader writing global memory".into(),
         Unsupported::PackedSpecialRegister { sr } => format!("packed special register {sr:#x}"),
+        Unsupported::ImageFormat => "image store (no draw binds a storage format)".into(),
     }
 }
 
@@ -86,7 +87,8 @@ fn blocked_at(why: &Unsupported) -> Option<usize> {
         | Unsupported::SharedHandleKey { at } => Some(at),
         Unsupported::TextureDimension { .. }
         | Unsupported::VertexWrite
-        | Unsupported::PackedSpecialRegister { .. } => None,
+        | Unsupported::PackedSpecialRegister { .. }
+        | Unsupported::ImageFormat => None,
     }
 }
 

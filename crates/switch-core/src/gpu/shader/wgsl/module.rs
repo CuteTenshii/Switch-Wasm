@@ -1,9 +1,10 @@
 //! Wrapping a translation into a complete module with its entry points.
 
 use super::layout::{
-    attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Layout, Stage, Update, ATOMS,
-    ATTRIBUTE_WORDS, CONSTANTS_BINDING, CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE,
-    GLOBAL_BINDING, IDENTITY_SWIZZLE, INSTANCE_ID, POSITION, TEXTURE_BINDING, VERTEX_ID,
+    attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Layout, Stage, StorageNumeric, Update,
+    ATOMS, ATTRIBUTE_WORDS, CONSTANTS_BINDING, CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE,
+    GLOBAL_BINDING, IDENTITY_SWIZZLE, IMAGE_BINDING, INSTANCE_ID, POSITION, TEXTURE_BINDING,
+    VERTEX_ID,
 };
 use super::{Translation, Unsupported};
 use crate::gpu::pipeline::AttributeBase;
@@ -91,6 +92,9 @@ pub fn module(
     if stage == Stage::Vertex && layout.globals.iter().any(|g| g.written) {
         return Err(Unsupported::VertexWrite);
     }
+    if let Some(at) = translated.warp.filter(|_| stage != Stage::Compute) {
+        return Err(Unsupported::Quad { at });
+    }
     if stage == Stage::Compute {
         // Lanes of a warp exist only in a fragment quad here.
         if let Some(at) = translated.quad.or(translated.quad_swap) {
@@ -105,6 +109,9 @@ pub fn module(
         }
     }
     // Directives first, then the lane index.
+    if translated.warp.is_some() && translated.subgroup_enable {
+        out.push_str("enable subgroups;\n\n");
+    }
     if translated.quad_swap.is_some() {
         if translated.subgroups {
             if translated.subgroup_enable {
@@ -166,9 +173,37 @@ pub fn module(
             GLOBAL_BINDING + slot as u32
         ));
     }
-    if !layout.const_banks.is_empty() || !layout.textures.is_empty() || !layout.globals.is_empty() {
+    let mut stores = String::new();
+    for (index, image) in layout.images.iter().enumerate() {
+        let format = image.format.ok_or(Unsupported::ImageFormat)?;
+        out.push_str(&format!(
+            "@group({}) @binding({}) var img{index}: texture_storage_2d<{}, write>;\n",
+            layout.group,
+            IMAGE_BINDING + index as u32,
+            format.name
+        ));
+        let texel = match format.numeric {
+            StorageNumeric::Float => "bitcast<vec4<f32>>(value)",
+            StorageNumeric::Uint => "value",
+            StorageNumeric::Sint => "bitcast<vec4<i32>>(value)",
+        };
+        stores.push_str(&format!(
+            "    case {}u: {{ if (all(vec2<u32>(x, y) < textureDimensions(img{index}))) {{ \
+             textureStore(img{index}, vec2<u32>(x, y), {texel}); }} }}\n",
+            image.slot.key()
+        ));
+    }
+    if !layout.const_banks.is_empty()
+        || !layout.textures.is_empty()
+        || !layout.globals.is_empty()
+        || !layout.images.is_empty()
+    {
         out.push('\n');
     }
+    out.push_str(&format!(
+        "fn imgStore(key: u32, x: u32, y: u32, value: vec4<u32>) {{\n  switch (key) {{\n{stores}    \
+         default: {{ }}\n  }}\n}}\n\n"
+    ));
     if !layout.globals.is_empty() {
         out.push_str("fn gRead(slot: u32, offset: u32) -> u32 {\n  let word = offset >> 2u;\n  switch (slot) {\n");
         for (slot, global) in layout.globals.iter().enumerate() {
@@ -559,7 +594,7 @@ pub fn module(
     out.push_str(&match stage {
         Stage::Vertex => vertex_entry(layout),
         Stage::Fragment => fragment_entry(translated, layout),
-        Stage::Compute => compute_entry(layout),
+        Stage::Compute => compute_entry(layout, translated.warp.is_some()),
     });
     Ok(out)
 }
@@ -609,12 +644,19 @@ fn special_registers(stage: Stage, layout: &Layout) -> String {
     )
 }
 
-/// One invocation per thread of a CTA, a workgroup per CTA.
-fn compute_entry(layout: &Layout) -> String {
+/// One invocation per thread of a CTA, a workgroup per CTA. A program with warp instructions
+/// takes its lane from the subgroup they run on: every invocation is active on entry, so the
+/// count before it is its index there, whatever the workgroup's shape.
+fn compute_entry(layout: &Layout, warp: bool) -> String {
     let [x, y, z] = layout
         .compute
         .expect("a compute module is built for a shape")
         .block;
+    let lane = if warp {
+        "subgroupExclusiveAdd(1u)"
+    } else {
+        "index % 32u"
+    };
     format!(
         "@compute @workgroup_size({x}, {y}, {z})\n\
          fn cs_main(\n\
@@ -622,7 +664,7 @@ fn compute_entry(layout: &Layout) -> String {
          \x20 @builtin(local_invocation_index) index: u32,\n\
          \x20 @builtin(workgroup_id) group: vec3<u32>,\n\
          ) {{\n\
-         \x20 sr_lane = index % 32u;\n\
+         \x20 sr_lane = {lane};\n\
          \x20 sr_tid = local;\n\
          \x20 sr_ctaid = group;\n\
          \x20 _ = run();\n}}\n"

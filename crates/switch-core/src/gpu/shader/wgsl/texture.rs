@@ -49,6 +49,18 @@ impl Emitter<'_> {
         }
     }
 
+    /// Record that the program stores to `slot`.
+    pub(super) fn bind_image(&mut self, at: usize, slot: TextureSlot) -> Result<(), Unsupported> {
+        if self.images.contains(&slot) {
+            return Ok(());
+        }
+        if self.images.iter().any(|seen| seen.key() == slot.key()) {
+            return Err(Unsupported::SharedHandleKey { at });
+        }
+        self.images.push(slot);
+        Ok(())
+    }
+
     /// `tex.aoffi`: a sample offset by an immediate texel offset (signed nibbles, x low).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn sample_offset(

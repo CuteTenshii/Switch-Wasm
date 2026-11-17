@@ -261,32 +261,8 @@ impl Gpu {
             }
         }
 
-        // The texture swizzle is in the descriptor, and WebGPU has no per-texture swizzle.
-        for (layout, stage) in [
-            (&mut vs_layout, ShaderStage::VertexB),
-            (&mut fs_layout, ShaderStage::Fragment),
-        ] {
-            for binding in &mut layout.textures {
-                if let Some(upload) = uploads
-                    .textures
-                    .iter()
-                    .find(|t| t.stage == stage && t.slot == binding.slot)
-                {
-                    binding.swizzle = upload.swizzle;
-                    binding.uint = upload.format.is_uint();
-                    if binding.uint {
-                        // Read texel by texel, with the raw words as they are.
-                        if upload.swizzle != wgsl::IDENTITY_SWIZZLE || binding.compare {
-                            return Err(
-                                "an integer image sampled through a swizzle or a comparison".into(),
-                            );
-                        }
-                        continue;
-                    }
-                    binding.fold = self.fold(upload, binding)?;
-                }
-            }
-        }
+        self.fill_texture_bindings(&mut vs_layout, ShaderStage::VertexB, &uploads.textures)?;
+        self.fill_texture_bindings(&mut fs_layout, ShaderStage::Fragment, &uploads.textures)?;
         let drawn = [color.map(|c| c.addr), depth.map(|d| d.addr)];
         for (layout, stage, translation) in [
             (&mut vs_layout, ShaderStage::VertexB, &vs),
@@ -465,10 +441,39 @@ impl Gpu {
         })
     }
 
+    /// What a stage's texture bindings take from the descriptors: the swizzle, which WebGPU has
+    /// no per-texture form of, whether the image is integer, and how a tall one is folded.
+    pub(super) fn fill_texture_bindings(
+        &self,
+        layout: &mut Layout,
+        stage: ShaderStage,
+        textures: &[switch_core::gpu::upload::TextureUpload],
+    ) -> std::result::Result<(), String> {
+        for binding in &mut layout.textures {
+            let Some(upload) = textures
+                .iter()
+                .find(|t| t.stage == stage && t.slot == binding.slot)
+            else {
+                continue;
+            };
+            binding.swizzle = upload.swizzle;
+            binding.uint = upload.format.is_uint();
+            if binding.uint {
+                // Read texel by texel, with the raw words as they are.
+                if upload.swizzle != wgsl::IDENTITY_SWIZZLE || binding.compare {
+                    return Err("an integer image sampled through a swizzle or a comparison".into());
+                }
+                continue;
+            }
+            binding.fold = self.fold(upload, binding)?;
+        }
+        Ok(())
+    }
+
     /// Past the device's sampler limit, point each texture at the first earlier one bound with
     /// the same sampler, so only distinct samplers are bound. Under it nothing is shared, so a
     /// module does not change with the samplers its draws happen to use.
-    fn share_samplers(
+    pub(super) fn share_samplers(
         &self,
         layout: &mut Layout,
         stage: ShaderStage,
@@ -552,7 +557,7 @@ impl Gpu {
             if stage == ShaderStage::Fragment {
                 let program = switch_core::gpu::shader::no_fragment_program();
                 // Always the same program, so always the same serial.
-                return wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps())
+                return wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps(false))
                     .map(|translation| (translation, 0))
                     .map_err(|e| e.to_string());
             }
@@ -584,8 +589,9 @@ impl Gpu {
         let (program, reads) =
             switch_core::gpu::shader::decode_program_from_memory_recording(ctx, key.0, bank)
                 .map_err(|e| format!("{e:?}"))?;
-        let translation = wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps())
-            .map_err(|e| e.to_string())?;
+        let translation =
+            wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps(key.1.is_none()))
+                .map_err(|e| e.to_string())?;
         // Watch the CPU page behind each virtual page the decode read.
         for &page in &reads.pages {
             if let Some((cpu, _)) = ctx.vmm.translate(page << PAGE_BITS) {
@@ -611,11 +617,13 @@ impl Gpu {
         Ok((translation, serial))
     }
 
-    fn wgsl_caps(&self) -> wgsl::Caps {
+    /// What the translation of a draw stage's program, or a `compute` one's, may use.
+    fn wgsl_caps(&self, compute: bool) -> wgsl::Caps {
         wgsl::Caps {
             subgroups: self.features().contains(wgpu::Features::SUBGROUP),
             // A browser wants the directive; naga rejects it.
             subgroup_enable: cfg!(target_arch = "wasm32"),
+            warp: compute && self.warp_subgroups,
         }
     }
 

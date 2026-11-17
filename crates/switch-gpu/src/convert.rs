@@ -2,6 +2,7 @@
 //! because not every guest format is available on the device.
 
 use switch_core::gpu::pipeline::{self as state, Format};
+use switch_core::gpu::shader::wgsl;
 use switch_core::gpu::upload::{DepthKind, IndexFormat};
 use switch_core::{Error, Result};
 
@@ -293,6 +294,32 @@ pub(crate) fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
         Format::Bc7RgbaUnorm => T::Bc7RgbaUnorm,
         Format::Bc7RgbaUnormSrgb => T::Bc7RgbaUnormSrgb,
     })
+}
+
+/// The storage texel format a shader writes `format` through, from those WebGPU guarantees.
+pub(crate) fn storage_format(format: wgpu::TextureFormat) -> Option<wgsl::StorageFormat> {
+    use wgpu::TextureFormat as T;
+    use wgsl::StorageNumeric::{Float, Sint, Uint};
+    let (name, numeric) = match format {
+        T::Rgba8Unorm => ("rgba8unorm", Float),
+        T::Rgba8Snorm => ("rgba8snorm", Float),
+        T::Rgba8Uint => ("rgba8uint", Uint),
+        T::Rgba8Sint => ("rgba8sint", Sint),
+        T::Rgba16Uint => ("rgba16uint", Uint),
+        T::Rgba16Sint => ("rgba16sint", Sint),
+        T::Rgba16Float => ("rgba16float", Float),
+        T::R32Uint => ("r32uint", Uint),
+        T::R32Sint => ("r32sint", Sint),
+        T::R32Float => ("r32float", Float),
+        T::Rg32Uint => ("rg32uint", Uint),
+        T::Rg32Sint => ("rg32sint", Sint),
+        T::Rg32Float => ("rg32float", Float),
+        T::Rgba32Uint => ("rgba32uint", Uint),
+        T::Rgba32Sint => ("rgba32sint", Sint),
+        T::Rgba32Float => ("rgba32float", Float),
+        _ => return None,
+    };
+    Some(wgsl::StorageFormat { name, numeric })
 }
 
 #[cfg(test)]

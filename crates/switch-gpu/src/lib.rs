@@ -33,8 +33,9 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         // Blending into 32-bit float targets.
         | wgpu::Features::FLOAT32_BLENDABLE;
     // Raise the storage buffer limit to the adapter's: a shader may read more than the guaranteed
-    // eight banks. Sampled textures too, past 16; samplers stay at 16, which is all a browser
-    // gives, so textures share them past that (`Gpu::share_samplers`) natively as well.
+    // eight banks. Sampled textures too, past 16, and storage textures past 4; samplers stay at
+    // 16, which is all a browser gives, so textures share them past that (`Gpu::share_samplers`)
+    // natively as well.
     let (default, offered) = (wgpu::Limits::default(), adapter.limits());
     let required_limits = wgpu::Limits {
         max_storage_buffers_per_shader_stage: default
@@ -43,6 +44,9 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         max_sampled_textures_per_shader_stage: default
             .max_sampled_textures_per_shader_stage
             .max(offered.max_sampled_textures_per_shader_stage),
+        max_storage_textures_per_shader_stage: default
+            .max_storage_textures_per_shader_stage
+            .max(offered.max_storage_textures_per_shader_stage),
         ..default
     };
     wgpu::DeviceDescriptor {
@@ -528,6 +532,9 @@ pub struct Gpu {
     queue: wgpu::Queue,
     /// The device's vertex buffer count; a draw with more is folded by [`fit_vertex_buffers`].
     vertex_buffer_limit: u32,
+    /// Whether the adapter's subgroups are always 32 lanes, so compute warp instructions run
+    /// on them; see `wgsl::Caps::warp`.
+    warp_subgroups: bool,
     /// The address space draws now run in, and its surfaces and caches.
     space_id: u32,
     space: Space,

@@ -197,6 +197,11 @@ impl Gpu {
             resources.push(Resource::Bytes(wgsl::CONSTANTS_BINDING, packed));
         }
 
+        let drawn: Vec<u64> = [p.color, p.depth]
+            .iter()
+            .flatten()
+            .map(|t| t.addr)
+            .collect();
         for (index, upload) in p
             .uploads
             .textures
@@ -204,140 +209,21 @@ impl Gpu {
             .filter(|t| t.stage == stage)
             .enumerate()
         {
-            use switch_core::gpu::shader::isa::TexDim;
             let declared_texture = declared
                 .textures
                 .iter()
                 .find(|b| b.slot == upload.slot)
                 .ok_or("a texture the module never declared")?;
-            let compare = declared_texture.compare;
-            let uint = declared_texture.uint;
-            // An integer image is read texel by texel, which needs no filter.
-            if !compare && !uint {
-                let (format, _) = sampled_texture_format(self.features(), upload.format)
-                    .map_err(|e| format!("{e:?}"))?;
-                if !can_filter(format, self.features()) {
-                    return Err(format!(
-                        "samples a {format:?} texture, which this device cannot filter"
-                    ));
-                }
-            }
-            let dim = declared_texture.dim;
-            let fold = declared_texture.fold;
-            let view_dimension = match dim {
-                // Folded tiles are layers, whatever the program samples the image as.
-                _ if fold.is_some() => wgpu::TextureViewDimension::D2Array,
-                TexDim::T2dArray => wgpu::TextureViewDimension::D2Array,
-                TexDim::T3d => wgpu::TextureViewDimension::D3,
-                // Six faces of a 2D texture, viewed as one cube.
-                TexDim::TCube => wgpu::TextureViewDimension::Cube,
-                // Six faces to a cube, as many cubes as the array holds.
-                TexDim::TCubeArray => wgpu::TextureViewDimension::CubeArray,
-                _ => wgpu::TextureViewDimension::D2,
-            };
-            let binding = TEXTURE_BINDING + 2 * index as u32;
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility: own,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: if compare {
-                        wgpu::TextureSampleType::Depth
-                    } else if uint {
-                        wgpu::TextureSampleType::Uint
-                    } else {
-                        wgpu::TextureSampleType::Float { filterable: true }
-                    },
-                    view_dimension,
-                    multisampled: false,
-                },
-                count: None,
-            });
-            // A texture sharing an earlier one's sampler binds none of its own.
-            let own_sampler = declared_texture.sampler.is_none();
-            if own_sampler {
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: binding + 1,
-                    visibility: own,
-                    ty: wgpu::BindingType::Sampler(if compare {
-                        wgpu::SamplerBindingType::Comparison
-                    } else if uint {
-                        wgpu::SamplerBindingType::NonFiltering
-                    } else {
-                        wgpu::SamplerBindingType::Filtering
-                    }),
-                    count: None,
-                });
-            }
-            // A size-only query binds as 2D, and the device refuses a 2D view of a layered texture.
-            if view_dimension == wgpu::TextureViewDimension::D2 && upload.layers > 1 {
-                return Err(format!(
-                    "binds a {}-layer texture where the program declared a 2D one",
-                    upload.layers
-                ));
-            }
-            // A cube view takes exactly six layers and a cube array a multiple of six; anything
-            // else invalidates the whole command buffer.
-            let layers = upload.layers.max(1);
-            let cube_layers_fit = match view_dimension {
-                wgpu::TextureViewDimension::Cube => layers == 6,
-                wgpu::TextureViewDimension::CubeArray => layers.is_multiple_of(6),
-                _ => true,
-            };
-            if !cube_layers_fit {
-                return Err(format!(
-                    "binds a {layers}-layer texture where the program declared a {view_dimension:?}"
-                ));
-            }
-            // Nothing the device holds is as tall as an image that needs folding.
-            // `prepare` settled that the held surface's corner is sampled in place.
-            let cropped = match declared_texture.crop {
-                Some(_) => Some(
-                    self.space
-                        .held
-                        .get(&upload.key.addr)
-                        .map(|held| held.texture.clone())
-                        .ok_or("a cropped surface that is no longer held")?,
-                ),
-                None => None,
-            };
-            let (held, writes) = match (fold, &cropped) {
-                (None, None) => self.held_layers(upload, compare, view_dimension)?,
-                _ => (Vec::new(), Vec::new()),
-            };
-            let direct = match cropped {
-                Some(surface) => {
-                    self.cropped_binds += 1;
-                    Some(surface)
-                }
-                None => self.directly_sampled(p, upload, view_dimension, compare, &held)?,
-            };
-            let texture = if let Some(surface) = direct {
-                surface
-            } else if !held.is_empty() {
+            if let Some(reason) = self.bind_texture(
+                upload,
+                declared_texture,
+                index,
+                own,
+                &drawn,
+                (&mut entries, &mut resources),
+            )? {
                 persistent = false;
-                why[0] = true;
-                self.texture_over_held(upload, view_dimension, &held, &writes, compare)?
-            } else if compare {
-                persistent = false;
-                why[1] = true;
-                self.shadow_texture(upload)?
-            } else {
-                let texture = self.texture(upload, view_dimension, fold)?;
-                let kept = self
-                    .space
-                    .gpu_textures
-                    .get(&upload.key)
-                    .is_some_and(|made| made.iter().any(|(_, kept)| *kept == texture));
-                persistent &= kept;
-                why[2] |= !kept;
-                texture
-            };
-            resources.push(Resource::Texture(binding, texture, view_dimension));
-            if own_sampler {
-                resources.push(Resource::Sampler(
-                    binding + 1,
-                    self.sampler(upload, compare, uint, fold.is_some()),
-                ));
+                why[reason] = true;
             }
         }
 
@@ -473,6 +359,159 @@ impl Gpu {
             );
         }
         Ok((layout, bind_group, patched))
+    }
+
+    /// Bind one texture and its sampler at `TEXTURE_BINDING + 2 * index`, never sampling in
+    /// place a surface in `drawn`. Answers why the binding does not outlive the work, if it
+    /// does not, as an index into [`Gpu::bind_uncached_why`].
+    pub(super) fn bind_texture(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        declared_texture: &wgsl::TextureBinding,
+        index: usize,
+        own: wgpu::ShaderStages,
+        drawn: &[u64],
+        (entries, resources): (&mut Vec<wgpu::BindGroupLayoutEntry>, &mut Vec<Resource>),
+    ) -> std::result::Result<Option<usize>, String> {
+        use switch_core::gpu::shader::isa::TexDim;
+        let compare = declared_texture.compare;
+        let uint = declared_texture.uint;
+        // An integer image is read texel by texel, which needs no filter.
+        if !compare && !uint {
+            let (format, _) = sampled_texture_format(self.features(), upload.format)
+                .map_err(|e| format!("{e:?}"))?;
+            if !can_filter(format, self.features()) {
+                return Err(format!(
+                    "samples a {format:?} texture, which this device cannot filter"
+                ));
+            }
+        }
+        let dim = declared_texture.dim;
+        let fold = declared_texture.fold;
+        let view_dimension = match dim {
+            // Folded tiles are layers, whatever the program samples the image as.
+            _ if fold.is_some() => wgpu::TextureViewDimension::D2Array,
+            TexDim::T2dArray => wgpu::TextureViewDimension::D2Array,
+            TexDim::T3d => wgpu::TextureViewDimension::D3,
+            // Six faces of a 2D texture, viewed as one cube.
+            TexDim::TCube => wgpu::TextureViewDimension::Cube,
+            // Six faces to a cube, as many cubes as the array holds.
+            TexDim::TCubeArray => wgpu::TextureViewDimension::CubeArray,
+            _ => wgpu::TextureViewDimension::D2,
+        };
+        let binding = TEXTURE_BINDING + 2 * index as u32;
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: own,
+            ty: wgpu::BindingType::Texture {
+                sample_type: if compare {
+                    wgpu::TextureSampleType::Depth
+                } else if uint {
+                    wgpu::TextureSampleType::Uint
+                } else {
+                    wgpu::TextureSampleType::Float { filterable: true }
+                },
+                view_dimension,
+                multisampled: false,
+            },
+            count: None,
+        });
+        // A texture sharing an earlier one's sampler binds none of its own.
+        let own_sampler = declared_texture.sampler.is_none();
+        if own_sampler {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: binding + 1,
+                visibility: own,
+                ty: wgpu::BindingType::Sampler(if compare {
+                    wgpu::SamplerBindingType::Comparison
+                } else if uint {
+                    wgpu::SamplerBindingType::NonFiltering
+                } else {
+                    wgpu::SamplerBindingType::Filtering
+                }),
+                count: None,
+            });
+        }
+        // A null image reads zero through any view.
+        let null_cube;
+        let upload = if upload.is_null() && view_dimension == wgpu::TextureViewDimension::Cube {
+            null_cube = upload.null_layers(6);
+            &null_cube
+        } else {
+            upload
+        };
+        // A size-only query binds as 2D, and the device refuses a 2D view of a layered texture.
+        if view_dimension == wgpu::TextureViewDimension::D2 && upload.layers > 1 {
+            return Err(format!(
+                "binds a {}-layer texture where the program declared a 2D one",
+                upload.layers
+            ));
+        }
+        // A cube view takes exactly six layers and a cube array a multiple of six; anything
+        // else invalidates the whole command buffer.
+        let layers = upload.layers.max(1);
+        let cube_layers_fit = match view_dimension {
+            wgpu::TextureViewDimension::Cube => layers == 6,
+            wgpu::TextureViewDimension::CubeArray => layers.is_multiple_of(6),
+            _ => true,
+        };
+        if !cube_layers_fit {
+            return Err(format!(
+                "binds a {layers}-layer texture where the program declared a {view_dimension:?}"
+            ));
+        }
+        // Nothing the device holds is as tall as an image that needs folding.
+        // `prepare` settled that the held surface's corner is sampled in place.
+        let cropped = match declared_texture.crop {
+            Some(_) => Some(
+                self.space
+                    .held
+                    .get(&upload.key.addr)
+                    .map(|held| held.texture.clone())
+                    .ok_or("a cropped surface that is no longer held")?,
+            ),
+            None => None,
+        };
+        let (held, writes) = match (fold, &cropped) {
+            (None, None) => self.held_layers(upload, compare, view_dimension)?,
+            _ => (Vec::new(), Vec::new()),
+        };
+        let direct = match cropped {
+            Some(surface) => {
+                self.cropped_binds += 1;
+                Some(surface)
+            }
+            None => self.directly_sampled(drawn, upload, view_dimension, compare, &held)?,
+        };
+        let mut reason = None;
+        let texture = if let Some(surface) = direct {
+            surface
+        } else if !held.is_empty() {
+            reason = Some(0);
+            self.texture_over_held(upload, view_dimension, &held, &writes, compare)?
+        } else if compare {
+            reason = Some(1);
+            self.shadow_texture(upload)?
+        } else {
+            let texture = self.texture(upload, view_dimension, fold)?;
+            let kept = self
+                .space
+                .gpu_textures
+                .get(&upload.key)
+                .is_some_and(|made| made.iter().any(|(_, kept)| *kept == texture));
+            if !kept {
+                reason = Some(2);
+            }
+            texture
+        };
+        resources.push(Resource::Texture(binding, texture, view_dimension));
+        if own_sampler {
+            resources.push(Resource::Sampler(
+                binding + 1,
+                self.sampler(upload, compare, uint, fold.is_some()),
+            ));
+        }
+        Ok(reason)
     }
 
     /// Layers of a sampled texture that are surfaces still held on the device, whose guest
@@ -734,7 +773,7 @@ impl Gpu {
     /// draw does not also render to.
     fn directly_sampled(
         &self,
-        p: &Prepared,
+        drawn: &[u64],
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
         compare: bool,
@@ -761,13 +800,8 @@ impl Gpu {
             return Ok(None);
         }
         // A pass cannot sample what it draws to.
-        let target = |addr: u64| self.space.held.get(&addr).map(|held| &held.texture);
-        let drawn = [p.color.map(|c| c.addr), p.depth.map(|d| d.addr)];
-        if drawn
-            .into_iter()
-            .flatten()
-            .any(|addr| target(addr) == Some(surface))
-        {
+        let target = |addr: &u64| self.space.held.get(addr).map(|held| &held.texture);
+        if drawn.iter().any(|addr| target(addr) == Some(surface)) {
             return Ok(None);
         }
         Ok(Some(surface.clone()))

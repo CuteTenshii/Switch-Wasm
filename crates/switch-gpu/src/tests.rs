@@ -1590,6 +1590,170 @@ fn a_compute_launch_on_the_device_writes_what_the_software_dispatch_writes() {
     assert_eq!(device.output(12), expected);
 }
 
+/// A launch that samples a texture and stores to an image runs on the device, and once
+/// flushed the image holds what the software dispatch stores.
+#[test]
+fn a_compute_launch_stores_sampled_texels_to_an_image_on_the_device() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{
+        image_copy_program, image_copy_texel, ComputeHarness, IMAGE_COPY_SIZE,
+    };
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = IMAGE_COPY_SIZE;
+    let block = [width, height, 1];
+    let program = image_copy_program();
+    // Sampled at 2^x / 16 and 2^y / 2 of the texture's width and height.
+    let column = |x: u32| ((1u32 << x) / 16).min(width - 1);
+    let row = |y: u32| ((1u32 << y) / 2).min(height - 1);
+    let expected: Vec<u32> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| image_copy_texel(column(x), row(y))))
+        .collect();
+
+    let mut software = ComputeHarness::new(&program, [1, 1, 1], block, 0);
+    let engine = software.image_copy();
+    switch_core::gpu::compute::dispatch(&engine, &mut software.ctx()).unwrap();
+    assert_eq!(software.image(), expected);
+
+    let mut device = ComputeHarness::new(&program, [1, 1, 1], block, 0);
+    let engine = device.image_copy();
+    assert!(
+        gpu.dispatch(&engine, &mut device.ctx()).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    assert_eq!(
+        device.image(),
+        vec![0; expected.len()],
+        "held until a flush"
+    );
+    let mut flushes = 0;
+    while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
+        flushes += 1;
+        assert!(flushes < 100, "the readback never landed");
+    }
+    assert_eq!(device.image(), expected);
+}
+
+/// The distinct subgroup sizes one 64-invocation workgroup runs with.
+fn subgroup_sizes(gpu: &super::Gpu) -> Vec<u32> {
+    let module = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(
+                "@group(0) @binding(0) var<storage, read_write> sizes: array<u32, 64>;\n\
+                 @compute @workgroup_size(64)\n\
+                 fn main(@builtin(subgroup_size) size: u32, \
+                 @builtin(local_invocation_index) index: u32) { sizes[index] = size; }"
+                    .into(),
+            ),
+        });
+    let pipeline = gpu
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+    let sizes = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 256,
+        usage,
+        mapped_at_creation: false,
+    });
+    let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 256,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: sizes.as_entire_binding(),
+        }],
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&sizes, 0, &out, 0, 256);
+    gpu.queue.submit([encoder.finish()]);
+    out.slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.expect("the readback"));
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("the device");
+    let mapped = out
+        .slice(..)
+        .get_mapped_range()
+        .expect("the mapped readback");
+    let mut seen: Vec<u32> = mapped
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect();
+    seen.sort_unstable();
+    seen.dedup();
+    seen
+}
+
+/// Warp instructions in a launch run on 32-lane subgroups where the device has them, and
+/// write what the software dispatch writes.
+#[test]
+fn a_compute_launch_shuffles_and_votes_across_its_warps_on_the_device() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{warp_program, ComputeHarness, WARP_THREADS};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    // The adapter may report a range wider than the subgroups this device runs.
+    if !gpu.features().contains(wgpu::Features::SUBGROUP) || subgroup_sizes(&gpu) != [32] {
+        return;
+    }
+    gpu.warp_subgroups = true;
+    let program = warp_program();
+    let (grid, block) = ([1, 1, 1], [WARP_THREADS, 1, 1]);
+    let words = WARP_THREADS * 2;
+    let mut expected: Vec<u32> = (0..WARP_THREADS).map(|tid| tid ^ 3).collect();
+    expected.extend((0..WARP_THREADS).map(|tid| if tid < 32 { u32::MAX } else { 0xf }));
+
+    let mut software = ComputeHarness::new(&program, grid, block, words);
+    let engine = software.engine();
+    switch_core::gpu::compute::dispatch(&engine, &mut software.ctx()).unwrap();
+    assert_eq!(software.output(words as usize), expected);
+
+    let mut device = ComputeHarness::new(&program, grid, block, words);
+    let engine = device.engine();
+    assert!(
+        gpu.dispatch(&engine, &mut device.ctx()).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    let mut flushes = 0;
+    while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
+        flushes += 1;
+        assert!(flushes < 100, "the readback never landed");
+    }
+    assert_eq!(device.output(words as usize), expected);
+}
+
 /// What a compute launch only reads stays on the device for the next launch, until the guest
 /// writes over it.
 #[test]

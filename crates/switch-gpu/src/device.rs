@@ -33,7 +33,11 @@ impl Gpu {
         });
         let (device_features, device_limits) = (device.features(), device.limits());
         let vertex_buffer_limit = device_limits.max_vertex_buffers;
+        let info = adapter.get_info();
+        let warp_subgroups = device_features.contains(wgpu::Features::SUBGROUP)
+            && (info.subgroup_min_size, info.subgroup_max_size) == (32, 32);
         Gpu {
+            warp_subgroups,
             _instance: instance,
             adapter,
             device,

@@ -46,6 +46,7 @@ pub struct Layout {
     /// See [`Translation::const_extents`].
     pub const_extents: Vec<u32>,
     pub textures: Vec<TextureBinding>,
+    pub images: Vec<ImageBinding>,
     /// See [`Translation::texture_offsets`].
     pub texture_offsets: Vec<(i32, i32)>,
     pub globals: Vec<Global>,
@@ -109,6 +110,28 @@ pub struct TextureBinding {
     /// Set by the backend to an earlier binding whose sampler is the same, which this one
     /// uses instead of binding its own; a stage may bind few samplers.
     pub sampler: Option<u32>,
+}
+
+/// A 2D image a program stores to, bound as a write-only storage texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageBinding {
+    pub slot: TextureSlot,
+    /// Filled from the TIC by the backend.
+    pub format: Option<StorageFormat>,
+}
+
+/// A storage texel format, by its WGSL name, and what its texels hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageFormat {
+    pub name: &'static str,
+    pub numeric: StorageNumeric,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageNumeric {
+    Float,
+    Uint,
+    Sint,
 }
 
 /// A 2D image sampled out of the top-left corner of a larger texture, clamped to its edge:
@@ -191,6 +214,9 @@ pub(super) const VERTEX_ID: usize = 0x2fc;
 pub(super) const TEXTURE_BINDING: u32 = 32;
 
 pub const GLOBAL_BINDING: u32 = 96;
+
+/// Image `i` a program stores to binds at `IMAGE_BINDING + i`.
+pub const IMAGE_BINDING: u32 = 160;
 
 /// All of a stage's constant banks are one buffer: a table of `(first word, word count)` per
 /// bank, then the banks, so a stage costs one storage binding however many banks it reads.
@@ -287,6 +313,11 @@ impl Layout {
                     crop: None,
                     sampler: None,
                 })
+                .collect(),
+            images: translated
+                .images
+                .iter()
+                .map(|&slot| ImageBinding { slot, format: None })
                 .collect(),
             texture_offsets: translated.texture_offsets.clone(),
             globals: translated.globals.clone(),

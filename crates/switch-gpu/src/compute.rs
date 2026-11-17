@@ -3,15 +3,20 @@
 //! it flushes first. A launch this cannot run goes to the software dispatch.
 
 use crate::bind::pack_banks;
+use crate::convert::{device_attachment_format, storage_format};
+use crate::held::{spans_overlap, surface_span};
 use crate::readback::Readback;
-use crate::{Feed, GlobalUpload, Gpu, Patch};
+use crate::{Feed, GlobalUpload, Gpu, Patch, Resource};
 use switch_core::gpu::compute::{self as software, Launch};
 use switch_core::gpu::engine::compute::EngineCompute;
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::shader::wgsl::{self, ComputeShape, Layout, Stage};
-use switch_core::gpu::upload::ConstantUpload;
+use switch_core::gpu::upload::{self, ConstantUpload, Target, TexturePools, TextureUpload};
 use switch_core::Result;
+
+/// What a store to a null image is declared as.
+const NULL_IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// A compute pipeline, by its module and its bind group layout.
 pub(crate) type ComputeKey = (u64, Vec<wgpu::BindGroupLayoutEntry>);
@@ -33,12 +38,13 @@ impl Gpu {
             return Ok(false);
         };
         if !launch.qmd.is_empty() {
-            if let Err(why) = self.encode_dispatch(&launch, ctx) {
-                self.release_scratch();
+            let encoded = self.encode_dispatch(engine, &launch, ctx);
+            self.release_scratch();
+            self.remember_textures(ctx);
+            if let Err(why) = encoded {
                 *self.compute_refusals.entry(why).or_default() += 1;
                 return Ok(false);
             }
-            self.release_scratch();
             self.compute_dispatched += 1;
         }
         // Commands are queued in order, so whatever waits on the release comes after the work.
@@ -48,6 +54,7 @@ impl Gpu {
 
     fn encode_dispatch(
         &mut self,
+        engine: &EngineCompute,
         launch: &Launch,
         ctx: &ExecCtx,
     ) -> std::result::Result<(), String> {
@@ -93,9 +100,18 @@ impl Gpu {
             shared_size: qmd.shared_memory_size,
             local_size: qmd.local_memory_size,
         });
-        if !layout.textures.is_empty() {
-            return Err("samples a texture".into());
-        }
+        // A compute program has no draw stage; the texture reads and the packing ignore it.
+        let stage = ShaderStage::VertexB;
+        let pools = TexturePools {
+            stage,
+            tex_cb_index: engine.tex_cb_index(),
+            header_pool: engine.tex_header_pool(),
+            sampler_pool: engine.tex_sampler_pool(),
+            bank: &bank_of,
+        };
+        let images = self.storage_images(&mut layout, pools, ctx)?;
+        let stored: Vec<u64> = images.iter().flatten().map(|t| t.addr).collect();
+        let textures = self.compute_textures(&mut layout, pools, ctx)?;
         // A browser allows as few as eight; past the limit the layout is rejected.
         let buffers = usize::from(!layout.const_banks.is_empty()) + layout.globals.len();
         let storage_limit = limits.max_storage_buffers_per_shader_stage as usize;
@@ -134,12 +150,13 @@ impl Gpu {
         };
         let globals = self.globals_through(&layout, None, &bank_bytes, ctx)?;
         // What it reads from guest memory must be current there: not a surface drawn on the
-        // device, and for a buffer it only reads, nothing a launch wrote that has not landed.
+        // device, and for a buffer it only reads, nothing a launch wrote that has not landed,
+        // unless it reads the held buffer itself.
         let span = |global: &GlobalUpload| global.addr..global.addr + global.len;
         let uploaded: Vec<_> = globals.iter().filter(|g| g.addr != 0).map(span).collect();
         let only_read: Vec<_> = globals
             .iter()
-            .filter(|g| g.addr != 0 && !g.writes)
+            .filter(|g| g.addr != 0 && !g.writes && !self.space.globals.contains_key(&g.addr))
             .map(span)
             .collect();
         if !self.touches_no_surface(&uploaded) || !self.no_global_in(&only_read) {
@@ -152,7 +169,45 @@ impl Gpu {
             self.built_module("compute", (&translation, serial), Stage::Compute, &layout)
         )?;
 
-        let entries = compute_entries(&layout, &globals);
+        let mut entries = compute_entries(&layout, &globals);
+        let mut resources = Vec::new();
+        for (index, upload) in textures.iter().enumerate() {
+            let declared = layout
+                .textures
+                .iter()
+                .find(|b| b.slot == upload.slot)
+                .ok_or("a texture the module never declared")?;
+            self.bind_texture(
+                upload,
+                declared,
+                index,
+                wgpu::ShaderStages::COMPUTE,
+                &stored,
+                (&mut entries, &mut resources),
+            )?;
+        }
+        let mut image_views = Vec::new();
+        for (index, target) in images.iter().enumerate() {
+            let texture = match target {
+                Some(target) => self.storage_surface(target, ctx)?,
+                None => self.null_image(),
+            };
+            let binding = wgsl::IMAGE_BINDING + index as u32;
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: texture.format(),
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            });
+            image_views.push((
+                binding,
+                texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            ));
+        }
         let group_layout = match self.group_layouts.get(&entries) {
             Some(layout) => layout.clone(),
             None => {
@@ -210,19 +265,56 @@ impl Gpu {
             };
             buffers.push((wgsl::GLOBAL_BINDING + global.slot, buffer));
         }
-        let bindings: Vec<wgpu::BindGroupEntry> = buffers
+        let texture_views: Vec<(u32, wgpu::TextureView)> = resources
+            .iter()
+            .filter_map(|resource| match resource {
+                Resource::Texture(binding, texture, dimension) => Some((
+                    *binding,
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(*dimension),
+                        ..Default::default()
+                    }),
+                )),
+                _ => None,
+            })
+            .collect();
+        let mut bindings: Vec<wgpu::BindGroupEntry> = buffers
             .iter()
             .map(|(binding, buffer)| wgpu::BindGroupEntry {
                 binding: *binding,
                 resource: buffer.as_entire_binding(),
             })
             .collect();
+        for (binding, view) in texture_views.iter().chain(&image_views) {
+            bindings.push(wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+        }
+        for resource in &resources {
+            if let Resource::Sampler(binding, sampler) = resource {
+                bindings.push(wgpu::BindGroupEntry {
+                    binding: *binding,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                });
+            }
+        }
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compute"),
             layout: &group_layout,
             entries: &bindings,
         });
 
+        for target in images.iter().flatten() {
+            let held = self
+                .space
+                .held
+                .get_mut(&target.addr)
+                .ok_or("an image that is no longer held")?;
+            held.dirty = true;
+            held.writes += 1;
+            held.overwritten.clear();
+        }
         self.end_pass();
         let mut encoder = self.batch.take().unwrap_or_else(|| {
             self.device
@@ -250,6 +342,159 @@ impl Gpu {
 }
 
 impl Gpu {
+    /// The images a launch stores to, each held on the device or `None` for a null image, with
+    /// their storage formats filled into `layout`.
+    fn storage_images(
+        &mut self,
+        layout: &mut Layout,
+        pools: TexturePools<'_>,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<Vec<Option<Target>>, String> {
+        let limit = self.device_limits.max_storage_textures_per_shader_stage as usize;
+        if layout.images.len() > limit {
+            return Err(format!(
+                "stores to {} images, past the device's {limit}",
+                layout.images.len()
+            ));
+        }
+        let mut images: Vec<Option<Target>> = Vec::new();
+        for image in &mut layout.images {
+            let target =
+                upload::image_target(pools, ctx, image.slot).map_err(|e| format!("{e:?}"))?;
+            let format = match &target {
+                Some(target) => device_attachment_format(self.features(), target.format)
+                    .map_err(|e| format!("{e:?}"))?,
+                None => NULL_IMAGE_FORMAT,
+            };
+            image.format = Some(
+                storage_format(format)
+                    .ok_or_else(|| format!("stores to a {format:?} image, which WebGPU cannot"))?,
+            );
+            if let Some(target) = target {
+                if images
+                    .iter()
+                    .flatten()
+                    .any(|other| spans_overlap(&surface_span(other), &surface_span(&target)))
+                {
+                    return Err("stores to two images over the same memory".into());
+                }
+                self.hold(&target, ctx).map_err(|e| format!("{e:?}"))?;
+                self.resolve_companion(target.addr)?;
+            }
+            images.push(target);
+        }
+        Ok(images)
+    }
+
+    /// The textures a launch samples, read and described into `layout`.
+    fn compute_textures(
+        &mut self,
+        layout: &mut Layout,
+        pools: TexturePools<'_>,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<Vec<TextureUpload>, String> {
+        let limits = self.device_limits.clone();
+        if layout.textures.len() > limits.max_sampled_textures_per_shader_stage as usize {
+            return Err(format!(
+                "{} textures, past the device's limit",
+                layout.textures.len()
+            ));
+        }
+        let slots: Vec<_> = layout.textures.iter().map(|b| b.slot).collect();
+        let cache = std::mem::take(&mut self.space.texture_cache);
+        let mut hits = 0u64;
+        let textures = upload::read_textures(pools, ctx, &slots, &mut |key| {
+            let hit = cache.get(key).cloned();
+            hits += u64::from(hit.is_some());
+            hit
+        });
+        self.space.texture_cache = cache;
+        self.texture_hits += hits;
+        let textures = textures.map_err(|e| format!("{e:?}"))?;
+        for upload in &textures {
+            self.hold_at_sampled_size(upload, ctx)
+                .map_err(|e| format!("{e:?}"))?;
+            if !self.space.texture_cache.contains_key(&upload.key) {
+                self.uploaded.add_texture(upload.bytes.len());
+                self.to_remember
+                    .push((upload.key, upload.bytes.clone(), upload.source_len));
+            }
+        }
+        self.fill_texture_bindings(layout, pools.stage, &textures)?;
+        self.share_samplers(layout, pools.stage, &textures);
+        let samplers = layout
+            .textures
+            .iter()
+            .filter(|b| b.sampler.is_none())
+            .count();
+        if samplers > limits.max_samplers_per_shader_stage as usize {
+            return Err(format!(
+                "{samplers} distinct samplers, past the device's limit"
+            ));
+        }
+        Ok(textures)
+    }
+
+    /// The held surface at `target`, made writable by a shader if it was not.
+    fn storage_surface(
+        &mut self,
+        target: &Target,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<wgpu::Texture, String> {
+        self.hold(target, ctx).map_err(|e| format!("{e:?}"))?;
+        let held = self
+            .space
+            .held
+            .get(&target.addr)
+            .ok_or("the surface was not held")?;
+        if held.other.is_some() || held.companion.is_some() {
+            return Err("stores to a surface also held at another size or sample grid".into());
+        }
+        let old = held.texture.clone();
+        if old.usage().contains(wgpu::TextureUsages::STORAGE_BINDING) {
+            return Ok(old);
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("storage image"),
+            size: old.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: old.format(),
+            usage: old.usage() | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("storage image"),
+            });
+        encoder.copy_texture_to_texture(old.as_image_copy(), texture.as_image_copy(), old.size());
+        self.submit_with_batch(encoder);
+        if let Some(held) = self.space.held.get_mut(&target.addr) {
+            held.texture = texture.clone();
+        }
+        Ok(texture)
+    }
+
+    /// What a store to a null image lands in: one texel nothing reads.
+    fn null_image(&mut self) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("null image"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: NULL_IMAGE_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        })
+    }
+
     /// Buffers shaders wrote on the device that guest memory does not have yet, oldest first:
     /// those on their way back, then those still held.
     fn written_on_device(&self) -> Vec<(std::ops::Range<u64>, &wgpu::Buffer)> {

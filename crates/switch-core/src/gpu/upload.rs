@@ -263,14 +263,21 @@ impl Uploads {
         }
 
         let mut textures = Vec::new();
-        for &(stage, slot) in slots {
-            if textures
+        for stage in [ShaderStage::VertexB, ShaderStage::Fragment] {
+            let bank = |bank: u8| engine.bound_constbuf(stage, u32::from(bank));
+            let pools = TexturePools {
+                stage,
+                tex_cb_index: engine.tex_cb_index(),
+                header_pool: engine.tex_header_pool(),
+                sampler_pool: engine.tex_sampler_pool(),
+                bank: &bank,
+            };
+            let wanted: Vec<TextureSlot> = slots
                 .iter()
-                .any(|t: &TextureUpload| t.stage == stage && t.slot == slot)
-            {
-                continue;
-            }
-            textures.push(read_texture(engine, ctx, stage, slot, cached)?);
+                .filter(|&&(s, _)| s == stage)
+                .map(|&(_, slot)| slot)
+                .collect();
+            textures.extend(read_textures(pools, ctx, &wanted, cached)?);
         }
 
         Ok(Uploads {
@@ -625,26 +632,98 @@ impl Targets {
     }
 }
 
-/// The constant word at `(bank, offset)` of `stage`'s bound banks.
-fn handle_word(
-    engine: &Engine3D,
+/// Where a stage finds its texture handles and the descriptors they index.
+#[derive(Clone, Copy)]
+pub struct TexturePools<'a> {
+    pub stage: ShaderStage,
+    pub tex_cb_index: u8,
+    pub header_pool: u64,
+    pub sampler_pool: u64,
+    /// A constant bank's address and size, if bound.
+    pub bank: &'a dyn Fn(u8) -> Option<(u64, u32)>,
+}
+
+impl TexturePools<'_> {
+    /// The constant word at `(bank, offset)`.
+    fn word(&self, ctx: &ExecCtx, (bank, offset): (u8, u16)) -> Result<u32> {
+        let stage = self.stage;
+        let (addr, size) = (self.bank)(bank).ok_or_else(|| {
+            Error::Gpu(format!(
+                "upload: {stage:?}'s texture bank {bank} is not bound"
+            ))
+        })?;
+        let offset = u32::from(offset);
+        if offset + 4 > size {
+            return Err(Error::Gpu(format!(
+                "upload: texture handle at c{bank}[{offset:#x}] is past the bound buffer's {size:#x}"
+            )));
+        }
+        ctx.read_u32(addr + u64::from(offset))
+    }
+
+    /// The bindless handle `slot` names.
+    fn handle(&self, ctx: &ExecCtx, slot: TextureSlot) -> Result<u32> {
+        let (first, second) = slot.handle_words(self.tex_cb_index);
+        let mut handle = self.word(ctx, first)?;
+        if let Some(word) = second {
+            handle |= self.word(ctx, word)?;
+        }
+        Ok(handle)
+    }
+}
+
+/// Each slot's texture, read once.
+pub fn read_textures(
+    pools: TexturePools<'_>,
     ctx: &ExecCtx,
-    stage: ShaderStage,
-    (bank, offset): (u8, u16),
-) -> Result<u32> {
-    let bank = u32::from(bank);
-    let (addr, size) = engine.bound_constbuf(stage, bank).ok_or_else(|| {
-        Error::Gpu(format!(
-            "upload: {stage:?}'s texture bank {bank} is not bound"
-        ))
-    })?;
-    let offset = u32::from(offset);
-    if offset + 4 > size {
+    slots: &[TextureSlot],
+    cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
+) -> Result<Vec<TextureUpload>> {
+    let mut textures: Vec<TextureUpload> = Vec::new();
+    for &slot in slots {
+        if !textures.iter().any(|t| t.slot == slot) {
+            textures.push(read_texture(pools, ctx, slot, cached)?);
+        }
+    }
+    Ok(textures)
+}
+
+/// The surface a `sust` to `slot` writes, or `None` for a null image.
+pub fn image_target(
+    pools: TexturePools<'_>,
+    ctx: &ExecCtx,
+    slot: TextureSlot,
+) -> Result<Option<Target>> {
+    let handle = pools.handle(ctx, slot)?;
+    let at = pools.header_pool + u64::from(texture::image_id(handle)) * 32;
+    let Some(image) = texture::read_bound_image(ctx, at)? else {
+        return Ok(None);
+    };
+    let TexelKind::Plain(format) = image.kind else {
         return Err(Error::Gpu(format!(
-            "upload: texture handle at c{bank}[{offset:#x}] is past the bound buffer's {size:#x}"
+            "upload: a surface store to a {:?} image",
+            image.kind
+        )));
+    };
+    if image.layers > 1 || image.block_depth_gobs > 1 {
+        return Err(Error::Gpu(format!(
+            "upload: a 2D surface store to an image of {} layers and {} GOBs of depth",
+            image.layers, image.block_depth_gobs
         )));
     }
-    ctx.read_u32(addr + u64::from(offset))
+    let unit = format.bytes_per_pixel;
+    Ok(Some(Target {
+        format: crate::gpu::pipeline::color_format(format)
+            .map_err(|e| Error::Gpu(format!("upload: stored image: {e}")))?,
+        addr: image.addr,
+        width: image.width,
+        height: image.height,
+        layout: image.layout,
+        row_bytes: image.width * unit,
+        rows: image.height,
+        unit,
+        depth: None,
+    }))
 }
 
 /// One GOB, the block-linear unit rows are padded to.
@@ -653,27 +732,19 @@ const GOB_BYTES: u64 = 512;
 /// Resolve a texture slot and copy it out. A `texs` immediate indexes the
 /// `TexCbIndex` constant bank for a bindless handle into the TIC/TSC pools.
 fn read_texture(
-    engine: &Engine3D,
+    pools: TexturePools<'_>,
     ctx: &ExecCtx,
-    stage: ShaderStage,
     slot: TextureSlot,
     cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
 ) -> Result<TextureUpload> {
-    let (first, second) = slot.handle_words(engine.tex_cb_index());
-    let mut handle = handle_word(engine, ctx, stage, first)?;
-    if let Some(word) = second {
-        handle |= handle_word(engine, ctx, stage, word)?;
-    }
-    let Some(descriptors) = texture::read_descriptors(
-        ctx,
-        engine.tex_header_pool(),
-        engine.tex_sampler_pool(),
-        handle,
-    )?
+    let stage = pools.stage;
+    let handle = pools.handle(ctx, slot)?;
+    let Some(descriptors) =
+        texture::read_descriptors(ctx, pools.header_pool, pools.sampler_pool, handle)?
     else {
         let sampler = texture::read_sampler(
             ctx,
-            engine.tex_sampler_pool() + u64::from(texture::sampler_id(handle)) * 32,
+            pools.sampler_pool + u64::from(texture::sampler_id(handle)) * 32,
         )?;
         return Ok(null_texture(stage, slot, handle, sampler));
     };
@@ -831,6 +902,24 @@ fn read_texture(
         swizzle: image.swizzle,
         sampler: descriptors.sampler,
     })
+}
+
+impl TextureUpload {
+    /// Whether this stands in for a null image.
+    pub fn is_null(&self) -> bool {
+        self.key.addr == 0
+    }
+
+    /// A null image's stand-in as `layers` layers of one transparent texel, for a view that
+    /// takes several, such as a cube.
+    pub fn null_layers(&self, layers: u32) -> TextureUpload {
+        let mut upload = null_texture(self.stage, self.slot, self.handle, self.sampler);
+        upload.layers = layers;
+        upload.key.layers = layers;
+        upload.key.layer_stride = 4;
+        upload.bytes = std::sync::Arc::from(vec![0u8; 4 * layers as usize]);
+        upload
+    }
 }
 
 /// One transparent texel: what every read of a null image answers.

@@ -26,8 +26,9 @@ mod texture;
 
 use emitter::Emitter;
 pub use layout::{
-    ComputeShape, Coverage, Crop, Fold, Global, Layout, Stage, TextureBinding, CONSTANTS_BINDING,
-    CONSTANT_BANKS, GLOBAL_BINDING, IDENTITY_SWIZZLE,
+    ComputeShape, Coverage, Crop, Fold, Global, ImageBinding, Layout, Stage, StorageFormat,
+    StorageNumeric, TextureBinding, CONSTANTS_BINDING, CONSTANT_BANKS, GLOBAL_BINDING,
+    IDENTITY_SWIZZLE, IMAGE_BINDING,
 };
 pub use module::module;
 
@@ -54,6 +55,8 @@ pub enum Unsupported {
     VertexWrite,
     /// A compute program reading a packed special register, whose field layout is unconfirmed.
     PackedSpecialRegister { sr: u8 },
+    /// An image stored to whose format the backend did not fill in.
+    ImageFormat,
 }
 
 impl fmt::Display for Unsupported {
@@ -104,6 +107,7 @@ impl fmt::Display for Unsupported {
                     "instruction {at}: two bindless handles ORed from the same first word"
                 )
             }
+            Unsupported::ImageFormat => write!(f, "an image stored to with no storage format"),
         }
     }
 }
@@ -118,6 +122,7 @@ fn sreg(sr: u32) -> u32 { return 0u; }
 fn gRead(slot: u32, offset: u32) -> u32 { return 0u; }
 fn gWrite(slot: u32, offset: u32, value: u32, mask: u32) { }
 fn gAtom(op: u32, slot: u32, offset: u32, value: u32, stored: u32) -> u32 { return 0u; }
+fn imgStore(key: u32, x: u32, y: u32, value: vec4<u32>) { }
 fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
@@ -177,6 +182,8 @@ pub struct Translation {
     pub const_extents: Vec<u32>,
     /// Textures sampled, in first-mention order, with dimension and shadow flag.
     pub textures: Vec<(TextureSlot, TexDim, bool)>,
+    /// 2D images stored to, in first-mention order.
+    pub images: Vec<TextureSlot>,
     /// Distinct `tex.aoffi` offsets `(x, y)`, named by index since WGSL needs constants.
     pub texture_offsets: Vec<(i32, i32)>,
     /// The first instruction asking which quad lane it is.
@@ -185,6 +192,8 @@ pub struct Translation {
     pub quad_swap: Option<usize>,
     /// Whether that uses the device's quad operations rather than [`QUAD_SWAP`].
     pub subgroups: bool,
+    /// The first warp instruction run on a 32-lane subgroup; see [`Caps::warp`].
+    pub warp: Option<usize>,
     pub subgroup_enable: bool,
     /// Each 64-bit `ldg` or atomic descriptor, in binding order.
     pub globals: Vec<Global>,
@@ -206,18 +215,23 @@ pub struct Caps {
     pub subgroups: bool,
     /// Whether to write `enable subgroups;`: browsers require it, naga rejects it.
     pub subgroup_enable: bool,
+    /// For a compute program on a device whose subgroups are always 32 lanes: warp
+    /// instructions run on the subgroup, one warp each.
+    pub warp: bool,
 }
 
 impl Caps {
     pub const NONE: Caps = Caps {
         subgroups: false,
         subgroup_enable: false,
+        warp: false,
     };
 }
 
 pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsupported> {
     let leaders = leaders(program)?;
     let mut emitter = Emitter::new(program);
+    emitter.warp_caps = caps.warp;
     emitter.emit_blocks(&leaders)?;
     // Nintendo Switch Sports queries texture sizes without sampling.
     for &slot in &emitter.queried {
@@ -234,11 +248,13 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         const_banks: emitter.banks.keys().copied().collect(),
         const_extents: emitter.banks.values().copied().collect(),
         textures: emitter.textures.clone(),
+        images: emitter.images.clone(),
         texture_offsets: emitter.texture_offsets.clone(),
         quad: emitter.quad,
         quad_swap: emitter.quad_swap,
         subgroups: caps.subgroups,
         subgroup_enable: caps.subgroup_enable,
+        warp: emitter.warp,
         globals: emitter.globals.clone(),
         special: emitter.special.iter().copied().collect(),
         read_otherwise: emitter.read_otherwise.iter().copied().collect(),

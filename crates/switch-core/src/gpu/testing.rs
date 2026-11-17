@@ -1033,6 +1033,85 @@ impl ComputeHarness {
     pub fn output_addr(&self) -> u64 {
         self.base + COMPUTE_OUTPUT_AT
     }
+
+    /// Lay out what [`image_copy_program`] reads in the output's place: an
+    /// [`IMAGE_COPY_SIZE`] pitch-linear `A8B8G8R8` texture of [`image_copy_texel`]s and an
+    /// image of the same shape, cleared. Answers the engine with their pools set.
+    pub fn image_copy(&mut self) -> crate::gpu::engine::compute::EngineCompute {
+        let (width, height) = IMAGE_COPY_SIZE;
+        let tic = self.base + IMAGE_COPY_TIC_AT;
+        let tsc = self.base + IMAGE_COPY_TSC_AT;
+        let texture = self.base + IMAGE_COPY_TEXTURE_AT;
+        let image = self.image_copy_addr();
+        let bank = self.base + COMPUTE_BANK_AT;
+        let mut ctx = self.ctx();
+        for y in 0..height {
+            for x in 0..width {
+                let at = u64::from((y * width + x) * 4);
+                ctx.write_u32(texture + at, image_copy_texel(x, y)).unwrap();
+                ctx.write_u32(image + at, 0).unwrap();
+            }
+        }
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        for (entry, addr) in [(1u64, texture), (2, image)] {
+            let at = tic + entry * 32;
+            ctx.write_u32(at, 0x08 | (2 << 7) | identity).unwrap();
+            ctx.write_u32(at + 4, addr as u32).unwrap();
+            ctx.write_u32(at + 8, (addr >> 32) as u32 | (2 << 21))
+                .unwrap();
+            ctx.write_u32(at + 12, width * 4 / 32).unwrap();
+            ctx.write_u32(at + 16, (width - 1) | (1 << 23)).unwrap();
+            ctx.write_u32(at + 20, height - 1).unwrap();
+        }
+        // TSC 1: clamped to the edge on every axis, nearest filtering.
+        ctx.write_u32(tsc + 32, 2 | (2 << 3) | (2 << 6)).unwrap();
+        for (offset, word) in [
+            (IMAGE_COPY_TEXTURE, 1 | (1 << 20)),
+            (IMAGE_COPY_IMAGE, 2),
+            (IMAGE_COPY_U, (1.0f32 / 128.0).to_bits()),
+            (IMAGE_COPY_V, (1.0f32 / 8.0).to_bits()),
+        ] {
+            ctx.write_u32(bank + u64::from(offset), word).unwrap();
+        }
+        let mut engine = self.engine();
+        engine.regs.set(0x55D, (tic >> 32) as u32);
+        engine.regs.set(0x55E, tic as u32);
+        engine.regs.set(0x557, (tsc >> 32) as u32);
+        engine.regs.set(0x558, tsc as u32);
+        engine
+    }
+
+    /// The image [`ComputeHarness::image_copy`] lays out.
+    pub fn image_copy_addr(&self) -> u64 {
+        self.base + IMAGE_COPY_IMAGE_AT
+    }
+
+    /// The image's texels, row by row.
+    pub fn image(&mut self) -> Vec<u32> {
+        let (width, height) = IMAGE_COPY_SIZE;
+        let at = self.image_copy_addr();
+        let ctx = self.ctx();
+        (0..width * height)
+            .map(|i| ctx.read_u32(at + u64::from(i) * 4).unwrap())
+            .collect()
+    }
+}
+
+/// The texture and image [`ComputeHarness::image_copy`] lays out, and the launch's block.
+pub const IMAGE_COPY_SIZE: (u32, u32) = (8, 4);
+const IMAGE_COPY_TIC_AT: u64 = 0x2000;
+const IMAGE_COPY_TSC_AT: u64 = 0x2080;
+const IMAGE_COPY_TEXTURE_AT: u64 = 0x2100;
+const IMAGE_COPY_IMAGE_AT: u64 = 0x2200;
+
+/// Texel `(x, y)` of the texture [`image_copy_program`] samples, every byte distinct.
+pub fn image_copy_texel(x: u32, y: u32) -> u32 {
+    u32::from_le_bytes([
+        (x * 30 + 1) as u8,
+        (y * 60 + 2) as u8,
+        (x + y * 8 + 100) as u8,
+        255,
+    ])
 }
 
 /// Lay a launch out from `at`: its QMD, its program at `at + 0x1000` and constant bank 0 at
@@ -1256,6 +1335,204 @@ pub fn indexed_store_program() -> Vec<u64> {
                 size: MemSize::B32,
             },
         ),
+        check(0xe300_0000_0000_0000 | PT | 0xF, Op::Exit),
+    ]
+}
+
+/// Bank 0 words of [`image_copy_program`]: the texture's and the image's handles, then the
+/// float bits that scale each thread's x and y into a texture coordinate.
+pub const IMAGE_COPY_TEXTURE: u32 = 0x60;
+pub const IMAGE_COPY_IMAGE: u32 = 0x64;
+pub const IMAGE_COPY_U: u32 = 0x68;
+pub const IMAGE_COPY_V: u32 = 0x6c;
+
+/// Thread `(x, y)` samples the bindless texture at `(2^x * u, 2^y * v)` and stores the texel
+/// to texel `(x, y)` of the bindless image.
+pub fn image_copy_program() -> Vec<u64> {
+    use crate::gpu::shader::isa::{self, MemSize, Operand, SurfaceData, SurfaceDim, TexDim, RZ};
+    use crate::gpu::shader::Op;
+    const PT: u64 = 7 << 16;
+    let check = |word: u64, expected: Op| {
+        assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");
+        word
+    };
+    let s2r = |dst: u8, sr: u8| {
+        check(
+            0xf0c8u64 << 48 | u64::from(sr) << 20 | PT | u64::from(dst),
+            Op::S2r { dst, sr },
+        )
+    };
+    // `(a << 23) + c0[offset]`: a float's exponent raised by `a`.
+    let scale = |dst: u8, a: u8, offset: u32| {
+        let b = Operand::Const {
+            bank: 0,
+            offset: offset as u16,
+        };
+        check(
+            0x4c18u64 << 48
+                | u64::from(offset >> 2) << 20
+                | 23 << 39
+                | PT
+                | u64::from(a) << 8
+                | u64::from(dst),
+            Op::Iscadd {
+                dst,
+                a,
+                aneg: false,
+                b,
+                bneg: false,
+                shift: 23,
+                cout: false,
+            },
+        )
+    };
+    let ldc = |dst: u8, offset: u32| {
+        check(
+            0xef94u64 << 48 | u64::from(offset) << 20 | PT | u64::from(RZ) << 8 | u64::from(dst),
+            Op::Ldc {
+                dst,
+                bank: 0,
+                offset: offset as i32,
+                idx: RZ,
+                size: MemSize::B32,
+            },
+        )
+    };
+    vec![
+        s2r(8, 0x21),
+        s2r(9, 0x22),
+        scale(0, 8, IMAGE_COPY_U),
+        scale(1, 9, IMAGE_COPY_V),
+        ldc(2, IMAGE_COPY_TEXTURE),
+        check(
+            0xdeba_0007_a027_0000,
+            Op::Tex {
+                dst: 0,
+                coords: [0, 1, 2],
+                layer: None,
+                dref: None,
+                offset: None,
+                lod: None,
+                handle: 0,
+                handle_reg: Some(2),
+                dim: TexDim::T2d,
+                mask: [true; 4],
+            },
+        ),
+        ldc(39, IMAGE_COPY_IMAGE),
+        check(
+            0xeb20u64 << 48 | 39 << 39 | 3 << 33 | 0xf << 20 | PT | 8 << 8,
+            Op::Sust {
+                src: 0,
+                coords: 8,
+                handle: 0,
+                handle_reg: Some(39),
+                dim: SurfaceDim::D2,
+                data: SurfaceData::Formatted([true; 4]),
+            },
+        ),
+        check(0xe300_0000_0000_0000 | PT | 0xF, Op::Exit),
+    ]
+}
+
+/// The threads [`warp_program`] runs as: a full warp and four lanes of another.
+pub const WARP_THREADS: u32 = 36;
+
+/// Thread `tid` stores what lane `tid ^ 3` held, by two butterfly shuffles, to output word
+/// `tid`, and its warp's `vote.all` ballot to word [`WARP_THREADS`]` + tid`.
+pub fn warp_program() -> Vec<u64> {
+    use crate::gpu::shader::isa::{self, MemSize, Operand, ShflMode, RZ};
+    use crate::gpu::shader::Op;
+    const PT: u64 = 7 << 16;
+    let check = |word: u64, expected: Op| {
+        assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");
+        word
+    };
+    let shfl_bfly = |dst: u8, src: u8, index: u32| {
+        check(
+            0xef10u64 << 48
+                | 0x1f << 34
+                | 3 << 30
+                | 1 << 29
+                | 1 << 28
+                | u64::from(index) << 20
+                | PT
+                | u64::from(src) << 8
+                | u64::from(dst),
+            Op::Shfl {
+                dst,
+                pred: 0,
+                src,
+                index: Operand::Imm(index),
+                mask: Operand::Imm(0x1f),
+                mode: ShflMode::Bfly,
+            },
+        )
+    };
+    let iadd = |dst: u8, a: u8, offset: u16, cin: bool, cout: bool| {
+        check(
+            0x4c10u64 << 48
+                | u64::from(offset >> 2) << 20
+                | u64::from(cin) << 43
+                | u64::from(cout) << 47
+                | PT
+                | u64::from(a) << 8
+                | u64::from(dst),
+            Op::Iadd {
+                dst,
+                a,
+                aneg: false,
+                b: Operand::Const { bank: 0, offset },
+                bneg: false,
+                cin,
+                cout,
+            },
+        )
+    };
+    let stg = |offset: u32, src: u8| {
+        check(
+            (0xeed8u64 | 4) << 48 | u64::from(offset) << 20 | PT | 6 << 8 | u64::from(src),
+            Op::Stg {
+                addr: 6,
+                offset: offset as i32,
+                src,
+                size: MemSize::B32,
+            },
+        )
+    };
+    let descriptor = COMPUTE_DESCRIPTOR as u16;
+    vec![
+        check(
+            0xf0c8u64 << 48 | 0x21 << 20 | PT,
+            Op::S2r { dst: 0, sr: 0x21 },
+        ),
+        shfl_bfly(1, 0, 1),
+        shfl_bfly(1, 1, 2),
+        check(
+            0x50d8_e380_0000_0000 | PT | 2,
+            Op::Vote {
+                dst: 2,
+                pred: isa::Pred::PT,
+                src: isa::Pred::ALWAYS,
+                mode: isa::VoteMode::All,
+            },
+        ),
+        check(
+            0x5c18u64 << 48 | u64::from(RZ) << 20 | 2 << 39 | PT | 5,
+            Op::Iscadd {
+                dst: 5,
+                a: 0,
+                aneg: false,
+                b: Operand::Reg(RZ),
+                bneg: false,
+                shift: 2,
+                cout: false,
+            },
+        ),
+        iadd(6, 5, descriptor, false, true),
+        iadd(7, RZ, descriptor + 4, true, false),
+        stg(0, 1),
+        stg(WARP_THREADS * 4, 2),
         check(0xe300_0000_0000_0000 | PT | 0xF, Op::Exit),
     ]
 }

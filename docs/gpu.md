@@ -145,7 +145,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - `a[]` is a flat 256-word array with a written-mask (unwritten `clip.w` must default to 1.0); it replaced a HashMap that dominated per-pixel cost.
 - `centroid` needs no handling because shading is per covered sample at its centre.
 - Half ops compute in f32 and round once at the merge; `.ftz` uses the half threshold only for half lanes.
-- Warp shuffles to lanes absent from the warp (a quad is 4 of 32) read the caller's own value; votes count only lanes that reached them. The device runs `vote` over the quad too (ballot bit n is lane n, `all` is four of four), as the rasterizer does, so a ballot has four bits where hardware's has up to 32. The rasterizer shades a fragment shader with a `vote` in quads, as it does one with `shfl`.
+- Warp shuffles to lanes absent from the warp (a quad is 4 of 32) read the caller's own value; votes count only lanes that reached them. In a fragment shader the device runs `vote` over the quad too (ballot bit n is lane n, `all` is four of four), as the rasterizer does, so a ballot has four bits where hardware's has up to 32; a compute program's runs over a 32-lane subgroup ([gpu-backend.md](gpu-backend.md)). The rasterizer shades a fragment shader with a `vote` in quads, as it does one with `shfl`.
 - `SR_Y_DIRECTION` must be +/-1.0 (zero deletes screen-space directions). Packed `SR_TID`/`SR_NTID` are refused because their layout is unconfirmed.
 - `tex.aoffi` offsets are texels scaled by level size (Persona 5 Royal's blur).
 

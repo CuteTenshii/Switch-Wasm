@@ -26,6 +26,9 @@ pub(super) struct Emitter<'a> {
     pub(super) uses_stack: bool,
     pub(super) quad: Option<usize>,
     pub(super) quad_swap: Option<usize>,
+    /// See [`super::Caps::warp`].
+    pub(super) warp_caps: bool,
+    pub(super) warp: Option<usize>,
     /// The interface the emitted text reaches through.
     pub(super) loads: BTreeSet<usize>,
     pub(super) stores: BTreeSet<usize>,
@@ -33,6 +36,7 @@ pub(super) struct Emitter<'a> {
     /// Constant banks read, with how many bytes of each ([`ALL_OF_BANK`] when indexed).
     pub(super) banks: BTreeMap<u8, u32>,
     pub(super) textures: Vec<(TextureSlot, TexDim, bool)>,
+    pub(super) images: Vec<TextureSlot>,
     pub(super) globals: Vec<Global>,
     /// Counter naming `let` bindings.
     temps: usize,
@@ -61,11 +65,14 @@ impl<'a> Emitter<'a> {
             uses_stack: false,
             quad: None,
             quad_swap: None,
+            warp_caps: false,
+            warp: None,
             loads: BTreeSet::new(),
             stores: BTreeSet::new(),
             centroid_loads: BTreeSet::new(),
             banks: BTreeMap::new(),
             textures: Vec::new(),
+            images: Vec::new(),
             globals: Vec::new(),
             temps: 0,
             before: Vec::new(),
@@ -162,13 +169,42 @@ impl<'a> Emitter<'a> {
     /// mov     r28, r23
     /// ldg     r23, [r28]
     /// ```
+    ///
+    /// The low half may also be the descriptor's word moved in and moved on by an immediate,
+    /// as Echoes of Wisdom's atomics address theirs:
+    ///
+    /// ```text
+    /// mov     r0, c0[0x320]
+    /// iadd.cc r0, r0, 0x70
+    /// iadd.x  r1, RZ, c0[0x324]
+    /// ```
     fn indexed_global_base(&self, at: usize, addr: u8) -> Option<(u8, u16)> {
         let (mut lo, mut hi) = (None, None);
         // The registers holding each half before the copies seen so far.
         let (mut lo_reg, mut hi_reg) = (addr, addr.wrapping_add(1));
+        // Whether the low half was last an immediate added with a carry out.
+        let mut moved_on = false;
         for i in (0..at).rev() {
             let always = self.program.pred(i) == Pred::ALWAYS;
             match self.program.op(i) {
+                Op::Iadd {
+                    dst,
+                    a,
+                    b: Operand::Imm(_),
+                    aneg: false,
+                    bneg: false,
+                    cin: false,
+                    cout: true,
+                } if always && dst == lo_reg && lo.is_none() && !moved_on => {
+                    lo_reg = a;
+                    moved_on = true;
+                }
+                Op::Mov {
+                    dst,
+                    src: Operand::Const { bank, offset },
+                } if always && moved_on && dst == lo_reg && lo.is_none() => {
+                    lo = Some((bank, offset));
+                }
                 Op::Iadd {
                     dst,
                     b: Operand::Const { bank, offset },

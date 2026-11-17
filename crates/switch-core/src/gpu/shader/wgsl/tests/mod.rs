@@ -534,6 +534,7 @@ fn a_warp_shuffle_is_a_quad_operation_where_the_device_has_them() {
         Caps {
             subgroups: true,
             subgroup_enable: true,
+            ..Caps::NONE
         },
     )
     .unwrap();

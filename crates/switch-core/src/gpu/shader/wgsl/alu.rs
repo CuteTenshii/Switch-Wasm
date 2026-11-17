@@ -5,7 +5,8 @@ use super::layout::{atom_code, generic_slot};
 use super::texture::Gather;
 use super::Unsupported;
 use crate::gpu::shader::isa::{
-    AtomOp, AtomSpace, MemSize, Op, Operand, ShflMode, TexDim, VoteMode, RZ,
+    AtomOp, AtomSpace, MemSize, Op, Operand, ShflMode, SurfaceData, SurfaceDim, TexDim, VoteMode,
+    RZ,
 };
 use crate::gpu::texture::TextureSlot;
 
@@ -255,14 +256,16 @@ impl Emitter<'_> {
                 mask,
                 mode,
             } => {
-                self.quad.get_or_insert(at);
-                self.quad_swap.get_or_insert(at);
                 let value = self.r(src);
                 let here = self.bind(&value);
-                let x = self.bind(&format!("quadSwapX({here})"));
-                let y = self.bind(&format!("quadSwapY({here})"));
-                let d = self.bind(&format!("quadSwapDiagonal({here})"));
-                let lane = self.bind("i32(quadLane())");
+                let lane = if self.warp_caps {
+                    self.warp.get_or_insert(at);
+                    self.bind("i32(sr_lane)")
+                } else {
+                    self.quad.get_or_insert(at);
+                    self.quad_swap.get_or_insert(at);
+                    self.bind("i32(quadLane())")
+                };
                 let index = self.operand(index);
                 let index = self.bind(&format!("i32({index})"));
                 let mask = self.operand(mask);
@@ -284,6 +287,17 @@ impl Emitter<'_> {
                     _ => format!("({from} <= {ceiling})"),
                 };
                 let ok = self.bind(&format!("({within} && {from} >= 0)"));
+                if self.warp_caps {
+                    let peer = self.bind(&format!(
+                        "subgroupShuffle({here}, u32(clamp({from}, 0, 31)))"
+                    ));
+                    self.set_r(dst, &format!("select({here}, {peer}, {ok})"));
+                    self.set_p(pred, &ok);
+                    return Ok(());
+                }
+                let x = self.bind(&format!("quadSwapX({here})"));
+                let y = self.bind(&format!("quadSwapY({here})"));
+                let d = self.bind(&format!("quadSwapDiagonal({here})"));
                 let sel = self.bind(&format!("u32(({from} ^ {lane}) & 3)"));
                 let peer = format!(
                     "select(select(select({here}, {x}, {sel} == 1u), {y}, {sel} == 2u), {d}, {sel} == 3u)"
@@ -321,6 +335,25 @@ impl Emitter<'_> {
             }
 
             // The warp is the quad, as in the rasterizer: lane `n` is bit `n` of the ballot.
+            Op::Vote {
+                dst,
+                pred,
+                src,
+                mode,
+            } if self.warp_caps => {
+                self.warp.get_or_insert(at);
+                let holds = self.holds(src);
+                // Lanes that exited are no longer in the subgroup, as they are out of the warp.
+                let ballot = self.bind(&format!("subgroupBallot({holds}).x"));
+                let active = self.bind("subgroupBallot(true).x");
+                let verdict = match mode {
+                    VoteMode::All => format!("{ballot} == {active}"),
+                    VoteMode::Any => format!("{ballot} != 0u"),
+                    VoteMode::Eq => format!("{ballot} == 0u || {ballot} == {active}"),
+                };
+                self.set_r(dst, &ballot);
+                self.set_p(pred, &format!("({verdict})"));
+            }
             Op::Vote {
                 dst,
                 pred,
@@ -513,6 +546,30 @@ impl Emitter<'_> {
                 }
                 self.indent -= 1;
                 self.line("}");
+            }
+            // A store outside the image is dropped, as the interpreter drops it.
+            Op::Sust {
+                src,
+                coords,
+                handle,
+                handle_reg,
+                dim: SurfaceDim::D2,
+                data: SurfaceData::Formatted([true, true, true, true]),
+            } => {
+                let slot = match handle_reg {
+                    Some(reg) => self
+                        .bindless_slot(at, reg)
+                        .ok_or(Unsupported::UntracedHandle { at })?,
+                    None => TextureSlot::Bound(handle),
+                };
+                self.bind_image(at, slot)?;
+                let (x, y) = (self.r(coords), self.r(coords.wrapping_add(1)));
+                let value: Vec<String> = (0..4).map(|i| self.r(src.wrapping_add(i))).collect();
+                self.line(&format!(
+                    "imgStore({}u, {x}, {y}, vec4<u32>({}));",
+                    slot.key(),
+                    value.join(", ")
+                ));
             }
             Op::Lds { .. }
             | Op::Sts { .. }
