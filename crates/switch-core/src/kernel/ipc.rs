@@ -1190,8 +1190,8 @@ impl Cpu {
                 let event = self.kept_event("nfp:availability", handle);
                 self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
             }
-            // IUser's commands that name a device, and there are none.
-            Some(3..=18 | 20..=22 | 24) if user => {
+            // The commands that name a device, and there are none.
+            Some(3..=18 | 20..=22 | 24) => {
                 self.write_ipc_response(tls, DEVICE_NOT_FOUND, &[], &[], &[])
             }
             _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -1273,12 +1273,12 @@ impl Cpu {
             Some(1) | Some(2) | Some(8) | Some(26) => {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // GetReceiveEvent / GetStateChangeEvent: never signalled.
-            Some(5) | Some(7) => {
-                let purpose = if cmd_id == Some(5) {
-                    "npns:receive"
-                } else {
-                    "npns:state-change"
+            // GetReceiveEvent / GetStateChangeEvent / GetRequestChangeStateCancelEvent: never signalled.
+            Some(5) | Some(7) | Some(161) => {
+                let purpose = match cmd_id {
+                    Some(5) => "npns:receive",
+                    Some(7) => "npns:state-change",
+                    _ => "npns:request-change-state-cancel",
                 };
                 let event = self.kept_event(purpose, handle);
                 self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
@@ -1799,6 +1799,16 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u32(TLS + 0x0c).unwrap(), first, "same event");
 
+        write_request(&mut cpu, 161, &[]);
+        cpu.npns_request(TLS, 9, Some(161)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "cancel event result"
+        );
+        assert_ne!(cpu.mem.read_u32(TLS + 0x0c).unwrap(), 0, "no cancel event");
+        assert_ne!(cpu.mem.read_u32(TLS + 0x0c).unwrap(), first, "own event");
+
         // And the state beside it: not connected, never notified.
         write_request(&mut cpu, 103, &[]);
         cpu.npns_request(TLS, 9, Some(103)).unwrap();
@@ -1837,10 +1847,10 @@ mod tests {
 
         write_request(&mut cpu, 21, &[]);
         cpu.nfp_request(TLS, 9, Some(21)).unwrap();
-        assert_ne!(
+        assert_eq!(
             cpu.mem.read_u32(TLS + 0x18).unwrap(),
-            0,
-            "no device to name"
+            0x8073,
+            "GetNpadId: no device to name"
         );
     }
 
