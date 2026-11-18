@@ -273,9 +273,8 @@ export interface Commands {
   nandIdentify(content: Blob): NandIdentity;
   // The stored content named `name`; it is read here, not by the page.
   nandLaunch(name: string): number;
-  loadNcaFromNsp(index: number): number;
-  loadNca(): number;
-  programNcaIndex(): number;
+  // NSP file `index`, else the container's Program NCA, else the container as an NCA.
+  launch(index?: number): number;
   loadKeys(prod: Bytes | null, title: Bytes | null): void;
   readFile(index: number, offset: number, len: number): Bytes;
 

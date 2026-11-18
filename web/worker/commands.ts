@@ -10,12 +10,12 @@ import {
   switch_control_icon, switch_control_json, switch_end_title, switch_flush_storage, switch_force_software, switch_get_reg,
   switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
-  switch_load_keys, switch_load_nca, switch_load_nca_from_nsp, switch_load_program,
+  switch_launch, switch_load_keys, switch_load_program,
   switch_load_sd, switch_memory_json, switch_nand_content, switch_nand_identify, switch_nand_launch,
   switch_net_connect,
   switch_net_connections_json, switch_net_disconnect, switch_net_status_json, switch_next_load,
   switch_open_nca,
-  switch_open_nsp, switch_parse_nca, switch_program_nca_index, switch_read_file, switch_reg_dump,
+  switch_open_nsp, switch_parse_nca, switch_read_file, switch_reg_dump,
   switch_remember_control, switch_restore_nand, switch_restore_storage, switch_run,
   switch_set_battery, switch_set_jit, switch_set_operation_mode, switch_set_touch,
   switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
@@ -82,9 +82,7 @@ export const CMD = {
     if (!content) throw new Error(name + ' is indexed but its content is missing.');
     return switch_nand_launch(content);
   },
-  loadNcaFromNsp: switch_load_nca_from_nsp,
-  loadNca: switch_load_nca,
-  programNcaIndex: switch_program_nca_index,
+  launch: switch_launch,
   loadKeys: switch_load_keys,
   readFile(index, offset, len) {
     return switch_read_file(index, BigInt(offset), len);

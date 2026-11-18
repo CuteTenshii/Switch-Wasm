@@ -2,7 +2,7 @@ use super::*;
 use switch_core::cpu::SaveKey;
 
 use crate::activity::switch_log_activity;
-use crate::boot::switch_load_nca_from_nsp;
+use crate::boot::switch_launch;
 use crate::container::{open_nsp, switch_read_file};
 use crate::debug::switch_set_trace_channels;
 use crate::log::switch_log_drain;
@@ -430,7 +430,7 @@ fn a_container_is_read_through_the_host_without_being_staged() {
     assert!(switch_read_file(7, 0, 32).is_err());
 
     // A non-NCA payload fails with a readable error.
-    let text = switch_load_nca_from_nsp(0).unwrap_err();
+    let text = switch_launch(Some(0)).unwrap_err();
     assert!(text.contains("bad magic"), "{text}");
 }
 

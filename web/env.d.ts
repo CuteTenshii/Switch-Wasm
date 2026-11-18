@@ -102,9 +102,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_load_program(file: Blob): Promise<number>;
   export function switch_load_sd(path: string): number;
   export function switch_next_load(): string;
-  export function switch_load_nca(): number;
-  export function switch_load_nca_from_nsp(index: number): number;
-  export function switch_program_nca_index(): number;
+  export function switch_launch(index?: number | null): number;
   export function switch_nand_launch(content: Blob): number;
   // `{ id, kind }` as JSON, or empty when the file is no NCA.
   export function switch_nand_identify(content: Blob): string;

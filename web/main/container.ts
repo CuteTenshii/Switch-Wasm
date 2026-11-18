@@ -285,23 +285,10 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     openPanel('files');
     return;
   }
-  loadPhase('Looking for the title\'s program');
-  let index: number;
-  try {
-    index = await call('programNcaIndex');
-  } catch (err) {
-    const why = (err as Error).message;
-    setState('fault');
-    failLoad(why);
-    log('Nothing to boot in ' + file.name + ': ' + why, 'error');
-    return;
-  }
-  await launchNca(nspFiles[index], index);
+  await launchNca(file.name);
 }
 
 let openContainer: { file: File; kind: 'nsp' | 'nca' } | null = null;
-
-let nspFiles: NspFile[] = [];
 
 // The File goes to the worker, which reads ranges from it; only its header is read.
 async function handleNspFile(file: File): Promise<void> {
@@ -310,8 +297,9 @@ async function handleNspFile(file: File): Promise<void> {
   const status = el('div', 'nca-info', 'Reading the container header \u2026');
   $('nsp-result').appendChild(status);
   log('Opening ' + file.name + ' (' + fmtSize(file.size) + ') ...');
+  let files: NspFile[];
   try {
-    nspFiles = await call('openNsp', file);
+    files = await call('openNsp', file);
     openContainer = { file, kind: 'nsp' };
     setNote('container-badge', file.name, true);
   } catch (e) {
@@ -324,7 +312,7 @@ async function handleNspFile(file: File): Promise<void> {
   status.remove();
 
   const ul = el('ul', 'nsp-list');
-  nspFiles.forEach((f, index) => {
+  files.forEach((f, index) => {
     const li = el('li');
     li.appendChild(el('span', 'name', f.name));
     li.appendChild(el('span', 'size', fmtSize(f.size)));
@@ -343,7 +331,6 @@ async function handleNspFile(file: File): Promise<void> {
 export function clearNsp(): void {
   $('nsp-result').textContent = '';
   setNote('container-badge', 'none open', false);
-  nspFiles = [];
   // The held update outlives the container; the pairing does not.
   openTitleId = '';
   holdTitle(null, null);
@@ -476,7 +463,7 @@ async function inspectNca(f: NspFile, index: number): Promise<void> {
     out.textContent = 'read failed: ' + (err as Error).message;
     return;
   }
-  await parseAndRenderNca(out, header, () => launchNca(f, index));
+  await parseAndRenderNca(out, header, () => launchNca(f.name, index));
 }
 
 // Drop/browse a standalone .nca, which becomes the open container.
@@ -545,12 +532,12 @@ async function parseAndRenderNca(
   return info;
 }
 
-// Boot NSP file `index` as a Program NCA.
-function launchNca(f: NspFile, index: number): Promise<void> {
+// Boot NSP file `index`, or without one the program the core finds in the open container.
+function launchNca(name: string, index?: number): Promise<void> {
   // The core's trace buffer is cleared by booting, so the page reports the version.
   const notes = [];
   let identity = heldTitle;
-  if (heldUpdate && heldUpdate.titleId === openTitleId) {
+  if (heldUpdate?.titleId === openTitleId) {
     notes.push('Update ' + describeUpdate(heldUpdate)
       + ' applied: its modules, over the base game\'s data.');
     // The update's version is what runs.
@@ -560,13 +547,13 @@ function launchNca(f: NspFile, index: number): Promise<void> {
     .filter((held) => held.titleId === openTitleId)
     .reduce((n, held) => n + held.indices.length, 0);
   if (packs) notes.push(describeDlc(packs) + ' mounted.');
-  return doLaunchNca(f.name, () => call('loadNcaFromNsp', index), identity,
+  return doLaunchNca(name, () => call('launch', index), identity,
     notes.join(' '));
 }
 
 // Same as `launchNca`, for a standalone .nca that is already the open container.
 function launchStandaloneNca(file: File): Promise<void> {
-  return doLaunchNca(file.name, () => call('loadNca'), heldTitle);
+  return doLaunchNca(file.name, () => call('launch'), heldTitle);
 }
 
 // The log's first line: title, publisher, id, version and file.

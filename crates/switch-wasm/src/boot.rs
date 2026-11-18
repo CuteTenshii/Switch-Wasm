@@ -224,58 +224,37 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
     }
 }
 
-/// Boot the open container as a standalone Program NCA. Returns the entry address, or fails
-/// with the reason.
+/// Boot the open container: NSP file `index`, else the container's Program NCA, else the
+/// container itself when it is a standalone NCA. Returns the entry address, or fails with
+/// the reason (including that no `prod.keys` are loaded).
 #[wasm_bindgen]
-pub fn switch_load_nca() -> Result<f64, String> {
+pub fn switch_launch(index: Option<u32>) -> Result<f64, String> {
     let s = session();
-    apply_container_nacp(s);
     let container = container(s)?;
-    let added = Added {
-        update: s.update.as_ref(),
-        dlc: &s.dlc,
-    };
-    load_and_boot_nca(&s.keys, &mut s.cpu, container, added).map(|entry| entry as f64)
-}
-
-/// Give the process the open container's save sizes and add-on base id, which live on
-/// the process and so start over with each `switch_end_title`.
-fn apply_container_nacp(s: &mut Session) {
-    if let Some(nacp) = &s.container_nacp {
-        s.cpu
-            .set_save_data_quota(switch_core::cpu::SaveDataQuota::from(nacp));
-        s.cpu
-            .set_add_on_content_base_id(nacp.add_on_content_base_id);
+    apply_container_nacp(s);
+    if index.is_none() && s.nsp_files.is_empty() {
+        let added = Added {
+            update: s.update.as_ref(),
+            dlc: &s.dlc,
+        };
+        return load_and_boot_nca(&s.keys, &mut s.cpu, container, added).map(|entry| entry as f64);
     }
-}
-
-/// The index of the Program NCA in the open container, or why there is none (including that
-/// no `prod.keys` are loaded). Pass it to `switch_load_nca_from_nsp`.
-#[wasm_bindgen]
-pub fn switch_program_nca_index() -> Result<u32, String> {
-    let s = session();
-    let container = container(s)?;
-    switch_core::nca::find_nca_by_type(
-        &s.nsp_files,
-        &container,
-        &s.keys,
-        switch_core::nca::ContentType::Program,
-    )
-    .map(|(index, _)| index as u32)
-    .ok_or_else(|| {
-        "no Program NCA in this container (or its header couldn't be decrypted; load prod.keys)"
-            .to_owned()
-    })
-}
-
-/// Boot NSP file `index` as a Program NCA. Returns the entry address, or fails with the
-/// reason.
-#[wasm_bindgen]
-pub fn switch_load_nca_from_nsp(index: u32) -> Result<f64, String> {
-    let s = session();
-    apply_container_nacp(s);
-    let container = container(s)?;
+    let index = match index {
+        Some(index) => index,
+        None => switch_core::nca::find_nca_by_type(
+            &s.nsp_files,
+            &container,
+            &s.keys,
+            switch_core::nca::ContentType::Program,
+        )
+        .map(|(index, _)| index as u32)
+        .ok_or("no Program NCA in this container (or its header couldn't be decrypted; load prod.keys)")?,
+    };
     let nca_src = nsp_file_source(s, index)?;
+    s.cpu.log(
+        Level::Info,
+        &format!("[launch] {}", s.nsp_files[index as usize].name),
+    );
 
     // Try the bundled ticket before external title.keys.
     if let Ok(nca) = Nca::parse_source(&nca_src, Some(&s.keys)) {
@@ -294,6 +273,17 @@ pub fn switch_load_nca_from_nsp(index: u32) -> Result<f64, String> {
     let entry = load_and_boot_nca(&s.keys, &mut s.cpu, nca_src, added)?;
     mount_manual(s, &container);
     Ok(entry as f64)
+}
+
+/// Give the process the open container's save sizes and add-on base id, which live on
+/// the process and so start over with each `switch_end_title`.
+fn apply_container_nacp(s: &mut Session) {
+    if let Some(nacp) = &s.container_nacp {
+        s.cpu
+            .set_save_data_quota(switch_core::cpu::SaveDataQuota::from(nacp));
+        s.cpu
+            .set_add_on_content_base_id(nacp.add_on_content_base_id);
+    }
 }
 
 /// Give the booted title the RomFS of its `HtmlDocument` NCA, which its web applets open.
