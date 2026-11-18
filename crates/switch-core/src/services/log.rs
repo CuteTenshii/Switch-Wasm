@@ -61,8 +61,8 @@ impl Cpu {
             },
             "lm:logger" => match cmd_id {
                 Some(0) => {
-                    // Log(buffer): arrives as a map-alias send buffer.
-                    if let Some((addr, size)) = self.ipc_send_buffer(tls, 0) {
+                    // Log(AutoSelect buffer): a pointer or a map-alias send buffer.
+                    if let Some((addr, size)) = self.ipc_input_buffer(tls, 0) {
                         self.absorb_log_packet(addr, size);
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -147,5 +147,31 @@ impl Cpu {
         if flags & FLAG_TAIL != 0 && !self.out.ends_with(b"\n") {
             self.out.push(b'\n');
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::kernel::ipc::testing::*;
+
+    #[test]
+    fn a_log_packet_sent_as_a_pointer_buffer_is_printed() {
+        const PACKET: u32 = 0x3000;
+        let text = b"hello";
+        let mut packet = vec![0u8; 0x18];
+        packet[0x10] = 0b11; // head and tail
+        packet[0x12] = 2; // WARN
+        packet[0x14] = 2 + text.len() as u8;
+        packet.extend_from_slice(&[2, text.len() as u8]);
+        packet.extend_from_slice(text);
+
+        let mut cpu = auto_select_request(0, &[], PACKET, packet.len() as u32, true);
+        cpu.mem.map_zero(PACKET, 0x100).unwrap();
+        for (offset, &byte) in packet.iter().enumerate() {
+            cpu.mem.write_u8(PACKET + offset as u32, byte).unwrap();
+        }
+        cpu.record_handle(9, "lm:logger");
+        cpu.lm_request(TLS, 9, Some(0)).unwrap();
+        assert_eq!(cpu.out, b"[lm/WARN] hello\n");
     }
 }

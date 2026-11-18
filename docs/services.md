@@ -147,7 +147,7 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 ## `log.rs`
 
 - A `fatal:u` command's `Result` is the guest's only account of why it stopped; it is reported and the call succeeds (no error-screen policy).
-- `lm`'s `Log` reads its packet from the map-alias send buffer. The prefix goes on a message's head packet and the newline on its tail.
+- `lm`'s `Log` buffer is AutoSelect: `nnSdk` sends the packet as a pointer buffer and leaves the map-alias one empty, so reading only the latter dropped every message (Minecraft's Vulkan abort said nothing). The prefix goes on a message's head packet and the newline on its tail.
 
 ## `net/`
 
