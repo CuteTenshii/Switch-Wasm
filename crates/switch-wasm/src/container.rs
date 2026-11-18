@@ -23,6 +23,7 @@ pub(crate) fn open_nsp(size: u64) -> Result<String, String> {
     s.container = Some(container);
     s.nsp_files = Vec::new();
     s.control = None;
+    s.container_nacp = None;
     match switch_core::xci::read_container(&container) {
         Ok(pfs0) => {
             s.nsp_files = pfs0.files;
@@ -50,6 +51,7 @@ pub fn switch_open_nca(file: &web_sys::Blob, name: &str) -> i32 {
     });
     s.nsp_files = Vec::new();
     s.control = None;
+    s.container_nacp = None;
     s.last_error.clear();
     s.cpu.log(
         Level::Info,
@@ -332,16 +334,13 @@ pub fn switch_parse_nca(data: &[u8]) -> String {
     }
 }
 
-/// Cache control data and pass its NACP figures (save data, add-on base id) to the CPU.
+/// Cache control data, and its NACP for the launches of the open container.
 fn cache_control(s: &mut Session, control: switch_core::control::Control) {
     if control.title_id != 0 {
         s.cpu
             .add_application_control(control.title_id, &control.nacp_raw, &control.icon);
     }
-    s.cpu
-        .set_save_data_quota(switch_core::cpu::SaveDataQuota::from(&control.nacp));
-    s.cpu
-        .set_add_on_content_base_id(control.nacp.add_on_content_base_id);
+    s.container_nacp = Some(control.nacp.clone());
     s.control = Some(control);
 }
 

@@ -229,12 +229,24 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
 #[wasm_bindgen]
 pub fn switch_load_nca() -> Result<f64, String> {
     let s = session();
+    apply_container_nacp(s);
     let container = container(s)?;
     let added = Added {
         update: s.update.as_ref(),
         dlc: &s.dlc,
     };
     load_and_boot_nca(&s.keys, &mut s.cpu, container, added).map(|entry| entry as f64)
+}
+
+/// Give the process the open container's save sizes and add-on base id, which live on
+/// the process and so start over with each `switch_end_title`.
+fn apply_container_nacp(s: &mut Session) {
+    if let Some(nacp) = &s.container_nacp {
+        s.cpu
+            .set_save_data_quota(switch_core::cpu::SaveDataQuota::from(nacp));
+        s.cpu
+            .set_add_on_content_base_id(nacp.add_on_content_base_id);
+    }
 }
 
 /// The index of the Program NCA in the open container, or why there is none (including that
@@ -261,6 +273,7 @@ pub fn switch_program_nca_index() -> Result<u32, String> {
 #[wasm_bindgen]
 pub fn switch_load_nca_from_nsp(index: u32) -> Result<f64, String> {
     let s = session();
+    apply_container_nacp(s);
     let container = container(s)?;
     let nca_src = nsp_file_source(s, index)?;
 

@@ -103,6 +103,7 @@ Section headings are paths under `crates/switch-wasm/src/`; a heading that start
 - The session is the console, created and staged once per page (SD card, saves, controls, users, keys, archives, library applets). A title is a process in it: every launch and Stop calls `endTitle`, which has the core end the title and its applets (`Cpu::end_title`) and leaves an empty process for the next one, so nothing is restaged.
 - Before titles were processes, every boot rebuilt the session: loading into the running one left the previous title's pages mapped (hundreds of MiB for retail) until guest RAM hit the cap.
 - `endTitle` then restages the users: a running title keeps the player it started with, and profile edits made meanwhile reach the next one.
+- The NACP figures (save sizes, cache storage, add-on base id) live on the process, so `endTitle` drops the ones `loadControl` set when the container opened. `loadControl` keeps the container's NACP in the session (`container_nacp`), and `switch_load_nca` and `switch_load_nca_from_nsp` give it to the new process before booting.
 
 ## `web/main/index.ts`, `web/main/boot.ts`, `web/main/dock.ts`, `web/main/wakelock.ts`
 

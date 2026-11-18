@@ -77,6 +77,8 @@ struct Session {
     keys: switch_core::keys::KeySet,
     /// Control data from the last Control NCA read, cached so the icon can be fetched separately.
     control: Option<switch_core::control::Control>,
+    /// The open container's NACP, given to the process each launch of it boots in.
+    container_nacp: Option<switch_core::control::Nacp>,
     /// Users staged by `switch_user_stage`, installed whole by `switch_users_commit`.
     staged_users: Vec<switch_core::cpu::UserAccount>,
     cpu: Cpu,
@@ -192,6 +194,7 @@ pub fn switch_init() {
             dlc: Vec::new(),
             keys: switch_core::keys::KeySet::default(),
             control: None,
+            container_nacp: None,
             staged_users: Vec::new(),
             cpu,
             last_error: String::new(),
