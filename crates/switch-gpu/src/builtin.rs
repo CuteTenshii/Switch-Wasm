@@ -40,6 +40,7 @@ struct Parameters {
   first: vec2<f32>,
   last: vec2<f32>,
   round: f32,
+  srgb: u32,
 }
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> p: Parameters;
@@ -51,11 +52,24 @@ fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
   return vec4<f32>(x, y, 0.0, 1.0);
 }
 
+fn to_srgb(v: vec3<f32>) -> vec3<f32> {
+  return select(1.055 * pow(v, vec3<f32>(1.0 / 2.4)) - 0.055, v * 12.92, v <= vec3<f32>(0.0031308));
+}
+
+fn to_linear(v: vec3<f32>) -> vec3<f32> {
+  return select(pow((v + 0.055) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));
+}
+
+// An sRGB target is rounded in sRGB and given back the linear value the device encodes onto it.
 fn rounded(colour: vec4<f32>) -> vec4<f32> {
   if p.round == 0.0 {
     return colour;
   }
-  return floor(colour * p.round + 0.5) / p.round;
+  if p.srgb == 0u {
+    return floor(colour * p.round + 0.5) / p.round;
+  }
+  let stored = floor(clamp(vec4<f32>(to_srgb(colour.rgb), colour.a), vec4<f32>(0.0), vec4<f32>(1.0)) * p.round + 0.5) / p.round;
+  return vec4<f32>(to_linear(stored.rgb), stored.a);
 }
 
 @fragment

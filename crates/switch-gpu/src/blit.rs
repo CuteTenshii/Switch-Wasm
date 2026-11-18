@@ -17,7 +17,12 @@ use switch_core::gpu::upload::Target;
 /// `None` for a format the blit shader cannot carry unchanged.
 fn rounding(format: Format) -> Option<f32> {
     match format {
-        Format::R8Unorm | Format::Rg8Unorm | Format::Rgba8Unorm | Format::Bgra8Unorm => Some(255.0),
+        Format::R8Unorm
+        | Format::Rg8Unorm
+        | Format::Rgba8Unorm
+        | Format::Bgra8Unorm
+        | Format::Rgba8UnormSrgb
+        | Format::Bgra8UnormSrgb => Some(255.0),
         Format::Rgb10a2Unorm
         | Format::R16Unorm
         | Format::Rg16Unorm
@@ -31,6 +36,36 @@ fn rounding(format: Format) -> Option<f32> {
         | Format::Rg11b10Ufloat => Some(0.0),
         _ => None,
     }
+}
+
+/// Whether the device texture for `format` stores an alpha channel, which a guest format
+/// without alpha leaves as whatever was rendered.
+fn stores_alpha(format: Format) -> bool {
+    !matches!(
+        format,
+        Format::R8Unorm
+            | Format::Rg8Unorm
+            | Format::R16Unorm
+            | Format::Rg16Unorm
+            | Format::R16Float
+            | Format::Rg16Float
+            | Format::R32Float
+            | Format::Rg32Float
+            | Format::Rg11b10Ufloat
+    )
+}
+
+fn is_srgb(format: Format) -> bool {
+    matches!(format, Format::Rgba8UnormSrgb | Format::Bgra8UnormSrgb)
+}
+
+/// Whether the shader converts `blit`'s source into its target as the engine's decode and
+/// encode do: only into 8-bit targets, which it rounds itself, and with alpha read as stored.
+fn converts(blit: &Blit, source: Format, target: Format) -> bool {
+    rounding(source).is_some()
+        && rounding(target) == Some(255.0)
+        && (blit.src.format.has_alpha() || !stores_alpha(source))
+        && (blit.dst.format.has_alpha() || !stores_alpha(target))
 }
 
 /// Past this many destination texels, filtering on the CPU every frame costs more than
@@ -127,7 +162,9 @@ impl Gpu {
         let target = Target::of_surface(&blit.dst).ok()?;
         let round = rounding(target.format)?;
         let (x1, y1) = (x0.checked_add(width)?, y0.checked_add(height)?);
-        if source.format != target.format
+        // The device's sRGB decode is not the engine's.
+        if is_srgb(source.format)
+            || (source.format != target.format && !converts(blit, source.format, target.format))
             || width == 0
             || height == 0
             || x1 > target.width
@@ -174,12 +211,11 @@ impl Gpu {
             last.0,
             last.1,
             round,
-            0.0,
-            0.0,
-            0.0,
         ] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+        bytes.extend_from_slice(&u32::from(is_srgb(target.format)).to_le_bytes());
+        bytes.resize(48, 0);
         let parameters = self.buffer("blit", &bytes, wgpu::BufferUsages::UNIFORM);
         let source_view = self
             .space

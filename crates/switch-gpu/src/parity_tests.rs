@@ -2941,12 +2941,15 @@ fn downscale(h: &Harness, filtered: bool) -> Blit {
     }
 }
 
-/// What `Engine2D` computes for a blit of `source`, `Harness::target`'s texels.
+/// What `Engine2D` computes for a blit of `source`, the source surface's words.
 fn expected_blit(blit: &Blit, source: &[u32]) -> Vec<u32> {
     let (width, height) = (blit.src.width, blit.src.height);
     let texel = |x: u32, y: u32| {
         let raw = source[(y.min(height - 1) * width + x.min(width - 1)) as usize];
-        std::array::from_fn::<f32, 4, _>(|i| ((raw >> (8 * i)) & 0xFF) as f32 / 255.0)
+        blit.src
+            .format
+            .decode(u128::from(raw))
+            .expect("a decodable source")
     };
     let mut out = Vec::new();
     for y in 0..blit.dst_rect.3 {
@@ -2967,9 +2970,7 @@ fn expected_blit(blit: &Blit, source: &[u32]) -> Vec<u32> {
             } else {
                 texel(u as u32, v as u32)
             };
-            out.push(colour.iter().enumerate().fold(0u32, |word, (i, channel)| {
-                word | (((channel * 255.0 + 0.5).floor() as u32) << (8 * i))
-            }));
+            out.push(blit.dst.format.encode(colour).expect("an encodable target") as u32);
         }
     }
     out
@@ -3087,6 +3088,77 @@ fn a_blit_out_of_guest_memory_uploads_its_source_and_agrees_with_the_engine() {
         .map(|i| ctx.read_u32(source + 0x400 + i * 4).expect("a texel"))
         .collect();
     assert_eq!(got, expected_blit(&blit, &texels));
+}
+
+/// A filtered 24x16 blit of `texels` from `source` into `target`, on the device and in the engine.
+fn converting_blit_agrees_with_the_engine(texels: &[u32], source: u32, target: u32) {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let mut h = Harness::new();
+    let at = h.base + BLIT_TARGET;
+    {
+        let mut ctx = h.ctx();
+        for (i, texel) in texels.iter().enumerate() {
+            ctx.write_u32(at + i as u64 * 4, *texel).expect("a texel");
+        }
+    }
+    let mut blit = Blit {
+        src: colour_surface(at, 24, 16),
+        dst: colour_surface(at + 0x600, 24, 16),
+        dst_rect: (0, 0, 24, 16),
+        src_origin: (0.3, 0.7),
+        step: (0.77, 0.61),
+        filtered: true,
+    };
+    blit.src.format = ColorFormat::from_raw(source).expect("a source format");
+    blit.dst.format = ColorFormat::from_raw(target).expect("a target format");
+    let route = gpu.blit_on_device(&blit, &h.ctx());
+    assert_eq!(route, BlitRoute::Done);
+    gpu.flush(&mut h.ctx()).expect("the flush");
+    let ctx = h.ctx();
+    let got: Vec<u32> = (0..24 * 16u64)
+        .map(|i| ctx.read_u32(at + 0x600 + i * 4).expect("a texel"))
+        .collect();
+    assert_eq!(got, expected_blit(&blit, texels));
+}
+
+const SRGB8: u32 = 0xD6;
+
+/// Echoes of Wisdom's upscale of its `B10G11R11_FLOAT` frame into the `sRGB` one it presents.
+#[test]
+fn a_blit_from_small_floats_into_srgb_converts_on_the_device_as_the_engine_does() {
+    // Channels below one, where the sRGB curve decides the byte.
+    let below_one =
+        |k: u32, mantissa: u32| ((k >> mantissa) % 15) << mantissa | k & ((1 << mantissa) - 1);
+    let texels: Vec<u32> = (0..24 * 16u32)
+        .map(|i| {
+            below_one(i.wrapping_mul(0x9E37_79B9), 6)
+                | below_one(i.wrapping_mul(0x85EB_CA6B), 6) << 11
+                | below_one(i.wrapping_mul(0xC2B2_AE35), 5) << 22
+        })
+        .collect();
+    converting_blit_agrees_with_the_engine(&texels, 0xE0, SRGB8);
+}
+
+#[test]
+fn a_blit_out_of_srgb_stays_with_the_engine() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let mut h = Harness::new();
+    let at = h.base + BLIT_TARGET;
+    let mut blit = Blit {
+        src: colour_surface(at, 24, 16),
+        dst: colour_surface(at + 0x600, 24, 16),
+        dst_rect: (0, 0, 24, 16),
+        src_origin: (0.0, 0.0),
+        step: (1.0, 1.0),
+        filtered: true,
+    };
+    blit.src.format = ColorFormat::from_raw(SRGB8).expect("A8B8G8R8_sRGB");
+    blit.dst.format = blit.src.format;
+    assert_eq!(gpu.blit_on_device(&blit, &h.ctx()), BlitRoute::Flush);
 }
 
 /// Minecraft's world pass: each surface is larger one way, and the draw lands in their overlap.
