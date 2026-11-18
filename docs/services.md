@@ -60,7 +60,7 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - `GetImageId` must be stable and nonzero (zero means "no icon"; garbage made caches never hit); it is two seeded FNV-1a hashes of uid and picture.
 - `LoadImage` must return a real JPEG because callers decode it directly. A user without a picture gets a baseline solid-colour JPEG: DC-only blocks (only the first per component has a nonzero difference), quantization 8 so `8x` round-trips to `x`, minimal but complete Huffman tables (Kraft sum 1). The colour is picked by uid with u32 arithmetic so wasm32 and 64-bit hosts agree.
 - Nicknames are truncated to 0x1F bytes on a char boundary to avoid mojibake.
-- `acc:manager` `GetNintendoAccountUserResourceCache` (130, and 136 from 19.0.0) fails with 124-0200 (registration required), since no Nintendo Account is linked: Shop parses a birthday out of any success.
+- `acc:manager` `GetNintendoAccountUserResourceCache` (130, and 136 from 19.0.0) fails with 124-0200 (registration required), since no Nintendo Account is linked: Shop parses a birthday out of any success. `LoadIdTokenCache` (3, renumbered 4 in 19.0.0) loads an empty cache under both ids; Minecraft showed the error applet when 4 was refused.
 - An `AccountUid` is two `u64`s, not a UUID, so a user's uid is 128 random bits (`acc::random_uid`, never zero): the page makes one for each profile it creates, and the core's own first user gets one made once per process, shared by every console in it so two consoles run in lockstep see the same user.
 
 ## `crates/switch-core/src/uuid.rs`

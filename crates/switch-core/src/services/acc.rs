@@ -615,8 +615,8 @@ impl Cpu {
                 self.reply_with_interface(tls, handle, "acc:async-context")?;
                 Ok(())
             }
-            // LoadIdTokenCache(out buffer) -> u32 size: always empty.
-            Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // LoadIdTokenCache (4, 19.0.0+; 3 before) (out buffer) -> u32 size: always empty.
+            Some(3) | Some(4) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
             // GetNetworkServiceLicenseCacheEx (15.0.0+) -> u32 license, s64 expiry, zeroed.
             Some(143) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
             // GetNintendoAccountUserResourceCache (130, and 136 from 19.0.0): no Nintendo Account
@@ -1015,6 +1015,26 @@ mod tests {
             acc(&mut cpu, service, 101);
             let session = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
             assert_eq!(cpu.service_name(session), Some(iface), "{service} cmd 101");
+        }
+    }
+
+    #[test]
+    fn acc_an_id_token_cache_loads_empty_under_its_old_and_new_command_ids() {
+        for command in [3, 4] {
+            let mut cpu = request(false, command, &[]);
+            cpu.mem.write_u32(TLS + 0x20, 0xFFFF_FFFF).unwrap();
+            cpu.register_service_handle(9, "acc:manager");
+            cpu.acc_request(TLS, 9, Some(command)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "cmd {command} Result"
+            );
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x20).unwrap(),
+                0,
+                "cmd {command} size"
+            );
         }
     }
 
