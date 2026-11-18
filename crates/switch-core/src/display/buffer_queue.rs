@@ -206,7 +206,8 @@ impl BufferQueue {
                     QUERY_HEIGHT => self.height as i32,
                     // PIXEL_FORMAT_RGBA_8888.
                     QUERY_FORMAT => 1,
-                    QUERY_MIN_UNDEQUEUED_BUFFERS => 1,
+                    // Horizon's queue holds no buffer back; Vulkan adds this to minImageCount.
+                    QUERY_MIN_UNDEQUEUED_BUFFERS => 0,
                     QUERY_CONSUMER_RUNNING_BEHIND => 0,
                     _ => 0,
                 };
@@ -544,7 +545,12 @@ mod tests {
     #[test]
     fn query_answers_the_native_window_selectors() {
         let mut q = BufferQueue::new();
-        for (what, expected) in [(QUERY_WIDTH, 1280), (QUERY_HEIGHT, 720), (QUERY_FORMAT, 1)] {
+        for (what, expected) in [
+            (QUERY_WIDTH, 1280),
+            (QUERY_HEIGHT, 720),
+            (QUERY_FORMAT, 1),
+            (QUERY_MIN_UNDEQUEUED_BUFFERS, 0),
+        ] {
             let (reply, _) = q.transact(QUERY, &request(&words(&[what])));
             let mut r = ParcelReader::new(&reply);
             assert_eq!(r.read_i32(), expected, "query {}", what);

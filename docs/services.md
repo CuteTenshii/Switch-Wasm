@@ -283,4 +283,5 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - `TransactParcel` (0) must work, not only `TransactParcelAuto` (3, added in 3.0.0): pre-3.0.0 SDK titles like Just Dance 2017 send only 0, and an empty success queued every frame into nothing. The same goes for domain sessions (libnx's default).
 - Event handles (`GetNativeHandle`, `GetDisplayVsyncEvent`) must go in the copy slot.
 - The Home Menu uses the system shared buffer when `IsSystemBufferSharingEnabled` succeeds; otherwise it builds its own swapchain and never draws into it.
+- `IGraphicBufferProducer::Query(NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS)` is 0, as Horizon's queue answers. The Vulkan driver allocates `minImageCount` plus this many swapchain images; answering 1 gave Minecraft three images for its two-entry array, whose third entry overwrote its `VkDevice`.
 - `PresentSharedFrameBuffer`: `android::Fence` is 36 bytes, so the crop is at 0x24 and the transform at 0x34; reading one field later decoded swap interval 1 as `FLIP_H`.
