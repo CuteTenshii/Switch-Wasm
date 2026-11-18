@@ -1129,7 +1129,8 @@ mod tests {
             4,
             // A single pitch-linear line.
             header(1, 1, 1, LAUNCH_DMA),
-            (1 << 7) | (1 << 8),
+            // Non-pipelined.
+            2 | (1 << 7) | (1 << 8),
             header(1, 1, 0, SYNCPOINT),
             increment,
         ];

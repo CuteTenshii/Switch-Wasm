@@ -8,6 +8,8 @@ use crate::{Error, Result};
 
 /// The launch method, so a GPU backend can flush its surfaces before guest memory is read.
 pub const LAUNCH_DMA: u32 = 0x0C0;
+const SET_SEMAPHORE_A: u32 = 0x090;
+const SET_SEMAPHORE_PAYLOAD: u32 = 0x092;
 pub(crate) const OFFSET_IN: u32 = 0x100;
 const OFFSET_OUT: u32 = 0x102;
 const PITCH_IN: u32 = 0x104;
@@ -27,6 +29,12 @@ const REMAP_SRC_X: u32 = 0;
 const REMAP_CONST_0: u32 = 4;
 const REMAP_CONST_1: u32 = 5;
 const REMAP_NO_WRITE: u32 = 6;
+
+/// `LaunchDma`'s `DATA_TRANSFER_TYPE`: a launch that only releases a semaphore.
+const DATA_TRANSFER_NONE: u32 = 0;
+/// `LaunchDma`'s `SEMAPHORE_TYPE`.
+const RELEASE_ONE_WORD_SEMAPHORE: u32 = 1;
+const RELEASE_FOUR_WORD_SEMAPHORE: u32 = 2;
 
 #[derive(Debug, Default)]
 pub struct EngineCopy {
@@ -82,7 +90,7 @@ impl EngineCopy {
     /// of bytes; other shapes do not say so without walking them.
     pub fn plain_ranges(&self, flags: u32) -> Option<[std::ops::Range<u64>; 2]> {
         let (multi_line, remap) = (field(flags, 9, 9) != 0, field(flags, 10, 10) != 0);
-        if multi_line || remap {
+        if multi_line || remap || field(flags, 0, 1) == DATA_TRANSFER_NONE {
             return None;
         }
         let len = u64::from(self.regs.get(LINE_LENGTH_IN));
@@ -90,7 +98,24 @@ impl EngineCopy {
         Some([src..src + len, dst..dst + len])
     }
 
+    /// The copy `flags` asks for, if any, then its semaphore release.
     fn launch(&mut self, flags: u32, ctx: &mut ExecCtx) -> Result<()> {
+        if field(flags, 0, 1) != DATA_TRANSFER_NONE {
+            self.copy(flags, ctx)?;
+        }
+        let addr = self.regs.iova(SET_SEMAPHORE_A);
+        let payload = self.regs.get(SET_SEMAPHORE_PAYLOAD);
+        match field(flags, 3, 4) {
+            RELEASE_ONE_WORD_SEMAPHORE => ctx.write_u32(addr, payload),
+            RELEASE_FOUR_WORD_SEMAPHORE => {
+                ctx.write_u64(addr, u64::from(payload))?;
+                ctx.write_u64(addr + 8, ctx.stats.submissions)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn copy(&mut self, flags: u32, ctx: &mut ExecCtx) -> Result<()> {
         let src_pitch_layout = field(flags, 7, 7) != 0;
         let dst_pitch_layout = field(flags, 8, 8) != 0;
         let multi_line = field(flags, 9, 9) != 0;
@@ -184,17 +209,18 @@ impl EngineCopy {
             self.regs.get(SET_REMAP_CONST + 1),
         ];
         let component_size = components.component_size;
+        // A fill from the constants has no source, and its address may be unmapped.
+        let reads_source = components.dst[..components.num_dst as usize]
+            .iter()
+            .any(|&selector| selector < REMAP_CONST_0);
+        let num_src = if reads_source { components.num_src } else { 0 };
 
         for line in 0..line_count {
             for element in 0..line_length {
                 let src_off = src.offset(element, line);
                 let dst_off = dst.offset(element, line);
                 let mut source = [0u32; 4];
-                for (i, s) in source
-                    .iter_mut()
-                    .enumerate()
-                    .take(components.num_src as usize)
-                {
+                for (i, s) in source.iter_mut().enumerate().take(num_src as usize) {
                     let mut v = 0u32;
                     for b in 0..component_size {
                         let addr = at(src_base, src_off + i64::from(i as u32 * component_size + b));
@@ -431,6 +457,9 @@ mod tests {
         }
     }
 
+    /// `LaunchDma`'s `DATA_TRANSFER_TYPE_NON_PIPELINED`.
+    const NON_PIPELINED: u32 = 2;
+
     fn set_iova(engine: &mut EngineCopy, method: u32, va: u64) {
         engine.regs.set(method, (va >> 32) as u32);
         engine.regs.set(method + 1, va as u32);
@@ -448,7 +477,7 @@ mod tests {
         engine.regs.set(LINE_LENGTH_IN, 16);
 
         let mut ctx = h.ctx();
-        engine.write(LAUNCH_DMA, 0, &mut ctx).unwrap();
+        engine.write(LAUNCH_DMA, NON_PIPELINED, &mut ctx).unwrap();
 
         for i in 0..16u32 {
             assert_eq!(h.mem.read_u8(0x3000_0100 + i).unwrap(), i as u8);
@@ -476,7 +505,11 @@ mod tests {
 
         let mut ctx = h.ctx();
         engine
-            .write(LAUNCH_DMA, (1 << 7) | (1 << 8) | (1 << 9), &mut ctx)
+            .write(
+                LAUNCH_DMA,
+                NON_PIPELINED | (1 << 7) | (1 << 8) | (1 << 9),
+                &mut ctx,
+            )
             .unwrap();
 
         for y in 0..4u32 {
@@ -506,7 +539,11 @@ mod tests {
 
         let mut ctx = h.ctx();
         engine
-            .write(LAUNCH_DMA, (1 << 7) | (1 << 8) | (1 << 9), &mut ctx)
+            .write(
+                LAUNCH_DMA,
+                NON_PIPELINED | (1 << 7) | (1 << 8) | (1 << 9),
+                &mut ctx,
+            )
             .unwrap();
 
         for y in 0..4u32 {
@@ -539,13 +576,66 @@ mod tests {
         engine
             .write(
                 LAUNCH_DMA,
-                (1 << 7) | (1 << 8) | (1 << 9) | (1 << 10),
+                NON_PIPELINED | (1 << 7) | (1 << 8) | (1 << 9) | (1 << 10),
                 &mut ctx,
             )
             .unwrap();
 
         for i in 0..4u32 {
             assert_eq!(h.mem.read_u32(0x3000_0400 + i * 4).unwrap(), 0xDEAD_BEEF);
+        }
+    }
+
+    #[test]
+    fn a_launch_that_transfers_nothing_only_releases_its_semaphore() {
+        let mut h = Harness::new();
+        let mut engine = EngineCopy::new();
+        set_iova(&mut engine, OFFSET_IN, h.base + 0x200);
+        set_iova(&mut engine, OFFSET_OUT, h.base + 0x400);
+        engine.regs.set(LINE_LENGTH_IN, 8);
+        set_iova(&mut engine, SET_SEMAPHORE_A, h.base + 0x100);
+        engine.regs.set(SET_SEMAPHORE_PAYLOAD, 0x1234);
+        h.stats.submissions = 7;
+        h.mem.write_u32(0x3000_0200, 0xABCD).unwrap();
+
+        let mut ctx = h.ctx();
+        // No transfer, flush, four-word semaphore.
+        engine.write(LAUNCH_DMA, 0x14, &mut ctx).unwrap();
+        assert_eq!(h.mem.read_u32(0x3000_0400).unwrap(), 0, "nothing copied");
+        assert_eq!(h.mem.read_u64(0x3000_0100).unwrap(), 0x1234);
+        assert_eq!(h.mem.read_u64(0x3000_0108).unwrap(), 7, "timestamp");
+
+        engine.regs.set(SET_SEMAPHORE_PAYLOAD, 0x5678);
+        let mut ctx = h.ctx();
+        // A one-word release after a plain copy.
+        engine.write(LAUNCH_DMA, 0x0a, &mut ctx).unwrap();
+        assert_eq!(h.mem.read_u32(0x3000_0400).unwrap(), 0xABCD, "copied");
+        assert_eq!(h.mem.read_u32(0x3000_0100).unwrap(), 0x5678);
+        assert_eq!(h.mem.read_u64(0x3000_0108).unwrap(), 7, "untouched");
+    }
+
+    #[test]
+    fn a_constant_fill_reads_no_source() {
+        let mut h = Harness::new();
+        let mut engine = EngineCopy::new();
+        set_iova(&mut engine, OFFSET_OUT, h.base + 0x400);
+        engine.regs.set(LINE_LENGTH_IN, 2);
+        engine.regs.set(SET_REMAP_CONST, 0x1111_2222);
+        engine.regs.set(SET_REMAP_CONST + 1, 0x3333_4444);
+        // Two 4-byte destination components, RemapConst[0] then RemapConst[1].
+        engine.regs.set(
+            SET_REMAP_COMPONENTS,
+            REMAP_CONST_0 | (REMAP_CONST_1 << 4) | (3 << 16) | (1 << 24),
+        );
+
+        let mut ctx = h.ctx();
+        // Pipelined, pitch to pitch, one line, remapped; the source address is 0.
+        engine.write(LAUNCH_DMA, 0x581, &mut ctx).unwrap();
+
+        for i in 0..2u32 {
+            let at = 0x3000_0400 + i * 8;
+            assert_eq!(h.mem.read_u32(at).unwrap(), 0x1111_2222);
+            assert_eq!(h.mem.read_u32(at + 4).unwrap(), 0x3333_4444);
         }
     }
 
@@ -566,7 +656,7 @@ mod tests {
 
         let mut ctx = h.ctx();
         engine
-            .write(LAUNCH_DMA, (1 << 7) | (1 << 9), &mut ctx)
+            .write(LAUNCH_DMA, NON_PIPELINED | (1 << 7) | (1 << 9), &mut ctx)
             .unwrap();
 
         // Row 0 of a GOB lands at 0..16, 32..48, 256..272, 288..304.
