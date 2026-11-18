@@ -250,7 +250,15 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, "aoc:control", cmd_id),
             };
         }
+        if self.ipc_interface(tls, handle, "aoc:u") == "aoc:purchase-events" {
+            return self.aoc_purchase_events_request(tls, handle, cmd_id);
+        }
         match cmd_id {
+            // CreateEcPurchasedEventManager / CreatePermanentEcPurchasedEventManager.
+            Some(100) | Some(101) => {
+                self.reply_with_interface(tls, handle, "aoc:purchase-events")?;
+                Ok(())
+            }
             // CountAddOnContent -> u32.
             Some(2) => {
                 let count = self.add_on_content().len() as u32;
@@ -302,6 +310,26 @@ impl Cpu {
             // is never removed.
             Some(50) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             _ => self.unimplemented_command(tls, "aoc:u", cmd_id),
+        }
+    }
+
+    /// `nn::ec::IPurchaseEventManager`: nothing is ever bought, so its event never fires.
+    fn aoc_purchase_events_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        match cmd_id {
+            // SetDefaultDeliveryTarget / SetDeliveryTarget.
+            Some(0) | Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetPurchasedEventReadableHandle.
+            Some(2) => {
+                let manager = self.ipc_object_key(tls, handle);
+                let event = self.kept_event("aoc:purchased", manager);
+                self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+            }
+            _ => self.unimplemented_command(tls, "aoc:purchase-events", cmd_id),
         }
     }
 
@@ -872,6 +900,22 @@ mod tests {
         aoc(&mut cpu, 50);
         assert_eq!(cpu.mem.read_u32(TLS + 0x10).unwrap(), SFCO);
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+    }
+
+    #[test]
+    fn the_purchase_event_manager_hands_out_an_event_that_never_fires() {
+        let mut cpu = request(false, 100, &[]);
+        aoc(&mut cpu, 100);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+        let manager = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.service_name(manager), Some("aoc:purchase-events"));
+
+        marshal(&mut cpu, false, 2, &[]);
+        cpu.aoc_request(TLS, manager, Some(2)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x1c).unwrap(), 0, "Result");
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert!(cpu.events.contains_key(&event), "a copied event handle");
+        assert!(!cpu.events[&event].signaled);
     }
 
     #[test]

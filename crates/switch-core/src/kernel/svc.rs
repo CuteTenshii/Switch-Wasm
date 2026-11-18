@@ -935,7 +935,7 @@ impl Cpu {
                         | "ns:async-latest-update"
                         | "ns:async-unnamed" => self.ns_request(tls, handle, cmd_id)?,
                         // aoc, add-on content.
-                        "aoc:u" => self.aoc_request(tls, handle, cmd_id)?,
+                        "aoc:u" | "aoc:purchase-events" => self.aoc_request(tls, handle, cmd_id)?,
                         // ldr:ro, used by `nn::ro`.
                         "ldr:ro" => self.ldr_ro_request(tls, handle, cmd_id)?,
                         // csrng and `spl:`.
