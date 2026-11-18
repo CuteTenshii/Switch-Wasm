@@ -144,6 +144,8 @@ pub struct Gpu {
     pub frames: u64,
     next_as_id: u32,
     next_channel_id: u32,
+    /// The submission a channel parked, by channel and entries, and the fence it retires to.
+    parked: Option<(u32, Vec<u64>, NvFence)>,
 }
 
 impl Default for Gpu {
@@ -170,6 +172,7 @@ impl Gpu {
             frames: 0,
             next_as_id: 1,
             next_channel_id: 1,
+            parked: None,
         }
     }
 
@@ -211,13 +214,34 @@ impl Gpu {
     }
 
     /// Runs the GPFIFO submission to completion, so the returned fence is already expired.
+    /// Run a submission, answering its fence; `None` when it has to be asked again later, a
+    /// parked submission not yet finished or another submission in its way. The same call
+    /// asked again runs on from where it parked, so nothing runs twice and nothing overtakes.
     pub fn submit(
         &mut self,
         channel_id: u32,
         mem: &Memory,
         entries: &[u64],
         increments: u32,
-    ) -> Result<NvFence> {
+    ) -> Result<Option<NvFence>> {
+        if let Some((parked_on, parked_entries, fence)) = self.parked.clone() {
+            let alive = self
+                .channels
+                .get(&parked_on)
+                .is_some_and(|chan| chan.is_parked());
+            if !alive {
+                self.parked = None;
+            } else if parked_on == channel_id && parked_entries == entries {
+                let done = self.on_channel(channel_id, mem, |chan, ctx| chan.resume(ctx))?;
+                if done == channel::Submitted::Parked {
+                    return Ok(None);
+                }
+                self.parked = None;
+                return Ok(Some(fence));
+            } else {
+                return Ok(None);
+            }
+        }
         let syncpt = {
             let chan = self.channels.get(&channel_id).ok_or_else(|| {
                 Error::Gpu(format!("gpu: submit on unknown channel {}", channel_id))
@@ -226,11 +250,27 @@ impl Gpu {
         };
         let value = self.host1x.incr_max(syncpt, increments.max(1))?;
         let fence = NvFence { id: syncpt, value };
+        let submitted = self.on_channel(channel_id, mem, |chan, ctx| {
+            chan.submit(entries, fence, ctx)
+        })?;
+        if submitted == channel::Submitted::Parked {
+            self.parked = Some((channel_id, entries.to_vec(), fence));
+            return Ok(None);
+        }
+        Ok(Some(fence))
+    }
 
+    /// Run `f` on a channel with the backend lent to it, in the channel's address space.
+    fn on_channel<T>(
+        &mut self,
+        channel_id: u32,
+        mem: &Memory,
+        f: impl FnOnce(&mut Channel, &mut ExecCtx) -> Result<T>,
+    ) -> Result<T> {
         let chan = self
             .channels
             .get_mut(&channel_id)
-            .expect("channel checked above");
+            .ok_or_else(|| Error::Gpu(format!("gpu: submit on unknown channel {}", channel_id)))?;
         let as_id = chan.as_id.ok_or_else(|| {
             Error::Gpu(format!("gpu: channel {} has no address space", channel_id))
         })?;
@@ -250,11 +290,10 @@ impl Gpu {
         };
         // Lent for the submission and taken back even on a fault.
         chan.three_d.swap_renderer(&mut self.renderer);
-        let submitted = chan.submit(entries, fence, &mut ctx);
+        let result = f(chan, &mut ctx);
         chan.three_d.swap_renderer(&mut self.renderer);
         self.last_channel = Some(channel_id);
-        submitted?;
-        Ok(fence)
+        result
     }
 
     /// Everything drawn, cleared, copied, presented and refused since the last call.
@@ -1009,6 +1048,129 @@ mod tests {
         );
     }
 
+    /// A backend whose flush lands only after it has answered `Pending` `left` times.
+    #[derive(Debug)]
+    struct Landing {
+        left: u32,
+    }
+
+    impl renderer::Renderer for Landing {
+        fn draw(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_color(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+            _target: u32,
+            _layer: u32,
+            _channels: [bool; 4],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_depth_stencil(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+            _depth: bool,
+            _stencil: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn flush(&mut self, _ctx: &mut ExecCtx) -> Result<renderer::Flush> {
+            if self.left == 0 {
+                return Ok(renderer::Flush::Done);
+            }
+            self.left -= 1;
+            Ok(renderer::Flush::Pending)
+        }
+    }
+
+    /// A copy whose flush is still landing parks its submission: what came before it ran once,
+    /// nothing after it runs, and no other submission overtakes, until the same call is asked
+    /// again after the readbacks land.
+    #[test]
+    fn a_submission_waiting_for_readbacks_runs_on_from_where_it_stopped() {
+        use crate::gpu::engine::copy::{LAUNCH_DMA, LINE_LENGTH_IN, OFFSET_IN};
+        use crate::gpu::engine::CLASS_COPY;
+        const SYNCPOINT: u32 = 0x1D;
+        let mut gpu = Gpu::new();
+        let mem = Memory::new();
+        mem.map_zero(0x3000_0000, 0x3000).unwrap();
+        let as_id = gpu.create_address_space();
+        let base = gpu
+            .address_space_mut(as_id)
+            .unwrap()
+            .map(0x3000_0000, 0x3000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        let (src, dst) = (base + 0x1000, base + 0x2000);
+        mem.write_u32(0x3000_1000, 0xAABB_CCDD).unwrap();
+        let counted = gpu.host1x.allocate().unwrap();
+        let increment = 1 | (counted << 8);
+        let words = [
+            header(1, 1, 0, SYNCPOINT),
+            increment,
+            header(1, 1, 1, 0),
+            CLASS_COPY,
+            // The source's address, then the destination's.
+            header(1, 4, 1, OFFSET_IN),
+            (src >> 32) as u32,
+            src as u32,
+            (dst >> 32) as u32,
+            dst as u32,
+            header(1, 1, 1, LINE_LENGTH_IN),
+            4,
+            // A single pitch-linear line.
+            header(1, 1, 1, LAUNCH_DMA),
+            (1 << 7) | (1 << 8),
+            header(1, 1, 0, SYNCPOINT),
+            increment,
+        ];
+        for (index, &word) in words.iter().enumerate() {
+            mem.write_u32(0x3000_0000 + index as u32 * 4, word).unwrap();
+        }
+        gpu.set_renderer(Box::new(Landing { left: 2 }));
+        let (first, second) = (
+            gpu.create_channel(1).unwrap(),
+            gpu.create_channel(1).unwrap(),
+        );
+        for id in [first, second] {
+            gpu.channel_mut(id).unwrap().as_id = Some(as_id);
+        }
+        let entry = base | ((words.len() as u64) << 42);
+
+        assert_eq!(gpu.submit(first, &mem, &[entry], 1).unwrap(), None);
+        assert_eq!(gpu.host1x.read(counted).unwrap(), 1, "ran up to the copy");
+        assert_eq!(
+            mem.read_u32(0x3000_2000).unwrap(),
+            0,
+            "copied before it landed"
+        );
+        assert_eq!(
+            gpu.submit(second, &mem, &[], 1).unwrap(),
+            None,
+            "another submission overtook it"
+        );
+        assert_eq!(gpu.submit(first, &mem, &[entry], 1).unwrap(), None);
+        assert_eq!(gpu.host1x.read(counted).unwrap(), 1);
+
+        let fence = gpu
+            .submit(first, &mem, &[entry], 1)
+            .unwrap()
+            .expect("a fence");
+        assert_eq!(gpu.host1x.read(counted).unwrap(), 2, "each increment once");
+        assert_eq!(mem.read_u32(0x3000_2000).unwrap(), 0xAABB_CCDD);
+        assert!(gpu.host1x.is_expired(fence.id, fence.value).unwrap());
+        assert!(gpu.submit(second, &mem, &[], 1).unwrap().is_some());
+    }
+
     #[test]
     fn submit_needs_an_address_space() {
         let mut gpu = Gpu::new();
@@ -1030,10 +1192,10 @@ mod tests {
         let id = gpu.create_channel(1).unwrap();
         gpu.channel_mut(id).unwrap().as_id = Some(as_id);
 
-        let fence = gpu.submit(id, &mem, &[], 1).unwrap();
+        let fence = gpu.submit(id, &mem, &[], 1).unwrap().expect("a fence");
         assert_eq!(fence.value, 1);
         assert!(gpu.host1x.is_expired(fence.id, fence.value).unwrap());
-        let second = gpu.submit(id, &mem, &[], 1).unwrap();
+        let second = gpu.submit(id, &mem, &[], 1).unwrap().expect("a fence");
         assert_eq!(second.value, 2);
     }
 

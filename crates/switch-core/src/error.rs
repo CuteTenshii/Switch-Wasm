@@ -54,6 +54,9 @@ pub enum Error {
     /// A GPU fault: an unmapped address, a malformed command stream, or an
     /// unimplemented class or format.
     Gpu(String),
+    /// A GPU method that needs guest memory the backend has not finished putting back; the
+    /// channel parks the submission to run on from that method later.
+    GpuSyncPending,
 }
 
 impl fmt::Display for Error {
@@ -117,6 +120,7 @@ impl fmt::Display for Error {
             Error::Ticket(msg) => write!(f, "ticket: {}", msg),
             Error::Cpu(msg) => write!(f, "CPU: {}", msg),
             Error::Gpu(msg) => write!(f, "GPU: {}", msg),
+            Error::GpuSyncPending => write!(f, "GPU: waiting for the backend's readbacks"),
         }
     }
 }

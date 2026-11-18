@@ -8,11 +8,11 @@ use crate::{Error, Result};
 
 /// The launch method, so a GPU backend can flush its surfaces before guest memory is read.
 pub const LAUNCH_DMA: u32 = 0x0C0;
-const OFFSET_IN: u32 = 0x100;
+pub(crate) const OFFSET_IN: u32 = 0x100;
 const OFFSET_OUT: u32 = 0x102;
 const PITCH_IN: u32 = 0x104;
 const PITCH_OUT: u32 = 0x105;
-const LINE_LENGTH_IN: u32 = 0x106;
+pub(crate) const LINE_LENGTH_IN: u32 = 0x106;
 const LINE_COUNT: u32 = 0x107;
 const SET_REMAP_CONST: u32 = 0x1C0;
 const SET_REMAP_COMPONENTS: u32 = 0x1C2;

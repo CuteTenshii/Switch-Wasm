@@ -10,7 +10,7 @@ use crate::gpu::engine::{
     field, Registers, CLASS_2D, CLASS_3D, CLASS_COMPUTE, CLASS_COPY, CLASS_GPFIFO, CLASS_INLINE,
 };
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::renderer::BlitRoute;
+use crate::gpu::renderer::{BlitRoute, Flush};
 use crate::gpu::syncpt::NvFence;
 use crate::{Error, Result};
 
@@ -151,6 +151,44 @@ pub struct Channel {
     pub gpfifo_regs: Registers,
     pub gpfifo_entries: u32,
     pfifo: Pfifo,
+    /// A submission stopped at a method waiting for the backend; see [`Channel::resume`].
+    parked: Option<Parked>,
+    /// Set by the method that stopped, until the submission is parked.
+    resume: Option<Resume>,
+    /// Set by the pushbuffer that stopped: its words and the one after the method.
+    stopped_at: Option<(Vec<u32>, usize)>,
+}
+
+/// Where a submission stopped, and what it had left to run.
+#[derive(Debug)]
+struct Parked {
+    resume: Resume,
+    words: Vec<u32>,
+    next: usize,
+    entries: Vec<u64>,
+    fence: NvFence,
+}
+
+/// The work a parked submission runs first.
+#[derive(Debug, Clone, Copy)]
+enum Resume {
+    /// The method that stopped, from the start.
+    Method {
+        subchannel: u32,
+        method: u32,
+        arg: u32,
+        last_call: bool,
+    },
+    /// The software dispatch of the compute launch already recorded.
+    SoftwareCompute,
+}
+
+/// How far a submission got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Submitted {
+    Done,
+    /// Parked at a method waiting for the backend's readbacks.
+    Parked,
 }
 
 impl Channel {
@@ -170,19 +208,95 @@ impl Channel {
             gpfifo_regs: Registers::new(),
             gpfifo_entries: 0,
             pfifo: Pfifo::default(),
+            parked: None,
+            resume: None,
+            stopped_at: None,
         }
     }
 
-    /// Run every pushbuffer in `entries`, then retire the channel's syncpoint to `fence`.
-    pub fn submit(&mut self, entries: &[u64], fence: NvFence, ctx: &mut ExecCtx) -> Result<()> {
+    /// Run every pushbuffer in `entries`, then retire the channel's syncpoint to `fence`; or
+    /// park at a method waiting for the backend, for [`Channel::resume`] to finish.
+    pub fn submit(
+        &mut self,
+        entries: &[u64],
+        fence: NvFence,
+        ctx: &mut ExecCtx,
+    ) -> Result<Submitted> {
         ctx.stats.submissions += 1;
-        for &entry in entries {
-            self.run_gpfifo_entry(entry, ctx)?;
+        self.run_entries(entries, fence, ctx)
+    }
+
+    /// Run on from where a submission parked, parking again if the backend is still not done.
+    pub fn resume(&mut self, ctx: &mut ExecCtx) -> Result<Submitted> {
+        let Some(parked) = self.parked.take() else {
+            return Ok(Submitted::Done);
+        };
+        let first = match parked.resume {
+            Resume::Method {
+                subchannel,
+                method,
+                arg,
+                last_call,
+            } => self.method(subchannel, method, arg, last_call, ctx),
+            Resume::SoftwareCompute => self.software_compute(ctx),
+        };
+        match first {
+            Err(Error::GpuSyncPending) => {
+                let resume = self.resume.take().unwrap_or(parked.resume);
+                self.parked = Some(Parked { resume, ..parked });
+                return Ok(Submitted::Parked);
+            }
+            other => other?,
+        }
+        match self.run_words(parked.words, parked.next, ctx) {
+            Err(Error::GpuSyncPending) => {
+                self.park(parked.entries, parked.fence);
+                return Ok(Submitted::Parked);
+            }
+            other => other?,
+        }
+        self.run_entries(&parked.entries, parked.fence, ctx)
+    }
+
+    /// Whether a submission is parked.
+    pub fn is_parked(&self) -> bool {
+        self.parked.is_some()
+    }
+
+    fn run_entries(
+        &mut self,
+        entries: &[u64],
+        fence: NvFence,
+        ctx: &mut ExecCtx,
+    ) -> Result<Submitted> {
+        for (i, &entry) in entries.iter().enumerate() {
+            match self.run_gpfifo_entry(entry, ctx) {
+                Err(Error::GpuSyncPending) => {
+                    self.park(entries[i + 1..].to_vec(), fence);
+                    return Ok(Submitted::Parked);
+                }
+                other => other?,
+            }
         }
         if fence.is_valid() {
             ctx.host1x.set(fence.id, fence.value)?;
         }
-        Ok(())
+        Ok(Submitted::Done)
+    }
+
+    fn park(&mut self, entries: Vec<u64>, fence: NvFence) {
+        let (words, next) = self.stopped_at.take().unwrap_or_default();
+        let resume = self
+            .resume
+            .take()
+            .expect("a method stopped without saying how to resume");
+        self.parked = Some(Parked {
+            resume,
+            words,
+            next,
+            entries,
+            fence,
+        });
     }
 
     fn run_gpfifo_entry(&mut self, entry: u64, ctx: &mut ExecCtx) -> Result<()> {
@@ -212,43 +326,62 @@ impl Channel {
             .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-        for &word in &words {
-            if self.pfifo.remaining > 0 {
-                self.data_word(word, ctx)?;
-                continue;
-            }
-            if word == 0 {
-                // Pushbuffer padding.
-                continue;
-            }
-            match Command::decode(word)? {
-                Command::Methods {
-                    method,
-                    subchannel,
-                    count,
-                    non_incrementing,
-                    increment_once,
-                } => {
-                    self.pfifo = Pfifo {
-                        method,
-                        subchannel,
-                        remaining: count,
-                        non_incrementing,
-                        increment_once,
-                    };
+        self.run_words(words, 0, ctx)
+    }
+
+    /// Execute `words` from `from`; a method that has to wait keeps them for the resume.
+    fn run_words(&mut self, words: Vec<u32>, from: usize, ctx: &mut ExecCtx) -> Result<()> {
+        for at in from..words.len() {
+            match self.run_word(words[at], ctx) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(Error::GpuSyncPending) => {
+                    self.stopped_at = Some((words, at + 1));
+                    return Err(Error::GpuSyncPending);
                 }
-                Command::Immediate {
-                    method,
-                    subchannel,
-                    arg,
-                } => {
-                    self.method(subchannel, method, arg, true, ctx)?;
-                }
-                Command::SubDeviceMask => {}
-                Command::EndSegment => break,
+                Err(e) => return Err(e),
             }
         }
         Ok(())
+    }
+
+    /// One pushbuffer word; `false` at the end of the segment.
+    fn run_word(&mut self, word: u32, ctx: &mut ExecCtx) -> Result<bool> {
+        if self.pfifo.remaining > 0 {
+            self.data_word(word, ctx)?;
+            return Ok(true);
+        }
+        if word == 0 {
+            // Pushbuffer padding.
+            return Ok(true);
+        }
+        match Command::decode(word)? {
+            Command::Methods {
+                method,
+                subchannel,
+                count,
+                non_incrementing,
+                increment_once,
+            } => {
+                self.pfifo = Pfifo {
+                    method,
+                    subchannel,
+                    remaining: count,
+                    non_incrementing,
+                    increment_once,
+                };
+            }
+            Command::Immediate {
+                method,
+                subchannel,
+                arg,
+            } => {
+                self.method(subchannel, method, arg, true, ctx)?;
+            }
+            Command::SubDeviceMask => {}
+            Command::EndSegment => return Ok(false),
+        }
+        Ok(true)
     }
 
     fn data_word(&mut self, word: u32, ctx: &mut ExecCtx) -> Result<()> {
@@ -343,14 +476,16 @@ impl Channel {
                             let span = |s: &crate::gpu::surface::Surface| {
                                 s.addr..s.addr + u64::from(s.size())
                             };
-                            self.three_d.sync_renderer_ranges(
+                            let synced = self.three_d.sync_renderer_ranges(
                                 &[span(&blit.src)],
                                 &[span(&blit.dst)],
                                 ctx,
                             )?;
+                            self.wait_for(synced, subchannel, method, arg, last_call)?;
                         }
                         (_, None) => {
-                            self.three_d.flush_renderer(ctx)?;
+                            let flushed = self.three_d.flush_renderer(ctx)?;
+                            self.wait_for(flushed, subchannel, method, arg, last_call)?;
                         }
                     }
                 }
@@ -365,7 +500,8 @@ impl Channel {
                         .plain_ranges(arg)
                         .is_some_and(|ranges| self.three_d.guest_memory_is_current(&ranges, ctx));
                     if !current {
-                        self.three_d.flush_renderer(ctx)?;
+                        let flushed = self.three_d.flush_renderer(ctx)?;
+                        self.wait_for(flushed, subchannel, method, arg, last_call)?;
                     }
                 }
                 self.copy.write(method, arg, ctx)
@@ -374,9 +510,7 @@ impl Channel {
                 if self.compute.write(method, arg, ctx)?
                     && !self.three_d.dispatch_on_device(&self.compute, ctx)?
                 {
-                    // Device-resident memory goes back before the CPU reads guest memory.
-                    self.three_d.flush_renderer(ctx)?;
-                    self.compute.run_software(ctx);
+                    self.software_compute(ctx)?;
                 }
                 Ok(())
             }
@@ -393,6 +527,37 @@ impl Channel {
                 other, subchannel
             ))),
         }
+    }
+
+    /// Device-resident memory goes back before the CPU reads guest memory for a launch.
+    fn software_compute(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+        if self.three_d.flush_renderer(ctx)? == Flush::Pending {
+            self.resume = Some(Resume::SoftwareCompute);
+            return Err(Error::GpuSyncPending);
+        }
+        self.compute.run_software(ctx);
+        Ok(())
+    }
+
+    /// Stop at this method until a sync the backend has not finished lands.
+    fn wait_for(
+        &mut self,
+        synced: Flush,
+        subchannel: u32,
+        method: u32,
+        arg: u32,
+        last_call: bool,
+    ) -> Result<()> {
+        if synced == Flush::Done {
+            return Ok(());
+        }
+        self.resume = Some(Resume::Method {
+            subchannel,
+            method,
+            arg,
+            last_call,
+        });
+        Err(Error::GpuSyncPending)
     }
 
     /// The channel's host methods, answered on any subchannel.

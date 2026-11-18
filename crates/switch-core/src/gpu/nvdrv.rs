@@ -130,6 +130,8 @@ pub struct NvDrv {
     pub zbc_color: ZbcTable,
     pub zbc_depth: ZbcTable,
     pub video: Video,
+    /// Set by an ioctl that cannot answer yet, to be asked again; see [`Gpu::submit`].
+    pub ask_again: bool,
 }
 
 impl Default for NvDrv {
@@ -142,6 +144,7 @@ impl NvDrv {
     pub fn new() -> NvDrv {
         NvDrv {
             gpu: Gpu::new(),
+            ask_again: false,
             files: HashMap::new(),
             next_fd: 1,
             transfer_mem_size: 0,
@@ -934,9 +937,13 @@ impl NvDrv {
                 for i in 0..num_entries as usize {
                     entries.push(read_u64(data, 0x18 + i * 8));
                 }
-                let fence = self.gpu.submit(channel_id, mem, &entries, 1)?;
-                write_u32(data, 0x10, fence.id);
-                write_u32(data, 0x14, fence.value);
+                match self.gpu.submit(channel_id, mem, &entries, 1)? {
+                    Some(fence) => {
+                        write_u32(data, 0x10, fence.id);
+                        write_u32(data, 0x14, fence.value);
+                    }
+                    None => self.ask_again = true,
+                }
                 Ok(NV_OK)
             }
 
@@ -947,9 +954,13 @@ impl NvDrv {
                 for i in 0..num_entries {
                     entries.push(read_u64(inline_in, i * 8));
                 }
-                let fence = self.gpu.submit(channel_id, mem, &entries, 1)?;
-                write_u32(data, 0x10, fence.id);
-                write_u32(data, 0x14, fence.value);
+                match self.gpu.submit(channel_id, mem, &entries, 1)? {
+                    Some(fence) => {
+                        write_u32(data, 0x10, fence.id);
+                        write_u32(data, 0x14, fence.value);
+                    }
+                    None => self.ask_again = true,
+                }
                 Ok(NV_OK)
             }
 

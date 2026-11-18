@@ -4,6 +4,9 @@ use crate::cpu::Cpu;
 use crate::trace::Level;
 use crate::Result;
 
+/// How long a submission waiting for the backend's readbacks sleeps before it is asked again.
+const GPU_WAIT_NS: i64 = 1_000_000;
+
 impl Cpu {
     /// `INvDrvServices`; command ids follow libnx's `services/nv.c`.
     pub(crate) fn nvdrv_request(
@@ -85,6 +88,11 @@ impl Cpu {
                     &inline_in,
                     &mut inline_out,
                 )?;
+                // Unanswered, so the request is still in the buffer for the call to run again.
+                if std::mem::take(&mut self.machine.nv.ask_again) {
+                    self.retry_after(GPU_WAIT_NS);
+                    return Ok(());
+                }
                 if error != 0 {
                     if crate::trace::enabled(crate::trace::Trace::Nv) {
                         crate::traceln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
