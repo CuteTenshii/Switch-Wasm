@@ -45,6 +45,9 @@ pub struct SaveDataQuota {
     /// Cache storage ceiling (data plus journal) and how many the title may address.
     pub cache_storage_size_max: i64,
     pub cache_storage_index_max: i32,
+    /// Cache storage 0, created at launch when the size is not 0.
+    pub cache_storage_size: i64,
+    pub cache_storage_journal_size: i64,
 }
 
 impl Default for SaveDataQuota {
@@ -58,6 +61,8 @@ impl Default for SaveDataQuota {
             device_journal_size_max: DEFAULT_SAVE_DATA_JOURNAL_SIZE,
             cache_storage_size_max: DEFAULT_SAVE_DATA_SIZE,
             cache_storage_index_max: DEFAULT_CACHE_STORAGE_INDEX_MAX,
+            cache_storage_size: 0,
+            cache_storage_journal_size: 0,
         }
     }
 }
@@ -73,6 +78,8 @@ impl From<&crate::control::Nacp> for SaveDataQuota {
             device_journal_size_max: nacp.device_save_data_journal_size_max,
             cache_storage_size_max: nacp.cache_storage_data_and_journal_size_max,
             cache_storage_index_max: i32::from(nacp.cache_storage_index_max),
+            cache_storage_size: nacp.cache_storage_size,
+            cache_storage_journal_size: nacp.cache_storage_journal_size,
         }
     }
 }
@@ -1910,6 +1917,33 @@ mod tests {
         assert!(cpu
             .save_data(crate::cpu::SaveKey::cache_storage(program, 1))
             .is_some());
+    }
+
+    #[test]
+    fn the_cache_storage_a_nacp_declares_mounts_without_being_created() {
+        let mut cpu = seeded_saves();
+        cpu.set_save_data_quota(super::SaveDataQuota {
+            cache_storage_size: 0x140_0000,
+            cache_storage_journal_size: 0x40_0000,
+            ..Default::default()
+        });
+        cpu.ensure_launch_cache_storage();
+        assert_eq!(cache_storage_size(&mut cpu, 0), (0, 0x140_0000, 0x40_0000));
+        assert_eq!(cache_storage_size(&mut cpu, 1).0, super::TARGET_NOT_FOUND);
+        let mut open = [0u8; 0x48];
+        open[0] = 1;
+        open[8 + 0x20] = 5;
+        write_request(&mut cpu, 51, &open);
+        cpu.fsp_srv_request(TLS, Some(51), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+    }
+
+    #[test]
+    fn no_cache_storage_is_made_for_a_nacp_that_declares_none() {
+        let mut cpu = seeded_saves();
+        cpu.set_save_data_quota(super::SaveDataQuota::default());
+        cpu.ensure_launch_cache_storage();
+        assert_eq!(cache_storage_size(&mut cpu, 0).0, super::TARGET_NOT_FOUND);
     }
 
     #[test]

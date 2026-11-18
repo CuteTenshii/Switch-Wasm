@@ -742,6 +742,8 @@ mod tests {
         assert_eq!(quota.device_journal_size_max, 0x50_0000);
         assert_eq!(quota.cache_storage_size_max, 0x400_0000);
         assert_eq!(quota.cache_storage_index_max, 3);
+        assert_eq!(quota.cache_storage_size, 0x10_0000);
+        assert_eq!(quota.cache_storage_journal_size, 0x8_0000);
     }
 
     /// A minimal NRO with an asset section appended.

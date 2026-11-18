@@ -127,11 +127,26 @@ impl Cpu {
     /// Boot `program` in the running process. Returns where each module landed, entry first.
     pub fn boot_program(&mut self, program: &Program) -> Result<Vec<crate::nso::LoadedNso>> {
         self.adopt_program(program)?;
+        self.ensure_launch_cache_storage();
         if !program.is_64_bit() {
             self.log(Level::Info, "[npdm] AArch32 title: running in A32 state");
             self.set_mode(ExecMode::A32);
         }
         self.boot_retail_program(&program.modules())
+    }
+
+    /// ns's `EnsureApplicationSaveData`: the NACP's cache storage exists before the title
+    /// runs, so a title may mount it without creating it.
+    pub(crate) fn ensure_launch_cache_storage(&mut self) {
+        let quota = self.save_data_quota();
+        if quota.cache_storage_size > 0 {
+            let key = crate::cpu::SaveKey::cache_storage(self.program_id(), 0);
+            self.create_cache_storage(
+                key,
+                quota.cache_storage_size,
+                quota.cache_storage_journal_size,
+            );
+        }
     }
 
     /// Start installed program `program_id` as a new process beside the running one.
