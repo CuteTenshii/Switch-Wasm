@@ -79,6 +79,15 @@ pub(crate) struct BsdSocket {
     pub shut_write: bool,
     /// The host listener taking connections for this one, with the network on.
     pub host_listener: Option<StreamId>,
+    /// The counter of a descriptor made by `EventFd` rather than `Socket`.
+    pub eventfd: Option<EventFd>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EventFd {
+    pub counter: u64,
+    /// `EFD_SEMAPHORE`: a read takes 1 rather than the whole count.
+    pub semaphore: bool,
 }
 
 impl BsdSocket {
@@ -99,6 +108,7 @@ impl BsdSocket {
             shut_read: false,
             shut_write: false,
             host_listener: None,
+            eventfd: None,
         }
     }
 
@@ -112,6 +122,9 @@ impl BsdSocket {
     /// Readable: has bytes, a pending connection, a closed peer or a shut reading side (EOF),
     /// or an error to report.
     fn readable(&self) -> bool {
+        if let Some(eventfd) = self.eventfd {
+            return eventfd.counter > 0;
+        }
         !self.rx.is_empty()
             || !self.datagram.received.is_empty()
             || !self.incoming.is_empty()
@@ -129,7 +142,8 @@ impl BsdSocket {
     /// Writable: any datagram socket, a live loopback connection, a host connection with room
     /// in its send window, or one with an error a send would report.
     fn writable(&self) -> bool {
-        self.kind == BSD_SOCK_DGRAM
+        self.eventfd.is_some()
+            || self.kind == BSD_SOCK_DGRAM
             || (self.peer.is_some() && !self.peer_closed)
             || self
                 .stream
@@ -241,6 +255,9 @@ const BSD_F_SETFL: u32 = 4;
 
 const BSD_O_NONBLOCK: u32 = 0x0800;
 
+/// `EFD_SEMAPHORE`, the same in FreeBSD and Linux.
+const BSD_EFD_SEMAPHORE: u32 = 1;
+
 /// `SOL_SOCKET`, `SO_RCVTIMEO` and `SO_ERROR`, FreeBSD's.
 const BSD_SOL_SOCKET: u32 = 0xFFFF;
 
@@ -303,6 +320,19 @@ impl Cpu {
             Some(30) => {
                 let (fd, count, flags) = (word(self, 0) as i32, word(self, 1), word(self, 2));
                 self.bsd_send_messages(tls, fd, count, flags)
+            }
+            // EventFd(u64 initval, s32 flags).
+            Some(31) => {
+                let counter = self.mem.read_u64(data).unwrap_or(0);
+                let flags = word(self, 2);
+                let mut socket = BsdSocket::new(0, 0);
+                socket.eventfd = Some(EventFd {
+                    counter,
+                    semaphore: flags & BSD_EFD_SEMAPHORE != 0,
+                });
+                let fd = self.alloc_bsd_fd();
+                self.process_mut().bsd_sockets.insert(fd, socket);
+                self.bsd_reply(tls, fd, 0)
             }
             // Cmd36(pid, version, pid_reserved) -> u32: a stub that returns 0 on the Switch.
             Some(36) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
@@ -874,6 +904,9 @@ impl Cpu {
     ) -> Option<(i32, i32)> {
         let peer = match self.process().bsd_sockets.get(&fd) {
             None => return Some((-1, BSD_EBADF)),
+            Some(socket) if socket.eventfd.is_some() => {
+                return Some(self.bsd_eventfd_write(fd, &data))
+            }
             Some(socket) if socket.shut_write => return Some((-1, BSD_EPIPE)),
             Some(socket) if socket.stream.is_some() => {
                 return self.bsd_send_outside(fd, data, flags);
@@ -970,6 +1003,9 @@ impl Cpu {
         if let Some(errno) = self.bsd_take_reset(fd) {
             return Some(Receipt::failed(errno));
         }
+        if let Some(eventfd) = self.process().bsd_sockets.get(&fd).and_then(|s| s.eventfd) {
+            return self.bsd_eventfd_read(fd, eventfd, room, flags);
+        }
         if self
             .process()
             .bsd_sockets
@@ -1022,6 +1058,73 @@ impl Cpu {
             self.net.outbox.push(NetCommand::Consumed { stream, bytes });
         }
         Some(Receipt::read(data, None, false))
+    }
+
+    /// Add a write's 8-byte value to an eventfd's counter, which never reaches `u64::MAX`.
+    fn bsd_eventfd_write(&mut self, fd: i32, data: &[u8]) -> (i32, i32) {
+        let Some(value) = data
+            .get(..8)
+            .map(|raw| u64::from_le_bytes(raw.try_into().unwrap()))
+        else {
+            return (-1, BSD_EINVAL);
+        };
+        if value == u64::MAX {
+            return (-1, BSD_EINVAL);
+        }
+        let Some(eventfd) = self
+            .process_mut()
+            .bsd_sockets
+            .get_mut(&fd)
+            .and_then(|socket| socket.eventfd.as_mut())
+        else {
+            return (-1, BSD_EBADF);
+        };
+        match eventfd
+            .counter
+            .checked_add(value)
+            .filter(|&sum| sum < u64::MAX)
+        {
+            Some(sum) => {
+                eventfd.counter = sum;
+                (8, 0)
+            }
+            None => (-1, BSD_EAGAIN),
+        }
+    }
+
+    /// Read an eventfd's counter as 8 bytes and clear it, or take 1 in semaphore mode. A zero
+    /// counter waits like an empty socket.
+    fn bsd_eventfd_read(
+        &mut self,
+        fd: i32,
+        eventfd: EventFd,
+        room: usize,
+        flags: u32,
+    ) -> Option<Receipt> {
+        if room < 8 {
+            return Some(Receipt::failed(BSD_EINVAL));
+        }
+        if eventfd.counter == 0 {
+            if self.bsd_waits(fd, None, flags & BSD_MSG_DONTWAIT != 0) {
+                return None;
+            }
+            self.pending_yield = true;
+            return Some(Receipt::failed(BSD_EAGAIN));
+        }
+        let taken = if eventfd.semaphore {
+            1
+        } else {
+            eventfd.counter
+        };
+        if let Some(eventfd) = self
+            .process_mut()
+            .bsd_sockets
+            .get_mut(&fd)
+            .and_then(|socket| socket.eventfd.as_mut())
+        {
+            eventfd.counter -= taken;
+        }
+        Some(Receipt::read(taken.to_le_bytes().to_vec(), None, false))
     }
 
     /// Whether a call that found nothing on `fd` waits for it. A blocking socket does: the

@@ -978,3 +978,52 @@ pub(in crate::services::net) fn each_blocked_thread_keeps_its_own_deadline() {
         "thread 0's has passed"
     );
 }
+
+/// `EventFd(initval, flags)` on a fresh `bsd:u` session, with `SCRATCH` mapped.
+fn eventfd(initval: u64, flags: u32) -> (Cpu, i32) {
+    let mut cpu = request(false, 31, &[]);
+    cpu.register_service_handle(9, "bsd:u");
+    cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+    let mut payload = [0u8; 12];
+    payload[..8].copy_from_slice(&initval.to_le_bytes());
+    payload[8..].copy_from_slice(&flags.to_le_bytes());
+    write_request(&mut cpu, 31, &payload);
+    cpu.bsd_request(TLS, 9, Some(31)).unwrap();
+    let (fd, errno) = bsd_result(&cpu);
+    assert_eq!(errno, 0, "eventfd");
+    (cpu, fd)
+}
+
+/// `Read(fd)` into `SCRATCH`: the result and the 8 bytes read.
+fn read_counter(cpu: &mut Cpu, fd: i32) -> ((i32, i32), u64) {
+    write_map_buffer_request(cpu, 25, &fd.to_le_bytes(), SCRATCH, 8, false);
+    cpu.bsd_request(TLS, 9, Some(25)).unwrap();
+    (bsd_result(cpu), cpu.mem.read_u64(SCRATCH).unwrap())
+}
+
+#[test]
+fn an_eventfd_reads_back_what_was_written_and_is_readable_only_until_then() {
+    const POLLIN: u16 = 1;
+    const POLLOUT: u16 = 4;
+    let (mut cpu, fd) = eventfd(2, 0);
+    assert_eq!(cpu.bsd_poll_revents(fd, POLLIN | POLLOUT), POLLIN | POLLOUT);
+
+    place(&mut cpu, SCRATCH, &5u64.to_le_bytes());
+    write_map_buffer_request(&mut cpu, 24, &fd.to_le_bytes(), SCRATCH, 8, true);
+    cpu.bsd_request(TLS, 9, Some(24)).unwrap();
+    assert_eq!(bsd_result(&cpu), (8, 0), "write");
+
+    assert_eq!(read_counter(&mut cpu, fd), ((8, 0), 7), "the whole count");
+    assert_eq!(cpu.bsd_poll_revents(fd, POLLIN | POLLOUT), POLLOUT);
+    set_nonblocking(&mut cpu, fd);
+    assert_eq!(read_counter(&mut cpu, fd).0, (-1, super::BSD_EAGAIN));
+}
+
+#[test]
+fn a_semaphore_eventfd_reads_one_at_a_time() {
+    let (mut cpu, fd) = eventfd(2, super::BSD_EFD_SEMAPHORE);
+    set_nonblocking(&mut cpu, fd);
+    assert_eq!(read_counter(&mut cpu, fd), ((8, 0), 1));
+    assert_eq!(read_counter(&mut cpu, fd), ((8, 0), 1));
+    assert_eq!(read_counter(&mut cpu, fd).0, (-1, super::BSD_EAGAIN));
+}
