@@ -1734,19 +1734,24 @@ fn a_packed_depth_image_samples_its_depth_in_green() {
     assert_eq!(got, want, "the colour surface differs");
 }
 
-/// A held depth surface sampled as a shadow map, whole and as a padded surface's corner.
+/// A held `ZF32` or `Z16` surface sampled as a shadow map, whole and as a padded surface's corner.
 #[test]
 fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
     let Some((_serial, mut gpu)) = device() else {
         return;
     };
-    for width in [testing::TARGET_WIDTH, testing::TARGET_WIDTH / 2] {
+    // The zeta format and the TIC components and R data type sampling it.
+    let formats = [(0x0A, 0x2f | (7 << 7)), (0x13, 0x3a | (2 << 7))];
+    for ((zeta, components), width) in formats
+        .into_iter()
+        .flat_map(|f| [(f, testing::TARGET_WIDTH), (f, testing::TARGET_WIDTH / 2)])
+    {
         let build = |gpu: Option<&mut super::Gpu>, clear: f32| {
             let mut h = Harness::with_fragment_shader(testing::shadow_fragment_shader());
             h.bindless_texture();
             h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
             h.depth_target(0x0207);
-            h.engine.regs.set(0x3FA, 0x0A); // ZF32
+            h.engine.regs.set(0x3FA, zeta);
             h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
             h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
             h.engine.regs.set(0x364, clear.to_bits());
@@ -1756,7 +1761,7 @@ fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
             let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
             let mut ctx = h.ctx();
             for (word, value) in [
-                (0, 0x2f | (7 << 7) | identity),
+                (0, components | identity),
                 (1, depth as u32),
                 (2, (depth >> 32) as u32 | (3 << 21)),
                 (3, 0),
@@ -1786,18 +1791,33 @@ fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
         };
         // A stale read would compare against zero, a different picture.
         let want = build(None, 0.75);
-        assert_ne!(want, build(None, 0.0), "{width} wide: 0.75 reads as 0");
+        assert_ne!(
+            want,
+            build(None, 0.0),
+            "{zeta:#x}, {width} wide: 0.75 reads as 0"
+        );
         let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
         let got = build(Some(&mut gpu), 0.75);
         assert_eq!(
             gpu.fallbacks, fallbacks,
-            "{width} wide: the draw fell back: {:?}",
+            "{zeta:#x}, {width} wide: the draw fell back: {:?}",
             gpu.last_fallback
         );
-        assert_eq!(gpu.drawn, drawn + 1, "{width} wide: not on the device");
+        assert_eq!(
+            gpu.drawn,
+            drawn + 1,
+            "{zeta:#x}, {width} wide: not on the device"
+        );
         let _ = gpu.device.poll(wgpu::PollType::Poll);
-        assert_eq!(gpu.device_error(), None, "{width} wide: rejected");
-        assert_eq!(got, want, "{width} wide: the colour surface differs");
+        assert_eq!(
+            gpu.device_error(),
+            None,
+            "{zeta:#x}, {width} wide: rejected"
+        );
+        assert_eq!(
+            got, want,
+            "{zeta:#x}, {width} wide: the colour surface differs"
+        );
     }
 }
 

@@ -880,7 +880,7 @@ enum HeldLayer {
     PackedDepth(wgpu::Texture),
     /// A `depth32float` copied whole into its layer of a shadow map.
     Shadow(wgpu::Texture),
-    /// A larger `depth32float` whose corner is drawn into a shadow map layer.
+    /// A larger depth surface whose corner is drawn into a `depth32float` shadow map layer.
     ShadowCorner(wgpu::Texture),
     /// A colour surface whose bytes are another format's of the same size, copied through a
     /// buffer; an `S8D24` image's words are converted after.

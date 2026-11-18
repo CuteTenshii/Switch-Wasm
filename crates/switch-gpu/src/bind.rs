@@ -567,7 +567,7 @@ impl Gpu {
                         continue;
                     }
                     // A padded depth surface sampled at its drawn size goes through the shadow map pass.
-                    if depth32
+                    if (depth32 || depth16)
                         && upload.width <= width
                         && upload.height <= height
                         && same_rows(&held.target, &upload.key)
@@ -1233,76 +1233,15 @@ impl Gpu {
         pipeline
     }
 
-    /// Draw the top-left corner of a held `depth32float` into a smaller shadow map layer, via `r32float`.
+    /// Draw the top-left corner of a held depth surface into a smaller shadow map layer.
     fn draw_shadow_corner(
         &mut self,
         shadow: &wgpu::Texture,
         layer: u32,
         surface: &wgpu::Texture,
     ) -> std::result::Result<(), String> {
-        let size = surface.size();
-        let row = (size.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("held shadow"),
-            size: u64::from(row) * u64::from(size.height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let staging = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("held shadow"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let layout = wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(row),
-            rows_per_image: Some(size.height),
-        };
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("held shadow"),
-            });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: surface,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::DepthOnly,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout,
-            },
-            size,
-        );
-        encoder.copy_buffer_to_texture(
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout,
-            },
-            staging.as_image_copy(),
-            size,
-        );
-        self.submit_with_batch(encoder);
-        let drawn = self
-            .load_depth_layer(
-                shadow,
-                layer,
-                &staging,
-                0,
-                wgpu::TextureFormat::Depth32Float,
-            )
-            .map_err(|e| format!("{e:?}"));
-        staging.destroy();
-        self.scratch.push(Scratch::Buffer(buffer));
-        drawn
+        self.load_depth_layer(shadow, layer, surface, 0, wgpu::TextureFormat::Depth32Float)
+            .map_err(|e| format!("{e:?}"))
     }
 
     fn texture(

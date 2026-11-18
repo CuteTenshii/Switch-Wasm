@@ -81,7 +81,7 @@ Section headings are paths under `crates/switch-gpu/src/`; a heading that starts
 
 ## `builtin.rs`
 
-- Depth uploads and shadow maps go through a fullscreen draw writing `frag_depth` from an `r32float` texture (`LOAD_DEPTH_WGSL`, one layer at a time), because a copy cannot write `depth32float`. `depth16unorm` could be copied but takes the same draw path so the two formats cannot diverge.
+- Depth uploads and shadow maps go through a fullscreen draw writing `frag_depth` from an `r32float` texture (`LOAD_DEPTH_WGSL`, one layer at a time), because a copy cannot write `depth32float`. `depth16unorm` could be copied but takes the same draw path so the two formats cannot diverge. A padded held `ZF32` or `Z16` shadow map layer is drawn by the same pass straight from the held depth texture, since a depth copy takes whole subresources; Breath of the Wild samples a three-layer 720x720 `Z16` shadow map out of surfaces held at 736x720.
 - The resample grid is a storage buffer, not a uniform: its tables are indexed by a runtime value, and a uniform array pads every element to 16 bytes.
 
 ## `tests.rs`
