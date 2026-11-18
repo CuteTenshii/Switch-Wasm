@@ -233,6 +233,7 @@ impl Engine3D {
             while ty < ty1 {
                 let gob_row = ty - ty % GOB_HEIGHT;
                 let row_whole = whole_gobs && ty == gob_row && ty + GOB_HEIGHT <= ty1;
+                let rows = if row_whole { GOB_HEIGHT } else { 1 };
                 let mut tx = tx0;
                 while tx < tx1 {
                     let gob_col = tx - tx % gob_texels;
@@ -242,12 +243,16 @@ impl Engine3D {
                         tx += gob_texels;
                         continue;
                     }
-                    let (offset, run) = rt.texel_run(tx, ty);
-                    let count = run.min(tx1 - tx);
-                    ctx.fill_pixels(base + offset as u64, bpp, raw, count)?;
+                    // A run spans the same columns on every row of its GOB.
+                    let mut count = 0;
+                    for y in ty..ty + rows {
+                        let (offset, run) = rt.texel_run(tx, y);
+                        count = run.min(tx1 - tx);
+                        ctx.fill_pixels(base + offset as u64, bpp, raw, count)?;
+                    }
                     tx += count;
                 }
-                ty += if row_whole { GOB_HEIGHT } else { 1 };
+                ty += rows;
             }
             return Ok(());
         }
@@ -356,6 +361,7 @@ impl Engine3D {
         while ty < ty1 {
             let gob_row = ty - ty % GOB_HEIGHT;
             let row_whole = gob_texels > 0 && ty == gob_row && ty + GOB_HEIGHT <= ty1;
+            let rows = if row_whole { GOB_HEIGHT } else { 1 };
             let mut tx = tx0;
             while tx < tx1 {
                 let gob_col = if gob_texels > 0 {
@@ -371,13 +377,16 @@ impl Engine3D {
                     tx += gob_texels;
                     continue;
                 }
-                let (offset, run) = layout.run_at(tx * bytes, ty, width_bytes);
-                let count = (run / bytes).max(1).min(tx1 - tx);
-                span = span.max(offset as u64 + u64::from(count) * u64::from(bytes));
-                ctx.merge_pixels(addr + offset as u64, bytes, value, written, count)?;
+                let mut count = 0;
+                for y in ty..ty + rows {
+                    let (offset, run) = layout.run_at(tx * bytes, y, width_bytes);
+                    count = (run / bytes).max(1).min(tx1 - tx);
+                    span = span.max(offset as u64 + u64::from(count) * u64::from(bytes));
+                    ctx.merge_pixels(addr + offset as u64, bytes, value, written, count)?;
+                }
                 tx += count;
             }
-            ty += if row_whole { GOB_HEIGHT } else { 1 };
+            ty += rows;
         }
 
         // Arm the watch after the walk so its own stores are not reported.

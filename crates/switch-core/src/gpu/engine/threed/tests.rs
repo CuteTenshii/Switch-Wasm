@@ -377,8 +377,12 @@ fn a_depth_clear_writes_runs_where_a_per_texel_clear_would() {
         0xDEAD_0000 | (tx << 8) | ((tx * 7 + ty) & 0xFF)
     }
 
-    // Whole GOBs and a partial rectangle, covering both the run path and its edges.
-    for &(rx, rw, ry, rh) in &[(0u32, WIDTH, 0u32, HEIGHT), (4, 20, 3, 9)] {
+    // Whole GOBs, whole GOB rows ending in a partial GOB, and a partial rectangle.
+    for &(rx, rw, ry, rh) in &[
+        (0u32, WIDTH, 0u32, HEIGHT),
+        (0, 20, 0, HEIGHT),
+        (4, 20, 3, 9),
+    ] {
         let mut h = Harness::new(0x10000);
         let layout = Layout::BlockLinear {
             block_height_gobs: 1,
@@ -454,6 +458,38 @@ fn clear_of_a_block_linear_target_uses_the_swizzle() {
             "word {}",
             i
         );
+    }
+}
+
+/// A GOB row cut short by the scissor still has all eight rows of its last, partial GOB filled.
+#[test]
+fn clear_of_part_of_a_gob_fills_every_row_of_it() {
+    let mut h = Harness::new(0x10000);
+    let mut engine = Engine3D::new();
+    engine.regs.set(0x200, (h.base >> 32) as u32);
+    engine.regs.set(0x201, h.base as u32);
+    engine.regs.set(0x202, 32);
+    engine.regs.set(0x203, 8);
+    engine.regs.set(0x204, 0xD5);
+    engine.regs.set(0x205, 0); // block-linear, one GOB per block
+    engine.regs.set(SCREEN_SCISSOR_HORIZONTAL, 20 << 16);
+    engine.regs.set(SCREEN_SCISSOR_VERTICAL, 8 << 16);
+    engine.regs.set(CLEAR_COLOR + 3, 1.0f32.to_bits());
+
+    let mut ctx = h.ctx();
+    engine
+        .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
+        .unwrap();
+
+    let layout = Layout::BlockLinear {
+        block_height_gobs: 1,
+    };
+    for ty in 0..8 {
+        for tx in 0..32 {
+            let at = 0x3000_0000 + layout.offset(tx * 4, ty, 32 * 4);
+            let want = if tx < 20 { 0xFF00_0000 } else { 0 };
+            assert_eq!(h.mem.read_u32(at).unwrap(), want, "texel ({tx},{ty})");
+        }
     }
 }
 
