@@ -144,7 +144,7 @@ export interface StorageInfo {
   size: number;
 }
 
-// `ids` are the stored saves (`<hex save id>[@<user uid>]`); `names` map a uid to its nickname.
+// `ids` are the stored saves (`<hex save id>[@<user uid>]`, or `<hex title id>.cache<index>`); `names` map a uid to its nickname.
 export interface SaveListing {
   ids: string[];
   names: [string, string][];

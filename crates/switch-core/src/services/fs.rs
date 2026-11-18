@@ -92,9 +92,16 @@ const SAVE_TYPE_ACCOUNT: u8 = 1;
 
 const SAVE_TYPE_DEVICE: u8 = 3;
 
+const SAVE_TYPE_CACHE: u8 = 5;
+
+/// `fs`'s "target not found" (2002-1002).
+const TARGET_NOT_FOUND: u32 = 2 | (1002 << 9);
+
 /// System save ids have the top bit set; application ids never do.
 fn save_data_type(key: SaveKey) -> u8 {
-    if key.user != [0; 16] {
+    if key.cache.is_some() {
+        SAVE_TYPE_CACHE
+    } else if key.user != [0; 16] {
         SAVE_TYPE_ACCOUNT
     } else if key.id >> 63 == 1 {
         SAVE_TYPE_SYSTEM
@@ -123,7 +130,7 @@ impl SaveDataFilter {
             && self.save_type.is_none_or(|t| t == kind)
             && self.user.is_none_or(|u| u == key.user)
             && self.system_save_id.is_none_or(|id| id == system)
-            && self.index.is_none_or(|i| i == 0)
+            && self.index.is_none_or(|i| i == key.cache.unwrap_or(0))
     }
 }
 
@@ -163,6 +170,8 @@ fn fsp_srv_command(cmd: u32) -> Option<&'static str> {
         23 => "CreateSaveDataFileSystemBySystemSaveDataId",
         30 => "OpenGameCardStorage",
         31 => "OpenGameCardFileSystem",
+        33 => "DeleteCacheStorage",
+        34 => "GetCacheStorageSize",
         51 => "OpenSaveDataFileSystem",
         52 => "OpenSaveDataFileSystemBySystemSaveDataId",
         53 => "OpenReadOnlySaveDataFileSystem",
@@ -470,33 +479,73 @@ impl Cpu {
             }
             // 203 = OpenPatchDataStorageByCurrentProcess. There is no update NCA, and
             // `QueryMountRomCacheSize` only treats `TargetNotFound` as "no patch".
-            Some(203) => {
-                const TARGET_NOT_FOUND: u32 = 2 | (1002 << 9);
-                self.write_ipc_response(tls, TARGET_NOT_FOUND, &[], &[], &[])
-            }
-            // 22/23 = Create, 51/52/53 = Open save data: a filesystem over the NAND save.
-            Some(22) | Some(23) | Some(51) | Some(52) | Some(53) => {
-                let id = self.save_data_key(tls);
+            Some(203) => self.write_ipc_response(tls, TARGET_NOT_FOUND, &[], &[], &[]),
+            // 22/23 = Create(attribute, creation info, ...): a NAND save.
+            Some(22) | Some(23) => {
+                const CREATION_INFO: u32 = 0x40;
+                let data = self.ipc_request_data(tls);
+                let id = self.save_data_key(data);
                 crate::trace!(Trace::Fs, "[fs] save data {id}");
-                self.save_data_mut(id);
-                if matches!(cmd_id, Some(22) | Some(23)) {
-                    return self.write_ipc_response(tls, 0, &[], &[], &[]);
+                if id.cache.is_some() {
+                    let size = self.mem.read_u64(data.wrapping_add(CREATION_INFO))? as i64;
+                    let journal = self.mem.read_u64(data.wrapping_add(CREATION_INFO + 8))? as i64;
+                    self.create_cache_storage(id, size, journal);
+                } else {
+                    self.save_data_mut(id);
                 }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // 51/52/53 = Open(u8 space, attribute): a filesystem over the NAND save.
+            Some(51) | Some(52) | Some(53) => {
+                let id = self.save_data_key(self.ipc_request_data(tls).wrapping_add(8));
+                crate::trace!(Trace::Fs, "[fs] save data {id}");
+                if id.cache.is_some() && !self.cache_storage_exists(id) {
+                    return self.write_ipc_response(tls, TARGET_NOT_FOUND, &[], &[], &[]);
+                }
+                self.save_data_mut(id);
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-fs")?;
                 self.set_mount(key, Mount::Save(id));
                 Ok(())
             }
-            // 60 = all spaces, 61 = one space, 62 = cache storage (none), 68 = filtered.
+            // 33 = DeleteCacheStorage(u16 index).
+            Some(33) => {
+                let index = self.mem.read_u16(self.ipc_request_data(tls))?;
+                let key = SaveKey::cache_storage(self.program_id(), index);
+                let result = match self.delete_cache_storage(key) {
+                    true => 0,
+                    false => TARGET_NOT_FOUND,
+                };
+                self.write_ipc_response(tls, result, &[], &[], &[])
+            }
+            // 34 = GetCacheStorageSize(s32 index) -> (s64 size, s64 journal size).
+            Some(34) => {
+                let index = self.mem.read_u32(self.ipc_request_data(tls))?;
+                let sizes = u16::try_from(index).ok().and_then(|index| {
+                    self.cache_storage_size(SaveKey::cache_storage(self.program_id(), index))
+                });
+                match sizes {
+                    Some((size, journal)) => self.write_save_data_pair(tls, size, journal),
+                    None => self.write_ipc_response(tls, TARGET_NOT_FOUND, &[], &[], &[]),
+                }
+            }
+            // 60 = all spaces, 61 = one space, 62 = the title's cache storage, 68 = filtered.
             Some(60) | Some(61) | Some(62) | Some(68) => {
                 let data = self.ipc_request_data(tls);
                 let space = self.mem.read_u8(data).unwrap_or(0);
                 let filter = match cmd_id {
                     Some(68) => Some(self.save_data_filter(data.wrapping_add(8))),
+                    Some(62) => Some(SaveDataFilter {
+                        application_id: Some(self.program_id()),
+                        save_type: Some(SAVE_TYPE_CACHE),
+                        user: None,
+                        system_save_id: None,
+                        index: None,
+                    }),
                     _ => None,
                 };
                 let infos = match cmd_id {
-                    Some(62) => VecDeque::new(),
                     Some(60) => self.save_data_infos(None, None),
+                    Some(62) => self.save_data_infos(None, filter),
                     _ => self.save_data_infos(Some(space), filter),
                 };
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
@@ -681,7 +730,12 @@ impl Cpu {
         space: Option<u8>,
         filter: Option<SaveDataFilter>,
     ) -> VecDeque<[u8; SAVE_DATA_INFO_SIZE]> {
-        let mut keys: Vec<SaveKey> = self.saves.keys().copied().collect();
+        let mut keys: Vec<SaveKey> = self
+            .saves
+            .keys()
+            .copied()
+            .filter(|&key| key.cache.is_none() || self.cache_storage_exists(key))
+            .collect();
         keys.sort();
         keys.iter()
             .enumerate()
@@ -703,6 +757,11 @@ impl Cpu {
                 info[0x10..0x20].copy_from_slice(&key.user);
                 let id_at = if system { 0x20 } else { 0x28 };
                 info[id_at..id_at + 8].copy_from_slice(&key.id.to_le_bytes());
+                if let Some(index) = key.cache {
+                    let size = self.cache_storage_size(key).map_or(0, |(size, _)| size);
+                    info[0x30..0x38].copy_from_slice(&size.to_le_bytes());
+                    info[0x38..0x3A].copy_from_slice(&index.to_le_bytes());
+                }
                 Some(info)
             })
             .collect()
@@ -831,13 +890,14 @@ impl Cpu {
         self.mem.write_bytes(addr, &bytes[..take])
     }
 
-    /// Which save a request's `SaveDataAttribute` names: system saves by system save
-    /// id, applications by title id (none means the running title), per user by uid.
-    fn save_data_key(&mut self, tls: u32) -> SaveKey {
-        const ATTRIBUTE: u32 = 8;
+    /// Which save the `SaveDataAttribute` at `attribute` names: system saves by system save
+    /// id, applications by title id (none means the running title), per user by uid, cache
+    /// storage by index.
+    fn save_data_key(&mut self, attribute: u32) -> SaveKey {
         const USER_ID: u32 = 0x8;
         const SYSTEM_SAVE_DATA_ID: u32 = 0x18;
-        let attribute = self.ipc_request_data(tls).wrapping_add(ATTRIBUTE);
+        const TYPE: u32 = 0x20;
+        const INDEX: u32 = 0x22;
         let application_id = self.mem.read_u64(attribute).unwrap_or(0);
         let mut user = [0u8; 16];
         for (index, byte) in user.iter_mut().enumerate() {
@@ -855,7 +915,14 @@ impl Cpu {
             (0, application) => application,
             (system, _) => system,
         };
-        SaveKey { id, user }
+        let cache = (self.mem.read_u8(attribute.wrapping_add(TYPE)).unwrap_or(0)
+            == SAVE_TYPE_CACHE)
+            .then(|| {
+                self.mem
+                    .read_u16(attribute.wrapping_add(INDEX))
+                    .unwrap_or(0)
+            });
+        SaveKey { id, user, cache }
     }
 
     /// `IStorage` over the process RomFS or a data archive.
@@ -1478,11 +1545,13 @@ mod tests {
                 crate::cpu::SaveKey::shared(TITLE),
                 crate::cpu::SaveKey {
                     id: TITLE,
-                    user: *b"ann-uid-00000001"
+                    user: *b"ann-uid-00000001",
+                    cache: None,
                 },
                 crate::cpu::SaveKey {
                     id: TITLE,
-                    user: *b"ben-uid-00000002"
+                    user: *b"ben-uid-00000002",
+                    cache: None,
                 },
             ]
         );
@@ -1641,10 +1710,12 @@ mod tests {
             crate::cpu::SaveKey {
                 id: 0x0100_0000_0000_1000,
                 user: *b"ann-uid-00000001",
+                cache: None,
             },
             crate::cpu::SaveKey {
                 id: 0x0100_0000_0000_2000,
                 user: *b"ben-uid-00000002",
+                cache: None,
             },
             crate::cpu::SaveKey::shared(0x0100_0000_0000_1000),
             crate::cpu::SaveKey::shared(0x8000_0000_0000_0010),
@@ -1733,6 +1804,120 @@ mod tests {
             .unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "entries");
+    }
+
+    /// `GetCacheStorageSize(index)`: the result, then the two sizes.
+    fn cache_storage_size(cpu: &mut Cpu, index: u32) -> (u32, i64, i64) {
+        write_request(cpu, 34, &index.to_le_bytes());
+        cpu.fsp_srv_request(TLS, Some(34), 9).unwrap();
+        (
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            cpu.mem.read_u64(TLS + 0x20).unwrap() as i64,
+            cpu.mem.read_u64(TLS + 0x28).unwrap() as i64,
+        )
+    }
+
+    #[test]
+    fn a_cache_storage_the_title_creates_is_its_own_volume_until_deleted() {
+        let mut cpu = seeded_saves();
+        cpu.register_service_handle(10, "am:application-functions");
+        let program = cpu.program_id();
+        assert_eq!(cache_storage_size(&mut cpu, 0).0, super::TARGET_NOT_FOUND);
+
+        // am's CreateCacheStorage(u16 index, s64 size, s64 journal).
+        let mut create = [0u8; 0x18];
+        create[8..0x10].copy_from_slice(&0x10_0000i64.to_le_bytes());
+        create[0x10..].copy_from_slice(&0x4_0000i64.to_le_bytes());
+        write_request(&mut cpu, 27, &create);
+        cpu.applet_request(TLS, 10, Some(27)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "creating");
+        assert_eq!(cache_storage_size(&mut cpu, 0), (0, 0x10_0000, 0x4_0000));
+        assert_eq!(cache_storage_size(&mut cpu, 1).0, super::TARGET_NOT_FOUND);
+
+        let listed = scan_saves(&mut cpu, 62, &[]);
+        assert_eq!(listed.len(), 1, "only the title's cache storage");
+        assert_eq!(
+            (listed[0][8], listed[0][9]),
+            (1, 5),
+            "user space, cache type"
+        );
+        assert_eq!(
+            u64::from_le_bytes(listed[0][0x28..0x30].try_into().unwrap()),
+            program
+        );
+        assert_eq!(
+            i64::from_le_bytes(listed[0][0x30..0x38].try_into().unwrap()),
+            0x10_0000
+        );
+
+        // OpenSaveDataFileSystem(u8 space, attribute) with the Cache type and index 0.
+        let mut open = [0u8; 0x48];
+        open[0] = 1;
+        open[8 + 0x20] = 5;
+        write_request(&mut cpu, 51, &open);
+        cpu.fsp_srv_request(TLS, Some(51), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "mounting");
+        let fs = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        write_path_request(&mut cpu, 2, "/blobs", &[]);
+        cpu.fs_request(TLS, Some(2), fs).unwrap();
+        let cache = crate::cpu::SaveKey::cache_storage(program, 0);
+        assert_eq!(
+            cpu.save_data(cache).unwrap().entry_type("/blobs"),
+            Some(crate::vfs::ENTRY_TYPE_DIR)
+        );
+        assert_eq!(
+            cpu.save_data(crate::cpu::SaveKey::shared(program))
+                .and_then(|vfs| vfs.entry_type("/blobs")),
+            None,
+            "must not land in the device save"
+        );
+
+        // DeleteCacheStorage(u16 index).
+        write_request(&mut cpu, 33, &0u16.to_le_bytes());
+        cpu.fsp_srv_request(TLS, Some(33), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "deleting");
+        assert_eq!(cache_storage_size(&mut cpu, 0).0, super::TARGET_NOT_FOUND);
+        assert!(scan_saves(&mut cpu, 62, &[]).is_empty());
+        let changes = cpu.save_data_mut(cache).take_changes();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.path == "/blobs" && c.kind.is_none()),
+            "the host must learn the files went: {changes:?}"
+        );
+        write_request(&mut cpu, 51, &open);
+        cpu.fsp_srv_request(TLS, Some(51), 9).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            super::TARGET_NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn a_save_created_through_fsp_srv_is_keyed_by_the_attribute_it_leads_with() {
+        let mut cpu = seeded_saves();
+        let program = cpu.program_id();
+        // CreateSaveDataFileSystem(attribute, creation info, meta info).
+        let mut create = [0u8; 0x90];
+        create[0x20] = 5;
+        create[0x22..0x24].copy_from_slice(&1u16.to_le_bytes());
+        create[0x40..0x48].copy_from_slice(&0x8000i64.to_le_bytes());
+        create[0x48..0x50].copy_from_slice(&0x2000i64.to_le_bytes());
+        write_request(&mut cpu, 22, &create);
+        cpu.fsp_srv_request(TLS, Some(22), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+        assert_eq!(cache_storage_size(&mut cpu, 1), (0, 0x8000, 0x2000));
+        assert!(cpu
+            .save_data(crate::cpu::SaveKey::cache_storage(program, 1))
+            .is_some());
+    }
+
+    #[test]
+    fn a_restored_cache_storage_reports_the_bytes_it_holds() {
+        let mut cpu = seeded_saves();
+        let key = crate::cpu::SaveKey::cache_storage(cpu.program_id(), 0);
+        cpu.save_data_mut(key).write_file("/a", vec![0; 0x300]);
+        assert_eq!(cache_storage_size(&mut cpu, 0), (0, 0x300, 0));
     }
 
     #[test]

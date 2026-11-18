@@ -310,7 +310,11 @@ impl Cpu {
                     }
                     if user != [0; 16] {
                         let id = self.program_id();
-                        self.save_data_mut(crate::cpu::SaveKey { id, user });
+                        self.save_data_mut(crate::cpu::SaveKey {
+                            id,
+                            user,
+                            cache: None,
+                        });
                     }
                     self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
                 }
@@ -350,8 +354,15 @@ impl Cpu {
                     out.extend_from_slice(&quota.cache_storage_size_max.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &out, &[])
                 }
-                // CreateCacheStorage(u16 index, s64 size, s64 journal).
+                // CreateCacheStorage(u16 index, s64 size, s64 journal) -> (u32 target
+                // media, s64 bytes still needed): on NAND.
                 Some(27) => {
+                    let data = self.ipc_request_data(tls);
+                    let index = self.mem.read_u16(data)?;
+                    let size = self.mem.read_u64(data.wrapping_add(8))? as i64;
+                    let journal = self.mem.read_u64(data.wrapping_add(0x10))? as i64;
+                    let key = crate::cpu::SaveKey::cache_storage(self.program_id(), index);
+                    self.create_cache_storage(key, size, journal);
                     let mut out = Vec::with_capacity(16);
                     out.extend_from_slice(&1u32.to_le_bytes());
                     out.extend_from_slice(&[0u8; 4]);

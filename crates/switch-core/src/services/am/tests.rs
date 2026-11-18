@@ -905,7 +905,11 @@ fn ensure_save_data_creates_the_users_save() {
         "nothing more needed"
     );
     assert!(cpu
-        .save_data(crate::cpu::SaveKey { id: TITLE, user })
+        .save_data(crate::cpu::SaveKey {
+            id: TITLE,
+            user,
+            cache: None
+        })
         .is_some());
 }
 

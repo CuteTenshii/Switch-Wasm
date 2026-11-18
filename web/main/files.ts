@@ -415,9 +415,11 @@ async function renderSaves(mine: number): Promise<void> {
   }
   for (const id of ids) {
     const [save, uid] = id.split('@');
-    const owner = uid ? names.get(uid) ?? 'profile ' + uid.slice(0, 8) : 'shared';
-    const label = titleLabel(save);
-    const { actions } = row(Save, label, (label === save ? '' : save + ' · ') + owner,
+    const [title, cache] = save.split('.cache');
+    const user = uid ? names.get(uid) ?? 'profile ' + uid.slice(0, 8) : 'shared';
+    const owner = cache === undefined ? user : 'cache storage ' + cache;
+    const label = titleLabel(title);
+    const { actions } = row(Save, label, (label === title ? '' : title + ' · ') + owner,
       () => go({ kind: 'save', id, dir: '/' }));
     action(actions, 'Export ' + label + ' as .zip', () => void guarded(() => exportZip({ kind: 'save', id }, '/', id)), false, Archive);
     action(actions, 'Delete ' + label, () => confirmIn(actions, 'Delete this save?', 'Delete', async () => {

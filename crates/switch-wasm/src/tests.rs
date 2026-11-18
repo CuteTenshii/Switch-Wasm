@@ -272,6 +272,23 @@ fn save_data_round_trips_and_stays_out_of_the_sd_card() {
 }
 
 #[test]
+fn a_cache_storage_is_its_own_volume_by_its_stored_name() {
+    let _host = new_session();
+    switch_fs_write("0100000000001000.cache1", "/blob", b"cached").unwrap();
+    let key = SaveKey::cache_storage(0x0100_0000_0000_1000, 1);
+    assert_eq!(key.to_string(), "0100000000001000.cache1");
+    assert_eq!(session().cpu.save_data_mut(key).size("/blob"), Some(6));
+    assert_eq!(
+        session()
+            .cpu
+            .save_data_mut(SaveKey::shared(0x0100_0000_0000_1000))
+            .size("/blob"),
+        None
+    );
+    assert!(switch_fs_write("0100000000001000.cachex", "/blob", b"").is_err());
+}
+
+#[test]
 fn users_are_staged_committed_and_read_back() {
     let _host = new_session();
     let ann = "000102030405060708090a0b0c0d0e0f";

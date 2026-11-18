@@ -254,6 +254,8 @@ pub struct Machine {
     pub(crate) data_archives: IdMap<u64, Box<dyn crate::source::ByteSource>>,
     /// Save data, by save key.
     pub(crate) saves: HashMap<SaveKey, crate::vfs::Vfs>,
+    /// `(size, journal size)` of each cache storage created this session.
+    pub(crate) cache_storage_sizes: HashMap<SaveKey, (i64, i64)>,
     pub(crate) bis: HashMap<u32, crate::vfs::Vfs>,
     /// What a web applet reads as its caller's Manual: the SD card's `/atmosphere/hbl_html`.
     pub(crate) manual: crate::vfs::Vfs,
@@ -560,6 +562,7 @@ impl Cpu {
                 last_vsync_cycles: 0,
                 data_archives: IdMap::default(),
                 saves: HashMap::new(),
+                cache_storage_sizes: HashMap::new(),
                 bis: HashMap::new(),
                 manual: crate::vfs::Vfs::empty(),
                 storage_usage: None,

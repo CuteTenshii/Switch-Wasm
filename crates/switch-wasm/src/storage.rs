@@ -151,8 +151,15 @@ mod lock {
     }
 }
 
-/// A save's [`Display`](std::fmt::Display) form: `<16 hex digits>` or `<id>@<32 hex digits of uid>`.
+/// A save's [`Display`](std::fmt::Display) form: `<16 hex digits>`, `<id>@<32 hex digits of
+/// uid>` or `<id>.cache<index>`.
 pub(crate) fn parse_save_key(text: &str) -> Option<SaveKey> {
+    if let Some((id, index)) = text.split_once(".cache") {
+        return Some(SaveKey::cache_storage(
+            u64::from_str_radix(id, 16).ok()?,
+            index.parse().ok()?,
+        ));
+    }
     let (id, user) = text.split_once('@').unwrap_or((text, ""));
     let mut key = SaveKey::shared(u64::from_str_radix(id, 16).ok()?);
     if !user.is_empty() {

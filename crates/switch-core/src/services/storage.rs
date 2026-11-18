@@ -7,6 +7,8 @@ use crate::cpu::*;
 pub struct SaveKey {
     pub id: u64,
     pub user: [u8; 16],
+    /// The index of a title's cache storage; `None` for every other save.
+    pub cache: Option<u16>,
 }
 
 /// What an `IFileSystem` object serves.
@@ -32,7 +34,19 @@ pub struct StorageUsage {
 
 impl SaveKey {
     pub const fn shared(id: u64) -> SaveKey {
-        SaveKey { id, user: [0; 16] }
+        SaveKey {
+            id,
+            user: [0; 16],
+            cache: None,
+        }
+    }
+
+    pub const fn cache_storage(id: u64, index: u16) -> SaveKey {
+        SaveKey {
+            id,
+            user: [0; 16],
+            cache: Some(index),
+        }
     }
 
     /// From the uid's two little-endian halves as the host passes them.
@@ -40,14 +54,22 @@ impl SaveKey {
         let mut user = [0u8; 16];
         user[..8].copy_from_slice(&user_lo.to_le_bytes());
         user[8..].copy_from_slice(&user_hi.to_le_bytes());
-        SaveKey { id, user }
+        SaveKey {
+            id,
+            user,
+            cache: None,
+        }
     }
 }
 
 impl std::fmt::Display for SaveKey {
-    /// `0100000000001000` for a shared save, `id@uid` (32 hex digits, memory order) for a user's.
+    /// `0100000000001000` for a shared save, `id@uid` (32 hex digits, memory order) for a user's,
+    /// `id.cache<index>` for cache storage.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:016x}", self.id)?;
+        if let Some(index) = self.cache {
+            write!(f, ".cache{index}")?;
+        }
         if self.user != [0; 16] {
             f.write_str("@")?;
             for byte in self.user {
@@ -122,6 +144,50 @@ impl Cpu {
 
     pub fn save_data(&self, key: SaveKey) -> Option<&crate::vfs::Vfs> {
         self.saves.get(&key)
+    }
+
+    /// Whether a cache storage exists: created this session, or restored with files in it.
+    pub(crate) fn cache_storage_exists(&self, key: SaveKey) -> bool {
+        self.cache_storage_sizes.contains_key(&key)
+            || self
+                .saves
+                .get(&key)
+                .is_some_and(|vfs| !vfs.entries().is_empty())
+    }
+
+    /// Create a cache storage, or grow an existing one to at least these sizes.
+    pub(crate) fn create_cache_storage(&mut self, key: SaveKey, size: i64, journal_size: i64) {
+        let (old_size, old_journal) = self.cache_storage_size(key).unwrap_or((0, 0));
+        self.cache_storage_sizes
+            .insert(key, (old_size.max(size), old_journal.max(journal_size)));
+        self.save_data_mut(key);
+    }
+
+    /// `(size, journal size)` of a cache storage. One restored from the host without
+    /// being created this session reports the bytes it holds and no journal.
+    pub(crate) fn cache_storage_size(&self, key: SaveKey) -> Option<(i64, i64)> {
+        if !self.cache_storage_exists(key) {
+            return None;
+        }
+        match self.cache_storage_sizes.get(&key) {
+            Some(&sizes) => Some(sizes),
+            None => Some((self.saves.get(&key).map_or(0, |vfs| vfs.bytes()) as i64, 0)),
+        }
+    }
+
+    /// Delete a cache storage's files, each recorded as a change for the host. False when
+    /// there was none.
+    pub(crate) fn delete_cache_storage(&mut self, key: SaveKey) -> bool {
+        if !self.cache_storage_exists(key) {
+            return false;
+        }
+        self.cache_storage_sizes.remove(&key);
+        if let Some(vfs) = self.saves.get_mut(&key) {
+            for (path, _, _) in vfs.entries() {
+                vfs.remove(&path);
+            }
+        }
+        true
     }
 
     /// Every opened save, for a host that persists them.
