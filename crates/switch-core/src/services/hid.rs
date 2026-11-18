@@ -67,6 +67,19 @@ impl Cpu {
                 | Some(1000..=1004) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // SetGestureOutputRanges(u32 width, u32 height, u64 aruid): no gestures are synthesised.
                 Some(92) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // Set/Get/ResetGyroscopeZeroDriftMode(handle, mode, aruid): stored and read back.
+                Some(79) => {
+                    self.gyroscope_zero_drift_mode = self.mem.read_u32(data.wrapping_add(4))?;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(80) => {
+                    let mode = self.gyroscope_zero_drift_mode;
+                    self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
+                }
+                Some(81) => {
+                    self.gyroscope_zero_drift_mode = GYROSCOPE_ZERO_DRIFT_STANDARD;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 // Enable/IsSixAxisSensorUnalteredPassthroughEnabled(flag, handle, aruid):
                 // stored and read back; no six-axis samples are published to alter.
                 Some(84) => {
@@ -338,6 +351,9 @@ impl Cpu {
     }
 }
 
+/// `GyroscopeZeroDriftMode_Standard`, the default and what Reset restores.
+pub(crate) const GYROSCOPE_ZERO_DRIFT_STANDARD: u32 = 1;
+
 /// `SixAxisSensorCalibrationParameter`'s size; its layout is unknown.
 const SIX_AXIS_CALIBRATION_SIZE: u32 = 0x744;
 
@@ -417,6 +433,35 @@ mod tests {
             0xAA,
             "past the block"
         );
+    }
+
+    #[test]
+    fn gyroscope_zero_drift_mode_reads_back_what_was_set_until_reset() {
+        let call = |cpu: &mut Cpu, cmd: u32, payload: &[u8]| -> u32 {
+            let mut next = request(false, cmd, payload);
+            next.gyroscope_zero_drift_mode = cpu.gyroscope_zero_drift_mode;
+            next.register_service_handle(9, "hid");
+            next.hid_request(TLS, 9, Some(cmd)).unwrap();
+            assert_eq!(
+                next.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "cmd {cmd} refused"
+            );
+            *cpu = next;
+            cpu.mem.read_u32(TLS + 0x20).unwrap()
+        };
+        // { handle, mode, aruid }
+        let mut set = 0x2000_0000u32.to_le_bytes().to_vec();
+        set.extend_from_slice(&2u32.to_le_bytes());
+        set.extend_from_slice(&0u64.to_le_bytes());
+        let query = [0u8; 16];
+
+        let mut cpu = request(false, 80, &query);
+        assert_eq!(call(&mut cpu, 80, &query), 1, "the default is Standard");
+        call(&mut cpu, 79, &set);
+        assert_eq!(call(&mut cpu, 80, &query), 2);
+        call(&mut cpu, 81, &query);
+        assert_eq!(call(&mut cpu, 80, &query), 1);
     }
 
     #[test]

@@ -375,6 +375,7 @@ impl Cpu {
         self.npad_id_types.clear();
         self.npad_joy_hold_type = 0;
         self.six_axis_passthrough = false;
+        self.gyroscope_zero_drift_mode = crate::services::hid::GYROSCOPE_ZERO_DRIFT_STANDARD;
         self.vibration = (0.0, 0.0);
         self.error_dialogs.clear();
         self.am_terminate_result = 0;
