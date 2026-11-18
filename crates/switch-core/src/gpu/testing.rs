@@ -1521,6 +1521,8 @@ pub const WARP_THREADS: u32 = 36;
 
 /// Thread `tid` stores what lane `tid ^ 3` held, by two butterfly shuffles, to output word
 /// `tid`, and its warp's `vote.all` ballot to word [`WARP_THREADS`]` + tid`.
+/// Word `2 * WARP_THREADS + tid` gets `fswzadd`'s identity swizzle of 3.0 and 1.0, whose signs
+/// follow the lane's place in its quad.
 pub fn warp_program() -> Vec<u64> {
     use crate::gpu::shader::isa::{self, MemSize, Operand, ShflMode, RZ};
     use crate::gpu::shader::Op;
@@ -1610,10 +1612,35 @@ pub fn warp_program() -> Vec<u64> {
                 cout: false,
             },
         ),
+        check(
+            0x010u64 << 52 | u64::from(3.0f32.to_bits()) << 20 | 3,
+            Op::Mov32i {
+                dst: 3,
+                imm: 3.0f32.to_bits(),
+            },
+        ),
+        check(
+            0x010u64 << 52 | u64::from(1.0f32.to_bits()) << 20 | 4,
+            Op::Mov32i {
+                dst: 4,
+                imm: 1.0f32.to_bits(),
+            },
+        ),
+        check(
+            0x50f8u64 << 48 | 0xe4 << 28 | 4 << 20 | PT | 3 << 8 | 3,
+            Op::Fswzadd {
+                dst: 3,
+                a: 3,
+                b: 4,
+                swizzle: 0xe4,
+                ftz: false,
+            },
+        ),
         iadd(6, 5, descriptor, false, true),
         iadd(7, RZ, descriptor + 4, true, false),
         stg(0, 1),
         stg(WARP_THREADS * 4, 2),
+        stg(WARP_THREADS * 8, 3),
         check(0xe300_0000_0000_0000 | PT | 0xF, Op::Exit),
     ]
 }

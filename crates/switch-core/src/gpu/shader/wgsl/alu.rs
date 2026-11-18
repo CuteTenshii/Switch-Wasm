@@ -308,7 +308,7 @@ impl Emitter<'_> {
                 self.set_p(pred, &ok);
             }
 
-            // `fswzadd` needs only this lane's index, not another lane's value.
+            // `fswzadd` needs only this lane's index, not another lane's value: in a warp, its place in its quad.
             Op::Fswzadd {
                 dst,
                 a,
@@ -316,16 +316,20 @@ impl Emitter<'_> {
                 swizzle,
                 ftz,
             } => {
-                self.quad.get_or_insert(at);
+                let lane = if self.warp_caps {
+                    self.warp.get_or_insert(at);
+                    "sr_lane"
+                } else {
+                    self.quad.get_or_insert(at);
+                    "quadLane()"
+                };
                 let x = self.r(a);
                 let x = self.flush(ftz, format!("bitcast<f32>({x})"));
                 let x = self.bind(&x);
                 let y = self.r(b);
                 let y = self.flush(ftz, format!("bitcast<f32>({y})"));
                 let y = self.bind(&y);
-                let code = self.bind(&format!(
-                    "((({swizzle}u) >> ((quadLane() & 3u) * 2u)) & 3u)"
-                ));
+                let code = self.bind(&format!("((({swizzle}u) >> (({lane} & 3u) * 2u)) & 3u)"));
                 // `FSWZ_SIGNS` in `super::interp`, arm for arm.
                 let ka = self.bind(&format!(
                     "select(select(-1.0, 1.0, {code} == 1u), 0.0, {code} == 3u)"

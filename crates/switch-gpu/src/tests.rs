@@ -1863,8 +1863,8 @@ fn a_null_texture_is_read_once_across_launches() {
     assert_eq!(gpu.texture_misses, 1);
 }
 
-/// Warp instructions in a launch run on 32-lane subgroups where the device has them, and
-/// write what the software dispatch writes.
+/// Warp and quad instructions in a launch run on 32-lane subgroups where the device has them,
+/// and write what the software dispatch writes.
 #[test]
 fn a_compute_launch_shuffles_and_votes_across_its_warps_on_the_device() {
     use switch_core::gpu::renderer::{Flush, Renderer};
@@ -1880,9 +1880,11 @@ fn a_compute_launch_shuffles_and_votes_across_its_warps_on_the_device() {
     gpu.warp_subgroups = true;
     let program = warp_program();
     let (grid, block) = ([1, 1, 1], [WARP_THREADS, 1, 1]);
-    let words = WARP_THREADS * 2;
+    let words = WARP_THREADS * 3;
     let mut expected: Vec<u32> = (0..WARP_THREADS).map(|tid| tid ^ 3).collect();
     expected.extend((0..WARP_THREADS).map(|tid| if tid < 32 { u32::MAX } else { 0xf }));
+    let signed = [-4.0f32, 2.0, -2.0, -1.0];
+    expected.extend((0..WARP_THREADS).map(|tid| signed[tid as usize & 3].to_bits()));
 
     let mut software = ComputeHarness::new(&program, grid, block, words);
     let engine = software.engine();
