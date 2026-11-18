@@ -52,8 +52,9 @@ pub struct Layout {
     pub globals: Vec<Global>,
     /// Colour targets written, from `r0` in fours. Zero is a depth-only pass.
     pub targets: u32,
-    /// Targets whose format is integer, written as raw words; filled from the draw.
-    pub uint_targets: Vec<u32>,
+    /// Targets whose format is integer, with the largest value a channel holds, written as raw
+    /// words saturated to it; filled from the draw.
+    pub uint_targets: Vec<(u32, u32)>,
     /// This module's bind group; each stage needs its own.
     pub group: u32,
     /// Whether the vertex entry negates `position.y`: when the guest's viewport

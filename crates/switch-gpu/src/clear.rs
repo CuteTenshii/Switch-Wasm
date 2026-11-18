@@ -126,15 +126,17 @@ impl Gpu {
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: match (whole, color) {
-                                // An integer target's clear value is its raw words.
+                                // An integer target's clear value is its raw words, saturated.
                                 (true, Some((target, [r, g, b, a], _)))
                                     if target.format.is_uint() =>
                                 {
+                                    let max = target.format.uint_max().unwrap_or(u32::MAX);
+                                    let word = |c: f32| f64::from(c.to_bits().min(max));
                                     wgpu::LoadOp::Clear(wgpu::Color {
-                                        r: f64::from(r.to_bits()),
-                                        g: f64::from(g.to_bits()),
-                                        b: f64::from(b.to_bits()),
-                                        a: f64::from(a.to_bits()),
+                                        r: word(r),
+                                        g: word(g),
+                                        b: word(b),
+                                        a: word(a),
                                     })
                                 }
                                 (true, Some((_, [r, g, b, a], _))) => {

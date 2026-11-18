@@ -124,8 +124,8 @@ impl Gpu {
         // A depth-only pass has no colour output.
         fs_layout.targets = u32::from(color.is_some());
         // An integer target takes raw words.
-        if color.is_some_and(|target| target.format.is_uint()) {
-            fs_layout.uint_targets = vec![0];
+        if let Some(max) = color.and_then(|target| target.format.uint_max()) {
+            fs_layout.uint_targets = vec![(0, max)];
         }
         // Both stages must name the same varyings; missing ones read as zero.
         let mut varyings = vs_layout.varyings.clone();

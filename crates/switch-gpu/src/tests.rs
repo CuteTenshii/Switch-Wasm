@@ -190,17 +190,20 @@ fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
         wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE).expect("a texs translates");
     let mut layout = Layout::of(&translated, Stage::Fragment);
     layout.textures[0].uint = true;
-    layout.uint_targets = vec![0];
-    let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
-    let _ = gpu
-        .device
-        .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("integer texs"),
-            source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
-        });
-    let _ = gpu.device.poll(wgpu::PollType::Poll);
-    let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
-    assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    // `RGBA32_UINT` and `RGBA16_UINT`.
+    for max in [u32::MAX, 0xFFFF] {
+        layout.uint_targets = vec![(0, max)];
+        let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+        let _ = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("integer texs"),
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+        assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    }
 }
 
 /// The `.fmz`, `.cc`, `.x`, `.brev` and `lop3` predicate forms are valid WGSL.

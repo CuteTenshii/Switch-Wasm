@@ -213,7 +213,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - `Pipeline` resolves register state into WebGPU vocabulary so backends never re-decode raw codes. Anything WebGPU cannot express (except fans, handled by index rewriting) is `Unsupported`, never approximated, and the caller falls back to the software rasterizer. Unknown codes are errors here even where the rasterizer defaults (e.g. blend factor `One`).
 - Facing is judged in window space like `raster::culls`, so it carries over unchanged through the y negation (`Layout::flip_y`, [shader/wgsl/](#shaderwgsl)).
 - Clip z: the GL (-w..w) or Vulkan (0..w) convention is inferred from the viewport's depth transform (`Viewport::depth_minus_one_to_one`: `translate - scale >= 0`, e.g. scale 0.5 and translate 0.5 is GL); WebGPU clips 0..w.
-- `Rgba16Float` can't stand in for `Rg11b10Ufloat` (guest surface width). The feature `Rg11b10Ufloat` rendering needs and the native-only 16-bit norm formats are under [convert.rs](gpu-backend.md#convertrs). Integer colour formats are unnamed except `RGBA32_UINT` (`Rgba32Uint`), whose raw words the shader writes and reads.
+- `Rgba16Float` can't stand in for `Rg11b10Ufloat` (guest surface width). The feature `Rg11b10Ufloat` rendering needs and the native-only 16-bit norm formats are under [convert.rs](gpu-backend.md#convertrs). Integer colour formats are unnamed except `RGBA32_UINT` (`Rgba32Uint`), whose raw words the shader writes and reads, and `RGBA16_UINT` (`Rgba16Uint`, Breath of the Wild), whose words it saturates to 16 bits as the hardware does.
 - Colour format names must agree with `gpu::surface` on width, sRGB and number kind (SINT was once misnamed `Rgba8Unorm`).
 
 ## `activity.rs`

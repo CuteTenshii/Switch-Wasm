@@ -129,7 +129,16 @@ pub enum BlendOperation {
 impl Format {
     /// Whether texels are integers, read and written as raw words.
     pub fn is_uint(self) -> bool {
-        matches!(self, Format::Rgba32Uint)
+        self.uint_max().is_some()
+    }
+
+    /// The largest value an integer channel holds; written words saturate to it.
+    pub fn uint_max(self) -> Option<u32> {
+        match self {
+            Format::Rgba16Uint => Some(0xFFFF),
+            Format::Rgba32Uint => Some(u32::MAX),
+            _ => None,
+        }
     }
 }
 
@@ -160,6 +169,8 @@ pub enum Format {
     R32Uint,
     Rg32Float,
     Rgba32Float,
+    /// `RGBA16_UINT`: as `Rgba32Uint`, each word saturated to 16 bits.
+    Rgba16Uint,
     /// `RGBA32_UINT`: raw words, written and read as integers and never blended.
     Rgba32Uint,
     /// `B10G11R11_FLOAT`; needs `rg11b10ufloat-renderable`, and `Rgba16Float`
@@ -456,7 +467,7 @@ impl Pipeline {
                 format: color_format(rt.format)?,
                 // An integer target is never blended.
                 blend: match color_format(rt.format)? {
-                    Format::Rgba32Uint => None,
+                    format if format.is_uint() => None,
                     _ => blend(engine.blend_target(0))?,
                 },
                 write_mask: engine.color_mask(slot),
@@ -700,6 +711,7 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
         // Sixteen. Normalized needs `texture-format-16bit-norm` (native only).
         0xC6 => Format::Rgba16Unorm,
         0xC7 => Format::Rgba16Snorm,
+        0xC9 => Format::Rgba16Uint,
         0xCA | 0xCE => Format::Rgba16Float,
         0xDA => Format::Rg16Unorm,
         0xDB => Format::Rg16Snorm,
@@ -1035,9 +1047,11 @@ mod tests {
             | Format::R32Float
             | Format::Rg11b10Ufloat => (4, false),
             Format::Rgba8UnormSrgb | Format::Bgra8UnormSrgb => (4, true),
-            Format::Rgba16Unorm | Format::Rgba16Snorm | Format::Rgba16Float | Format::Rg32Float => {
-                (8, false)
-            }
+            Format::Rgba16Unorm
+            | Format::Rgba16Snorm
+            | Format::Rgba16Float
+            | Format::Rgba16Uint
+            | Format::Rg32Float => (8, false),
             Format::Rgba32Float | Format::Rgba32Uint => (16, false),
             other => panic!("{other:?} is not a colour target format"),
         }
@@ -1052,6 +1066,7 @@ mod tests {
             | Format::R32Float
             | Format::Rg32Float
             | Format::Rgba32Float
+            | Format::Rgba16Uint
             | Format::Rgba32Uint
             | Format::Rg11b10Ufloat => None,
             Format::R8Snorm
@@ -1085,9 +1100,9 @@ mod tests {
     /// Codes `gpu::surface` stores that have no device name, deliberately.
     #[test]
     fn the_codes_with_no_webgpu_name_are_the_ones_that_cannot_have_one() {
-        const UNNAMED: [u32; 25] = [
-            0xC1, 0xC4, 0xC5, 0xC8, 0xC9, 0xCC, 0xCD, 0xD2, 0xD8, 0xD9, 0xDC, 0xDD, 0xE3, 0xE4,
-            0xEC, 0xED, 0xF0, 0xF1, 0xF5, 0xF6,
+        const UNNAMED: [u32; 24] = [
+            0xC1, 0xC4, 0xC5, 0xC8, 0xCC, 0xCD, 0xD2, 0xD8, 0xD9, 0xDC, 0xDD, 0xE3, 0xE4, 0xEC,
+            0xED, 0xF0, 0xF1, 0xF5, 0xF6,
             // `A2R10G10B10`, `R5G6B5`, `A1R5G5B5`, `X1R5G5B5`, `A8`.
             0xDF, 0xE8, 0xE9, 0xF7, 0xF8,
         ];

@@ -206,7 +206,7 @@ fn an_integer_image_is_read_by_texel_and_an_integer_target_takes_raw_words() {
     let translated = translate(&p).unwrap();
     let mut layout = Layout::of(&translated, Stage::Fragment);
     layout.textures[0].uint = true;
-    layout.uint_targets = vec![0];
+    layout.uint_targets = vec![(0, u32::MAX)];
     let source = module(&translated, Stage::Fragment, &layout).unwrap();
     assert!(source.contains("var tex0: texture_2d<u32>"), "{source}");
     assert!(
@@ -217,6 +217,12 @@ fn an_integer_image_is_read_by_texel_and_an_integer_target_takes_raw_words() {
     assert!(
         source.contains("return vec4<u32>(r0, r1, r2, r3);"),
         "{source}"
+    );
+    layout.uint_targets = vec![(0, 0xFFFF)];
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(
+        source.contains("return vec4<u32>(min(r0, 0xffffu), min(r1, 0xffffu), min(r2, 0xffffu), min(r3, 0xffffu));"),
+        "a 16-bit integer target saturates: {source}"
     );
 
     // A gather reads an integer image's footprint as raw words.

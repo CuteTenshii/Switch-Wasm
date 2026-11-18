@@ -888,16 +888,22 @@ fn vertex_entry(layout: &Layout) -> String {
 
 fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
     let colour = |target: u32| -> String {
-        let uint = layout.uint_targets.contains(&target);
+        let max = layout
+            .uint_targets
+            .iter()
+            .find(|(t, _)| *t == target)
+            .map(|&(_, max)| max);
+        let uint = max.is_some();
         let components: Vec<String> = (0..4)
             .map(|c| {
                 let reg = (target * 4 + c) as u8;
-                match (translated.registers.contains(&reg), uint) {
-                    (true, true) => format!("r{reg}"),
-                    (true, false) => format!("bitcast<f32>(r{reg})"),
+                match (translated.registers.contains(&reg), max) {
+                    (true, Some(u32::MAX)) => format!("r{reg}"),
+                    (true, Some(max)) => format!("min(r{reg}, {max:#x}u)"),
+                    (true, None) => format!("bitcast<f32>(r{reg})"),
                     // An unwritten channel is zero.
-                    (false, true) => "0u".to_string(),
-                    (false, false) => "0.0".to_string(),
+                    (false, Some(_)) => "0u".to_string(),
+                    (false, None) => "0.0".to_string(),
                 }
             })
             .collect();
@@ -905,7 +911,7 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         format!("{vec}({})", components.join(", "))
     };
     let output_type = |target: u32| {
-        if layout.uint_targets.contains(&target) {
+        if layout.uint_targets.iter().any(|(t, _)| *t == target) {
             "vec4<u32>"
         } else {
             "vec4<f32>"
