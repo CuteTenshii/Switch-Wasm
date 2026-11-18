@@ -122,7 +122,7 @@ pub const RO_MODULE_REGION_SIZE: u32 = GUEST_HEAP_REGION_ADDR.wrapping_sub(RO_MO
 pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
 
 /// The arena `VammManagerImplByHorizon` claims at the alias region base; an SDK constant.
-pub const VAMM_ARENA_SIZE: u32 = 0x3FE0_0000;
+pub const VAMM_ARENA_SIZE: u32 = 0x0200_0000;
 
 /// Layout for titles using virtual address memory: nearly everything is alias region.
 /// The heap region is unused here, so it is small.
