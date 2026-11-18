@@ -114,10 +114,20 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @builtin(frag_depth) f32 {
 /// An `S8D24` image's words, uploaded as they are, as the rasterizer reads them: the stencil's
 /// bits in red and the unorm depth in green. `fs_held` takes the depth from a held
 /// `depth32float` instead, as guest memory would hold it.
+/// `fs_blit` is the 2D engine's move of those words into an 8-bit surface, byte for byte.
 /// The integer arithmetic reproduces both conversions exactly; floats would round.
 pub(crate) const PACKED_DEPTH_WGSL: &str = "\
 @group(0) @binding(0) var depth: texture_depth_2d;
 @group(0) @binding(1) var words: texture_2d<u32>;
+
+struct Blit {
+  origin: vec2<f32>,
+  step: vec2<f32>,
+  first: vec2<f32>,
+  last: vec2<f32>,
+  bgra: u32,
+}
+@group(0) @binding(2) var<uniform> blit: Blit;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
@@ -171,6 +181,16 @@ fn fs_held(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let stencil = textureLoad(words, at, 0).x & 0xffu;
   let d = textureLoad(depth, at, 0);
   return vec4<f32>(bitcast<f32>(stencil), from_unorm24(unorm24(d)), 0.0, 1.0);
+}
+
+// `BLIT_WGSL`'s `fs_point` texel; a BGRA target takes the word's first byte as blue.
+@fragment
+fn fs_blit(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = max(blit.origin + blit.step * (floor(position.xy) - blit.first), vec2<f32>(0.0));
+  let at = vec2<u32>(min(floor(c), blit.last));
+  let word = (textureLoad(words, at, 0).x & 0xffu) | (unorm24(textureLoad(depth, at, 0)) << 8u);
+  let bytes = unpack4x8unorm(word);
+  return select(bytes, bytes.zyxw, blit.bgra != 0u);
 }
 ";
 

@@ -3161,6 +3161,80 @@ fn a_blit_out_of_srgb_stays_with_the_engine() {
     assert_eq!(gpu.blit_on_device(&blit, &h.ctx()), BlitRoute::Flush);
 }
 
+/// Echoes of Wisdom's copy of its `Z24S8` depth surface, word for word, into a `B8G8R8A8` one.
+#[test]
+fn a_depth_surface_moved_into_colour_on_the_device_carries_the_words_the_engine_moves() {
+    const DEPTH: u64 = 0x1000;
+    const COPY: u64 = 0x2000;
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let surface = |h: &Harness, at: u64| Surface {
+        addr: h.base + at,
+        width: testing::TARGET_WIDTH,
+        height: testing::TARGET_HEIGHT,
+        format: ColorFormat::from_raw(0xCF).expect("B8G8R8A8"),
+        layout: Layout::BlockLinear {
+            block_height_gobs: 1,
+        },
+    };
+    let words = |h: &mut Harness, at: u64| -> Vec<u32> {
+        let (layout, base) = (surface(h, at).layout, h.base);
+        let ctx = h.ctx();
+        (0..testing::TARGET_HEIGHT)
+            .flat_map(|y| (0..testing::TARGET_WIDTH).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let offset = layout.offset(x * 4, y, testing::TARGET_WIDTH * 4);
+                ctx.read_u32(base + at + u64::from(offset)).expect("a word")
+            })
+            .collect()
+    };
+    let draw = |gpu: &mut super::Gpu| {
+        let mut h = Harness::new();
+        h.depth_target(0x0207);
+        h.engine.regs.set(0x364, 0.75f32.to_bits());
+        {
+            // Stencil the device does not hold, which the copy takes from guest memory.
+            let base = h.base;
+            let mut ctx = h.ctx();
+            for i in 0..testing::TARGET_WIDTH * testing::TARGET_HEIGHT {
+                ctx.write_u32(base + DEPTH + u64::from(i) * 4, (i * 37) & 0xff)
+                    .expect("a word");
+            }
+        }
+        h.write_vertex(0, [-1.0, 1.0, 0.1, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.9, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.4, 1.0], [0.0, 0.0, 1.0, 1.0]);
+        h.clear_depth_with(gpu).expect("the depth clear");
+        h.draw_with(gpu).expect("the draw");
+        h
+    };
+    let blit = |h: &Harness| Blit {
+        src: surface(h, DEPTH),
+        dst: surface(h, COPY),
+        dst_rect: (0, 0, testing::TARGET_WIDTH, testing::TARGET_HEIGHT),
+        src_origin: (0.5, 0.5),
+        step: (1.0, 1.0),
+        filtered: false,
+    };
+
+    let mut h = draw(&mut gpu);
+    let blit = blit(&h);
+    assert_eq!(gpu.blit_on_device(&blit, &h.ctx()), BlitRoute::Done);
+    h.flush_with(&mut gpu);
+    // What the engine would move once the depth is back in guest memory.
+    let expected = words(&mut h, DEPTH);
+    assert!(
+        expected.iter().any(|word| word >> 8 != expected[0] >> 8),
+        "the draw leaves more than one depth"
+    );
+    assert!(
+        expected.iter().any(|word| word & 0xff != 0),
+        "the words carry stencil"
+    );
+    assert_eq!(words(&mut h, COPY), expected);
+}
+
 /// Minecraft's world pass: each surface is larger one way, and the draw lands in their overlap.
 #[test]
 fn a_depth_surface_alternating_with_its_crop_stays_on_the_device_and_agrees() {

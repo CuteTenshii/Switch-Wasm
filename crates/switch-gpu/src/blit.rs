@@ -1,10 +1,11 @@
 //! 2D engine blits between surfaces held on the device, so a resolve does not send a
 //! rendered frame through guest memory and back.
 
-use crate::builtin::BLIT_WGSL;
+use crate::builtin::{BLIT_WGSL, PACKED_DEPTH_WGSL};
 use crate::convert::device_attachment_format;
 use crate::held::{spans_overlap as overlap, surface_span as span};
 use crate::Gpu;
+use crate::{Held, Scratch};
 use std::ops::Range;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::Format;
@@ -160,12 +161,8 @@ impl Gpu {
         let (x0, y0, width, height) = blit.dst_rect;
         let source = Target::of_surface(&blit.src).ok()?;
         let target = Target::of_surface(&blit.dst).ok()?;
-        let round = rounding(target.format)?;
         let (x1, y1) = (x0.checked_add(width)?, y0.checked_add(height)?);
-        // The device's sRGB decode is not the engine's.
-        if is_srgb(source.format)
-            || (source.format != target.format && !converts(blit, source.format, target.format))
-            || width == 0
+        if width == 0
             || height == 0
             || x1 > target.width
             || y1 > target.height
@@ -173,14 +170,47 @@ impl Gpu {
         {
             return None;
         }
-        match self.space.held.get(&source.addr) {
-            Some(held) if held.target != source => return None,
-            Some(_) => {}
-            None if self.in_flight_overlaps(&span(&source)) => return None,
-            None => self.hold(&source, ctx).ok()?,
-        }
+        let packed = self
+            .space
+            .held
+            .get(&source.addr)
+            .is_some_and(|held| held.target != source && holds_words_of(held, &source));
+        // The last parameter: the rounding scale and sRGB flag, or whether the target is BGRA.
+        let (entry, tail) = if packed {
+            if !moves_words(blit, &target) {
+                return None;
+            }
+            let bgra = u32::from(target.format == Format::Bgra8Unorm);
+            ((PACKED_DEPTH_WGSL, "fs_blit"), [bgra, 0])
+        } else {
+            let round = rounding(target.format)?;
+            // The device's sRGB decode is not the engine's.
+            if is_srgb(source.format)
+                || (source.format != target.format && !converts(blit, source.format, target.format))
+            {
+                return None;
+            }
+            match self.space.held.get(&source.addr) {
+                Some(held) if held.target != source => return None,
+                Some(_) => {}
+                None if self.in_flight_overlaps(&span(&source)) => return None,
+                None => self.hold(&source, ctx).ok()?,
+            }
+            self.resolve_companion(source.addr).ok()?;
+            let entry = if blit.filtered {
+                "fs_filtered"
+            } else {
+                "fs_point"
+            };
+            let entry = (BLIT_WGSL, entry);
+            (entry, [round.to_bits(), u32::from(is_srgb(target.format))])
+        };
         let format = device_attachment_format(self.features(), target.format).ok()?;
-        self.resolve_companion(source.addr).ok()?;
+        let stencil = if packed {
+            Some(self.stencil_words(&source, ctx)?)
+        } else {
+            None
+        };
         // A surface about to be written whole need not be uploaded.
         if (x0, y0, x1, y1) == (0, 0, target.width, target.height) {
             self.hold_blank(&target).ok()?;
@@ -195,11 +225,7 @@ impl Gpu {
             self.resolve_companion(target.addr).ok()?;
         }
 
-        let pipeline = self.blit_pipeline(format, blit.filtered);
-        let last = (
-            source.width.saturating_sub(1) as f32,
-            source.height.saturating_sub(1) as f32,
-        );
+        let pipeline = self.blit_pipeline(format, entry);
         let mut bytes = Vec::with_capacity(48);
         for value in [
             blit.src_origin.0 as f32,
@@ -208,21 +234,28 @@ impl Gpu {
             blit.step.1 as f32,
             x0 as f32,
             y0 as f32,
-            last.0,
-            last.1,
-            round,
+            source.width.saturating_sub(1) as f32,
+            source.height.saturating_sub(1) as f32,
         ] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        bytes.extend_from_slice(&u32::from(is_srgb(target.format)).to_le_bytes());
+        for value in tail {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
         bytes.resize(48, 0);
         let parameters = self.buffer("blit", &bytes, wgpu::BufferUsages::UNIFORM);
-        let source_view = self
-            .space
-            .held
-            .get(&source.addr)?
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let source_texture = &self.space.held.get(&source.addr)?.texture;
+        let source_view = source_texture.create_view(&wgpu::TextureViewDescriptor {
+            aspect: if packed {
+                wgpu::TextureAspect::DepthOnly
+            } else {
+                wgpu::TextureAspect::All
+            },
+            ..Default::default()
+        });
+        let stencil_view = stencil
+            .as_ref()
+            .map(|words| words.create_view(&wgpu::TextureViewDescriptor::default()));
         let held = self.space.held.get_mut(&target.addr)?;
         held.dirty = true;
         held.writes += 1;
@@ -230,20 +263,26 @@ impl Gpu {
         let target_view = held
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&source_view),
+        }];
+        // `PACKED_DEPTH_WGSL` binds the words second.
+        if let Some(view) = &stencil_view {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: entries.len() as u32,
+            resource: parameters.as_entire_binding(),
+        });
         let layout = pipeline.get_bind_group_layout(0);
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("blit"),
             layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: parameters.as_entire_binding(),
-                },
-            ],
+            entries: &entries,
         });
         let mut encoder = self
             .device
@@ -273,18 +312,58 @@ impl Gpu {
             pass.draw(0..3, 0..1);
         }
         self.submit_with_batch(encoder);
+        if let Some(words) = stencil {
+            self.scratch.push(Scratch::Texture(words));
+        }
         Some(())
     }
 
+    /// `source`'s words as guest memory holds them, for their stencil bytes.
+    fn stencil_words(&mut self, source: &Target, ctx: &ExecCtx) -> Option<wgpu::Texture> {
+        let bytes = source.read(ctx).ok()?;
+        let size = wgpu::Extent3d {
+            width: source.width,
+            height: source.height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("stencil words"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(source.row_bytes),
+                rows_per_image: Some(source.rows),
+            },
+            size,
+        );
+        Some(texture)
+    }
+
+    /// The pipeline running `entry` of `source` into `format`; entry points are unique across sources.
     fn blit_pipeline(
         &mut self,
         format: wgpu::TextureFormat,
-        filtered: bool,
+        (source, entry): (&'static str, &'static str),
     ) -> wgpu::RenderPipeline {
-        if let Some(pipeline) = self.blit_pipelines.get(&(format, filtered)) {
+        if let Some(pipeline) = self.blit_pipelines.get(&(format, entry)) {
             return pipeline.clone();
         }
-        let (_, module) = self.module("blit", BLIT_WGSL);
+        let (_, module) = self.module("blit", source);
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -301,7 +380,7 @@ impl Gpu {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some(if filtered { "fs_filtered" } else { "fs_point" }),
+                    entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
@@ -313,7 +392,43 @@ impl Gpu {
                 cache: None,
             });
         self.blit_pipelines
-            .insert((format, filtered), pipeline.clone());
+            .insert((format, entry), pipeline.clone());
         pipeline
     }
+}
+
+/// Whether `held` is an `S8D24` depth surface on the same texels as `source`, so each of
+/// `source`'s words is its stencil byte and its depth in unorm.
+fn holds_words_of(held: &Held, source: &Target) -> bool {
+    let target = &held.target;
+    target.depth.is_some_and(|depth| {
+        (
+            depth.bytes,
+            depth.depth_bits,
+            depth.depth_shift,
+            depth.stencil_shift,
+        ) == (4, 24, 8, Some(0))
+    }) && (
+        target.width,
+        target.height,
+        target.layout,
+        target.row_bytes,
+        target.rows,
+    ) == (
+        source.width,
+        source.height,
+        source.layout,
+        source.row_bytes,
+        source.rows,
+    ) && held.texture.format() == wgpu::TextureFormat::Depth32Float
+        && held.texture.sample_count() == 1
+        && (held.texture.width(), held.texture.height()) == (source.width, source.height)
+}
+
+/// Whether the engine runs `blit` as a move of whole words into `target`, which holds bytes.
+fn moves_words(blit: &Blit, target: &Target) -> bool {
+    !blit.filtered
+        && blit.src.format.raw == blit.dst.format.raw
+        && blit.dst.format.is_byte_exact()
+        && matches!(target.format, Format::Rgba8Unorm | Format::Bgra8Unorm)
 }

@@ -571,7 +571,9 @@ pub struct Gpu {
     packed_depth: std::collections::HashMap<bool, wgpu::RenderPipeline>,
     /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
     clear_pipelines: std::collections::HashMap<ClearKey, wgpu::RenderPipeline>,
-    blit_pipelines: std::collections::HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
+    /// 2D blit pipelines, by target format and entry point.
+    blit_pipelines:
+        std::collections::HashMap<(wgpu::TextureFormat, &'static str), wgpu::RenderPipeline>,
     /// The canvas, once the page has handed one over. See [`Gpu::set_screen`].
     screen: Option<screen::Screen>,
     scan_pipelines: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
