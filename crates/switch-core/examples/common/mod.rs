@@ -197,10 +197,14 @@ fn channel(name: &str) -> Result<Trace, String> {
 }
 
 /// A machine with the `--no-jit` and `--no-vsync-throttle` flags applied.
+/// The POSIX time a host tool's console starts at: fixed, so runs repeat step for step.
+const UNIX_TIME: i64 = 1_790_000_000;
+
 pub fn new_cpu() -> Cpu {
     let mut cpu = Cpu::new();
     cpu.set_jit_enabled(!flags().shared.no_jit);
     cpu.set_vsync_throttle(!flags().shared.no_vsync_throttle);
+    cpu.set_unix_time(UNIX_TIME);
     cpu
 }
 

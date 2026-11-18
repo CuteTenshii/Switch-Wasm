@@ -26,6 +26,8 @@ Game images and keys (`.nro`, `.nsp`, `.xci`, `.nca`, `.keys`) are gitignored.
 - **Checking the WebGPU backend**: run `screenshot` with and without `--software` over the same frame and `cmp` the PPMs; `--only <i>` narrows a difference to one draw. With `--web-limits --defer-readbacks` it reproduces a browser's fallback reasons natively ([tooling.md](tooling.md#cratesswitch-gpuexamplesscreenshotrs)).
 - `--example opus_testvectors <dir> [--out <dir>]`: the Opus decoder against the RFC 8251 vectors (`opus_testvectors-rfc8251.tar.gz` from opus-codec.org), in stereo and mono. It reports the first packet of each vector whose range coder state disagrees with the encoder's, and writes `<name>.rs.dec` (and `<name>m.rs.dec`) into the out dir, `<dir>` by default, for `opus_compare` to score. `--example opus_difftest <dir>` does the same against a reference decode you generate yourself, which covers output rates below 48 kHz and the multi-stream layouts.
 
+- Host tools start the console's clock at a fixed POSIX time (`common::new_cpu`), so a run repeats step for step; the page uses its own clock. At the epoch, `nnSdk`'s `clock_gettime(CLOCK_REALTIME)` fails and Minecraft dies of the `system_error` it throws.
+
 ## Tracing
 
 - Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, ...; the list is `switch_core::trace::ALL`). Host tools set it with `--trace ipc,svc,...` (a channel's name without `TRACE_`) in `common::parse`. The core reads no environment, so in the browser the console's log level decides: **Trace** turns every channel on, any other level turns them off. Trace is slow on a busy title and `TRACE_GPU` alone prints a line per method write, so leave the level on Log unless a channel is needed.
