@@ -307,7 +307,7 @@ impl Engine3D {
         }
         let trace_draw = ctx.trace || crate::trace::enabled(crate::trace::Trace::Draw);
         if trace_draw {
-            let rt = self.render_target(self.render_target_slot(0));
+            let rt = self.draw_target(self.render_target_slot(0));
             let cull = self.cull_state();
             crate::traceln!(
                 "[gpu] draw {} prim={:#x} first={} count={} indexed={} cull={} -> rt0 {}",
@@ -342,7 +342,7 @@ impl Engine3D {
                 }
             );
         }
-        let target = match self.render_target(self.render_target_slot(0)) {
+        let target = match self.draw_target(self.render_target_slot(0)) {
             Ok(Some(rt)) => Some((
                 rt.addr,
                 ctx.span(rt.addr, 4),

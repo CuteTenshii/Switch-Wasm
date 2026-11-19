@@ -2230,3 +2230,38 @@ fn a_draw_folds_the_arrays_beside_one_a_compute_launch_wrote() {
     h.flush_with(&mut gpu);
     assert_eq!(h.target(), expected);
 }
+
+/// A draw lands in the layer `SET_RT_LAYER` picks on the device too, and layer 0 keeps its
+/// texels: Minecraft's title panorama is six such draws into a cube map's faces.
+#[test]
+fn a_draw_into_the_layer_set_rt_layer_picks_lands_there_on_the_device() {
+    use switch_core::gpu::exec::ExecCtx;
+    use switch_core::gpu::testing::Harness;
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let mut h = Harness::new();
+    let mut ctx = ExecCtx {
+        mem: &h.mem,
+        vmm: &h.vmm,
+        as_id: h.as_id,
+        host1x: &mut h.host1x,
+        stats: &mut h.stats,
+        trace: false,
+    };
+    // Two layers 0x2000 bytes apart; the array pitch counts words.
+    for (method, arg) in [(0x206, 2), (0x207, 0x800), (0x573, 1)] {
+        h.engine.write(method, arg, true, &mut ctx).unwrap();
+    }
+    let colour = [0.25, 0.5, 1.0, 1.0];
+    h.triangle(colour);
+    h.draw_with(&mut gpu).unwrap();
+    assert!(gpu.reasons.is_empty(), "fell back: {:?}", gpu.reasons);
+    h.flush_with(&mut gpu);
+    let rt = h.engine.render_target(0).unwrap().unwrap();
+    let expected = rt.format.encode(colour).unwrap() as u32;
+    let ctx = h.ctx();
+    assert_eq!(ctx.read_u32(rt.addr + 0x2000).unwrap(), expected);
+    assert_eq!(ctx.read_u32(rt.addr).unwrap(), 0);
+}

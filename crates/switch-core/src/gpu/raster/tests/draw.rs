@@ -57,6 +57,39 @@ fn a_solid_colour_triangle_matches_a_clear_color_equivalent_fill() {
     );
 }
 
+/// `SET_RT_LAYER` sends a draw to that layer of a layered target and leaves layer 0 alone.
+/// Minecraft renders each face of its title panorama's cube map this way.
+#[test]
+fn a_draw_renders_into_the_layer_set_rt_layer_picks() {
+    let (mut mem, vmm, mut engine) = pipeline_harness();
+    // Two layers 0x2000 bytes apart; the array pitch counts words.
+    engine.regs.set(0x206, 2);
+    engine.regs.set(0x207, 0x800);
+    engine.regs.set(0x573, 1);
+    let vbuf_addr = engine.vertex_array(0).start;
+    let color = [0.2f32, 0.4, 0.6, 1.0];
+    write_vertex(&mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+    write_vertex(&mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+
+    let mut host1x = Host1x::new();
+    let mut stats = Default::default();
+    let mut ctx = ExecCtx {
+        mem: &mut mem,
+        vmm: &vmm,
+        as_id: 0,
+        host1x: &mut host1x,
+        stats: &mut stats,
+        trace: false,
+    };
+    draw(&engine, &mut ctx).unwrap();
+
+    let rt = engine.render_target(0).unwrap().unwrap();
+    let expected = rt.format.encode(color).unwrap();
+    assert_eq!(ctx.read_u32(rt.addr + 0x2000).unwrap() as u128, expected);
+    assert_eq!(ctx.read_u32(rt.addr).unwrap(), 0);
+}
+
 /// A warp shuffle reads the neighbouring lane's register.
 #[test]
 fn a_shuffling_fragment_shader_reads_the_pixel_beside_it() {

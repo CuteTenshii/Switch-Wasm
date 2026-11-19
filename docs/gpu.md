@@ -50,6 +50,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - `SET_PRIMITIVE_TOPOLOGY` (0x65C) replaces a one-word draw's topology while `SET_PRIMITIVE_TOPOLOGY_CONTROL` (0x652) is 1; the driver leaves the per-draw field at points. `VERTEX_BEGIN_GL` draws keep their own.
 - The MME shadow RAM (`SET_MME_SHADOW_RAM_CONTROL`, 0x049): writes are recorded while tracking (0, 1), go only to the registers in passthrough (2), and take the recorded value in replay (3). The driver sets its present blit's state in passthrough and replays the same block to restore the title's; without replay its `SET_VIEWPORT_SCALE_OFFSET` 0 stuck and the title's next composite collapsed to a pixel.
 - `SET_VIEWPORT_SCALE_OFFSET` (0x64B) off means the vertex stage writes window coordinates (the driver's blit computes pixels from the vertex id). The software rasterizer passes them through; the device path converts them back to clip space ([pipeline.rs](#pipeliners)). The register starts on, so titles that never write it keep the transform.
+- `SET_RT_LAYER` (0x573) picks the layer of a layered colour target that draws render into, unless bit 16 hands the choice to a shader (not supported). `Engine3D::draw_target` moves the target to that layer's address, where a layer clear also lands and where the device holds surfaces, so a sampled array or cube finds each layer. Minecraft draws its title panorama's six cube faces this way; with the register ignored every face landed on layer 0, leaving a flat blue screen.
 
 ## `engine/twod.rs`
 

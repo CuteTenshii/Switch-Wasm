@@ -11,11 +11,11 @@ use super::{
     INDEPENDENT_BLEND_STRIDE, INDEX_ARRAY_START, MULTISAMPLE_CONTROL, MULTISAMPLE_ENABLE,
     MULTISAMPLE_MODE, MULTISAMPLE_SAMPLE_LOCATIONS, MULTISAMPLE_SAMPLE_MASK, OGL_SET_CULL,
     OGL_SET_CULL_FACE, OGL_SET_FRONT_FACE, RENDER_TARGET_BASE, RENDER_TARGET_CONTROL,
-    RENDER_TARGET_STRIDE, SCISSOR_BASE, SCREEN_SCISSOR_HORIZONTAL, SCREEN_SCISSOR_VERTICAL,
-    SET_PROGRAM, SET_PROGRAM_REGION, SET_PROGRAM_STRIDE, SET_TEX_HEADER_POOL, SET_TEX_SAMPLER_POOL,
-    TEX_CB_INDEX, VERTEX_ARRAY, VERTEX_ARRAY_LIMIT, VERTEX_ARRAY_PER_INSTANCE, VERTEX_ARRAY_STRIDE,
-    VERTEX_ATTRIB_STATE, VIEWPORT_BASE, VIEWPORT_SCALE_OFFSET, VIEWPORT_TRANSFORM_BASE,
-    WINDOW_ORIGIN,
+    RENDER_TARGET_STRIDE, RT_LAYER, SCISSOR_BASE, SCREEN_SCISSOR_HORIZONTAL,
+    SCREEN_SCISSOR_VERTICAL, SET_PROGRAM, SET_PROGRAM_REGION, SET_PROGRAM_STRIDE,
+    SET_TEX_HEADER_POOL, SET_TEX_SAMPLER_POOL, TEX_CB_INDEX, VERTEX_ARRAY, VERTEX_ARRAY_LIMIT,
+    VERTEX_ARRAY_PER_INSTANCE, VERTEX_ARRAY_STRIDE, VERTEX_ATTRIB_STATE, VIEWPORT_BASE,
+    VIEWPORT_SCALE_OFFSET, VIEWPORT_TRANSFORM_BASE, WINDOW_ORIGIN,
 };
 use crate::gpu::engine::field;
 use crate::gpu::exec::ExecCtx;
@@ -496,6 +496,23 @@ impl Engine3D {
             layout,
             layers: self.regs.field(base + 6, 0, 15).max(1),
             layer_stride: self.regs.get(base + 7),
+        }))
+    }
+
+    /// Colour target `index` as a draw sees it: the layer `SET_RT_LAYER` picks, held at its
+    /// own address as a layer clear is. A clear names its layer itself.
+    pub fn draw_target(&self, index: u32) -> Result<Option<RenderTarget>> {
+        let layer = self.regs.field(RT_LAYER, 0, 15);
+        let shader_selects = self.regs.bit(RT_LAYER, 16);
+        Ok(self.render_target(index)?.map(|rt| {
+            if shader_selects || layer == 0 || layer >= rt.layers {
+                return rt;
+            }
+            RenderTarget {
+                addr: rt.addr + u64::from(layer) * u64::from(rt.layer_stride) * 4,
+                layers: 1,
+                ..rt
+            }
         }))
     }
 }

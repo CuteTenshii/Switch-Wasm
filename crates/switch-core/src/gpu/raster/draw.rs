@@ -146,7 +146,7 @@ pub fn only_shades_vertices(engine: &Engine3D, ctx: &ExecCtx) -> Result<bool> {
 pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let call = engine.last_draw;
     // Logical target 0, mapped through RenderTargetControl as a clear is.
-    let rt = engine.render_target(engine.render_target_slot(0))?;
+    let rt = engine.draw_target(engine.render_target_slot(0))?;
 
     let vs_binding = engine
         .program(ShaderStage::VertexB)

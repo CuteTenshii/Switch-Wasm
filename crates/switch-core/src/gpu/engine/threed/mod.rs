@@ -47,6 +47,8 @@ const SCREEN_SCISSOR_VERTICAL: u32 = 0x3FE;
 const WINDOW_ORIGIN: u32 = 0x4EB;
 const CLEAR_BUFFER_FLAGS: u32 = 0x43E;
 const RENDER_TARGET_CONTROL: u32 = 0x487;
+/// `SET_RT_LAYER`: the layer draws render into, unless bit 16 hands the choice to a shader.
+const RT_LAYER: u32 = 0x573;
 const DEPTH_TARGET_HORIZONTAL: u32 = 0x48A;
 const DEPTH_TARGET_VERTICAL: u32 = 0x48B;
 const VERTEX_END_GL: u32 = 0x585;

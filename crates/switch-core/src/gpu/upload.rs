@@ -3,7 +3,7 @@
 //! by what the draw touches and capped at [`MAX_UPLOAD`].
 
 use crate::gpu::bcn::Codec;
-use crate::gpu::engine::threed::{DepthLayout, Engine3D, ShaderStage};
+use crate::gpu::engine::threed::{DepthLayout, Engine3D, RenderTarget, ShaderStage};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::pipeline::{Format, Pipeline, StepMode, VertexBuffer};
 use crate::gpu::surface::{ColorFormat, Layout, RowRuns};
@@ -499,7 +499,11 @@ impl Target {
 
     /// The colour surface bound at `slot`, or `None`.
     pub fn color(engine: &Engine3D, slot: u32) -> Result<Option<Target>> {
-        let Some(rt) = engine.render_target(slot)? else {
+        Target::of_render_target(engine.render_target(slot)?)
+    }
+
+    fn of_render_target(rt: Option<RenderTarget>) -> Result<Option<Target>> {
+        let Some(rt) = rt else {
             return Ok(None);
         };
         let unit = rt.format.bytes_per_pixel;
@@ -617,7 +621,7 @@ pub struct Targets {
 impl Targets {
     pub fn of(engine: &Engine3D) -> Result<Targets> {
         Ok(Targets {
-            color: Target::color(engine, engine.render_target_slot(0))?,
+            color: Target::of_render_target(engine.draw_target(engine.render_target_slot(0))?)?,
             depth: Target::depth_surface(engine)?,
         })
     }
