@@ -27,6 +27,8 @@ pub(crate) enum Readback {
         row_bytes: u32,
         /// `row_bytes` rounded up to the 256 bytes `copyTextureToBuffer` wants.
         padded: u32,
+        /// Held as 32-bit floats for its 16-bit unorm channels, narrowed on landing.
+        widened: bool,
         /// CPU pages the guest wrote over, which keep what the guest wrote.
         kept: Vec<u32>,
     },

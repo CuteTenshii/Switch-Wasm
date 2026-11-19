@@ -2618,16 +2618,15 @@ fn a_clear_the_device_cannot_hold_does_not_latch_the_frames() {
         return;
     };
     gpu.deferred_readbacks = true;
-    // No browser renders into `R16_UNORM`.
-    gpu.set_web_limits(true);
-    let r16_unorm = |h: &mut Harness| {
-        h.engine.regs.set(0x204, 0xEE);
+    // WebGPU cannot render into `R8_SNORM`.
+    let r8_snorm = |h: &mut Harness| {
+        h.engine.regs.set(0x204, 0xF4);
         for (i, value) in [0.6f32, 0.0, 0.0, 0.0].into_iter().enumerate() {
             h.engine.regs.set(0x360 + i as u32, value.to_bits());
         }
     };
     let mut h = Harness::new();
-    r16_unorm(&mut h);
+    r8_snorm(&mut h);
     let fallbacks = gpu.fallbacks;
     h.clear_with(&mut gpu, [true; 4]).expect("the clear");
     assert_eq!(
@@ -2637,7 +2636,7 @@ fn a_clear_the_device_cannot_hold_does_not_latch_the_frames() {
     );
 
     let mut want = Harness::new();
-    r16_unorm(&mut want);
+    r8_snorm(&mut want);
     want.clear_with(&mut Software, [true; 4])
         .expect("the clear");
     assert_eq!(h.target(), want.target());
@@ -3393,6 +3392,138 @@ fn an_integer_target_takes_the_shader_words_on_both_renderers() {
         assert_eq!(got, want, "{format:#x}");
         assert_eq!(got[..top_left.len()], *top_left, "{format:#x}");
     }
+}
+
+/// Without 16-bit norm formats an `R16_UNORM` target is held as `r32float`. What the guest left
+/// in it, a partial clear and a draw past one land as the rasterizer's 16-bit channel stores
+/// them, and a draw sampling it into an `R32_FLOAT` target reads those 16-bit values, so the
+/// device clamped and rounded. A blend into it, which would not clamp, falls back.
+#[test]
+fn an_r16_unorm_target_held_as_float_stores_what_the_rasterizer_does() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    gpu.set_web_limits(true);
+    const SURFACE: u64 = 0x2800;
+    const SOLID_SHADER: u32 = 0x2000;
+    let (width, height) = (testing::TARGET_WIDTH, testing::TARGET_HEIGHT);
+    let build = |renderer: &mut dyn Renderer, blend: bool| {
+        let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+        h.bindless_texture();
+        let (base, surface) = (h.base, h.base + SURFACE);
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        {
+            let mut ctx = h.ctx();
+            for (i, chunk) in testing::solid_fragment_shader()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                ctx.write_u32(
+                    base + u64::from(SOLID_SHADER) + i as u64 * 4,
+                    u32::from_le_bytes(*chunk),
+                )
+                .unwrap();
+            }
+            for word in 0..width * height / 2 {
+                ctx.write_u32(
+                    surface + u64::from(word) * 4,
+                    word.wrapping_mul(0x9E37_79B9),
+                )
+                .unwrap();
+            }
+            // The image the second draw samples: the surface as `R16` UNORM.
+            let tic = base + 0x1400 + 32;
+            for (word, value) in [
+                (0, 0x1B | (2 << 7) | identity),
+                (1, surface as u32),
+                (2, (surface >> 32) as u32 | (2 << 21)),
+                (3, width * 2 / 32),
+                (4, (width - 1) | (1 << 23)),
+                (5, height - 1),
+            ] {
+                ctx.write_u32(tic + word * 4, value).unwrap();
+            }
+        }
+        let fragment_offset = 0x800 + 5 * 0x10 + 1;
+        h.engine.regs.set(fragment_offset, SOLID_SHADER);
+        h.engine.regs.set(0x200, (surface >> 32) as u32);
+        h.engine.regs.set(0x201, surface as u32);
+        h.engine.regs.set(0x202, width * 2);
+        h.engine.regs.set(0x204, 0xEE);
+        // The left half, to a value between two 16-bit steps.
+        h.engine.regs.set(0x3FD, (width / 2) << 16);
+        h.engine.regs.set(0x3FE, height << 16);
+        h.engine.regs.set(0x360, 0.300_001f32.to_bits());
+        h.clear_with(renderer, [true; 4]).expect("the clear");
+        h.engine.regs.set(0x3FD, 0);
+        h.engine.regs.set(0x3FE, 0);
+        if blend {
+            for (reg, value) in [
+                (0x4D0, 1),
+                (0x4D1, 2),
+                (0x4D2, 2),
+                (0x4D3, 1),
+                (0x4D4, 2),
+                (0x4D6, 2),
+                (0x4D8, 1),
+            ] {
+                h.engine.regs.set(reg, value);
+            }
+        }
+        // Red from past one to between steps.
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [1.7, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [0.123_457, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.400_003, 0.0, 0.0, 1.0]);
+        h.draw_with(renderer).expect("the draw into the surface");
+        h.engine.regs.set(0x4D8, 0);
+
+        h.engine.regs.set(fragment_offset, 0x300);
+        h.engine.regs.set(0x200, (base >> 32) as u32);
+        h.engine.regs.set(0x201, base as u32);
+        h.engine.regs.set(0x202, width * 4);
+        h.engine.regs.set(0x204, 0xE5);
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [2.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 2.0, 0.0, 1.0]);
+        h.draw_with(renderer).expect("the draw sampling it");
+        h.flush_with(renderer);
+        let ctx = h.ctx();
+        let words = |at: u64, count: u32| -> Vec<u32> {
+            (0..count)
+                .map(|word| ctx.read_u32(at + u64::from(word) * 4).unwrap())
+                .collect()
+        };
+        (
+            words(surface, width * height / 2),
+            words(base, width * height),
+        )
+    };
+    let want = build(&mut Software, false);
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let got = build(&mut gpu, false);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "a clear or draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 2, "a draw did not run on the device");
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected a pass");
+    assert_eq!(got.0, want.0, "the surface");
+    assert_eq!(got.1, want.1, "what sampling it read");
+
+    let fallbacks = gpu.fallbacks;
+    assert_eq!(build(&mut gpu, true), build(&mut Software, true), "blended");
+    assert_eq!(gpu.fallbacks, fallbacks + 1, "the blend did not fall back");
+    assert!(
+        gpu.last_fallback
+            .as_ref()
+            .is_some_and(|why| why.contains("blending")),
+        "{:?}",
+        gpu.last_fallback
+    );
 }
 
 mod condition_codes {

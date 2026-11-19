@@ -691,6 +691,19 @@ impl Gpu {
             }
             let (format, widening) = sampled_texture_format(self.features(), upload.format)
                 .map_err(|e| format!("{e:?}"))?;
+            // A surface held widened holds the texels the widened image would.
+            if self.holds_widened(&held.target) {
+                if widening == Widen::Unorm16 && format == held.texture.format() {
+                    layers.push((layer, HeldLayer::Colour(held.texture.clone())));
+                    continue;
+                }
+                return Err(format!(
+                    "samples a {:?} surface held on the device as {:?}, as {:?}",
+                    held.target.format,
+                    held.texture.format(),
+                    upload.format
+                ));
+            }
             // A copy may change nothing but whether the format is sRGB.
             if widening != Widen::None
                 || format.remove_srgb_suffix() != held.texture.format().remove_srgb_suffix()
@@ -764,7 +777,9 @@ impl Gpu {
             return None;
         }
         let (format, widening) = sampled_texture_format(self.features(), upload.format).ok()?;
-        (widening == Widen::None && format == surface.format()).then_some(wgsl::Crop {
+        let as_held = widening == Widen::None
+            || (widening == Widen::Unorm16 && self.holds_widened(&held.target));
+        (as_held && format == surface.format()).then_some(wgsl::Crop {
             width: upload.width,
             height: upload.height,
             full_width,
@@ -800,7 +815,8 @@ impl Gpu {
         }
         let (format, widening) =
             sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
-        if widening != Widen::None || format != surface.format() {
+        // `held_layers` stands a held surface in for a widened image only when it is held widened.
+        if !matches!(widening, Widen::None | Widen::Unorm16) || format != surface.format() {
             return Ok(None);
         }
         // A pass cannot sample what it draws to.

@@ -55,6 +55,9 @@ pub struct Layout {
     /// Targets whose format is integer, with the largest value a channel holds, written as raw
     /// words saturated to it; filled from the draw.
     pub uint_targets: Vec<(u32, u32)>,
+    /// Targets held as 32-bit floats for a 16-bit unorm surface the device lacks, whose writes
+    /// are clamped and rounded to what the surface would store; filled from the draw.
+    pub unorm16_targets: Vec<u32>,
     /// This module's bind group; each stage needs its own.
     pub group: u32,
     /// Whether the vertex entry negates `position.y`: when the guest's viewport
@@ -327,6 +330,7 @@ impl Layout {
             globals: translated.globals.clone(),
             targets: 1,
             uint_targets: Vec::new(),
+            unorm16_targets: Vec::new(),
             group: 0,
             // Both from the draw's viewport.
             flip_y: false,

@@ -1,8 +1,8 @@
 //! The draw pass: pipeline, encoding, and attachments.
 
 use crate::convert::{
-    blend, compare, depth_texture_format, device_attachment_format, index_format, topology,
-    vertex_format, write_mask,
+    blend, compare, depth_texture_format, held_attachment_format, index_format, topology,
+    vertex_format, write_mask, Widen,
 };
 use crate::readback::Scratch;
 use crate::{
@@ -25,16 +25,23 @@ impl Gpu {
         if p.count == 0 {
             return Ok(());
         }
-        let target_format = match p.color {
+        let target = match p.color {
             Some(color) => Some(
-                device_attachment_format(self.features(), color.format)
+                held_attachment_format(self.features(), color.format)
                     .map_err(|e| format!("{e:?}"))?,
             ),
             None => None,
         };
+        let target_format = target.map(|(format, _)| format);
         // A blend the device cannot do must fall back here; a rejected pipeline silently draws nothing.
-        if let Some(format) = target_format {
+        if let Some((format, widen)) = target {
             let blends = p.state.target.is_some_and(|t| t.blend.is_some());
+            if blends && widen == Widen::Unorm16 {
+                return Err(format!(
+                    "blending into a 16-bit unorm target held as {format:?}, which would not \
+                     clamp as the surface does"
+                ));
+            }
             if blends && !can_blend(format, self.features()) {
                 return Err(format!(
                     "blending into a {format:?} target, which this device cannot blend"

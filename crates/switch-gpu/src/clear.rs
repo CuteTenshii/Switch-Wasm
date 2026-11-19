@@ -1,7 +1,9 @@
 //! Clears on the device.
 
 use crate::builtin::CLEAR_RECT_WGSL;
-use crate::convert::{depth_texture_format, device_attachment_format, write_mask};
+use crate::convert::{
+    depth_texture_format, held_attachment_format, quantize_unorm16, write_mask, Widen,
+};
 use crate::readback::Held;
 use crate::{ClearKey, Gpu};
 use switch_core::gpu::engine::threed::Engine3D;
@@ -34,6 +36,23 @@ impl Gpu {
         if !whole && color.is_some_and(|(target, _, _)| target.format.is_uint()) {
             return Err("a partial clear of an integer target".into());
         }
+        let held_as = match color {
+            Some((target, _, _)) => Some(
+                held_attachment_format(self.features(), target.format)
+                    .map_err(|e| format!("{e:?}"))?,
+            ),
+            None => None,
+        };
+        // A target held wider stores the value its surface would.
+        let color = color
+            .zip(held_as)
+            .map(|((target, colour, channels), (_, widen))| {
+                let colour = match widen {
+                    Widen::Unorm16 => colour.map(quantize_unorm16),
+                    _ => colour,
+                };
+                (target, colour, channels)
+            });
 
         let mut views = Vec::new();
         for (target, blank) in [color.map(|(t, _, _)| t), depth.map(|(t, _)| t)]
@@ -69,13 +88,7 @@ impl Gpu {
         let depth_view = depth.map(|_| view.next().expect("a depth view"));
 
         let key = ClearKey {
-            color: match color {
-                Some((target, _, _)) => Some(
-                    device_attachment_format(self.features(), target.format)
-                        .map_err(|e| format!("{e:?}"))?,
-                ),
-                None => None,
-            },
+            color: held_as.map(|(format, _)| format),
             depth: depth
                 .and_then(|(target, _)| target.depth_kind())
                 .map(depth_texture_format),
@@ -343,7 +356,7 @@ impl Gpu {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
             ),
             None => (
-                device_attachment_format(self.features(), target.format)?,
+                held_attachment_format(self.features(), target.format)?.0,
                 wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::COPY_DST

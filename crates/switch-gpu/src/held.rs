@@ -1,7 +1,7 @@
 //! Surfaces held on the device: uploads, depth loads, readbacks, and flushes.
 
 use crate::builtin::LOAD_DEPTH_WGSL;
-use crate::convert::{depth_texture_format, device_attachment_format};
+use crate::convert::{depth_texture_format, held_attachment_format, narrow, widen, Widen};
 use crate::readback::{Held, Pending, Readback, MAP_FAILED, MAP_READY, MAP_WAITING};
 use crate::resources::guest_pages;
 use crate::{Gpu, Space, COPY_ALIGNMENT, MAX_FRAMES_IN_FLIGHT};
@@ -376,11 +376,19 @@ impl Gpu {
         }
     }
 
+    /// Whether `target` is held as 32-bit floats for its 16-bit unorm channels; see
+    /// [`held_attachment_format`].
+    pub(super) fn holds_widened(&self, target: &Target) -> bool {
+        target.depth_kind().is_none()
+            && held_attachment_format(self.features(), target.format)
+                .is_ok_and(|(_, widening)| widening == Widen::Unorm16)
+    }
+
     fn upload_target(&mut self, target: &Target, ctx: &ExecCtx) -> Result<wgpu::Texture> {
         if let Some(kind) = target.depth_kind() {
             return self.upload_depth_target(target, kind, ctx);
         }
-        let format = device_attachment_format(self.features(), target.format)?;
+        let (format, widening) = held_attachment_format(self.features(), target.format)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("render target"),
             size: wgpu::Extent3d {
@@ -398,7 +406,12 @@ impl Gpu {
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let rows = target.read(ctx)?;
+        let mut rows = target.read(ctx)?;
+        let mut row_bytes = target.row_bytes;
+        if widening == Widen::Unorm16 {
+            rows = widen(&rows, widening);
+            row_bytes *= 2;
+        }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -409,7 +422,7 @@ impl Gpu {
             &rows,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(target.row_bytes),
+                bytes_per_row: Some(row_bytes),
                 rows_per_image: Some(target.rows),
             },
             wgpu::Extent3d {
@@ -606,9 +619,11 @@ impl Gpu {
         texture: &wgpu::Texture,
         kept: Vec<u32>,
     ) -> Pending {
-        // Device row width, which for depth is not the guest's texel width.
+        let widened = self.holds_widened(target);
+        // Device row width, which for depth or a widened target is not the guest's.
         let row_bytes = match target.depth_kind() {
             Some(kind) => target.width * kind.unit(),
+            None if widened => target.row_bytes * 2,
             None => target.row_bytes,
         };
         let aspect = match target.depth_kind() {
@@ -663,6 +678,7 @@ impl Gpu {
                 target: *target,
                 row_bytes,
                 padded,
+                widened,
                 kept,
             },
             generation: self.space.asked,
@@ -729,6 +745,7 @@ impl Gpu {
                 target,
                 row_bytes,
                 padded,
+                widened,
                 kept,
             } => {
                 let page = 1usize << PAGE_BITS;
@@ -736,16 +753,18 @@ impl Gpu {
                 for (bytes, &at) in guest.chunks_exact_mut(page).zip(kept) {
                     ctx.mem.read_into(at << PAGE_BITS, bytes)?;
                 }
-                match target.depth_kind() {
-                    None => target.write_strided(ctx, &mapped, *padded),
-                    Some(_) => {
-                        let mut rows = Vec::with_capacity((row_bytes * target.rows) as usize);
-                        for y in 0..target.rows {
-                            let at = (y * padded) as usize;
-                            rows.extend_from_slice(&mapped[at..at + *row_bytes as usize]);
-                        }
-                        Self::land_depth(target, &rows, ctx)
+                let unpadded = || {
+                    let mut rows = Vec::with_capacity((row_bytes * target.rows) as usize);
+                    for y in 0..target.rows {
+                        let at = (y * padded) as usize;
+                        rows.extend_from_slice(&mapped[at..at + *row_bytes as usize]);
                     }
+                    rows
+                };
+                match target.depth_kind() {
+                    None if *widened => target.write(ctx, &narrow(&unpadded())),
+                    None => target.write_strided(ctx, &mapped, *padded),
+                    Some(_) => Self::land_depth(target, &unpadded(), ctx),
                 }
                 .and_then(|()| {
                     guest

@@ -918,6 +918,17 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         }
     };
 
+    // Applied after alpha-to-coverage, which reads the shader's own alpha.
+    let stored = |target: u32, value: &str| -> String {
+        if layout.unorm16_targets.contains(&target) {
+            format!(
+                "floor(clamp({value}, vec4<f32>(0.0), vec4<f32>(1.0)) * 65535.0 + 0.5) / 65535.0"
+            )
+        } else {
+            value.to_string()
+        }
+    };
+
     let mut out = String::new();
     if layout.coverage.as_ref().is_some_and(|c| c.per_sample_pass) {
         out.push_str("override pass_sample: u32 = 0u;\n\n");
@@ -992,16 +1003,20 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         if let Some(coverage) = alpha_to_coverage {
             out.push_str(&alpha_coverage(coverage, "out.target0.w"));
         }
+        for &target in layout.unorm16_targets.iter().filter(|&&t| t < targets) {
+            let value = format!("out.target{target}");
+            out.push_str(&format!("  {value} = {};\n", stored(target, &value)));
+        }
         out.push_str("  return out;\n");
     } else if let Some(coverage) = alpha_to_coverage {
         // Shaded even depth-only, for alpha-to-coverage.
         out.push_str(&format!("  let target0 = {};\n", colour(0)));
         out.push_str(&alpha_coverage(coverage, "target0.w"));
         if targets == 1 {
-            out.push_str("  return target0;\n");
+            out.push_str(&format!("  return {};\n", stored(0, "target0")));
         }
     } else if targets == 1 {
-        out.push_str(&format!("  return {};\n", colour(0)));
+        out.push_str(&format!("  return {};\n", stored(0, &colour(0))));
     }
     out.push_str("}\n");
     out

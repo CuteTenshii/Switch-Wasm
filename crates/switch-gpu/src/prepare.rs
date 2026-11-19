@@ -1,5 +1,6 @@
 //! Checking and preparing a draw, and translating its shaders.
 
+use crate::convert::{held_attachment_format, Widen};
 use crate::{CachedShader, Checked, Gpu, Prepared, Render, PAGE_BITS, SHADER_CACHE_ENTRIES};
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
@@ -126,6 +127,12 @@ impl Gpu {
         // An integer target takes raw words.
         if let Some(max) = color.and_then(|target| target.format.uint_max()) {
             fs_layout.uint_targets = vec![(0, max)];
+        }
+        if color.is_some_and(|target| {
+            held_attachment_format(self.features(), target.format)
+                .is_ok_and(|(_, widen)| widen == Widen::Unorm16)
+        }) {
+            fs_layout.unorm16_targets = vec![0];
         }
         // Both stages must name the same varyings; missing ones read as zero.
         let mut varyings = vs_layout.varyings.clone();

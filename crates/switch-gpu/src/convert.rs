@@ -246,6 +246,42 @@ pub(crate) fn device_attachment_format(
     Ok(wanted)
 }
 
+/// [`device_attachment_format`], or for a 16-bit unorm target the device lacks the 32-bit
+/// float sibling [`sampled_texture_format`] widens it to, with [`Widen::Unorm16`]. Writes into
+/// it are quantized to 16 bits (`wgsl::Layout::unorm16_targets`, [`quantize_unorm16`]).
+pub(crate) fn held_attachment_format(
+    features: wgpu::Features,
+    format: Format,
+) -> Result<(wgpu::TextureFormat, Widen)> {
+    match device_attachment_format(features, format) {
+        Ok(wanted) => Ok((wanted, Widen::None)),
+        Err(refused) => match sampled_texture_format(features, format) {
+            Ok(widened @ (_, Widen::Unorm16)) => Ok(widened),
+            _ => Err(refused),
+        },
+    }
+}
+
+/// The value a 16-bit unorm channel stores for `value`, rounded as the rasterizer rounds it.
+pub(crate) fn quantize_unorm16(value: f32) -> f32 {
+    f32::from(narrow_unorm16(value)) / 65535.0
+}
+
+/// A 16-bit unorm channel's bits for `value`; a NaN stores zero.
+fn narrow_unorm16(value: f32) -> u16 {
+    (value.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
+}
+
+/// [`widen`]'s inverse for [`Widen::Unorm16`]: `f32` channels back to 16-bit unorm.
+pub(crate) fn narrow(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|word| narrow_unorm16(f32::from_le_bytes(*word)).to_le_bytes())
+        .collect()
+}
+
 pub(crate) fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
     use wgpu::TextureFormat as T;
     Ok(match format {
