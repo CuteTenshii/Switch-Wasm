@@ -567,6 +567,8 @@ pub struct Gpu {
         std::collections::HashMap<Vec<wgpu::BindGroupLayoutEntry>, wgpu::BindGroupLayout>,
     /// Depth upload pipelines by depth format. See [`LOAD_DEPTH_WGSL`].
     depth_loaders: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// Depth to colour pipelines by colour format. See [`builtin::DEPTH_TO_COLOUR_WGSL`].
+    depth_readers: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     /// See [`builtin::PACKED_DEPTH_WGSL`], by whether a held surface supplies the depth.
     packed_depth: std::collections::HashMap<bool, wgpu::RenderPipeline>,
     /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
@@ -878,6 +880,8 @@ enum HeldLayer {
     Depth(wgpu::Texture),
     /// A `depth32float` drawn into the green of an `S8D24` image's `rg32float`.
     PackedDepth(wgpu::Texture),
+    /// A `depth16unorm` drawn into the sampled colour format, then copied.
+    UnormDepth(wgpu::Texture),
     /// A `depth32float` copied whole into its layer of a shadow map.
     Shadow(wgpu::Texture),
     /// A larger depth surface whose corner is drawn into a `depth32float` shadow map layer.
@@ -893,6 +897,7 @@ impl HeldLayer {
             HeldLayer::Colour(surface)
             | HeldLayer::Depth(surface)
             | HeldLayer::PackedDepth(surface)
+            | HeldLayer::UnormDepth(surface)
             | HeldLayer::Shadow(surface)
             | HeldLayer::ShadowCorner(surface)
             | HeldLayer::Bytes(surface) => surface,

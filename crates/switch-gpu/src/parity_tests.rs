@@ -1386,14 +1386,22 @@ fn vertex_arrays_past_the_device_limit_are_folded_and_draw_alike() {
     assert_eq!(got, want, "the colour surface differs");
 }
 
-/// A held float depth surface sampled as a float texture reads the device's depth, not stale
-/// memory, whether or not a stencil byte shares its texels.
+/// A held depth surface sampled as a colour texture reads the device's depth, not stale memory:
+/// a float one whether or not a stencil byte shares its texels, and a `Z16` one as `R16`, with and
+/// without the device's 16-bit norm formats.
 #[test]
-fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
+fn a_held_depth_surface_samples_as_the_depth_it_holds() {
     let Some((_serial, mut gpu)) = device() else {
         return;
     };
-    for (zt_format, tic_format, name) in [(0x0A, 0x2f, "ZF32"), (0x19, 0x30, "ZF32_X24S8")] {
+    let (float, unorm) = (7 << 7, 2 << 7);
+    for (zt_format, tic_format, web_limits, name) in [
+        (0x0A, 0x2f | float, false, "ZF32"),
+        (0x19, 0x30 | float, false, "ZF32_X24S8"),
+        (0x13, 0x3a | unorm, false, "Z16"),
+        (0x13, 0x3a | unorm, true, "Z16 widened"),
+    ] {
+        gpu.set_web_limits(web_limits);
         let build = |gpu: Option<&mut super::Gpu>| {
             let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
             h.bindless_texture();
@@ -1408,7 +1416,7 @@ fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
             let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
             let mut ctx = h.ctx();
             for (word, value) in [
-                (0, tic_format | (7 << 7) | identity),
+                (0, tic_format | identity),
                 (1, depth as u32),
                 (2, (depth >> 32) as u32 | (3 << 21)),
                 (3, 0),

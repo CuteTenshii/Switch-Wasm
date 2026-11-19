@@ -1,6 +1,6 @@
 //! Bind groups and the textures and samplers they bind.
 
-use crate::builtin::PACKED_DEPTH_WGSL;
+use crate::builtin::{DEPTH_TO_COLOUR_WGSL, PACKED_DEPTH_WGSL};
 use crate::convert::{can_filter, sampled_texture_format, widen, Widen};
 use crate::held::{overwritten, spans_overlap};
 use crate::readback::{HeldGlobal, Scratch};
@@ -594,18 +594,34 @@ impl Gpu {
                     depth.depth_shift,
                     depth.stencil_shift,
                 ) == (4, 24, 8, Some(0));
-                let wanted = if packed {
-                    wgpu::TextureFormat::Rg32Float
+                // `Z16` sampled as `R16` takes the unorm depth the device holds.
+                let unorm16 = (
+                    depth.bytes,
+                    depth.depth_bits,
+                    depth.depth_shift,
+                    depth.stencil_shift,
+                ) == (2, 16, 0, None)
+                    && upload.format == switch_core::gpu::pipeline::Format::R16Unorm;
+                let (wanted, held_as) = if packed {
+                    (
+                        wgpu::TextureFormat::Rg32Float,
+                        wgpu::TextureFormat::Depth32Float,
+                    )
+                } else if unorm16 {
+                    (format, wgpu::TextureFormat::Depth16Unorm)
                 } else {
-                    wgpu::TextureFormat::R32Float
+                    (
+                        wgpu::TextureFormat::R32Float,
+                        wgpu::TextureFormat::Depth32Float,
+                    )
                 };
-                let refused = if !float && !packed {
+                let refused = if !float && !packed && !unorm16 {
                     Some(format!(
                         "packed {depth:?}, which is not the float it would be read as"
                     ))
                 } else if format != wanted
-                    || held.texture.format() != wgpu::TextureFormat::Depth32Float
-                    || (packed && held.texture.sample_count() != 1)
+                    || held.texture.format() != held_as
+                    || ((packed || unorm16) && held.texture.sample_count() != 1)
                 {
                     Some(format!(
                         "held as {:?} and sampled as {format:?}",
@@ -649,6 +665,8 @@ impl Gpu {
                     layer,
                     if packed {
                         HeldLayer::PackedDepth(surface)
+                    } else if unorm16 {
+                        HeldLayer::UnormDepth(surface)
                     } else {
                         HeldLayer::Depth(surface)
                     },
@@ -919,14 +937,22 @@ impl Gpu {
         } else {
             self.upload_texture(upload, view, None, &depths)?.0
         };
+        let mut unorm_depths = Vec::new();
         for (layer, surface) in held {
-            if let HeldLayer::ShadowCorner(surface) = surface {
-                if let Err(why) = self.draw_shadow_corner(&texture, *layer, surface) {
-                    self.scratch.push(Scratch::Texture(texture));
-                    return Err(why);
+            match surface {
+                HeldLayer::ShadowCorner(surface) => {
+                    if let Err(why) = self.draw_shadow_corner(&texture, *layer, surface) {
+                        self.scratch.push(Scratch::Texture(texture));
+                        return Err(why);
+                    }
                 }
+                HeldLayer::UnormDepth(surface) => {
+                    unorm_depths.push(self.depth_to_colour(surface, texture.format()));
+                }
+                _ => {}
             }
         }
+        let mut unorm_depths = unorm_depths.into_iter();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -954,6 +980,11 @@ impl Gpu {
                 }
                 // Drawn above, before these copies were encoded.
                 HeldLayer::ShadowCorner(_) | HeldLayer::PackedDepth(_) => {}
+                HeldLayer::UnormDepth(_) => {
+                    let colour = unorm_depths.next().expect("drawn above");
+                    encoder.copy_texture_to_texture(colour.as_image_copy(), into, extent);
+                    self.scratch.push(Scratch::Texture(colour));
+                }
                 HeldLayer::Bytes(_) if packed_words.is_some() => {}
                 HeldLayer::Bytes(surface) => {
                     self.copy_through_buffer(&mut encoder, surface, into, extent);
@@ -1258,6 +1289,107 @@ impl Gpu {
     ) -> std::result::Result<(), String> {
         self.load_depth_layer(shadow, layer, surface, 0, wgpu::TextureFormat::Depth32Float)
             .map_err(|e| format!("{e:?}"))
+    }
+
+    /// A texture of `format` the size of a held depth surface, holding its depth in red.
+    fn depth_to_colour(
+        &mut self,
+        surface: &wgpu::Texture,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
+        let colour = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("held depth as colour"),
+            size: wgpu::Extent3d {
+                width: surface.width(),
+                height: surface.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let pipeline = self.depth_reader(format);
+        let depth = surface.create_view(&wgpu::TextureViewDescriptor {
+            aspect: wgpu::TextureAspect::DepthOnly,
+            ..Default::default()
+        });
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("held depth as colour"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&depth),
+            }],
+        });
+        let target = colour.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("held depth as colour"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("held depth as colour"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.submit_with_batch(encoder);
+        colour
+    }
+
+    /// The pipeline of [`Gpu::depth_to_colour`], built once per colour format.
+    fn depth_reader(&mut self, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
+        if let Some(pipeline) = self.depth_readers.get(&format) {
+            return pipeline.clone();
+        }
+        let (_, module) = self.module("depth to colour", DEPTH_TO_COLOUR_WGSL);
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("depth to colour"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        self.depth_readers.insert(format, pipeline.clone());
+        pipeline
     }
 
     fn texture(

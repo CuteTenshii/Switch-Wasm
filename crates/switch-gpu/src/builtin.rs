@@ -111,6 +111,23 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @builtin(frag_depth) f32 {
 }
 ";
 
+/// A depth surface's values written as the red of a colour target.
+pub(crate) const DEPTH_TO_COLOUR_WGSL: &str = "\
+@group(0) @binding(0) var src: texture_depth_2d;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  return vec4<f32>(textureLoad(src, vec2<u32>(position.xy), 0), 0.0, 0.0, 1.0);
+}
+";
+
 /// An `S8D24` image's words, uploaded as they are, as the rasterizer reads them: the stencil's
 /// bits in red and the unorm depth in green. `fs_held` takes the depth from a held
 /// `depth32float` instead, as guest memory would hold it.
