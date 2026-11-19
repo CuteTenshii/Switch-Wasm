@@ -132,7 +132,7 @@ fn texSampleCompare(imm: u32, dim: u32, u: f32, v: f32, layer: u32, dref: f32) -
 fn texDims(imm: u32, lod: u32) -> vec4<u32> {
   return vec4<u32>(1u, 1u, 1u, 1u);
 }
-fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {
+fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 fn texGather(imm: u32, component: u32, u: f32, v: f32, w: f32, layer: u32) -> vec4<f32> {
@@ -186,8 +186,8 @@ pub struct Translation {
     pub images: Vec<TextureSlot>,
     /// The [`Translation::textures`] only `txq` reads, whose texels nothing reads.
     pub sized_only: Vec<TextureSlot>,
-    /// Distinct `tex.aoffi` offsets `(x, y)`, named by index since WGSL needs constants.
-    pub texture_offsets: Vec<(i32, i32)>,
+    /// Distinct `tex.aoffi` offsets `(x, y, z)`, named by index since WGSL needs constants.
+    pub texture_offsets: Vec<(i32, i32, i32)>,
     /// The first instruction asking which quad lane it is.
     pub quad: Option<usize>,
     /// The first instruction reading another lane.

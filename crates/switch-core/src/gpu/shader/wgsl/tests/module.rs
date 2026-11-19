@@ -1380,7 +1380,7 @@ fn a_size_query_alone_and_a_zeroed_offset_translate() {
         (tex, ALWAYS),
         (Op::Exit, ALWAYS),
     ]);
-    assert_eq!(translate(&zeroed).unwrap().texture_offsets, vec![(0, 0)]);
+    assert_eq!(translate(&zeroed).unwrap().texture_offsets, vec![(0, 0, 0)]);
 }
 
 #[test]

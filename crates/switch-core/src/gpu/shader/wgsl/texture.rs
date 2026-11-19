@@ -75,12 +75,15 @@ impl Emitter<'_> {
         op: Op,
     ) -> Result<(), Unsupported> {
         let refuse = Unsupported::Op { at, op };
-        if dref.is_some() || !matches!(dim, TexDim::T2d | TexDim::T2dArray) {
+        if dref.is_some() || !matches!(dim, TexDim::T2d | TexDim::T2dArray | TexDim::T3d) {
             return Err(refuse);
         }
         let packed = self.constant_in(at, offset).ok_or(refuse)?;
         let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
-        let texel = (axis(0), axis(4));
+        let texel = match dim {
+            TexDim::T3d => (axis(0), axis(4), axis(8)),
+            _ => (axis(0), axis(4), 0),
+        };
         let index = match self.texture_offsets.iter().position(|&seen| seen == texel) {
             Some(index) => index,
             None => {
@@ -98,8 +101,12 @@ impl Emitter<'_> {
             }
             None => "0u".to_string(),
         };
+        let w = match dim {
+            TexDim::T3d => self.f(coords[2]),
+            _ => "0.0".to_string(),
+        };
         let color = self.bind(&format!(
-            "texSampleOffset({}u, {index}u, {u}, {v}, {layer})",
+            "texSampleOffset({}u, {index}u, {u}, {v}, {layer}, {w})",
             slot.key()
         ));
         for (reg, store, _) in self.program.texs_writes(at).to_vec() {

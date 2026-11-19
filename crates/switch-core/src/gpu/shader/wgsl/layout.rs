@@ -48,7 +48,7 @@ pub struct Layout {
     pub textures: Vec<TextureBinding>,
     pub images: Vec<ImageBinding>,
     /// See [`Translation::texture_offsets`].
-    pub texture_offsets: Vec<(i32, i32)>,
+    pub texture_offsets: Vec<(i32, i32, i32)>,
     pub globals: Vec<Global>,
     /// Colour targets written, from `r0` in fours. Zero is a depth-only pass.
     pub targets: u32,

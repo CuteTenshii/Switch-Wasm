@@ -44,7 +44,7 @@ pub(super) struct Emitter<'a> {
     pub(super) before: Vec<Vec<usize>>,
     /// Textures only `txq`'d, bound as 2D.
     pub(super) queried: Vec<TextureSlot>,
-    pub(super) texture_offsets: Vec<(i32, i32)>,
+    pub(super) texture_offsets: Vec<(i32, i32, i32)>,
     /// Special registers `s2r` reads.
     pub(super) special: BTreeSet<u8>,
     /// Texture keys read by anything but a plain sample: a fetch, a size query or a gather.

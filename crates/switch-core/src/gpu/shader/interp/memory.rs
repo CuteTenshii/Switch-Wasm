@@ -232,6 +232,7 @@ impl Invocation {
             TexDim::T1d => 0.0,
             _ => self.reg_f32(coords[1]),
         };
+        let mut w = self.reg_f32(coords[2]);
         // `.AOFFI` packs a signed four-bit offset per axis into one register.
         if let Some(reg) = offset {
             let packed = self.reg(reg);
@@ -239,6 +240,10 @@ impl Invocation {
             let (du, dv) = env.textures.texel_step(handle)?;
             u += axis(0) as f32 * du;
             v += axis(4) as f32 * dv;
+            if dim == TexDim::T3d {
+                let depth = env.textures.dimensions(handle)?[2];
+                w += axis(8) as f32 / depth.max(1) as f32;
+            }
         }
         let layer = layer.map_or(0, |reg| self.reg(reg) & 0xffff);
         let color = match (dref, dim) {
@@ -246,17 +251,9 @@ impl Invocation {
                 env.textures
                     .sample_compare(handle, u, v, layer, self.reg_f32(reg))?
             }
-            (None, TexDim::T3d) => env
-                .textures
-                .sample_3d(handle, u, v, self.reg_f32(coords[2]))?,
-            (None, TexDim::TCube) => {
-                env.textures
-                    .sample_cube(handle, u, v, self.reg_f32(coords[2]))?
-            }
-            (None, TexDim::TCubeArray) => {
-                env.textures
-                    .sample_cube_array(handle, u, v, self.reg_f32(coords[2]), layer)?
-            }
+            (None, TexDim::T3d) => env.textures.sample_3d(handle, u, v, w)?,
+            (None, TexDim::TCube) => env.textures.sample_cube(handle, u, v, w)?,
+            (None, TexDim::TCubeArray) => env.textures.sample_cube_array(handle, u, v, w, layer)?,
             (None, _) => env.textures.sample(handle, u, v, layer)?,
         };
         self.land_texture(program, pc, color, pending);

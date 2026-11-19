@@ -373,7 +373,8 @@ pub fn module(
 
     // One case per binding and offset: offsets must be constants.
     out.push_str(
-        "fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {\n  \
+        "fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32, w: f32) \
+         -> vec4<f32> {\n  \
          switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
@@ -381,11 +382,12 @@ pub fn module(
         let coords = match (texture.dim, texture.compare) {
             (TexDim::T2d, false) => "vec2<f32>(u, v), 0.0",
             (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer, 0.0",
+            (TexDim::T3d, false) => "vec3<f32>(u, v, w), 0.0",
             _ => continue,
         };
         let key = texture.slot.key();
         out.push_str(&format!("    case {key}u: {{\n      switch (offset) {{\n"));
-        for (n, &(x, y)) in layout.texture_offsets.iter().enumerate() {
+        for (n, &(x, y, z)) in layout.texture_offsets.iter().enumerate() {
             if texture.uint {
                 let load = uint_load(index, texture.dim, (x, y))?;
                 out.push_str(&format!(
@@ -414,12 +416,16 @@ pub fn module(
                     ),
                     texture.swizzle,
                 ),
-                (None, None) => return_swizzled(
-                    &format!(
-                        "textureSampleLevel(tex{index}, smp{smp}, {coords}, vec2<i32>({x}, {y}))"
-                    ),
-                    texture.swizzle,
-                ),
+                (None, None) => {
+                    let texels = match texture.dim {
+                        TexDim::T3d => format!("vec3<i32>({x}, {y}, {z})"),
+                        _ => format!("vec2<i32>({x}, {y})"),
+                    };
+                    return_swizzled(
+                        &format!("textureSampleLevel(tex{index}, smp{smp}, {coords}, {texels})"),
+                        texture.swizzle,
+                    )
+                }
             };
             out.push_str(&format!("        case {n}u: {{ {body} }}\n"));
         }

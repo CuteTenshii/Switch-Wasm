@@ -379,6 +379,30 @@ pub fn offset_fragment_shader() -> Vec<u8> {
     bytes
 }
 
+/// `oColor = textureOffset(volume, vColor.xyz, offset)` from slot 4, `offset` packed as `tex.aoffi`
+/// packs it: a signed nibble per axis, x lowest.
+pub fn offset_volume_fragment_shader(offset: u32) -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
+        mov32i(10, offset),
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0xc0a70000, 0xc07a0047), // tex aoffi nodep $r0 $r0 $r10 0x4 3d 0xf
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+    ));
+    bytes
+}
+
 /// `oColor = texture(shadowMap, vec3(vColor.xy, 0.5))` from slot 4.
 pub fn shadow_fragment_shader() -> Vec<u8> {
     let mut bytes = block(

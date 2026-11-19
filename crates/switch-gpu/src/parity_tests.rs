@@ -1257,6 +1257,39 @@ fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
     agrees_shading(new, |_| {}, set_up);
 }
 
+/// A `tex.aoffi` of a volume moves the sample by whole slices too, on both renderers.
+#[test]
+fn a_constant_volume_offset_moves_the_sample_by_slices() {
+    let in_slice = |slice: u32| {
+        move |h: &mut Harness| {
+            h.bindless_volume_texture();
+            let w = (slice as f32 + 0.5) / testing::BINDLESS_LAYERS as f32;
+            colour_triangle(
+                h,
+                [[0.0, 0.0, w, 1.0], [1.0, 0.0, w, 1.0], [0.0, 1.0, w, 1.0]],
+            );
+        }
+    };
+    let software = |offset: u32, slice: u32| {
+        let mut h = Harness::with_fragment_shader(testing::offset_volume_fragment_shader(offset));
+        in_slice(slice)(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        h.target()
+    };
+    // x +1, y -1, and z +1 or 0.
+    let (deeper, flat) = (0x1f1, 0x0f1);
+    let drawn = software(deeper, 0);
+    assert!(drawn.iter().any(|&c| c != 0), "nothing was drawn");
+    assert_eq!(drawn, software(flat, 1), "not the next slice");
+    assert_ne!(drawn, software(flat, 0), "the slice did not move");
+
+    agrees_shading(
+        || Harness::with_fragment_shader(testing::offset_volume_fragment_shader(deeper)),
+        |_| {},
+        in_slice(0),
+    );
+}
+
 /// An integer image's words, gathered and offset-sampled, reach the same pixels on both renderers
 /// and the pixels its float twin draws.
 #[test]
