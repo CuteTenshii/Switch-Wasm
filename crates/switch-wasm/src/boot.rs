@@ -83,26 +83,17 @@ pub fn switch_load_sd(path: &str) -> Result<f64, String> {
     load_image(s, &data, Some(path)).map(|entry| entry as f64)
 }
 
-/// Decrypt a Program NCA's ExeFS from `nca_src`, load it and boot. Returns the entry address.
-/// `nca_src` stays alive as the title's RomFS source. `added` holds the update and DLC.
+/// Decrypt the ExeFS of `nca`, the Program NCA `nca_src` holds, load it and boot. Returns
+/// the entry address. `nca_src` stays alive as the title's RomFS source. `added` holds the
+/// update, used only if it patches this title, and the DLC.
 pub(crate) fn load_and_boot_nca<S: ByteSource + 'static>(
     keys: &switch_core::keys::KeySet,
     cpu: &mut Cpu,
+    nca: Nca,
     nca_src: S,
     added: Added<'_>,
 ) -> Result<u64, String> {
-    let nca = Nca::parse_source(&nca_src, Some(keys)).map_err(|e| e.to_string())?;
-    // Refuse an update for a different title.
-    let update = match added.update {
-        Some(u) if u.nca.program_id == nca.program_id => Some(u),
-        Some(u) => {
-            return Err(format!(
-                "the update added to this session is for title {:016x}, but this container is {:016x}",
-                u.nca.program_id, nca.program_id
-            ));
-        }
-        None => None,
-    };
+    let update = added.update.filter(|u| u.nca.program_id == nca.program_id);
     // An update's ExeFS is a complete replacement set of modules.
     let program = update.map_or(&nca, |u| &u.nca);
     let exefs_index = program
@@ -232,45 +223,38 @@ pub fn switch_launch(index: Option<u32>) -> Result<f64, String> {
     let s = session();
     let container = container(s)?;
     apply_container_nacp(s);
-    if index.is_none() && s.nsp_files.is_empty() {
-        let added = Added {
-            update: s.update.as_ref(),
-            dlc: &s.dlc,
-        };
-        return load_and_boot_nca(&s.keys, &mut s.cpu, container, added).map(|entry| entry as f64);
-    }
-    let index = match index {
-        Some(index) => index,
-        None => switch_core::nca::find_nca_by_type(
-            &s.nsp_files,
-            &container,
-            &s.keys,
-            switch_core::nca::ContentType::Program,
-        )
-        .map(|(index, _)| index as u32)
-        .ok_or("no Program NCA in this container (or its header couldn't be decrypted; load prod.keys)")?,
-    };
-    let nca_src = nsp_file_source(s, index)?;
-    s.cpu.log(
-        Level::Info,
-        &format!("[launch] {}", s.nsp_files[index as usize].name),
-    );
-
-    // Try the bundled ticket before external title.keys.
-    if let Ok(nca) = Nca::parse_source(&nca_src, Some(&s.keys)) {
-        let _ = switch_core::ticket::load_bundled_title_key(
-            &mut s.keys,
-            &nca,
-            &s.nsp_files,
-            &container,
-        );
-    }
-
     let added = Added {
         update: s.update.as_ref(),
         dlc: &s.dlc,
     };
-    let entry = load_and_boot_nca(&s.keys, &mut s.cpu, nca_src, added)?;
+    if index.is_none() && s.nsp_files.is_empty() {
+        let nca = Nca::parse_source(&container, Some(&s.keys)).map_err(|e| e.to_string())?;
+        return load_and_boot_nca(&s.keys, &mut s.cpu, nca, container, added)
+            .map(|entry| entry as f64);
+    }
+    let index = match index {
+        Some(index) => index as usize,
+        None => s
+            .ncas
+            .iter()
+            .find(|(_, nca)| nca.content_type == switch_core::nca::ContentType::Program)
+            .map(|(index, _)| *index)
+            .ok_or("no Program NCA in this container (or its header couldn't be decrypted; load prod.keys)")?,
+    };
+    let nca_src = nsp_file_source(s, index as u32)?;
+    // An NCA whose header did not parse is parsed again for the reason.
+    let nca = match s.ncas.iter().find(|(i, _)| *i == index) {
+        Some((_, nca)) => nca.clone(),
+        None => Nca::parse_source(&nca_src, Some(&s.keys)).map_err(|e| e.to_string())?,
+    };
+    s.cpu.log(
+        Level::Info,
+        &format!("[launch] {}", s.nsp_files[index].name),
+    );
+    // Try the bundled ticket before external title.keys.
+    let _ =
+        switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &s.nsp_files, &container);
+    let entry = load_and_boot_nca(&s.keys, &mut s.cpu, nca, nca_src, added)?;
     mount_manual(s, &container);
     Ok(entry as f64)
 }
@@ -288,11 +272,12 @@ fn apply_container_nacp(s: &mut Session) {
 
 /// Give the booted title the RomFS of its `HtmlDocument` NCA, which its web applets open.
 fn mount_manual(s: &mut crate::Session, container: &crate::HostSource) {
-    let Some((index, nca)) = switch_core::nca::find_html_document(&s.nsp_files, container, &s.keys)
+    let Some((index, nca)) =
+        switch_core::nca::find_html_document(&s.ncas, &s.nsp_files, container, &s.keys)
     else {
         return;
     };
-    let f = &s.nsp_files[index];
+    let f = &s.nsp_files[*index];
     let romfs = Window::new(*container, f.offset, f.size, &f.name).and_then(|window| {
         let section = nca
             .romfs_section_index()

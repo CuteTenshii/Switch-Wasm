@@ -42,8 +42,7 @@ pub(crate) async fn restore() {
 }
 
 /// Store the control data the session has just read, for the next session's `ns`.
-#[wasm_bindgen]
-pub async fn switch_remember_control() {
+pub(crate) async fn remember() {
     let Some(s) = session_if_live() else {
         return;
     };

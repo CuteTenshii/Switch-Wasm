@@ -1,12 +1,13 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, DlcEntry, GpuReport, JitStats, MemoryReport, NandIdentity, NspFile, UpdateInfo,
+  CommandHandlers, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
+  OpenedContainer,
 } from '../shared/protocol';
 import { noteRegistered } from './activity';
 import { flushLog } from './log';
 import {
-  switch_add_dlc, switch_add_update, switch_clear_dlc, switch_clear_screen, switch_clear_update,
+  switch_clear_screen,
   switch_control_icon, switch_control_json, switch_end_title, switch_flush_storage, switch_force_software, switch_get_reg,
   switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
@@ -15,8 +16,7 @@ import {
   switch_net_connect,
   switch_net_connections_json, switch_net_disconnect, switch_net_status_json, switch_next_load,
   switch_open_nca,
-  switch_open_nsp, switch_parse_nca, switch_read_file, switch_reg_dump,
-  switch_remember_control, switch_restore_nand, switch_restore_storage, switch_run,
+  switch_inspect_nca, switch_open_container, switch_reg_dump, switch_restore_nand, switch_restore_storage, switch_run,
   switch_set_battery, switch_set_jit, switch_set_operation_mode, switch_set_touch,
   switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
   switch_user_stage, switch_users_commit,
@@ -50,25 +50,14 @@ export const CMD = {
   nextLoad: switch_next_load,
 
   // The File is kept and read by range.
-  openNsp(file) {
-    return JSON.parse(switch_open_nsp(file)) as NspFile[];
+  openContainer(file) {
+    return JSON.parse(switch_open_container(file, file.name)) as OpenedContainer;
   },
   openNca(file) {
     return switch_open_nca(file, file.name);
   },
   // Register the stored firmware with the session; how many system data archives it took.
   restoreNand: switch_restore_nand,
-  // The base title the update patches and its version, or null if it is not an update.
-  addUpdate(file) {
-    const found = switch_add_update(file, file.name);
-    return found ? JSON.parse(found) as UpdateInfo : null;
-  },
-  // The pieces the add-on content container holds.
-  addDlc(file) {
-    return JSON.parse(switch_add_dlc(file, file.name)) as DlcEntry[];
-  },
-  clearDlc: switch_clear_dlc,
-  clearUpdate: switch_clear_update,
   // Header-only probe. Kind 0 is a program, 1 a data archive, 2 anything else; throws the core's reason if unreadable.
   nandIdentify(content) {
     noteRegistered('NAND files to identify', content.size);
@@ -84,16 +73,16 @@ export const CMD = {
   },
   launch: switch_launch,
   loadKeys: switch_load_keys,
-  readFile(index, offset, len) {
-    return switch_read_file(index, BigInt(offset), len);
+  inspectNca(index) {
+    return JSON.parse(switch_inspect_nca(index)) as NcaInfo;
   },
 
-  loadControl: switch_load_control,
+  async loadControl() {
+    const info = JSON.parse(await switch_load_control()) as ControlInfo;
+    return { info, icon: info.icon_size > 0 ? switch_control_icon() : null };
+  },
   controlJson: switch_control_json,
   controlIcon: switch_control_icon,
-  // Store the control data just read, for the next session's ns.
-  rememberControl: switch_remember_control,
-  parseNca: switch_parse_nca,
 
   run(budget) {
     return switch_run(budget);

@@ -121,12 +121,19 @@ export interface UpdateInfo {
   version: string;
 }
 
-// Add-on content from `switch_dlc_json`.
+// One piece of add-on content the core holds.
 export interface DlcEntry {
   id: string;
   title_id: string;
   index: number;
 }
+
+// What an opened file turned out to be: an update or add-on content, held for its title,
+// or anything else, which became the open container.
+export type OpenedContainer =
+  | ({ kind: 'update' } & UpdateInfo)
+  | { kind: 'dlc'; packs: DlcEntry[] }
+  | { kind: 'container'; files: NspFile[] };
 
 // An installed NAND title with the size of its content.
 export interface NandTitle {
@@ -161,7 +168,7 @@ export interface NcaSection {
   size: number;
 }
 
-// `switch_parse_nca`'s JSON; `error` replaces the rest if the header can't be read.
+// `switch_inspect_nca`'s JSON; `error` replaces the rest if the header can't be read.
 export interface NcaInfo {
   error?: string;
   title_id: string;
@@ -261,31 +268,25 @@ export interface Commands {
   // The SD path the exited homebrew asked to run next, or empty.
   nextLoad(): string;
 
-  // The container's file table; throws the reason if it cannot be read.
-  openNsp(file: File): NspFile[];
+  // Throws the reason if it is no container.
+  openContainer(file: File): OpenedContainer;
   openNca(file: File): number;
   restoreNand(): number;
-  addUpdate(file: File): UpdateInfo | null;
-  // The pieces the container holds; none if it is not add-on content.
-  addDlc(file: File): DlcEntry[];
-  clearDlc(): void;
-  clearUpdate(): void;
   nandIdentify(content: Blob): NandIdentity;
   // The stored content named `name`; it is read here, not by the page.
   nandLaunch(name: string): number;
   // NSP file `index`, else the container's Program NCA, else the container as an NCA.
   launch(index?: number): number;
   loadKeys(prod: Bytes | null, title: Bytes | null): void;
-  readFile(index: number, offset: number, len: number): Bytes;
+  // The header of NSP file `index`, or of the container when it is a standalone NCA.
+  inspectNca(index?: number): NcaInfo;
 
-  // The title's NACP and icon, from the container's Control NCA or a standalone one.
-  // Throws the reason when there is none.
-  loadControl(): void;
+  // The title's NACP and icon, from the container's Control NCA or a standalone one, also
+  // stored so a later session's ns can describe the title. Throws the reason when there is none.
+  loadControl(): { info: ControlInfo; icon: Bytes | null };
+  // The cached control data: the container's, or a homebrew's.
   controlJson(): string;
   controlIcon(): Bytes;
-  // Store the control data just read, so a later session's ns can describe the title.
-  rememberControl(): void;
-  parseNca(header: Bytes): string;
 
   run(budget: number): number;
   // The worker runs slices itself until paused, halted or faulted, reporting each.

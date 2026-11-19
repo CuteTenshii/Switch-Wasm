@@ -1,44 +1,75 @@
 //! Containers, updates, add-on content, control data and keys.
 
 use switch_core::json;
-use switch_core::nca::Nca;
-use switch_core::nsp::Pfs0;
-use switch_core::source::{ByteSource, Window};
+use switch_core::nca::{ContentType, Nca};
+use switch_core::source::Window;
 use switch_core::trace::Level;
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::{container, nsp_file_source, session, Dlc, HostSource, Session, Update};
 
-/// Open `file`, a container (NSP or XCI), read by range. Returns its file table as JSON, or
-/// fails with the reason.
+/// Open `file`, named `name`, read by range: an update or add-on content is held for the
+/// title it belongs to, anything else becomes the open container. Returns `{ kind, .. }` as
+/// JSON: `update` with `title` and `version`, `dlc` with `packs`, or `container` with
+/// `files`. Fails with the reason when it is not a container.
 #[wasm_bindgen]
-pub fn switch_open_nsp(file: &web_sys::Blob) -> Result<String, String> {
-    open_nsp(crate::hostfiles::open_container(file))
+pub fn switch_open_container(file: &web_sys::Blob, name: &str) -> Result<String, String> {
+    let index = crate::hostfiles::add(file);
+    let src = HostSource {
+        file: index,
+        len: file.size() as u64,
+    };
+    let mut held = true;
+    let opened = open_file(session(), src, name, || {
+        held = false;
+        HostSource {
+            file: 0,
+            len: crate::hostfiles::open_container(file),
+        }
+    });
+    if !held || opened.is_err() {
+        crate::hostfiles::forget(index);
+    }
+    opened
 }
 
-pub(crate) fn open_nsp(size: u64) -> Result<String, String> {
-    let s = session();
-    let container = HostSource { file: 0, len: size };
-    s.container = Some(container);
-    s.nsp_files = Vec::new();
+/// [`switch_open_container`] over `src`. `promote` makes it the open container and returns
+/// the source it is then read through.
+pub(crate) fn open_file(
+    s: &mut Session,
+    src: HostSource,
+    name: &str,
+    promote: impl FnOnce() -> HostSource,
+) -> Result<String, String> {
+    let files = switch_core::xci::read_container(&src)
+        .map_err(|e| e.to_string())?
+        .files;
+    let ncas = switch_core::nca::parse_ncas(&files, &src, &s.keys);
+    if let Some(json) = hold_update(s, src, &files, &ncas, name) {
+        return Ok(json);
+    }
+    if let Some(json) = hold_dlc(s, src, &files, &ncas, name) {
+        return Ok(json);
+    }
+    s.container = Some(promote());
     s.control = None;
     s.container_nacp = None;
-    match switch_core::xci::read_container(&container) {
-        Ok(pfs0) => {
-            s.nsp_files = pfs0.files;
-            Ok(json::array(|a| {
-                for f in &s.nsp_files {
-                    a.object(|o| {
-                        o.field("name", &f.name)
-                            .field("offset", f.offset)
-                            .field("size", f.size);
-                    });
-                }
-            }))
-        }
-        Err(e) => Err(e.to_string()),
-    }
+    let json = json::object(|o| {
+        o.field("kind", "container");
+        o.array("files", |a| {
+            for f in &files {
+                a.object(|o| {
+                    o.field("name", &f.name)
+                        .field("offset", f.offset)
+                        .field("size", f.size);
+                });
+            }
+        });
+    });
+    s.nsp_files = files;
+    s.ncas = ncas;
+    Ok(json)
 }
 
 /// Open `file`, named `name`, as a single standalone `.nca`. Returns 0.
@@ -50,6 +81,7 @@ pub fn switch_open_nca(file: &web_sys::Blob, name: &str) -> i32 {
         len: crate::hostfiles::open_container(file),
     });
     s.nsp_files = Vec::new();
+    s.ncas = Vec::new();
     s.control = None;
     s.container_nacp = None;
     s.last_error.clear();
@@ -71,7 +103,6 @@ pub(crate) fn add_archive(s: &mut Session, src: HostSource) -> i32 {
             return -1;
         }
     };
-    use switch_core::nca::ContentType;
     if !matches!(
         nca.content_type,
         ContentType::Data | ContentType::PublicData
@@ -99,49 +130,32 @@ pub(crate) fn add_archive(s: &mut Session, src: HostSource) -> i32 {
     }
 }
 
-/// Register `file`, an update container named `name`, for the title about to run.
-/// Returns `{ title, version }` as JSON, the base program id it patches and its NACP display
-/// version ("1.0.1", or empty), or nothing with the reason in `switch_last_error`. Pairing
-/// is checked at boot.
-#[wasm_bindgen]
-pub fn switch_add_update(file: &web_sys::Blob, name: &str) -> String {
-    let s = session();
-    let src = HostSource {
-        file: crate::hostfiles::add(file),
-        len: file.size() as u64,
-    };
-    let files = match Pfs0::read_from(&src) {
-        Ok(pfs0) => pfs0.files,
-        Err(e) => {
-            s.last_error = format!("an update has to be an NSP: {e}");
-            return String::new();
-        }
-    };
-    let Some((index, nca)) = switch_core::nca::find_nca_by_type(
-        &files,
-        &src,
-        &s.keys,
-        switch_core::nca::ContentType::Program,
-    ) else {
-        s.last_error =
-            "no Program NCA in this container (or its header couldn't be decrypted; load prod.keys)"
-                .into();
-        return String::new();
-    };
-    // An update carries its own ticket.
-    let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &files, &src);
+/// Hold `src` as the update it is, for the launches of the title it patches: `{ kind, title,
+/// version }` as JSON, the base program id and its NACP display version ("1.0.1", or empty).
+/// `None` if it is no update.
+fn hold_update(
+    s: &mut Session,
+    src: HostSource,
+    files: &[switch_core::nsp::Pfs0File],
+    ncas: &[(usize, Nca)],
+    name: &str,
+) -> Option<String> {
+    let (index, nca) = ncas
+        .iter()
+        .find(|(_, nca)| nca.content_type == ContentType::Program)?;
     if !nca.is_update() {
-        s.last_error =
-            "this container is a title in its own right, not an update: its RomFS is its own"
-                .into();
-        return String::new();
+        return None;
     }
-    let f = &files[index];
-    let program = (f.offset, f.size);
+    // An update carries its own ticket.
+    let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, nca, files, &src);
+    let f = &files[*index];
     let program_id = nca.program_id;
-    let version = display_version(&files, &src, &s.keys);
-    s.update = Some(Update { nca, src, program });
-    s.last_error.clear();
+    let version = display_version(files, ncas, &src, &s.keys);
+    s.update = Some(Update {
+        nca: nca.clone(),
+        src,
+        program: (f.offset, f.size),
+    });
     let shown = if version.is_empty() {
         String::new()
     } else {
@@ -151,69 +165,49 @@ pub fn switch_add_update(file: &web_sys::Blob, name: &str) -> String {
         Level::Info,
         &format!("[io] opened {name} as update{shown} for {program_id:016x}"),
     );
-    json::object(|o| {
-        o.field("title", format!("{program_id:016x}"))
+    Some(json::object(|o| {
+        o.field("kind", "update")
+            .field("title", format!("{program_id:016x}"))
             .field("version", version);
-    })
+    }))
 }
 
-/// The NACP display version of the Control NCA among `files`, or empty.
+/// The NACP display version of the Control NCA among `ncas`, or empty.
 fn display_version(
     files: &[switch_core::nsp::Pfs0File],
+    ncas: &[(usize, Nca)],
     src: &HostSource,
     keys: &switch_core::keys::KeySet,
 ) -> String {
     let control = || {
-        let (index, _) = switch_core::control::find_control_nca(files, src, keys)?;
-        let f = files.get(index)?;
+        let (index, _) = ncas
+            .iter()
+            .find(|(_, nca)| nca.content_type == ContentType::Control)?;
+        let f = files.get(*index)?;
         let window = Window::new(*src, f.offset, f.size, &f.name).ok()?;
         switch_core::control::Control::from_source(window, keys).ok()
     };
     control().map_or_else(String::new, |control| control.nacp.display_version)
 }
 
-/// Register `file`, a container of add-on content named `name`. Returns the pieces it holds as
-/// JSON, each with its content id, base title and index; none, with the reason in
-/// `switch_last_error`, if it is not add-on content. Pairing is checked at boot.
-#[wasm_bindgen]
-pub fn switch_add_dlc(file: &web_sys::Blob, name: &str) -> String {
-    let s = session();
-    let src = HostSource {
-        file: crate::hostfiles::add(file),
-        len: file.size() as u64,
-    };
-    let files = match Pfs0::read_from(&src) {
-        Ok(pfs0) => pfs0.files,
-        Err(e) => {
-            s.last_error = format!("add-on content has to be an NSP: {e}");
-            return dlc_json([].into_iter());
-        }
-    };
+/// Hold the add-on content `src` holds, for the launches of its title: `{ kind, packs }` as
+/// JSON, each piece with its content id, base title and index. `None` if it holds none.
+fn hold_dlc(
+    s: &mut Session,
+    src: HostSource,
+    files: &[switch_core::nsp::Pfs0File],
+    ncas: &[(usize, Nca)],
+    name: &str,
+) -> Option<String> {
     // A container with a Program NCA is a game or an update, not DLC.
-    if switch_core::nca::find_nca_by_type(
-        &files,
-        &src,
-        &s.keys,
-        switch_core::nca::ContentType::Program,
-    )
-    .is_some()
+    if ncas
+        .iter()
+        .any(|(_, nca)| nca.content_type == ContentType::Program)
     {
-        s.last_error = "this container holds a program; add-on content is data only".into();
-        return dlc_json([].into_iter());
+        return None;
     }
-
     let mut found = Vec::new();
-    for f in &files {
-        if !f.name.to_ascii_lowercase().ends_with(".nca") {
-            continue;
-        }
-        let Ok(window) = Window::new(src, f.offset, f.size, &f.name) else {
-            continue;
-        };
-        let Ok(nca) = Nca::parse_source(&window, Some(&s.keys)) else {
-            continue;
-        };
-        use switch_core::nca::ContentType;
+    for (index, nca) in ncas {
         if !matches!(
             nca.content_type,
             ContentType::Data | ContentType::PublicData
@@ -222,10 +216,11 @@ pub fn switch_add_dlc(file: &web_sys::Blob, name: &str) -> String {
             continue;
         }
         // Each piece carries its own ticket.
-        let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &files, &src);
+        let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, nca, files, &src);
         if nca.romfs_section_index().is_none() {
             continue;
         }
+        let f = &files[*index];
         s.dlc.retain(|held| held.content_id != nca.title_id);
         s.dlc.push(Dlc {
             content_id: nca.title_id,
@@ -234,43 +229,30 @@ pub fn switch_add_dlc(file: &web_sys::Blob, name: &str) -> String {
         });
         found.push(nca.title_id);
     }
-    if let Some(first) = found.first() {
-        s.last_error.clear();
-        let packs = match found.len() {
-            1 => "1 add-on content pack".to_owned(),
-            n => format!("{n} add-on content packs"),
-        };
-        s.cpu.log(
-            Level::Info,
-            &format!("[io] opened {name} as {packs} for {:016x}", first & !0x1FFF),
-        );
-    } else {
-        s.last_error = "no add-on content in this container".into();
-    }
-    dlc_json(found.into_iter())
+    let first = found.first()?;
+    let packs = match found.len() {
+        1 => "1 add-on content pack".to_owned(),
+        n => format!("{n} add-on content packs"),
+    };
+    s.cpu.log(
+        Level::Info,
+        &format!("[io] opened {name} as {packs} for {:016x}", first & !0x1FFF),
+    );
+    Some(json::object(|o| {
+        o.field("kind", "dlc");
+        o.array("packs", |a| add_on_content_entries(a, &found));
+    }))
 }
 
 /// Each add-on content id with its base title and index.
-fn dlc_json(content_ids: impl Iterator<Item = u64>) -> String {
-    json::array(|a| {
-        for id in content_ids {
-            a.object(|o| {
-                o.field("id", format!("{id:016x}"))
-                    .field("title_id", format!("{:016x}", id & !0x1FFF))
-                    .field("index", id & 0x7FF);
-            });
-        }
-    })
-}
-
-#[wasm_bindgen]
-pub fn switch_clear_dlc() {
-    session().dlc.clear();
-}
-
-#[wasm_bindgen]
-pub fn switch_clear_update() {
-    session().update = None;
+fn add_on_content_entries(a: &mut json::Array, content_ids: &[u64]) {
+    for id in content_ids {
+        a.object(|o| {
+            o.field("id", format!("{id:016x}"))
+                .field("title_id", format!("{:016x}", id & !0x1FFF))
+                .field("index", id & 0x7FF);
+        });
+    }
 }
 
 /// Whether a title id is add-on content: the base plus 0x1000 and an 11-bit index.
@@ -278,27 +260,18 @@ fn is_add_on_content_id(title_id: u64) -> bool {
     (0x1000..0x1800).contains(&(title_id & 0x1FFF))
 }
 
-/// Read up to `len` bytes of NSP file `index` from `file_offset`; fails with the reason.
+/// A JSON summary of the header of NSP file `index`'s NCA, or of the container's when it is
+/// a standalone NCA, decrypting with loaded keys.
 #[wasm_bindgen]
-pub fn switch_read_file(index: u32, file_offset: u64, len: u32) -> Result<Vec<u8>, String> {
-    let file = nsp_file_source(session(), index)?;
-    if len == 0 || file_offset >= file.len() {
-        return Ok(Vec::new());
-    }
-    let n = u64::from(len).min(file.len() - file_offset) as usize;
-    let mut out = vec![0u8; n];
-    let got = file
-        .read_at(file_offset, &mut out)
-        .map_err(|e| e.to_string())?;
-    out.truncate(got);
-    Ok(out)
-}
-
-/// A JSON summary of the NCA whose header is `data`, decrypting with loaded keys.
-#[wasm_bindgen]
-pub fn switch_parse_nca(data: &[u8]) -> String {
+pub fn switch_inspect_nca(index: Option<u32>) -> String {
     let s = session();
-    match Nca::parse_with_keys(data, Some(&s.keys)) {
+    let parsed = match index {
+        Some(index) => nsp_file_source(s, index)
+            .and_then(|f| Nca::parse_source(&f, Some(&s.keys)).map_err(|e| e.to_string())),
+        None => container(s)
+            .and_then(|c| Nca::parse_source(&c, Some(&s.keys)).map_err(|e| e.to_string())),
+    };
+    match parsed {
         Ok(nca) => json::object(|o| {
             o.field("title_id", format!("{:016x}", nca.title_id))
                 .field("content_type", nca.content_type.name())
@@ -329,47 +302,46 @@ pub fn switch_parse_nca(data: &[u8]) -> String {
         }),
         // Return the raw error; the frontend adds friendly context.
         Err(e) => json::object(|o| {
-            o.field("error", e.to_string());
+            o.field("error", e);
         }),
     }
 }
 
-/// Cache control data, and its NACP for the launches of the open container.
-fn cache_control(s: &mut Session, control: switch_core::control::Control) {
-    if control.title_id != 0 {
-        s.cpu
-            .add_application_control(control.title_id, &control.nacp_raw, &control.icon);
-    }
-    s.container_nacp = Some(control.nacp.clone());
-    s.control = Some(control);
-}
-
-/// Read and cache the open container's Control NCA: the one in its file table, or the
-/// container itself when it was opened as a standalone NCA (which has no file table).
-/// Fails with the reason when it has none readable (including when no `prod.keys` are loaded).
+/// Read and cache the open container's Control NCA (the one in its file table, or the
+/// container itself when it was opened as a standalone NCA), keep its NACP for the
+/// container's launches, store it for the next session's `ns`, and return it as
+/// [`switch_control_json`] does. Fails with the reason when there is none readable
+/// (including when no `prod.keys` are loaded).
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn switch_load_control() -> Result<(), String> {
+pub async fn switch_load_control() -> Result<String, String> {
     let s = session();
     s.control = None;
     let container = container(s)?;
     let control = if s.nsp_files.is_empty() {
         switch_core::control::Control::from_source(container, &s.keys)
     } else {
-        let (index, nca) =
-            switch_core::control::find_control_nca(&s.nsp_files, &container, &s.keys).ok_or(
+        let (index, nca) = s
+            .ncas
+            .iter()
+            .find(|(_, nca)| nca.content_type == ContentType::Control)
+            .ok_or(
                 "no Control NCA in this container (or its header couldn't be decrypted; load prod.keys)",
             )?;
-        let _ = switch_core::ticket::load_bundled_title_key(
-            &mut s.keys,
-            &nca,
-            &s.nsp_files,
-            &container,
-        );
-        let file = nsp_file_source(s, index as u32)?;
+        let _ =
+            switch_core::ticket::load_bundled_title_key(&mut s.keys, nca, &s.nsp_files, &container);
+        let file = nsp_file_source(s, *index as u32)?;
         switch_core::control::Control::from_source(file, &s.keys)
-    };
-    cache_control(s, control.map_err(|e| e.to_string())?);
-    Ok(())
+    }
+    .map_err(|e| e.to_string())?;
+    if control.title_id != 0 {
+        s.cpu
+            .add_application_control(control.title_id, &control.nacp_raw, &control.icon);
+    }
+    s.container_nacp = Some(control.nacp.clone());
+    s.control = Some(control);
+    crate::idb::controls::remember().await;
+    Ok(switch_control_json())
 }
 
 /// The cached control data as JSON, or `{}`. `icon_size` is the length of `switch_control_icon`.
@@ -449,6 +421,10 @@ pub fn switch_load_keys(prod: Option<Vec<u8>>, title: Option<Vec<u8>>) {
     let mut ks = switch_core::keys::keyset_from_prod(&prod_entries);
     ks.title_keys = switch_core::keys::keyset_from_title(&title_entries);
     s.keys = ks;
+    // The header key decides which NCAs parse.
+    if let Some(container) = s.container {
+        s.ncas = switch_core::nca::parse_ncas(&s.nsp_files, &container, &s.keys);
+    }
     s.last_error.clear();
 }
 
@@ -459,12 +435,15 @@ mod tests {
     #[test]
     fn add_on_content_is_listed_with_its_base_title_and_index() {
         assert_eq!(
-            dlc_json([0x0100_0000_0000_1001u64, 0x0100_0000_0000_17ff].into_iter()),
+            json::array(|a| add_on_content_entries(
+                a,
+                &[0x0100_0000_0000_1001, 0x0100_0000_0000_17ff]
+            )),
             concat!(
                 r#"[{"id":"0100000000001001","title_id":"0100000000000000","index":1},"#,
                 r#"{"id":"01000000000017ff","title_id":"0100000000000000","index":2047}]"#
             )
         );
-        assert_eq!(dlc_json(std::iter::empty()), "[]");
+        assert_eq!(json::array(|a| add_on_content_entries(a, &[])), "[]");
     }
 }

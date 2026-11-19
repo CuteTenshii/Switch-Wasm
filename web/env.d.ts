@@ -36,8 +36,6 @@ declare module '@core/switch_wasm.js' {
   export function switch_serve_core(slot: number): void;
   export function switch_end_title(): void;
   export function switch_open_nca(file: Blob, name: string): number;
-  export function switch_clear_dlc(): void;
-  export function switch_clear_update(): void;
   export function switch_set_trace(enabled: boolean): void;
   export function switch_set_jit(enabled: boolean): void;
   export function switch_set_trace_channels(on: boolean): void;
@@ -75,8 +73,6 @@ declare module '@core/switch_wasm.js' {
     content: Blob, name: string, id: string, kind: number): Promise<void>;
   export function switch_nand_remove(id: string): Promise<void>;
   export function switch_nand_erase(): Promise<void>;
-  // `idb/controls.rs`: stores the control data the session has just read.
-  export function switch_remember_control(): Promise<void>;
   // `idb/users.rs`: stores the guest's profile edits; whether there were any.
   export function switch_store_profile_edits(): Promise<boolean>;
   // The exports that carry bytes or text, in `crates/switch-wasm/src`. The ones that return a
@@ -85,19 +81,15 @@ declare module '@core/switch_wasm.js' {
   // The panic that trapped the last call, which is then forgotten.
   export function switch_panic_message(): string;
   // `container.rs`
-  // `{ title, version }` as JSON, or empty when the file is no update.
-  export function switch_add_update(file: Blob, name: string): string;
-  // The pieces as JSON: `[{ id, title_id, index }]`, empty when the file is no add-on content.
-  export function switch_add_dlc(file: Blob, name: string): string;
-  // The file table as JSON; throws the reason when the container cannot be read.
-  export function switch_open_nsp(file: Blob): string;
-  export function switch_read_file(
-    index: number, offset: bigint, len: number): Uint8Array<ArrayBuffer>;
-  export function switch_parse_nca(header: Uint8Array): string;
+  // An `OpenedContainer` as JSON; throws the reason when the file is no container.
+  export function switch_open_container(file: Blob, name: string): string;
+  // An `NcaInfo` as JSON.
+  export function switch_inspect_nca(index?: number | null): string;
   export function switch_control_json(): string;
   export function switch_control_icon(): Uint8Array<ArrayBuffer>;
   export function switch_load_keys(prod: Uint8Array | null, title: Uint8Array | null): void;
-  export function switch_load_control(): void;
+  // The control data as JSON, once read and stored.
+  export function switch_load_control(): Promise<string>;
   // `boot.rs` and `nand.rs`: the entry address; they throw the reason when a program will not boot.
   export function switch_load_program(file: Blob): Promise<number>;
   export function switch_load_sd(path: string): number;

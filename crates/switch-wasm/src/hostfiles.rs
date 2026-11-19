@@ -113,6 +113,13 @@ pub(crate) fn add(blob: &Blob) -> u32 {
     index
 }
 
+/// Drop host file `index`, registered by [`add`].
+pub(crate) fn forget(index: u32) {
+    let h = hosts();
+    h.index.forget_file(index);
+    h.files[index as usize] = None;
+}
+
 impl Hosts {
     fn io(&mut self, file: u32) -> &mut Io {
         let entry = self.files[file as usize].as_mut().expect("file exists");

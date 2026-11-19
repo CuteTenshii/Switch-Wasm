@@ -3,7 +3,7 @@ use switch_core::cpu::SaveKey;
 
 use crate::activity::switch_log_activity;
 use crate::boot::switch_launch;
-use crate::container::{open_nsp, switch_read_file};
+use crate::container::open_file;
 use crate::debug::switch_set_trace_channels;
 use crate::log::switch_log_drain;
 use crate::storage::{switch_fs_create_dir, switch_fs_write};
@@ -404,34 +404,73 @@ fn build_nsp(files: &[(&str, &[u8])]) -> Vec<u8> {
     image
 }
 
+/// Open the host container as a dropped file named `name` would be.
+fn open_host_container(image: Vec<u8>, name: &str) -> Result<String, String> {
+    let src = HostSource {
+        file: 0,
+        len: image.len() as u64,
+    };
+    set_host_container(image);
+    open_file(session(), src, name, || src)
+}
+
+/// `len` bytes of the open container's file `index` from `offset`.
+fn read_nsp_file(index: u32, offset: u64, len: u64) -> Vec<u8> {
+    nsp_file_source(session(), index)
+        .unwrap()
+        .read_vec(offset, len)
+        .unwrap()
+}
+
 /// The container is read through `host_read` without being staged.
 #[test]
 fn a_container_is_read_through_the_host_without_being_staged() {
     let _host = new_session();
     let payload: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
     let image = build_nsp(&[("main.nca", &payload), ("notes.txt", b"hello")]);
-    let size = image.len() as u64;
-    set_host_container(image);
 
-    let json = open_nsp(size).unwrap();
+    let json = open_host_container(image, "game.nsp").unwrap();
+    assert!(
+        json.starts_with(r#"{"kind":"container","files":["#),
+        "{json}"
+    );
     assert!(json.contains(r#"{"name":"main.nca","offset":"#), "{json}");
     assert!(json.contains(r#""size":4096}"#), "{json}");
     assert!(json.contains(r#"{"name":"notes.txt""#), "{json}");
 
-    // Reads are relative to the inner file and stop at its end.
-    assert_eq!(
-        switch_read_file(0, 0x1000 - 8, 32).unwrap(),
-        payload[0x1000 - 8..]
-    );
-    assert_eq!(switch_read_file(1, 0, 32).unwrap(), b"hello");
-
-    // Past a file's end is empty; past the table is an error.
-    assert_eq!(switch_read_file(1, 5, 32).unwrap(), b"");
-    assert!(switch_read_file(7, 0, 32).is_err());
+    // Reads are relative to the inner file.
+    assert_eq!(read_nsp_file(0, 0x1000 - 8, 8), payload[0x1000 - 8..]);
+    assert_eq!(read_nsp_file(1, 0, 5), b"hello");
+    assert!(nsp_file_source(session(), 7).is_err());
 
     // A non-NCA payload fails with a readable error.
     let text = switch_launch(Some(0)).unwrap_err();
     assert!(text.contains("bad magic"), "{text}");
+}
+
+/// A cleartext Program NCA header, too short to hold an ExeFS.
+fn program_nca_header() -> Vec<u8> {
+    let mut header = vec![0u8; 0xC00];
+    header[0x200..0x204].copy_from_slice(&switch_core::nca::NCA_MAGIC.to_le_bytes());
+    header[0x210..0x218].copy_from_slice(&0x0100_0000_0000_1000u64.to_le_bytes());
+    header
+}
+
+/// A launch without an index boots the Program NCA found when the container opened.
+#[test]
+fn a_launch_finds_the_program_the_open_scanned() {
+    let _host = new_session();
+    let image = build_nsp(&[("notes.txt", b"hello"), ("main.nca", &program_nca_header())]);
+    assert!(open_host_container(image, "game.nsp")
+        .unwrap()
+        .contains("main.nca"));
+    let text = switch_launch(None).unwrap_err();
+    assert!(text.contains("ExeFS"), "{text}");
+
+    let image = build_nsp(&[("notes.txt", b"hello")]);
+    open_host_container(image, "empty.nsp").unwrap();
+    let text = switch_launch(None).unwrap_err();
+    assert!(text.contains("no Program NCA"), "{text}");
 }
 
 /// A cartridge image opens through the same entry point as an `.nsp`.
@@ -449,19 +488,14 @@ fn a_cartridge_image_opens_as_a_container() {
     // The firmware partition's NCAs are not listed as the game's.
     let update = partition_fs(PartitionKind::Hfs0, &[("system.nca", b"firmware")]);
     let image = switch_core::xci::testing::cartridge(&[("update", &update), ("secure", &secure)]);
-    let size = image.len() as u64;
-    set_host_container(image);
 
-    let json = open_nsp(size).unwrap();
+    let json = open_host_container(image, "game.xci").unwrap();
     assert!(json.contains(r#"{"name":"program.nca""#), "{json}");
     assert!(json.contains(r#"{"name":"meta.cnmt.nca""#), "{json}");
     assert!(!json.contains("system.nca"), "{json}");
 
     // Offsets are the image's own.
-    assert_eq!(
-        switch_read_file(0, 0x700, 16).unwrap(),
-        payload[0x700..0x710]
-    );
+    assert_eq!(read_nsp_file(0, 0x700, 16), payload[0x700..0x710]);
 }
 
 #[test]
@@ -502,7 +536,7 @@ fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
 /// A title's control data and an unreadable NCA, in the bytes the page parses.
 #[test]
 fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
-    use crate::container::{switch_control_json, switch_parse_nca};
+    use crate::container::{switch_control_json, switch_inspect_nca};
     use switch_core::control::{CaptureSupport, Control, Nacp, Rating, StartupUserAccount, Title};
     let _guard = new_session();
     assert_eq!(switch_control_json(), "{}", "nothing cached");
@@ -561,8 +595,10 @@ fn control_data_and_nca_summaries_are_the_json_the_page_reads() {
         )
     );
 
+    set_host_container(vec![0u8; 16]);
+    session().container = Some(HostSource { file: 0, len: 16 });
     assert_eq!(
-        switch_parse_nca(&[0u8; 16]),
+        switch_inspect_nca(None),
         r#"{"error":"NCA header: expected at least 1024 bytes, got 16"}"#
     );
 }

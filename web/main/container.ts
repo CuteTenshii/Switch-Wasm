@@ -1,6 +1,8 @@
 // NSP / NCA / XCI containers: inspecting, showing the title, launching.
 
-import type { Bytes, ControlInfo, DlcEntry, NcaInfo, NspFile, UpdateInfo } from '../shared/protocol';
+import type {
+  Bytes, ControlInfo, DlcEntry, NcaInfo, NspFile, OpenedContainer, UpdateInfo,
+} from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from './format';
@@ -56,18 +58,26 @@ async function handleContainerFile(file: File): Promise<void> {
     await handleStandaloneNca(file);
     return;
   }
-  // An update holds no game; inspecting it also names the title it patches.
-  const update = await call('addUpdate', file).catch(() => null);
-  if (update) {
-    await handleUpdateFile(file, update);
-    return;
+  const opened = await openFile(file);
+  if (opened?.kind === 'update') handleUpdateFile(file, opened);
+  else if (opened?.kind === 'dlc') handleDlcFile(file, opened.packs);
+  else if (opened) await showContainer(file, opened.files);
+}
+
+// The core reads `file` once and says what it is: null, with the reason shown, if it is no
+// container.
+async function openFile(file: File): Promise<OpenedContainer | null> {
+  log('Opening ' + file.name + ' (' + fmtSize(file.size) + ') ...');
+  try {
+    return await call('openContainer', file);
+  } catch (err) {
+    const why = 'Could not open ' + file.name + ': ' + (err as Error).message;
+    // Without clearing: an open container should not vanish over a bad drop.
+    $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
+    $('nsp-result').appendChild(el('div', 'nca-info nca-inspect', why));
+    log(why, 'error');
+    return null;
   }
-  const packs = await call('addDlc', file).catch((): DlcEntry[] => []);
-  if (packs.length > 0) {
-    handleDlcFile(file, packs);
-    return;
-  }
-  await handleNspFile(file);
 }
 
 // Updates and add-on content are paired with their title rather than opened.
@@ -150,35 +160,20 @@ function describeDlc(packs: number): string {
   return packs === 1 ? '1 add-on content pack' : packs + ' add-on content packs';
 }
 
-async function handleUpdateFile(file: File, { title: titleId, version }: UpdateInfo): Promise<void> {
+function handleUpdateFile(file: File, { title: titleId, version }: UpdateInfo): void {
   heldUpdate = { file, titleId, version };
   rememberUpdate(heldUpdate);
   // The core has logged what the file holds; this is what happens to it.
   log(titleId === openTitleId
     ? 'The update is applied when this title launches.'
     : 'Open that game to launch it patched.', 'info');
-  await syncPaired();
+  showPairedNotes();
 }
 
 function describeUpdate(u: HeldUpdate | RememberedUpdate & { file?: File }): string {
   const version = 'version' in u && u.version ? 'v' + u.version : '';
   const name = 'file' in u && u.file ? u.file.name : (u as RememberedUpdate).name;
   return version || name;
-}
-
-// The session refuses an update for another title, so it is handed over only
-// while its title is open. Add-on content is always handed over.
-async function syncPaired(): Promise<void> {
-  if (heldUpdate?.titleId === openTitleId) {
-    await call('addUpdate', heldUpdate.file).catch(() => '');
-  } else {
-    await call('clearUpdate').catch(() => 0);
-  }
-  await call('clearDlc').catch(() => 0);
-  for (const held of heldDlc) {
-    await call('addDlc', held.file).catch(() => []);
-  }
-  showPairedNotes();
 }
 
 // Rendered under the card, not inside it, so rebuilding the card clears them.
@@ -253,64 +248,45 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     await launchStandaloneNca(file);
     return;
   }
-  // An update or add-on content means: pair it with the game and launch that.
-  const update = await call('addUpdate', file).catch(() => null);
-  if (update) {
-    await handleUpdateFile(file, update);
-    setState('idle');
-    failLoad(update.title === openTitleId
-      ? 'Update applied - launch ' + (heldTitle?.name || 'the game') + ' to run it patched.'
-      : 'That is an update for ' + update.title + ', not a game. Open that title to launch it patched.');
+  const opened = await openFile(file);
+  if (!opened) {
+    setState('fault');
+    failLoad('Could not open ' + file.name + '. The Files panel has the details.');
     openPanel('files');
     return;
   }
-  const packs = await call('addDlc', file).catch((): DlcEntry[] => []);
-  if (packs.length > 0) {
-    handleDlcFile(file, packs);
+  // An update or add-on content means: pair it with the game and launch that.
+  if (opened.kind === 'update') {
+    handleUpdateFile(file, opened);
+    setState('idle');
+    failLoad(opened.title === openTitleId
+      ? 'Update applied - launch ' + (heldTitle?.name || 'the game') + ' to run it patched.'
+      : 'That is an update for ' + opened.title + ', not a game. Open that title to launch it patched.');
+    openPanel('files');
+    return;
+  }
+  if (opened.kind === 'dlc') {
+    handleDlcFile(file, opened.packs);
     const held = heldDlc[heldDlc.length - 1];
     setState('idle');
     failLoad(held.titleId === openTitleId
-      ? describeDlc(packs.length) + ' added - launch ' + (heldTitle?.name || 'the game')
+      ? describeDlc(opened.packs.length) + ' added - launch ' + (heldTitle?.name || 'the game')
       + ' to run with them.'
       : 'That is add-on content for ' + held.titleId + ', not a game. Open that title'
         + ' to launch it with them.');
     openPanel('files');
     return;
   }
-  await handleNspFile(file);
-  // A failed open leaves `openContainer` unchanged, so compare by identity.
-  if (openContainer?.file !== file) {
-    setState('fault');
-    failLoad('Could not open ' + file.name + '. The Files panel has the details.');
-    openPanel('files');
-    return;
-  }
+  await showContainer(file, opened.files);
   await launchNca(file.name);
 }
 
 let openContainer: { file: File; kind: 'nsp' | 'nca' } | null = null;
 
-// The File goes to the worker, which reads ranges from it; only its header is read.
-async function handleNspFile(file: File): Promise<void> {
+// The container the core has just opened, with its file table: listed, with its title card.
+async function showContainer(file: File, files: NspFile[]): Promise<void> {
   clearNsp();
-  setNote('container-badge', 'opening ' + file.name, false);
-  const status = el('div', 'nca-info', 'Reading the container header \u2026');
-  $('nsp-result').appendChild(status);
-  log('Opening ' + file.name + ' (' + fmtSize(file.size) + ') ...');
-  let files: NspFile[];
-  try {
-    files = await call('openNsp', file);
-    openContainer = { file, kind: 'nsp' };
-    setNote('container-badge', file.name, true);
-  } catch (e) {
-    const why = (e as Error).message;
-    status.textContent = 'Could not open ' + file.name + ': ' + why;
-    setNote('container-badge', 'none open', false);
-    log('Could not open ' + file.name + ': ' + why, 'error');
-    return;
-  }
-  status.remove();
-
+  openContainer = { file, kind: 'nsp' };
   const ul = el('ul', 'nsp-list');
   files.forEach((f, index) => {
     const li = el('li');
@@ -359,21 +335,19 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
 // Title card: icon, name, publisher and NACP details from the Control NCA.
 // Needs prod.keys, since the content type is in the encrypted header.
 async function showTitleCard(): Promise<ControlInfo | null> {
-  let info: ControlInfo;
+  let control: { info: ControlInfo; icon: Bytes | null };
   try {
-    await call('loadControl');
-    info = JSON.parse(await call('controlJson')) as ControlInfo;
+    control = await call('loadControl');
   } catch (err) {
     log('No title details: ' + (err as Error).message, 'debug');
     return null;
   }
+  const { info, icon } = control;
   if (!info.name) return null;
-  const icon = info.icon_size > 0 ? await call('controlIcon') : null;
-  await call('rememberControl');
   const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);
   openTitleId = info.title_id;
-  await syncPaired();
+  showPairedNotes();
   return info;
 }
 
@@ -453,17 +427,7 @@ async function inspectNca(f: NspFile, index: number): Promise<void> {
   $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
   const out = el('div', 'nca-info nca-inspect', 'Parsing ' + f.name + ' ...');
   $('nsp-result').appendChild(out);
-
-  // 0xC00 covers the base header and all four FS headers.
-  const headerLen = Math.min(f.size, 0xC00);
-  let header: Bytes;
-  try {
-    header = await call('readFile', index, 0, headerLen);
-  } catch (err) {
-    out.textContent = 'read failed: ' + (err as Error).message;
-    return;
-  }
-  await parseAndRenderNca(out, header, () => launchNca(f.name, index));
+  await parseAndRenderNca(out, index, () => launchNca(f.name, index));
 }
 
 // Drop/browse a standalone .nca, which becomes the open container.
@@ -481,9 +445,7 @@ async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   }
   openContainer = { file, kind: 'nca' };
   setNote('container-badge', file.name, true);
-  const headerLen = Math.min(file.size, 0xC00);
-  const header = new Uint8Array(await file.slice(0, headerLen).arrayBuffer());
-  const info = await parseAndRenderNca(out, header, () => launchStandaloneNca(file));
+  const info = await parseAndRenderNca(out, undefined, () => launchStandaloneNca(file));
   if (info?.content_type === 'Control') {
     setNote('container-badge', 'reading title details\u2026', false);
     await showTitleCard();
@@ -492,14 +454,15 @@ async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   return info;
 }
 
+// The header of NSP file `index`, or of the container when it is a standalone NCA.
 async function parseAndRenderNca(
   out: HTMLElement,
-  header: Bytes,
+  index: number | undefined,
   onLaunch: () => void,
 ): Promise<NcaInfo | null> {
   let info: NcaInfo;
   try {
-    info = JSON.parse(await call('parseNca', header)) as NcaInfo;
+    info = await call('inspectNca', index);
   } catch (err) {
     out.textContent = 'parse failed: ' + (err as Error).message;
     return null;

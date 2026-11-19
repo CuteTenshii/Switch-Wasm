@@ -1459,12 +1459,13 @@ impl Title {
         let Ok(pfs0) = switch_core::xci::read_container(&src) else {
             return;
         };
+        let ncas = switch_core::nca::parse_ncas(&pfs0.files, &src, &self.keys);
         let Some((index, nca)) =
-            switch_core::nca::find_html_document(&pfs0.files, &src, &self.keys)
+            switch_core::nca::find_html_document(&ncas, &pfs0.files, &src, &self.keys)
         else {
             return;
         };
-        let file = &pfs0.files[index];
+        let file = &pfs0.files[*index];
         let romfs =
             switch_core::source::Window::new(open_source(path), file.offset, file.size, &file.name)
                 .and_then(|window| {

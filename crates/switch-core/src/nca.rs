@@ -815,6 +815,15 @@ impl<S: ByteSource> ByteSource for RomFsImage<S> {
     }
 }
 
+/// The header of `f`, a file of a PFS0 container, if it is an NCA that parses.
+fn parse_nca_file<S: ByteSource>(f: &Pfs0File, src: &S, keys: &KeySet) -> Option<Nca> {
+    if !f.name.to_ascii_lowercase().ends_with(".nca") {
+        return None;
+    }
+    let window = Window::new(src, f.offset, f.size, &f.name).ok()?;
+    Nca::parse_source(&window, Some(keys)).ok()
+}
+
 /// Find the first NCA of content type `want` in a PFS0 container.
 pub fn find_nca_by_type<S: ByteSource>(
     files: &[Pfs0File],
@@ -823,27 +832,36 @@ pub fn find_nca_by_type<S: ByteSource>(
     want: ContentType,
 ) -> Option<(usize, Nca)> {
     files.iter().enumerate().find_map(|(index, f)| {
-        if !f.name.to_ascii_lowercase().ends_with(".nca") {
-            return None;
-        }
-        let window = Window::new(src, f.offset, f.size, &f.name).ok()?;
-        let nca = Nca::parse_source(&window, Some(keys)).ok()?;
+        let nca = parse_nca_file(f, src, keys)?;
         (nca.content_type == want).then_some((index, nca))
     })
 }
 
+/// Every NCA of a PFS0 container whose header parses, with its index in `files`.
+pub fn parse_ncas<S: ByteSource>(files: &[Pfs0File], src: &S, keys: &KeySet) -> Vec<(usize, Nca)> {
+    files
+        .iter()
+        .enumerate()
+        .filter_map(|(index, f)| Some((index, parse_nca_file(f, src, keys)?)))
+        .collect()
+}
+
 /// The title's `HtmlDocument` NCA, the one its CNMT lists with content type 4: the Manual
 /// a web applet opens. Titles ship a `LegalInformation` Manual (5) beside it.
-pub fn find_html_document<S: ByteSource>(
+/// `ncas` are the container's, from [`parse_ncas`].
+pub fn find_html_document<'a, S: ByteSource>(
+    ncas: &'a [(usize, Nca)],
     files: &[Pfs0File],
     src: &S,
     keys: &KeySet,
-) -> Option<(usize, Nca)> {
+) -> Option<&'a (usize, Nca)> {
     const HTML_DOCUMENT: u8 = 4;
     const HEADER_SIZE: usize = 0x20;
     const RECORD_SIZE: usize = 0x38;
-    let (index, meta) = find_nca_by_type(files, src, keys, ContentType::Meta)?;
-    let file = &files[index];
+    let (index, meta) = ncas
+        .iter()
+        .find(|(_, nca)| nca.content_type == ContentType::Meta)?;
+    let file = &files[*index];
     let window = Window::new(src, file.offset, file.size, &file.name).ok()?;
     let image = meta
         .read_pfs0_section(window, keys, meta.exefs_section_index()?)
@@ -863,12 +881,9 @@ pub fn find_html_document<S: ByteSource>(
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        let (index, f) = files
-            .iter()
-            .enumerate()
-            .find(|(_, f)| f.name.eq_ignore_ascii_case(&format!("{id}.nca")))?;
-        let window = Window::new(src, f.offset, f.size, &f.name).ok()?;
-        Some((index, Nca::parse_source(&window, Some(keys)).ok()?))
+        let name = format!("{id}.nca");
+        ncas.iter()
+            .find(|(index, _)| files[*index].name.eq_ignore_ascii_case(&name))
     })
 }
 
@@ -985,6 +1000,19 @@ mod tests {
             Some(2)
         );
         assert!(find_nca_by_type(&files, &src, &keys, ContentType::Manual).is_none());
+
+        let parsed: Vec<_> = parse_ncas(&files, &src, &keys)
+            .into_iter()
+            .map(|(index, nca)| (index, nca.content_type))
+            .collect();
+        assert_eq!(
+            parsed,
+            [
+                (1, ContentType::Meta),
+                (2, ContentType::Control),
+                (3, ContentType::Program)
+            ]
+        );
     }
 }
 

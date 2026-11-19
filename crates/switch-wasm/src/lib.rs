@@ -70,6 +70,8 @@ struct Session {
     /// The open container, read from the host by range.
     container: Option<HostSource>,
     nsp_files: Vec<switch_core::nsp::Pfs0File>,
+    /// The open container's NCAs whose headers parse, with their index in `nsp_files`.
+    ncas: Vec<(usize, switch_core::nca::Nca)>,
     /// The update added for the open title, held as a host file until boot.
     update: Option<Update>,
     /// Add-on content, one entry per DLC archive, held as host files until boot.
@@ -190,6 +192,7 @@ pub fn switch_init() {
         *SESSION.get() = Some(Session {
             container: None,
             nsp_files: Vec::new(),
+            ncas: Vec::new(),
             update: None,
             dlc: Vec::new(),
             keys: switch_core::keys::KeySet::default(),
@@ -252,14 +255,14 @@ pub fn switch_panic_message() -> String {
     message
 }
 
-/// Why the last `run`, `add_update`, `add_dlc` or `nand_identify` failed.
+/// Why the last `run` or `nand_identify` failed.
 #[wasm_bindgen]
 pub fn switch_last_error() -> String {
     session_if_live().map_or_else(String::new, |s| s.last_error.clone())
 }
 
-/// An update container added for the title about to run. Its Program NCA holds
-/// full replacement modules and a RomFS patch over the base's.
+/// An update container held for the title it patches, applied only when that title launches.
+/// Its Program NCA holds full replacement modules and a RomFS patch over the base's.
 struct Update {
     /// Its program id is the base title's, which is what pairing checks.
     nca: Nca,
