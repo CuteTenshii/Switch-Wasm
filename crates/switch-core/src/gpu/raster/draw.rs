@@ -194,6 +194,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             if let Ok(pipeline) = crate::gpu::pipeline::Pipeline::of(engine) {
                 layout.flip_y = pipeline.viewport.flip_y;
                 layout.depth_minus_one_to_one = pipeline.viewport.depth_minus_one_to_one();
+                layout.window_coordinates = pipeline.viewport.window_coordinates;
             }
             match wgsl::module(&translated, stage, &layout) {
                 Ok(_) if !keep => crate::traceln!(

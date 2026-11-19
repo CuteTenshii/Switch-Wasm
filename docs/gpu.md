@@ -44,6 +44,13 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - Scan-out honors the queued `transform` (Minecraft queues `FLIP_V` every frame) and `crop` (A Short Hike renders 1280x720 into a 1920x1080 buffer). `ROT_90` is refused rather than shown wrong. An empty or off-surface crop means the whole surface; crops are guest data, so they are clamped.
 - Scan-out reads the whole surface with one page-table walk (`read_into`) into a buffer reused across frames, computes row/column swizzle halves once, and clamps the slice so per-pixel bounds checks are elided. Per-pixel `read_le` was the full cost of a frame in titles that draw nothing.
 
+## `engine/threed/`
+
+- The Vulkan driver (Minecraft 1.26) draws with `DRAW_INDEX_BUFFER{32,16,8}_BEGIN_END_INSTANCE_FIRST` (0x5F9..0x5FB): first index, count and topology in one word, the index size from `SET_INDEX_BUFFER_E` as Eden reads it. Treated as inert, every one of the title's draws was dropped and the screen stayed black. The `_SUBSEQUENT` variants are not handled yet.
+- `SET_PRIMITIVE_TOPOLOGY` (0x65C) replaces a one-word draw's topology while `SET_PRIMITIVE_TOPOLOGY_CONTROL` (0x652) is 1; the driver leaves the per-draw field at points. `VERTEX_BEGIN_GL` draws keep their own.
+- The MME shadow RAM (`SET_MME_SHADOW_RAM_CONTROL`, 0x049): writes are recorded while tracking (0, 1), go only to the registers in passthrough (2), and take the recorded value in replay (3). The driver sets its present blit's state in passthrough and replays the same block to restore the title's; without replay its `SET_VIEWPORT_SCALE_OFFSET` 0 stuck and the title's next composite collapsed to a pixel.
+- `SET_VIEWPORT_SCALE_OFFSET` (0x64B) off means the vertex stage writes window coordinates (the driver's blit computes pixels from the vertex id). The software rasterizer passes them through; the device path converts them back to clip space ([pipeline.rs](#pipeliners)). The register starts on, so titles that never write it keep the transform.
+
 ## `engine/twod.rs`
 
 - deko3d routes `dkCmdBufBlitImage` to the 2D engine whenever the copy engine cannot express it (scaling, format conversion, filtering).
@@ -212,6 +219,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 
 - `Pipeline` resolves register state into WebGPU vocabulary so backends never re-decode raw codes. Anything WebGPU cannot express (except fans, handled by index rewriting) is `Unsupported`, never approximated, and the caller falls back to the software rasterizer. Unknown codes are errors here even where the rasterizer defaults (e.g. blend factor `One`).
 - Facing is judged in window space like `raster::culls`, so it carries over unchanged through the y negation (`Layout::flip_y`, [shader/wgsl/](#shaderwgsl)).
+- With `SET_VIEWPORT_SCALE_OFFSET` off, `Viewport` covers colour target 0 (the surface clip is left at 16384, past WebGPU's limit) and carries `window_coordinates`, and the vertex entry maps x and y to `2 * p / size - w` before its y flip: WebGPU clips before the viewport, so passing pixels through would clip them away.
 - Clip z: the GL (-w..w) or Vulkan (0..w) convention is inferred from the viewport's depth transform (`Viewport::depth_minus_one_to_one`: `translate - scale >= 0`, e.g. scale 0.5 and translate 0.5 is GL); WebGPU clips 0..w.
 - `Rgba16Float` can't stand in for `Rg11b10Ufloat` (guest surface width). The feature `Rg11b10Ufloat` rendering needs and the native-only 16-bit norm formats are under [convert.rs](gpu-backend.md#convertrs). Integer colour formats are unnamed except `RGBA32_UINT` (`Rgba32Uint`), whose raw words the shader writes and reads, and `RGBA16_UINT` (`Rgba16Uint`, Breath of the Wild), whose words it saturates to 16 bits as the hardware does.
 - Colour format names must agree with `gpu::surface` on width, sRGB and number kind (SINT was once misnamed `Rgba8Unorm`).

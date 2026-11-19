@@ -867,6 +867,16 @@ fn vertex_entry(layout: &Layout) -> String {
         out.push_str("  // left alone, the near half of the frustum is clipped away.\n");
         out.push_str("  out.position.z = (out.position.z + out.position.w) * 0.5;\n");
     }
+    if let Some((width, height)) = layout.window_coordinates.filter(|&(w, h)| w > 0 && h > 0) {
+        out.push_str(&format!(
+            "  out.position.x = out.position.x * {:?} - out.position.w;\n",
+            2.0 / width as f32
+        ));
+        out.push_str(&format!(
+            "  out.position.y = out.position.y * {:?} - out.position.w;\n",
+            2.0 / height as f32
+        ));
+    }
     if layout.flip_y {
         out.push_str("  // The viewport transform mirrors y, and WebGPU has no\n");
         out.push_str("  // negative viewport height to mirror it with.\n");

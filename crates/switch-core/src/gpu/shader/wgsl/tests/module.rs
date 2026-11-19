@@ -1813,3 +1813,24 @@ fn an_address_copied_into_place_still_reads_its_descriptor() {
         "a source rewritten before the copy"
     );
 }
+
+#[test]
+fn window_coordinates_are_turned_into_clip_space_before_y_is_flipped() {
+    let (vs, _) = pair(3);
+    let translated = translate(&vs).unwrap();
+    let mut layout = Layout::of(&translated, Stage::Vertex);
+    layout.flip_y = true;
+    let plain = module(&translated, Stage::Vertex, &layout).unwrap();
+    assert!(!plain.contains("- out.position.w"));
+
+    layout.window_coordinates = Some((1280, 720));
+    let source = module(&translated, Stage::Vertex, &layout).unwrap();
+    let x = source
+        .find("out.position.x = out.position.x * 0.0015625 - out.position.w;")
+        .expect("x scaled by 2/1280");
+    let y = source
+        .find("out.position.y = out.position.y * 0.0027777778 - out.position.w;")
+        .expect("y scaled by 2/720");
+    let flip = source.find("out.position.y = -out.position.y;").unwrap();
+    assert!(x < flip && y < flip, "converted, then mirrored");
+}

@@ -19,6 +19,9 @@ const MME_INSTRUCTION_RAM_POINTER: u32 = 0x045;
 const MME_INSTRUCTION_RAM_LOAD: u32 = 0x046;
 const MME_START_ADDRESS_RAM_POINTER: u32 = 0x047;
 const MME_START_ADDRESS_RAM_LOAD: u32 = 0x048;
+/// `SET_MME_SHADOW_RAM_CONTROL`: whether method writes are recorded, passed through, or
+/// replaced by the recorded value; see [`ShadowRam`].
+const SHADOW_RAM_CONTROL: u32 = 0x049;
 const SYNCPT_ACTION: u32 = 0x0B2;
 const RENDER_TARGET_BASE: u32 = 0x200;
 const RENDER_TARGET_STRIDE: u32 = 0x10;
@@ -51,6 +54,16 @@ const VERTEX_BEGIN_GL: u32 = 0x586;
 /// `VertexBeginGl.InstanceNext`: step the instance counter instead of resetting it.
 const VERTEX_BEGIN_INSTANCE_NEXT: u32 = 1 << 26;
 const DRAW_ELEMENTS_COUNT: u32 = 0x5F8;
+/// `DRAW_INDEX_BUFFER{32,16,8}_BEGIN_END_INSTANCE_FIRST` (methods 0x17E4..0x17EC): a whole
+/// indexed draw in one word, first in 15:0, count in 27:16, topology in 31:28.
+const DRAW_INDEX_BUFFER32_FIRST: u32 = 0x5F9;
+const DRAW_INDEX_BUFFER8_FIRST: u32 = 0x5FB;
+/// `SET_PRIMITIVE_TOPOLOGY` (method 0x1970), which Vulkan drivers set per pipeline; it
+/// applies while `SET_PRIMITIVE_TOPOLOGY_CONTROL` (method 0x1948) is 1, separate state.
+const PRIMITIVE_TOPOLOGY_CONTROL: u32 = 0x652;
+/// `SET_VIEWPORT_SCALE_OFFSET` (method 0x192C): off, positions are already window coordinates.
+const VIEWPORT_SCALE_OFFSET: u32 = 0x64B;
+const SET_PRIMITIVE_TOPOLOGY: u32 = 0x65C;
 /// `SET_GLOBAL_BASE_VERTEX_INDEX` (method 0x1434): added to every index of an indexed draw.
 const GLOBAL_BASE_VERTEX_INDEX: u32 = 0x50D;
 const CLEAR_BUFFERS: u32 = 0x674;
@@ -354,9 +367,35 @@ struct DepthFill {
     width_bytes: u32,
 }
 
+/// The MME shadow RAM: a copy of the registers that writes update while tracking. A driver
+/// sets temporary state in passthrough and puts the title's back by replaying the same writes.
+#[derive(Debug, Clone)]
+struct ShadowRam {
+    regs: Registers,
+    control: u32,
+}
+
+impl ShadowRam {
+    const TRACK_WITH_FILTER: u32 = 1;
+    const REPLAY: u32 = 3;
+
+    /// The value a write of `arg` to `method` stores.
+    fn filter(&mut self, method: u32, arg: u32) -> u32 {
+        match self.control {
+            0 | Self::TRACK_WITH_FILTER => {
+                self.regs.set(method, arg);
+                arg
+            }
+            Self::REPLAY => self.regs.get(method),
+            _ => arg,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Engine3D {
     pub regs: Registers,
+    shadow: ShadowRam,
     /// Backend that turns draws and clears into pixels.
     renderer: Box<dyn Renderer>,
     /// `gl_InstanceID` for the next draw.

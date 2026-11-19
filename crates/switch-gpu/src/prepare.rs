@@ -146,6 +146,7 @@ impl Gpu {
         // Negated because WebGPU mirrors y itself. See `Layout::flip_y`.
         vs_layout.flip_y = !state.viewport.flip_y;
         vs_layout.depth_minus_one_to_one = state.viewport.depth_minus_one_to_one();
+        vs_layout.window_coordinates = state.viewport.window_coordinates;
         // On the expanded route the shader applies the sample mask and alpha-to-coverage.
         if render == Render::Expanded {
             fs_layout.coverage = Some(Coverage {

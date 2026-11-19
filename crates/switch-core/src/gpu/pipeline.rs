@@ -416,6 +416,9 @@ pub struct Viewport {
     /// Whether the guest's transform mirrors y (negative `scale_y`). A backend
     /// negates `position.y` where it doesn't, since WebGPU has no negative viewport height.
     pub flip_y: bool,
+    /// The surface size a vertex stage writing window coordinates is measured in; the
+    /// backend turns them into clip space. See [`Engine3D::window_coordinates`].
+    pub window_coordinates: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -453,7 +456,21 @@ impl Pipeline {
         let primitive =
             Primitive::from_raw(engine.last_draw.primitive).map_err(|e| state("primitive", e))?;
         let cull = engine.cull_state();
-        let viewport = viewport(engine.viewport_transform());
+        let viewport = match engine.window_coordinates() {
+            Some((width, height)) => Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: width as f32,
+                height: height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+                depth_scale: 1.0,
+                depth_translate: 0.0,
+                flip_y: false,
+                window_coordinates: Some((width, height)),
+            },
+            None => viewport(engine.viewport_transform()),
+        };
 
         let slot = engine.render_target_slot(0);
         let rt = engine
@@ -553,6 +570,7 @@ fn viewport(transform: ViewportTransform) -> Viewport {
         depth_scale: sz,
         depth_translate: tz,
         flip_y: sy < 0.0,
+        window_coordinates: None,
     }
 }
 

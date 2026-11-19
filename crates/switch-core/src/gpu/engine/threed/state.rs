@@ -14,7 +14,8 @@ use super::{
     RENDER_TARGET_STRIDE, SCISSOR_BASE, SCREEN_SCISSOR_HORIZONTAL, SCREEN_SCISSOR_VERTICAL,
     SET_PROGRAM, SET_PROGRAM_REGION, SET_PROGRAM_STRIDE, SET_TEX_HEADER_POOL, SET_TEX_SAMPLER_POOL,
     TEX_CB_INDEX, VERTEX_ARRAY, VERTEX_ARRAY_LIMIT, VERTEX_ARRAY_PER_INSTANCE, VERTEX_ARRAY_STRIDE,
-    VERTEX_ATTRIB_STATE, VIEWPORT_BASE, VIEWPORT_TRANSFORM_BASE, WINDOW_ORIGIN,
+    VERTEX_ATTRIB_STATE, VIEWPORT_BASE, VIEWPORT_SCALE_OFFSET, VIEWPORT_TRANSFORM_BASE,
+    WINDOW_ORIGIN,
 };
 use crate::gpu::engine::field;
 use crate::gpu::exec::ExecCtx;
@@ -194,7 +195,29 @@ impl Engine3D {
         vt
     }
 
+    /// The size window coordinates are measured against when `SET_VIEWPORT_SCALE_OFFSET` is
+    /// off: colour target 0's, else the surface clip's, which drivers leave at 16384.
+    /// `None` while the transform applies.
+    pub fn window_coordinates(&self) -> Option<(u32, u32)> {
+        if self.regs.bit(VIEWPORT_SCALE_OFFSET, 0) {
+            return None;
+        }
+        match self.render_target(self.render_target_slot(0)) {
+            Ok(Some(target)) => Some((target.width, target.height)),
+            _ => Some((
+                self.regs.field(SCREEN_SCISSOR_HORIZONTAL, 16, 31),
+                self.surface_clip_height(),
+            )),
+        }
+    }
+
     pub fn viewport_transform(&self) -> ViewportTransform {
+        if self.window_coordinates().is_some() {
+            return ViewportTransform {
+                scale: [1.0, 1.0, 1.0],
+                translate: [0.0, 0.0, 0.0],
+            };
+        }
         let f = |i: u32| f32::from_bits(self.regs.get(VIEWPORT_TRANSFORM_BASE + i));
         let scale = [f(0), f(1), f(2)];
         if scale[0] != 0.0 || scale[1] != 0.0 {

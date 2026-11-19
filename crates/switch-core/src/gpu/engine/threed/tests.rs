@@ -1009,3 +1009,120 @@ fn blend_and_depth_state_resolve_from_registers() {
         }
     );
 }
+
+#[test]
+fn a_one_word_indexed_draw_takes_the_separate_topology_when_told_to() {
+    let mut h = Harness::new(0x1000);
+    let mut engine = Engine3D::new();
+    let log = std::rc::Rc::new(std::cell::RefCell::new(Recorded::default()));
+    engine.set_renderer(Box::new(Recorder(log.clone())));
+    let mut ctx = h.ctx();
+    engine.write(0x5F6, 1, true, &mut ctx).unwrap(); // 16-bit indices
+
+    // First 44, count 6, its own topology 0 (points); the separate state is ignored.
+    engine
+        .write(SET_PRIMITIVE_TOPOLOGY, 4, true, &mut ctx)
+        .unwrap();
+    engine
+        .write(DRAW_INDEX_BUFFER32_FIRST + 1, 0x0006_002c, true, &mut ctx)
+        .unwrap();
+    assert_eq!(log.borrow().draws, 1);
+    assert_eq!(
+        (
+            engine.last_draw.primitive,
+            engine.last_draw.first,
+            engine.last_draw.count
+        ),
+        (0, 44, 6)
+    );
+    assert!(engine.last_draw.indexed);
+    assert_eq!(engine.last_draw.index_format, 1);
+
+    // With SET_PRIMITIVE_TOPOLOGY_CONTROL on, TRIANGLELIST wins.
+    engine
+        .write(PRIMITIVE_TOPOLOGY_CONTROL, 1, true, &mut ctx)
+        .unwrap();
+    engine
+        .write(DRAW_INDEX_BUFFER32_FIRST, 0x0003_0000, true, &mut ctx)
+        .unwrap();
+    assert_eq!(engine.last_draw.primitive, 4);
+    // POINTLIST and LINELIST are numbered one above the draw's own points and lines.
+    engine
+        .write(SET_PRIMITIVE_TOPOLOGY, 2, true, &mut ctx)
+        .unwrap();
+    engine
+        .write(DRAW_INDEX_BUFFER8_FIRST, 0x0002_0000, true, &mut ctx)
+        .unwrap();
+    assert_eq!(engine.last_draw.primitive, 1);
+}
+
+#[test]
+fn a_replayed_write_puts_back_what_was_tracked_before_a_passthrough_one() {
+    const PASSTHROUGH: u32 = 2;
+    let mut h = Harness::new(0x1000);
+    let mut engine = Engine3D::new();
+    let mut ctx = h.ctx();
+    // The title's state, tracked.
+    engine
+        .write(VIEWPORT_SCALE_OFFSET, 1, true, &mut ctx)
+        .unwrap();
+    // A driver blit sets its own without touching the record...
+    engine
+        .write(SHADOW_RAM_CONTROL, PASSTHROUGH, true, &mut ctx)
+        .unwrap();
+    engine
+        .write(VIEWPORT_SCALE_OFFSET, 0, true, &mut ctx)
+        .unwrap();
+    assert_eq!(engine.regs.get(VIEWPORT_SCALE_OFFSET), 0);
+    // ...and restores the title's by replaying the same write.
+    engine
+        .write(SHADOW_RAM_CONTROL, ShadowRam::REPLAY, true, &mut ctx)
+        .unwrap();
+    engine
+        .write(VIEWPORT_SCALE_OFFSET, 0, true, &mut ctx)
+        .unwrap();
+    assert_eq!(engine.regs.get(VIEWPORT_SCALE_OFFSET), 1);
+    // Tracking again records new values.
+    engine.write(SHADOW_RAM_CONTROL, 0, true, &mut ctx).unwrap();
+    engine
+        .write(VIEWPORT_SCALE_OFFSET, 0, true, &mut ctx)
+        .unwrap();
+    assert_eq!(engine.regs.get(VIEWPORT_SCALE_OFFSET), 0);
+}
+
+#[test]
+fn with_the_viewport_scale_offset_off_positions_are_window_coordinates() {
+    let mut h = Harness::new(0x1000);
+    let mut engine = Engine3D::new();
+    let mut ctx = h.ctx();
+    engine
+        .write(VIEWPORT_TRANSFORM_BASE, 640f32.to_bits(), true, &mut ctx)
+        .unwrap();
+    engine
+        .write(
+            VIEWPORT_TRANSFORM_BASE + 3,
+            640f32.to_bits(),
+            true,
+            &mut ctx,
+        )
+        .unwrap();
+    engine
+        .write(SCREEN_SCISSOR_HORIZONTAL, 1280 << 16, true, &mut ctx)
+        .unwrap();
+    engine
+        .write(SCREEN_SCISSOR_VERTICAL, 720 << 16, true, &mut ctx)
+        .unwrap();
+    assert_eq!(
+        engine.window_coordinates(),
+        None,
+        "on until a title turns it off"
+    );
+    assert_eq!(engine.viewport_transform().scale[0], 640.0);
+
+    engine
+        .write(VIEWPORT_SCALE_OFFSET, 0, true, &mut ctx)
+        .unwrap();
+    assert_eq!(engine.window_coordinates(), Some((1280, 720)));
+    let identity = engine.viewport_transform();
+    assert_eq!((identity.scale, identity.translate), ([1.0; 3], [0.0; 3]));
+}

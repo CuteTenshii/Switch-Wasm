@@ -71,6 +71,9 @@ pub struct Layout {
     pub flip_y: bool,
     /// Whether to remap z from GL's `-w..w` onto WebGPU's `0..w`.
     pub depth_minus_one_to_one: bool,
+    /// The surface size when the vertex stage writes window coordinates, which the entry
+    /// turns into clip space; see `pipeline::Viewport::window_coordinates`.
+    pub window_coordinates: Option<(u32, u32)>,
     /// Attribute slots fetched as BGRA; filled from the draw.
     pub bgra_attributes: Vec<usize>,
     /// Attribute slots packed as 10-10-10-2; filled from the draw.
@@ -335,6 +338,7 @@ impl Layout {
             // Both from the draw's viewport.
             flip_y: false,
             depth_minus_one_to_one: false,
+            window_coordinates: None,
             bgra_attributes: Vec::new(),
             packed_attributes: Vec::new(),
             coverage: None,

@@ -1,15 +1,16 @@
 //! Method writes: macros, semaphores, constant buffer loads, binds, and draws.
 
 use super::{
-    DrawCall, Engine3D, BIND, BIND_CONSTBUF_OFFSET, BIND_LAST, BIND_SLOTS, BIND_STRIDE,
+    DrawCall, Engine3D, ShadowRam, BIND, BIND_CONSTBUF_OFFSET, BIND_LAST, BIND_SLOTS, BIND_STRIDE,
     CLEAR_BUFFERS, COLOR_MASK, COLOR_MASK_ALL, COLOR_TARGETS, CONSTBUF_BANKS,
     CONSTBUF_SELECTOR_ADDR, CONSTBUF_SELECTOR_SIZE, DRAW_ARRAYS_COUNT, DRAW_ELEMENTS_COUNT,
-    FIRMWARE_CALL, FIRMWARE_CALL_LAST, GLOBAL_BASE_VERTEX_INDEX, INLINE_FIRST, INLINE_LAST,
-    LOAD_CONSTBUF_DATA, LOAD_CONSTBUF_DATA_LAST, LOAD_CONSTBUF_OFFSET, MME_FIRMWARE_ARGS,
-    MME_INSTRUCTION_RAM_LOAD, MME_INSTRUCTION_RAM_POINTER, MME_START_ADDRESS_RAM_LOAD,
-    MME_START_ADDRESS_RAM_POINTER, REPORT_SEMAPHORE, REPORT_SEMAPHORE_OFFSET,
-    REPORT_SEMAPHORE_PAYLOAD, SYNCPT_ACTION, VERTEX_BEGIN_GL, VERTEX_BEGIN_INSTANCE_NEXT,
-    VERTEX_END_GL,
+    DRAW_INDEX_BUFFER32_FIRST, DRAW_INDEX_BUFFER8_FIRST, FIRMWARE_CALL, FIRMWARE_CALL_LAST,
+    GLOBAL_BASE_VERTEX_INDEX, INLINE_FIRST, INLINE_LAST, LOAD_CONSTBUF_DATA,
+    LOAD_CONSTBUF_DATA_LAST, LOAD_CONSTBUF_OFFSET, MME_FIRMWARE_ARGS, MME_INSTRUCTION_RAM_LOAD,
+    MME_INSTRUCTION_RAM_POINTER, MME_START_ADDRESS_RAM_LOAD, MME_START_ADDRESS_RAM_POINTER,
+    PRIMITIVE_TOPOLOGY_CONTROL, REPORT_SEMAPHORE, REPORT_SEMAPHORE_OFFSET,
+    REPORT_SEMAPHORE_PAYLOAD, SET_PRIMITIVE_TOPOLOGY, SHADOW_RAM_CONTROL, SYNCPT_ACTION,
+    VERTEX_BEGIN_GL, VERTEX_BEGIN_INSTANCE_NEXT, VERTEX_END_GL, VIEWPORT_SCALE_OFFSET,
 };
 use crate::gpu::engine::{field, Registers, REGISTER_COUNT};
 use crate::gpu::exec::ExecCtx;
@@ -23,7 +24,12 @@ impl Engine3D {
         for target in 0..COLOR_TARGETS {
             regs.set(COLOR_MASK + target, COLOR_MASK_ALL);
         }
+        regs.set(VIEWPORT_SCALE_OFFSET, 1);
         Engine3D {
+            shadow: ShadowRam {
+                regs: regs.clone(),
+                control: 0,
+            },
             regs,
             renderer: Box::new(Software),
             instance_id: 0,
@@ -49,8 +55,11 @@ impl Engine3D {
         if method >= MACRO_METHODS_START {
             return self.write_macro(method, arg, last_call, ctx);
         }
+        let written = arg;
+        let arg = self.shadow.filter(method, arg);
         self.regs.set(method, arg);
         match method {
+            SHADOW_RAM_CONTROL => self.shadow.control = written,
             MME_INSTRUCTION_RAM_POINTER => self.macros.instruction_ram_pointer = arg,
             MME_INSTRUCTION_RAM_LOAD => self.macros.push_instruction(arg),
             MME_START_ADDRESS_RAM_POINTER => self.macros.start_address_pointer = arg,
@@ -64,6 +73,9 @@ impl Engine3D {
             BIND..=BIND_LAST => self.bind(method, arg),
             DRAW_ARRAYS_COUNT => self.draw_arrays(arg, ctx)?,
             DRAW_ELEMENTS_COUNT => self.draw_elements(arg, ctx)?,
+            DRAW_INDEX_BUFFER32_FIRST..=DRAW_INDEX_BUFFER8_FIRST => {
+                self.draw_index_buffer(arg, ctx)?
+            }
             VERTEX_BEGIN_GL => {
                 self.last_draw.primitive = field(arg, 0, 15);
                 self.instance_id = if arg & VERTEX_BEGIN_INSTANCE_NEXT != 0 {
@@ -230,6 +242,39 @@ impl Engine3D {
         self.trace_reg_diff();
         self.rasterize_or_log(ctx);
         Ok(())
+    }
+
+    /// One of the one-word indexed draws over the index buffer `SET_INDEX_BUFFER_*` describes.
+    fn draw_index_buffer(&mut self, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
+        self.instance_id = 0;
+        self.last_draw = DrawCall {
+            primitive: self
+                .topology_override()
+                .unwrap_or_else(|| field(arg, 28, 31)),
+            first: field(arg, 0, 15),
+            count: field(arg, 16, 27),
+            indexed: true,
+            index_format: self.regs.get(0x5F6),
+            base_vertex: self.regs.get(GLOBAL_BASE_VERTEX_INDEX) as i32,
+        };
+        ctx.stats.draws += 1;
+        self.trace_reg_diff();
+        self.rasterize_or_log(ctx);
+        Ok(())
+    }
+
+    /// `SET_PRIMITIVE_TOPOLOGY` as a `VERTEX_BEGIN_GL` primitive, when it is in force and
+    /// neither unset nor legacy.
+    fn topology_override(&self) -> Option<u32> {
+        if self.regs.get(PRIMITIVE_TOPOLOGY_CONTROL) != 1 {
+            return None;
+        }
+        match self.regs.field(SET_PRIMITIVE_TOPOLOGY, 0, 15) {
+            1 => Some(0),
+            2 => Some(1),
+            topology @ (3..=5 | 0xA..=0xE) => Some(topology),
+            _ => None,
+        }
     }
 
     /// `--trace regs`: log which registers changed since the previous draw.
