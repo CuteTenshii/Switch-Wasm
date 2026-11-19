@@ -1,5 +1,5 @@
-//! Online services (`friend`, `news`, `bcat`, `olsc`, `ovln`, `ldn`, `lp2p`),
-//! answering as a console that has never been online. Their events never signal.
+//! Online services (`friend`, `news`, `bcat`, `olsc`, `ovln`, `ldn`, `lp2p`, `nim:eca`),
+//! answering as a console that has never been online. Only `nim:eca`'s events signal.
 
 use crate::cpu::Cpu;
 use crate::Result;
@@ -485,6 +485,74 @@ impl Cpu {
         }
     }
 
+    /// `nim:eca` and its shop interfaces: every request finishes at once with `{}`, as Eden's.
+    pub(crate) fn nim_eca_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        const BODY: &[u8] = b"{}";
+        if self.ipc_answer_control(tls, handle, "nim:eca", cmd_id)? {
+            return Ok(());
+        }
+        let iface = self.ipc_interface(tls, handle, "nim:eca");
+        match (iface.as_str(), cmd_id) {
+            // CreateServerInterface, CreateServerInterface2.
+            ("nim:eca", Some(0) | Some(5)) => {
+                self.reply_with_interface(tls, handle, "nim:shop-server")?;
+                Ok(())
+            }
+            // IsLargeResourceAvailable(u64) -> bool.
+            ("nim:eca", Some(4)) => self.write_ipc_response(tls, 0, &[], &[0], &[]),
+            // CreateAccessorInterface.
+            ("nim:shop-server", Some(0)) => {
+                self.reply_with_interface(tls, handle, "nim:shop-accessor")?;
+                Ok(())
+            }
+            // CreateAsyncInterface -> the completion event and an IShopServiceAsync.
+            ("nim:shop-accessor", Some(0)) => {
+                let name = "nim:shop-async";
+                if self.ipc_is_domain_request(tls) {
+                    let object = self.alloc_domain_object();
+                    self.record_domain_object(handle, object, name);
+                    let event = self.kept_event(name, Self::object_key(handle, object));
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[object])
+                } else {
+                    let session = self.alloc_handle();
+                    self.record_handle(session, name);
+                    let event = self.kept_event(name, Self::object_key(session, 0));
+                    self.write_ipc_reply(tls, 0, &[event], &[session], &[], &[])
+                }
+            }
+            // Cancel, Prepare(path, post data).
+            ("nim:shop-async", Some(0) | Some(5)) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetSize -> u64.
+            ("nim:shop-async", Some(1)) => {
+                let size = BODY.len() as u64;
+                self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
+            }
+            // Read(u64 offset, out buffer) -> u64 bytes read.
+            ("nim:shop-async", Some(2)) => {
+                let offset = self.ipc_arg_u64(tls, 0).min(BODY.len() as u64) as usize;
+                let read = u64::from(self.write_output_buffer(tls, 0, &BODY[offset..]));
+                self.write_ipc_response(tls, 0, &[], &read.to_le_bytes(), &[])
+            }
+            // GetErrorCode -> u32.
+            ("nim:shop-async", Some(3)) => {
+                self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+            }
+            // Request.
+            ("nim:shop-async", Some(4)) => {
+                let key = self.ipc_object_key(tls, handle);
+                let event = self.kept_event("nim:shop-async", key);
+                self.signal_event(event);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
     /// `bcat:*`: delivery cache, always empty with nothing to sync.
     pub(crate) fn bcat_request(
         &mut self,
@@ -665,5 +733,54 @@ mod tests {
 
         payload[8..].fill(0);
         assert_ne!(key(&payload).0, 0, "a null uid is refused");
+    }
+
+    #[test]
+    fn a_shop_request_finishes_at_once_with_an_empty_json_object() {
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request(false, 4, &[0; 8]);
+        cpu.register_service_handle(9, "nim:eca");
+        cpu.nim_eca_request(TLS, 9, Some(4)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "no large resource");
+
+        let mut session = 9;
+        for (cmd, name) in [(5, "nim:shop-server"), (0, "nim:shop-accessor")] {
+            write_request(&mut cpu, cmd, &[]);
+            cpu.nim_eca_request(TLS, session, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+            session = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+            assert_eq!(cpu.service_name(session), Some(name));
+        }
+
+        write_request(&mut cpu, 0, &[]);
+        cpu.nim_eca_request(TLS, session, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        let job = u64::from(cpu.mem.read_u32(TLS + 0x10).unwrap());
+        assert_eq!(cpu.service_name(job), Some("nim:shop-async"));
+        assert!(!cpu.events[&event].signaled, "not requested yet");
+
+        write_request(&mut cpu, 4, &[]);
+        cpu.nim_eca_request(TLS, job, Some(4)).unwrap();
+        assert!(cpu.events[&event].signaled, "finished");
+
+        write_request(&mut cpu, 1, &[]);
+        cpu.nim_eca_request(TLS, job, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 2, "size");
+
+        cpu.mem.map_zero(BUFFER, 0x10).unwrap();
+        for (offset, body) in [(0u64, &b"{}"[..]), (1, b"}"), (5, b"")] {
+            cpu.mem.write_u16(BUFFER, 0).unwrap();
+            write_map_buffer_request(&mut cpu, 2, &offset.to_le_bytes(), BUFFER, 0x10, false);
+            cpu.nim_eca_request(TLS, job, Some(2)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+            assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), body.len() as u64);
+            assert_eq!(cpu.read_bytes(BUFFER, body.len() as u32), body);
+        }
+
+        write_request(&mut cpu, 3, &[]);
+        cpu.nim_eca_request(TLS, job, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "no error");
     }
 }

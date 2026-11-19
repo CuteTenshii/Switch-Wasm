@@ -205,6 +205,7 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - friend `GetUserPresenceView` (20600, 20601) and `LoadUserSetting` (20800, 20802) fill a zeroed struct: offline, every setting at zero.
 - friend `Pop`, bcat `GetImpl`, the news data service and the bcat file/directory services are refused rather than answered with zeroed data that callers would treat as real.
 - news: the five `news:*` names are permission levels; permissions are not modelled.
+- `nim:eca` (Minecraft opens it): `IsLargeResourceAvailable` (4) is false. `CreateServerInterface` (0) and the 17.0.0+ `CreateServerInterface2` (5) lead through `IShopServiceAccessServer` and `IShopServiceAccessor` to an `IShopServiceAsync` whose `Request` (4) finishes at once with error code 0 and a body of `{}`, as Eden's, which notes that callers fail without one. The body is invented: no shop is asked.
 
 ## `ldn.rs`
 

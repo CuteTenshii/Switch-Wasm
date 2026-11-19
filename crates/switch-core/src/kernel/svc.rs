@@ -1057,6 +1057,10 @@ impl Cpu {
                         | "news:overwrite-event"
                         | "news:data"
                         | "news:database" => self.news_request(tls, handle, cmd_id)?,
+                        // nim:eca, the eShop's web requests.
+                        "nim:eca" | "nim:shop-server" | "nim:shop-accessor" | "nim:shop-async" => {
+                            self.nim_eca_request(tls, handle, cmd_id)?
+                        }
                         // bcat, background delivery.
                         "bcat:a" | "bcat:m" | "bcat:u" | "bcat:s" | "bcat:service"
                         | "bcat:storage" | "bcat:progress" | "bcat:notifier"
