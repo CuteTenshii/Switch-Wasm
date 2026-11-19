@@ -489,6 +489,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x01, FLOAT) => 0xC0, // R32_G32_B32_A32   -> RGBA32Float
         (0x01, UINT) => 0xC2,  // R32_G32_B32_A32   -> RGBA32Uint
         (0x03, FLOAT) => 0xCA, // R16_G16_B16_A16   -> RGBA16Float
+        (0x03, UNORM) => 0xC6, // R16_G16_B16_A16   -> RGBA16Unorm
         (0x04, FLOAT) => 0xCB, // R32_G32           -> RG32Float
         (0x0C, FLOAT) => 0xDE, // R16_G16           -> RG16Float
         (0x0F, FLOAT) => 0xE5, // R32               -> R32Float
@@ -1691,7 +1692,7 @@ mod tests {
         assert_eq!(plain(0x03, 7).bytes_per_pixel, 8);
         assert_eq!(plain(0x01, 7).raw, 0xC0); // R32_G32_B32_A32 -> RGBA32Float
         assert_eq!(plain(0x0F, 7).raw, 0xE5); // R32             -> R32Float
-        assert!(texel_kind_for(0x03, 2).is_err());
+        assert_eq!(plain(0x03, 2).raw, 0xC6); // R16_G16_B16_A16 -> RGBA16Unorm
         assert!(texel_kind_for(0x09, 7).is_err());
     }
 
