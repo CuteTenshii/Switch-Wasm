@@ -488,9 +488,10 @@ fn mov32i(dst: u64, imm: u32) -> u64 {
 }
 
 /// `body` between a prologue that points `r10` at the global buffer and an `exit`, drawn by
-/// both renderers over `initial` words; returns the words the rasterizer leaves. The program
-/// has to fit the harness's 0x100 bytes before its vertex buffer.
-fn global_words_after_both(body: &[u64], initial: &[u32]) -> Vec<u32> {
+/// both renderers over `initial` words; returns the words the rasterizer leaves. `size` is the
+/// descriptor's byte size, 0 for none. The program has to fit the harness's 0x100 bytes before
+/// its vertex buffer.
+fn global_words_after_both(body: &[u64], initial: &[u32], size: u32) -> Vec<u32> {
     use switch_core::gpu::testing::block;
     let iadd_c0 = |dst: u64, word: u64, cin: u64, cout: u64| {
         0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | RZ << 8 | dst
@@ -513,6 +514,9 @@ fn global_words_after_both(body: &[u64], initial: &[u32]) -> Vec<u32> {
     let set_up = |h: &mut Harness| {
         h.triangle([0.0; 4]);
         bind_global(h, initial);
+        h.vmm
+            .write_u32(&h.mem, h.base + 0x1500 + 0x118, size)
+            .unwrap();
     };
     let words_after = |h: &Harness| -> Vec<u32> {
         (0..initial.len() as u64)
@@ -603,6 +607,7 @@ fn global_atomics_leave_the_same_words_on_both_renderers() {
             red(add, f32_, 5, 2),
         ],
         &initial,
+        0,
     );
     let covered = (f32::from_bits(counted[5]) - 1.0) * 2.0;
     assert!(covered >= 1.0, "the triangle covers fragments");
@@ -622,6 +627,7 @@ fn global_atomics_leave_the_same_words_on_both_renderers() {
             cas(10, 2),
         ],
         &initial,
+        0,
     );
     assert_eq!(
         rest[8],
@@ -686,6 +692,7 @@ fn global_stores_and_narrow_loads_leave_the_same_words_on_both_renderers() {
             stg(b32, 6 * 4 + 2, 2),
         ],
         &initial,
+        0,
     );
     assert_eq!(stored[0], 0x1122_3344, "b32");
     assert_eq!(stored[1], 0x0102_aa04, "u8 beside its neighbours");
@@ -710,11 +717,22 @@ fn global_stores_and_narrow_loads_leave_the_same_words_on_both_renderers() {
             stg(b32, 12, 4),
         ],
         &initial,
+        0,
     );
     assert_eq!(loaded[0], 0xffff_ff81, "s8");
     assert_eq!(loaded[1], 0xab80, "u16 straddling");
     assert_eq!(loaded[2], 0xffff_ab80, "s16 straddling");
     assert_eq!(loaded[3], 0x7f, "u8");
+}
+
+/// A byte store through a descriptor sized under a word runs on the device and leaves the
+/// rest of its word alone. Minecraft's compute launches write such one-byte buffers.
+#[test]
+fn a_byte_store_to_a_one_byte_buffer_runs_on_the_device() {
+    let stg_u8 = 0xeed8u64 << 48 | PT | 10 << 8 | 2;
+    let stored =
+        global_words_after_both(&[mov32i(2, 0xaa), stg_u8], &[0x1111_1111, 0x2222_2222], 1);
+    assert_eq!(stored, [0x1111_11aa, 0x2222_2222]);
 }
 
 /// The register form of `iadd3` adds the same halves and shifts the same sums on both renderers.
@@ -762,6 +780,7 @@ fn iadd3_half_selects_and_shifts_give_the_same_words_on_both_renderers() {
             stg(4, 5),
         ],
         &[0; 5],
+        0,
     );
     assert_eq!(
         words,

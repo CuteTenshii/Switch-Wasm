@@ -1502,12 +1502,13 @@ impl Gpu {
                 Some(size) if size != 0 => u64::from(size).min(mapped),
                 _ => mapped,
             } as usize;
-            // Atomics work on whole words.
-            let len = if global.written { len & !3 } else { len };
+            // Atomics work on whole words, so a written buffer covers every word it touches.
+            let words = len.next_multiple_of(4).min(mapped as usize & !3);
+            let len = if global.written { words } else { len };
             let span = address..address + len as u64;
             // What a device draw wrote is read from where it is, until the flush puts it back.
             if let Some(held) = self.space.globals.get(&address) {
-                if held.original.len() != len & !3 {
+                if held.original.len() != words {
                     return Err(format!(
                         "a buffer at {address:#x} used at two lengths before a flush"
                     ));
