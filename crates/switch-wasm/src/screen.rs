@@ -133,7 +133,7 @@ pub fn switch_present() -> Result<bool, JsValue> {
                     }
                 };
                 pixels.copy_from(rgba);
-                context.put_image_data(image, 0.0, 0.0)?;
+                context.put_image_data(image, 0, 0)?;
                 screen.painted = gpu.frames;
                 Ok(true)
             }

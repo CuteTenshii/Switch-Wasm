@@ -28,6 +28,8 @@ mod hostfiles;
 mod jit;
 #[cfg(target_arch = "wasm32")]
 mod screen;
+#[cfg(target_arch = "wasm32")]
+mod video;
 
 mod activity;
 #[cfg(target_arch = "wasm32")]
@@ -206,6 +208,11 @@ pub fn switch_init() {
     }
     #[cfg(target_arch = "wasm32")]
     {
+        session()
+            .cpu
+            .nv
+            .video
+            .set_h264(Box::new(video::WebH264::default()));
         audio::announce_ring();
         input::announce_mailbox();
         storage::start_claim();

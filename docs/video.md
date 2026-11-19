@@ -1,6 +1,6 @@
 # Video decoding
 
-Titles decode video on the console's nvdec engine and hand the frames to VIC. `gpu/multimedia.rs` models both; `vp9/` is the VP9 decoder behind nvdec. Only VP9 (nvdec codec 9, profile 0, 8-bit 4:2:0) is decoded; other codecs still only retire their syncpoints.
+Titles decode video on the console's nvdec engine and hand the frames to VIC. `gpu/multimedia.rs` models both; `vp9/` is the VP9 decoder behind nvdec, and H.264 (codec 3) goes to the browser's decoder (`gpu/h264.rs`, `switch-wasm/src/video.rs`). Other codecs, and H.264 in a native build, only retire their syncpoints.
 
 ## The decoder
 
@@ -23,6 +23,16 @@ An `EXECUTE` (method 0xC0) with codec 9 in method 0x80 decodes one frame. The dr
 - Luma surface addresses in slots 0 to 2 (last, golden, altref) and 3 (the frame written), at `SET_PICTURE_LUMA_OFFSET + i` (0x10c).
 
 The decoded frame is kept by its slot 3 luma address in `Video::surfaces`; nothing is written to the surface itself.
+
+## H.264
+
+The driver keeps a stream's parameter sets and gives nvdec only slice data: Annex B slices with their start codes, then two end-of-stream units, `stream_len` covering both, and the picture setup (`nvdec_h264_pic_s` in NVIDIA's `nvdec_drv.h`, whose offsets match Mario Kart 8 Deluxe's setups). The decoded picture's surface is picture index `CurrPicIdx`'s luma address (method `0x10c + i`).
+
+- `h264::parameter_sets` writes an SPS and PPS back from the setup: High profile at level 5.1, the PPS numbered as the first slice asks, scaling matrices in the PPS when they are not flat. What the setup does not carry is set to what any stream allows: 16 reference frames, no cropping. Picture order count type 1 keeps its cycle in the SPS alone and is refused.
+- The SPS's VUI asks for no reordering (`max_num_reorder_frames` 0). Chrome's hardware decoder then hands every picture back as soon as it is decoded, in decode order and with the same bytes; nvdec writes each picture to its surface at once, so the order does not matter. Without it the decoder held up to four pictures for display order.
+- The browser's decoder (`WebH264`, WebCodecs on the system worker, which runs every SVC) is asynchronous, so a picture lands between slices. A VIC submit whose slot 0 surface is still decoding is asked again (`Submitted::Waiting`, the ioctl retried 1 ms later), before it reserves any syncpoint, and composes without it after 1000 asks.
+- `~/Perso/nvdec-h264` (outside the repository) is a homebrew that drives nvdec and VIC as a title's driver does over an x264 clip with CABAC, 8x8 transforms and B-frames, and prints a hash of each composed frame's planes. In Chrome all 24 match ffmpeg's decode.
+- Chrome's software decoder (ffmpeg, where there is no hardware H.264) takes no reordering literally and drops pictures that arrive out of display order: half of the test clip's.
 
 ## VIC
 

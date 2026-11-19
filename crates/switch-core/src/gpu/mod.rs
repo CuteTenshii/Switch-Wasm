@@ -10,6 +10,7 @@ pub mod channel;
 pub mod compute;
 pub mod engine;
 pub mod exec;
+pub mod h264;
 pub mod macro_engine;
 pub mod multimedia;
 pub mod nvdrv;
@@ -258,6 +259,15 @@ impl Gpu {
             return Ok(None);
         }
         Ok(Some(fence))
+    }
+
+    /// Whether a submission is parked on a channel in address space `as_id`.
+    pub fn parked_in(&self, as_id: u32) -> bool {
+        self.parked.as_ref().is_some_and(|(channel_id, _, _)| {
+            self.channels
+                .get(channel_id)
+                .is_some_and(|chan| chan.is_parked() && chan.as_id == Some(as_id))
+        })
     }
 
     /// Run `f` on a channel with the backend lent to it, in the channel's address space.
@@ -1050,8 +1060,8 @@ mod tests {
 
     /// A backend whose flush lands only after it has answered `Pending` `left` times.
     #[derive(Debug)]
-    struct Landing {
-        left: u32,
+    pub(crate) struct Landing {
+        pub(crate) left: u32,
     }
 
     impl renderer::Renderer for Landing {

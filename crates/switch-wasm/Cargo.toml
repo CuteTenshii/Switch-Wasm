@@ -78,7 +78,18 @@ features = [
   "AbortSignal",
   "DedicatedWorkerGlobalScope",
   "DomStringList",
+  "CodecState",
   "DomException",
+  "EncodedVideoChunk",
+  "EncodedVideoChunkInit",
+  "EncodedVideoChunkType",
+  "HardwareAcceleration",
+  "PlaneLayout",
+  "VideoDecoder",
+  "VideoDecoderConfig",
+  "VideoDecoderInit",
+  "VideoFrame",
+  "VideoPixelFormat",
 ]
 
 [lints]

@@ -2,7 +2,7 @@
 //! Linux-style ioctls with one in/out argument struct, laid out as in libnx's
 //! `nvidia/ioctl` sources.
 
-use crate::gpu::multimedia::{self, Engine, Video};
+use crate::gpu::multimedia::{self, Engine, Submitted, Video};
 use crate::gpu::syncpt::NvFence;
 use crate::gpu::vmm::{
     BIG_REGION_END, FLAG_FIXED_OFFSET, FLAG_REMAP_SUB_RANGE, SMALL_PAGE_SIZE, SMALL_REGION_BASE,
@@ -647,6 +647,12 @@ impl NvDrv {
     // -- /dev/nvhost-as-gpu ----------------------------------------------
 
     fn as_gpu_ioctl(&mut self, as_id: u32, nr: u32, data: &mut [u8]) -> Result<u32> {
+        // FreeSpace, UnmapBuffer, MapBufferEx and Remap wait for a parked submission, which
+        // the hardware would have run before they came.
+        if matches!(nr, 0x03 | 0x05 | 0x06 | 0x14) && self.gpu.parked_in(as_id) {
+            self.ask_again = true;
+            return Ok(NV_OK);
+        }
         match nr {
             // BindChannel { in u32 fd }
             0x01 => {
@@ -876,14 +882,21 @@ impl NvDrv {
             (TYPE_CHANNEL, 0x01) | (TYPE_NVHOST, 0x07) => Ok(NV_OK),
             // Submit { cmdbufs, relocs, syncpt_incrs, fences; records... }
             (TYPE_NVHOST, 0x01) => {
-                let ok = self.video.submit(
+                let submitted = self.video.submit(
                     channel_id,
                     data,
                     mem,
                     &self.gpu.nvmap,
                     &mut self.gpu.host1x,
                 )?;
-                Ok(if ok { NV_OK } else { NV_BAD_PARAMETER })
+                Ok(match submitted {
+                    Submitted::Done => NV_OK,
+                    Submitted::Refused => NV_BAD_PARAMETER,
+                    Submitted::Waiting => {
+                        self.ask_again = true;
+                        NV_OK
+                    }
+                })
             }
             // GetSyncpoint { in param; out value }
             (TYPE_NVHOST, 0x02) => {
@@ -1623,6 +1636,81 @@ mod tests {
             panic!("expected a channel fd");
         };
         assert!(drv.gpu.channel_mut(channel_id).unwrap().as_id.is_some());
+    }
+
+    /// Mario Kart 8 Deluxe's movie decoder unmaps a frame while the copy out of it waits for
+    /// readbacks, a wait the hardware never has; the unmap waits for the copy instead.
+    #[test]
+    fn an_unmap_waits_for_the_parked_submission_that_reads_the_mapping() {
+        use crate::gpu::engine::copy::{LAUNCH_DMA, LINE_LENGTH_IN, OFFSET_IN};
+        use crate::gpu::engine::CLASS_COPY;
+        let header = |mode: u32, arg: u32, subchannel: u32, method: u32| {
+            method | (subchannel << 13) | (arg << 16) | (mode << 29)
+        };
+        let mut drv = NvDrv::new();
+        let mem = Memory::new();
+        mem.map_zero(0x3000_0000, 0x3000).unwrap();
+        let (map_fd, _) = drv.open(1, "/dev/nvmap").unwrap();
+        let (as_fd, _) = drv.open(1, "/dev/nvhost-as-gpu").unwrap();
+        let (chan_fd, _) = drv.open(1, "/dev/nvhost-gpu").unwrap();
+        let map_page = |drv: &mut NvDrv, addr: u64| {
+            let mut create = [0u8; 8];
+            write_u32(&mut create, 0, 0x1000);
+            ioctl(drv, &mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
+            let handle = read_u32(&create, 4);
+            let mut alloc = [0u8; 0x20];
+            write_u32(&mut alloc, 0, handle);
+            write_u64(&mut alloc, 0x18, addr);
+            ioctl(drv, &mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
+            let mut map = [0u8; 0x28];
+            write_u32(&mut map, 8, handle);
+            write_u64(&mut map, 0x18, 0x1000);
+            ioctl(drv, &mem, as_fd, TYPE_AS_GPU, 0x06, &mut map);
+            read_u64(&map, 0x20)
+        };
+        let commands = map_page(&mut drv, 0x3000_0000);
+        let src = map_page(&mut drv, 0x3000_1000);
+        let dst = map_page(&mut drv, 0x3000_2000);
+        let mut bind = [0u8; 4];
+        write_u32(&mut bind, 0, chan_fd);
+        ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x01, &mut bind);
+        mem.write_u32(0x3000_1000, 0xAABB_CCDD).unwrap();
+        let words = [
+            header(1, 1, 1, 0),
+            CLASS_COPY,
+            header(1, 4, 1, OFFSET_IN),
+            (src >> 32) as u32,
+            src as u32,
+            (dst >> 32) as u32,
+            dst as u32,
+            header(1, 1, 1, LINE_LENGTH_IN),
+            4,
+            header(1, 1, 1, LAUNCH_DMA),
+            (1 << 7) | (1 << 8),
+        ];
+        for (i, &word) in words.iter().enumerate() {
+            mem.write_u32(0x3000_0000 + i as u32 * 4, word).unwrap();
+        }
+        drv.gpu
+            .set_renderer(Box::new(crate::gpu::tests::Landing { left: 1 }));
+        let mut submit = vec![0u8; 0x18 + 8];
+        write_u32(&mut submit, 8, 1);
+        write_u64(&mut submit, 0x18, commands | ((words.len() as u64) << 42));
+        let mut unmap = [0u8; 8];
+        write_u64(&mut unmap, 0, src);
+
+        ioctl(&mut drv, &mem, chan_fd, TYPE_CHANNEL, 0x08, &mut submit);
+        assert!(std::mem::take(&mut drv.ask_again), "the copy did not wait");
+        ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x05, &mut unmap);
+        assert!(
+            std::mem::take(&mut drv.ask_again),
+            "the unmap went ahead of the copy"
+        );
+        ioctl(&mut drv, &mem, chan_fd, TYPE_CHANNEL, 0x08, &mut submit);
+        assert!(!drv.ask_again, "the copy is still waiting");
+        assert_eq!(mem.read_u32(0x3000_2000).unwrap(), 0xAABB_CCDD);
+        ioctl(&mut drv, &mem, as_fd, TYPE_AS_GPU, 0x05, &mut unmap);
+        assert!(!drv.ask_again, "the unmap waited with nothing parked");
     }
 
     #[test]

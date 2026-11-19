@@ -2,6 +2,7 @@
 //! `/dev/nvhost-nvdec` and `/dev/nvhost-vic`. Engine methods go through THI's
 //! `METHOD0`/`METHOD1`. Work retires as the stream reaches each syncpoint increment.
 
+use crate::gpu::h264;
 use crate::gpu::nvmap::NvMap;
 use crate::gpu::syncpt::Host1x;
 use crate::mem::Memory;
@@ -25,6 +26,7 @@ const METHOD_FILE_WORDS: usize = 0x400;
 /// nvdec `EXECUTE`: decode the frame described by the methods before it.
 const NVDEC_EXECUTE: u32 = 0xC0;
 
+const NVDEC_CODEC_H264: u32 = 3;
 const NVDEC_CODEC_VP9: u32 = 9;
 
 /// nvdec frame methods, as word offsets; buffer addresses are device addresses >> 8.
@@ -119,6 +121,64 @@ pub struct MmChannel {
 
 /// Decoded frames by the address of their luma surface: what nvdec "writes" and VIC reads.
 type Surfaces = HashMap<u32, Arc<vp9::Frame>>;
+
+/// A host's H.264 decoder. Pictures go in by the surface nvdec writes and come back in any
+/// order, `None` for one it could not decode.
+pub trait H264Decoder: std::fmt::Debug {
+    fn decode(&mut self, surface: u32, access_unit: &[u8], key: bool);
+    fn take(&mut self) -> Vec<(u32, Option<vp9::Frame>)>;
+}
+
+/// How many times VIC is asked again for one frame before it composes without it.
+const WAIT_LIMIT: u32 = 1000;
+
+/// What nvdec has written, or is still writing, as VIC finds it.
+#[derive(Debug, Default)]
+struct Frames {
+    surfaces: Surfaces,
+    h264: Option<Box<dyn H264Decoder>>,
+    /// Surfaces the H.264 decoder has yet to hand back, and how often VIC has waited for each.
+    pending: HashMap<u32, u32>,
+    /// The parameter sets the decoder was last given.
+    parameter_sets: Vec<u8>,
+}
+
+impl Frames {
+    fn land(&mut self) {
+        let Some(decoder) = self.h264.as_mut() else {
+            return;
+        };
+        for (surface, frame) in decoder.take() {
+            self.pending.remove(&surface);
+            match frame {
+                Some(frame) => self.surfaces.insert(surface, Arc::new(frame)),
+                None => self.surfaces.remove(&surface),
+            };
+        }
+    }
+
+    /// Whether VIC should wait for `surface`, counting the wait.
+    fn waiting_for(&mut self, surface: u32) -> bool {
+        let Some(waits) = self.pending.get_mut(&surface) else {
+            return false;
+        };
+        *waits += 1;
+        if *waits <= WAIT_LIMIT {
+            return true;
+        }
+        self.pending.remove(&surface);
+        crate::traceln!("[video] the H.264 picture for surface {surface:#x} never came back");
+        false
+    }
+}
+
+/// How a submit went: run, refused as malformed, or to be asked again once a frame it reads lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Submitted {
+    Done,
+    Refused,
+    Waiting,
+}
 
 impl MmChannel {
     fn new(engine: Engine, syncpt: u32) -> MmChannel {
@@ -220,7 +280,7 @@ fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
 pub struct Video {
     channels: HashMap<u32, MmChannel>,
     next_channel: u32,
-    surfaces: Surfaces,
+    frames: Frames,
 }
 
 impl Video {
@@ -248,6 +308,10 @@ impl Video {
         self.channels.get(&id)
     }
 
+    pub fn set_h264(&mut self, decoder: Box<dyn H264Decoder>) {
+        self.frames.h264 = Some(decoder);
+    }
+
     /// `SUBMIT`: run the command buffers and write each increment's fence threshold
     /// back. `args` includes every record after the header.
     pub fn submit(
@@ -257,12 +321,12 @@ impl Video {
         mem: &Memory,
         nvmap: &NvMap,
         host1x: &mut Host1x,
-    ) -> Result<bool> {
+    ) -> Result<Submitted> {
         let Video {
-            channels, surfaces, ..
+            channels, frames, ..
         } = self;
         let Some(channel) = channels.get_mut(&id) else {
-            return Ok(false);
+            return Ok(Submitted::Refused);
         };
         let count = |at: usize| read_u32(args, at) as usize;
         let (cmdbufs, relocs, incrs, fences) = (count(0), count(4), count(8), count(12));
@@ -278,18 +342,10 @@ impl Video {
                 channel.engine.name(),
                 args.len()
             );
-            return Ok(false);
-        }
-        channel.submits += 1;
-
-        // Reserve every increment first so each fence reports the final threshold.
-        let mut thresholds = Vec::with_capacity(incrs);
-        for i in 0..incrs {
-            let at = incrs_at + i * SUBMIT_SYNCPT_INCR;
-            let (syncpt, increments) = (read_u32(args, at), read_u32(args, at + 4));
-            thresholds.push((syncpt, host1x.incr_max(syncpt, increments)?));
+            return Ok(Submitted::Refused);
         }
 
+        let mut streams = Vec::with_capacity(cmdbufs);
         for i in 0..cmdbufs {
             let at = SUBMIT_HEADER + i * SUBMIT_CMDBUF;
             let (handle, offset, words) = (
@@ -325,7 +381,29 @@ impl Video {
                     stream[word as usize] = address.wrapping_add(target_offset) >> shift;
                 }
             }
-            channel.run(&stream, mem, host1x, surfaces)?;
+            streams.push(stream);
+        }
+
+        if channel.engine == Engine::Vic {
+            frames.land();
+            let source = streams
+                .iter()
+                .find_map(|stream| slot_luma(stream, channel.method));
+            if source.is_some_and(|surface| frames.waiting_for(surface)) {
+                return Ok(Submitted::Waiting);
+            }
+        }
+        channel.submits += 1;
+
+        // Reserve every increment first so each fence reports the final threshold.
+        let mut thresholds = Vec::with_capacity(incrs);
+        for i in 0..incrs {
+            let at = incrs_at + i * SUBMIT_SYNCPT_INCR;
+            let (syncpt, increments) = (read_u32(args, at), read_u32(args, at + 4));
+            thresholds.push((syncpt, host1x.incr_max(syncpt, increments)?));
+        }
+        for stream in &streams {
+            channel.run(stream, mem, host1x, frames)?;
         }
 
         // Force each syncpoint to its threshold so no fence is left unreachable.
@@ -343,8 +421,23 @@ impl Video {
                 write_u32(args, fences_at + i * SUBMIT_FENCE, threshold);
             }
         }
-        Ok(true)
+        Ok(Submitted::Done)
     }
+}
+
+/// The surface a VIC stream composes from slot 0, if it sets one; `method` is the method a
+/// `METHOD1` names before the stream sets another.
+fn slot_luma(stream: &[u32], mut method: u32) -> Option<u32> {
+    let (writes, _) = decode_stream(stream, Engine::Vic.class());
+    let mut surface = None;
+    for write in writes.iter().filter(|w| w.class == Engine::Vic.class()) {
+        match write.offset {
+            THI_METHOD0 => method = write.value,
+            THI_METHOD1 if method == VIC_SLOT0_LUMA_OFFSET => surface = Some(write.value << 8),
+            _ => {}
+        }
+    }
+    surface
 }
 
 impl MmChannel {
@@ -353,7 +446,7 @@ impl MmChannel {
         stream: &[u32],
         mem: &Memory,
         host1x: &mut Host1x,
-        surfaces: &mut Surfaces,
+        frames: &mut Frames,
     ) -> Result<()> {
         let (writes, stopped) = decode_stream(stream, self.engine.class());
         for write in writes {
@@ -363,7 +456,7 @@ impl MmChannel {
                 }
                 (class, THI_METHOD0) if class == self.engine.class() => self.method = write.value,
                 (class, THI_METHOD1) if class == self.engine.class() => {
-                    self.write_method(self.method, write.value, mem, surfaces)
+                    self.write_method(self.method, write.value, mem, frames)
                 }
                 (CLASS_HOST1X, offset) => {
                     if enabled(Trace::Video) {
@@ -394,7 +487,7 @@ impl MmChannel {
         Ok(())
     }
 
-    fn write_method(&mut self, method: u32, value: u32, mem: &Memory, surfaces: &mut Surfaces) {
+    fn write_method(&mut self, method: u32, value: u32, mem: &Memory, frames: &mut Frames) {
         if let Some(slot) = self.methods.get_mut(method as usize) {
             *slot = value;
         }
@@ -411,9 +504,12 @@ impl MmChannel {
             }
             match self.engine {
                 Engine::Nvdec if self.method(NVDEC_SET_APPLICATION_ID) == NVDEC_CODEC_VP9 => {
-                    self.decode_vp9(mem, surfaces)
+                    self.decode_vp9(mem, &mut frames.surfaces)
                 }
-                Engine::Vic => self.compose(mem, surfaces),
+                Engine::Nvdec if self.method(NVDEC_SET_APPLICATION_ID) == NVDEC_CODEC_H264 => {
+                    self.decode_h264(mem, frames)
+                }
+                Engine::Vic => self.compose(mem, &frames.surfaces),
                 _ => {}
             }
         }
@@ -455,6 +551,60 @@ impl MmChannel {
                 }
             }
         }
+    }
+
+    /// Hands the H.264 picture an nvdec `EXECUTE` describes to the host's decoder, behind the
+    /// parameter sets its setup was filled from.
+    fn decode_h264(&mut self, mem: &Memory, frames: &mut Frames) {
+        /// Past any picture's size, so a corrupt length reads no further.
+        const MAX_STREAM: u32 = 16 << 20;
+        let Frames {
+            h264: Some(decoder),
+            pending,
+            surfaces,
+            parameter_sets,
+        } = frames
+        else {
+            return;
+        };
+        let read = |at: u32, len: usize| {
+            let mut buf = vec![0u8; len];
+            let _ = mem.read_into(at, &mut buf);
+            buf
+        };
+        let picture = h264::Picture::parse(&read(
+            self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET),
+            h264::SETUP_BYTES,
+        ));
+        let bitstream = read(
+            self.address(NVDEC_SET_IN_BUF_BASE_OFFSET),
+            picture.stream_len.min(MAX_STREAM) as usize,
+        );
+        let surface = self.address(NVDEC_SET_PICTURE_LUMA_OFFSET + picture.current_index);
+        let refused = |why: &str| {
+            if enabled(Trace::Video) {
+                crate::traceln!(
+                    "[video] nvdec H.264 picture {} not decoded: {why}",
+                    self.executes
+                );
+            }
+        };
+        let Some(unit) = h264::access_unit(&bitstream) else {
+            return refused("no slice in its bitstream");
+        };
+        let sets = match h264::parameter_sets(&picture, unit.pps_id) {
+            Ok(sets) => sets,
+            Err(why) => return refused(&why),
+        };
+        let mut bytes = Vec::with_capacity(sets.len() + unit.bytes.len());
+        if unit.key || sets != *parameter_sets {
+            bytes.extend_from_slice(&sets);
+            *parameter_sets = sets;
+        }
+        bytes.extend_from_slice(&unit.bytes);
+        surfaces.remove(&surface);
+        pending.insert(surface, 0);
+        decoder.decode(surface, &bytes, unit.key);
     }
 
     /// VIC reduced to what the game asks of it: the decoded frame in slot 0 written to the output
@@ -732,9 +882,12 @@ mod tests {
             write_u32(&mut args, at, value);
         }
 
-        assert!(video
-            .submit(id, &mut args, &mem, &nvmap, &mut host1x)
-            .unwrap());
+        assert_eq!(
+            video
+                .submit(id, &mut args, &mem, &nvmap, &mut host1x)
+                .unwrap(),
+            Submitted::Done
+        );
         let threshold = read_u32(&args, 0x24);
         assert_eq!(threshold, 1);
         assert!(host1x.is_expired(syncpt, threshold).unwrap());
@@ -748,6 +901,159 @@ mod tests {
         assert_eq!(channel.method(NVDEC_EXECUTE), 0);
     }
 
+    type Shared<T> = std::rc::Rc<std::cell::RefCell<Vec<T>>>;
+
+    /// A decoder whose pictures come back only when the test lands them.
+    #[derive(Debug, Default)]
+    struct Deferred {
+        given: Shared<(u32, Vec<u8>, bool)>,
+        ready: Shared<(u32, Option<vp9::Frame>)>,
+    }
+
+    impl H264Decoder for Deferred {
+        fn decode(&mut self, surface: u32, access_unit: &[u8], key: bool) {
+            self.given
+                .borrow_mut()
+                .push((surface, access_unit.to_vec(), key));
+        }
+
+        fn take(&mut self) -> Vec<(u32, Option<vp9::Frame>)> {
+            std::mem::take(&mut self.ready.borrow_mut())
+        }
+    }
+
+    /// Methods through THI, then the channel's syncpoint once done.
+    fn method_stream(methods: &[(u32, u32)], syncpt: u32) -> Vec<u32> {
+        let mut stream = Vec::new();
+        for &(method, value) in methods {
+            stream.extend([0x1000_0000 | (THI_METHOD0 << 16) | 2, method, value]);
+        }
+        stream.push(0x4000_0000 | (THI_INCR_SYNCPT << 16) | 0x100 | syncpt);
+        stream
+    }
+
+    /// Submit `stream` from guest memory at `at` with one increment, returning how it went and
+    /// the fence it reported.
+    fn submit_stream(
+        video: &mut Video,
+        id: u32,
+        stream: &[u32],
+        (mem, nvmap, handle): (&Memory, &NvMap, u32),
+        host1x: &mut Host1x,
+    ) -> (Submitted, u32) {
+        for (i, word) in stream.iter().enumerate() {
+            mem.write_u32(0x1000_0000 + 4 * i as u32, *word).unwrap();
+        }
+        let syncpt = video.channel(id).unwrap().syncpt;
+        let mut args = vec![0u8; SUBMIT_HEADER + SUBMIT_CMDBUF + SUBMIT_SYNCPT_INCR + SUBMIT_FENCE];
+        for (at, value) in [
+            (0, 1),
+            (8, 1),
+            (12, 1),
+            (0x10, handle),
+            (0x18, stream.len() as u32),
+            (0x1C, syncpt),
+            (0x20, 1),
+        ] {
+            write_u32(&mut args, at, value);
+        }
+        let submitted = video.submit(id, &mut args, mem, nvmap, host1x).unwrap();
+        (submitted, read_u32(&args, 0x24))
+    }
+
+    /// An H.264 picture reaches the host's decoder behind its parameter sets, and VIC waits for
+    /// it, without spending an increment, until the decoder hands it back.
+    #[test]
+    fn vic_waits_for_the_h264_picture_it_composes() {
+        const BASE: u32 = 0x1000_0000;
+        const SETUP: u32 = BASE + 0x1000;
+        const BITSTREAM: u32 = BASE + 0x2000;
+        const CONFIG: u32 = BASE + 0x3000;
+        const OUTPUT: u32 = BASE + 0x4000;
+        const SURFACE: u32 = BASE + 0x8000;
+        let mem = Memory::new();
+        mem.map_zero(BASE, 0x10000).unwrap();
+        let mut nvmap = NvMap::new();
+        let handle = nvmap.create(0x10000);
+        nvmap.alloc(handle, 0, 0, 0x10000, 0, BASE).unwrap();
+        let mut host1x = Host1x::new();
+        let mut video = Video::default();
+        let decoder = Deferred::default();
+        let (given, ready) = (decoder.given.clone(), decoder.ready.clone());
+        video.set_h264(Box::new(decoder));
+        let nvdec = video.open(Engine::Nvdec, &mut host1x).unwrap();
+        let vic = video.open(Engine::Vic, &mut host1x).unwrap();
+
+        // A 16x32 frame from picture index 0, with a CABAC IDR slice and the driver's tail.
+        let slice = [0u8, 0, 1, 0x65, 0x88, 0x84, 0x21];
+        let tail = [0u8, 0, 1, 0x0b, 0, 0, 0, 0, 0, 0, 1, 0x0b, 0, 0, 0, 0];
+        for (at, value) in [
+            (0x48, (slice.len() + tail.len()) as u32),
+            (0x60, 1),
+            (0x64, 1),
+            (0x68, 2),
+            (0x70, 1),
+            (0xb0, 1 << 12),
+        ] {
+            mem.write_u32(SETUP + at, value).unwrap();
+        }
+        mem.write_bytes(BITSTREAM, &slice).unwrap();
+        mem.write_bytes(BITSTREAM + slice.len() as u32, &tail)
+            .unwrap();
+        let syncpt = video.channel(nvdec).unwrap().syncpt;
+        let decode = method_stream(
+            &[
+                (NVDEC_SET_APPLICATION_ID, NVDEC_CODEC_H264),
+                (NVDEC_SET_DRV_PIC_SETUP_OFFSET, SETUP >> 8),
+                (NVDEC_SET_IN_BUF_BASE_OFFSET, BITSTREAM >> 8),
+                (NVDEC_SET_PICTURE_LUMA_OFFSET, SURFACE >> 8),
+                (NVDEC_EXECUTE, 0x100),
+            ],
+            syncpt,
+        );
+        let memory = (&mem, &nvmap, handle);
+        assert_eq!(
+            submit_stream(&mut video, nvdec, &decode, memory, &mut host1x).0,
+            Submitted::Done
+        );
+        {
+            let given = given.borrow();
+            let [(surface, unit, key)] = given.as_slice() else {
+                panic!("{} pictures reached the decoder", given.len());
+            };
+            assert_eq!((*surface, *key), (SURFACE, true));
+            assert_eq!(&unit[..5], &[0, 0, 0, 1, 0x67], "the SPS first");
+            assert!(unit.ends_with(&slice), "then the slice, without the tail");
+        }
+
+        mem.write_u32(CONFIG + VIC_CONFIG_OUTPUT_SURFACE, VIC_PIXEL_FORMAT_NV12)
+            .unwrap();
+        mem.write_u32(CONFIG + VIC_CONFIG_OUTPUT_SURFACE + 8, 15 | 31 << 14)
+            .unwrap();
+        let syncpt = video.channel(vic).unwrap().syncpt;
+        let compose = method_stream(
+            &[
+                (VIC_SET_CONFIG_STRUCT_OFFSET, CONFIG >> 8),
+                (VIC_SLOT0_LUMA_OFFSET, SURFACE >> 8),
+                (VIC_SET_OUTPUT_LUMA_OFFSET, OUTPUT >> 8),
+                (VIC_SET_OUTPUT_CHROMA_OFFSET, (OUTPUT + 0x800) >> 8),
+                (VIC_EXECUTE, 0),
+            ],
+            syncpt,
+        );
+        assert_eq!(
+            submit_stream(&mut video, vic, &compose, memory, &mut host1x).0,
+            Submitted::Waiting
+        );
+        let mut frame = vp9::Frame::new(16, 32);
+        frame.planes[0].data[0] = 0x5a;
+        ready.borrow_mut().push((SURFACE, Some(frame)));
+        let (submitted, fence) = submit_stream(&mut video, vic, &compose, memory, &mut host1x);
+        assert_eq!(submitted, Submitted::Done);
+        assert_eq!(fence, 1, "the wait reserved no increment");
+        assert_eq!(mem.read_u8(OUTPUT).unwrap(), 0x5a);
+    }
+
     #[test]
     fn a_submit_whose_records_overrun_its_arguments_is_refused() {
         let mut host1x = Host1x::new();
@@ -755,9 +1061,12 @@ mod tests {
         let id = video.open(Engine::Vic, &mut host1x).unwrap();
         let mut args = vec![0u8; SUBMIT_HEADER];
         write_u32(&mut args, 0, 3);
-        assert!(!video
-            .submit(id, &mut args, &Memory::new(), &NvMap::new(), &mut host1x)
-            .unwrap());
+        assert_eq!(
+            video
+                .submit(id, &mut args, &Memory::new(), &NvMap::new(), &mut host1x)
+                .unwrap(),
+            Submitted::Refused
+        );
     }
 
     #[test]
