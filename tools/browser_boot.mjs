@@ -2,6 +2,7 @@
 // page and its worker said.
 // Serves `dist` (run `make assets` first) with WebGPU enabled and a fresh profile.
 // `--firmware` installs a directory's NCAs to the NAND first, so library applets run.
+// `--update` opens an update NSP before the container, so the title launches patched.
 // `--nand` launches the title of that name from the NAND tab, in place of a container.
 // `--port=N` serves on that port, so a relay can be told the page's origin; any free one by default.
 // `--relay=ws://…` turns the Network tab on through that relay before the title starts, and
@@ -40,7 +41,7 @@ import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
 import { hookSource, parseSpec, readTextures, writeTextures } from './texture_dump.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
-  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
+  [--firmware=dir] [--update=update.nsp] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
   [--relay=ws://127.0.0.1:18787] [--port=N]
   [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
@@ -60,6 +61,7 @@ if (!existsSync(join(repoRoot, 'dist/index.html'))) fail('dist/ has not been bui
 const keys = pathFlag('keys');
 const titleKeys = pathFlag('title-keys');
 const firmware = pathFlag('firmware');
+const update = pathFlag('update');
 const screenshot = pathFlag('screenshot');
 const out = flag('out');
 const logLevel = flag('log-level');
@@ -235,6 +237,13 @@ try {
     await badge.filter({ hasText: /^(on|no relay)$/ }).waitFor({ timeout: 15_000 });
     say(`network: ${await badge.innerText()} through ${relay}`);
     await page.locator('#btn-panel').click();
+  }
+  if (update) {
+    await page.setInputFiles('#nro-file', update);
+    await page.locator('#console').getByText('launch it patched', { exact: false }).first()
+      .waitFor({ state: 'attached', timeout: 60_000 });
+    await page.keyboard.press('Escape');
+    say(`holding the update in ${update}`);
   }
   const before = await page.evaluate(() => document.getElementById('console').childElementCount);
   if (docked) await page.locator('#btn-dock').evaluate((button) => button.click());
