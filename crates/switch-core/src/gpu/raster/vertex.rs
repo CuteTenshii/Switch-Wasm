@@ -20,9 +20,10 @@ pub(super) const VARYING_STRIDE: u16 = 0x10;
 /// input space, holding integer bits.
 pub(super) const INSTANCE_ID_OFFSET: u16 = 0x2f8;
 pub(super) const VERTEX_ID_OFFSET: u16 = 0x2fc;
-/// How many generic varying slots exist: Maxwell's `a[0x80]..a[0x280)`.
-/// [`Program::interpolated_slots`] narrows it to what the shader reads.
-pub(super) const NUM_VARYINGS: usize = 32;
+/// How many varying slots exist, generic and fixed-function texture coordinates
+/// ([`crate::gpu::shader::varying_slot`]). [`Program::interpolated_slots`] narrows it to what the
+/// shader reads.
+pub(super) const NUM_VARYINGS: usize = crate::gpu::shader::VARYING_SLOTS;
 /// Vertex attribute slots scanned, so shaders need not declare a count.
 pub(super) const MAX_VERTEX_ATTRIBS: u32 = 16;
 /// One vertex after the vertex shader: clip position and every varying.

@@ -61,6 +61,56 @@ fn a_layout_is_read_off_what_translating_the_program_touched() {
     assert_eq!(Layout::of(&fs, Stage::Fragment).varyings, vec![3]);
 }
 
+/// A fixed-function texture coordinate (`a[0x300]`) is a varying on both renderers, slot 40
+/// counting on from the generic ones. The Vulkan driver's blits pass their coordinates there;
+/// dropped, every texel read was (0, 0) and Minecraft's panorama faces came out one colour.
+#[test]
+fn a_fixed_function_texture_coordinate_is_a_varying() {
+    let texcoord = 0x300;
+    let vs = program(&[
+        (
+            Op::Ld {
+                dst: 1,
+                offset: GENERIC_BASE as u16,
+                idx: RZ,
+                size: MemSize::B32,
+            },
+            ALWAYS,
+        ),
+        (
+            Op::St {
+                offset: texcoord,
+                idx: RZ,
+                src: 1,
+                size: MemSize::B32,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    let fs = program(&[
+        (
+            Op::Ipa {
+                dst: 0,
+                offset: texcoord,
+                mul: None,
+                perspective: false,
+                sat: false,
+                centroid: false,
+            },
+            ALWAYS,
+        ),
+        (Op::Exit, ALWAYS),
+    ]);
+    assert_eq!(fs.interpolated_slots(), [40]);
+    let vs = Layout::of(&translate(&vs).unwrap(), Stage::Vertex);
+    assert_eq!((vs.attributes, vs.varyings), (vec![0], vec![40]));
+    assert_eq!(
+        Layout::of(&translate(&fs).unwrap(), Stage::Fragment).varyings,
+        vec![40]
+    );
+}
+
 #[test]
 fn a_layout_names_every_binding_the_text_calls_through() {
     let p = program(&[

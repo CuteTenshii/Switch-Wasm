@@ -8,6 +8,7 @@ use crate::gpu::shader::isa::{
     AtomOp, AtomSpace, MemSize, Op, Operand, ShflMode, SurfaceData, SurfaceDim, TexDim, VoteMode,
     RZ,
 };
+use crate::gpu::shader::varying_slot;
 use crate::gpu::texture::TextureSlot;
 
 impl Emitter<'_> {
@@ -34,7 +35,7 @@ impl Emitter<'_> {
                 src,
                 size,
             } => {
-                self.stores.extend(generic_slot(offset));
+                self.stores.extend(varying_slot(offset));
                 let base = self.attr_base(offset, idx);
                 for i in 0..size.regs() {
                     let word = i as u32 * 4;
@@ -50,9 +51,9 @@ impl Emitter<'_> {
                 sat,
                 centroid,
             } => {
-                self.loads.extend(generic_slot(offset));
+                self.loads.extend(varying_slot(offset));
                 if centroid {
-                    self.centroid_loads.extend(generic_slot(offset));
+                    self.centroid_loads.extend(varying_slot(offset));
                 }
                 let mut value = format!("attrIn({offset}u)");
                 if perspective {

@@ -61,26 +61,40 @@ pub fn no_fragment_program() -> Program {
     }
 }
 
-/// The generic varying slots `insns`' `ipa`s read, ascending.
+/// The varying slots `insns`' `ipa`s read, ascending: see [`varying_slot`].
 pub fn interpolated_slots(ops: &[Op]) -> Vec<usize> {
     let mut slots: Vec<usize> = ops
         .iter()
         .filter_map(|op| match op {
-            Op::Ipa { offset, .. } => Some(*offset),
+            Op::Ipa { offset, .. } => varying_slot(*offset),
             _ => None,
         })
-        .filter(|&offset| (GENERIC_ATTR_BASE..GENERIC_ATTR_END).contains(&offset))
-        .map(|offset| usize::from(offset - GENERIC_ATTR_BASE) / GENERIC_ATTR_STRIDE)
         .collect();
     slots.sort_unstable();
     slots.dedup();
     slots
 }
 
+/// The varying slot an attribute offset is in: a generic attribute, or a fixed-function
+/// texture coordinate, which the Vulkan driver's blits pass between stages. Slots run on from
+/// the generic ones, so slot `n` starts at `0x80 + n * 0x10` either way.
+pub fn varying_slot(offset: u16) -> Option<usize> {
+    let varying = (GENERIC_ATTR_BASE..GENERIC_ATTR_END).contains(&offset)
+        || (FIXED_TEXTURE_BASE..FIXED_TEXTURE_END).contains(&offset);
+    varying.then(|| usize::from(offset - GENERIC_ATTR_BASE) / GENERIC_ATTR_STRIDE)
+}
+
+/// How many slots [`varying_slot`] can answer.
+pub const VARYING_SLOTS: usize =
+    (FIXED_TEXTURE_END - GENERIC_ATTR_BASE) as usize / GENERIC_ATTR_STRIDE;
+
 /// Generic attribute slots (four components each).
 const GENERIC_ATTR_BASE: u16 = 0x80;
 const GENERIC_ATTR_END: u16 = 0x280;
 const GENERIC_ATTR_STRIDE: usize = 0x10;
+/// `FixedFncTexture[0..10]`.
+const FIXED_TEXTURE_BASE: u16 = 0x300;
+const FIXED_TEXTURE_END: u16 = 0x3A0;
 
 /// Instructions in ascending address order, each with its byte offset.
 #[derive(Debug, Clone, Default)]
