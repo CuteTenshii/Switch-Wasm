@@ -1881,6 +1881,71 @@ fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
     }
 }
 
+/// A held `R32Float` colour surface sampled as a `ZF32` shadow map compares against the depths it
+/// holds. Breath of the Wild samples one so.
+#[test]
+fn a_held_float_colour_surface_is_the_shadow_map_the_rasterizer_compares_against() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let build = |gpu: Option<&mut super::Gpu>, clear: f32| {
+        let mut h = Harness::with_fragment_shader(testing::shadow_fragment_shader());
+        h.bindless_texture();
+        h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+        h.engine.regs.set(0x204, 0xE5); // R32Float
+        h.engine.regs.set(0x360, clear.to_bits());
+        let (tic, tsc, target) = (h.base + 0x1400 + 32, h.base + 0x1480 + 32, h.base);
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        let mut ctx = h.ctx();
+        for (word, value) in [
+            (0, 0x2f | (7 << 7) | identity),
+            (1, target as u32),
+            (2, (target >> 32) as u32 | (2 << 21)),
+            (3, testing::TARGET_WIDTH * 4 / 32),
+            (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
+            (5, testing::TARGET_HEIGHT - 1),
+        ] {
+            ctx.write_u32(tic + word * 4, value).unwrap();
+        }
+        // The fixture's sampler, comparing with Less.
+        ctx.write_u32(tsc, 2 | (2 << 3) | (2 << 6) | (1 << 9) | (1 << 10))
+            .unwrap();
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        match gpu {
+            Some(gpu) => {
+                h.clear_with(gpu, [true; 4]).expect("the clear");
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => {
+                h.clear_with(&mut Software, [true; 4]).expect("the clear");
+                h.draw_with(&mut Software).expect("the draw");
+            }
+        }
+        h.target()
+    };
+    // The reference compares 0.5 against what was cleared; a stale read would compare against 0.
+    let want = build(None, 0.75);
+    assert!(
+        want.contains(&1.0f32.to_bits()),
+        "nothing passed the comparison"
+    );
+    assert_ne!(want, build(None, 0.25), "the comparison ignored the depths");
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let got = build(Some(&mut gpu), 0.75);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// A texture that is the corner of a held surface is copied from the device.
 #[test]
 fn a_held_surface_stands_in_for_a_smaller_texture_laid_out_the_same_way() {

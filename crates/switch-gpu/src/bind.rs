@@ -709,6 +709,20 @@ impl Gpu {
             }
             let (format, widening) = sampled_texture_format(self.features(), upload.format)
                 .map_err(|e| format!("{e:?}"))?;
+            // A float colour surface sampled as a shadow map is drawn into it as depth.
+            if compare {
+                if held.texture.format() != wgpu::TextureFormat::R32Float
+                    || format != wgpu::TextureFormat::R32Float
+                {
+                    return Err(format!(
+                        "samples a {:?} surface held on the device as a shadow map, as {:?}",
+                        held.texture.format(),
+                        upload.format
+                    ));
+                }
+                layers.push((layer, HeldLayer::ShadowCorner(held.texture.clone())));
+                continue;
+            }
             // A surface held widened holds the texels the widened image would.
             if self.holds_widened(&held.target) {
                 if widening == Widen::Unorm16 && format == held.texture.format() {
