@@ -479,13 +479,18 @@ impl Pipeline {
         let dt = engine
             .depth_target()
             .map_err(|e| state("depth target", e))?;
+        let mut blend_constant = engine.blend_constant();
         let target = match rt {
             Some(rt) => Some(ColorTarget {
                 format: color_format(rt.format)?,
                 // An integer target is never blended.
                 blend: match color_format(rt.format)? {
                     format if format.is_uint() => None,
-                    _ => blend(engine.blend_target(0))?,
+                    _ => {
+                        let (state, constant) = blend(engine.blend_target(0), blend_constant)?;
+                        blend_constant = constant;
+                        state
+                    }
                 },
                 write_mask: engine.color_mask(slot),
             }),
@@ -551,7 +556,7 @@ impl Pipeline {
             alpha_to_coverage: engine.alpha_to_coverage(),
             viewport,
             scissor,
-            blend_constant: engine.blend_constant(),
+            blend_constant,
         })
     }
 }
@@ -650,22 +655,56 @@ fn blend_equation(code: u32) -> Result<BlendOperation, Unsupported> {
     })
 }
 
-fn blend(target: BlendTarget) -> Result<Option<Blend>, Unsupported> {
+/// The blend state and the constant to draw it with. A blend reading only the constant's alpha
+/// reads `Constant` with the alpha in every channel.
+fn blend(
+    target: BlendTarget,
+    constant: [f32; 4],
+) -> Result<(Option<Blend>, [f32; 4]), Unsupported> {
     if !target.enabled {
-        return Ok(None);
+        return Ok((None, constant));
     }
-    Ok(Some(Blend {
+    let codes = [
+        target.func_rgb_src,
+        target.func_rgb_dst,
+        target.func_alpha_src,
+        target.func_alpha_dst,
+    ];
+    let alpha_only = codes
+        .into_iter()
+        .find(|code| matches!(code, 0x63 | 0x64 | 0xc003 | 0xc004));
+    let per_channel = codes
+        .into_iter()
+        .any(|code| matches!(code, 0x61 | 0x62 | 0xc001 | 0xc002));
+    if let Some(code) = alpha_only {
+        if per_channel && constant[..3] != [constant[3]; 3] {
+            return Err(Unsupported::BlendFactor { code });
+        }
+    }
+    let factor = |code| {
+        blend_factor(match code {
+            0x63 | 0xc003 => 0x61,
+            0x64 | 0xc004 => 0x62,
+            code => code,
+        })
+    };
+    let blend = Blend {
         color: BlendComponent {
-            src_factor: blend_factor(target.func_rgb_src)?,
-            dst_factor: blend_factor(target.func_rgb_dst)?,
+            src_factor: factor(target.func_rgb_src)?,
+            dst_factor: factor(target.func_rgb_dst)?,
             operation: blend_equation(target.equation_rgb)?,
         },
         alpha: BlendComponent {
-            src_factor: blend_factor(target.func_alpha_src)?,
-            dst_factor: blend_factor(target.func_alpha_dst)?,
+            src_factor: factor(target.func_alpha_src)?,
+            dst_factor: factor(target.func_alpha_dst)?,
             operation: blend_equation(target.equation_alpha)?,
         },
-    }))
+    };
+    let constant = match alpha_only {
+        Some(_) => [constant[3]; 4],
+        None => constant,
+    };
+    Ok((Some(blend), constant))
 }
 
 /// The GL comparison enums `raster::depth_test_passes` implements.
@@ -945,6 +984,35 @@ mod tests {
     }
 
     #[test]
+    fn a_blend_reading_only_the_constant_alpha_draws_with_it_in_every_channel() {
+        let target = |rgb_src, rgb_dst| BlendTarget {
+            enabled: true,
+            equation_rgb: 0x8006,
+            func_rgb_src: rgb_src,
+            func_rgb_dst: rgb_dst,
+            equation_alpha: 0x8006,
+            func_alpha_src: 0x4001,
+            func_alpha_dst: 0x4000,
+        };
+        let constant = [0.1, 0.2, 0.3, 0.4];
+        let (state, drawn_with) = blend(target(0xc003, 0xc004), constant).unwrap();
+        let color = state.unwrap().color;
+        assert_eq!(
+            (color.src_factor, color.dst_factor),
+            (BlendFactor::Constant, BlendFactor::OneMinusConstant)
+        );
+        assert_eq!(drawn_with, [0.4; 4]);
+
+        assert_eq!(
+            blend(target(0xc003, 0xc001), constant),
+            Err(Unsupported::BlendFactor { code: 0xc003 }),
+            "the colour constant needs its own channels"
+        );
+        let grey = [0.5; 4];
+        assert_eq!(blend(target(0x63, 0x61), grey).unwrap().1, grey);
+    }
+
+    #[test]
     fn blending_that_is_off_is_no_blend_state_at_all() {
         let mut target = BlendTarget {
             enabled: false,
@@ -955,9 +1023,12 @@ mod tests {
             func_alpha_src: 0,
             func_alpha_dst: 0,
         };
-        assert_eq!(blend(target), Ok(None));
+        assert_eq!(blend(target, [0.0; 4]), Ok((None, [0.0; 4])));
         target.enabled = true;
-        assert!(blend(target).is_err(), "an enabled blend reads its codes");
+        assert!(
+            blend(target, [0.0; 4]).is_err(),
+            "an enabled blend reads its codes"
+        );
     }
 
     #[test]

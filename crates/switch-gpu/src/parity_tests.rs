@@ -1257,6 +1257,41 @@ fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
     agrees_shading(new, |_| {}, set_up);
 }
 
+/// A blend by the constant's alpha alone weighs every channel by that alpha on both renderers,
+/// whatever the constant's colour.
+#[test]
+fn a_constant_alpha_blend_weighs_every_channel_by_the_alpha() {
+    let set_up = |h: &mut Harness| {
+        let constant = [0.9f32, 0.9, 0.9, 0.25];
+        for (i, c) in constant.into_iter().enumerate() {
+            h.engine.regs.set(0x4C7 + i as u32, c.to_bits());
+        }
+        // ConstantAlpha and OneMinusConstantAlpha for colour, One and Zero for alpha, all added.
+        for (reg, value) in [
+            (0x4D0, 0x8006),
+            (0x4D1, 0xc003),
+            (0x4D2, 0xc004),
+            (0x4D3, 0x8006),
+            (0x4D4, 0x4001),
+            (0x4D6, 0x4000),
+            (0x4D8, 1),
+        ] {
+            h.engine.regs.set(reg, value);
+        }
+        h.triangle([1.0; 4]);
+    };
+    let mut h = Harness::new();
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    // 0.25 of white over the zeroed target, opaque.
+    assert!(
+        h.target().contains(&0xff40_4040),
+        "the reference drew no blend"
+    );
+
+    agrees_shading(Harness::new, |_| {}, set_up);
+}
+
 /// A `tex.aoffi` of a volume moves the sample by whole slices too, on both renderers.
 #[test]
 fn a_constant_volume_offset_moves_the_sample_by_slices() {

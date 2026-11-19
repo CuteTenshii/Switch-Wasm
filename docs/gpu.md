@@ -219,6 +219,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 ## `pipeline.rs`
 
 - `Pipeline` resolves register state into WebGPU vocabulary so backends never re-decode raw codes. Anything WebGPU cannot express (except fans, handled by index rewriting) is `Unsupported`, never approximated, and the caller falls back to the software rasterizer. Unknown codes are errors here even where the rasterizer defaults (e.g. blend factor `One`).
+- WebGPU's blend constant is per channel, so a blend reading only the constant's alpha (`ConstantAlpha`, `OneMinusConstantAlpha`) reads `Constant` with that alpha in every channel (`Pipeline::blend_constant`); beside a per-channel constant factor it is drawn so only when every channel of the constant equals its alpha (Breath of the Wild).
 - Facing is judged in window space like `raster::culls`, so it carries over unchanged through the y negation (`Layout::flip_y`, [shader/wgsl/](#shaderwgsl)).
 - With `SET_VIEWPORT_SCALE_OFFSET` off, `Viewport` covers colour target 0 (the surface clip is left at 16384, past WebGPU's limit) and carries `window_coordinates`, and the vertex entry maps x and y to `2 * p / size - w` before its y flip: WebGPU clips before the viewport, so passing pixels through would clip them away.
 - Clip z: the GL (-w..w) or Vulkan (0..w) convention is inferred from the viewport's depth transform (`Viewport::depth_minus_one_to_one`: `translate - scale >= 0`, e.g. scale 0.5 and translate 0.5 is GL); WebGPU clips 0..w.
