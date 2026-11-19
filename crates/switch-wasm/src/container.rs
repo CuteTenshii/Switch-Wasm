@@ -284,7 +284,7 @@ pub fn switch_inspect_nca(index: Option<u32>) -> String {
                     // The filesystem type lives in the FS header, which needs the full header to decrypt.
                     let fs_type = match nca.fs_headers.get(i).and_then(|o| o.as_ref()) {
                         Some(fs) if sec.media_size > 0 => {
-                            if fs.fs_type == 1 {
+                            if fs.partition_type == 1 {
                                 "PFS0"
                             } else {
                                 "ROMFS"
