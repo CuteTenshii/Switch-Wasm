@@ -1257,6 +1257,25 @@ fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
     agrees_shading(new, |_| {}, set_up);
 }
 
+/// A `tmml.b` asking for the level a sample reads answers level 0, the one both renderers sample.
+/// Breath of the Wild's, writing r3 over a one, so the pixel's alpha is that level.
+#[test]
+fn a_level_of_detail_query_answers_the_level_both_renderers_sample() {
+    let one = 1.0f32.to_bits();
+    let shader = testing::alu_fragment_shader(
+        &[(0, one), (1, one), (2, one), (3, one)],
+        &[0xdf60_0001_2037_0403],
+    );
+    let new = || Harness::with_fragment_shader(shader.clone());
+    let set_up = |h: &mut Harness| h.triangle([0.0; 4]);
+    let mut h = new();
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    assert_eq!(h.texel(1, 1), 0x00ff_ffff, "level 0 in r3");
+
+    agrees_shading(new, |_| {}, set_up);
+}
+
 /// A blend by the constant's alpha alone weighs every channel by that alpha on both renderers,
 /// whatever the constant's colour.
 #[test]

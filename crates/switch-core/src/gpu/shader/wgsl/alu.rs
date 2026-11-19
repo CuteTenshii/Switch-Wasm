@@ -189,6 +189,7 @@ impl Emitter<'_> {
                     }
                 }
             }
+            Op::Tmml { dst } => self.set_r(dst, "0u"),
             Op::Txq { lod, handle, .. } => {
                 self.query_texture(at, TextureSlot::Bound(handle), lod);
             }

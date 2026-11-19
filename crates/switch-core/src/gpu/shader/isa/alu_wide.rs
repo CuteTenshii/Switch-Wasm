@@ -605,6 +605,10 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
     if insn & 0xfff8_0000_0000_0000 == 0xdf48_0000_0000_0000 {
         return decode_txq(insn);
     }
+    // tmml and tmml.b: 0xdf58 and 0xdf60, over 0xfff8.
+    if matches!(insn >> 51, 0x1beb | 0x1bec) {
+        return decode_tmml(insn);
+    }
     // tld4s: the gather with `texs`'s layout, 0xdf00 with bit 54 clear (`txq`'s is set).
     if insn >> 56 == 0xdf && field(insn, 54, 1) == 0 {
         return decode_tld4s(insn);

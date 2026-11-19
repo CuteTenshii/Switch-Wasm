@@ -157,6 +157,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - Half ops compute in f32 and round once at the merge; `.ftz` uses the half threshold only for half lanes.
 - Warp shuffles to lanes absent from the warp (a quad is 4 of 32) read the caller's own value; votes count only lanes that reached them. In a fragment shader the device runs `vote` over the quad too (ballot bit n is lane n, `all` is four of four), as the rasterizer does, so a ballot has four bits where hardware's has up to 32; a compute program's runs over a 32-lane subgroup ([gpu-backend.md](gpu-backend.md)). The rasterizer shades a fragment shader with a `vote` in quads, as it does one with `shfl`.
 - `SR_Y_DIRECTION` must be +/-1.0 (zero deletes screen-space directions). Packed `SR_TID`/`SR_NTID` are refused because their layout is unconfirmed.
+- `tmml` (0xdf58, `tmml.b` 0xdf60) is decoded only with mask 0x2, the level a sample would read, which is 0 because every image is sampled at level 0. The hardware returns the raw LOD first and that level second, as nouveau's `handleTXLQ` reads them (Eden returns them in SPIR-V's order instead); a mask asking for the raw LOD stays undecoded and falls back (Breath of the Wild).
 - `tex.aoffi` offsets are texels scaled by level size (Persona 5 Royal's blur); a 3D image's z nibble (bits 8 to 11) moves it by slices (Breath of the Wild).
 
 ## `shader/compiled.rs`

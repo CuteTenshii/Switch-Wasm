@@ -639,6 +639,29 @@ fn decodes_a_tld4s_into_texss_registers() {
 }
 
 #[test]
+fn decodes_a_tmml_asking_only_for_the_level_a_sample_reads() {
+    // Breath of the Wild's `tmml.b`, mask 0x2.
+    for (insn, dst) in [
+        (0xdf60_0001_2037_0403u64, 3),
+        (0xdf60_0001_2077_0407, 7),
+        (0xdf60_0001_20b7_080b, 11),
+    ] {
+        assert_eq!(decode(insn).op, Op::Tmml { dst }, "{insn:#x}");
+    }
+    // The bound form, 0xdf58.
+    let bound = 0xdf58_0001_2037_0403u64;
+    assert_eq!(decode(bound).op, Op::Tmml { dst: 3 });
+    // The raw LOD, alone (0x1) or beside the level (0x3), is not decoded.
+    let mask = |insn: u64, bits: u64| insn & !(0xf << 31) | bits << 31;
+    for bits in [0b0001, 0b0011] {
+        assert!(matches!(
+            decode(mask(bound, bits)).op,
+            Op::Unimplemented { .. }
+        ));
+    }
+}
+
+#[test]
 fn decodes_a_bindless_tex() {
     // Tomodachi Life's `tex.b`.
     assert_eq!(

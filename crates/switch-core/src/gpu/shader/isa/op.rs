@@ -636,6 +636,11 @@ pub enum Op {
         handle: u16,
         mask: [bool; 4],
     },
+    /// `tmml` or `tmml.b` asking only for the mip level a sample would read, as unsigned 8.8
+    /// fixed point. Every image is sampled at level 0, so that is the level it reads.
+    Tmml {
+        dst: u8,
+    },
     /// `tld4.<component> dst, coords.., handle, dim, mask`.
     Tld4 {
         dst: u8,

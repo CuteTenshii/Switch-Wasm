@@ -195,6 +195,16 @@ pub(super) fn decode_txq(insn: u64) -> Op {
     }
 }
 
+/// `tmml`, bound or bindless, when its mask asks only for the level a sample would read. The
+/// hardware returns the raw LOD first and that level second, as nouveau's `handleTXLQ` reads them.
+pub(super) fn decode_tmml(insn: u64) -> Op {
+    let dst = reg(insn, 0, 8);
+    if dst == RZ || field(insn, 31, 4) != 0b0010 {
+        return Op::Unimplemented { raw: insn };
+    }
+    Op::Tmml { dst }
+}
+
 /// `tld4`, bound or bindless, as Eden's `texture_gather.cpp` reads it, of a 2D image, array,
 /// cube or cube array. The 1D and 3D types decode there but no gather of them exists in WebGPU
 /// or in the texture model, and a cube takes no offset.

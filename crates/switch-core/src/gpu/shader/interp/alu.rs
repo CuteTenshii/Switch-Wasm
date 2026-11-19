@@ -930,6 +930,7 @@ impl Invocation {
                 self.set_reg(dst, v);
             }
             Op::Mov32i { dst, imm } => self.set_reg(dst, imm),
+            Op::Tmml { dst } => self.set_reg(dst, 0),
             Op::S2r { dst, sr } => {
                 if SpecialRegs::PACKED.contains(&sr) {
                     return Err(fault(format!(
