@@ -185,7 +185,8 @@ export interface AgeRating {
   age: number;
 }
 
-// The NACP from `switch_control_json`; fields past the name are often absent.
+// The NACP from `switch_control_json`; fields past the name are often absent. Empty when
+// there is no control data.
 export interface ControlInfo {
   name: string;
   publisher?: string;
@@ -209,6 +210,12 @@ export interface ControlInfo {
   save_data_owner_id?: string;
   error_code_category?: string;
   isbn?: string;
+}
+
+// Control data, with its icon or null.
+export interface ControlData {
+  info: ControlInfo;
+  icon: Bytes | null;
 }
 
 export interface UserRecord {
@@ -281,12 +288,11 @@ export interface Commands {
   // The header of NSP file `index`, or of the container when it is a standalone NCA.
   inspectNca(index?: number): NcaInfo;
 
-  // The title's NACP and icon, from the container's Control NCA or a standalone one, also
-  // stored so a later session's ns can describe the title. Throws the reason when there is none.
-  loadControl(): { info: ControlInfo; icon: Bytes | null };
+  // Read the container's Control NCA, or a standalone one, store it so a later session's ns
+  // can describe the title, and return it as `control` does. Throws the reason when there is none.
+  loadControl(): ControlData;
   // The cached control data: the container's, or a homebrew's.
-  controlJson(): string;
-  controlIcon(): Bytes;
+  control(): ControlData;
 
   run(budget: number): number;
   // The worker runs slices itself until paused, halted or faulted, reporting each.

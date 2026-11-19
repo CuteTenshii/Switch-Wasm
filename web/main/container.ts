@@ -1,7 +1,7 @@
 // NSP / NCA / XCI containers: inspecting, showing the title, launching.
 
 import type {
-  Bytes, ControlInfo, DlcEntry, NcaInfo, NspFile, OpenedContainer, UpdateInfo,
+  Bytes, ControlData, ControlInfo, DlcEntry, NcaInfo, NspFile, OpenedContainer, UpdateInfo,
 } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
@@ -335,7 +335,7 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
 // Title card: icon, name, publisher and NACP details from the Control NCA.
 // Needs prod.keys, since the content type is in the encrypted header.
 async function showTitleCard(): Promise<ControlInfo | null> {
-  let control: { info: ControlInfo; icon: Bytes | null };
+  let control: ControlData;
   try {
     control = await call('loadControl');
   } catch (err) {

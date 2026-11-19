@@ -1,7 +1,7 @@
 // Booting from the stage: the Open buttons and file drops. Executables load
 // directly; containers go to `container.ts`. The format comes from the header.
 
-import type { ControlInfo } from '../shared/protocol';
+import type { ControlData } from '../shared/protocol';
 import { bootContainer } from './container';
 import { $, pickedFile } from './dom';
 import { classify } from './filetype';
@@ -59,14 +59,14 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
 
 // An NRO's icon and name from its asset section, falling back to the file name.
 async function homebrewTitle(filename: string): Promise<RunningTitle> {
-  let info: ControlInfo;
+  let control: ControlData;
   try {
-    info = JSON.parse(await call('controlJson')) as ControlInfo;
+    control = await call('control');
   } catch (err) {
     log('No homebrew details: ' + (err as Error).message, 'debug');
     return { name: filename, publisher: '', icon: null, version: '' };
   }
-  const icon = info.icon_size > 0 ? await call('controlIcon') : null;
+  const { info, icon } = control;
   return {
     name: info.name || filename,
     publisher: info.publisher || '',

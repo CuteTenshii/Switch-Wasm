@@ -1,7 +1,7 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
+  CommandHandlers, ControlData, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
   OpenedContainer,
 } from '../shared/protocol';
 import { noteRegistered } from './activity';
@@ -24,6 +24,11 @@ import {
 import { pauseLoop, startLoop, stopLoop } from './loop';
 import { STORAGE } from './storage';
 import { core, parseOr } from './wasm';
+
+function cachedControl(): ControlData {
+  const info = JSON.parse(switch_control_json()) as ControlInfo;
+  return { info, icon: info.icon_size > 0 ? switch_control_icon() : null };
+}
 
 export const CMD = {
   endTitle() {
@@ -78,11 +83,10 @@ export const CMD = {
   },
 
   async loadControl() {
-    const info = JSON.parse(await switch_load_control()) as ControlInfo;
-    return { info, icon: info.icon_size > 0 ? switch_control_icon() : null };
+    await switch_load_control();
+    return cachedControl();
   },
-  controlJson: switch_control_json,
-  controlIcon: switch_control_icon,
+  control: cachedControl,
 
   run(budget) {
     return switch_run(budget);

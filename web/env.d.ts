@@ -88,8 +88,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_control_json(): string;
   export function switch_control_icon(): Uint8Array<ArrayBuffer>;
   export function switch_load_keys(prod: Uint8Array | null, title: Uint8Array | null): void;
-  // The control data as JSON, once read and stored.
-  export function switch_load_control(): Promise<string>;
+  export function switch_load_control(): Promise<void>;
   // `boot.rs` and `nand.rs`: the entry address; they throw the reason when a program will not boot.
   export function switch_load_program(file: Blob): Promise<number>;
   export function switch_load_sd(path: string): number;

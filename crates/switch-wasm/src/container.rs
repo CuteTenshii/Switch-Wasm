@@ -309,12 +309,11 @@ pub fn switch_inspect_nca(index: Option<u32>) -> String {
 
 /// Read and cache the open container's Control NCA (the one in its file table, or the
 /// container itself when it was opened as a standalone NCA), keep its NACP for the
-/// container's launches, store it for the next session's `ns`, and return it as
-/// [`switch_control_json`] does. Fails with the reason when there is none readable
-/// (including when no `prod.keys` are loaded).
+/// container's launches, and store it for the next session's `ns`. Fails with the reason
+/// when there is none readable (including when no `prod.keys` are loaded).
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub async fn switch_load_control() -> Result<String, String> {
+pub async fn switch_load_control() -> Result<(), String> {
     let s = session();
     s.control = None;
     let container = container(s)?;
@@ -341,7 +340,7 @@ pub async fn switch_load_control() -> Result<String, String> {
     s.container_nacp = Some(control.nacp.clone());
     s.control = Some(control);
     crate::idb::controls::remember().await;
-    Ok(switch_control_json())
+    Ok(())
 }
 
 /// The cached control data as JSON, or `{}`. `icon_size` is the length of `switch_control_icon`.
