@@ -1686,7 +1686,7 @@ mod tests {
             header(1, 1, 1, LINE_LENGTH_IN),
             4,
             header(1, 1, 1, LAUNCH_DMA),
-            (1 << 7) | (1 << 8),
+            2 | (1 << 7) | (1 << 8),
         ];
         for (i, &word) in words.iter().enumerate() {
             mem.write_u32(0x3000_0000 + i as u32 * 4, word).unwrap();
