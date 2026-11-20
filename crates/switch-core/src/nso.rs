@@ -61,29 +61,48 @@ fn read_segment(data: &[u8], at: usize) -> RawSegment {
     }
 }
 
-/// `VammManagerImplByHorizon::Initialize`'s two `movz wN, #0x3fe0, lsl #16`, each with the
-/// instructions that pin it down.
-const VAMM_ARENA_SITES: [[u32; 4]; 2] = [
+/// The two instructions that load the SDK's arena size, 0x3fe00000, each with the instructions
+/// that pin it down: `movz wN, #0x3fe0, lsl #16` in `VammManagerImplByHorizon::Initialize`,
+/// `orr w9, wzr, #0x3fe00000` in older SDKs' `AddressRegionManager` constructor.
+const VAMM_ARENA_SITES: [[u32; 4]; 4] = [
     // movz w8; mov x21, x0; movz w9, #0x1000; add x8, x1, x8
     [0x52a7_fc08, 0xaa00_03f5, 0x5282_0009, 0x8b08_0028],
     // movz w9; mov x1, x0; stp x8, x9, [x0, #0x20]; mov x0, x19
     [0x52a7_fc09, 0xaa00_03e1, 0xa902_2408, 0xaa13_03e0],
+    // orr w9; mov x8, x1; mov x19, x0; mov x21, x0
+    [0x320b_23e9, 0xaa01_03e8, 0xaa00_03f3, 0xaa00_03f5],
+    // orr w9; mov x1, x0; stp x8, x9, [x0, #0x20]; mov x0, x19
+    [0x320b_23e9, 0xaa00_03e1, 0xa902_2408, 0xaa13_03e0],
 ];
 
-/// Shrink the SDK's Vamm bookkeeping arena to [`crate::kernel::layout::VAMM_ARENA_SIZE`].
-fn shrink_vamm_arena(text: &mut [u8]) {
+/// Paper Mario: The Origami King's `nninitStartup` reserving 62 GiB through
+/// `StandardAllocator::Initialize`: `orr x2, xzr, #0xf80000000` with its neighbours.
+const TITLE_RESERVATION_SITE: [u32; 4] = [0xb261_13e2, 0xa900_2309, 0xaa13_03e0, 0xa941_a7e8];
+
+/// Replace the first word of the first run of `site` in `text` with `with(site[0])`.
+fn rewrite_site(text: &mut [u8], site: &[u32; 4], with: impl Fn(u32) -> u32) {
     let word = |text: &[u8], at: usize| u32::from_le_bytes(text[at..at + 4].try_into().unwrap());
-    let imm16 = crate::kernel::layout::VAMM_ARENA_SIZE >> 16;
-    for site in VAMM_ARENA_SITES {
-        let Some(at) = (0..text.len().saturating_sub(16))
-            .step_by(4)
-            .find(|&at| (0..4).all(|i| word(text, at + 4 * i) == site[i]))
-        else {
-            continue;
-        };
-        let movz = (site[0] & !(0xffff << 5)) | (imm16 << 5);
-        text[at..at + 4].copy_from_slice(&movz.to_le_bytes());
+    let Some(at) = (0..text.len().saturating_sub(16))
+        .step_by(4)
+        .find(|&at| (0..4).all(|i| word(text, at + 4 * i) == site[i]))
+    else {
+        return;
+    };
+    text[at..at + 4].copy_from_slice(&with(site[0]).to_le_bytes());
+}
+
+/// Shrink the SDK's Vamm bookkeeping arena to [`crate::kernel::layout::VAMM_ARENA_SIZE`] and a
+/// title's own reservation to [`crate::kernel::layout::VAMM_TITLE_RESERVATION_SIZE`].
+fn shrink_vamm_reservations(text: &mut [u8]) {
+    use crate::kernel::layout::{VAMM_ARENA_SIZE, VAMM_TITLE_RESERVATION_SIZE};
+    for site in &VAMM_ARENA_SITES {
+        rewrite_site(text, site, |old| {
+            0x52a0_0000 | ((VAMM_ARENA_SIZE >> 16) << 5) | (old & 0x1f)
+        });
     }
+    rewrite_site(text, &TITLE_RESERVATION_SITE, |old| {
+        0xd2a0_0000 | ((VAMM_TITLE_RESERVATION_SIZE >> 16) << 5) | (old & 0x1f)
+    });
 }
 
 /// Load an NSO0 image into `mem` at `base`, decompressing LZ4 segments.
@@ -139,7 +158,7 @@ pub fn load_nso(mem: &Memory, data: &[u8], base: u32) -> Result<LoadedNso> {
     )?;
 
     let mut text_bytes = text_bytes;
-    shrink_vamm_arena(&mut text_bytes);
+    shrink_vamm_reservations(&mut text_bytes);
     mem.map(text_addr, &text_bytes)?;
     mem.map(ro_addr, &ro_bytes)?;
     mem.map(data_addr, &data_bytes)?;
@@ -216,17 +235,36 @@ mod tests {
     fn the_sdk_vamm_arena_is_shrunk_where_its_instructions_match_exactly() {
         let words = |ws: &[u32]| ws.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>();
         let mut text = words(&[0xd503_201f]);
-        text.extend(words(&VAMM_ARENA_SITES[0]));
-        text.extend(words(&VAMM_ARENA_SITES[1]));
+        for site in VAMM_ARENA_SITES {
+            text.extend(words(&site));
+        }
         // The same movz without its neighbours is some other 0x3fe00000 and stays.
         text.extend(words(&[0x52a7_fc08, 0xd503_201f, 0xd503_201f, 0xd503_201f]));
-        shrink_vamm_arena(&mut text);
+        shrink_vamm_reservations(&mut text);
         let word = |i: usize| u32::from_le_bytes(text[4 * i..4 * i + 4].try_into().unwrap());
         // movz w8 / w9, #0x200, lsl #16: 32 MiB.
         assert_eq!(word(1), 0x52a0_4008);
         assert_eq!(word(5), 0x52a0_4009);
-        assert_eq!(word(9), 0x52a7_fc08, "unrelated constant");
+        assert_eq!(word(9), 0x52a0_4009);
+        assert_eq!(word(13), 0x52a0_4009);
+        assert_eq!(word(17), 0x52a7_fc08, "unrelated constant");
         assert_eq!(crate::kernel::layout::VAMM_ARENA_SIZE, 0x0200_0000);
+    }
+
+    #[test]
+    fn a_title_reservation_is_cut_where_its_instructions_match_exactly() {
+        let words = |ws: &[u32]| ws.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>();
+        let mut text = words(&TITLE_RESERVATION_SITE);
+        text.extend(words(&[0xb261_13e2, 0xd503_201f, 0xd503_201f, 0xd503_201f]));
+        shrink_vamm_reservations(&mut text);
+        let word = |i: usize| u32::from_le_bytes(text[4 * i..4 * i + 4].try_into().unwrap());
+        // movz x2, #0x8000, lsl #16: 2 GiB.
+        assert_eq!(word(0), 0xd2b0_0002);
+        assert_eq!(word(4), 0xb261_13e2, "unrelated constant");
+        assert_eq!(
+            crate::kernel::layout::VAMM_TITLE_RESERVATION_SIZE,
+            0x8000_0000
+        );
     }
 
     fn build_nso(text: &[u8], rodata: &[u8], data: &[u8], bss: u32) -> Vec<u8> {

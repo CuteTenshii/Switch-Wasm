@@ -124,6 +124,9 @@ pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
 /// The arena `VammManagerImplByHorizon` claims at the alias region base; an SDK constant.
 pub const VAMM_ARENA_SIZE: u32 = 0x0200_0000;
 
+/// What a title's own oversized Vamm reservation is cut to; above the memory it can commit.
+pub const VAMM_TITLE_RESERVATION_SIZE: u32 = 0x8000_0000;
+
 /// Layout for titles using virtual address memory: nearly everything is alias region.
 /// The heap region is unused here, so it is small.
 pub const VAMM_HEAP_REGION_SIZE: u32 = 0x0800_0000;
