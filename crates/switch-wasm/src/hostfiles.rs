@@ -349,7 +349,7 @@ pub(crate) fn read(file: u32, offset: u64, out: &mut [u8]) -> usize {
     if offset >= size || out.is_empty() {
         return 0;
     }
-    let want = out.len().min((size - offset) as usize);
+    let want = (out.len() as u64).min(size - offset) as usize;
     h.io(file).reads += 1;
     match h.read(file, size, offset, &mut out[..want]) {
         Ok(got) => {
