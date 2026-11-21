@@ -45,11 +45,13 @@ impl Cpu {
         self.refresh_memory_layout();
     }
 
-    /// Re-choose the layout from the program id and system resource size, set in either order.
-    fn refresh_memory_layout(&mut self) {
+    /// Re-choose the layout from the program id, system resource size and loaded code, set in
+    /// any order.
+    pub(crate) fn refresh_memory_layout(&mut self) {
         self.process_mut().memory_layout = MemoryLayout::for_program(
             self.process().program_id,
             self.process().system_resource_size,
+            self.process().heap_beside_vamm,
         );
     }
 

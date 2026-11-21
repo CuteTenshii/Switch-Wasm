@@ -1022,9 +1022,9 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
         MemoryLayout, OperationMode, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE,
         GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
         GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
-        GUEST_TOTAL_MEMORY_SIZE, MAIN_THREAD_TLS_BASE, SELF_RETURN_TRAMPOLINE, SHARED_BUFFER_ADDR,
-        SHARED_BUFFER_RESERVED_SIZE, STACK_SIZE, STACK_TOP, THREAD_EXIT_TRAMPOLINE,
-        THREAD_TLS_BASE, THREAD_TLS_STRIDE, VAMM_ARENA_SIZE,
+        GUEST_TOTAL_MEMORY_SIZE, HEAP_BESIDE_VAMM_HELD_BACK, MAIN_THREAD_TLS_BASE,
+        SELF_RETURN_TRAMPOLINE, SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE, STACK_SIZE,
+        STACK_TOP, THREAD_EXIT_TRAMPOLINE, THREAD_TLS_BASE, THREAD_TLS_STRIDE, VAMM_ARENA_SIZE,
     };
     use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
 
@@ -1114,6 +1114,35 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     assert_eq!(
         MemoryLayout::for_system_resource(0x0100_0000),
         MemoryLayout::VIRTUAL_ADDRESS
+    );
+
+    // Tears of the Kingdom's startup asks for exactly the heap region, and the alias region
+    // holds the arena and the memory it held back.
+    let split = MemoryLayout::HEAP_BESIDE_VAMM;
+    assert_eq!(split.heap_addr + split.heap_size, split.alias_addr);
+    assert!(split.alias_addr + split.alias_size <= SHARED_BUFFER_ADDR);
+    assert_eq!(
+        (split.total_memory - split.system_resource) - HEAP_BESIDE_VAMM_HELD_BACK,
+        split.heap_size
+    );
+    assert!(VAMM_ARENA_SIZE + HEAP_BESIDE_VAMM_HELD_BACK <= split.alias_size);
+    assert!(u64::from(split.total_memory) <= switch_core::mem::MAX_MAPPED_BYTES);
+    assert_ne!(
+        split.system_resource, 0,
+        "the title still uses the Vamm manager"
+    );
+    assert_eq!(
+        MemoryLayout::for_program(0, 0x0180_0000, true),
+        MemoryLayout::HEAP_BESIDE_VAMM
+    );
+    assert_eq!(
+        MemoryLayout::for_program(0, 0x0180_0000, false),
+        MemoryLayout::VIRTUAL_ADDRESS
+    );
+    assert_eq!(
+        MemoryLayout::for_program(0, 0, true),
+        MemoryLayout::PLAIN,
+        "without a system resource there is no Vamm to sit beside"
     );
 
     let vamm = MemoryLayout::VIRTUAL_ADDRESS;

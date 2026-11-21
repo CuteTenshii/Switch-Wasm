@@ -56,6 +56,8 @@ pub(crate) struct Process {
     pub(crate) memory_layout: MemoryLayout,
     /// Kept because the layout also depends on the program id, which may arrive later.
     pub(crate) system_resource_size: u32,
+    /// The loaded modules size a heap beside Vamm; see [`MemoryLayout::HEAP_BESIDE_VAMM`].
+    pub(crate) heap_beside_vamm: bool,
     /// Application proxy (told `FocusStateChanged`) vs applet (told `ChangeIntoForeground`).
     pub(crate) applet_is_application: bool,
     /// `ISelfController` auto-sleep settings, stored so getters read them back.
@@ -185,6 +187,7 @@ impl Process {
             save_data_quota: fs::SaveDataQuota::default(),
             memory_layout: MemoryLayout::PLAIN,
             system_resource_size: 0,
+            heap_beside_vamm: false,
             in_focus: true,
             applet_focus_announced: false,
             applet_is_application: true,

@@ -186,6 +186,16 @@ impl Cpu {
         if loaded.is_empty() {
             return Err(Error::Cpu("no modules to boot".into()));
         }
+        // Before the guest runs: `nnSdk` reads the regions with its first `svcGetInfo`.
+        let heap_beside_vamm = loaded.iter().any(|m| m.heap_beside_vamm);
+        if heap_beside_vamm {
+            self.log(
+                Level::Debug,
+                "[loader] the title sizes its own heap beside Vamm: heap and alias regions split the space",
+            );
+        }
+        self.process_mut().heap_beside_vamm = heap_beside_vamm;
+        self.refresh_memory_layout();
         Ok(loaded)
     }
 

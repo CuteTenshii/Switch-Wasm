@@ -144,6 +144,20 @@ pub const APPLET_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(APPLET_HEAP_REGION_SIZE);
 pub const APPLET_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR.wrapping_sub(APPLET_ALIAS_REGION_ADDR);
 
+/// Layout for titles that declare a system resource but size an `svcSetHeapSize` heap
+/// themselves, holding back [`HEAP_BESIDE_VAMM_HELD_BACK`] for the alias route. A console fits
+/// both in its 39-bit space; here the heap region and alias region split what is left.
+pub const HEAP_BESIDE_VAMM_HEAP_REGION_SIZE: u32 = 0x8000_0000;
+pub const HEAP_BESIDE_VAMM_ALIAS_REGION_ADDR: u32 =
+    GUEST_HEAP_REGION_ADDR.wrapping_add(HEAP_BESIDE_VAMM_HEAP_REGION_SIZE);
+pub const HEAP_BESIDE_VAMM_ALIAS_REGION_SIZE: u32 =
+    SHARED_BUFFER_ADDR.wrapping_sub(HEAP_BESIDE_VAMM_ALIAS_REGION_ADDR);
+/// What Tears of the Kingdom's `nninitStartup` subtracts from `TotalNonSystemMemorySize`.
+pub const HEAP_BESIDE_VAMM_HELD_BACK: u32 = 0x4380_0000;
+/// Reported so the title's heap comes out exactly as large as the heap region.
+pub const HEAP_BESIDE_VAMM_TOTAL_MEMORY_SIZE: u32 =
+    HEAP_BESIDE_VAMM_HEAP_REGION_SIZE + HEAP_BESIDE_VAMM_HELD_BACK + VAMM_SYSTEM_RESOURCE_SIZE;
+
 /// The address space a process is given, selected by its NPDM system resource size:
 /// `nnSdk` uses the Vamm manager exactly when `SystemResourceSizeTotal` is nonzero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +203,16 @@ impl MemoryLayout {
         system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
     };
 
+    /// Titles whose startup code sizes a heap beside the Vamm manager's alias reservations.
+    pub const HEAP_BESIDE_VAMM: MemoryLayout = MemoryLayout {
+        heap_addr: GUEST_HEAP_REGION_ADDR,
+        heap_size: HEAP_BESIDE_VAMM_HEAP_REGION_SIZE,
+        alias_addr: HEAP_BESIDE_VAMM_ALIAS_REGION_ADDR,
+        alias_size: HEAP_BESIDE_VAMM_ALIAS_REGION_SIZE,
+        total_memory: HEAP_BESIDE_VAMM_TOTAL_MEMORY_SIZE,
+        system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
+    };
+
     /// Zero (or no readable manifest) selects the plain layout.
     pub fn for_system_resource(size: u32) -> MemoryLayout {
         if size == 0 {
@@ -198,10 +222,14 @@ impl MemoryLayout {
         }
     }
 
-    /// [`Self::for_system_resource`], except library applets get [`Self::APPLET`].
-    pub fn for_program(program_id: u64, size: u32) -> MemoryLayout {
+    /// [`Self::for_system_resource`], except library applets get [`Self::APPLET`] and a title
+    /// whose loaded code sizes its own heap beside Vamm gets [`Self::HEAP_BESIDE_VAMM`].
+    pub fn for_program(program_id: u64, size: u32, heap_beside_vamm: bool) -> MemoryLayout {
         if size != 0 && crate::services::am::is_library_applet(program_id) {
             return MemoryLayout::APPLET;
+        }
+        if size != 0 && heap_beside_vamm {
+            return MemoryLayout::HEAP_BESIDE_VAMM;
         }
         MemoryLayout::for_system_resource(size)
     }

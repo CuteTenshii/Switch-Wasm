@@ -45,6 +45,9 @@ pub struct LoadedNso {
     pub data: Segment,
     pub bss_size: u32,
     pub build_id: [u8; 0x20],
+    /// The module's own startup sizes a heap beside its Vamm arena; see
+    /// [`crate::cpu::MemoryLayout::HEAP_BESIDE_VAMM`].
+    pub heap_beside_vamm: bool,
 }
 
 struct RawSegment {
@@ -79,16 +82,24 @@ const VAMM_ARENA_SITES: [[u32; 4]; 4] = [
 /// `StandardAllocator::Initialize`: `orr x2, xzr, #0xf80000000` with its neighbours.
 const TITLE_RESERVATION_SITE: [u32; 4] = [0xb261_13e2, 0xa900_2309, 0xaa13_03e0, 0xa941_a7e8];
 
+/// The Legend of Zelda: Tears of the Kingdom's `nninitStartup`, which declares a system resource
+/// yet sizes an `svcSetHeapSize` heap as `TotalNonSystemMemorySize` less 1080 MiB:
+/// `movz w2, #0x4380, lsl #16; movz w19, #0x90, lsl #16; movz x5, #0x7340, lsl #16; movk x5, #1, lsl #32`.
+const HEAP_BESIDE_VAMM_SITE: [u32; 4] = [0x52a8_7002, 0x52a0_1213, 0xd2ae_6805, 0xf2c0_0025];
+
+/// Where the first run of `site` starts in `text`.
+fn find_site(text: &[u8], site: &[u32; 4]) -> Option<usize> {
+    let word = |at: usize| u32::from_le_bytes(text[at..at + 4].try_into().unwrap());
+    (0..text.len().saturating_sub(16))
+        .step_by(4)
+        .find(|&at| (0..4).all(|i| word(at + 4 * i) == site[i]))
+}
+
 /// Replace the first word of the first run of `site` in `text` with `with(site[0])`.
 fn rewrite_site(text: &mut [u8], site: &[u32; 4], with: impl Fn(u32) -> u32) {
-    let word = |text: &[u8], at: usize| u32::from_le_bytes(text[at..at + 4].try_into().unwrap());
-    let Some(at) = (0..text.len().saturating_sub(16))
-        .step_by(4)
-        .find(|&at| (0..4).all(|i| word(text, at + 4 * i) == site[i]))
-    else {
-        return;
-    };
-    text[at..at + 4].copy_from_slice(&with(site[0]).to_le_bytes());
+    if let Some(at) = find_site(text, site) {
+        text[at..at + 4].copy_from_slice(&with(site[0]).to_le_bytes());
+    }
 }
 
 /// Shrink the SDK's Vamm bookkeeping arena to [`crate::kernel::layout::VAMM_ARENA_SIZE`] and a
@@ -159,6 +170,7 @@ pub fn load_nso(mem: &Memory, data: &[u8], base: u32) -> Result<LoadedNso> {
 
     let mut text_bytes = text_bytes;
     shrink_vamm_reservations(&mut text_bytes);
+    let heap_beside_vamm = find_site(&text_bytes, &HEAP_BESIDE_VAMM_SITE).is_some();
     mem.map(text_addr, &text_bytes)?;
     mem.map(ro_addr, &ro_bytes)?;
     mem.map(data_addr, &data_bytes)?;
@@ -192,6 +204,7 @@ pub fn load_nso(mem: &Memory, data: &[u8], base: u32) -> Result<LoadedNso> {
         },
         bss_size,
         build_id,
+        heap_beside_vamm,
     })
 }
 
@@ -264,6 +277,34 @@ mod tests {
         assert_eq!(
             crate::kernel::layout::VAMM_TITLE_RESERVATION_SIZE,
             0x8000_0000
+        );
+    }
+
+    #[test]
+    fn a_heap_beside_vamm_is_flagged_only_where_the_startup_matches_exactly() {
+        let words = |ws: &[u32]| ws.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>();
+        let mut text = words(&[0xd503_201f]);
+        text.extend(words(&HEAP_BESIDE_VAMM_SITE));
+        text.extend(words(&[0xd503_201f; 4]));
+        let mem = Memory::new();
+        assert!(
+            load_nso(&mem, &build_nso(&text, &[], &[], 0), NSO_BASE)
+                .unwrap()
+                .heap_beside_vamm
+        );
+        // The same 0x43800000 without its neighbours is some other constant.
+        let text = words(&[
+            0x52a8_7002,
+            0xd503_201f,
+            0xd503_201f,
+            0xd503_201f,
+            0xd503_201f,
+        ]);
+        let mem = Memory::new();
+        assert!(
+            !load_nso(&mem, &build_nso(&text, &[], &[], 0), NSO_BASE)
+                .unwrap()
+                .heap_beside_vamm
         );
     }
 

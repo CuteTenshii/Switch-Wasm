@@ -123,6 +123,7 @@ mod tests {
             MemoryLayout::PLAIN,
             MemoryLayout::VIRTUAL_ADDRESS,
             MemoryLayout::APPLET,
+            MemoryLayout::HEAP_BESIDE_VAMM,
         ] {
             let mut ranges: Vec<_> = Region::ALL.iter().map(|r| r.range(&layout)).collect();
             ranges.sort_unstable();
