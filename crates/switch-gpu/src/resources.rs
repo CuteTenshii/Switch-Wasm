@@ -368,8 +368,8 @@ impl Gpu {
 
     pub(super) fn release_scratch(&mut self) {
         if self.batch.is_some() {
-            // Recorded draws still use it, unless they are submitted first: Breath of the Wild
-            // makes a fresh 32 MiB copy of a held array in each of a pass's hundreds of draws.
+            // Recorded draws still use it, unless they are submitted first: a pass of hundreds of
+            // draws can each leave a large stale copy behind.
             let pending: u64 = self.scratch.iter().map(Scratch::bytes).sum();
             if pending < crate::MAX_SCRATCH_BYTES {
                 return;

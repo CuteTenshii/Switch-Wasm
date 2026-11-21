@@ -2342,3 +2342,284 @@ fn scratch_counts_every_level_of_a_compressed_texture() {
         (4 + 1 + 1 + 1) * 8
     );
 }
+
+/// A kept copy of a held array, one of whose layers was drawn again, takes only that layer, after
+/// the work recorded before it, which still reads the layer as it was.
+#[test]
+fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
+    use crate::HeldLayer;
+    use switch_core::gpu::engine::threed::ShaderStage;
+    use switch_core::gpu::pipeline::Format;
+    use switch_core::gpu::surface::Layout;
+    use switch_core::gpu::texture::{Sampler, SwizzleSource, TextureSlot, Wrap};
+    use switch_core::gpu::upload::{TextureKey, TextureUpload};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    const SIDE: u32 = 4;
+    // A texture-buffer copy pads each row to this.
+    const ROW: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let format = Format::Rgba8Unorm;
+    let upload = TextureUpload {
+        stage: ShaderStage::Fragment,
+        slot: TextureSlot::Bound(0),
+        handle: 0,
+        format,
+        width: SIDE,
+        height: SIDE,
+        layers: 2,
+        row_bytes: SIDE * 4,
+        rows: SIDE,
+        bytes: std::sync::Arc::from(vec![0u8; (SIDE * SIDE * 4 * 2) as usize]),
+        key: TextureKey {
+            addr: 0x1_0000,
+            width: SIDE,
+            height: SIDE,
+            layers: 2,
+            layer_stride: SIDE * SIDE * 4,
+            row_bytes: SIDE * 4,
+            rows: SIDE,
+            block_depth_gobs: 1,
+            layout: Layout::Pitch { pitch: SIDE * 4 },
+            format,
+            srgb: false,
+        },
+        source_len: u64::from(SIDE * SIDE * 4 * 2),
+        swizzle: [
+            SwizzleSource::R,
+            SwizzleSource::G,
+            SwizzleSource::B,
+            SwizzleSource::A,
+        ],
+        sampler: Sampler {
+            wrap_u: Wrap::ClampToEdge,
+            wrap_v: Wrap::ClampToEdge,
+            wrap_w: Wrap::ClampToEdge,
+            mag_linear: false,
+            min_linear: false,
+            compare: None,
+        },
+    };
+    let extent = wgpu::Extent3d {
+        width: SIDE,
+        height: SIDE,
+        depth_or_array_layers: 1,
+    };
+    let fill = |gpu: &crate::Gpu, texture: &wgpu::Texture, byte: u8| {
+        gpu.queue.write_texture(
+            texture.as_image_copy(),
+            &vec![byte; (SIDE * SIDE * 4) as usize],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(SIDE * 4),
+                rows_per_image: Some(SIDE),
+            },
+            extent,
+        );
+    };
+    let surface = |gpu: &crate::Gpu, byte: u8| {
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("held layer"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        fill(gpu, &texture, byte);
+        texture
+    };
+    let readback = |gpu: &crate::Gpu| {
+        gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("layer readback"),
+            size: u64::from(ROW),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    };
+    // Read a layer's first texel as a draw sampling the copy would: the copy is never a copy source.
+    let copy_layer = |gpu: &crate::Gpu,
+                      encoder: &mut wgpu::CommandEncoder,
+                      texture: &wgpu::Texture,
+                      layer: u32,
+                      buffer: &wgpu::Buffer| {
+        let module = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("layer texel"),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!(
+                        "@group(0) @binding(0) var image: texture_2d_array<f32>;
+                         @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {{
+                           let corners = array(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                           return vec4(corners[i], 0.0, 1.0);
+                         }}
+                         @fragment fn fs() -> @location(0) vec4<f32> {{
+                           return textureLoad(image, vec2(0i, 0i), {layer}i, 0i);
+                         }}"
+                    )
+                    .into(),
+                ),
+            });
+        let pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("layer texel"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("layer texel"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            }],
+        });
+        let pixel = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("layer texel"),
+            size: pixel,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("layer texel"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(ROW),
+                    rows_per_image: Some(1),
+                },
+            },
+            pixel,
+        );
+    };
+    let first_texel = |gpu: &crate::Gpu, buffer: &wgpu::Buffer| {
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.expect("the readback"));
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the device");
+        let texel = buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("the mapped readback")[..4]
+            .to_vec();
+        texel
+    };
+
+    let (below, drawn) = (surface(&gpu, 0x11), surface(&gpu, 0x22));
+    let held = [
+        (0, HeldLayer::Colour(below.clone())),
+        (1, HeldLayer::Colour(drawn.clone())),
+    ];
+    let view = wgpu::TextureViewDimension::D2Array;
+    let copy = gpu
+        .texture_over_held(&upload, view, &held, &[1, 1], false)
+        .expect("the first copy");
+    let made = gpu.held_copies_made;
+
+    // Work recorded before the layer is drawn again, as an earlier draw sampling the copy is.
+    let mut earlier = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    let before = readback(&gpu);
+    copy_layer(&gpu, &mut earlier, &copy, 1, &before);
+    gpu.batch = Some(earlier);
+    fill(&gpu, &drawn, 0x33);
+    let again = gpu
+        .texture_over_held(&upload, view, &held, &[1, 2], false)
+        .expect("the update");
+    assert!(again == copy, "a new copy was made for one written layer");
+    assert_eq!(gpu.held_copies_made, made);
+    assert_eq!(gpu.held_copies_updated, 1);
+    assert!(gpu.batch.is_none(), "the earlier work was left unsubmitted");
+
+    let after = [readback(&gpu), readback(&gpu)];
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    for (layer, buffer) in after.iter().enumerate() {
+        copy_layer(&gpu, &mut encoder, &copy, layer as u32, buffer);
+    }
+    gpu.queue.submit([encoder.finish()]);
+    assert_eq!(
+        first_texel(&gpu, &before),
+        [0x22; 4],
+        "earlier work saw the update"
+    );
+    assert_eq!(
+        first_texel(&gpu, &after[0]),
+        [0x11; 4],
+        "the unwritten layer changed"
+    );
+    assert_eq!(
+        first_texel(&gpu, &after[1]),
+        [0x33; 4],
+        "the written layer is stale"
+    );
+
+    // The same sources again are the same copy, untouched.
+    let reused = gpu.held_copies_reused;
+    gpu.texture_over_held(&upload, view, &held, &[1, 2], false)
+        .expect("the reuse");
+    assert_eq!(gpu.held_copies_reused, reused + 1);
+}

@@ -861,8 +861,10 @@ impl Gpu {
 
     /// Upload a texture, then copy the held layers over it. When the held layers are the whole
     /// texture, guest memory is not read and the copy is kept until a source is written: a
-    /// title samples one shadow map in hundreds of draws.
-    fn texture_over_held(
+    /// title samples one shadow map in hundreds of draws. A kept copy whose sources were only
+    /// written or added to takes just those layers: Breath of the Wild draws an array layer by
+    /// layer, sampling it after every draw.
+    pub(super) fn texture_over_held(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
@@ -882,18 +884,6 @@ impl Gpu {
             .map(|((layer, surface), &writes)| (*layer, surface.surface().clone(), writes))
             .collect();
         let guest = (!covered).then(|| upload.bytes.clone());
-        if let Some(copy) = self.space.held_copies.get(&key) {
-            let same_guest = match (&copy.guest, &guest) {
-                (None, None) => true,
-                (Some(was), Some(now)) => std::sync::Arc::ptr_eq(was, now),
-                _ => false,
-            };
-            if copy.sources == sources && same_guest {
-                self.held_copies_reused += 1;
-                return Ok(copy.texture.clone());
-            }
-        }
-        self.held_copies_made += 1;
         let depths: Vec<(u32, wgpu::Texture)> = held
             .iter()
             .filter_map(|(layer, surface)| match surface {
@@ -903,6 +893,44 @@ impl Gpu {
             .collect();
         let (_, widening) =
             sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
+        // Packed depth is converted from the whole image at once, so no layer can be redone alone.
+        let by_layer = depths.is_empty() && widening != Widen::PackedDepth;
+        let mut update = None;
+        if let Some(copy) = self.space.held_copies.get(&key) {
+            let same_guest = match (&copy.guest, &guest) {
+                (None, None) => true,
+                (Some(was), Some(now)) => std::sync::Arc::ptr_eq(was, now),
+                _ => false,
+            };
+            if same_guest && copy.sources == sources {
+                self.held_copies_reused += 1;
+                return Ok(copy.texture.clone());
+            }
+            if same_guest && by_layer {
+                update = stale_layers(&copy.sources, &sources, compare)
+                    .map(|layers| (copy.texture.clone(), layers));
+            }
+        }
+        if let Some((texture, layers)) = update {
+            let stale: Vec<(u32, HeldLayer)> = held
+                .iter()
+                .filter(|(layer, _)| layers.contains(layer))
+                .cloned()
+                .collect();
+            // Draws recorded before this are submitted first, so they still sample the old layers.
+            if let Err(why) = self.fill_held_layers(&texture, upload, &stale, false) {
+                if let Some(copy) = self.space.held_copies.remove(&key) {
+                    self.scratch.push(Scratch::Texture(copy.texture));
+                }
+                return Err(why);
+            }
+            self.held_copies_updated += 1;
+            if let Some(copy) = self.space.held_copies.get_mut(&key) {
+                copy.sources = sources;
+            }
+            return Ok(texture);
+        }
+        self.held_copies_made += 1;
         // `held_layers` lets these through only as the single layer of a 2D image.
         let packed_words = match held {
             [(0, HeldLayer::Bytes(surface))] if widening == Widen::PackedDepth => Some(surface),
@@ -951,14 +979,46 @@ impl Gpu {
         } else {
             self.upload_texture(upload, view, None, &depths)?.0
         };
+        if let Err(why) = self.fill_held_layers(&texture, upload, held, packed_words.is_some()) {
+            self.scratch.push(Scratch::Texture(texture));
+            return Err(why);
+        }
+        if self.space.held_copies.len() >= crate::MAX_HELD_COPIES {
+            let stale: Vec<HeldCopy> = self
+                .space
+                .held_copies
+                .drain()
+                .map(|(_, copy)| copy)
+                .collect();
+            self.scratch
+                .extend(stale.into_iter().map(|copy| Scratch::Texture(copy.texture)));
+        }
+        let copy = HeldCopy {
+            texture: texture.clone(),
+            sources,
+            guest,
+        };
+        if let Some(stale) = self.space.held_copies.insert(key, copy) {
+            // A draw recorded before this one may still sample it.
+            self.scratch.push(Scratch::Texture(stale.texture));
+        }
+        Ok(texture)
+    }
+
+    /// Fill `held`'s layers of `texture` from their surfaces, after the draws recorded so far.
+    /// `packed_words` leaves a packed depth image's words to [`Gpu::packed_depth_from_held`].
+    fn fill_held_layers(
+        &mut self,
+        texture: &wgpu::Texture,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        held: &[(u32, HeldLayer)],
+        packed_words: bool,
+    ) -> std::result::Result<(), String> {
         let mut unorm_depths = Vec::new();
         for (layer, surface) in held {
             match surface {
                 HeldLayer::ShadowCorner(surface) => {
-                    if let Err(why) = self.draw_shadow_corner(&texture, *layer, surface) {
-                        self.scratch.push(Scratch::Texture(texture));
-                        return Err(why);
-                    }
+                    self.draw_shadow_corner(texture, *layer, surface)?;
                 }
                 HeldLayer::UnormDepth(surface) => {
                     unorm_depths.push(self.depth_to_colour(surface, texture.format()));
@@ -979,7 +1039,7 @@ impl Gpu {
         };
         for (layer, surface) in held {
             let into = wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: 0,
@@ -999,7 +1059,7 @@ impl Gpu {
                     encoder.copy_texture_to_texture(colour.as_image_copy(), into, extent);
                     self.scratch.push(Scratch::Texture(colour));
                 }
-                HeldLayer::Bytes(_) if packed_words.is_some() => {}
+                HeldLayer::Bytes(_) if packed_words => {}
                 HeldLayer::Bytes(surface) => {
                     self.copy_through_buffer(&mut encoder, surface, into, extent);
                 }
@@ -1050,26 +1110,7 @@ impl Gpu {
             }
         }
         self.submit_with_batch(encoder);
-        if self.space.held_copies.len() >= crate::MAX_HELD_COPIES {
-            let stale: Vec<HeldCopy> = self
-                .space
-                .held_copies
-                .drain()
-                .map(|(_, copy)| copy)
-                .collect();
-            self.scratch
-                .extend(stale.into_iter().map(|copy| Scratch::Texture(copy.texture)));
-        }
-        let copy = HeldCopy {
-            texture: texture.clone(),
-            sources,
-            guest,
-        };
-        if let Some(stale) = self.space.held_copies.insert(key, copy) {
-            // A draw recorded before this one may still sample it.
-            self.scratch.push(Scratch::Texture(stale.texture));
-        }
-        Ok(texture)
+        Ok(())
     }
 
     /// Copy the top-left `extent` of a colour surface into `into` byte for byte, whatever the
@@ -1915,6 +1956,33 @@ pub(crate) fn volume_slice_addr(key: &TextureKey, z: u32) -> u64 {
 /// plain surface's are, so a held surface can stand in for it.
 pub(crate) fn slice_fits_one_gob(key: &TextureKey) -> bool {
     key.row_bytes <= GOB_WIDTH && key.rows <= GOB_HEIGHT
+}
+
+/// The layers of a kept copy whose sources `now` has written or added, when filling just those
+/// makes what a fresh copy would. Every surface it was made from must still be on its layer,
+/// and a shadow map gains none: its texture is chosen by what all its layers are.
+fn stale_layers(
+    was: &[(u32, wgpu::Texture, u64)],
+    now: &[(u32, wgpu::Texture, u64)],
+    compare: bool,
+) -> Option<Vec<u32>> {
+    let kept = |(layer, surface, _): &(u32, wgpu::Texture, u64)| {
+        now.iter()
+            .any(|(at, other, _)| at == layer && other == surface)
+    };
+    if !was.iter().all(kept) {
+        return None;
+    }
+    let mut stale = Vec::new();
+    for (layer, _, writes) in now {
+        match was.iter().find(|(at, _, _)| at == layer) {
+            Some((_, _, before)) if before == writes => {}
+            Some(_) => stale.push(*layer),
+            None if compare => return None,
+            None => stale.push(*layer),
+        }
+    }
+    Some(stale)
 }
 
 /// Whether a held colour surface's texels are the sampled image's texels in another format of

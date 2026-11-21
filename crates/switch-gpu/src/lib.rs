@@ -672,6 +672,8 @@ pub struct Gpu {
     /// Textures made from held surfaces, and draws that reused one still current.
     pub held_copies_made: u64,
     pub held_copies_reused: u64,
+    /// Kept copies brought up to date by copying in only the layers that changed.
+    pub held_copies_updated: u64,
     /// Bindings that sampled a padded held surface in place. See [`wgsl::Crop`].
     pub cropped_binds: u64,
     /// Compute launches run on the device, and why others went to the software dispatch.
@@ -740,7 +742,8 @@ impl Drop for Gpu {
         eprintln!(
             "[gpu] {} stage bind groups reused, {} built and kept, {} built for one draw \
              (held surface {}, shadow map {}, texture not kept {}, global {}); \
-             {} copies of held surfaces made, {} reused, {} corners sampled in place",
+             {} copies of held surfaces made, {} reused, {} updated by layer, {} corners \
+             sampled in place",
             self.bind_hits,
             self.bind_misses,
             self.bind_uncached,
@@ -750,6 +753,7 @@ impl Drop for Gpu {
             self.bind_uncached_why[3],
             self.held_copies_made,
             self.held_copies_reused,
+            self.held_copies_updated,
             self.cropped_binds,
         );
         eprintln!(
@@ -876,6 +880,7 @@ fn same_rows(surface: &Target, texture: &TextureKey) -> bool {
 }
 
 /// A held surface standing in for one layer of a sampled texture: see [`Gpu::held_layers`].
+#[derive(Clone)]
 enum HeldLayer {
     /// Copied texture to texture.
     Colour(wgpu::Texture),
@@ -1277,6 +1282,7 @@ impl Renderer for Gpu {
             .field("bindUncachedGlobal", self.bind_uncached_why[3])
             .field("heldCopiesMade", self.held_copies_made)
             .field("heldCopiesReused", self.held_copies_reused)
+            .field("heldCopiesUpdated", self.held_copies_updated)
             .field("croppedBinds", self.cropped_binds)
             .field("passesJoined", self.passes_joined)
             .field("buffersUploaded", self.buffers_uploaded)
