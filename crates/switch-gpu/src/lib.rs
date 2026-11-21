@@ -106,6 +106,9 @@ const MAX_GLOBAL: u64 = 8 << 20;
 /// Draws recorded before they are submitted anyway, which bounds the buffers they keep alive.
 const MAX_BATCHED_DRAWS: u32 = 256;
 
+/// Per-draw resources kept alive by unsubmitted draws before those draws are submitted anyway.
+const MAX_SCRATCH_BYTES: u64 = 256 << 20;
+
 /// A depth surface is cropped to the colour target beside it along each axis it is larger,
 /// as every draw does, since a pass's attachments must match in size.
 fn crop_depth(depth: Target, color: Option<Target>) -> Target {

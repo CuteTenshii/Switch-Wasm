@@ -2265,3 +2265,80 @@ fn a_draw_into_the_layer_set_rt_layer_picks_lands_there_on_the_device() {
     assert_eq!(ctx.read_u32(rt.addr + 0x2000).unwrap(), expected);
     assert_eq!(ctx.read_u32(rt.addr).unwrap(), 0);
 }
+
+/// Copies made for unsubmitted draws are submitted and freed once they pass
+/// `MAX_SCRATCH_BYTES`, rather than piling up until the frame ends.
+#[test]
+fn unsubmitted_draws_are_submitted_once_their_scratch_passes_the_budget() {
+    use crate::readback::Scratch;
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let array = |gpu: &crate::Gpu| {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scratch test"),
+            size: wgpu::Extent3d {
+                width: 1024,
+                height: 1024,
+                depth_or_array_layers: 8,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    };
+    let copy = Scratch::Texture(array(&gpu));
+    assert_eq!(copy.bytes(), 32 << 20);
+    gpu.batch = Some(
+        gpu.device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default()),
+    );
+    gpu.scratch.push(copy);
+    gpu.release_scratch();
+    assert!(gpu.batch.is_some(), "submitted under the budget");
+    assert_eq!(gpu.scratch.len(), 1);
+    while gpu.scratch.len() as u64 * (32 << 20) < crate::MAX_SCRATCH_BYTES {
+        gpu.scratch.push(Scratch::Texture(array(&gpu)));
+    }
+    gpu.release_scratch();
+    assert!(gpu.batch.is_none());
+    assert!(gpu.scratch.is_empty());
+}
+
+/// A mipmapped block-compressed texture counts each level in whole blocks.
+#[test]
+fn scratch_counts_every_level_of_a_compressed_texture() {
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    if !gpu
+        .device
+        .features()
+        .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+    {
+        return;
+    }
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scratch test"),
+        size: wgpu::Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 4,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Bc1RgbaUnorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    // 8x8, 4x4, 2x2 and 1x1 are four blocks, then one each, at 8 bytes a block.
+    assert_eq!(
+        crate::readback::Scratch::Texture(texture).bytes(),
+        (4 + 1 + 1 + 1) * 8
+    );
+}
