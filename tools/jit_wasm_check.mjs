@@ -34,8 +34,9 @@ const A32_PROGRAMS = [
       0xe0c55004, // sbc  r5, r5, r4
       0xe12fff1e, // bx   lr
     ],
-    steps: 8001n,
-    expect: { 0: 1000n },
+    // Eight instructions a trip, past HOT trips: 320001 steps is 40000 trips plus one.
+    steps: 320001n,
+    expect: { 0: 40000n },
   },
   {
     name: 'A32 loads and stores: write-back, halfwords, multiples, a skipped add',
@@ -57,8 +58,9 @@ const A32_PROGRAMS = [
       0xe8b10180, // ldmia r1!, {r7, r8}
       0xe12fff1e, // bx    lr
     ],
-    steps: 14001n,
-    expect: { 0: 1000n },
+    // Fourteen instructions a trip: 560001 steps is 40000 trips plus one.
+    steps: 560001n,
+    expect: { 0: 40000n },
   },
   {
     name: 'A32 calls and returns, through conditional branches and links',
@@ -79,7 +81,8 @@ const A32_PROGRAMS = [
       0x112fff1e, //     bxne lr
       0xe12fff1e, //     bx   lr
     ],
-    steps: 20001n,
+    // Eleven instructions a trip.
+    steps: 440001n,
     expect: {},
   },
   {
@@ -106,7 +109,8 @@ const A32_PROGRAMS = [
       0xe2866001, // add   r6, r6, #1
       0xe12fff1e, // bx    lr
     ],
-    steps: 17001n,
+    // Eighteen instructions a trip.
+    steps: 720001n,
     expect: {},
   },
   {
@@ -121,7 +125,8 @@ const A32_PROGRAMS = [
       0xe2822001, // add  r2, r2, #1
       0xe12fff1e, // bx   lr
     ],
-    steps: 4001n,
+    // r0 passes 100 once; then the loop is three instructions a trip.
+    steps: 130001n,
     expect: {},
   },
 ];
@@ -178,8 +183,9 @@ const PROGRAMS = [
       0x54ffffa1, // b.ne #-0xc          -> back to BASE
       0xd65f03c0, // ret  x30
     ],
-    // x0 passes 100 and never matches again: 4001 steps end with x0 = 1000.
-    expect: { 0: 1000n },
+    // x0 passes 100 and never matches again: 160001 steps end with x0 = 40000.
+    steps: 160001n,
+    expect: { 0: 40000n },
   },
   {
     name: 'a branch out of one block and into another',
@@ -193,8 +199,10 @@ const PROGRAMS = [
       0x91000463, // add  x3, x3, #1     -> the taken path, x0 even
       0xd65f03c0, // ret  x30
     ],
-    // Either path is five instructions: 4001 steps is 800 trips plus one.
-    expect: { 0: 800n, 2: 400n, 3: 400n },
+    // Either path is five instructions: 400001 steps is 80000 trips plus one, so each path
+    // runs HOT times.
+    steps: 400001n,
+    expect: { 0: 80000n, 2: 40000n, 3: 40000n },
   },
   {
     name: 'the clock, read in blocks that branch into each other',
@@ -211,9 +219,9 @@ const PROGRAMS = [
       0xd53be047, // mrs  x7, cntvct_el0
       0xd65f03c0, // ret  x30
     ],
-    // An odd and an even trip are fifteen instructions: 20001 steps is 1333 pairs and six more.
-    steps: 20001n,
-    expect: { 0: 2667n, 3: 1333n },
+    // An odd and an even trip are fifteen instructions: 600006 steps is 40000 pairs and six more.
+    steps: 600006n,
+    expect: { 0: 80001n, 3: 40000n },
   },
   {
     name: 'calls and returns',
@@ -230,8 +238,8 @@ const PROGRAMS = [
       0xd65f03c0, // ret
     ],
     // Nine instructions a trip; enough trips for each block to be compiled.
-    steps: 8001n,
-    expect: { 0: 889n, 2: 889n, 3: 889n },
+    steps: 360000n,
+    expect: { 0: 40000n, 2: 40000n, 3: 40000n },
   },
 ];
 
@@ -327,7 +335,8 @@ function elf32(program) {
   return file;
 }
 
-const STEPS = 4001n;
+// Past HOT trips of the longest default program, seven instructions a trip.
+const STEPS = 280001n;
 
 async function run(program, jit) {
   api.switch_init();

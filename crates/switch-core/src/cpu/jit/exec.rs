@@ -16,8 +16,9 @@ use crate::cpu::{Cpu, ExecMode, Layout, Result, RunReport, SELF_RETURN_TRAMPOLIN
 use std::rc::Rc;
 use std::sync::atomic::{fence, Ordering::SeqCst};
 
-/// Entries before a block is emitted as wasm.
-pub const HOT: u32 = 512;
+/// Entries before a block is emitted as wasm. A region costs the core's thread milliseconds of
+/// V8 compiling, which boot code that runs a few thousand times never pays back.
+pub const HOT: u32 = 32768;
 
 /// Hand-backs at a block's first instruction before its emitted form is dropped.
 pub(super) const MAX_MISSES: u16 = 8;
