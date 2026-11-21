@@ -404,7 +404,9 @@ try {
       path: resolve(traceSpec[1]),
       categories: [
         'toplevel', 'gpu', 'gpu.dawn', 'disabled-by-default-gpu.dawn', 'webgpu', 'ipc',
-        ...traceCpu ? ['disabled-by-default-v8.cpu_profiler'] : [],
+        ...traceCpu
+          ? ['disabled-by-default-v8.cpu_profiler', 'v8', 'v8.wasm', 'disabled-by-default-v8.gc']
+          : [],
       ],
     });
     await page.waitForTimeout(Number(traceSpec[3]) * 1000);
