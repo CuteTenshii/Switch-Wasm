@@ -991,6 +991,86 @@ fn a_handle_ored_with_a_register_is_refused() {
     );
 }
 
+/// Just Dance 2023's guard on a split handle: `@!p0 mov`, `@!p0 lop.or`, then `between`
+/// unguarded, then the sample under `sample_guard`.
+fn guarded_split_handle(between: Option<Op>, sample_guard: Pred) -> Vec<(Op, Pred)> {
+    let load_guard = Pred {
+        reg: 0,
+        negate: true,
+    };
+    let mut ops: Vec<(Op, Pred)> = split_handle(sampler_word(0x578))
+        .into_iter()
+        .map(|(op, _)| (op, load_guard))
+        .collect();
+    let (tex, _) = ops.pop().unwrap();
+    ops.extend(between.map(|op| (op, ALWAYS)));
+    ops.push((tex, sample_guard));
+    ops.push((Op::Exit, ALWAYS));
+    ops
+}
+
+const NOT_P0: Pred = Pred {
+    reg: 0,
+    negate: true,
+};
+
+#[test]
+fn a_handle_loaded_under_the_samples_own_guard_is_traced() {
+    let ops = guarded_split_handle(None, NOT_P0);
+    assert_eq!(
+        translate(&program(&ops)).unwrap().textures,
+        vec![(
+            TextureSlot::BindlessPair {
+                bank: 2,
+                offset: 0x168,
+                other_bank: 2,
+                other_offset: 0x578,
+            },
+            TexDim::T2d,
+            false
+        )]
+    );
+}
+
+#[test]
+fn a_handle_loaded_under_a_guard_rewritten_before_the_sample_is_refused() {
+    let isetp = |p0| Op::Isetp {
+        p0,
+        p1: Pred::PT,
+        a: 3,
+        b: Operand::Imm(1),
+        cmp: ICmp::Eq,
+        signed: true,
+        bop: BoolOp::And,
+        src: ALWAYS,
+        x: false,
+    };
+    // The sample can now run where the loads were skipped.
+    let ops = guarded_split_handle(Some(isetp(0)), NOT_P0);
+    assert_eq!(
+        translate(&program(&ops)).unwrap_err(),
+        Unsupported::UntracedHandle { at: 3 }
+    );
+    // Another predicate leaves the guard alone.
+    assert!(translate(&program(&guarded_split_handle(Some(isetp(1)), NOT_P0))).is_ok());
+}
+
+#[test]
+fn a_handle_loaded_under_another_guard_than_the_samples_is_refused() {
+    for sample_guard in [
+        ALWAYS,
+        Pred {
+            reg: 0,
+            negate: false,
+        },
+    ] {
+        assert_eq!(
+            translate(&program(&guarded_split_handle(None, sample_guard))).unwrap_err(),
+            Unsupported::UntracedHandle { at: 2 }
+        );
+    }
+}
+
 #[test]
 fn two_handles_keyed_by_one_first_word_are_refused() {
     // The same image word with two sampler words would share one sampling case.

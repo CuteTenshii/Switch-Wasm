@@ -655,6 +655,23 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
     out
 }
 
+/// Whether `op` may write predicate register `p`.
+pub(super) fn writes_pred(op: &Op, p: u8) -> bool {
+    match *op {
+        Op::Fsetp { p0, p1, .. }
+        | Op::Hsetp2 { p0, p1, .. }
+        | Op::Isetp { p0, p1, .. }
+        | Op::Psetp { p0, p1, .. }
+        | Op::Csetp { p0, p1, .. } => p0 == p || p1 == p,
+        Op::Lop { pred, .. } | Op::Lop3 { pred, .. } => pred.is_some_and(|(out, _)| out == p),
+        Op::Tld4 { sparse, .. } => sparse == p,
+        Op::Shfl { pred, .. } | Op::Vote { pred, .. } => pred == p,
+        // Its mask can be a register, so any predicate may be the one it writes.
+        Op::R2p { flags, .. } => !flags,
+        _ => false,
+    }
+}
+
 pub(super) fn writes(op: &Op) -> Vec<u8> {
     match *op {
         Op::Ld { dst, size, .. }

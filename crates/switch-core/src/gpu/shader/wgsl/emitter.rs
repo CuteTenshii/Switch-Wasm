@@ -326,30 +326,32 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// The unguarded instruction whose value `reg` holds at `at`: the one write
-    /// reaching it on every path, else the program's only write.
+    /// The instruction whose value `reg` holds at `at`: the one write reaching it on every
+    /// path, else the program's only write if unguarded. See [`Emitter::reaching_write`].
     fn sole_writer(&self, at: usize, reg: u8) -> Option<usize> {
         let writes_reg = |i: usize| super::interp::writes(&self.program.op(i)).contains(&reg);
-        let writer = match self.reaching_write(at, &writes_reg) {
-            Some(writer) => writer,
-            None => {
-                let mut writers = (0..self.program.len()).filter(|&i| i != at && writes_reg(i));
-                let only = writers.next()?;
-                if writers.next().is_some() {
-                    return None;
-                }
-                only
-            }
-        };
-        (self.program.pred(writer) == Pred::ALWAYS).then_some(writer)
+        if let Some(writer) = self.reaching_write(at, &writes_reg) {
+            return Some(writer);
+        }
+        let mut writers = (0..self.program.len()).filter(|&i| i != at && writes_reg(i));
+        let only = writers.next()?;
+        if writers.next().is_some() {
+            return None;
+        }
+        (self.program.pred(only) == Pred::ALWAYS).then_some(only)
     }
 
-    /// The single write every path to `at` ends on; `None` when paths disagree, a
-    /// write is guarded (it may not happen), or a path reaches the entry without one.
+    /// The single write every path to `at` ends on; `None` when paths disagree or a path
+    /// reaches the entry without one. A guarded write may not happen, so it counts only under
+    /// `at`'s own guard, which nothing from it to `at` may rewrite: `at` then runs only
+    /// where it ran.
     fn reaching_write(&self, at: usize, writes_reg: &dyn Fn(usize) -> bool) -> Option<usize> {
         if at == 0 {
             return None;
         }
+        let guard = self.program.pred(at);
+        let rewrites_guard = |i: usize| super::interp::writes_pred(&self.program.op(i), guard.reg);
+        let mut guard_kept = true;
         let mut found = None;
         let mut seen = BTreeSet::new();
         let mut pending = self.before.get(at)?.clone();
@@ -357,8 +359,10 @@ impl<'a> Emitter<'a> {
             if !seen.insert(i) {
                 continue;
             }
+            guard_kept &= !rewrites_guard(i);
             if writes_reg(i) {
-                if self.program.pred(i) != Pred::ALWAYS || found.is_some_and(|w| w != i) {
+                let pred = self.program.pred(i);
+                if (pred != Pred::ALWAYS && pred != guard) || found.is_some_and(|w| w != i) {
                     return None;
                 }
                 found = Some(i);
@@ -368,7 +372,7 @@ impl<'a> Emitter<'a> {
                 pending.extend_from_slice(&self.before[i]);
             }
         }
-        found
+        found.filter(|&writer| self.program.pred(writer) == Pred::ALWAYS || guard_kept)
     }
 
     /// The immediate `reg` holds at `at`. See [`Emitter::sole_writer`].
