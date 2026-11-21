@@ -101,7 +101,7 @@ const FIXED_TEXTURE_END: u16 = 0x3A0;
 pub struct Program {
     pub insns: Vec<Instruction>,
     pub offsets: Vec<u32>,
-    /// Targets of each `brx`, keyed by the `brx`'s byte offset.
+    /// Distinct targets of each `brx`, keyed by the `brx`'s byte offset.
     pub indirect: BTreeMap<u32, Vec<u32>>,
     /// The Shader Program Header this program was preceded by, if any.
     pub header: Option<ProgramHeader>,
@@ -390,15 +390,17 @@ fn brx_targets(
     // Wider than any real `switch`: the wrong `imnmx` was matched.
     let arms = arms.filter(|&n| n <= MAX_BRX_ARMS)?;
     // Keep the entries read before the first unreadable one.
-    Some(
-        (0..arms)
-            .map_while(|i| {
-                let offset = table_offset.wrapping_add(i as i32 * 4);
-                let entry = consts(table_bank, u32::try_from(offset).ok()?).ok()?;
-                Some(align_slot(base.wrapping_add(entry)))
-            })
-            .collect(),
-    )
+    let mut targets: Vec<u32> = (0..arms)
+        .map_while(|i| {
+            let offset = table_offset.wrapping_add(i as i32 * 4);
+            let entry = consts(table_bank, u32::try_from(offset).ok()?).ok()?;
+            Some(align_slot(base.wrapping_add(entry)))
+        })
+        .collect();
+    // A `switch` whose cases share an arm lists it once per case; WGSL takes each `case` once.
+    let mut seen = HashSet::new();
+    targets.retain(|&target| seen.insert(target));
+    Some(targets)
 }
 
 /// Decode a program by walking its control-flow graph from `ENTRY_OFFSET`.
@@ -845,6 +847,14 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn a_jump_table_naming_one_arm_twice_lists_it_once() {
+        // Tears of the Kingdom's shaders have such tables; two `case 1992u` arms failed naga.
+        let (bytes, _) = brx_switch_fixture();
+        let program = decode_with_table(&bytes, [0x338, 0x338, 0x350]).unwrap();
+        assert_eq!(program.indirect.get(&0x330), Some(&vec![0x338, 0x350]));
     }
 
     #[test]
