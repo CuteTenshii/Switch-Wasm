@@ -761,8 +761,9 @@ fn read_texture(
     let total = u64::from(row_bytes) * u64::from(rows) * u64::from(layers);
     if total > MAX_UPLOAD {
         return Err(Error::Gpu(format!(
-            "upload: texture {}x{} is {total} bytes, past the {MAX_UPLOAD}-byte cap",
-            image.width, image.height
+            "upload: texture {}x{} is {total} bytes, past the {MAX_UPLOAD}-byte cap \
+             ({layers} {:?} layers of {row_bytes}x{rows} bytes)",
+            image.width, image.height, format
         )));
     }
     let key = TextureKey {
