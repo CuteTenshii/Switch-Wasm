@@ -121,8 +121,10 @@ impl Gpu {
                 state::StepMode::Vertex => wgpu::VertexStepMode::Vertex,
             };
             let read = upload.addr..upload.addr + upload.inside;
-            for (bytes, attributes, shift) in crate::within_stride(bytes, attributes, stride)? {
-                let (bytes, widened) = crate::aligned_stride(bytes, stride);
+            for (bytes, attributes, shift, part_stride) in
+                crate::within_stride(bytes, attributes, stride)
+            {
+                let (bytes, widened) = crate::aligned_stride(bytes, part_stride);
                 // Widening moves every element but the first.
                 let origin = (widened == stride || bytes.len() <= stride as usize)
                     .then(|| (upload.addr + shift, upload.inside.saturating_sub(shift)));

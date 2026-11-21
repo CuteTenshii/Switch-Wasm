@@ -1359,9 +1359,9 @@ fn an_attribute_past_its_stride_reads_from_a_later_buffer() {
         std::borrow::Cow::Borrowed(&bytes[..]),
         vec![attribute(0, 0), attribute(32, 1)],
         8,
-    )
-    .expect("both fit a stride");
+    );
     assert_eq!(split.len(), 2);
+    assert_eq!((split[0].3, split[1].3), (8, 8), "both fit the stride");
     assert_eq!(split[0].0.as_ref(), &bytes[..]);
     assert_eq!(split[0].1, [attribute(0, 0)]);
     assert_eq!(split[1].0.len(), bytes.len(), "a draw must still fit it");
@@ -1370,15 +1370,26 @@ fn an_attribute_past_its_stride_reads_from_a_later_buffer() {
     assert_eq!(split[1].1, [attribute(0, 1)]);
 }
 
+/// Tears of the Kingdom's 8-byte half-float attribute on a 6-byte stride reads two bytes of the
+/// next vertex, as Maxwell does, from a copy laid out 8 bytes apart.
 #[test]
-fn an_attribute_wider_than_its_stride_is_refused_before_the_device_sees_it() {
+fn an_attribute_running_into_the_next_element_reads_its_bytes() {
     let wide = wgpu::VertexAttribute {
-        format: wgpu::VertexFormat::Float32x2,
-        offset: 4,
+        format: wgpu::VertexFormat::Float16x4,
+        offset: 0,
         shader_location: 0,
     };
-    let refused = super::within_stride(std::borrow::Cow::Borrowed(&[0u8; 16][..]), vec![wide], 8);
-    assert!(refused.is_err());
+    let bytes: Vec<u8> = (1..=18).collect();
+    let parts = super::within_stride(std::borrow::Cow::Borrowed(&bytes[..]), vec![wide], 6);
+    assert_eq!(parts.len(), 1);
+    let (restrided, attributes, shift, stride) = &parts[0];
+    assert_eq!((*shift, *stride), (0, 8));
+    assert_eq!(attributes, &[wide]);
+    assert_eq!(
+        restrided.as_ref(),
+        [1, 2, 3, 4, 5, 6, 7, 8, 7, 8, 9, 10, 11, 12, 13, 14, 13, 14, 15, 16, 17, 18, 0, 0],
+        "each element is the eight bytes at six apart, zeros past the end"
+    );
 }
 
 #[test]

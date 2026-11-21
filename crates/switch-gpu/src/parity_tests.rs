@@ -1388,6 +1388,65 @@ fn an_integer_image_gathers_and_offset_samples_the_words_the_rasterizer_reads() 
     }
 }
 
+/// An 8-byte half-float colour on a 6-byte stride takes its alpha from the next vertex's red,
+/// as Tears of the Kingdom's arrays do, on both renderers.
+#[test]
+fn an_attribute_running_into_the_next_vertex_draws_alike() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    // 0.2, 0.4 and 0.8 as halves, off the eight-bit half-way points.
+    const RED: u16 = 0x3266;
+    const GREEN: u16 = 0x3666;
+    const BLUE: u16 = 0x3a66;
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::new();
+        let colours = h.base + 0x600;
+        // Attribute 1 from array 1: offset 0, R16G16B16A16, float.
+        h.engine.regs.set(0x458 + 1, 1 | (0x03 << 21) | (7 << 27));
+        h.engine.regs.set(0x704, 6 | (1 << 12));
+        h.engine.regs.set(0x705, (colours >> 32) as u32);
+        h.engine.regs.set(0x706, colours as u32);
+        h.engine.regs.set(0x7C2, (colours >> 32) as u32);
+        h.engine.regs.set(0x7C3, colours as u32 + 4 * 6 - 1);
+        h.triangle([1.0, 1.0, 1.0, 1.0]);
+        let mut ctx = h.ctx();
+        // A fourth red past the third vertex is the third vertex's alpha.
+        for vertex in 0..4u64 {
+            for (i, half) in [RED, GREEN, BLUE].into_iter().enumerate() {
+                let at = colours + vertex * 6 + i as u64 * 2;
+                let word = ctx.read_u32(at & !3).unwrap();
+                let shift = (at & 3) * 8;
+                let word = (word & !(0xffff << shift)) | (u32::from(half) << shift);
+                ctx.write_u32(at & !3, word).unwrap();
+            }
+        }
+        match gpu {
+            Some(gpu) => {
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => h.draw_with(&mut Software).expect("the draw"),
+        }
+        h.target()
+    };
+    let want = build(None);
+    assert!(
+        want.contains(&0x33cc_6633),
+        "the reference lacks alpha 0.2 from the next red: {want:x?}"
+    );
+    let fallbacks = gpu.fallbacks;
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// Vertex arrays past the device's buffer count are interleaved into one buffer and draw alike.
 #[test]
 fn vertex_arrays_past_the_device_limit_are_folded_and_draw_alike() {

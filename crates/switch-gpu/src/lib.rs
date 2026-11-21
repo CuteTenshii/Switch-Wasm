@@ -266,51 +266,76 @@ struct Bound {
     step: wgpu::VertexStepMode,
 }
 
-/// A vertex buffer's bytes with the attributes that read them, and how many bytes into the
-/// array they start.
-type VertexPart<'a> = (std::borrow::Cow<'a, [u8]>, Vec<wgpu::VertexAttribute>, u64);
+/// A vertex buffer's bytes, the attributes that read them, how many bytes into the array they
+/// start, and their stride.
+type VertexPart<'a> = (
+    std::borrow::Cow<'a, [u8]>,
+    Vec<wgpu::VertexAttribute>,
+    u64,
+    u64,
+);
 
 /// Split a vertex array so each attribute lies inside its stride, as WebGPU requires and
 /// Maxwell does not: one past it reads the same bytes from a buffer starting whole strides
-/// later. The buffer keeps its length, zeros where the array ended, so a draw still fits.
+/// later, and one running into the next element (Tears of the Kingdom's 8-byte `Float16x4` on
+/// a 6-byte stride) reads them from a copy laid out at a stride that holds it. The buffer
+/// keeps its element count, zeros where the array ended, so a draw still fits.
 fn within_stride<'a>(
     bytes: std::borrow::Cow<'a, [u8]>,
     attributes: Vec<wgpu::VertexAttribute>,
     stride: u64,
-) -> std::result::Result<Vec<VertexPart<'a>>, String> {
+) -> Vec<VertexPart<'a>> {
     if stride == 0 {
-        return Ok(vec![(bytes, attributes, 0)]);
+        return vec![(bytes, attributes, 0, 0)];
     }
     let mut by_skip: std::collections::BTreeMap<u64, Vec<wgpu::VertexAttribute>> =
         std::collections::BTreeMap::new();
     for attribute in attributes {
-        let offset = attribute.offset % stride;
-        if offset + attribute.format.size() > stride {
-            return Err(format!(
-                "a {:?} attribute at {} overruns its {stride}-byte stride",
-                attribute.format, attribute.offset
-            ));
-        }
         by_skip
             .entry(attribute.offset / stride)
             .or_default()
             .push(wgpu::VertexAttribute {
-                offset,
+                offset: attribute.offset % stride,
                 ..attribute
             });
     }
-    Ok(by_skip
+    by_skip
         .into_iter()
         .map(|(skip, attributes)| {
-            if skip == 0 {
-                return (bytes.clone(), attributes, 0);
+            let (bytes, shift) = if skip == 0 {
+                (bytes.clone(), 0)
+            } else {
+                let from =
+                    usize::try_from(skip * stride).map_or(bytes.len(), |at| at.min(bytes.len()));
+                let mut moved = bytes[from..].to_vec();
+                moved.resize(bytes.len(), 0);
+                (std::borrow::Cow::Owned(moved), from as u64)
+            };
+            let reach = attributes
+                .iter()
+                .map(|a| a.offset + a.format.size())
+                .max()
+                .unwrap_or(0);
+            if reach <= stride {
+                return (bytes, attributes, shift, stride);
             }
-            let from = usize::try_from(skip * stride).map_or(bytes.len(), |at| at.min(bytes.len()));
-            let mut moved = bytes[from..].to_vec();
-            moved.resize(bytes.len(), 0);
-            (std::borrow::Cow::Owned(moved), attributes, from as u64)
+            let restrided = restride(&bytes, stride, reach);
+            (std::borrow::Cow::Owned(restrided), attributes, shift, reach)
         })
-        .collect())
+        .collect()
+}
+
+/// Each element's first `reach` bytes, read `stride` apart as Maxwell reads them and laid out
+/// `reach` apart, zeros past the array's end.
+fn restride(bytes: &[u8], stride: u64, reach: u64) -> Vec<u8> {
+    let (stride, reach) = (stride as usize, reach as usize);
+    let mut out = vec![0u8; bytes.len() / stride * reach];
+    for (i, element) in out.chunks_exact_mut(reach).enumerate() {
+        let from = i * stride;
+        let to = (from + reach).min(bytes.len());
+        element[..to - from].copy_from_slice(&bytes[from..to]);
+    }
+    out
 }
 
 /// Widen each element to a multiple of four bytes, which WebGPU requires of a stride and
