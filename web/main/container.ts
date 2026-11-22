@@ -471,7 +471,7 @@ async function parseAndRenderNca(
   if (info.error) {
     // A CDN NCA's header is encrypted, so the magic is hidden without keys.
     out.textContent = /bad magic/.test(info.error)
-      ? 'NCA header is encrypted - load prod.keys to decrypt and inspect. (' + info.error + ')'
+      ? 'NCA header is encrypted - load prod.keys in the NAND tab to decrypt and inspect. (' + info.error + ')'
       : 'NCA: ' + info.error;
     return null;
   }

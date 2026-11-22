@@ -549,23 +549,6 @@
 
     <details class="section" open>
       <summary class="section-head">
-        <span class="section-title">Keys</span>
-        <info-tip text="An NCA from the CDN keeps its header encrypted, so prod.keys is what makes one readable at all. Kept in this browser."></info-tip>
-        <span class="section-note" id="keys-badge">none</span>
-      </summary>
-      <div class="section-body">
-        <div class="panel-tools">
-          <label class="btn small" for="prod-keys">prod.keys</label>
-          <input type="file" id="prod-keys" accept=".keys" hidden>
-          <label class="btn small" for="title-keys">title.keys</label>
-          <input type="file" id="title-keys" accept=".keys" hidden>
-          <button id="btn-clear-keys" class="btn small ghost">Clear</button>
-        </div>
-      </div>
-    </details>
-
-    <details class="section" open>
-      <summary class="section-head">
         <span class="section-title">Container</span>
         <span class="section-note" id="container-badge">none open</span>
       </summary>
@@ -581,6 +564,23 @@
   </section>
 
   <section class="tabpanel" data-panel="nand">
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Keys</span>
+        <info-tip text="prod.keys decrypts NCA headers: installing firmware needs it, and so does any NCA from the CDN, whose header stays encrypted. Kept in this browser."></info-tip>
+        <span class="section-note" id="keys-badge">none</span>
+      </summary>
+      <div class="section-body">
+        <div class="panel-tools">
+          <label class="btn small" for="prod-keys">prod.keys</label>
+          <input type="file" id="prod-keys" accept=".keys" hidden>
+          <label class="btn small" for="title-keys">title.keys</label>
+          <input type="file" id="title-keys" accept=".keys" hidden>
+          <button id="btn-clear-keys" class="btn small ghost">Clear</button>
+        </div>
+      </div>
+    </details>
+
     <details class="section" open>
       <summary class="section-head">
         <span class="section-title">System &middot; NAND</span>

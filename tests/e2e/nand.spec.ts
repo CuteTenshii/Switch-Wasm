@@ -1,7 +1,7 @@
 import { expect, openPage, openPanel, test } from './page';
 
-const NEEDS_KEYS = 'Load prod.keys to install firmware: each NCA is identified from its encrypted'
-  + ' header before it is stored.';
+const NEEDS_KEYS = 'Load prod.keys in the NAND tab to install firmware: each NCA is identified'
+  + ' from its encrypted header before it is stored.';
 
 // Each firmware NCA is identified from its encrypted header before it is stored, so without
 // prod.keys the install buttons are unavailable and say why; loading them makes them available.

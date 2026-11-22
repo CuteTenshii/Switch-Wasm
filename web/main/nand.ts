@@ -237,8 +237,8 @@ function installFirmware(
 }
 
 // Each NCA is identified from its encrypted header before it is stored, which needs prod.keys.
-const NEEDS_KEYS = 'Load prod.keys to install firmware: each NCA is identified from its encrypted'
-  + ' header before it is stored.';
+const NEEDS_KEYS = 'Load prod.keys in the NAND tab to install firmware: each NCA is identified'
+  + ' from its encrypted header before it is stored.';
 
 function refuseInstallWithoutKeys(): boolean {
   if (hasProdKeys()) return false;
