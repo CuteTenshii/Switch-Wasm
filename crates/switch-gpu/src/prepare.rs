@@ -337,8 +337,8 @@ impl Gpu {
 
         let mut globals = self.global_uploads(&vs_layout, ShaderStage::VertexB, &uploads, ctx)?;
         globals.extend(self.global_uploads(&fs_layout, ShaderStage::Fragment, &uploads, ctx)?);
-        // WebGPU refuses a buffer bound read-only where the same draw writes it, so a read of
-        // one binds it writable too; only the fragment stage may.
+        // WebGPU refuses a buffer bound read-only where the same draw writes it, so a fragment
+        // read of one binds it writable too, and a vertex read, which cannot, reads a copy.
         let written: Vec<wgpu::Buffer> = globals
             .iter()
             .filter(|g| g.writes)
@@ -350,7 +350,8 @@ impl Gpu {
                 continue;
             }
             if global.stage != Some(ShaderStage::Fragment) {
-                return Err("a vertex read of a buffer the draw writes".into());
+                global.snapshot = true;
+                continue;
             }
             global.writes = true;
             fs_layout.globals[global.slot as usize].written = true;

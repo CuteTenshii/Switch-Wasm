@@ -224,7 +224,7 @@ impl Gpu {
         let groups = Groups {
             vs: vs_group,
             fs: fs_group,
-            patched_constants: vs_constants.into_iter().chain(fs_constants).collect(),
+            patched: vs_constants.into_iter().chain(fs_constants).collect(),
         };
         // An assembled topology is always `u32` indices.
         let draw_index_format = match &p.assembled {
@@ -464,8 +464,7 @@ impl Gpu {
         };
 
         // Copies cannot be recorded inside a pass, so a draw needing one opens its own.
-        let patched =
-            bound.iter().any(|b| !b.patches.is_empty()) || !groups.patched_constants.is_empty();
+        let patched = bound.iter().any(|b| !b.patches.is_empty()) || !groups.patched.is_empty();
         let joins = !patched
             && scratch.is_none()
             && self
@@ -483,8 +482,8 @@ impl Gpu {
                     })
             });
             let vertex_patches = bound.iter().map(|b| (&b.buffer, &b.patches));
-            let constant_patches = groups.patched_constants.iter().map(|(b, p)| (b, p));
-            for (buffer, patches) in vertex_patches.chain(constant_patches) {
+            let group_patches = groups.patched.iter().map(|(b, p)| (b, p));
+            for (buffer, patches) in vertex_patches.chain(group_patches) {
                 for patch in patches {
                     encoder.copy_buffer_to_buffer(
                         &patch.source,
@@ -656,9 +655,10 @@ impl Gpu {
     }
 }
 
-/// A draw's bind groups, and its constant buffers with what compute launches wrote over them.
+/// A draw's bind groups, and the buffers of its own that copies fill before its pass: constant
+/// buffers with what compute launches wrote over them, and copies of written globals.
 struct Groups {
     vs: wgpu::BindGroup,
     fs: wgpu::BindGroup,
-    patched_constants: Vec<(wgpu::Buffer, Vec<crate::Patch>)>,
+    patched: Vec<(wgpu::Buffer, Vec<crate::Patch>)>,
 }

@@ -100,6 +100,9 @@ struct GlobalUpload {
     writes: bool,
     /// Words into `held` where `addr` is, when it is a written buffer the read lies inside.
     base: u32,
+    /// The vertex stage reads a copy of `held` made before the draw: the fragment stage writes
+    /// it, and the vertex stage cannot bind storage writable.
+    snapshot: bool,
 }
 
 /// Upper bound on one `ldg` buffer, since the program does not say how far it reads.

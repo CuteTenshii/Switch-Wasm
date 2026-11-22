@@ -132,7 +132,7 @@ fn pack_banks_at<'a>(
 type StageBinding = (
     wgpu::BindGroupLayout,
     wgpu::BindGroup,
-    Option<(wgpu::Buffer, Vec<Patch>)>,
+    Vec<(wgpu::Buffer, Vec<Patch>)>,
 );
 
 impl Gpu {
@@ -157,6 +157,8 @@ impl Gpu {
         // Why it is not: a held surface, a shadow map, a texture the cache does not keep, a global.
         let mut why = [false; 4];
         let mut constant_patches = Vec::new();
+        // Buffers of this draw's own that copies fill before its pass.
+        let mut snapshots = Vec::new();
         // Only its own stage reads a stage's buffers, and each stage has a storage buffer limit.
         let own = if stage == ShaderStage::VertexB {
             wgpu::ShaderStages::VERTEX
@@ -247,6 +249,23 @@ impl Gpu {
             persistent &= shared;
             why[3] |= !shared;
             resources.push(match &global.held {
+                Some(held) if global.snapshot => {
+                    let copy = self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("global snapshot"),
+                        size: held.size(),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    self.scratch.push(Scratch::Buffer(copy.clone()));
+                    let whole = Patch {
+                        source: held.clone(),
+                        from: 0,
+                        to: 0,
+                        len: held.size(),
+                    };
+                    snapshots.push((copy.clone(), vec![whole]));
+                    Resource::Buffer(binding, copy)
+                }
                 Some(held) => Resource::Buffer(binding, held.clone()),
                 None => Resource::Bytes(binding, global.bytes.to_vec()),
             });
@@ -258,7 +277,7 @@ impl Gpu {
             .filter(|cached| cached.entries == entries && cached.resources == resources)
         {
             self.bind_hits += 1;
-            return Ok((cached.layout.clone(), cached.group.clone(), None));
+            return Ok((cached.layout.clone(), cached.group.clone(), Vec::new()));
         }
         let remembered = key.map(|key| (key, entries.clone(), resources.clone()));
         if key.is_some() {
@@ -358,7 +377,11 @@ impl Gpu {
                 },
             );
         }
-        Ok((layout, bind_group, patched))
+        Ok((
+            layout,
+            bind_group,
+            patched.into_iter().chain(snapshots).collect(),
+        ))
     }
 
     /// Bind one texture and its sampler at `TEXTURE_BINDING + 2 * index`, never sampling in
@@ -1709,6 +1732,7 @@ impl Gpu {
                     held: None,
                     writes: false,
                     base: 0,
+                    snapshot: false,
                 });
                 continue;
             }
@@ -1742,6 +1766,7 @@ impl Gpu {
                     held: Some(held.buffer.clone()),
                     writes: global.written,
                     base: 0,
+                    snapshot: false,
                 });
                 continue;
             }
@@ -1765,6 +1790,7 @@ impl Gpu {
                             held: Some(held.buffer.clone()),
                             writes: false,
                             base: ((address - at) / 4) as u32,
+                            snapshot: false,
                         });
                         continue;
                     }
@@ -1799,6 +1825,7 @@ impl Gpu {
                     held: Some(self.compute_input(address, len, ctx)?),
                     writes: false,
                     base: 0,
+                    snapshot: false,
                 });
                 continue;
             }
@@ -1820,6 +1847,7 @@ impl Gpu {
                 held,
                 writes: global.written,
                 base: 0,
+                snapshot: false,
             });
         }
         Ok(out)
