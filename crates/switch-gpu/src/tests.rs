@@ -1086,7 +1086,10 @@ fn a_volume_slice_is_looked_for_where_the_volume_puts_it() {
         row_bytes,
         rows,
         block_depth_gobs: 8,
-        layout: Layout::BlockLinear { block_height_gobs },
+        layout: Layout::BlockLinear {
+            block_height_gobs,
+            block_depth_gobs: 1,
+        },
         format: Format::Rgba8Unorm,
         srgb: false,
     };
@@ -1104,6 +1107,126 @@ fn a_volume_slice_is_looked_for_where_the_volume_puts_it() {
     assert!(slice_fits_one_gob(&small));
     assert!(!slice_fits_one_gob(&key(128, 8, 1)), "two GOBs wide");
     assert!(!slice_fits_one_gob(&key(64, 16, 2)), "two GOBs tall");
+}
+
+/// Tears of the Kingdom draws its volumes slice by slice, each slice a target of its own whose
+/// tile mode carries the volume's block depth, then samples the volume. Cleared that way, a
+/// volume of slices two GOBs tall samples each slice's colour on the device, from the slices
+/// it holds, as the rasterizer does from guest memory.
+#[test]
+fn a_volume_cleared_slice_by_slice_samples_each_slice_on_both_renderers() {
+    use switch_core::gpu::renderer::{Renderer, Software};
+    use switch_core::gpu::surface::block_linear_volume_offset;
+    use switch_core::gpu::testing::{self, Harness};
+
+    const SIDE: u32 = 16;
+    const SLICES: u32 = 4;
+    const CLEAR_COLOR: u32 = 0x360;
+    let colours = [
+        [1.0f32, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+    ];
+    let packed = |[r, g, b, a]: [f32; 4]| {
+        [r, g, b, a].iter().enumerate().fold(0u32, |word, (i, &c)| {
+            word | (((c * 255.0) as u32) << (8 * i))
+        })
+    };
+    let sampled = |renderer: &mut dyn Renderer| -> Vec<u32> {
+        let mut h = Harness::with_fragment_shader(testing::offset_volume_fragment_shader(0));
+        h.bindless_volume_texture();
+        // Handles come from the bank the volume's handle is in.
+        h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+        let volume = h.base + 0x2000;
+        // The harness's own target, put back once the slices are drawn.
+        let kept: Vec<(u32, u32)> = (0x200..0x208)
+            .chain([0x300, 0x301, 0x3FD, 0x3FE])
+            .map(|reg| (reg, h.engine.regs.get(reg)))
+            .collect();
+        for (z, colour) in colours.iter().enumerate() {
+            let slice = volume
+                + u64::from(block_linear_volume_offset(
+                    0,
+                    0,
+                    z as u32,
+                    SIDE * 4,
+                    SIDE,
+                    1,
+                    SLICES,
+                ));
+            for (reg, value) in [
+                (0x200, (slice >> 32) as u32),
+                (0x201, slice as u32),
+                (0x202, SIDE),
+                (0x203, SIDE),
+                (0x204, 0xD5),
+                // A volume's slice, one GOB tall per block and four deep.
+                (0x205, 1 << 16 | 2 << 8),
+                (0x206, 1),
+                (0x300, SIDE << 16),
+                (0x301, SIDE << 16),
+                (0x3FD, SIDE << 16),
+                (0x3FE, SIDE << 16),
+            ] {
+                h.engine.regs.set(reg, value);
+            }
+            for (channel, value) in colour.iter().enumerate() {
+                h.engine
+                    .regs
+                    .set(CLEAR_COLOR + channel as u32, value.to_bits());
+            }
+            h.clear_with(renderer, [true; 4]).expect("the clear");
+        }
+        for (reg, value) in kept {
+            h.engine.regs.set(reg, value);
+        }
+        // TIC 1 as the volume: block-linear A8B8G8R8, one GOB tall per block and four deep.
+        let tic = h.base + 0x1400 + 32;
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        let mut ctx = h.ctx();
+        for (word, value) in [
+            0x08 | (2 << 7) | identity,
+            volume as u32,
+            (volume >> 32) as u32 | (3 << 21),
+            2 << 6,
+            (SIDE - 1) | (2 << 23),
+            (SIDE - 1) | ((SLICES - 1) << 16),
+            0,
+            0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ctx.write_u32(tic + word as u64 * 4, value).unwrap();
+        }
+        (0..SLICES)
+            .map(|z| {
+                // The middle of the slice's second row of blocks, then its first.
+                let w = (z as f32 + 0.5) / SLICES as f32;
+                let mut texels = Vec::new();
+                for v in [0.75, 0.25] {
+                    h.triangle([0.5, v, w, 1.0]);
+                    h.draw_with(renderer).expect("the draw");
+                    h.flush_with(renderer);
+                    texels.push(h.texel(0, 0));
+                }
+                assert_eq!(
+                    texels[0], texels[1],
+                    "slice {z}'s two rows of blocks differ"
+                );
+                texels[0]
+            })
+            .collect()
+    };
+    let want: Vec<u32> = colours.iter().map(|&c| packed(c)).collect();
+    assert_eq!(sampled(&mut Software), want, "the rasterizer");
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let drawn = sampled(&mut gpu);
+    assert!(gpu.reasons.is_empty(), "fell back: {:?}", gpu.reasons);
+    assert_eq!(drawn, want, "the device");
 }
 
 #[test]

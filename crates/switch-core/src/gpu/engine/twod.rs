@@ -119,6 +119,7 @@ impl Engine2D {
         } else {
             Layout::BlockLinear {
                 block_height_gobs: 1 << self.regs.field(block_reg, 4, 6),
+                block_depth_gobs: 1,
             }
         };
         Ok(Surface {
@@ -642,7 +643,9 @@ fn for_each_run(
             groups.push(vec![(0, row_bytes, layout.column_offset(x0) as usize)]);
             1
         }
-        Layout::BlockLinear { block_height_gobs } => {
+        Layout::BlockLinear {
+            block_height_gobs, ..
+        } => {
             let mut x = x0;
             while x < x1 {
                 let (_, run) = layout.run_at(x, 0, width_bytes);

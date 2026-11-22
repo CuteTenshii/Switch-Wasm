@@ -3464,6 +3464,7 @@ fn a_depth_surface_moved_into_colour_on_the_device_carries_the_words_the_engine_
         format: ColorFormat::from_raw(0xCF).expect("B8G8R8A8"),
         layout: Layout::BlockLinear {
             block_height_gobs: 1,
+            block_depth_gobs: 1,
         },
     };
     let words = |h: &mut Harness, at: u64| -> Vec<u32> {

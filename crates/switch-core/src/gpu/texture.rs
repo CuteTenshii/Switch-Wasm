@@ -263,7 +263,10 @@ impl Texture {
     /// Mip level `level` of every layer, or `None` past the chain or for a pitch image or
     /// volume, whose smaller levels are not laid out as a 2D layer's are.
     pub fn level(&self, level: u32) -> Option<Texture> {
-        let Layout::BlockLinear { block_height_gobs } = self.layout else {
+        let Layout::BlockLinear {
+            block_height_gobs, ..
+        } = self.layout
+        else {
             return None;
         };
         if level >= self.levels || self.block_depth_gobs > 1 {
@@ -302,7 +305,9 @@ impl Texture {
             Layout::BlockLinear { .. } => self.width * bpp,
         };
         match self.layout {
-            Layout::BlockLinear { block_height_gobs } if self.block_depth_gobs > 1 => {
+            Layout::BlockLinear {
+                block_height_gobs, ..
+            } if self.block_depth_gobs > 1 => {
                 self.addr
                     + u64::from(crate::gpu::surface::block_linear_volume_offset(
                         x * bpp,
@@ -581,7 +586,12 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
         3 | 4 => {
             // BLOCKLINEAR[_COLORKEY]: 27 address MSBs, 512B-aligned.
             let block_height_gobs = 1u32 << ((dw3 >> 3) & 0x7);
-            ((dw1 >> 9) << 9, Layout::BlockLinear { block_height_gobs })
+            // A volume's depth is the texture's own `block_depth_gobs`.
+            let layout = Layout::BlockLinear {
+                block_height_gobs,
+                block_depth_gobs: 1,
+            };
+            ((dw1 >> 9) << 9, layout)
         }
         1 | 2 => {
             // PITCH[_COLORKEY]: 27 address MSBs, 32B-aligned; pitch is 16 bits in 32B units.
@@ -632,9 +642,9 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     // `MAX_MIP_LEVEL` is the top nibble of dword 3.
     let levels = (dw3 >> 28) + 1;
     let layer_stride = match layout {
-        Layout::BlockLinear { block_height_gobs }
-            if levels > 1 && layers > 1 && texture_type != THREE_D =>
-        {
+        Layout::BlockLinear {
+            block_height_gobs, ..
+        } if levels > 1 && layers > 1 && texture_type != THREE_D => {
             mipmapped_layer_stride(kind, width, height, block_height_gobs, levels)
         }
         _ => layout.layer_stride(width_bytes(kind, width), layer_rows(kind, height)),
@@ -728,6 +738,7 @@ fn level_layout(
     let rows = layer_rows(kind, (height >> level).max(1));
     let layout = Layout::BlockLinear {
         block_height_gobs: fitted_block_height(block_height_gobs, rows),
+        block_depth_gobs: 1,
     };
     (
         layout,
@@ -1605,7 +1616,8 @@ mod tests {
         assert_eq!(
             texture.layout,
             Layout::BlockLinear {
-                block_height_gobs: 1
+                block_height_gobs: 1,
+                block_depth_gobs: 1,
             }
         );
         assert_eq!(

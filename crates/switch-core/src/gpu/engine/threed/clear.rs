@@ -296,6 +296,7 @@ impl Engine3D {
         let tile_mode = self.regs.get(DEPTH_TARGET_TILE_MODE);
         let layout = Layout::BlockLinear {
             block_height_gobs: 1 << field(tile_mode, 4, 7),
+            block_depth_gobs: 1 << field(tile_mode, 8, 11),
         };
         let depth = self.regs.float(CLEAR_DEPTH).clamp(0.0, 1.0);
         let stencil = self.regs.get(CLEAR_STENCIL) & 0xFF;

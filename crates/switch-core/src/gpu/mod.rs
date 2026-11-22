@@ -796,6 +796,7 @@ fn buffer_layout(buffer: &DisplayBuffer) -> Result<Layout> {
         }),
         NV_LAYOUT_BLOCK_LINEAR => Ok(Layout::BlockLinear {
             block_height_gobs: 1 << buffer.block_height_log2,
+            block_depth_gobs: 1,
         }),
         other => Err(Error::Gpu(format!("present: unsupported NvLayout {other}"))),
     }

@@ -828,7 +828,9 @@ fn read_texture(
                         source_row_bytes,
                         rows,
                         match image.layout {
-                            Layout::BlockLinear { block_height_gobs } => block_height_gobs,
+                            Layout::BlockLinear {
+                                block_height_gobs, ..
+                            } => block_height_gobs,
                             Layout::Pitch { .. } => 1,
                         },
                         image.block_depth_gobs,
@@ -1488,6 +1490,7 @@ mod tests {
         let array = |levels| Texture {
             layout: Layout::BlockLinear {
                 block_height_gobs: 16,
+                block_depth_gobs: 1,
             },
             layers: 8,
             layer_stride: 4096 * 4096 * 4 * 2,
@@ -1668,6 +1671,7 @@ mod tests {
         let base = h.base;
         let layout = Layout::BlockLinear {
             block_height_gobs: 2,
+            block_depth_gobs: 1,
         };
         let texture = Texture {
             addr: base,
@@ -1722,6 +1726,7 @@ mod tests {
             height: 16,
             layout: Layout::BlockLinear {
                 block_height_gobs: 2,
+                block_depth_gobs: 1,
             },
             row_bytes: 16 * 4,
             rows: 16,

@@ -90,6 +90,7 @@ impl EngineInline {
             (
                 Layout::BlockLinear {
                     block_height_gobs: 1 << field(block, 4, 7),
+                    block_depth_gobs: 1,
                 },
                 self.regs.get(SET_DST_WIDTH),
             )

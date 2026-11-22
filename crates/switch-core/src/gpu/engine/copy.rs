@@ -377,6 +377,7 @@ impl SurfaceWalk {
         Ok(SurfaceWalk {
             layout: Layout::BlockLinear {
                 block_height_gobs: 1 << field(block, 4, 7),
+                block_depth_gobs: 1,
             },
             base: 0,
             width_bytes: regs.get(width_reg).saturating_mul(element_bytes),

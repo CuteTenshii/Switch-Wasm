@@ -298,6 +298,50 @@ fn clear_with_a_channel_mask_preserves_the_others() {
     assert_eq!(h.mem.read_u32(0x3000_0000).unwrap(), 0x1122_33FF);
 }
 
+/// Tears of the Kingdom binds each slice of a 64-deep `R8` volume, 16 GOBs per block, as a
+/// target of its own one GOB along: a clear of slice 1 lands where the volume puts slice 1,
+/// its second row of blocks sixteen slices' worth of GOBs past its first.
+#[test]
+fn a_clear_of_a_volume_slice_target_lands_where_the_volume_puts_it() {
+    use crate::gpu::surface::{block_linear_volume_offset, GOB_SIZE};
+    let mut h = Harness::new(0x10000);
+    let mut engine = Engine3D::new();
+    let slice = h.base + u64::from(GOB_SIZE);
+    engine.regs.set(0x200, (slice >> 32) as u32);
+    engine.regs.set(0x201, slice as u32);
+    engine.regs.set(0x202, 64);
+    engine.regs.set(0x203, 16);
+    engine.regs.set(0x204, 0xF3); // R8Unorm
+    engine.regs.set(0x205, 0x10400); // 3D, 16 GOBs deep, 1 tall
+    engine.regs.set(0x206, 1);
+    engine.regs.set(SCREEN_SCISSOR_HORIZONTAL, 64 << 16);
+    engine.regs.set(SCREEN_SCISSOR_VERTICAL, 16 << 16);
+    assert_eq!(
+        engine.render_target(0).unwrap().unwrap().layout,
+        Layout::BlockLinear {
+            block_height_gobs: 1,
+            block_depth_gobs: 16,
+        }
+    );
+    engine.regs.set(CLEAR_COLOR, 1.0f32.to_bits());
+    {
+        let mut ctx = h.ctx();
+        engine.write(CLEAR_BUFFERS, 0b100, true, &mut ctx).unwrap();
+    }
+    for (x, y, z) in [
+        (0, 0, 1),
+        (63, 7, 1),
+        (0, 8, 1),
+        (63, 15, 1),
+        (0, 0, 0),
+        (0, 8, 2),
+    ] {
+        let at = 0x3000_0000 + block_linear_volume_offset(x, y, z, 64, 16, 1, 16);
+        let want = if z == 1 { 0xff } else { 0 };
+        assert_eq!(h.mem.read_u8(at).unwrap(), want, "({x}, {y}) of slice {z}");
+    }
+}
+
 #[test]
 fn a_colour_target_holding_a_depth_format_is_not_a_colour_target() {
     // One Z24S8 surface bound as both Z target and colour target 0; the clear must do nothing.
@@ -386,6 +430,7 @@ fn a_depth_clear_writes_runs_where_a_per_texel_clear_would() {
         let mut h = Harness::new(0x10000);
         let layout = Layout::BlockLinear {
             block_height_gobs: 1,
+            block_depth_gobs: 1,
         };
         let width_bytes = WIDTH * BYTES;
         for ty in 0..HEIGHT {
@@ -483,6 +528,7 @@ fn clear_of_part_of_a_gob_fills_every_row_of_it() {
 
     let layout = Layout::BlockLinear {
         block_height_gobs: 1,
+        block_depth_gobs: 1,
     };
     for ty in 0..8 {
         for tx in 0..32 {

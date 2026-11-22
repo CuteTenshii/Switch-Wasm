@@ -156,6 +156,7 @@ impl Engine3D {
             height: self.regs.get(DEPTH_TARGET_VERTICAL),
             layout: Layout::BlockLinear {
                 block_height_gobs: 1 << field(tile_mode, 4, 7),
+                block_depth_gobs: 1 << field(tile_mode, 8, 11),
             },
             format,
         }))
@@ -485,8 +486,12 @@ impl Engine3D {
                     1 << block_width_gobs
                 )));
             }
-            let block_height_gobs = 1 << field(tile_mode, 4, 7);
-            (Layout::BlockLinear { block_height_gobs }, horizontal)
+            // A slice of a volume bound as a target of its own interleaves with the others.
+            let layout = Layout::BlockLinear {
+                block_height_gobs: 1 << field(tile_mode, 4, 7),
+                block_depth_gobs: 1 << field(tile_mode, 8, 11),
+            };
+            (layout, horizontal)
         };
         Ok(Some(RenderTarget {
             addr,

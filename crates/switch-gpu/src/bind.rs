@@ -676,8 +676,18 @@ impl Gpu {
             if held.companion.is_some() {
                 return Err("samples a multisampled surface held on the device".into());
             }
-            // Within one GOB a slice is addressed as a plain surface is; past it, slices interleave.
-            if deep_volume && !slice_fits_one_gob(&upload.key) {
+            // A slice drawn as a target of the volume's block depth is laid out as the volume
+            // lays it; within one GOB any slice is addressed as a plain surface is.
+            let slice = deep_volume.then(|| slice_layout(&upload.key));
+            let rows = match slice {
+                Some(layout) if held.target.layout == layout => TextureKey {
+                    layout,
+                    ..upload.key
+                },
+                _ => upload.key,
+            };
+            if deep_volume && rows.layout != held.target.layout && !slice_fits_one_gob(&upload.key)
+            {
                 return Err(format!(
                     "samples a surface held on the device as a slice of an interleaved volume \
                      (slice {layer} of {}x{}x{} {:?} at {:#x}, {:?}, {} GOBs deep; held {}x{} {:?})",
@@ -695,7 +705,7 @@ impl Gpu {
             }
             // A texture may be the top-left corner of a larger surface with the same rows.
             let size = held.texture.size();
-            if !same_rows(&held.target, &upload.key)
+            if !same_rows(&held.target, &rows)
                 || upload.width > size.width
                 || upload.height > size.height
             {
@@ -1947,7 +1957,9 @@ impl Gpu {
 /// Where slice `z` of a deep-block volume starts: slices interleave inside each block.
 pub(crate) fn volume_slice_addr(key: &TextureKey, z: u32) -> u64 {
     let block_height_gobs = match key.layout {
-        SurfaceLayout::BlockLinear { block_height_gobs } => block_height_gobs,
+        SurfaceLayout::BlockLinear {
+            block_height_gobs, ..
+        } => block_height_gobs,
         SurfaceLayout::Pitch { .. } => 1,
     };
     key.addr
@@ -1960,6 +1972,19 @@ pub(crate) fn volume_slice_addr(key: &TextureKey, z: u32) -> u64 {
             block_height_gobs,
             key.block_depth_gobs,
         ))
+}
+
+/// How a slice of a deep-block volume is laid out, drawn as a surface of its own.
+pub(crate) fn slice_layout(key: &TextureKey) -> SurfaceLayout {
+    match key.layout {
+        SurfaceLayout::BlockLinear {
+            block_height_gobs, ..
+        } => SurfaceLayout::BlockLinear {
+            block_height_gobs,
+            block_depth_gobs: key.block_depth_gobs,
+        },
+        pitch @ SurfaceLayout::Pitch { .. } => pitch,
+    }
 }
 
 /// Whether a volume's slice lies within one GOB, where its texels are addressed as a

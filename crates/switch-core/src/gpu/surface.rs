@@ -31,10 +31,16 @@ pub fn gob_offset(x: u32, y: u32) -> u32 {
 }
 
 /// The row-dependent half of a block-linear address, hoistable out of an inner loop.
-pub fn block_linear_row(y: u32, width_bytes: u32, block_height_gobs: u32) -> u32 {
+/// `block_depth_gobs` is above 1 for one slice of a volume, whose blocks hold that many slices.
+pub fn block_linear_row(
+    y: u32,
+    width_bytes: u32,
+    block_height_gobs: u32,
+    block_depth_gobs: u32,
+) -> u32 {
     let block_height_gobs = block_height_gobs.max(1);
     let width_gobs = width_bytes.div_ceil(GOB_WIDTH).max(1);
-    let block_row_bytes = width_gobs * GOB_SIZE * block_height_gobs;
+    let block_row_bytes = width_gobs * GOB_SIZE * block_height_gobs * block_depth_gobs.max(1);
     let rows_per_block = GOB_HEIGHT * block_height_gobs;
 
     let block_y = y / rows_per_block;
@@ -46,8 +52,8 @@ pub fn block_linear_row(y: u32, width_bytes: u32, block_height_gobs: u32) -> u32
 }
 
 /// The column-dependent half of a block-linear address.
-pub fn block_linear_column(x_bytes: u32, block_height_gobs: u32) -> u32 {
-    let block_bytes = GOB_SIZE * block_height_gobs.max(1);
+pub fn block_linear_column(x_bytes: u32, block_height_gobs: u32, block_depth_gobs: u32) -> u32 {
+    let block_bytes = GOB_SIZE * block_height_gobs.max(1) * block_depth_gobs.max(1);
     let gob_x = x_bytes / GOB_WIDTH;
     // The `x` half of `gob_offset`.
     let x = x_bytes % GOB_WIDTH;
@@ -56,8 +62,8 @@ pub fn block_linear_column(x_bytes: u32, block_height_gobs: u32) -> u32 {
 
 /// `block_height_gobs` is `2^height` from the tile mode.
 pub fn block_linear_offset(x_bytes: u32, y: u32, width_bytes: u32, block_height_gobs: u32) -> u32 {
-    block_linear_row(y, width_bytes, block_height_gobs)
-        + block_linear_column(x_bytes, block_height_gobs)
+    block_linear_row(y, width_bytes, block_height_gobs, 1)
+        + block_linear_column(x_bytes, block_height_gobs, 1)
 }
 
 /// Block-linear volume offset; slices interleave inside a block (Eden's `SwizzleImpl`).
@@ -89,8 +95,14 @@ pub fn block_linear_volume_offset(
 pub enum Layout {
     /// Plain rows of `pitch` bytes.
     Pitch { pitch: u32 },
-    /// `2^n` GOBs per block vertically.
-    BlockLinear { block_height_gobs: u32 },
+    /// `2^n` GOBs per block vertically. `block_depth_gobs` is above 1 for one slice of a
+    /// volume drawn as a surface of its own: each block then holds that many slices' GOBs,
+    /// so its columns and block rows are that much further apart. A sampled volume keeps 1
+    /// here and its depth in the texture's own `block_depth_gobs`.
+    BlockLinear {
+        block_height_gobs: u32,
+        block_depth_gobs: u32,
+    },
 }
 
 impl Layout {
@@ -102,9 +114,10 @@ impl Layout {
     pub fn row_offset(&self, y: u32, width_bytes: u32) -> u32 {
         match *self {
             Layout::Pitch { pitch } => y * pitch,
-            Layout::BlockLinear { block_height_gobs } => {
-                block_linear_row(y, width_bytes, block_height_gobs)
-            }
+            Layout::BlockLinear {
+                block_height_gobs,
+                block_depth_gobs,
+            } => block_linear_row(y, width_bytes, block_height_gobs, block_depth_gobs),
         }
     }
 
@@ -112,9 +125,10 @@ impl Layout {
     pub fn column_offset(&self, x_bytes: u32) -> u32 {
         match *self {
             Layout::Pitch { .. } => x_bytes,
-            Layout::BlockLinear { block_height_gobs } => {
-                block_linear_column(x_bytes, block_height_gobs)
-            }
+            Layout::BlockLinear {
+                block_height_gobs,
+                block_depth_gobs,
+            } => block_linear_column(x_bytes, block_height_gobs, block_depth_gobs),
         }
     }
 
@@ -125,10 +139,9 @@ impl Layout {
         const RUN: u32 = 16;
         match *self {
             Layout::Pitch { pitch } => (y * pitch + x_bytes, width_bytes.saturating_sub(x_bytes)),
-            Layout::BlockLinear { block_height_gobs } => (
-                block_linear_offset(x_bytes, y, width_bytes, block_height_gobs),
-                RUN - (x_bytes % RUN),
-            ),
+            Layout::BlockLinear { .. } => {
+                (self.offset(x_bytes, y, width_bytes), RUN - (x_bytes % RUN))
+            }
         }
     }
 
@@ -136,10 +149,14 @@ impl Layout {
     pub fn layer_stride(&self, width_bytes: u32, height: u32) -> u32 {
         match *self {
             Layout::Pitch { pitch } => pitch * height,
-            Layout::BlockLinear { block_height_gobs } => {
+            Layout::BlockLinear {
+                block_height_gobs,
+                block_depth_gobs,
+            } => {
                 let block_height_gobs = block_height_gobs.max(1);
                 let width_gobs = width_bytes.div_ceil(GOB_WIDTH).max(1);
-                let block_row_bytes = width_gobs * GOB_SIZE * block_height_gobs;
+                let block_row_bytes =
+                    width_gobs * GOB_SIZE * block_height_gobs * block_depth_gobs.max(1);
                 let rows_per_block = GOB_HEIGHT * block_height_gobs;
                 height.div_ceil(rows_per_block) * block_row_bytes
             }
@@ -160,8 +177,11 @@ impl RowRuns {
     pub fn new(layout: Layout, row_bytes: u32, width: u32) -> RowRuns {
         let columns = match layout {
             Layout::Pitch { .. } => Vec::new(),
-            Layout::BlockLinear { block_height_gobs } => (0..width.div_ceil(16))
-                .map(|piece| block_linear_column(piece * 16, block_height_gobs))
+            Layout::BlockLinear {
+                block_height_gobs,
+                block_depth_gobs,
+            } => (0..width.div_ceil(16))
+                .map(|piece| block_linear_column(piece * 16, block_height_gobs, block_depth_gobs))
                 .collect(),
         };
         RowRuns {
@@ -1144,6 +1164,43 @@ mod tests {
         }
     }
 
+    /// A slice of a deep-block volume drawn as a surface of its own, with the volume's block
+    /// depth in its layout, puts every texel where the volume does once based at the slice:
+    /// Tears of the Kingdom draws its 64x64x64 volumes, 16 GOBs deep, slice by slice.
+    #[test]
+    fn a_slice_laid_out_with_its_block_depth_addresses_as_the_volume_does() {
+        for (width_bytes, height) in [(64u32, 64u32), (64, 32), (256, 40), (100, 9)] {
+            for bh in [1u32, 2, 4] {
+                for bd in [1u32, 2, 16] {
+                    let slice = Layout::BlockLinear {
+                        block_height_gobs: bh,
+                        block_depth_gobs: bd,
+                    };
+                    for z in [0u32, 1, bd - 1, bd, 2 * bd + 1] {
+                        let base = block_linear_volume_offset(0, 0, z, width_bytes, height, bh, bd);
+                        for y in 0..height {
+                            for x in (0..width_bytes).step_by(4) {
+                                assert_eq!(
+                                    base + slice.offset(x, y, width_bytes),
+                                    block_linear_volume_offset(
+                                        x,
+                                        y,
+                                        z,
+                                        width_bytes,
+                                        height,
+                                        bh,
+                                        bd
+                                    ),
+                                    "{width_bytes}x{height} bh {bh} bd {bd} z {z} at ({x}, {y})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Slices of a deep block sit one GOB apart; the next block is a whole slice along.
     #[test]
     fn a_deep_block_interleaves_its_slices() {
@@ -1323,12 +1380,15 @@ mod tests {
             Layout::Pitch { pitch: 320 },
             Layout::BlockLinear {
                 block_height_gobs: 1,
+                block_depth_gobs: 1,
             },
             Layout::BlockLinear {
                 block_height_gobs: 2,
+                block_depth_gobs: 1,
             },
             Layout::BlockLinear {
                 block_height_gobs: 16,
+                block_depth_gobs: 1,
             },
         ];
         for layout in layouts {

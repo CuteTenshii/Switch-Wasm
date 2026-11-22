@@ -69,6 +69,7 @@ fn case(name: &str, width: u32, height: u32, pitch_linear: bool, crop: Crop) {
     } else {
         Layout::BlockLinear {
             block_height_gobs: 1 << BLOCK_HEIGHT_LOG2,
+            block_depth_gobs: 1,
         }
     };
     let width_bytes = width * BPP;
