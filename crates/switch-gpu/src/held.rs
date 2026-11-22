@@ -145,10 +145,13 @@ impl Gpu {
         };
         let mut new = match old.other.take() {
             Some(other) if other.target == *target => *other,
-            stale => {
-                if let Some(stale) = stale {
-                    self.submit_batch();
-                    stale.texture.destroy();
+            earlier => {
+                // A third size: the one before last may hold texels neither of the others does,
+                // so the two are merged rather than it dropped. Tears of the Kingdom crops its
+                // 384x376 shadow cascade to 384x360 and then to 320x180.
+                if let Some(earlier) = earlier {
+                    old.other = Some(earlier);
+                    old = self.merge_crop(old);
                 }
                 Held {
                     texture: self.blank_target(target)?,

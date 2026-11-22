@@ -2093,6 +2093,108 @@ fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
     }
 }
 
+/// A depth surface cropped twice, to narrower colour targets of two sizes, keeps what only the
+/// whole surface held: sampled whole after, its last rows are the depths drawn on the device.
+/// Tears of the Kingdom crops its 384x376 shadow cascade to 384x360, then to 320x180.
+#[test]
+fn a_depth_surface_cropped_to_two_sizes_keeps_what_only_the_whole_held() {
+    const COLOUR_ADDRESS_LOW: u32 = 0x201;
+    const COLOUR_PITCH: u32 = 0x202;
+    const COLOUR_HEIGHT: u32 = 0x203;
+    let (width, height) = (testing::TARGET_WIDTH, testing::TARGET_HEIGHT);
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::with_fragment_shader(testing::shadow_fragment_shader());
+        h.bindless_texture();
+        h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+        h.depth_target(0x0207);
+        h.engine.regs.set(0x3FA, 0x13); // Z16
+        let (tic, tsc, depth) = (h.base + 0x1400 + 32, h.base + 0x1480 + 32, h.base + 0x1000);
+        // The image the draws sample: an unrelated one while the depth surface is drawn, as
+        // post-processing draws do not sample the cascade, and the depth surface last.
+        let elsewhere = h.base + 0x2000;
+        let sample = |h: &mut Harness, image: u64| {
+            let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+            let mut ctx = h.ctx();
+            for (word, value) in [
+                (0, 0x3a | (2 << 7) | identity),
+                (1, image as u32),
+                (2, (image >> 32) as u32 | (3 << 21)),
+                (3, 0),
+                (4, (width - 1) | (1 << 23)),
+                (5, height - 1),
+            ] {
+                ctx.write_u32(tic + word * 4, value).unwrap();
+            }
+        };
+        sample(&mut h, elsewhere);
+        let mut ctx = h.ctx();
+        // The fixture's sampler, comparing with Less.
+        ctx.write_u32(tsc, 2 | (2 << 3) | (2 << 6) | (1 << 9) | (1 << 10))
+            .unwrap();
+        // Guest memory starts at the far plane, which the device's draws leave stale.
+        for at in (0..width * height * 2).step_by(4) {
+            ctx.write_u32(depth + u64::from(at), 0xffff_ffff).unwrap();
+            ctx.write_u32(elsewhere + u64::from(at), 0xffff_ffff)
+                .unwrap();
+        }
+        // One triangle over the whole viewport, its colour the texel it covers; `z` of -0.5 is
+        // depth 0.25 and 0.5 is 0.75, either side of the reference's 0.5.
+        let cover = |h: &mut Harness, z: f32| {
+            h.write_vertex(0, [-1.0, 1.0, z, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [3.0, 1.0, z, 1.0], [2.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -3.0, z, 1.0], [0.0, 2.0, 0.0, 1.0]);
+        };
+        let (wide, rows, corner) = (
+            h.base as u32,
+            (h.base + 0x3000) as u32,
+            (h.base + 0x3200) as u32,
+        );
+        let colour = |h: &mut Harness, at: u32, pixels: u32, rows: u32| {
+            h.engine.regs.set(COLOUR_ADDRESS_LOW, at);
+            h.engine.regs.set(COLOUR_PITCH, pixels * 4);
+            h.engine.regs.set(COLOUR_HEIGHT, rows);
+        };
+        cover(&mut h, -0.5);
+        h.draw_with(renderer).expect("the whole draw");
+        // Two narrower targets: the depth surface is drawn as its top 6 rows, then a corner,
+        // further away; its last two rows keep what only the whole draw wrote.
+        cover(&mut h, 0.5);
+        colour(&mut h, rows, width, height - 2);
+        h.draw_with(renderer).expect("the first cropped draw");
+        colour(&mut h, corner, width / 2, height / 2);
+        h.draw_with(renderer).expect("the second cropped draw");
+        // Sampled whole, and neither tested nor written, so it is not attached.
+        sample(&mut h, depth);
+        colour(&mut h, wide, width, height);
+        h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
+        h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
+        h.draw_with(renderer).expect("the draw sampling it");
+        h.flush_with(renderer);
+        h.target()
+    };
+    let want = build(&mut Software);
+    // The crops' rows pass the comparison; the last two, only the whole draw's, fail it.
+    let row = |y: u32| &want[(y * width) as usize..((y + 1) * width) as usize];
+    assert!(
+        row(0).iter().all(|&c| c == 0xffff_ffff)
+            && row(height - 1).iter().all(|&c| c == 0xff00_0000),
+        "the reference did not compare against both depths: {want:x?}"
+    );
+    let before = gpu.fallbacks;
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, before,
+        "a draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected a pass");
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// A `Z16` shadow map array with one layer held on the device and the other only in guest
 /// memory compares each layer against what it holds: Tears of the Kingdom holds some of its
 /// shadow cascades on the device and not others.
