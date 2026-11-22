@@ -1,5 +1,5 @@
-//! List a title's RomFS and map byte offsets to files:
-//! `romfs_ls <container> --keys <prod.keys> [--offsets <offset,...>]`.
+//! List the RomFS of a title, or of a bare NCA such as a firmware data archive, and map byte
+//! offsets to files: `romfs_ls <container or nca> --keys <prod.keys> [--offsets <offset,...>]`.
 mod common;
 
 use clap::Parser;
@@ -19,8 +19,7 @@ fn main() {
     let cli = Cli::parse();
     let wanted = cli.offsets;
 
-    let title = cli.target.open();
-    let (source, index) = title.romfs();
+    let (source, index) = cli.target.romfs();
     println!("RomFS: {:#x} bytes", source.len());
 
     if wanted.is_empty() {

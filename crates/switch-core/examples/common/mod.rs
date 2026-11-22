@@ -466,6 +466,26 @@ impl Target {
         }
     }
 
+    /// The target's RomFS and its metadata index, or exit. A bare NCA needs only a RomFS
+    /// section, so a firmware data archive opens as well as a program.
+    pub fn romfs(&self) -> (Box<dyn ByteSource>, switch_core::romfs::RomFsIndex) {
+        let path = Path::new(&self.target);
+        if !matches!(target_kind(path), Kind::Nca) {
+            return self.open().romfs();
+        }
+        let src = open_source(path);
+        let keys = self.keys();
+        let nca = switch_core::nca::Nca::parse_source(&src, Some(&keys))
+            .unwrap_or_else(|e| die(&format!("{} is not an NCA: {e}", path.display())));
+        let Some(section) = nca.romfs_section_index() else {
+            die("this NCA has no RomFS section")
+        };
+        match nca.romfs_source(src, &keys, section) {
+            Ok(source) => index_romfs(Box::new(source)),
+            Err(e) => die(&format!("this NCA's RomFS could not be opened: {e}")),
+        }
+    }
+
     /// The keys alone, for tools that read the container themselves.
     pub fn keys(&self) -> KeySet {
         keys(self.prod(), self.title_keys.as_ref())
@@ -1508,16 +1528,10 @@ impl Title {
 
     /// Open this title's RomFS and read its metadata tables, or exit.
     pub fn romfs(&self) -> (Box<dyn ByteSource>, switch_core::romfs::RomFsIndex) {
-        let source = match self.romfs_source() {
-            Some(Ok(source)) => source,
+        match self.romfs_source() {
+            Some(Ok(source)) => index_romfs(source),
             Some(Err(e)) => die(&format!("this title's RomFS could not be opened: {e}")),
             None => die("this NCA has no RomFS section"),
-        };
-        match switch_core::romfs::RomFsIndex::read(&*source) {
-            Ok(index) => (source, index),
-            Err(e) => die(&format!(
-                "this title's RomFS metadata could not be read: {e}"
-            )),
         }
     }
 
@@ -1711,6 +1725,16 @@ fn open_program(path: &Path, keys: &mut KeySet) -> ((u64, u64), switch_core::nca
         eprintln!("no title key for {}: {e}", path.display());
     }
     ((offset, size), nca)
+}
+
+/// Read a RomFS's metadata tables, or exit.
+fn index_romfs(
+    source: Box<dyn ByteSource>,
+) -> (Box<dyn ByteSource>, switch_core::romfs::RomFsIndex) {
+    match switch_core::romfs::RomFsIndex::read(&*source) {
+        Ok(index) => (source, index),
+        Err(e) => die(&format!("the RomFS metadata could not be read: {e}")),
+    }
 }
 
 fn open_source(path: &Path) -> switch_core::source::FileSource {
