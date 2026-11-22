@@ -2356,7 +2356,8 @@ fn a_draw_into_the_layer_set_rt_layer_picks_lands_there_on_the_device() {
     for (method, arg) in [(0x206, 2), (0x207, 0x800), (0x573, 1)] {
         h.engine.write(method, arg, true, &mut ctx).unwrap();
     }
-    let colour = [0.25, 0.5, 1.0, 1.0];
+    // Off the halfway points between unorm steps, where devices may round either way.
+    let colour = [0.2, 0.6, 1.0, 1.0];
     h.triangle(colour);
     h.draw_with(&mut gpu).unwrap();
     assert!(gpu.reasons.is_empty(), "fell back: {:?}", gpu.reasons);
