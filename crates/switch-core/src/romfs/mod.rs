@@ -1,8 +1,12 @@
-//! RomFS reader: walks the directory and file metadata tables of an NCA's
-//! RomFS section (the name hash tables are ignored). `0xFFFFFFFF` ends a
+//! RomFS images: [`RomFs`] walks the directory and file metadata tables of an
+//! NCA's RomFS section (the name hash tables are ignored). `0xFFFFFFFF` ends a
 //! sibling chain; the root directory is entry 0 with an empty name.
+//! [`RomFsIndex`] maps storage reads to those files.
 
-use crate::source::ByteSource;
+mod index;
+
+pub use index::RomFsIndex;
+
 use crate::Error;
 
 /// The header's declared size; RomFS has no magic, so this is the format check.
@@ -93,71 +97,6 @@ impl<'a> RomFs<'a> {
     /// The payload bytes of the file at `path`.
     pub fn read_path(&self, path: &str) -> Option<&'a [u8]> {
         self.read(self.find(path)?)
-    }
-}
-
-/// The largest metadata table [`RomFsIndex::read`] accepts before calling the
-/// header corrupt.
-const MAX_TABLE: u64 = 64 << 20;
-
-/// Maps byte ranges of a RomFS to file names, from the metadata tables alone,
-/// so raw `IStorage` reads can be attributed to files.
-#[derive(Debug, Clone, Default)]
-pub struct RomFsIndex {
-    /// `(start, end, path)`, absolute within the image and sorted by `start`
-    /// (payloads never overlap, so `end` is sorted too).
-    extents: Vec<(u64, u64, String)>,
-}
-
-impl RomFsIndex {
-    /// Read the header and the two metadata tables out of `src`.
-    pub fn read(src: &dyn ByteSource) -> Result<RomFsIndex, Error> {
-        let mut header = [0u8; HEADER_SIZE as usize];
-        src.read_exact_at(0, &mut header)?;
-        if crate::nsp::read_u64(&header, 0) != HEADER_SIZE {
-            return Err(Error::RomFs("not a RomFS image".into()));
-        }
-        let table = |offset_at: usize, what: &str| -> Result<Vec<u8>, Error> {
-            let offset = crate::nsp::read_u64(&header, offset_at);
-            let size = crate::nsp::read_u64(&header, offset_at + 8);
-            if size > MAX_TABLE {
-                return Err(Error::RomFs(format!("{what} claims {size:#x} bytes")));
-            }
-            src.read_vec(offset, size)
-        };
-        let dir_table = table(0x18, "RomFS directory metadata table")?;
-        let file_table = table(0x38, "RomFS file metadata table")?;
-        let data_offset = crate::nsp::read_u64(&header, 0x48);
-        let mut extents: Vec<(u64, u64, String)> = walk(&dir_table, &file_table)?
-            .into_iter()
-            .filter_map(|f| {
-                let start = data_offset.checked_add(f.offset)?;
-                Some((start, start.checked_add(f.size)?, f.path))
-            })
-            .collect();
-        extents.sort_unstable_by_key(|&(start, _, _)| start);
-        Ok(RomFsIndex { extents })
-    }
-
-    /// Every file as `(start, end, path)`, absolute within the image, in image order.
-    pub fn files(&self) -> impl Iterator<Item = (u64, u64, &str)> {
-        self.extents
-            .iter()
-            .map(|(start, end, path)| (*start, *end, path.as_str()))
-    }
-
-    /// Every file the range `offset..offset + len` touches, with how many of
-    /// its bytes fall inside that file, in image order.
-    pub fn files_in(&self, offset: u64, len: u64) -> impl Iterator<Item = (&str, u64)> {
-        let end = offset.saturating_add(len);
-        let first = self.extents.partition_point(|&(_, e, _)| e <= offset);
-        self.extents[first..]
-            .iter()
-            .take_while(move |&&(start, _, _)| start < end)
-            .filter_map(move |(start, e, path)| {
-                let overlap = end.min(*e).saturating_sub(offset.max(*start));
-                (overlap > 0).then_some((path.as_str(), overlap))
-            })
     }
 }
 
@@ -255,11 +194,14 @@ mod tests {
     use super::*;
 
     /// A file to put in a built image: its name and its contents.
-    type NamedFile<'a> = (&'a str, &'a [u8]);
+    pub(super) type NamedFile<'a> = (&'a str, &'a [u8]);
 
     /// Build a RomFS image with a root directory holding `root_files`, and one
     /// subdirectory `sub` holding `sub_files`.
-    fn build(root_files: &[NamedFile], sub: Option<(&str, &[NamedFile])>) -> Vec<u8> {
+    pub(super) fn build_tree(
+        root_files: &[NamedFile],
+        sub: Option<(&str, &[NamedFile])>,
+    ) -> Vec<u8> {
         fn push_padded(table: &mut Vec<u8>, name: &str) {
             table.extend_from_slice(name.as_bytes());
             while !table.len().is_multiple_of(4) {
@@ -348,7 +290,7 @@ mod tests {
 
     #[test]
     fn reads_root_files() {
-        let image = build(
+        let image = build_tree(
             &[
                 ("control.nacp", b"NACP"),
                 ("icon_AmericanEnglish.dat", b"JPEG"),
@@ -366,7 +308,7 @@ mod tests {
 
     #[test]
     fn lookup_ignores_case() {
-        let image = build(&[("control.nacp", b"NACP")], None);
+        let image = build_tree(&[("control.nacp", b"NACP")], None);
         let romfs = RomFs::parse(&image).unwrap();
         assert_eq!(romfs.read_path("/Control.NACP").unwrap(), b"NACP");
         assert!(romfs.find("/missing.bin").is_none());
@@ -374,7 +316,7 @@ mod tests {
 
     #[test]
     fn walks_subdirectories() {
-        let image = build(&[("a.bin", b"A")], Some(("sub", &[("b.bin", b"BB")])));
+        let image = build_tree(&[("a.bin", b"A")], Some(("sub", &[("b.bin", b"BB")])));
         let romfs = RomFs::parse(&image).unwrap();
         assert_eq!(romfs.files().len(), 2);
         assert_eq!(romfs.read_path("/a.bin").unwrap(), b"A");
@@ -451,37 +393,15 @@ mod tests {
     }
 
     #[test]
-    fn the_index_names_the_files_a_range_touches() {
-        let image = build(&[("a.bin", b"AAAA")], Some(("sub", &[("b.bin", b"BB")])));
-        let index = RomFsIndex::read(&crate::source::SliceSource(&image)).unwrap();
-        let data = crate::nsp::read_u64(&image, 0x48);
-        let hits = |offset: u64, len: u64| -> Vec<(String, u64)> {
-            index
-                .files_in(offset, len)
-                .map(|(path, n)| (path.to_owned(), n))
-                .collect()
-        };
-        assert_eq!(hits(data + 1, 2), vec![("/a.bin".to_owned(), 2)]);
-        // Across the boundary: three bytes of one file, one of the next.
-        assert_eq!(
-            hits(data + 1, 4),
-            vec![("/a.bin".to_owned(), 3), ("/sub/b.bin".to_owned(), 1)]
-        );
-        // The header and the tables are no file's.
-        assert!(hits(0, HEADER_SIZE).is_empty());
-        assert!(hits(data + 6, 16).is_empty());
-    }
-
-    #[test]
     fn rejects_a_non_romfs_image() {
-        let mut image = build(&[("a.bin", b"A")], None);
+        let mut image = build_tree(&[("a.bin", b"A")], None);
         image[0] = 0x40;
         assert!(matches!(RomFs::parse(&image), Err(Error::RomFs(_))));
     }
 
     #[test]
     fn rejects_a_truncated_image() {
-        let image = build(&[("a.bin", b"A")], None);
+        let image = build_tree(&[("a.bin", b"A")], None);
         assert!(matches!(
             RomFs::parse(&image[..0x20]),
             Err(Error::Truncated { .. })
@@ -490,7 +410,7 @@ mod tests {
 
     #[test]
     fn rejects_a_self_referential_file_chain() {
-        let mut image = build(&[("a.bin", b"A"), ("b.bin", b"B")], None);
+        let mut image = build_tree(&[("a.bin", b"A"), ("b.bin", b"B")], None);
         // Point the first file entry's sibling link back at itself.
         let file_table = crate::nsp::read_u64(&image, 0x38) as usize;
         image[file_table + 4..file_table + 8].copy_from_slice(&0u32.to_le_bytes());
@@ -499,7 +419,7 @@ mod tests {
 
     #[test]
     fn rejects_a_file_entry_outside_the_table() {
-        let mut image = build(&[("a.bin", b"A")], None);
+        let mut image = build_tree(&[("a.bin", b"A")], None);
         let dir_table = crate::nsp::read_u64(&image, 0x18) as usize;
         image[dir_table + 0x0C..dir_table + 0x10].copy_from_slice(&0x7000u32.to_le_bytes());
         assert!(matches!(RomFs::parse(&image), Err(Error::RomFs(_))));
@@ -507,7 +427,7 @@ mod tests {
 
     #[test]
     fn read_rejects_an_extent_past_the_image() {
-        let image = build(&[("a.bin", b"A")], None);
+        let image = build_tree(&[("a.bin", b"A")], None);
         let romfs = RomFs::parse(&image).unwrap();
         let mut file = romfs.find("/a.bin").unwrap().clone();
         file.size = 0x1000;
