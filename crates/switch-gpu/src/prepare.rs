@@ -337,14 +337,23 @@ impl Gpu {
 
         let mut globals = self.global_uploads(&vs_layout, ShaderStage::VertexB, &uploads, ctx)?;
         globals.extend(self.global_uploads(&fs_layout, ShaderStage::Fragment, &uploads, ctx)?);
-        // One buffer cannot be written and read in the same draw.
-        for (i, a) in globals.iter().enumerate() {
-            for b in &globals[i + 1..] {
-                let both = a.held.as_ref().zip(b.held.as_ref());
-                if both.is_some_and(|(x, y)| x == y) && (a.writes || b.writes) {
-                    return Err("a buffer a draw both writes and reads".into());
-                }
+        // WebGPU refuses a buffer bound read-only where the same draw writes it, so a read of
+        // one binds it writable too; only the fragment stage may.
+        let written: Vec<wgpu::Buffer> = globals
+            .iter()
+            .filter(|g| g.writes)
+            .filter_map(|g| g.held.clone())
+            .collect();
+        for global in &mut globals {
+            let shares = global.held.as_ref().is_some_and(|h| written.contains(h));
+            if !shares || global.writes {
+                continue;
             }
+            if global.stage != Some(ShaderStage::Fragment) {
+                return Err("a vertex read of a buffer the draw writes".into());
+            }
+            global.writes = true;
+            fs_layout.globals[global.slot as usize].written = true;
         }
 
         if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {

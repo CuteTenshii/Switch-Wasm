@@ -489,7 +489,8 @@ fn mov32i(dst: u64, imm: u32) -> u64 {
 
 /// `body` between a prologue that points `r10` at the global buffer and an `exit`, drawn by
 /// both renderers over `initial` words; returns the words the rasterizer leaves. `size` is the
-/// descriptor's byte size, 0 for none. The program has to fit the harness's 0x100 bytes before
+/// descriptor's byte size, 0 for none. A second descriptor at `c0[0x120]` names the same
+/// buffer with no size. The program has to fit the harness's 0x100 bytes before
 /// its vertex buffer.
 fn global_words_after_both(body: &[u64], initial: &[u32], size: u32) -> Vec<u32> {
     use switch_core::gpu::testing::block;
@@ -514,9 +515,14 @@ fn global_words_after_both(body: &[u64], initial: &[u32], size: u32) -> Vec<u32>
     let set_up = |h: &mut Harness| {
         h.triangle([0.0; 4]);
         bind_global(h, initial);
-        h.vmm
-            .write_u32(&h.mem, h.base + 0x1500 + 0x118, size)
-            .unwrap();
+        let (constants, buffer) = (h.base + 0x1500, h.base + 0x1a00);
+        for (at, word) in [
+            (0x118, size),
+            (0x120, buffer as u32),
+            (0x124, (buffer >> 32) as u32),
+        ] {
+            h.vmm.write_u32(&h.mem, constants + at, word).unwrap();
+        }
     };
     let words_after = |h: &Harness| -> Vec<u32> {
         (0..initial.len() as u64)
@@ -636,6 +642,31 @@ fn global_atomics_leave_the_same_words_on_both_renderers() {
     );
     assert_eq!(rest[9], 0x77, "exch");
     assert_eq!(rest[10], 9, "cas");
+}
+
+/// A draw that writes a buffer through one descriptor and reads it through another binds it
+/// twice, both writable as WebGPU asks, and leaves the words the rasterizer does: Tears of
+/// the Kingdom's draws fell back on it.
+#[test]
+fn a_buffer_a_draw_writes_and_reads_through_two_descriptors_runs_on_the_device() {
+    let iadd_c0 = |dst: u64, word: u64, cin: u64, cout: u64| {
+        0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | RZ << 8 | dst
+    };
+    let stg = |byte: u64, src: u64| 0xeed8u64 << 48 | 4 << 48 | byte << 20 | PT | 10 << 8 | src;
+    let ldg = |byte: u64, dst: u64| 0xeed0u64 << 48 | 4 << 48 | byte << 20 | PT | 12 << 8 | dst;
+    let words = global_words_after_both(
+        &[
+            iadd_c0(12, 0x120 / 4, 0, 1),
+            iadd_c0(13, 0x124 / 4, 1, 0),
+            mov32i(2, 0x5566_7788),
+            stg(4, 2),
+            ldg(0, 4),
+            stg(8, 4),
+        ],
+        &[0x1122_3344, 0, 0],
+        0,
+    );
+    assert_eq!(words, [0x1122_3344, 0x5566_7788, 0x1122_3344]);
 }
 
 /// Global stores of every size, and narrow loads read back through them, land the words the
