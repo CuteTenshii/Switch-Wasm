@@ -4,7 +4,7 @@ How guest cores run on several workers over one shared memory. The console gives
 
 ## Build
 
-- One wasm module, instantiated by every worker over a shared `WebAssembly.Memory`, so guest RAM, the page table and the emulator's heap (locked, see [`heap.rs`](jit.md#cratesswitch-wasmsrcheaprs)) are the same bytes everywhere. That needs std built with atomics, hence the pinned nightly in the `Makefile` and the `+atomics`/`--shared-memory` flags in `.cargo/config.toml`.
+- One wasm module, instantiated by every worker over a shared `WebAssembly.Memory`, so guest RAM, the page table and the emulator's heap (locked, see [`heap.rs`](jit.md#cratesswitch-wasmsrcheaprs)) are the same bytes everywhere. That needs std built with atomics, hence the nightly in the `Makefile` and the `+atomics`/`--shared-memory` flags in `.cargo/config.toml`.
 - `web/worker/core.ts` instantiates the module with `initSync` on the system worker's module and memory, then serves the core whose slot the system worker sends it (`switch_add_core` on the system worker, `switch_serve_core` here, which blocks until the session stops its cores). `web/worker/coreworkers.ts` starts the two workers and adds a core to the one session for each as it comes up.
 - Function tables are per instance, so a region compiled by one worker cannot be called from another: each core keeps its own per-process JIT caches ([`mod.rs`](jit.md#modrs)) and installs its own regions ([`switch-wasm/src/jit.rs`](jit.md#cratesswitch-wasmsrcjitrs)).
 

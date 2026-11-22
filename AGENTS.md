@@ -89,7 +89,7 @@ actual browser run, not just host tests.
   `dist`.
 - There are two cargo profiles, `dev` and `release`. Host examples that run a
   title use `--release`.
-- Both wasm builds use the nightly the `Makefile` pins (`NIGHTLY`), with
+- Both wasm builds use the nightly the `Makefile` names (`NIGHTLY`), with
   `rust-src`; see `docs/tooling.md`. Host builds, tests and clippy stay on
   stable. The `Makefile` prints the `rustup` command when that nightly is missing.
 - `ring`, under `rustls`, compiles C for wasm32, so the build needs a `clang`

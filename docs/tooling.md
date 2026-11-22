@@ -11,7 +11,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 ## `Makefile`
 
 - The wasm build always includes the WebGPU backend: `wgpu` reaches WebGPU through `wasm-bindgen`, so the artifact is a wasm-bindgen module with glue, and one shape of core is cheaper than two loaders. Without WebGPU the backend fails to open a device and the software rasterizer takes the frame.
-- Both wasm builds use the pinned `NIGHTLY`, and `.cargo/config.toml` turns on `build-std` for it (stable cargo ignores that table): the core's memory is shared between workers, which needs `+atomics`, and stable's prebuilt std has none.
+- Both wasm builds use `NIGHTLY` (plain `nightly`; override it per build to pin a date), and `.cargo/config.toml` turns on `build-std` for it (stable cargo ignores that table): the core's memory is shared between workers, which needs `+atomics`, and stable's prebuilt std has none.
 - `make assets` exists because the core is an input to the Vite build, and only make knows how to build it.
 - `switch-gpu` tests take turns on one shared device (`tests::device` holds a lock): concurrent use of a software Vulkan device fails at random, and the lock lets one `cargo test --workspace` run every crate.
 

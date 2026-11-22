@@ -6,7 +6,7 @@ DIST   := dist
 # The browser build shares one memory between workers, which needs std rebuilt
 # with atomics, and only nightly can. Host builds and tests stay on stable.
 # Both binaries by path: a stable toolchain on PATH would otherwise supply rustc.
-NIGHTLY       ?= nightly-2026-11-07
+NIGHTLY       ?= nightly
 NIGHTLY_CARGO := $(shell rustup which --toolchain $(NIGHTLY) cargo 2>/dev/null)
 NIGHTLY_RUSTC := $(shell rustup which --toolchain $(NIGHTLY) rustc 2>/dev/null)
 NIGHTLY_HINT  := rustup toolchain install $(NIGHTLY) --profile minimal --component rust-src --target $(TARGET)

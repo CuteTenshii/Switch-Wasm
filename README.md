@@ -9,10 +9,10 @@ bun install
 make
 ```
 
-Requires [Bun](https://bun.com) for the frontend, and the pinned nightly Rust toolchain, which the browser build needs to rebuild std with atomics:
+Requires [Bun](https://bun.com) for the frontend, and a nightly Rust toolchain, which the browser build needs to rebuild std with atomics:
 
 ```sh
-rustup toolchain install nightly-2026-11-07 --profile minimal --component rust-src --target wasm32-unknown-unknown
+rustup toolchain install nightly --profile minimal --component rust-src --target wasm32-unknown-unknown
 ```
 
 It also needs a `wasm-bindgen` CLI matching the version in `Cargo.lock`.

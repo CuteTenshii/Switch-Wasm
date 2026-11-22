@@ -75,18 +75,10 @@ jobs:
       - name: Checkout the repository
         uses: actions/checkout@v7
 
-      # The wasm build rebuilds std with atomics, so it needs the nightly the Makefile pins, with rust-src
-      - name: Read the pinned nightly
-        id: nightly
-        run: |
-          toolchain=$(sed -n 's/^NIGHTLY *?= *//p' Makefile)
-          test -n "$toolchain"
-          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
-
-      - name: Install pinned nightly Rust
-        uses: https://github.com/dtolnay/rust-toolchain@master
+      # The wasm build rebuilds std with atomics, so it needs nightly with rust-src
+      - name: Install nightly Rust
+        uses: https://github.com/dtolnay/rust-toolchain@nightly
         with:
-          toolchain: ${{ steps.nightly.outputs.toolchain }}
           components: rust-src
           targets: wasm32-unknown-unknown
 
