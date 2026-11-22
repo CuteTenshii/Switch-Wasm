@@ -508,6 +508,63 @@ fn every_tlds_shape_is_wgsl_naga_accepts() {
     assert!(folded.contains("fk"), "{folded}");
 }
 
+/// An image bound as a smaller level answers size queries, fetches and texel offsets in the
+/// guest's texels, in WGSL naga accepts.
+#[test]
+fn a_smaller_level_reads_in_the_guests_texels() {
+    use switch_core::gpu::shader::isa::{TexDim, RZ};
+    use switch_core::gpu::shader::Op;
+
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    let ops = [
+        Op::Mov32i { dst: 7, imm: 0xf1 },
+        Op::Tex {
+            dst: 0,
+            coords: [4, 5, RZ],
+            layer: Some(6),
+            dref: None,
+            offset: Some(7),
+            lod: None,
+            handle: 8,
+            handle_reg: None,
+            dim: TexDim::T2dArray,
+            mask: [true; 4],
+        },
+        Op::Tlds {
+            dst: 0,
+            dst2: RZ,
+            coords: [4, 5, RZ],
+            layer: None,
+            lod: None,
+            offset: None,
+            handle: 9,
+            dim: TexDim::T2d,
+            mask: [true, true, false, false],
+            f16: false,
+        },
+        Op::Txq {
+            dst: 0,
+            lod: RZ,
+            handle: 10,
+            mask: [true, true, false, false],
+        },
+    ];
+    let source = validated_module(&gpu, "smaller level", &ops, |layout| {
+        for binding in &mut layout.textures {
+            binding.shrink = 2;
+        }
+    });
+    for shrunk in [
+        "let x = x >> 2u; let y = y >> 2u;",
+        "(textureDimensions(tex2) << vec2<u32>(2u))",
+        "u + f32(1) / d.x, v + f32(-1) / d.y",
+    ] {
+        assert!(source.contains(shrunk), "{shrunk} in {source}");
+    }
+}
+
 /// A gather whose offset is in a register, folded images included, is valid WGSL.
 #[test]
 fn a_gather_with_a_register_offset_is_wgsl_naga_accepts() {
@@ -2411,6 +2468,7 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
             min_linear: false,
             compare: None,
         },
+        shrink: 0,
     };
     let extent = wgpu::Extent3d {
         width: SIDE,

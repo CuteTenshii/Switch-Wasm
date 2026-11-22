@@ -254,9 +254,47 @@ pub struct Texture {
     /// GOBs of depth per block. Above 1 the image is a volume whose slices
     /// interleave; see [`crate::gpu::surface::block_linear_volume_offset`].
     pub block_depth_gobs: u32,
+    /// Mip levels in each layer, level 0 included; 1 for a volume, whose smaller levels
+    /// shrink in depth too and are not addressed here.
+    pub levels: u32,
 }
 
 impl Texture {
+    /// Mip level `level` of every layer, or `None` past the chain or for a pitch image or
+    /// volume, whose smaller levels are not laid out as a 2D layer's are.
+    pub fn level(&self, level: u32) -> Option<Texture> {
+        let Layout::BlockLinear { block_height_gobs } = self.layout else {
+            return None;
+        };
+        if level >= self.levels || self.block_depth_gobs > 1 {
+            return None;
+        }
+        let offset: u64 = (0..level)
+            .map(|smaller| {
+                u64::from(
+                    level_layout(
+                        self.kind,
+                        self.width,
+                        self.height,
+                        block_height_gobs,
+                        smaller,
+                    )
+                    .1,
+                )
+            })
+            .sum();
+        let (layout, _) =
+            level_layout(self.kind, self.width, self.height, block_height_gobs, level);
+        Some(Texture {
+            addr: self.addr + offset,
+            width: (self.width >> level).max(1),
+            height: (self.height >> level).max(1),
+            layout,
+            levels: self.levels - level,
+            ..*self
+        })
+    }
+
     /// Where texel `(x, y)` of `layer` starts in an uncompressed image of `bpp`-byte texels.
     fn unit_address(&self, x: u32, y: u32, layer: u32, bpp: u32) -> u64 {
         let width_bytes = match self.layout {
@@ -611,6 +649,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
         layer_stride,
         layers,
         block_depth_gobs,
+        levels: if texture_type == THREE_D { 1 } else { levels },
     };
     if crate::dump::wants(crate::dump::Artefact::Texture) {
         dump_texture(&texture, ctx)?;
@@ -667,18 +706,31 @@ fn mipmapped_layer_stride(
     block_height_gobs: u32,
     levels: u32,
 ) -> u32 {
-    let mut total = 0u32;
-    for level in 0..levels {
-        let rows = layer_rows(kind, (height >> level).max(1));
-        let gobs = fitted_block_height(block_height_gobs, rows);
-        total += Layout::BlockLinear {
-            block_height_gobs: gobs,
-        }
-        .layer_stride(width_bytes(kind, (width >> level).max(1)), rows);
-    }
+    let total: u32 = (0..levels)
+        .map(|level| level_layout(kind, width, height, block_height_gobs, level).1)
+        .sum();
     let block =
         surface::GOB_SIZE * fitted_block_height(block_height_gobs, layer_rows(kind, height));
     total.div_ceil(block) * block
+}
+
+/// Mip level `level`'s block-linear layout and the bytes it takes, its block height
+/// fitted to its rows as Eden's `AdjustMipBlockSize` fits it.
+fn level_layout(
+    kind: TexelKind,
+    width: u32,
+    height: u32,
+    block_height_gobs: u32,
+    level: u32,
+) -> (Layout, u32) {
+    let rows = layer_rows(kind, (height >> level).max(1));
+    let layout = Layout::BlockLinear {
+        block_height_gobs: fitted_block_height(block_height_gobs, rows),
+    };
+    (
+        layout,
+        layout.layer_stride(width_bytes(kind, (width >> level).max(1)), rows),
+    )
 }
 
 /// Decode a whole texture through the sampling path and hand it to the dump sink.
@@ -1404,6 +1456,16 @@ mod tests {
         let mut one_level = TIC;
         one_level[3] &= 0x0fff_ffff;
         assert_eq!(read(&mut mem, one_level).layer_stride, 0x4000);
+
+        // Level 1 follows level 0's 0x4000 bytes in each face, a layer stride apart as before.
+        let level = image.level(1).unwrap();
+        assert_eq!(level.addr, image.addr + 0x4000);
+        assert_eq!((level.width, level.height, level.layers), (32, 32, 66));
+        assert_eq!(
+            (level.layer_stride, level.levels),
+            (0x6000, image.levels - 1)
+        );
+        assert!(image.level(image.levels).is_none());
     }
 
     /// A BC1 block with equal endpoints decodes to one flat colour.

@@ -119,6 +119,8 @@ pub struct TextureBinding {
     pub sampler: Option<u32>,
     /// Only its size is read; see [`Translation::sized_only`].
     pub sized_only: bool,
+    /// Set by the backend when it binds the image's mip level `shrink` in its place.
+    pub shrink: u32,
 }
 
 /// A 2D image a program stores to, bound as a write-only storage texture.
@@ -322,6 +324,7 @@ impl Layout {
                     crop: None,
                     sampler: None,
                     sized_only: translated.sized_only.contains(&slot),
+                    shrink: 0,
                 })
                 .collect(),
             images: translated

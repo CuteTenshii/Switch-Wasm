@@ -466,6 +466,10 @@ impl Gpu {
             };
             binding.swizzle = upload.swizzle;
             binding.uint = upload.format.is_uint();
+            binding.shrink = upload.shrink;
+            if binding.uint && upload.shrink > 0 {
+                return Err("an integer image past the upload cap, read as a smaller level".into());
+            }
             if binding.uint {
                 // Read texel by texel, with the raw words as they are.
                 if upload.swizzle != wgsl::IDENTITY_SWIZZLE || binding.compare {

@@ -164,6 +164,7 @@ fn a_layout_names_every_binding_the_text_calls_through() {
             crop: None,
             sampler: None,
             sized_only: false,
+            shrink: 0,
         }]
     );
     let source = module(&translated, Stage::Fragment, &layout).unwrap();

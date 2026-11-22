@@ -1,10 +1,10 @@
 //! Wrapping a translation into a complete module with its entry points.
 
 use super::layout::{
-    attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Layout, Stage, StorageNumeric, Update,
-    ATOMS, ATTRIBUTE_WORDS, CONSTANTS_BINDING, CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE,
-    GLOBAL_BINDING, IDENTITY_SWIZZLE, IMAGE_BINDING, INSTANCE_ID, POSITION, TEXTURE_BINDING,
-    VERTEX_ID,
+    attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Layout, Stage, StorageNumeric,
+    TextureBinding, Update, ATOMS, ATTRIBUTE_WORDS, CONSTANTS_BINDING, CONSTANT_BANKS,
+    GENERIC_BASE, GENERIC_STRIDE, GLOBAL_BINDING, IDENTITY_SWIZZLE, IMAGE_BINDING, INSTANCE_ID,
+    POSITION, TEXTURE_BINDING, VERTEX_ID,
 };
 use super::{Translation, Unsupported};
 use crate::gpu::pipeline::AttributeBase;
@@ -416,6 +416,19 @@ pub fn module(
                     ),
                     texture.swizzle,
                 ),
+                // Constant offsets count the device's texels, which are larger than the guest's.
+                (None, None) if texture.shrink > 0 => {
+                    let moved = format!("vec2<f32>(u + f32({x}) / d.x, v + f32({y}) / d.y)");
+                    let coords = coords.replacen("vec2<f32>(u, v)", &moved, 1);
+                    format!(
+                        "let d = vec2<f32>({}); {}",
+                        guest_size(index, texture),
+                        return_swizzled(
+                            &format!("textureSampleLevel(tex{index}, smp{smp}, {coords})"),
+                            texture.swizzle
+                        )
+                    )
+                }
                 (None, None) => {
                     let texels = match texture.dim {
                         TexDim::T3d => format!("vec3<i32>({x}, {y}, {z})"),
@@ -450,10 +463,11 @@ pub fn module(
             None => ("s.y".to_string(), depth),
         };
         out.push_str(&format!(
-            "    case {key}u: {{\n      let s = textureDimensions(tex{index});\n      \
+            "    case {key}u: {{\n      let s = {};\n      \
              return vec4<u32>(select(max(s.x >> lod, 1u), 1u, lod >= 32u), \
              select(max({height} >> lod, 1u), 1u, lod >= 32u), {depth}, \
-             textureNumLevels(tex{index}));\n    }}\n"
+             textureNumLevels(tex{index}));\n    }}\n",
+            guest_size(index, texture)
         ));
     }
     out.push_str("    default: { return vec4<u32>(1u, 1u, 1u, 1u); }\n  }\n}\n\n");
@@ -463,12 +477,12 @@ pub fn module(
     for (index, texture) in layout.textures.iter().enumerate() {
         let height = match texture.fold {
             Some(fold) => format!("{}u", fold.height),
-            None => format!("textureDimensions(tex{index}).y"),
+            None => format!("{}.y", guest_size(index, texture)),
         };
         out.push_str(&format!(
-            "    case {}u: {{ return vec2<f32>(1.0 / f32(textureDimensions(tex{index}).x), \
-             1.0 / f32({height})); }}\n",
-            texture.slot.key()
+            "    case {}u: {{ return vec2<f32>(1.0 / f32({}.x), 1.0 / f32({height})); }}\n",
+            texture.slot.key(),
+            guest_size(index, texture)
         ));
     }
     out.push_str("    default: { return vec2<f32>(1.0, 1.0); }\n  }\n}\n\n");
@@ -565,8 +579,13 @@ pub fn module(
         } else {
             format!("{load} {}", return_swizzled("texel", texture.swizzle))
         };
+        // A smaller level holds each texel of the guest's in one of its own.
+        let shrink = match texture.shrink {
+            0 => String::new(),
+            levels => format!("let x = x >> {levels}u; let y = y >> {levels}u;\n      "),
+        };
         out.push_str(&format!(
-            "    case {key}u: {{\n      let size = {size};\n      \
+            "    case {key}u: {{\n      {shrink}let size = {size};\n      \
              if (x >= size.x || y >= size.y || z >= size.z) {{ return vec4<f32>(0.0); }}\n      {result}\n    }}\n"
         ));
     }
@@ -675,6 +694,14 @@ fn compute_entry(layout: &Layout, warp: bool) -> String {
          \x20 sr_ctaid = group;\n\
          \x20 _ = run();\n}}\n"
     )
+}
+
+/// The guest's size of a 2D image or layer, which a smaller mip level stands in for.
+fn guest_size(index: usize, texture: &TextureBinding) -> String {
+    match texture.shrink {
+        0 => format!("textureDimensions(tex{index})"),
+        levels => format!("(textureDimensions(tex{index}) << vec2<u32>({levels}u))"),
+    }
 }
 
 /// Statements binding `texel`, the raw words of the integer image's texel under `(u, v)` moved

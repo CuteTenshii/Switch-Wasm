@@ -137,6 +137,9 @@ pub struct TextureUpload {
     /// Channel swizzle, applied by the backend when sampling.
     pub swizzle: [SwizzleSource; 4],
     pub sampler: Sampler,
+    /// Mip levels dropped to fit [`MAX_UPLOAD`]: the bytes are the guest's level `shrink`,
+    /// so the image is this many halvings smaller than the shader expects.
+    pub shrink: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -752,20 +755,12 @@ fn read_texture(
         )?;
         return Ok(null_texture(stage, slot, handle, sampler));
     };
-    let image = descriptors.texture;
-
+    let (image, shrink) = fitting_level(&descriptors.texture)?;
     let copy = image_copy(&image)?;
     let (format, row_bytes, rows) = copy.shape(&image);
     let source_row_bytes = copy.source_row_bytes(row_bytes);
     let layers = image.layers.max(1);
     let total = u64::from(row_bytes) * u64::from(rows) * u64::from(layers);
-    if total > MAX_UPLOAD {
-        return Err(Error::Gpu(format!(
-            "upload: texture {}x{} is {total} bytes, past the {MAX_UPLOAD}-byte cap \
-             ({layers} {:?} layers of {row_bytes}x{rows} bytes)",
-            image.width, image.height, format
-        )));
-    }
     let key = TextureKey {
         addr: image.addr,
         width: image.width,
@@ -807,6 +802,7 @@ fn read_texture(
             source_len,
             swizzle: image.swizzle,
             sampler: descriptors.sampler,
+            shrink,
         });
     }
 
@@ -906,7 +902,39 @@ fn read_texture(
         source_len,
         swizzle: image.swizzle,
         sampler: descriptors.sampler,
+        shrink,
     })
+}
+
+/// The image's bytes once copied out, as many as the device texture takes.
+fn upload_bytes(image: &Texture) -> Result<u64> {
+    let (_, row_bytes, rows) = image_copy(image)?.shape(image);
+    Ok(u64::from(row_bytes) * u64::from(rows) * u64::from(image.layers.max(1)))
+}
+
+/// The image, or its largest mip level under [`MAX_UPLOAD`] and how many levels that drops.
+fn fitting_level(image: &Texture) -> Result<(Texture, u32)> {
+    let total = upload_bytes(image)?;
+    if total <= MAX_UPLOAD {
+        return Ok((*image, 0));
+    }
+    for level in 1..image.levels {
+        let Some(smaller) = image.level(level) else {
+            break;
+        };
+        if upload_bytes(&smaller)? <= MAX_UPLOAD {
+            return Ok((smaller, level));
+        }
+    }
+    let (format, row_bytes, rows) = image_copy(image)?.shape(image);
+    Err(Error::Gpu(format!(
+        "upload: texture {}x{} is {total} bytes, past the {MAX_UPLOAD}-byte cap \
+         ({} {format:?} layers of {row_bytes}x{rows} bytes, {} levels)",
+        image.width,
+        image.height,
+        image.layers.max(1),
+        image.levels
+    )))
 }
 
 impl TextureUpload {
@@ -967,6 +995,7 @@ fn null_texture(
             SwizzleSource::A,
         ],
         sampler,
+        shrink: 0,
     }
 }
 
@@ -1452,6 +1481,32 @@ mod tests {
         assert_eq!(read[16..], [0; 16], "past the mapping");
     }
 
+    /// Past the cap, the largest level under it stands in; without one the image is refused.
+    #[test]
+    fn an_array_past_the_cap_uploads_its_largest_level_under_it() {
+        let rgba8 = TexelKind::Plain(ColorFormat::from_raw(0xD5).unwrap());
+        let array = |levels| Texture {
+            layout: Layout::BlockLinear {
+                block_height_gobs: 16,
+            },
+            layers: 8,
+            layer_stride: 4096 * 4096 * 4 * 2,
+            levels,
+            ..image(rgba8, 4096, 4096, false)
+        };
+        let (level, shrink) = fitting_level(&array(3)).unwrap();
+        assert_eq!((level.width, level.height, shrink), (1024, 1024, 2));
+        assert!(upload_bytes(&level).unwrap() <= MAX_UPLOAD);
+        let (level, shrink) = fitting_level(&image(rgba8, 1024, 1024, false)).unwrap();
+        assert_eq!((level.width, shrink), (1024, 0));
+
+        let refused = fitting_level(&array(1)).unwrap_err();
+        assert!(
+            format!("{refused:?}").contains("8 Rgba8Unorm layers"),
+            "{refused:?}"
+        );
+    }
+
     fn image(kind: TexelKind, width: u32, height: u32, srgb: bool) -> Texture {
         Texture {
             addr: 0,
@@ -1469,6 +1524,7 @@ mod tests {
             layer_stride: 0,
             layers: 1,
             block_depth_gobs: 1,
+            levels: 1,
         }
     }
 
@@ -1629,6 +1685,7 @@ mod tests {
             layer_stride: 0,
             layers: 1,
             block_depth_gobs: 1,
+            levels: 1,
         };
         let mut out = Vec::new();
         deswizzle(&h.ctx(), base, layout, 16 * 4, 16, 4, &mut out).unwrap();
