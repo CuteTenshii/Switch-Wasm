@@ -796,6 +796,114 @@ fn a_vertex_read_of_a_buffer_the_fragment_stage_writes_runs_on_the_device() {
     assert_eq!(got, want);
 }
 
+/// A draw that only reads a buffer an earlier draw in the same pass writes opens a pass of its
+/// own: a pass is one usage scope, and a buffer bound writable in it cannot be bound read-only.
+/// Tears of the Kingdom's draws read buffers the ones before them wrote, and the device rejected
+/// the pass.
+#[test]
+fn a_draw_reading_a_buffer_the_pass_writes_opens_a_pass_of_its_own() {
+    use switch_core::gpu::testing::block;
+    let iadd_c0 = |dst: u64, word: u64, cin: u64, cout: u64| {
+        0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | RZ << 8 | dst
+    };
+    let stg = |byte: u64, src: u64| 0xeed8u64 << 48 | 4 << 48 | byte << 20 | PT | 10 << 8 | src;
+    let ldg = |byte: u64, dst: u64| 0xeed0u64 << 48 | 4 << 48 | byte << 20 | PT | 10 << 8 | dst;
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    // `gl_Position = aPosition; vColor = vec4(uintBitsToFloat(buffer[2]), 0, 0, 1);`
+    let vertex: Vec<u8> = [
+        (0x0807ff00, 0xefd9ff80), // ld b128 $r0 a[0x80]  (aPosition)
+        (0x0707ff00, 0xeff1ff80), // st b128 a[0x70] $r0  (gl_Position)
+        split(iadd_c0(10, 0x110 / 4, 0, 1)),
+        split(iadd_c0(11, 0x114 / 4, 1, 0)),
+        split(ldg(8, 4)),
+        split(mov32i(5, 0)),
+        split(mov32i(6, 0)),
+        split(mov32i(7, 0x3f80_0000)),
+        (0x0807ff04, 0xeff1ff80), // st b128 a[0x80] $r4  (vColor)
+        (0x0007000f, 0xe3000000), // exit
+    ]
+    .chunks(3)
+    .flat_map(|slots| {
+        block(
+            (0xfc20070f, 0x081f8441),
+            slots[0],
+            slots.get(1).copied().unwrap_or(nop),
+            slots.get(2).copied().unwrap_or(nop),
+        )
+    })
+    .collect();
+    // The first draw's fragment program also writes `buffer[0]`; the second's only shades.
+    let mut writing = testing::solid_fragment_shader();
+    writing.truncate(writing.len() - 32);
+    writing.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        split(iadd_c0(10, 0x110 / 4, 0, 1)),
+        split(iadd_c0(11, 0x114 / 4, 1, 0)),
+        split(mov32i(8, 0x5566_7788)),
+    ));
+    writing.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        split(stg(0, 8)),
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+    ));
+    let shading = testing::solid_fragment_shader();
+    const SHADING_AT: u32 = 0x2800;
+    // A quarter: off the halfway points between unorm steps, where devices may round either way.
+    let quarter = 0.25f32.to_bits();
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::with_fragment_shader(writing.clone());
+        h.set_vertex_shader(&vertex);
+        h.triangle([0.0; 4]);
+        bind_global(&mut h, &[0, 0, quarter, 0]);
+        let program = h.base + u64::from(SHADING_AT);
+        let mut ctx = h.ctx();
+        for (i, word) in shading.as_chunks::<4>().0.iter().enumerate() {
+            ctx.write_u32(program + i as u64 * 4, u32::from_le_bytes(*word))
+                .unwrap();
+        }
+        // The same bank for the vertex stage, whose `Bind` block is the first.
+        let mut ctx = switch_core::gpu::exec::ExecCtx {
+            mem: &h.mem,
+            vmm: &h.vmm,
+            as_id: h.as_id,
+            host1x: &mut h.host1x,
+            stats: &mut h.stats,
+            trace: false,
+        };
+        h.engine.write(0x900 + 4, 1, true, &mut ctx).unwrap();
+        h.draw_with(renderer).expect("the writing draw");
+        // SetProgram[Fragment]'s offset, at the program that only shades.
+        h.engine.regs.set(0x800 + 5 * 0x10 + 1, SHADING_AT);
+        h.draw_with(renderer).expect("the reading draw");
+        h.flush_with(renderer);
+        let words: Vec<u32> = (0..4u64)
+            .map(|word| h.vmm.read_u32(&h.mem, h.base + 0x1a00 + word * 4).unwrap())
+            .collect();
+        (h.target(), words)
+    };
+    let want = build(&mut Software);
+    assert_eq!(
+        want.1,
+        [0x5566_7788, 0, quarter, 0],
+        "the rasterizer's words"
+    );
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let before = gpu.fallbacks;
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, before,
+        "a draw did not run on the device: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want);
+}
+
 /// A draw reading through a descriptor that points inside a buffer written on the device
 /// reads it there, from the word the address names: Tears of the Kingdom reads 0x1c0 bytes into
 /// a buffer an earlier draw wrote, and fell back until the flush.

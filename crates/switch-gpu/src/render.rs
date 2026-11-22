@@ -465,14 +465,33 @@ impl Gpu {
 
         // Copies cannot be recorded inside a pass, so a draw needing one opens its own.
         let patched = bound.iter().any(|b| !b.patches.is_empty()) || !groups.patched.is_empty();
+        // A pass is one usage scope: a buffer written in it cannot also be bound read-only.
+        let held_globals: Vec<(wgpu::Buffer, bool)> = p
+            .globals
+            .iter()
+            .filter(|g| !g.snapshot)
+            .filter_map(|g| g.held.clone().map(|buffer| (buffer, g.writes)))
+            .collect();
         let joins = !patched
             && scratch.is_none()
-            && self
-                .pass
-                .as_ref()
-                .is_some_and(|open| open.colour == colour_target && open.depth == depth_target);
+            && self.pass.as_ref().is_some_and(|open| {
+                open.colour == colour_target
+                    && open.depth == depth_target
+                    && !held_globals.iter().any(|(buffer, writes)| {
+                        open.globals
+                            .iter()
+                            .any(|(bound, was)| bound == buffer && was != writes)
+                    })
+            });
         if joins {
             self.passes_joined += 1;
+            if let Some(open) = self.pass.as_mut() {
+                for global in held_globals {
+                    if !open.globals.contains(&global) {
+                        open.globals.push(global);
+                    }
+                }
+            }
         } else {
             self.end_pass();
             let mut encoder = self.batch.take().unwrap_or_else(|| {
@@ -539,6 +558,7 @@ impl Gpu {
                 pass,
                 colour: colour_target,
                 depth: depth_target,
+                globals: held_globals,
             });
         }
         {

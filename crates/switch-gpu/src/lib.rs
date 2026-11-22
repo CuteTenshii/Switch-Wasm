@@ -497,6 +497,8 @@ struct OpenPass {
     pass: wgpu::RenderPass<'static>,
     colour: Option<wgpu::Texture>,
     depth: Option<wgpu::Texture>,
+    /// Buffers held on the device that its draws bind, and whether writable.
+    globals: Vec<(wgpu::Buffer, bool)>,
 }
 
 /// A buffer's bytes and the device buffer holding them; see [`Gpu::shared_buffer`].
