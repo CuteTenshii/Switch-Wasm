@@ -678,10 +678,20 @@ impl Gpu {
             }
             // Within one GOB a slice is addressed as a plain surface is; past it, slices interleave.
             if deep_volume && !slice_fits_one_gob(&upload.key) {
-                return Err(
-                    "samples a surface held on the device as a slice of an interleaved volume"
-                        .into(),
-                );
+                return Err(format!(
+                    "samples a surface held on the device as a slice of an interleaved volume \
+                     (slice {layer} of {}x{}x{} {:?} at {:#x}, {:?}, {} GOBs deep; held {}x{} {:?})",
+                    upload.width,
+                    upload.height,
+                    upload.layers,
+                    upload.format,
+                    upload.key.addr,
+                    upload.key.layout,
+                    upload.key.block_depth_gobs,
+                    held.target.width,
+                    held.target.height,
+                    held.target.layout
+                ));
             }
             // A texture may be the top-left corner of a larger surface with the same rows.
             let size = held.texture.size();
