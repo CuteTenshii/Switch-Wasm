@@ -1615,21 +1615,53 @@ fn a_held_depth_surface_samples_as_the_depth_it_holds() {
 /// A depth surface last drawn as a crop beside a narrower colour target samples whole: the
 /// crop's corner over the rest, which is the full surface the device holds or, when it never
 /// drew it, guest memory. Echoes of Wisdom samples its depth so after a quarter-size pass.
+/// Tears of the Kingdom samples a layer of a shadow map array so, out of the corner of a
+/// padded surface, after post-processing draws beside the last cascade.
 #[test]
 fn a_depth_surface_held_as_a_crop_samples_at_its_full_size() {
+    use switch_core::gpu::shader::isa::{self, TexDim};
+    use switch_core::gpu::shader::Op;
+    let (low, high) = testing::BINDLESS_ARRAY_TEX;
+    let tex = isa::decode(u64::from(high) << 32 | u64::from(low)).op;
+    assert!(
+        matches!(
+            tex,
+            Op::Tex {
+                dim: TexDim::T2dArray,
+                layer: Some(0),
+                coords: [1, 2, _],
+                handle_reg: Some(4),
+                ..
+            }
+        ),
+        "the array sample decodes as {tex:?}"
+    );
     for drawn_whole in [true, false] {
-        depth_held_as_a_crop_samples_at_its_full_size(drawn_whole);
+        for (layers, width) in [
+            (1, testing::TARGET_WIDTH),
+            (2, testing::TARGET_WIDTH),
+            (1, testing::TARGET_WIDTH - 4),
+        ] {
+            depth_held_as_a_crop_samples_at_its_full_size(drawn_whole, layers, width);
+        }
     }
 }
 
-fn depth_held_as_a_crop_samples_at_its_full_size(drawn_whole: bool) {
+/// `layers` and `width` describe the image sampled: an array of the depth surface and a layer
+/// after it, or its padded corner.
+fn depth_held_as_a_crop_samples_at_its_full_size(drawn_whole: bool, layers: u32, width: u32) {
+    let shape = format!("drawn whole {drawn_whole}, {layers} layer(s) {width} wide");
     const COLOUR_ADDRESS_LOW: u32 = 0x201;
     const COLOUR_PITCH: u32 = 0x202;
     let Some((_serial, mut gpu)) = device() else {
         return;
     };
     let build = |renderer: &mut dyn Renderer| {
-        let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+        let mut h = Harness::with_fragment_shader(if layers > 1 {
+            testing::bindless_array_fragment_shader()
+        } else {
+            testing::bindless_fragment_shader()
+        });
         h.bindless_texture();
         h.depth_target(0x0207);
         h.engine.regs.set(0x3FA, 0x0A); // ZF32
@@ -1674,8 +1706,9 @@ fn depth_held_as_a_crop_samples_at_its_full_size(drawn_whole: bool) {
             (1, depth as u32),
             (2, (depth >> 32) as u32 | (3 << 21)),
             (3, 0),
-            (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
-            (5, testing::TARGET_HEIGHT - 1),
+            // `TextureType` 1 is a 2D image, 5 a 2D array.
+            (4, (width - 1) | (if layers > 1 { 5 } else { 1 } << 23)),
+            (5, (testing::TARGET_HEIGHT - 1) | ((layers - 1) << 16)),
         ] {
             ctx.write_u32(tic + word * 4, value).unwrap();
         }
@@ -1688,31 +1721,28 @@ fn depth_held_as_a_crop_samples_at_its_full_size(drawn_whole: bool) {
     let reds: std::collections::BTreeSet<u32> = want.iter().map(|&texel| texel & 0xff).collect();
     assert!(
         reds.len() > 2,
-        "drawn whole {drawn_whole}: the reference did not sample both depths: {want:x?}"
+        "{shape}: the reference did not sample both depths: {want:x?}"
     );
     let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
     let got = build(&mut gpu);
     assert_eq!(
         gpu.fallbacks, fallbacks,
-        "drawn whole {drawn_whole}: a draw fell back: {:?}",
+        "{shape}: a draw fell back: {:?}",
         gpu.last_fallback
     );
     let draws = if drawn_whole { 3 } else { 2 };
     assert_eq!(
         gpu.drawn,
         drawn + draws,
-        "drawn whole {drawn_whole}: a draw did not run on the device"
+        "{shape}: a draw did not run on the device"
     );
     let _ = gpu.device.poll(wgpu::PollType::Poll);
     assert_eq!(
         gpu.device_error(),
         None,
-        "drawn whole {drawn_whole}: the device rejected a pass"
+        "{shape}: the device rejected a pass"
     );
-    assert_eq!(
-        got, want,
-        "drawn whole {drawn_whole}: the colour surface differs"
-    );
+    assert_eq!(got, want, "{shape}: the colour surface differs");
 }
 
 /// A held `Z24S8` surface sampled as `S8D24` by `draws` draws: the colour target they draw.

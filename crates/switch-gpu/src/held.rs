@@ -179,26 +179,52 @@ impl Gpu {
     }
 
     /// A depth surface held as crops narrower colour targets drew it at, sampled at a larger
-    /// size with the same rows, is held at that size instead: the crop already held at it, or
-    /// guest memory with the crops drawn over its corner, the current one last.
+    /// size with the same rows, is held at that size instead: the crop already held at it or
+    /// one that holds it, or guest memory with the crops drawn over its corner, the current one
+    /// last. Each layer of an array is its own surface: Tears of the Kingdom's post-processing
+    /// draws beside the last shadow cascade still bound, so that layer alone is held cropped.
     pub(super) fn hold_at_sampled_size(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         ctx: &ExecCtx,
     ) -> Result<()> {
-        let Some(held) = self.space.held.get(&upload.key.addr) else {
+        // A volume's slices interleave; none is a surface of its own size.
+        if upload.key.block_depth_gobs > 1 {
+            return Ok(());
+        }
+        for layer in 0..upload.layers.max(1) {
+            let addr = upload.key.addr + u64::from(layer) * u64::from(upload.key.layer_stride);
+            self.hold_layer_at_sampled_size(addr, upload, ctx)?;
+        }
+        Ok(())
+    }
+
+    /// [`Gpu::hold_at_sampled_size`] for the layer held at `addr`.
+    fn hold_layer_at_sampled_size(
+        &mut self,
+        addr: u64,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        ctx: &ExecCtx,
+    ) -> Result<()> {
+        let Some(held) = self.space.held.get(&addr) else {
             return Ok(());
         };
         let sampled = (upload.width, upload.height);
         let size = |target: &Target| (target.width, target.height);
         if held.target.depth_kind().is_none()
             || held.companion.is_some()
-            || upload.layers > 1
             || size(&held.target) == sampled
         {
             return Ok(());
         }
-        if let Some(other) = held.other.as_ref().filter(|o| size(&o.target) == sampled) {
+        // A padded surface is sampled out of its corner, which the shadow map pass draws.
+        let holds_sampled = |target: &Target| {
+            size(target) == sampled
+                || (target.width >= sampled.0
+                    && target.height >= sampled.1
+                    && crate::same_rows(target, &upload.key))
+        };
+        if let Some(other) = held.other.as_ref().filter(|o| holds_sampled(&o.target)) {
             let target = other.target;
             return self.switch_crop(&target, true).map(|_| ());
         }
@@ -217,7 +243,7 @@ impl Gpu {
             return Ok(());
         }
         let texture = self.upload_target(&full, ctx)?;
-        let Some(mut crop) = self.space.held.remove(&upload.key.addr) else {
+        let Some(mut crop) = self.space.held.remove(&addr) else {
             return Ok(());
         };
         let mut dirty = crop.dirty;

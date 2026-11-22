@@ -124,6 +124,32 @@ pub fn bindless_fragment_shader() -> Vec<u8> {
     bytes
 }
 
+/// `oColor = texture(bindless, vec3(vColor.xy, 0))`: layer 0 of an array, handle from `c3[0x10]`.
+pub fn bindless_array_fragment_shader() -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff01, 0xe043ff88), // ipa $r1 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff02, 0xe043ff88), // ipa $r2 a[0x84] $r3 0x0 0x1
+        (0x0107ff04, 0xef940030), // ld b32 $r4 c3[0x10]
+        mov32i(0, 0),
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        BINDLESS_ARRAY_TEX,       // tex b nodep $r0 $r0 $r4 0x0 a2d 0xf
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+    ));
+    bytes
+}
+
+/// [`bindless_array_fragment_shader`]'s sample: the layer in `r0`, then `u` and `v`.
+pub const BINDLESS_ARRAY_TEX: (u32, u32) = (0xb0470000, 0xdeba0007);
+
 /// `oColor = textureGather(texture, vColor.xy, component)` from bound slot 4.
 pub fn gather_fragment_shader(component: u32) -> Vec<u8> {
     let tld4_high = 0xc83a0047 | (component & 3) << 24;
