@@ -10,7 +10,7 @@ import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { log } from './log';
 import { call } from './rpc';
 import { run, updateReadouts } from './runloop';
-import { endTitle, noteBooted } from './session';
+import { endTitle, noteBooted, refuseBootWhileNandBusy } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
 import { holdUrl, releaseUrl } from './objecturl';
 import { setRunning } from './title';
@@ -226,6 +226,7 @@ function pairedNotes(): string[] {
 
 // Boot from the stage: open the container and launch its Program NCA.
 export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'): Promise<void> {
+  if (refuseBootWhileNandBusy(file.name)) return;
   setState('loading');
   beginLoad(file.name, 'Opening the container (' + fmtSize(file.size) + ')');
   if (format === 'nca') {
@@ -536,6 +537,7 @@ export async function doLaunchNca(
   identity?: LaunchIdentity | null,
   note?: string,
 ): Promise<void> {
+  if (refuseBootWhileNandBusy(identity?.name || name)) return;
   log(describeLaunch(name, identity), 'info');
   if (note) log(note, 'info');
   setState('loading');

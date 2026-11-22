@@ -4,7 +4,9 @@ import type { NandEntry } from '../shared/db';
 import { $, el } from './dom';
 import { beginLoad } from './loading';
 import { log } from './log';
+import { nandBusy, nandOperation, onNandBusy } from './nandbusy';
 import { call, onNandProgress } from './rpc';
+import { refuseBootWhileNandBusy } from './session';
 import { setNote } from './shell';
 import { doLaunchNca } from './container';
 import { zipExtract, zipMembers, type ZipMember } from './unzip';
@@ -57,7 +59,7 @@ onNandProgress((done, total) => {
 
 // Resolves to the number of archives registered.
 function beginArchiveRestore(): Promise<number> {
-  const run = restoring.catch(() => {}).then(async () => {
+  const run = restoring.catch(() => {}).then(() => nandOperation('Registering system data archives and applets', async () => {
     registering = true;
     restoreProgress = null;
     updateFirmwareState();
@@ -68,7 +70,7 @@ function beginArchiveRestore(): Promise<number> {
       registering = false;
       updateFirmwareState();
     }
-  });
+  }));
   restoring = run.catch(() => null);
   return run;
 }
@@ -91,6 +93,9 @@ export async function initNand(): Promise<void> {
     log('NAND: the archives could not be registered (' + (err as Error).message + ')', 'error');
   });
 }
+
+// Launching waits for NAND operations, so the rows say so while one runs.
+onNandBusy(() => renderNandTitles());
 
 export function titleLabel(id: string): string {
   return SYSTEM_TITLES[id] || id;
@@ -120,19 +125,21 @@ function nandRow(id: string, entry: NandEntry): HTMLButtonElement {
   main.appendChild(el('span', 'row-sub', id));
   row.appendChild(main);
   row.appendChild(el('span', 'row-action', '\u25B6 Launch'));
+  row.disabled = nandBusy() !== null;
   row.addEventListener('click', () => launchInstalled(id, entry));
   return row;
 }
 
 function launchInstalled(id: string, entry: NandEntry): Promise<void> {
   const name = titleLabel(id);
+  if (refuseBootWhileNandBusy(name)) return Promise.resolve();
   beginLoad(name, 'Reading ' + entry.name + ' from the NAND');
   return doLaunchNca(name, () => call('nandLaunch', entry.name));
 }
 
 // Content and index entry go together; a registered archive stays until the session is replaced.
 export async function removeNandTitle(id: string): Promise<void> {
-  await call('nandRemove', id);
+  await nandOperation('Removing a title', () => call('nandRemove', id));
   nandTitles = nandTitles.filter(([titleId]) => titleId !== id);
   renderNandTitles();
   updateFirmwareState();
@@ -220,7 +227,14 @@ function gatherNcas<T>(
   return { ncas, ignored, failures };
 }
 
-async function installFirmware(
+function installFirmware(
+  source: string,
+  found: { ncas: FirmwareNca[]; ignored: number; failures: string[] },
+): Promise<void> {
+  return nandOperation('Installing firmware', () => installFirmwareNcas(source, found));
+}
+
+async function installFirmwareNcas(
   source: string,
   { ncas, ignored, failures }: { ncas: FirmwareNca[]; ignored: number; failures: string[] },
 ): Promise<void> {
@@ -299,7 +313,7 @@ $('firmware-zip').addEventListener('change', async (e) => {
 $('btn-erase-nand').addEventListener('click', async () => {
 // Already registered content stays registered until the session is replaced.
   try {
-    await call('nandErase');
+    await nandOperation('Erasing the NAND', () => call('nandErase'));
   } catch (err) {
     log('NAND: could not be erased (' + (err as Error).message + ')', 'error');
     return;

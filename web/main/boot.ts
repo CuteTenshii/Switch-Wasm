@@ -8,14 +8,16 @@ import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
 import { log } from './log';
+import { nandBusy, onNandBusy } from './nandbusy';
 import { call } from './rpc';
 import { onChainLoad, run, updateReadouts } from './runloop';
-import { endTitle, noteBooted } from './session';
+import { endTitle, noteBooted, refuseBootWhileNandBusy } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
 import { runningIconUrl, setRunning } from './title';
 import type { RunningTitle } from './title';
 
 export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
+  if (refuseBootWhileNandBusy(file.name)) return false;
   setState('loading');
   beginLoad(file.name, 'Reading ' + fmtSize(file.size));
   loadPhase(kind === 'nro' ? 'Loading the NRO' : 'Loading the ELF',
@@ -26,6 +28,7 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
 // Launch the NRO at `path` on the SD card in place of the running title, as hbmenu does.
 export async function launchFromSd(path: string): Promise<void> {
   const name = path.slice(path.lastIndexOf('/') + 1);
+  if (refuseBootWhileNandBusy(name)) return;
   if (!(await replaceTitle(name))) return;
   setState('loading');
   loadPhase('Loading the NRO', 'Mapping the image and seeding the guest');
@@ -83,6 +86,8 @@ async function bootFile(file: File): Promise<void> {
     log(verdict.why, 'error');
     return;
   }
+  // Before the running title is ended for it.
+  if (refuseBootWhileNandBusy(file.name)) return;
   if (!(await replaceTitle(file.name))) return;
   if (verdict.format === 'pfs0' || verdict.format === 'xci' || verdict.format === 'nca') {
     await bootContainer(file, verdict.format);
@@ -106,6 +111,19 @@ async function replaceTitle(name: string): Promise<boolean> {
     return false;
   }
 }
+
+// The Open buttons are labels for the file input, so disabling the input stops the picker.
+const openTitles = new Map<string, string>();
+onNandBusy(() => {
+  const busy = nandBusy();
+  $<HTMLInputElement>('nro-file').disabled = busy !== null;
+  for (const id of ['btn-open', 'overlay-open']) {
+    const label = $(id);
+    if (!openTitles.has(id)) openTitles.set(id, label.title);
+    label.setAttribute('aria-disabled', String(busy !== null));
+    label.title = busy ? busy + ' on the NAND; opening a file waits for it.' : openTitles.get(id) ?? '';
+  }
+});
 
 $('nro-file').addEventListener('change', async (e) => {
   const f = pickedFile(e);

@@ -22,7 +22,8 @@
   border-color: var(--border-hi);
 }
 .btn:active { transform: translateY(0.5px); }
-.btn:disabled {
+.btn:disabled,
+.btn[aria-disabled="true"] {
   opacity: .4;
   cursor: not-allowed;
 }

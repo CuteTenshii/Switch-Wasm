@@ -60,6 +60,14 @@
   background: var(--hover-bg);
   border-color: var(--border-hi);
 }
+.row-item:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+.row-item:disabled:hover {
+  background: var(--chrome-hi);
+  border-color: var(--border);
+}
 .row-main {
   display: flex;
   flex-direction: column;

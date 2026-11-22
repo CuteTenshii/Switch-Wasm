@@ -1,7 +1,9 @@
 // Session bring-up and ending a title. The session is the console, staged once; each title
 // is a process in it.
 
+import { log } from './log';
 import { resetMemoryHistory } from './memory';
+import { bootRefusal } from './nandbusy';
 import { call } from './rpc';
 import { abortRun } from './runloop';
 import { stageUsers } from './users';
@@ -15,6 +17,13 @@ export function noteBooted(): void {
 
 export function titleBooted(): boolean {
   return booted;
+}
+
+// Whether `name` may not boot now, while a NAND operation runs; says why in the log.
+export function refuseBootWhileNandBusy(name: string): boolean {
+  const why = bootRefusal(name);
+  if (why) log(why, 'warn');
+  return why !== null;
 }
 
 // Leaving the page drops a loaded title's unsaved progress; the idle console loses nothing.
