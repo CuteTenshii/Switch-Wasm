@@ -163,6 +163,8 @@ Section headings are paths under `crates/switch-wasm/src/`; a heading that start
 - Content older builds kept in IndexedDB moves to OPFS in the background after the sweep, one file per queued job, each IndexedDB entry deleted once its copy is whole. Reads look in OPFS first and IndexedDB second, so nothing waits for the move. The emptied `content` store stays: dropping it takes a version bump of a database that also holds saves, and the fallback still writes it.
 - Every stored NCA is also listed read-only at `/Contents/registered/<name>` on the SYSTEM BIS partition (`add_nand_content`), read by range from its host file.
 - Data archives and library applets (`add_applet`) are registered by `restoreNand` (`idb/nand.rs`); the page queues registrations so each runs after the last. The core runs an applet as a process beside its caller.
+- Registering, installing firmware, erasing the NAND and removing a title are NAND operations (`nandOperation`, `web/main/nandbusy.ts`). While one runs no title boots: every launch path checks first (`refuseBootWhileNandBusy`, before a running title is ended for it) and the Open buttons and launch rows are disabled. Applets register last, after every archive, so a title booted during the background registration found offlineWeb "not on the NAND" and Minecraft's NgWord2 missing.
+- Each firmware NCA is identified from its encrypted header before it is stored, so the install buttons stay disabled until prod.keys is loaded, as Eden checks for keys before its picker opens. Without the check an install read every NCA and listed them all as failed.
 
 ## `web/main/files.ts`
 
