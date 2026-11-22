@@ -463,10 +463,22 @@ impl Cpu {
                 Ok(())
             }
             // 202 = OpenDataStorageByDataId: a registered data archive
-            // ([`Cpu::add_data_archive`]), or not found.
+            // ([`Cpu::add_data_archive`]), else a synthesized stand-in, or not found.
             Some(202) => {
                 let data = self.ipc_request_data(tls);
                 let data_id = self.mem.read_u64(data.wrapping_add(8))?;
+                if !self.data_archives.contains_key(&data_id) {
+                    // Registered like a real archive, so a firmware one added later replaces it.
+                    if let Some((name, image)) = super::system_archive::synthesize(data_id) {
+                        self.log(
+                            Level::Info,
+                            &format!(
+                                "[fs] synthesized system data archive {name} ({data_id:016x})"
+                            ),
+                        );
+                        self.add_data_archive(data_id, Box::new(crate::source::MemSource(image)));
+                    }
+                }
                 if !self.data_archives.contains_key(&data_id) {
                     self.log(
                         Level::Warn,
@@ -2134,6 +2146,92 @@ mod tests {
             "2002-0001 (0x202)"
         );
         assert_eq!(super::result_text(2 | (3005 << 9)), "2002-3005 (0x177a02)");
+    }
+
+    const NG_WORD2: u64 = 0x0100_0000_0000_0823;
+
+    /// `OpenDataStorageByDataId(u8 storage, u64 data id)` on a fresh `fsp-srv` session.
+    fn open_data_storage(cpu: &mut Cpu, data_id: u64) -> (u32, Option<u64>) {
+        let mut payload = [0u8; 0x10];
+        payload[0] = 1; // NAND system
+        payload[8..].copy_from_slice(&data_id.to_le_bytes());
+        cpu.record_handle(9, "fsp-srv");
+        write_request(cpu, 202, &payload);
+        cpu.fsp_srv_request(TLS, Some(202), 9).unwrap();
+        let result = cpu.mem.read_u32(TLS + 0x18).unwrap();
+        let session = (result == 0).then(|| cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64);
+        (result, session)
+    }
+
+    /// The whole of an opened storage, read through `IStorage`.
+    fn read_storage(cpu: &mut Cpu, session: u64) -> Vec<u8> {
+        const BUFFER: u32 = 0x4000;
+        write_request(cpu, 4, &[]);
+        cpu.fs_storage_request(TLS, session, Some(4)).unwrap();
+        let size = cpu.mem.read_u64(TLS + 0x20).unwrap();
+        cpu.mem.map_zero(BUFFER, size as usize).unwrap();
+        let mut payload = [0u8; 0x10];
+        payload[8..].copy_from_slice(&size.to_le_bytes());
+        write_map_buffer_request(cpu, 0, &payload, BUFFER, size as u32, false);
+        cpu.fs_storage_request(TLS, session, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "read result");
+        cpu.read_bytes(BUFFER, size as u32)
+    }
+
+    #[test]
+    fn a_missing_ng_word2_is_served_from_a_synthesized_image() {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        let (result, session) = open_data_storage(&mut cpu, NG_WORD2);
+        assert_eq!(result, 0, "opening NgWord2");
+        assert_eq!(cpu.service_name(session.unwrap()), Some("fsp-srv-storage"));
+
+        let image = read_storage(&mut cpu, session.unwrap());
+        let (_, expected) = super::super::system_archive::synthesize(NG_WORD2).unwrap();
+        assert_eq!(image, expected);
+        let romfs = crate::romfs::RomFs::parse(&image).unwrap();
+        assert_eq!(romfs.files().len(), 58);
+
+        // Synthesized once: the second open finds it registered.
+        let (result, _) = open_data_storage(&mut cpu, NG_WORD2);
+        assert_eq!(result, 0);
+        let log = String::from_utf8_lossy(&cpu.trace).into_owned();
+        assert_eq!(
+            log.matches("synthesized system data archive NgWord2")
+                .count(),
+            1,
+            "{log}"
+        );
+        // Reads are charged to the image's files, as for a real archive.
+        let files = cpu.fs_activity.take_files();
+        let version = files
+            .get("data archive 0100000000000823:/version.dat")
+            .unwrap_or_else(|| panic!("{files:?}"));
+        assert_eq!(version.read_bytes, 4);
+    }
+
+    #[test]
+    fn a_registered_archive_wins_over_the_stand_in() {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.add_data_archive(
+            NG_WORD2,
+            Box::new(crate::source::MemSource(b"real".to_vec())),
+        );
+        let (result, session) = open_data_storage(&mut cpu, NG_WORD2);
+        assert_eq!(result, 0);
+        assert_eq!(read_storage(&mut cpu, session.unwrap()), b"real");
+        assert!(!String::from_utf8_lossy(&cpu.trace).contains("synthesized"));
+    }
+
+    #[test]
+    fn an_archive_with_no_stand_in_is_still_not_found() {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        let (result, session) = open_data_storage(&mut cpu, 0x0100_0000_0000_0809);
+        assert_eq!(result, super::PATH_NOT_FOUND);
+        assert!(session.is_none());
+        assert!(!cpu.has_data_archive(0x0100_0000_0000_0809));
     }
 
     /// `IStorage::Read` refuses a range past the end.

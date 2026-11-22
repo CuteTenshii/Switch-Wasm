@@ -24,6 +24,7 @@ pub(crate) mod pl;
 pub(crate) mod power;
 pub(crate) mod settings;
 pub(crate) mod storage;
+pub(crate) mod system_archive;
 pub(crate) mod time;
 pub(crate) mod usb;
 pub(crate) mod vi;
