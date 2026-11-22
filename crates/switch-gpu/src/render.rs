@@ -126,8 +126,9 @@ impl Gpu {
             {
                 let (bytes, widened) = crate::aligned_stride(bytes, part_stride);
                 // Widening moves every element but the first.
-                let origin = (widened == stride || bytes.len() <= stride as usize)
-                    .then(|| (upload.addr + shift, upload.inside.saturating_sub(shift)));
+                let origin = shift
+                    .filter(|_| widened == stride || bytes.len() <= stride as usize)
+                    .map(|shift| (upload.addr + shift, upload.inside.saturating_sub(shift)));
                 feeds.push(Feed {
                     bytes,
                     origin,

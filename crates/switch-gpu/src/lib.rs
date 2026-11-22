@@ -267,26 +267,27 @@ struct Bound {
 }
 
 /// A vertex buffer's bytes, the attributes that read them, how many bytes into the array they
-/// start, and their stride.
+/// start (`None` once rearranged, so they are not the guest's bytes in place), and their stride.
 type VertexPart<'a> = (
     std::borrow::Cow<'a, [u8]>,
     Vec<wgpu::VertexAttribute>,
-    u64,
+    Option<u64>,
     u64,
 );
 
-/// Split a vertex array so each attribute lies inside its stride, as WebGPU requires and
-/// Maxwell does not: one past it reads the same bytes from a buffer starting whole strides
-/// later, and one running into the next element (Tears of the Kingdom's 8-byte `Float16x4` on
-/// a 6-byte stride) reads them from a copy laid out at a stride that holds it. The buffer
-/// keeps its element count, zeros where the array ended, so a draw still fits.
+/// Split a vertex array so each attribute lies inside its stride at an offset its format
+/// aligns, as WebGPU requires and Maxwell does not: one past the stride reads the same bytes
+/// from a buffer starting whole strides later, and one running into the next element (Tears of
+/// the Kingdom's 8-byte `Float16x4` on a 6-byte stride) or off its alignment (its offset 10)
+/// reads them from a copy laid out as WebGPU takes it. The buffer keeps its element count, zeros
+/// where the array ended, so a draw still fits.
 fn within_stride<'a>(
     bytes: std::borrow::Cow<'a, [u8]>,
     attributes: Vec<wgpu::VertexAttribute>,
     stride: u64,
 ) -> Vec<VertexPart<'a>> {
     if stride == 0 {
-        return vec![(bytes, attributes, 0, 0)];
+        return vec![(bytes, attributes, Some(0), 0)];
     }
     let mut by_skip: std::collections::BTreeMap<u64, Vec<wgpu::VertexAttribute>> =
         std::collections::BTreeMap::new();
@@ -311,31 +312,55 @@ fn within_stride<'a>(
                 moved.resize(bytes.len(), 0);
                 (std::borrow::Cow::Owned(moved), from as u64)
             };
-            let reach = attributes
-                .iter()
-                .map(|a| a.offset + a.format.size())
-                .max()
-                .unwrap_or(0);
-            if reach <= stride {
-                return (bytes, attributes, shift, stride);
+            let fits = attributes.iter().all(|a| {
+                a.offset + a.format.size() <= stride
+                    && a.offset.is_multiple_of(vertex_alignment(a.format))
+            });
+            if fits {
+                return (bytes, attributes, Some(shift), stride);
             }
-            let restrided = restride(&bytes, stride, reach);
-            (std::borrow::Cow::Owned(restrided), attributes, shift, reach)
+            let (repacked, attributes, wide) = repack(&bytes, stride, &attributes);
+            (std::borrow::Cow::Owned(repacked), attributes, None, wide)
         })
         .collect()
 }
 
-/// Each element's first `reach` bytes, read `stride` apart as Maxwell reads them and laid out
-/// `reach` apart, zeros past the array's end.
-fn restride(bytes: &[u8], stride: u64, reach: u64) -> Vec<u8> {
-    let (stride, reach) = (stride as usize, reach as usize);
-    let mut out = vec![0u8; bytes.len() / stride * reach];
-    for (i, element) in out.chunks_exact_mut(reach).enumerate() {
-        let from = i * stride;
-        let to = (from + reach).min(bytes.len());
-        element[..to - from].copy_from_slice(&bytes[from..to]);
+/// The offset alignment WebGPU asks of an attribute.
+fn vertex_alignment(format: wgpu::VertexFormat) -> u64 {
+    format.size().min(4)
+}
+
+/// Each element's attributes laid out one after another, each at an offset its format aligns,
+/// read `stride` apart as Maxwell reads them; zeros past the array's end.
+fn repack(
+    bytes: &[u8],
+    stride: u64,
+    attributes: &[wgpu::VertexAttribute],
+) -> (Vec<u8>, Vec<wgpu::VertexAttribute>, u64) {
+    let mut end = 0u64;
+    let moved: Vec<wgpu::VertexAttribute> = attributes
+        .iter()
+        .map(|attribute| {
+            let offset = end.next_multiple_of(vertex_alignment(attribute.format));
+            end = offset + attribute.format.size();
+            wgpu::VertexAttribute {
+                offset,
+                ..*attribute
+            }
+        })
+        .collect();
+    let wide = end.next_multiple_of(4);
+    let (stride, wide_len) = (stride as usize, wide as usize);
+    let mut out = vec![0u8; bytes.len() / stride * wide_len];
+    for (i, element) in out.chunks_exact_mut(wide_len).enumerate() {
+        for (from, to) in attributes.iter().zip(&moved) {
+            let at = i * stride + from.offset as usize;
+            let len = (from.format.size() as usize).min(bytes.len().saturating_sub(at));
+            let into = to.offset as usize;
+            element[into..into + len].copy_from_slice(&bytes[at..at + len]);
+        }
     }
-    out
+    (out, moved, wide)
 }
 
 /// Widen each element to a multiple of four bytes, which WebGPU requires of a stride and

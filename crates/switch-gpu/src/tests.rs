@@ -1440,12 +1440,46 @@ fn an_attribute_running_into_the_next_element_reads_its_bytes() {
     let parts = super::within_stride(std::borrow::Cow::Borrowed(&bytes[..]), vec![wide], 6);
     assert_eq!(parts.len(), 1);
     let (restrided, attributes, shift, stride) = &parts[0];
-    assert_eq!((*shift, *stride), (0, 8));
+    assert_eq!((*shift, *stride), (None, 8));
     assert_eq!(attributes, &[wide]);
     assert_eq!(
         restrided.as_ref(),
         [1, 2, 3, 4, 5, 6, 7, 8, 7, 8, 9, 10, 11, 12, 13, 14, 13, 14, 15, 16, 17, 18, 0, 0],
         "each element is the eight bytes at six apart, zeros past the end"
+    );
+}
+
+/// Tears of the Kingdom's attribute at offset 10, which WebGPU refuses for a 4-byte format,
+/// reads the same bytes from a copy that puts it on a word.
+#[test]
+fn an_attribute_off_its_alignment_reads_from_a_copy_on_it() {
+    let attribute = |format, offset, shader_location| wgpu::VertexAttribute {
+        format,
+        offset,
+        shader_location,
+    };
+    let bytes: Vec<u8> = (1..=28).collect();
+    let parts = super::within_stride(
+        std::borrow::Cow::Borrowed(&bytes[..]),
+        vec![
+            attribute(wgpu::VertexFormat::Unorm8x2, 0, 0),
+            attribute(wgpu::VertexFormat::Float16x2, 10, 3),
+        ],
+        14,
+    );
+    assert_eq!(parts.len(), 1);
+    let (copied, attributes, shift, stride) = &parts[0];
+    assert_eq!((*shift, *stride), (None, 8));
+    assert_eq!(
+        attributes,
+        &[
+            attribute(wgpu::VertexFormat::Unorm8x2, 0, 0),
+            attribute(wgpu::VertexFormat::Float16x2, 4, 3),
+        ]
+    );
+    assert_eq!(
+        copied.as_ref(),
+        [1, 2, 0, 0, 11, 12, 13, 14, 15, 16, 0, 0, 25, 26, 27, 28]
     );
 }
 
