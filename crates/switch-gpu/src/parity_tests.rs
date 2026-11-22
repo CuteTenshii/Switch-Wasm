@@ -2055,6 +2055,95 @@ fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
     }
 }
 
+/// A `Z16` shadow map array with one layer held on the device and the other only in guest
+/// memory compares each layer against what it holds: Tears of the Kingdom holds some of its
+/// shadow cascades on the device and not others.
+#[test]
+fn a_shadow_map_array_held_in_part_compares_each_layer_as_the_rasterizer_does() {
+    use switch_core::gpu::shader::isa::{self, TexDim};
+    use switch_core::gpu::shader::Op;
+    let (low, high) = testing::SHADOW_ARRAY_TEX;
+    let tex = isa::decode(u64::from(high) << 32 | u64::from(low)).op;
+    assert!(
+        matches!(
+            tex,
+            Op::Tex {
+                dim: TexDim::T2dArray,
+                layer: Some(0),
+                coords: [1, 2, _],
+                dref: Some(_),
+                ..
+            }
+        ),
+        "the array shadow sample decodes as {tex:?}"
+    );
+    let (width, height) = (testing::TARGET_WIDTH, testing::TARGET_HEIGHT);
+    // One GOB per layer: 16 two-byte texels by 8 rows.
+    let layer_stride = surface::GOB_SIZE;
+    let build = |renderer: &mut dyn Renderer, layer: u32| {
+        let mut h = Harness::with_fragment_shader(testing::shadow_array_fragment_shader(layer));
+        h.bindless_texture();
+        h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+        h.depth_target(0x0207);
+        h.engine.regs.set(0x3FA, 0x13); // Z16
+        h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
+        h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
+        h.engine.regs.set(0x364, 0.75f32.to_bits());
+        let (tic, tsc, depth) = (h.base + 0x1400 + 32, h.base + 0x1480 + 32, h.base + 0x1000);
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        let mut ctx = h.ctx();
+        for (word, value) in [
+            (0, 0x3a | (2 << 7) | identity),
+            (1, depth as u32),
+            (2, (depth >> 32) as u32 | (3 << 21)),
+            (3, 0),
+            // A 2D array of two layers.
+            (4, (width - 1) | (5 << 23)),
+            (5, (height - 1) | (1 << 16)),
+        ] {
+            ctx.write_u32(tic + word * 4, value).unwrap();
+        }
+        // The fixture's sampler, comparing with Less.
+        ctx.write_u32(tsc, 2 | (2 << 3) | (2 << 6) | (1 << 9) | (1 << 10))
+            .unwrap();
+        // Layer 1 only ever in guest memory: a quarter, against the clear's three quarters.
+        let quarter = (0.25f32 * 65535.0).round() as u32;
+        for y in 0..height {
+            for x in (0..width).step_by(2) {
+                let at = depth + u64::from(layer_stride + surface::gob_offset(x * 2, y));
+                ctx.write_u32(at, quarter | quarter << 16).unwrap();
+            }
+        }
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        // Layer 0 is the depth target, cleared and so held on the device.
+        h.clear_depth_with(renderer).expect("the clear");
+        h.draw_with(renderer).expect("the draw");
+        h.flush_with(renderer);
+        h.target()
+    };
+    let want: Vec<Vec<u32>> = (0..2).map(|layer| build(&mut Software, layer)).collect();
+    assert_ne!(want[0], want[1], "the layers compared alike");
+    for (layer, want) in want.iter().enumerate() {
+        // A device of its own: the layer is in the shader, whose page it never saw written.
+        let Some((_serial, mut gpu)) = device() else {
+            return;
+        };
+        let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+        let got = build(&mut gpu, layer as u32);
+        assert_eq!(
+            gpu.fallbacks, fallbacks,
+            "layer {layer}: the draw fell back: {:?}",
+            gpu.last_fallback
+        );
+        assert_eq!(gpu.drawn, drawn + 1, "layer {layer}: not on the device");
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        assert_eq!(gpu.device_error(), None, "layer {layer}: rejected");
+        assert_eq!(&got, want, "layer {layer}: the colour surface differs");
+    }
+}
+
 /// A held `R32Float` colour surface sampled as a `ZF32` shadow map compares against the depths it
 /// holds. Breath of the Wild samples one so.
 #[test]

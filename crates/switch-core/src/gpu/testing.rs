@@ -452,6 +452,33 @@ pub fn shadow_fragment_shader() -> Vec<u8> {
     bytes
 }
 
+/// `oColor = texture(shadowMaps, vec4(vColor.xy, layer, 0.5))` from slot 4: an array shadow map.
+pub fn shadow_array_fragment_shader(layer: u32) -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff01, 0xe043ff88), // ipa $r1 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff02, 0xe043ff88), // ipa $r2 a[0x84] $r3 0x0 0x1
+        mov32i(4, 0x3f00_0000),   // 0.5
+        mov32i(0, layer),
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        SHADOW_ARRAY_TEX,         // tex dc nodep $r0 $r0 $r4 0x4 a2d 0xf
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+    ));
+    bytes
+}
+
+/// [`shadow_array_fragment_shader`]'s sample: the layer in `r0`, then `u` and `v`, the
+/// reference in `r4`.
+pub const SHADOW_ARRAY_TEX: (u32, u32) = (0xb0470000, 0xc03e0047);
+
 pub const BINDLESS_HANDLE_BANK: u32 = 3;
 pub const BINDLESS_HANDLE_OFFSET: u32 = 0x10;
 

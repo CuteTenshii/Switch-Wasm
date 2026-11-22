@@ -892,6 +892,30 @@ impl Gpu {
         writes: &[u64],
         compare: bool,
     ) -> std::result::Result<wgpu::Texture, String> {
+        let sixteen = |surface: &HeldLayer| {
+            matches!(surface, HeldLayer::Shadow(t)
+                if t.format() == wgpu::TextureFormat::Depth16Unorm)
+        };
+        // A 16-bit shadow map is copied together only from 16-bit layers, every one held; beside
+        // others they are drawn into the float map the rest fill, which holds their depths
+        // exactly. Tears of the Kingdom holds some of its four cascades on the device.
+        let whole_sixteen =
+            held.len() == upload.layers.max(1) as usize && held.iter().all(|(_, s)| sixteen(s));
+        let drawn: Vec<(u32, HeldLayer)>;
+        let held = if compare && !whole_sixteen && held.iter().any(|(_, s)| sixteen(s)) {
+            drawn = held
+                .iter()
+                .map(|(layer, surface)| match surface {
+                    HeldLayer::Shadow(texture) if sixteen(surface) => {
+                        (*layer, HeldLayer::ShadowCorner(texture.clone()))
+                    }
+                    other => (*layer, other.clone()),
+                })
+                .collect();
+            &drawn[..]
+        } else {
+            held
+        };
         // Packed depth keeps its stencil from guest memory.
         let covered = held.len() == upload.layers.max(1) as usize
             && !held
@@ -960,19 +984,7 @@ impl Gpu {
             return Err("samples a packed depth image as a volume".into());
         }
         let texture = if compare {
-            let sixteen = |surface: &HeldLayer| {
-                matches!(surface, HeldLayer::Shadow(t)
-                    if t.format() == wgpu::TextureFormat::Depth16Unorm)
-            };
-            if held.iter().any(|(_, surface)| sixteen(surface)) {
-                // Every layer comes from the device, since there is no 16-bit staging path.
-                if held.len() != upload.layers.max(1) as usize
-                    || !held.iter().all(|(_, surface)| sixteen(surface))
-                {
-                    return Err(
-                        "samples a 16-bit depth surface held on the device beside others".into(),
-                    );
-                }
+            if whole_sixteen {
                 self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("held 16-bit shadow map"),
                     size: wgpu::Extent3d {
