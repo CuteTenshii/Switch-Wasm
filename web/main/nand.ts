@@ -3,6 +3,7 @@
 import type { NandEntry } from '../shared/db';
 import { $, el } from './dom';
 import { beginLoad } from './loading';
+import { hasProdKeys, onKeysChanged } from './keys';
 import { log } from './log';
 import { nandBusy, nandOperation, onNandBusy } from './nandbusy';
 import { call, onNandProgress } from './rpc';
@@ -231,8 +232,37 @@ function installFirmware(
   source: string,
   found: { ncas: FirmwareNca[]; ignored: number; failures: string[] },
 ): Promise<void> {
+  if (refuseInstallWithoutKeys()) return Promise.resolve();
   return nandOperation('Installing firmware', () => installFirmwareNcas(source, found));
 }
+
+// Each NCA is identified from its encrypted header before it is stored, which needs prod.keys.
+const NEEDS_KEYS = 'Load prod.keys to install firmware: each NCA is identified from its encrypted'
+  + ' header before it is stored.';
+
+function refuseInstallWithoutKeys(): boolean {
+  if (hasProdKeys()) return false;
+  installStatus(NEEDS_KEYS, true);
+  return true;
+}
+
+// The install buttons are labels for the two inputs; a disabled input opens no picker.
+function updateInstallButtons(): void {
+  const ready = hasProdKeys();
+  for (const id of ['firmware-dir', 'firmware-zip']) {
+    $<HTMLInputElement>(id).disabled = !ready;
+    for (const label of document.querySelectorAll<HTMLLabelElement>('label[for="' + id + '"]')) {
+      label.setAttribute('aria-disabled', String(!ready));
+      label.title = ready ? '' : NEEDS_KEYS;
+    }
+  }
+  const status = $('firmware-status');
+  if (!ready && !status.textContent) installStatus(NEEDS_KEYS);
+  else if (ready && status.textContent === NEEDS_KEYS) installStatus('');
+}
+
+onKeysChanged(updateInstallButtons);
+updateInstallButtons();
 
 async function installFirmwareNcas(
   source: string,
@@ -292,7 +322,7 @@ $('firmware-dir').addEventListener('change', (e) => {
 
 $('firmware-zip').addEventListener('change', async (e) => {
   const [zip] = takeFiles(e);
-  if (!zip) return;
+  if (!zip || refuseInstallWithoutKeys()) return;
   let members: ZipMember[];
   try {
     members = await zipMembers(zip);

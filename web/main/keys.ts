@@ -14,6 +14,17 @@ export function hasKeys(): boolean {
   return Boolean(prodKeysText || titleKeysText);
 }
 
+export function hasProdKeys(): boolean {
+  return Boolean(prodKeysText);
+}
+
+const keysListeners: (() => void)[] = [];
+
+// Call `handler` whenever the keys are loaded, restored or cleared.
+export function onKeysChanged(handler: () => void): void {
+  keysListeners.push(handler);
+}
+
 export async function stageKeys(): Promise<void> {
   if (!isReady()) return;
   const prod = prodKeysText ? new TextEncoder().encode(prodKeysText) : null;
@@ -27,6 +38,7 @@ export function updateKeysState(): void {
   if (prodKeysText) parts.push('prod.keys');
   if (titleKeysText) parts.push('title.keys');
   setNote('keys-badge', parts.length ? parts.length + ' loaded' : 'none', parts.length > 0);
+  for (const handler of keysListeners) handler();
 }
 
 // Refuse files that are not keys rather than persisting them.
