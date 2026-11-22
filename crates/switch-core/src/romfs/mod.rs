@@ -1,10 +1,12 @@
 //! RomFS images: [`RomFs`] walks the directory and file metadata tables of an
 //! NCA's RomFS section (the name hash tables are ignored). `0xFFFFFFFF` ends a
 //! sibling chain; the root directory is entry 0 with an empty name.
-//! [`RomFsIndex`] maps storage reads to those files.
+//! [`RomFsIndex`] maps storage reads to those files; [`build`] writes flat images.
 
+mod build;
 mod index;
 
+pub use build::build;
 pub use index::RomFsIndex;
 
 use crate::Error;
