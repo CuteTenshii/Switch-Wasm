@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, openPage, openPanel, test } from './page';
 
 const NEEDS_KEYS = 'Load prod.keys in the NAND tab to install firmware: each NCA is identified'
@@ -31,4 +34,20 @@ test('the firmware install buttons wait for prod.keys', async ({ page }) => {
     await expect(button).toHaveAttribute('title', '');
   }
   await expect(page.locator('#firmware-status')).toHaveText('');
+});
+
+// A folder install takes only the NCAs directly in the folder picked, as Eden's does.
+test('a firmware folder whose NCAs are in a sub-folder installs none', async ({ page }) => {
+  await openPage(page);
+  await openPanel(page, 'NAND');
+  await page.locator('#prod-keys').setInputFiles({
+    name: 'prod.keys',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('header_key = ' + '00'.repeat(32) + '\n'),
+  });
+  const picked = join(mkdtempSync(join(tmpdir(), 'firmware-')), 'Firmware');
+  mkdirSync(join(picked, '21.2.0'), { recursive: true });
+  writeFileSync(join(picked, '21.2.0', 'a.nca'), 'not read');
+  await page.locator('#firmware-dir').setInputFiles(picked);
+  await expect(page.locator('#firmware-status')).toHaveText('Nothing in Firmware is an NCA.');
 });

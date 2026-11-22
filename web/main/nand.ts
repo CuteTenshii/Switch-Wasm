@@ -2,6 +2,7 @@
 
 import type { NandEntry } from '../shared/db';
 import { $, el } from './dom';
+import { gatherNcas, type FirmwareFound } from './firmware';
 import { beginLoad } from './loading';
 import { hasProdKeys, onKeysChanged } from './keys';
 import { log } from './log';
@@ -180,57 +181,11 @@ function installStatus(text: string, error = false): void {
   installListener?.(text, error);
 }
 
-// An NCA to install, read only when its turn comes.
-interface FirmwareNca {
-  name: string;
-  open: () => Promise<Blob>;
-}
-
 // Plain `x.nca` files, and the `x.nca/00`, `x.nca/01`… pieces the console's own Contents folder splits them into.
-function gatherNcas<T>(
-  items: { path: string; item: T }[],
-  open: (pieces: T[]) => Promise<Blob>,
-): { ncas: FirmwareNca[]; ignored: number; failures: string[] } {
-  const found = new Map<string, { name: string; pieces: { order: number; item: T }[] }>();
-  let ignored = 0;
-  for (const { path, item } of items) {
-    const parts = path.split('/');
-    const base = parts[parts.length - 1];
-    const parent = parts.length > 1 ? parts[parts.length - 2] : '';
-    let key: string;
-    let name: string;
-    let order = 0;
-    if (/\.nca$/i.test(base)) {
-      key = path;
-      name = base;
-    } else if (/\.nca$/i.test(parent) && /^\d{2}$/.test(base)) {
-      key = parts.slice(0, -1).join('/');
-      name = parent;
-      order = Number(base);
-    } else {
-      ignored++;
-      continue;
-    }
-    const nca = found.get(key) ?? { name, pieces: [] };
-    nca.pieces.push({ order, item });
-    found.set(key, nca);
-  }
-  const ncas: FirmwareNca[] = [];
-  const failures: string[] = [];
-  for (const { name, pieces } of found.values()) {
-    pieces.sort((a, b) => a.order - b.order);
-    if (pieces.some((piece, i) => piece.order !== i)) {
-      failures.push(name + ' (some of its pieces are missing)');
-      continue;
-    }
-    ncas.push({ name, open: () => open(pieces.map((piece) => piece.item)) });
-  }
-  return { ncas, ignored, failures };
-}
 
 function installFirmware(
   source: string,
-  found: { ncas: FirmwareNca[]; ignored: number; failures: string[] },
+  found: FirmwareFound,
 ): Promise<void> {
   if (refuseInstallWithoutKeys()) return Promise.resolve();
   return nandOperation('Installing firmware', () => installFirmwareNcas(source, found));
@@ -266,7 +221,7 @@ updateInstallButtons();
 
 async function installFirmwareNcas(
   source: string,
-  { ncas, ignored, failures }: { ncas: FirmwareNca[]; ignored: number; failures: string[] },
+  { ncas, ignored, failures }: FirmwareFound,
 ): Promise<void> {
   if (!ncas.length && !failures.length) {
     installStatus('Nothing in ' + source + ' is an NCA.', true);
@@ -317,6 +272,7 @@ $('firmware-dir').addEventListener('change', (e) => {
   void installFirmware(folder, gatherNcas(
     files.map((file) => ({ path: file.webkitRelativePath || file.name, item: file })),
     (pieces) => Promise.resolve(pieces.length === 1 ? pieces[0] : new Blob(pieces)),
+    true,
   ));
 });
 
