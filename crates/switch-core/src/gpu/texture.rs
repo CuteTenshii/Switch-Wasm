@@ -530,6 +530,8 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x03, UNORM) => 0xC6, // R16_G16_B16_A16   -> RGBA16Unorm
         (0x04, FLOAT) => 0xCB, // R32_G32           -> RG32Float
         (0x0C, FLOAT) => 0xDE, // R16_G16           -> RG16Float
+        (0x0C, UNORM) => 0xDA, // R16_G16           -> RG16Unorm
+        (0x0C, SNORM) => 0xDB, // R16_G16           -> RG16Snorm
         (0x0F, FLOAT) => 0xE5, // R32               -> R32Float
         (0x1B, FLOAT) => 0xF2, // R16               -> R16Float
         (0x1B, UNORM) => 0xEE, // R16               -> R16Unorm
@@ -1755,6 +1757,10 @@ mod tests {
         assert_eq!(plain(0x01, 7).raw, 0xC0); // R32_G32_B32_A32 -> RGBA32Float
         assert_eq!(plain(0x0F, 7).raw, 0xE5); // R32             -> R32Float
         assert_eq!(plain(0x03, 2).raw, 0xC6); // R16_G16_B16_A16 -> RGBA16Unorm
+                                              // Tears of the Kingdom samples an R16_G16 unorm image.
+        assert_eq!(plain(0x0C, 2).raw, 0xDA); // R16_G16         -> RG16Unorm
+        assert_eq!(plain(0x0C, 2).bytes_per_pixel, 4);
+        assert_eq!(plain(0x0C, 1).raw, 0xDB); // R16_G16         -> RG16Snorm
         assert!(texel_kind_for(0x09, 7).is_err());
     }
 
