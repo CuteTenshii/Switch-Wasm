@@ -149,14 +149,19 @@ impl Gpu {
                 .map(|c| c.bytes.as_slice())
         };
         let globals = self.globals_through(&layout, None, &bank_bytes, ctx)?;
+        for global in &globals {
+            layout.globals[global.slot as usize].base = global.base;
+        }
         // What it reads from guest memory must be current there: not a surface drawn on the
         // device, and for a buffer it only reads, nothing a launch wrote that has not landed,
-        // unless it reads the held buffer itself.
+        // unless it reads a held buffer itself, from its start or inside it.
         let span = |global: &GlobalUpload| global.addr..global.addr + global.len;
         let uploaded: Vec<_> = globals.iter().filter(|g| g.addr != 0).map(span).collect();
         let only_read: Vec<_> = globals
             .iter()
-            .filter(|g| g.addr != 0 && !g.writes && !self.space.globals.contains_key(&g.addr))
+            .filter(|g| {
+                g.addr != 0 && !g.writes && g.base == 0 && !self.space.globals.contains_key(&g.addr)
+            })
             .map(span)
             .collect();
         if !self.touches_no_surface(&uploaded) || !self.no_global_in(&only_read) {

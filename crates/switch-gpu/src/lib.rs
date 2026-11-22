@@ -98,6 +98,8 @@ struct GlobalUpload {
     held: Option<wgpu::Buffer>,
     /// Whether this shader writes it.
     writes: bool,
+    /// Words into `held` where `addr` is, when it is a written buffer the read lies inside.
+    base: u32,
 }
 
 /// Upper bound on one `ldg` buffer, since the program does not say how far it reads.

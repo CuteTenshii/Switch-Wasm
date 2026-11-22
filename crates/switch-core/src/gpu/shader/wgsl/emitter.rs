@@ -96,6 +96,7 @@ impl<'a> Emitter<'a> {
                     bank,
                     offset,
                     written: false,
+                    base: 0,
                 });
                 self.globals.len() - 1
             }

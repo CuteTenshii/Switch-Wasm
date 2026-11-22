@@ -1111,7 +1111,8 @@ fn a_global_load_through_a_descriptor_loaded_whole_reads_that_descriptor() {
         vec![Global {
             bank: 1,
             offset: 0x40,
-            written: false
+            written: false,
+            base: 0,
         }]
     );
 
@@ -1130,7 +1131,8 @@ fn a_global_load_through_a_descriptor_loaded_whole_reads_that_descriptor() {
         vec![Global {
             bank: 1,
             offset: 0x40,
-            written: false
+            written: false,
+            base: 0,
         }]
     );
 
@@ -1172,7 +1174,8 @@ fn an_atomic_on_a_descriptor_makes_its_buffer_read_write_and_only_for_fragments(
         vec![Global {
             bank: 1,
             offset: 0x40,
-            written: true
+            written: true,
+            base: 0,
         }]
     );
     let layout = Layout::of(&translated, Stage::Fragment);
@@ -1346,7 +1349,8 @@ fn a_store_through_a_descriptor_makes_its_buffer_read_write_and_only_for_fragmen
         vec![Global {
             bank: 1,
             offset: 0x40,
-            written: true
+            written: true,
+            base: 0,
         }]
     );
     let source = fragment_module(&translated);
@@ -1935,7 +1939,8 @@ fn an_address_copied_into_place_still_reads_its_descriptor() {
         vec![Global {
             bank: 0,
             offset: 0x330,
-            written: false
+            written: false,
+            base: 0,
         }]
     );
     assert!(copied(IF_P0, false).is_err(), "a copy that may not happen");

@@ -484,7 +484,8 @@ fn a_global_load_through_a_descriptor_binds_the_memory_it_names() {
         vec![Global {
             bank: 0,
             offset: 0x110,
-            written: false
+            written: false,
+            base: 0,
         }]
     );
     assert!(

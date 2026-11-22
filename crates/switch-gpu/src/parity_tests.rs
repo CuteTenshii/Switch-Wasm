@@ -493,6 +493,16 @@ fn mov32i(dst: u64, imm: u32) -> u64 {
 /// buffer with no size. The program has to fit the harness's 0x100 bytes before
 /// its vertex buffer.
 fn global_words_after_both(body: &[u64], initial: &[u32], size: u32) -> Vec<u32> {
+    global_words_after_both_aliased(body, initial, size, 0)
+}
+
+/// [`global_words_after_both`] with the second descriptor `alias_at` bytes into the buffer.
+fn global_words_after_both_aliased(
+    body: &[u64],
+    initial: &[u32],
+    size: u32,
+    alias_at: u64,
+) -> Vec<u32> {
     use switch_core::gpu::testing::block;
     let iadd_c0 = |dst: u64, word: u64, cin: u64, cout: u64| {
         0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | RZ << 8 | dst
@@ -516,10 +526,11 @@ fn global_words_after_both(body: &[u64], initial: &[u32], size: u32) -> Vec<u32>
         h.triangle([0.0; 4]);
         bind_global(h, initial);
         let (constants, buffer) = (h.base + 0x1500, h.base + 0x1a00);
+        let alias = buffer + alias_at;
         for (at, word) in [
             (0x118, size),
-            (0x120, buffer as u32),
-            (0x124, (buffer >> 32) as u32),
+            (0x120, alias as u32),
+            (0x124, (alias >> 32) as u32),
         ] {
             h.vmm.write_u32(&h.mem, constants + at, word).unwrap();
         }
@@ -667,6 +678,33 @@ fn a_buffer_a_draw_writes_and_reads_through_two_descriptors_runs_on_the_device()
         0,
     );
     assert_eq!(words, [0x1122_3344, 0x5566_7788, 0x1122_3344]);
+}
+
+/// A draw reading through a descriptor that points inside a buffer written on the device
+/// reads it there, from the word the address names: Tears of the Kingdom reads 0x1c0 bytes into
+/// a buffer an earlier draw wrote, and fell back until the flush.
+#[test]
+fn a_read_inside_a_buffer_written_on_the_device_reads_it_there() {
+    let iadd_c0 = |dst: u64, word: u64, cin: u64, cout: u64| {
+        0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | RZ << 8 | dst
+    };
+    let stg = |byte: u64, src: u64| 0xeed8u64 << 48 | 4 << 48 | byte << 20 | PT | 10 << 8 | src;
+    let ldg = |byte: u64, dst: u64| 0xeed0u64 << 48 | 4 << 48 | byte << 20 | PT | 12 << 8 | dst;
+    let words = global_words_after_both_aliased(
+        &[
+            iadd_c0(12, 0x120 / 4, 0, 1),
+            iadd_c0(13, 0x124 / 4, 1, 0),
+            mov32i(2, 0x5566_7788),
+            stg(4, 2),
+            // The second word past the alias, the buffer's third.
+            ldg(4, 4),
+            stg(12, 4),
+        ],
+        &[0x11, 0, 0x33, 0],
+        0,
+        4,
+    );
+    assert_eq!(words, [0x11, 0x5566_7788, 0x33, 0x33]);
 }
 
 /// Global stores of every size, and narrow loads read back through them, land the words the

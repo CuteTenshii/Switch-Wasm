@@ -355,6 +355,13 @@ impl Gpu {
             global.writes = true;
             fs_layout.globals[global.slot as usize].written = true;
         }
+        for global in &globals {
+            let layout = match global.stage {
+                Some(ShaderStage::Fragment) => &mut fs_layout,
+                _ => &mut vs_layout,
+            };
+            layout.globals[global.slot as usize].base = global.base;
+        }
 
         if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {
             // Trace what the draw renders into.

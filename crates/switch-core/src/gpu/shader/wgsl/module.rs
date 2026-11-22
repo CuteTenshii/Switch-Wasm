@@ -1,7 +1,7 @@
 //! Wrapping a translation into a complete module with its entry points.
 
 use super::layout::{
-    attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Layout, Stage, StorageNumeric,
+    attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Global, Layout, Stage, StorageNumeric,
     TextureBinding, Update, ATOMS, ATTRIBUTE_WORDS, CONSTANTS_BINDING, CONSTANT_BANKS,
     GENERIC_BASE, GENERIC_STRIDE, GLOBAL_BINDING, IDENTITY_SWIZZLE, IMAGE_BINDING, INSTANCE_ID,
     POSITION, TEXTURE_BINDING, VERTEX_ID,
@@ -213,7 +213,8 @@ pub fn module(
                 format!("g{slot}[word]")
             };
             out.push_str(&format!(
-                "    case {slot}u: {{\n      if (word >= arrayLength(&g{slot})) {{ return 0u; }}\n      return {read};\n    }}\n"
+                "    case {slot}u: {{\n      {}if (word >= arrayLength(&g{slot})) {{ return 0u; }}\n      return {read};\n    }}\n",
+                rebase(global)
             ));
         }
         // An unbound slot reads zero.
@@ -228,13 +229,14 @@ pub fn module(
              let high_mask = select(0u, mask >> (32u - shift), shift != 0u);\n  \
              let high = select(0u, value >> (32u - shift), shift != 0u);\n  switch (slot) {\n",
         );
-        for (slot, _) in layout.globals.iter().enumerate().filter(|(_, g)| g.written) {
+        for (slot, global) in layout.globals.iter().enumerate().filter(|(_, g)| g.written) {
             let array = format!("g{slot}");
             let low = merge(&array, "word", "low_mask", "low");
             let high = merge(&array, "word + 1u", "high_mask", "high");
             out.push_str(&format!(
-                "    case {slot}u: {{\n      if (word < arrayLength(&{array})) {{\n{low}      }}\n      \
-                 if (high_mask != 0u && word + 1u < arrayLength(&{array})) {{\n{high}      }}\n    }}\n"
+                "    case {slot}u: {{\n      {}if (word < arrayLength(&{array})) {{\n{low}      }}\n      \
+                 if (high_mask != 0u && word + 1u < arrayLength(&{array})) {{\n{high}      }}\n    }}\n",
+                rebase(global)
             ));
         }
         out.push_str("    default: { }\n  }\n}\n\n");
@@ -242,9 +244,10 @@ pub fn module(
         out.push_str(
             "fn gAtom(op: u32, slot: u32, offset: u32, value: u32, stored: u32) -> u32 {\n  let word = offset >> 2u;\n  switch (slot) {\n",
         );
-        for (slot, _) in layout.globals.iter().enumerate().filter(|(_, g)| g.written) {
+        for (slot, global) in layout.globals.iter().enumerate().filter(|(_, g)| g.written) {
             out.push_str(&format!(
-                "    case {slot}u: {{\n      if (word < arrayLength(&g{slot})) {{\n        switch (op) {{\n"
+                "    case {slot}u: {{\n      {}if (word < arrayLength(&g{slot})) {{\n        switch (op) {{\n",
+                rebase(global)
             ));
             for (code, (_, _, update)) in ATOMS.iter().enumerate() {
                 match update {
@@ -694,6 +697,14 @@ fn compute_entry(layout: &Layout, warp: bool) -> String {
          \x20 sr_ctaid = group;\n\
          \x20 _ = run();\n}}\n"
     )
+}
+
+/// A global's word in the buffer bound for it, which starts `base` words before its address.
+fn rebase(global: &Global) -> String {
+    match global.base {
+        0 => String::new(),
+        base => format!("let word = word + {base}u;\n      "),
+    }
 }
 
 /// The guest's size of a 2D image or layer, which a smaller mip level stands in for.

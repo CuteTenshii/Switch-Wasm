@@ -12,6 +12,9 @@ pub struct Global {
     pub offset: u16,
     /// Whether a store or atomic writes it, which makes it a read-write binding.
     pub written: bool,
+    /// Words into the bound buffer where the descriptor's address is: set by the backend when
+    /// it binds a larger buffer the address lies inside.
+    pub base: u32,
 }
 
 /// Which pipeline stage a module is built for.

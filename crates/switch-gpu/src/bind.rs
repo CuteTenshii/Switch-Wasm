@@ -1708,6 +1708,7 @@ impl Gpu {
                     bytes: Vec::new(),
                     held: None,
                     writes: false,
+                    base: 0,
                 });
                 continue;
             }
@@ -1740,11 +1741,35 @@ impl Gpu {
                     bytes: Vec::new(),
                     held: Some(held.buffer.clone()),
                     writes: global.written,
+                    base: 0,
                 });
                 continue;
             }
             // Written buffers are sub-allocations of one pool, so their spans overlap by
-            // construction; a read of memory a device draw wrote waits for the flush.
+            // construction. A read inside one, and touching no other, is read from it on the
+            // device; any other read of memory a device draw wrote waits for the flush.
+            if !global.written {
+                let mut touched =
+                    self.space.globals.iter().filter(|(&at, g)| {
+                        spans_overlap(&(at..at + g.original.len() as u64), &span)
+                    });
+                if let (Some((&at, held)), None) = (touched.next(), touched.next()) {
+                    let inside = at <= address && span.end <= at + held.original.len() as u64;
+                    if inside && (address - at).is_multiple_of(4) {
+                        out.push(GlobalUpload {
+                            stage,
+                            slot: slot as u32,
+                            addr: address,
+                            len: len as u64,
+                            bytes: Vec::new(),
+                            held: Some(held.buffer.clone()),
+                            writes: false,
+                            base: ((address - at) / 4) as u32,
+                        });
+                        continue;
+                    }
+                }
+            }
             let reads_written = !global.written
                 && self
                     .space
@@ -1773,6 +1798,7 @@ impl Gpu {
                     bytes: Vec::new(),
                     held: Some(self.compute_input(address, len, ctx)?),
                     writes: false,
+                    base: 0,
                 });
                 continue;
             }
@@ -1793,6 +1819,7 @@ impl Gpu {
                 bytes,
                 held,
                 writes: global.written,
+                base: 0,
             });
         }
         Ok(out)
