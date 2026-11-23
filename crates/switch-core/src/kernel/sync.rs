@@ -253,8 +253,9 @@ impl Cpu {
         self.reschedule();
     }
 
-    /// `svcSignalToAddress`: wake up to `count` waiters (all if negative) after the
-    /// signal type's compare-and-modify. Reports whether the word held `value`.
+    /// `svcSignalToAddress`: wake up to `count` waiters (all if not positive), highest
+    /// priority first, after the signal type's compare-and-modify. Reports whether the
+    /// word held `value`.
     pub(crate) fn signal_to_address(
         &mut self,
         addr: u64,
@@ -263,24 +264,19 @@ impl Cpu {
         count: i32,
     ) -> bool {
         self.ensure_main_thread();
-        let waiting = self
-            .process()
-            .threads
-            .iter()
-            .filter(|t| matches!(t.state, ThreadState::WaitAddress { addr: a, .. } if a == addr))
-            .count() as i32;
+        let mut waiters: Vec<usize> = (0..self.process().threads.len())
+            .filter(|&i| {
+                matches!(self.process().threads[i].state,
+                    ThreadState::WaitAddress { addr: a, .. } if a == addr)
+            })
+            .collect();
+        waiters.sort_by_key(|&i| self.process().threads[i].priority);
         if signal_type != 0 {
             let updated = match signal_type {
                 // SignalAndIncrementIfEqual.
                 1 => value.wrapping_add(1),
-                // SignalAndModifyByWaitingCountIfEqual: the new word tells a semaphore whether waiters remain.
-                _ => match (count > 0).then_some(waiting.cmp(&count)) {
-                    Some(std::cmp::Ordering::Greater) => value.wrapping_sub(1),
-                    Some(std::cmp::Ordering::Equal) => value,
-                    Some(std::cmp::Ordering::Less) => value.wrapping_add(1),
-                    None if waiting > 0 => value.wrapping_sub(1),
-                    None => value.wrapping_add(1),
-                },
+                // SignalAndModifyByWaitingCountIfEqual.
+                _ => modify_by_waiting_count(value, count, waiters.len()),
             };
             let swapped = self.update_word(addr, |current| {
                 (current as i32 == value).then_some(updated as u32)
@@ -289,16 +285,13 @@ impl Cpu {
                 return false;
             }
         }
-        let mut woken = 0;
-        for i in 0..self.process().threads.len() {
-            if count >= 0 && woken >= count {
-                break;
-            }
-            if matches!(self.process().threads[i].state, ThreadState::WaitAddress { addr: a, .. } if a == addr)
-            {
-                self.process_mut().threads[i].state = ThreadState::Runnable;
-                woken += 1;
-            }
+        let wake = if count <= 0 {
+            waiters.len()
+        } else {
+            waiters.len().min(count as usize)
+        };
+        for &i in &waiters[..wake] {
+            self.process_mut().threads[i].state = ThreadState::Runnable;
         }
         true
     }
@@ -318,6 +311,20 @@ impl Cpu {
                 _ => None,
             })
             .min()
+    }
+}
+
+/// The word `SignalAndModifyByWaitingCountIfEqual` leaves, from the waiters on the address
+/// before the wake: one more than `value` with none, one less when the wake takes them all,
+/// `value` when some are left. `nn::os` auto-clear light events (word 1 meaning "waiters")
+/// rely on it: a word of 0 with a waiter left made the next signal store 2 without waking it.
+fn modify_by_waiting_count(value: i32, count: i32, waiters: usize) -> i32 {
+    if waiters == 0 {
+        value.wrapping_add(1)
+    } else if count <= 0 || waiters <= count as usize {
+        value.wrapping_sub(1)
+    } else {
+        value
     }
 }
 
@@ -378,5 +385,73 @@ mod tests {
         assert_eq!(cpu.process().threads[1].state, ThreadState::Runnable);
         let handle = cpu.process().threads[1].handle as u32;
         assert_eq!(cpu.mem.read_u32(MUTEX).unwrap(), handle);
+    }
+
+    #[test]
+    fn modify_by_waiting_count_says_whether_waiters_are_left() {
+        // Nobody waiting, the wake takes all, some left after it.
+        assert_eq!(modify_by_waiting_count(1, 1, 0), 2);
+        assert_eq!(modify_by_waiting_count(1, 1, 1), 0);
+        assert_eq!(modify_by_waiting_count(1, 2, 2), 0);
+        assert_eq!(modify_by_waiting_count(1, 1, 2), 1);
+        assert_eq!(modify_by_waiting_count(1, -1, 3), 0, "a wake of all");
+    }
+
+    /// An `nn::os` auto-clear light event with two waiters: each signal wakes one, the
+    /// higher priority first, and the word says "waiters" until the last is woken.
+    #[test]
+    fn a_light_event_wakes_its_waiters_one_signal_at_a_time() {
+        const EVENT: u64 = 0x20_0000_6100;
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        cpu.mem.map_zero(EVENT & !0xFFF, 0x1000).unwrap();
+        cpu.ensure_main_thread();
+        let low = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, 44, 0);
+        let high = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, 43, 0);
+        assert!(cpu.start_thread(low) && cpu.start_thread(high));
+        let index = |cpu: &Cpu, handle: u64| {
+            cpu.process()
+                .threads
+                .iter()
+                .position(|t| t.handle == handle)
+                .unwrap()
+        };
+        for handle in [low, high] {
+            let i = index(&cpu, handle);
+            cpu.process_mut().threads[i].state = ThreadState::WaitAddress {
+                addr: EVENT,
+                deadline: None,
+            };
+        }
+        cpu.mem.write_u32(EVENT, 1).unwrap();
+
+        assert!(cpu.signal_to_address(EVENT, 2, 1, 1));
+        assert_eq!(cpu.mem.read_u32(EVENT).unwrap(), 1, "a waiter is left");
+        assert_eq!(
+            cpu.process().threads[index(&cpu, high)].state,
+            ThreadState::Runnable
+        );
+        assert!(matches!(
+            cpu.process().threads[index(&cpu, low)].state,
+            ThreadState::WaitAddress { .. }
+        ));
+
+        assert!(cpu.signal_to_address(EVENT, 2, 1, 1));
+        assert_eq!(
+            cpu.mem.read_u32(EVENT).unwrap(),
+            0,
+            "the last waiter took it"
+        );
+        assert_eq!(
+            cpu.process().threads[index(&cpu, low)].state,
+            ThreadState::Runnable
+        );
+
+        assert!(cpu.signal_to_address(EVENT, 2, 0, 1));
+        assert_eq!(cpu.mem.read_u32(EVENT).unwrap(), 1);
+        assert!(
+            !cpu.signal_to_address(EVENT, 2, 0, 1),
+            "the word no longer holds 0"
+        );
     }
 }
