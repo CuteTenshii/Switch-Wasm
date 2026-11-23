@@ -27,8 +27,8 @@ mod texture;
 use emitter::Emitter;
 pub use layout::{
     ComputeShape, Coverage, Crop, Fold, Global, ImageBinding, Layout, Stage, StorageFormat,
-    StorageNumeric, TextureBinding, CONSTANTS_BINDING, CONSTANT_BANKS, GLOBAL_BINDING,
-    IDENTITY_SWIZZLE, IMAGE_BINDING,
+    StorageNumeric, TextureBinding, WordImage, WordPack, CONSTANTS_BINDING, CONSTANT_BANKS,
+    GLOBAL_BINDING, IDENTITY_SWIZZLE, IMAGE_BINDING,
 };
 pub use module::module;
 
@@ -131,6 +131,7 @@ fn gRead(slot: u32, offset: u32) -> u32 { return 0u; }
 fn gWrite(slot: u32, offset: u32, value: u32, mask: u32) { }
 fn gAtom(op: u32, slot: u32, offset: u32, value: u32, stored: u32) -> u32 { return 0u; }
 fn imgStore(key: u32, x: u32, y: u32, layer: u32, value: vec4<u32>) { }
+fn imgReduce(op: u32, key: u32, x: u32, y: u32, layer: u32, value: u32) { }
 fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
@@ -195,6 +196,8 @@ pub struct Translation {
     pub textures: Vec<(TextureSlot, TexDim, bool)>,
     /// 2D images stored to, in first-mention order.
     pub images: Vec<TextureSlot>,
+    /// The [`Translation::images`] a `sured` reduces into.
+    pub reduced_images: Vec<TextureSlot>,
     /// The [`Translation::textures`] only `txq` reads, whose texels nothing reads.
     pub sized_only: Vec<TextureSlot>,
     /// Bound textures a `tlds` fetches from a level a register names.
@@ -266,6 +269,7 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         const_extents: emitter.banks.values().copied().collect(),
         textures: emitter.textures.clone(),
         images: emitter.images.clone(),
+        reduced_images: emitter.reduced_images.clone(),
         sized_only,
         fetched_levels: emitter.fetched_levels.clone(),
         texture_offsets: emitter.texture_offsets.clone(),

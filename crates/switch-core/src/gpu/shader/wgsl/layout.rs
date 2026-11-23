@@ -132,12 +132,37 @@ pub struct TextureBinding {
     pub shrink: u32,
 }
 
-/// A 2D image a program stores to, bound as a write-only storage texture.
+/// A 2D image or array a program stores to, each layer bound as a write-only storage texture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageBinding {
     pub slot: TextureSlot,
     /// Filled from the TIC by the backend.
     pub format: Option<StorageFormat>,
+    /// The layers bound, one binding each; filled by the backend.
+    pub layers: u32,
+    /// Whether a `sured` reduces into it, which WebGPU has no texture form of.
+    pub reduced: bool,
+    /// Set by the backend for an image it binds as a buffer of words, one per texel, rather
+    /// than a storage texture: one reduced into, or one of a format WebGPU cannot store to.
+    pub words: Option<WordImage>,
+}
+
+/// An image's layer as a buffer of atomic words, one per texel and rows `row_words` apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WordImage {
+    pub width: u32,
+    pub height: u32,
+    pub row_words: u32,
+    pub pack: WordPack,
+}
+
+/// How a store's registers make a texel's word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordPack {
+    /// A 32-bit texel: the first register as it is.
+    Word,
+    /// `B10G11R11_FLOAT`, packed as the rasterizer packs it.
+    Rg11b10,
 }
 
 impl Layout {
@@ -163,6 +188,13 @@ impl Layout {
                 self.textures.push(TextureBinding { slot, ..binding });
             }
         }
+    }
+
+    /// Where layer `layer` of image `image` binds: the images' layers in order from
+    /// `IMAGE_BINDING`.
+    pub fn image_binding(&self, image: usize, layer: u32) -> u32 {
+        let before: u32 = self.images[..image].iter().map(|i| i.layers).sum();
+        IMAGE_BINDING + before + layer
     }
 }
 
@@ -261,7 +293,7 @@ pub(super) const TEXTURE_BINDING: u32 = 32;
 
 pub const GLOBAL_BINDING: u32 = 96;
 
-/// Image `i` a program stores to binds at `IMAGE_BINDING + i`.
+/// The first image layer a program stores to; see [`Layout::image_binding`].
 pub const IMAGE_BINDING: u32 = 160;
 
 /// All of a stage's constant banks are one buffer: a table of `(first word, word count)` per
@@ -282,7 +314,7 @@ pub(super) enum Update {
 /// The atomics `gAtom` runs, by the code it is passed. Eden defines `inc` and `dec` on
 /// words, `safeadd`, and every `f32` operation but `add` as plain loads, so they have no row.
 /// An integer type with no row of its own runs its operation's `u32` row.
-pub(super) const ATOMS: [(AtomOp, AtomType, Update); 11] = [
+pub(super) const ATOMS: [(AtomOp, AtomType, Update); 13] = [
     (AtomOp::Add, AtomType::U32, Update::Direct("atomicAdd")),
     (AtomOp::Min, AtomType::U32, Update::Direct("atomicMin")),
     (AtomOp::Max, AtomType::U32, Update::Direct("atomicMax")),
@@ -313,6 +345,17 @@ pub(super) const ATOMS: [(AtomOp, AtomType, Update); 11] = [
         AtomOp::Add,
         AtomType::F32,
         Update::Loop("bitcast<u32>(bitcast<f32>(was) + bitcast<f32>(value))"),
+    ),
+    // Unsigned: `inc` wraps to zero once the word reaches the operand, `dec` back up to it.
+    (
+        AtomOp::Inc,
+        AtomType::U32,
+        Update::Loop("select(was + 1u, 0u, was >= value)"),
+    ),
+    (
+        AtomOp::Dec,
+        AtomType::U32,
+        Update::Loop("select(was - 1u, value, was == 0u || was > value)"),
     ),
 ];
 
@@ -365,7 +408,13 @@ impl Layout {
             images: translated
                 .images
                 .iter()
-                .map(|&slot| ImageBinding { slot, format: None })
+                .map(|&slot| ImageBinding {
+                    slot,
+                    format: None,
+                    layers: 1,
+                    reduced: translated.reduced_images.contains(&slot),
+                    words: None,
+                })
                 .collect(),
             texture_offsets: translated.texture_offsets.clone(),
             fetch_levels: translated

@@ -1994,6 +1994,144 @@ fn a_compute_array_store_reaches_only_the_layer_the_image_has() {
     }
 }
 
+/// A 2D-array store to a three-layer image lands in the layer it names, on the device as in
+/// the software dispatch, and one past the last layer is dropped.
+#[test]
+fn a_compute_array_store_lands_in_the_layer_it_names() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{
+        image_copy_array_program, image_copy_program, ComputeHarness, IMAGE_COPY_SIZE,
+    };
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = IMAGE_COPY_SIZE;
+    let block = [width, height, 1];
+    let mut plain = ComputeHarness::new(&image_copy_program(), [1, 1, 1], block, 0);
+    let engine = plain.image_copy();
+    switch_core::gpu::compute::dispatch(&engine, &mut plain.ctx()).unwrap();
+    let stored = plain.image();
+    let blank = vec![0; stored.len()];
+    for layer in 0..4 {
+        let layers = |h: &mut ComputeHarness| (0..3).map(|l| h.image_layer(l)).collect::<Vec<_>>();
+        let want: Vec<Vec<u32>> = (0..3)
+            .map(|l| {
+                if l == layer {
+                    stored.clone()
+                } else {
+                    blank.clone()
+                }
+            })
+            .collect();
+
+        let mut software = ComputeHarness::new(&image_copy_array_program(), [1, 1, 1], block, 0);
+        let engine = software.image_copy();
+        software.image_copy_layers(3);
+        software.set_image_layer(layer);
+        switch_core::gpu::compute::dispatch(&engine, &mut software.ctx()).unwrap();
+        assert_eq!(
+            layers(&mut software),
+            want,
+            "layer {layer}: the software dispatch"
+        );
+
+        let mut device = ComputeHarness::new(&image_copy_array_program(), [1, 1, 1], block, 0);
+        let engine = device.image_copy();
+        device.image_copy_layers(3);
+        device.set_image_layer(layer);
+        assert!(
+            gpu.dispatch(&engine, &mut device.ctx()).unwrap(),
+            "layer {layer}: refused: {:?}",
+            gpu.compute_refusals
+        );
+        let mut flushes = 0;
+        while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
+            flushes += 1;
+            assert!(flushes < 100, "the readback never landed");
+        }
+        assert_eq!(layers(&mut device), want, "layer {layer}: the device");
+    }
+}
+
+/// A store to a `B10G11R11_FLOAT` image, which WebGPU cannot bind for storage, packs the
+/// texels the software dispatch packs, through a buffer of the image's words.
+#[test]
+fn a_compute_store_to_a_packed_float_image_packs_what_software_packs() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{image_copy_program, ComputeHarness, IMAGE_COPY_SIZE};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = IMAGE_COPY_SIZE;
+    let block = [width, height, 1];
+    let mut software = ComputeHarness::new(&image_copy_program(), [1, 1, 1], block, 0);
+    let engine = software.image_copy();
+    software.image_copy_packed_float();
+    switch_core::gpu::compute::dispatch(&engine, &mut software.ctx()).unwrap();
+    let want = software.image();
+    assert!(want.iter().any(|&texel| texel != 0), "nothing was stored");
+
+    let mut device = ComputeHarness::new(&image_copy_program(), [1, 1, 1], block, 0);
+    let engine = device.image_copy();
+    device.image_copy_packed_float();
+    assert!(
+        gpu.dispatch(&engine, &mut device.ctx()).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    let mut flushes = 0;
+    while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
+        flushes += 1;
+        assert!(flushes < 100, "the readback never landed");
+    }
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the launch");
+    assert_eq!(device.image(), want);
+}
+
+/// A launch reducing into an image, which WebGPU has no texture atomics for, runs on the device
+/// through a buffer of the image's words and leaves what the software dispatch does.
+#[test]
+fn a_compute_reduction_into_an_image_runs_on_the_device() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{image_reduce_program, ComputeHarness, IMAGE_COPY_SIZE};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = IMAGE_COPY_SIZE;
+    let block = [width, height, 1];
+    let threads = width * height;
+    let mut want = vec![0; threads as usize];
+    // `threads` increments wrapping past two land on `threads % 3`.
+    want[..3].copy_from_slice(&[threads, width - 1, threads % 3]);
+
+    let mut software = ComputeHarness::new(&image_reduce_program(), [1, 1, 1], block, 0);
+    let engine = software.image_copy();
+    software.image_copy_words();
+    switch_core::gpu::compute::dispatch(&engine, &mut software.ctx()).unwrap();
+    assert_eq!(software.image(), want, "the software dispatch");
+
+    let mut device = ComputeHarness::new(&image_reduce_program(), [1, 1, 1], block, 0);
+    let engine = device.image_copy();
+    device.image_copy_words();
+    assert!(
+        gpu.dispatch(&engine, &mut device.ctx()).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    let mut flushes = 0;
+    while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
+        flushes += 1;
+        assert!(flushes < 100, "the readback never landed");
+    }
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the launch");
+    assert_eq!(device.image(), want, "the device");
+}
+
 /// The distinct subgroup sizes one 64-invocation workgroup runs with.
 fn subgroup_sizes(gpu: &super::Gpu) -> Vec<u32> {
     let module = gpu

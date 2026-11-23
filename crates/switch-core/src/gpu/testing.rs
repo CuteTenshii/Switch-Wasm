@@ -1271,6 +1271,50 @@ impl ComputeHarness {
         self.ctx().write_u32(at, 3 | (1 << 20)).unwrap();
     }
 
+    /// Make [`Self::image_copy`]'s image `R32_UINT`.
+    pub fn image_copy_words(&mut self) {
+        let tic = self.base + IMAGE_COPY_TIC_AT + 2 * 32;
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        self.ctx()
+            .write_u32(tic, 0x0f | (4 << 7) | identity)
+            .unwrap();
+    }
+
+    /// Make [`Self::image_copy`]'s image `B10G11R11_FLOAT`, which WebGPU cannot store to.
+    pub fn image_copy_packed_float(&mut self) {
+        let tic = self.base + IMAGE_COPY_TIC_AT + 2 * 32;
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        self.ctx()
+            .write_u32(tic, 0x21 | (7 << 7) | identity)
+            .unwrap();
+    }
+
+    /// Make [`Self::image_copy`]'s image a 2D array of `layers` cleared layers, each
+    /// [`IMAGE_COPY_SIZE`] and one after another.
+    pub fn image_copy_layers(&mut self, layers: u32) {
+        let (width, height) = IMAGE_COPY_SIZE;
+        let tic = self.base + IMAGE_COPY_TIC_AT + 2 * 32;
+        let image = self.image_copy_addr();
+        let mut ctx = self.ctx();
+        for word in 0..layers * width * height {
+            ctx.write_u32(image + u64::from(word) * 4, 0).unwrap();
+        }
+        // `TextureType` 5, a 2D array, `DEPTH_MINUS_ONE` layers after the first.
+        ctx.write_u32(tic + 16, (width - 1) | (5 << 23)).unwrap();
+        ctx.write_u32(tic + 20, (height - 1) | ((layers - 1) << 16))
+            .unwrap();
+    }
+
+    /// Layer `layer` of [`Self::image_copy_layers`]'s image, row by row.
+    pub fn image_layer(&mut self, layer: u32) -> Vec<u32> {
+        let (width, height) = IMAGE_COPY_SIZE;
+        let at = self.image_copy_addr() + u64::from(layer * width * height * 4);
+        let ctx = self.ctx();
+        (0..width * height)
+            .map(|i| ctx.read_u32(at + u64::from(i) * 4).unwrap())
+            .collect()
+    }
+
     /// Set the layer [`image_copy_array_program`] stores to, after [`Self::image_copy`].
     pub fn set_image_layer(&mut self, layer: u32) {
         let at = self.base + COMPUTE_BANK_AT + u64::from(IMAGE_COPY_LAYER);
@@ -1723,6 +1767,56 @@ pub fn image_size_program() -> Vec<u64> {
         ldc0(7, IMAGE_COPY_U),
         ldc0(39, IMAGE_COPY_IMAGE),
         sust_p_2d(4, 0, 39),
+        exit_word(),
+    ]
+}
+
+/// Each of [`IMAGE_COPY_SIZE`]'s threads reduces into the bindless image, made `R32_UINT` by
+/// [`ComputeHarness::image_copy_words`]: it adds one to texel `(0, 0)`, raises `(1, 0)` to its
+/// x and increments `(2, 0)` wrapping past two, so only the thread count decides what lands.
+pub fn image_reduce_program() -> Vec<u64> {
+    use crate::gpu::shader::isa::{AtomOp, AtomType, SurfaceDim};
+    use crate::gpu::shader::Op;
+    let sured = |op: AtomOp, code: u64, coords: u8, src: u8| {
+        checked(
+            0xeb50u64 << 48
+                | 39 << 39
+                | 3 << 33
+                | code << 24
+                | PT
+                | u64::from(coords) << 8
+                | u64::from(src),
+            Op::Sured {
+                src,
+                coords,
+                handle: 0,
+                handle_reg: Some(39),
+                dim: SurfaceDim::D2,
+                op,
+                ty: AtomType::U32,
+            },
+        )
+    };
+    let tid_x = checked(
+        0xf0c8u64 << 48 | 0x21 << 20 | PT,
+        Op::S2r { dst: 0, sr: 0x21 },
+    );
+    // Bank words holding 0, 1 and 2.
+    let (zero, one, two) = (IMAGE_COPY_LAYER, IMAGE_SIZE_LEVEL, IMAGE_SIZE_HANDLE);
+    vec![
+        tid_x,
+        ldc0(39, IMAGE_COPY_IMAGE),
+        ldc0(20, zero),
+        ldc0(21, zero),
+        ldc0(5, one),
+        sured(AtomOp::Add, 0, 20, 5),
+        ldc0(22, one),
+        ldc0(23, zero),
+        sured(AtomOp::Max, 2, 22, 0),
+        ldc0(24, two),
+        ldc0(25, zero),
+        ldc0(6, two),
+        sured(AtomOp::Inc, 3, 24, 6),
         exit_word(),
     ]
 }

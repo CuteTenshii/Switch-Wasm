@@ -503,6 +503,11 @@ impl Gpu {
                         label: Some("draws"),
                     })
             });
+            for (_, layers) in &p.images {
+                for layer in layers {
+                    layer.copy_in(&mut encoder);
+                }
+            }
             let vertex_patches = bound.iter().map(|b| (&b.buffer, &b.patches));
             let group_patches = groups.patched.iter().map(|(b, p)| (b, p));
             for (buffer, patches) in vertex_patches.chain(group_patches) {
@@ -627,7 +632,14 @@ impl Gpu {
         }
         if stores {
             self.end_pass();
-            for image in p.images.iter().filter_map(|(image, _)| image.as_ref()) {
+            if let Some(encoder) = self.batch.as_mut() {
+                for (_, layers) in &p.images {
+                    for layer in layers {
+                        layer.copy_out(encoder);
+                    }
+                }
+            }
+            for image in p.images.iter().flat_map(|(layers, _)| layers) {
                 let held = self
                     .space
                     .held

@@ -485,7 +485,7 @@ impl Gpu {
         vs_layout: &Layout,
         fs_layout: &mut Layout,
         drawn: [Option<Target>; 2],
-    ) -> std::result::Result<Vec<(Option<Target>, wgpu::Texture)>, String> {
+    ) -> std::result::Result<Vec<crate::DrawImage>, String> {
         if !vs_layout.images.is_empty() {
             return Err("a vertex stage stores to an image, which WebGPU cannot".into());
         }
@@ -501,25 +501,17 @@ impl Gpu {
             bank: &bank,
         };
         let targets = self.storage_images(fs_layout, pools, ctx)?;
-        let mut images = Vec::with_capacity(targets.len());
-        for target in targets {
-            let texture = match &target {
-                Some(image) => {
-                    // A texture bound for storage cannot also be an attachment of the pass.
-                    if drawn
-                        .iter()
-                        .flatten()
-                        .any(|t| spans_overlap(&surface_span(t), &surface_span(image)))
-                    {
-                        return Err("stores to an image over a surface the draw renders to".into());
-                    }
-                    self.storage_surface(image, ctx)?
-                }
-                None => self.null_image(),
-            };
-            images.push((target, texture));
+        // A texture bound for storage cannot also be an attachment of the pass.
+        if targets.iter().flatten().any(|image| {
+            drawn
+                .iter()
+                .flatten()
+                .any(|t| spans_overlap(&surface_span(t), &surface_span(image)))
+        }) {
+            return Err("stores to an image over a surface the draw renders to".into());
         }
-        Ok(images)
+        let textures = self.storage_textures(&targets, fs_layout, ctx)?;
+        Ok(targets.into_iter().zip(textures).collect())
     }
 
     /// What a stage's texture bindings take from the descriptors: the swizzle, which WebGPU has

@@ -37,6 +37,8 @@ pub(super) struct Emitter<'a> {
     pub(super) banks: BTreeMap<u8, u32>,
     pub(super) textures: Vec<(TextureSlot, TexDim, bool)>,
     pub(super) images: Vec<TextureSlot>,
+    /// See [`super::Translation::reduced_images`].
+    pub(super) reduced_images: Vec<TextureSlot>,
     pub(super) globals: Vec<Global>,
     /// Counter naming `let` bindings.
     temps: usize,
@@ -75,6 +77,7 @@ impl<'a> Emitter<'a> {
             banks: BTreeMap::new(),
             textures: Vec::new(),
             images: Vec::new(),
+            reduced_images: Vec::new(),
             globals: Vec::new(),
             temps: 0,
             before: Vec::new(),

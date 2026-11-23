@@ -18,6 +18,90 @@ use switch_core::Result;
 /// What a store to a null image is declared as.
 const NULL_IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// A layer of an image a program stores to, as it binds.
+pub(crate) enum ImageLayer {
+    Texture(wgpu::Texture),
+    /// A layer whose texels are words in `buffer`, `row_bytes` apart, copied out of `texture`
+    /// before the work and back after it: one reduced into, which needs atomics, or one of
+    /// a format WebGPU cannot store to.
+    Words {
+        texture: wgpu::Texture,
+        buffer: wgpu::Buffer,
+        row_bytes: u32,
+    },
+}
+
+impl ImageLayer {
+    /// The layout entry binding this layer at `binding`.
+    pub(crate) fn entry(
+        &self,
+        binding: u32,
+        visibility: wgpu::ShaderStages,
+    ) -> wgpu::BindGroupLayoutEntry {
+        let ty = match self {
+            ImageLayer::Texture(texture) => wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: texture.format(),
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+            ImageLayer::Words { .. } => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        };
+        wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty,
+            count: None,
+        }
+    }
+
+    /// Record the copy of a word layer's texels into its buffer, before the work.
+    pub(crate) fn copy_in(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let ImageLayer::Words {
+            texture,
+            buffer,
+            row_bytes,
+        } = self
+        {
+            encoder.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                word_copy(buffer, *row_bytes),
+                texture.size(),
+            );
+        }
+    }
+
+    /// Record the copy of a word layer's buffer back into its texels, after the work.
+    pub(crate) fn copy_out(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let ImageLayer::Words {
+            texture,
+            buffer,
+            row_bytes,
+        } = self
+        {
+            encoder.copy_buffer_to_texture(
+                word_copy(buffer, *row_bytes),
+                texture.as_image_copy(),
+                texture.size(),
+            );
+        }
+    }
+}
+
+fn word_copy(buffer: &wgpu::Buffer, row_bytes: u32) -> wgpu::TexelCopyBufferInfo<'_> {
+    wgpu::TexelCopyBufferInfo {
+        buffer,
+        layout: wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(row_bytes),
+            rows_per_image: None,
+        },
+    }
+}
+
 /// A compute pipeline, by its module and its bind group layout.
 pub(crate) type ComputeKey = (u64, Vec<wgpu::BindGroupLayoutEntry>);
 
@@ -112,6 +196,7 @@ impl Gpu {
         crate::prepare::bind_levels_from(pools, ctx, &mut layout)?;
         let images = self.storage_images(&mut layout, pools, ctx)?;
         let stored: Vec<u64> = images.iter().flatten().map(|t| t.addr).collect();
+        let image_textures = self.storage_textures(&images, &layout, ctx)?;
         let textures = self.compute_textures(&mut layout, pools, ctx)?;
         // A browser allows as few as eight; past the limit the layout is rejected.
         let buffers = usize::from(!layout.const_banks.is_empty()) + layout.globals.len();
@@ -193,26 +278,21 @@ impl Gpu {
             )?;
         }
         let mut image_views = Vec::new();
-        for (index, target) in images.iter().enumerate() {
-            let texture = match target {
-                Some(target) => self.storage_surface(target, ctx)?,
-                None => self.null_image(),
-            };
-            let binding = wgsl::IMAGE_BINDING + index as u32;
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: texture.format(),
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            });
-            image_views.push((
-                binding,
-                texture.create_view(&wgpu::TextureViewDescriptor::default()),
-            ));
+        let mut image_buffers = Vec::new();
+        for (index, layers) in image_textures.iter().enumerate() {
+            for (layer, bound) in layers.iter().enumerate() {
+                let binding = layout.image_binding(index, layer as u32);
+                entries.push(bound.entry(binding, wgpu::ShaderStages::COMPUTE));
+                match bound {
+                    ImageLayer::Texture(texture) => image_views.push((
+                        binding,
+                        texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                    )),
+                    ImageLayer::Words { buffer, .. } => {
+                        image_buffers.push((binding, buffer.clone()));
+                    }
+                }
+            }
         }
         let group_layout = match self.group_layouts.get(&entries) {
             Some(layout) => layout.clone(),
@@ -286,6 +366,7 @@ impl Gpu {
             .collect();
         let mut bindings: Vec<wgpu::BindGroupEntry> = buffers
             .iter()
+            .chain(&image_buffers)
             .map(|(binding, buffer)| wgpu::BindGroupEntry {
                 binding: *binding,
                 resource: buffer.as_entire_binding(),
@@ -328,6 +409,9 @@ impl Gpu {
                     label: Some("draws"),
                 })
         });
+        for bound in image_textures.iter().flatten() {
+            bound.copy_in(&mut encoder);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("compute"),
@@ -337,6 +421,9 @@ impl Gpu {
             pass.set_bind_group(0, &group, &[]);
             let [gx, gy, gz] = qmd.cta_raster;
             pass.dispatch_workgroups(gx, gy, gz);
+        }
+        for bound in image_textures.iter().flatten() {
+            bound.copy_out(&mut encoder);
         }
         self.batch = Some(encoder);
         self.batched_draws += 1;
@@ -348,48 +435,135 @@ impl Gpu {
 }
 
 impl Gpu {
-    /// The images a launch stores to, each held on the device or `None` for a null image, with
-    /// their storage formats filled into `layout`.
+    /// The images a program stores to, each layer held on the device and none for a null
+    /// image, with their storage formats and layer counts filled into `layout`.
     pub(super) fn storage_images(
         &mut self,
         layout: &mut Layout,
         pools: TexturePools<'_>,
         ctx: &ExecCtx,
-    ) -> std::result::Result<Vec<Option<Target>>, String> {
-        let limit = self.device_limits.max_storage_textures_per_shader_stage as usize;
-        if layout.images.len() > limit {
-            return Err(format!(
-                "stores to {} images, past the device's {limit}",
-                layout.images.len()
-            ));
-        }
-        let mut images: Vec<Option<Target>> = Vec::new();
+    ) -> std::result::Result<Vec<Vec<Target>>, String> {
+        let mut images: Vec<Vec<Target>> = Vec::new();
         for image in &mut layout.images {
-            let target =
-                upload::image_target(pools, ctx, image.slot).map_err(|e| format!("{e:?}"))?;
-            let format = match &target {
+            let layers =
+                upload::image_targets(pools, ctx, image.slot).map_err(|e| format!("{e:?}"))?;
+            let format = match layers.first() {
                 Some(target) => device_attachment_format(self.features(), target.format)
                     .map_err(|e| format!("{e:?}"))?,
                 None => NULL_IMAGE_FORMAT,
             };
-            image.format = Some(
-                storage_format(format)
-                    .ok_or_else(|| format!("stores to a {format:?} image, which WebGPU cannot"))?,
-            );
-            if let Some(target) = target {
+            // A reduction needs atomics, which only a buffer of the texels' words has; a format
+            // WebGPU cannot store to is packed into one.
+            use wgpu::TextureFormat as T;
+            let pack = match (format, image.reduced && !layers.is_empty()) {
+                (T::R32Uint | T::R32Sint | T::R32Float, true) => Some(wgsl::WordPack::Word),
+                (T::Rg11b10Ufloat, false) => Some(wgsl::WordPack::Rg11b10),
+                (_, true) => {
+                    return Err(format!(
+                        "reduces into a {format:?} image, whose texels are not 32-bit words"
+                    ))
+                }
+                _ => None,
+            };
+            match (pack, layers.first()) {
+                (Some(pack), Some(target)) => {
+                    image.words = Some(wgsl::WordImage {
+                        width: target.width,
+                        height: target.height,
+                        row_words: word_row_bytes(target.width) / 4,
+                        pack,
+                    });
+                }
+                _ => {
+                    image.format = Some(storage_format(format).ok_or_else(|| {
+                        format!("stores to a {format:?} image, which WebGPU cannot")
+                    })?);
+                    // A null image takes nothing, so a reduction into it is dropped.
+                    if layers.is_empty() {
+                        image.reduced = false;
+                    }
+                }
+            }
+            image.layers = layers.len().max(1) as u32;
+            for target in &layers {
                 if images
                     .iter()
                     .flatten()
-                    .any(|other| spans_overlap(&surface_span(other), &surface_span(&target)))
+                    .any(|other| spans_overlap(&surface_span(other), &surface_span(target)))
                 {
                     return Err("stores to two images over the same memory".into());
                 }
-                self.hold(&target, ctx).map_err(|e| format!("{e:?}"))?;
+                self.hold(target, ctx).map_err(|e| format!("{e:?}"))?;
                 self.resolve_companion(target.addr)?;
             }
-            images.push(target);
+            images.push(layers);
+        }
+        // Each layer is a binding of its own.
+        let limit = self.device_limits.max_storage_textures_per_shader_stage;
+        let bound: u32 = layout.images.iter().map(|image| image.layers).sum();
+        if bound > limit {
+            return Err(format!(
+                "stores to {bound} image layers, past the device's {limit}"
+            ));
         }
         Ok(images)
+    }
+
+    /// What `images` bind as, layer by layer, as `layout` describes them; a null image is one
+    /// texel nothing reads.
+    pub(super) fn storage_textures(
+        &mut self,
+        images: &[Vec<Target>],
+        layout: &Layout,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<Vec<Vec<ImageLayer>>, String> {
+        let mut textures = Vec::with_capacity(images.len());
+        for (layers, image) in images.iter().zip(&layout.images) {
+            let mut bound = Vec::with_capacity(layers.len().max(1));
+            if layers.is_empty() {
+                bound.push(ImageLayer::Texture(self.null_image()));
+            }
+            for target in layers {
+                bound.push(match image.words {
+                    Some(_) => self.word_layer(target, ctx)?,
+                    None => ImageLayer::Texture(self.storage_surface(target, ctx)?),
+                });
+            }
+            textures.push(bound);
+        }
+        Ok(textures)
+    }
+
+    /// A held surface with a buffer for its texels' words.
+    fn word_layer(
+        &mut self,
+        target: &Target,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<ImageLayer, String> {
+        self.hold(target, ctx).map_err(|e| format!("{e:?}"))?;
+        let held = self
+            .space
+            .held
+            .get(&target.addr)
+            .ok_or("the surface was not held")?;
+        if held.other.is_some() || held.companion.is_some() {
+            return Err("stores to a surface also held at another size or sample grid".into());
+        }
+        let texture = held.texture.clone();
+        let row_bytes = word_row_bytes(texture.width());
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("image words"),
+            size: u64::from(row_bytes) * u64::from(texture.height()),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Ok(ImageLayer::Words {
+            texture,
+            buffer,
+            row_bytes,
+        })
     }
 
     /// The textures a launch samples, read and described into `layout`.
@@ -442,7 +616,7 @@ impl Gpu {
     }
 
     /// The held surface at `target`, made writable by a shader if it was not.
-    pub(super) fn storage_surface(
+    fn storage_surface(
         &mut self,
         target: &Target,
         ctx: &ExecCtx,
@@ -484,7 +658,7 @@ impl Gpu {
     }
 
     /// What a store to a null image lands in: one texel nothing reads.
-    pub(super) fn null_image(&mut self) -> wgpu::Texture {
+    fn null_image(&mut self) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("null image"),
             size: wgpu::Extent3d {
@@ -604,4 +778,9 @@ fn compute_entries(layout: &Layout, globals: &[GlobalUpload]) -> Vec<wgpu::BindG
         entries.push(storage(wgsl::GLOBAL_BINDING + global.slot, !global.writes));
     }
     entries
+}
+
+/// A word layer's row: its words, padded to the alignment a texture copy needs.
+fn word_row_bytes(width: u32) -> u32 {
+    (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
 }

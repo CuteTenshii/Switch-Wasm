@@ -984,6 +984,9 @@ struct Checked {
     serials: [u64; 2],
 }
 
+/// An image a draw stores to: its layers held, none for a null image, and what they bind as.
+type DrawImage = (Vec<Target>, Vec<compute::ImageLayer>);
+
 /// One draw, resolved into everything a device needs.
 struct Prepared {
     state: Pipeline,
@@ -1010,9 +1013,9 @@ struct Prepared {
     assembled: Option<(Vec<u32>, i32)>,
     /// `gl_InstanceID`, reproduced as the first instance of a one-instance draw.
     instance: u32,
-    /// The images the fragment stage stores to, `None` for a null image, each with the
-    /// storage-capable texture it is bound as.
-    images: Vec<(Option<Target>, wgpu::Texture)>,
+    /// The images the fragment stage stores to, each layer held (none for a null image), with
+    /// the storage textures their layers bind as.
+    images: Vec<DrawImage>,
 }
 
 /// Whether the rasterizer would only run the draw's vertex shader for what it stores.

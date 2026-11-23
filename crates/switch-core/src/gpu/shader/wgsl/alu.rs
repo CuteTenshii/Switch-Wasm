@@ -595,6 +595,40 @@ impl Emitter<'_> {
                     value.join(", ")
                 ));
             }
+            // A reduction binds its image as words; one outside the image changes nothing.
+            Op::Sured {
+                src,
+                coords,
+                handle,
+                handle_reg,
+                dim: dim @ (SurfaceDim::D2 | SurfaceDim::Array2d),
+                op: reduce,
+                ty,
+            } => {
+                let code = atom_code(reduce, ty).ok_or(Unsupported::Op { at, op })?;
+                let slot = match handle_reg {
+                    Some(reg) => self
+                        .bindless_slot(at, reg)
+                        .ok_or(Unsupported::UntracedHandle { at })?,
+                    None => TextureSlot::Bound(handle),
+                };
+                self.bind_image(at, slot)?;
+                if !self.reduced_images.contains(&slot) {
+                    self.reduced_images.push(slot);
+                }
+                let (x, y) = (self.r(coords), self.r(coords.wrapping_add(1)));
+                let layer = match dim {
+                    SurfaceDim::Array2d => {
+                        format!("({} & 0xffffu)", self.r(coords.wrapping_add(2)))
+                    }
+                    _ => "0u".to_string(),
+                };
+                let value = self.r(src);
+                self.line(&format!(
+                    "imgReduce({code}u, {}u, {x}, {y}, {layer}, {value});",
+                    slot.key()
+                ));
+            }
             Op::Lds { .. }
             | Op::Sts { .. }
             | Op::Atom { .. }

@@ -1285,17 +1285,16 @@ fn an_atomic_runs_the_row_for_its_operation_and_type() {
 }
 
 #[test]
-fn only_the_atomics_eden_applies_have_a_row() {
+fn only_the_atomics_the_interpreter_applies_have_a_row() {
     use AtomOp::*;
-    for op in [Add, Min, Max, And, Or, Xor, Exch, Cas] {
+    // `inc` and `dec` are unsigned whatever the type says, as the interpreter applies them.
+    for op in [Add, Min, Max, And, Or, Xor, Exch, Cas, Inc, Dec] {
         for ty in [AtomType::U32, AtomType::S32] {
             assert!(atom_code(op, ty).is_some(), "{op:?} {ty:?}");
         }
     }
     assert!(atom_code(Add, AtomType::F32).is_some());
     for (op, ty) in [
-        (Inc, AtomType::U32),
-        (Dec, AtomType::S32),
         (SafeAdd, AtomType::U32),
         (SafeAdd, AtomType::F32),
         (Min, AtomType::F32),
@@ -1315,7 +1314,6 @@ fn only_the_atomics_eden_applies_have_a_row() {
 #[test]
 fn an_atomic_without_a_row_is_refused() {
     for (op, ty) in [
-        (AtomOp::Inc, AtomType::U32),
         (AtomOp::SafeAdd, AtomType::U32),
         (AtomOp::Min, AtomType::F32),
     ] {

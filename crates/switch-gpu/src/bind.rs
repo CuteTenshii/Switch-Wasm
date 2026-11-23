@@ -201,8 +201,8 @@ impl Gpu {
 
         let drawn: Vec<u64> = [p.color, p.depth]
             .iter()
-            .chain(p.images.iter().map(|(image, _)| image))
             .flatten()
+            .chain(p.images.iter().flat_map(|(layers, _)| layers))
             .map(|t| t.addr)
             .collect();
         for (index, upload) in p
@@ -273,25 +273,23 @@ impl Gpu {
         }
 
         if stage == ShaderStage::Fragment {
-            for (index, (_, texture)) in p.images.iter().enumerate() {
-                let binding = wgsl::IMAGE_BINDING + index as u32;
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding,
-                    visibility: own,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: texture.format(),
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                });
-                resources.push(Resource::Texture(
-                    binding,
-                    texture.clone(),
-                    wgpu::TextureViewDimension::D2,
-                ));
-                persistent = false;
-                why[0] = true;
+            for (index, (_, layers)) in p.images.iter().enumerate() {
+                for (layer, bound) in layers.iter().enumerate() {
+                    let binding = declared.image_binding(index, layer as u32);
+                    entries.push(bound.entry(binding, own));
+                    resources.push(match bound {
+                        crate::compute::ImageLayer::Texture(texture) => Resource::Texture(
+                            binding,
+                            texture.clone(),
+                            wgpu::TextureViewDimension::D2,
+                        ),
+                        crate::compute::ImageLayer::Words { buffer, .. } => {
+                            Resource::Buffer(binding, buffer.clone())
+                        }
+                    });
+                    persistent = false;
+                    why[0] = true;
+                }
             }
         }
 

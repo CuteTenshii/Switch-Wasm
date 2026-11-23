@@ -2,8 +2,8 @@
 
 use super::layout::{
     attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Global, Layout, Stage, StorageNumeric,
-    TextureBinding, Update, ATOMS, ATTRIBUTE_WORDS, CONSTANTS_BINDING, CONSTANT_BANKS,
-    GENERIC_BASE, GENERIC_STRIDE, GLOBAL_BINDING, IDENTITY_SWIZZLE, IMAGE_BINDING, INSTANCE_ID,
+    TextureBinding, Update, WordImage, WordPack, ATOMS, ATTRIBUTE_WORDS, CONSTANTS_BINDING,
+    CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE, GLOBAL_BINDING, IDENTITY_SWIZZLE, INSTANCE_ID,
     POSITION, TEXTURE_BINDING, VERTEX_ID,
 };
 use super::{Translation, Unsupported};
@@ -173,24 +173,87 @@ pub fn module(
             GLOBAL_BINDING + slot as u32
         ));
     }
-    // An image is bound as its one layer, so a store to any other layer is out of range.
+    // Each layer of an image is its own binding, so a store picks one by its layer; a layer
+    // past the image's is out of range.
     let mut stores = String::new();
+    let mut reductions = String::new();
     for (index, image) in layout.images.iter().enumerate() {
+        if let Some(words) = image.words {
+            let WordImage {
+                width,
+                height,
+                row_words,
+                pack,
+            } = words;
+            let word = match pack {
+                WordPack::Word => "value.x",
+                WordPack::Rg11b10 => "packRg11b10(bitcast<vec4<f32>>(value))",
+            };
+            let (mut layers, mut reduced) = (String::new(), String::new());
+            for layer in 0..image.layers {
+                let array = format!("img{index}_{layer}");
+                out.push_str(&format!(
+                    "@group({}) @binding({}) var<storage, read_write> {array}: array<atomic<u32>>;\n",
+                    layout.group,
+                    layout.image_binding(index, layer),
+                ));
+                let at = format!("y * {row_words}u + x");
+                layers.push_str(&format!(
+                    "        case {layer}u: {{ if (x < {width}u && y < {height}u) {{ \
+                     atomicStore(&{array}[{at}], {word}); }} }}\n"
+                ));
+                reduced.push_str(&format!(
+                    "        case {layer}u: {{\n          if (x < {width}u && y < {height}u) {{\n            \
+                     let word = {at};\n            switch (op) {{\n"
+                ));
+                for (code, (_, _, update)) in ATOMS.iter().enumerate() {
+                    match update {
+                        Update::Direct(function) => reduced.push_str(&format!(
+                            "              case {code}u: {{ {function}(&{array}[word], value); }}\n"
+                        )),
+                        Update::Loop(next) => reduced.push_str(&format!(
+                            "              case {code}u: {{\n{}              }}\n",
+                            compare_exchange(&array, "word", next, "                ")
+                        )),
+                    }
+                }
+                reduced.push_str(
+                    "              default: { }\n            }\n          }\n        }\n",
+                );
+            }
+            let key = image.slot.key();
+            stores.push_str(&format!(
+                "    case {key}u: {{\n      switch (layer) {{\n{layers}        default: {{ }}\n      }}\n    }}\n"
+            ));
+            reductions.push_str(&format!(
+                "    case {key}u: {{\n      switch (layer) {{\n{reduced}        default: {{ }}\n      }}\n    }}\n"
+            ));
+            continue;
+        }
+        if image.reduced {
+            return Err(Unsupported::ImageFormat);
+        }
         let format = image.format.ok_or(Unsupported::ImageFormat)?;
-        out.push_str(&format!(
-            "@group({}) @binding({}) var img{index}: texture_storage_2d<{}, write>;\n",
-            layout.group,
-            IMAGE_BINDING + index as u32,
-            format.name
-        ));
         let texel = match format.numeric {
             StorageNumeric::Float => "bitcast<vec4<f32>>(value)",
             StorageNumeric::Uint => "value",
             StorageNumeric::Sint => "bitcast<vec4<i32>>(value)",
         };
+        let mut layers = String::new();
+        for layer in 0..image.layers {
+            out.push_str(&format!(
+                "@group({}) @binding({}) var img{index}_{layer}: texture_storage_2d<{}, write>;\n",
+                layout.group,
+                layout.image_binding(index, layer),
+                format.name
+            ));
+            layers.push_str(&format!(
+                "        case {layer}u: {{ if (all(vec2<u32>(x, y) < textureDimensions(img{index}_{layer}))) \
+                 {{ textureStore(img{index}_{layer}, vec2<u32>(x, y), {texel}); }} }}\n"
+            ));
+        }
         stores.push_str(&format!(
-            "    case {}u: {{ if (layer == 0u && all(vec2<u32>(x, y) < textureDimensions(img{index}))) {{ \
-             textureStore(img{index}, vec2<u32>(x, y), {texel}); }} }}\n",
+            "    case {}u: {{\n      switch (layer) {{\n{layers}        default: {{ }}\n      }}\n    }}\n",
             image.slot.key()
         ));
     }
@@ -201,6 +264,18 @@ pub fn module(
     {
         out.push('\n');
     }
+    if layout
+        .images
+        .iter()
+        .any(|image| image.words.is_some_and(|w| w.pack == WordPack::Rg11b10))
+    {
+        out.push_str(PACK_RG11B10);
+    }
+    // `sured`: no value comes back, and a compare-and-swap's `stored` is never asked for.
+    out.push_str(&format!(
+        "fn imgReduce(op: u32, key: u32, x: u32, y: u32, layer: u32, value: u32) {{\n  \
+         let stored = 0u;\n  switch (key) {{\n{reductions}    default: {{ }}\n  }}\n}}\n\n"
+    ));
     out.push_str(&format!(
         "fn imgStore(key: u32, x: u32, y: u32, layer: u32, value: vec4<u32>) {{\n  switch (key) {{\n{stores}    \
          default: {{ }}\n  }}\n}}\n\n"
@@ -1189,3 +1264,20 @@ fn alpha_coverage(coverage: &Coverage, alpha: &str) -> String {
         count
     )
 }
+
+/// A `B10G11R11_FLOAT` texel's word as the rasterizer packs it: each channel through a half,
+/// its mantissa rounded half up to 6 or 5 bits and held below infinity; negatives and NaN are 0.
+const PACK_RG11B10: &str = "\
+fn packSmallFloat(v: f32, mantissa_bits: u32) -> u32 {
+  if (!(v > 0.0)) { return 0u; }
+  let shift = 10u - mantissa_bits;
+  let half = pack2x16float(vec2<f32>(v, 0.0)) & 0x7fffu;
+  let largest = (1u << (5u + mantissa_bits)) - 1u;
+  return min((half + (1u << (shift - 1u))) >> shift, largest);
+}
+
+fn packRg11b10(v: vec4<f32>) -> u32 {
+  return packSmallFloat(v.x, 6u) | (packSmallFloat(v.y, 6u) << 11u) | (packSmallFloat(v.z, 5u) << 22u);
+}
+
+";

@@ -702,16 +702,16 @@ pub fn texture_levels(pools: TexturePools<'_>, ctx: &ExecCtx, slot: TextureSlot)
     Ok(texture::read_bound_image(ctx, at)?.map_or(1, |image| image.levels.max(1)))
 }
 
-/// The surface a `sust` to `slot` writes, or `None` for a null image.
-pub fn image_target(
+/// The surfaces a `sust` to `slot` writes, one per layer, or none for a null image.
+pub fn image_targets(
     pools: TexturePools<'_>,
     ctx: &ExecCtx,
     slot: TextureSlot,
-) -> Result<Option<Target>> {
+) -> Result<Vec<Target>> {
     let handle = pools.handle(ctx, slot)?;
     let at = pools.header_pool + u64::from(texture::image_id(handle)) * 32;
     let Some(image) = texture::read_bound_image(ctx, at)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let TexelKind::Plain(format) = image.kind else {
         return Err(Error::Gpu(format!(
@@ -719,25 +719,28 @@ pub fn image_target(
             image.kind
         )));
     };
-    if image.layers > 1 || image.block_depth_gobs > 1 {
+    if image.block_depth_gobs > 1 {
         return Err(Error::Gpu(format!(
-            "upload: a 2D surface store to an image of {} layers and {} GOBs of depth",
-            image.layers, image.block_depth_gobs
+            "upload: a 2D surface store to a volume of {} GOBs of depth",
+            image.block_depth_gobs
         )));
     }
     let unit = format.bytes_per_pixel;
-    Ok(Some(Target {
-        format: crate::gpu::pipeline::color_format(format)
-            .map_err(|e| Error::Gpu(format!("upload: stored image: {e}")))?,
-        addr: image.addr,
-        width: image.width,
-        height: image.height,
-        layout: image.layout,
-        row_bytes: image.width * unit,
-        rows: image.height,
-        unit,
-        depth: None,
-    }))
+    let format = crate::gpu::pipeline::color_format(format)
+        .map_err(|e| Error::Gpu(format!("upload: stored image: {e}")))?;
+    Ok((0..image.layers.max(1))
+        .map(|layer| Target {
+            format,
+            addr: image.addr + u64::from(layer) * u64::from(image.layer_stride),
+            width: image.width,
+            height: image.height,
+            layout: image.layout,
+            row_bytes: image.width * unit,
+            rows: image.height,
+            unit,
+            depth: None,
+        })
+        .collect())
 }
 
 /// One GOB, the block-linear unit rows are padded to.
