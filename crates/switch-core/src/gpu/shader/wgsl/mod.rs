@@ -32,6 +32,14 @@ pub use layout::{
 };
 pub use module::module;
 
+/// The source of the on-demand helper `name`, for checking it on a device.
+pub fn helper_source(name: &str) -> Option<&'static str> {
+    helpers::HELPERS
+        .iter()
+        .find(|(helper, _)| *helper == name)
+        .map(|(_, source)| *source)
+}
+
 /// Why a program could not be translated; the caller falls back to the rasterizer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsupported {

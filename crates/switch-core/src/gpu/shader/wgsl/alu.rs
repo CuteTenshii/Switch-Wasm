@@ -105,6 +105,8 @@ impl Emitter<'_> {
             | Op::Sel { .. } => self.emit_integer(op)?,
 
             Op::I2f { .. }
+            | Op::I2d { .. }
+            | Op::D2f { .. }
             | Op::F2i { .. }
             | Op::F2f { .. }
             | Op::I2i { .. }

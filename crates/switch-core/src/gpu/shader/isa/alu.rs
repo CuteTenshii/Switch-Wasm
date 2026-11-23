@@ -292,6 +292,9 @@ pub(super) fn decode_alu(insn: u64) -> Op {
         // i2f.
         0xb8 => {
             let Some(src) = rhs_int else { return un };
+            if field(insn, 8, 2) == 3 {
+                return decode_i2d(insn, src).unwrap_or(un);
+            }
             let dst_bits = match field(insn, 8, 2) {
                 1 => 16,
                 2 => 32,
@@ -349,6 +352,9 @@ pub(super) fn decode_alu(insn: u64) -> Op {
             }
         }
         // f2f, f16 and f32 in either direction, and the rounding a same-width conversion names.
+        0xa8 if (field(insn, 8, 2), field(insn, 10, 2)) == (2, 3) => {
+            decode_d2f(insn, rhs_float).unwrap_or(un)
+        }
         0xa8 => {
             let (Some(dst_bits), Some(src_bits)) = (
                 float_width(field(insn, 8, 2)),
@@ -422,4 +428,49 @@ pub(super) fn decode_alu(insn: u64) -> Op {
         }
         _ => decode_alu_wide(insn),
     }
+}
+
+/// `i2f.f64` from a register: round to nearest, no modifiers, a whole source.
+fn decode_i2d(insn: u64, src: Operand) -> Option<Op> {
+    let Operand::Reg(src) = src else { return None };
+    let plain = field(insn, 39, 2) == 0
+        && field(insn, 41, 2) == 0
+        && field(insn, 45, 1) == 0
+        && field(insn, 49, 1) == 0;
+    if !plain {
+        return None;
+    }
+    let (src_bytes, src_signed) = match field(insn, 10, 2) | (field(insn, 13, 1) << 2) {
+        3 => (8, false),
+        7 => (8, true),
+        bits => match int_type(bits)? {
+            (4, signed) => (4, signed),
+            _ => return None,
+        },
+    };
+    Some(Op::I2d {
+        dst: reg(insn, 0, 8),
+        src,
+        src_bytes,
+        src_signed,
+    })
+}
+
+/// `f2f.f32.f64` from a register: round to nearest, no modifiers or saturation.
+fn decode_d2f(insn: u64, src: Option<Operand>) -> Option<Op> {
+    let Some(Operand::Reg(src)) = src else {
+        return None;
+    };
+    let plain = field(insn, 39, 2) == 0
+        && field(insn, 41, 2) == 0
+        && field(insn, 45, 1) == 0
+        && field(insn, 49, 2) == 0;
+    if !plain {
+        return None;
+    }
+    Some(Op::D2f {
+        dst: reg(insn, 0, 8),
+        src,
+        ftz: field(insn, 44, 1) != 0,
+    })
 }

@@ -400,3 +400,30 @@ fn atom_less(ty: AtomType, x: u64, y: u64) -> bool {
         _ => x < y,
     }
 }
+
+/// A 64-bit integer as a double's bits, rounded to nearest even.
+pub fn int_to_f64_bits(raw: u64, signed: bool) -> u64 {
+    let value = if signed {
+        raw as i64 as f64
+    } else {
+        raw as f64
+    };
+    value.to_bits()
+}
+
+/// NVIDIA's canonical NaN, which a conversion of any NaN produces.
+const CANONICAL_NAN_F32: u32 = 0x7fff_ffff;
+
+/// A double's bits narrowed to a single's, rounded to nearest even; `ftz` flushes a denormal
+/// result to zero of its sign.
+pub fn f64_to_f32_bits(bits: u64, ftz: bool) -> u32 {
+    let value = f64::from_bits(bits);
+    if value.is_nan() {
+        return CANONICAL_NAN_F32;
+    }
+    let narrowed = value as f32;
+    if ftz && narrowed.is_subnormal() {
+        return narrowed.to_bits() & 0x8000_0000;
+    }
+    narrowed.to_bits()
+}

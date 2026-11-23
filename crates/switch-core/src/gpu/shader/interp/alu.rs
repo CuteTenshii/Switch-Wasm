@@ -802,6 +802,27 @@ impl Invocation {
             }
 
             // ---- conversions ----
+            Op::I2d {
+                dst,
+                src,
+                src_bytes,
+                src_signed,
+            } => {
+                let raw = if src_bytes == 8 {
+                    self.reg64(src)
+                } else if src_signed {
+                    self.reg(src) as i32 as i64 as u64
+                } else {
+                    u64::from(self.reg(src))
+                };
+                let bits = int_to_f64_bits(raw, src_signed);
+                self.set_reg(dst, bits as u32);
+                self.set_reg(dst.wrapping_add(1), (bits >> 32) as u32);
+            }
+            Op::D2f { dst, src, ftz } => {
+                let bits = f64_to_f32_bits(self.reg64(src), ftz);
+                self.set_reg(dst, bits);
+            }
             Op::I2f {
                 dst,
                 src,

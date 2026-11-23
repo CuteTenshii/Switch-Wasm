@@ -39,6 +39,46 @@ fn a_hand_written_alu_program_produces_the_expected_registers() {
     assert_eq!(inv.reg_f32(3), 20.0);
 }
 
+/// Z-A's tick difference: a 64-bit pair to a double, then to a single, each to nearest even.
+#[test]
+fn an_integer_pair_narrows_to_a_single_through_a_double() {
+    let program = prog(&[
+        Op::I2d {
+            dst: 4,
+            src: 2,
+            src_bytes: 8,
+            src_signed: false,
+        },
+        Op::D2f {
+            dst: 6,
+            src: 4,
+            ftz: false,
+        },
+        Op::I2d {
+            dst: 8,
+            src: 1,
+            src_bytes: 4,
+            src_signed: true,
+        },
+        Op::Exit,
+    ]);
+    // 2^53 + 1 ties to 2^53 in the double; the single holds it exactly.
+    let ticks = (1u64 << 53) + 1;
+    let mut inv = Invocation::new();
+    inv.set_reg(2, ticks as u32);
+    inv.set_reg(3, (ticks >> 32) as u32);
+    inv.set_reg(1, (-3i32) as u32);
+
+    inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+        .unwrap();
+
+    let double = u64::from(inv.reg(4)) | u64::from(inv.reg(5)) << 32;
+    assert_eq!(f64::from_bits(double), 9_007_199_254_740_992.0);
+    assert_eq!(inv.reg_f32(6), 9_007_199_254_740_992.0);
+    let negative = u64::from(inv.reg(8)) | u64::from(inv.reg(9)) << 32;
+    assert_eq!(f64::from_bits(negative), -3.0);
+}
+
 #[test]
 fn ffma32i_accumulates_into_its_destination() {
     // Taisei's "ffma32i ftz $r14 $r9 0x3e4ccccd $r14": r14 = r9 * 0.2 + r14.

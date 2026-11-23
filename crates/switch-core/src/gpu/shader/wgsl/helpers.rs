@@ -229,6 +229,103 @@ fn f2i_s(v: f32, bytes: u32) -> u32 {
   return bitcast<u32>(i32(v));
 }",
     ),
+    // 64-bit integers as `vec2<u32>`, low word first; shifts below 64.
+    (
+        "u64",
+        "\
+fn shl64(v: vec2<u32>, s: u32) -> vec2<u32> {
+  if (s == 0u) { return v; }
+  if (s >= 32u) { return vec2<u32>(0u, v.x << (s - 32u)); }
+  return vec2<u32>(v.x << s, (v.y << s) | (v.x >> (32u - s)));
+}
+
+fn shr64(v: vec2<u32>, s: u32) -> vec2<u32> {
+  if (s == 0u) { return v; }
+  if (s >= 32u) { return vec2<u32>(v.y >> (s - 32u), 0u); }
+  return vec2<u32>((v.x >> s) | (v.y << (32u - s)), v.y >> s);
+}
+
+fn add64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+  let lo = a.x + b.x;
+  return vec2<u32>(lo, a.y + b.y + select(0u, 1u, lo < a.x));
+}
+
+fn sub64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+  return vec2<u32>(a.x - b.x, a.y - b.y - select(0u, 1u, a.x < b.x));
+}
+
+fn gt64(a: vec2<u32>, b: vec2<u32>) -> bool {
+  return a.y > b.y || (a.y == b.y && a.x > b.x);
+}",
+    ),
+    (
+        "i2d",
+        "\
+fn i2dBits(lo: u32, hi: u32, signed: bool) -> vec2<u32> {
+  // A 64-bit integer to a double's bits, rounded to nearest even.
+  var v = vec2<u32>(lo, hi);
+  var sign = 0u;
+  if (signed && (hi & 0x80000000u) != 0u) {
+    sign = 0x80000000u;
+    v = sub64(vec2<u32>(0u, 0u), v);
+  }
+  if (v.x == 0u && v.y == 0u) { return vec2<u32>(0u, sign); }
+  let top = select(firstLeadingBit(v.x), 32u + firstLeadingBit(v.y), v.y != 0u);
+  var exponent = top + 1023u;
+  var m: vec2<u32>;
+  if (top <= 52u) {
+    m = shl64(v, 52u - top);
+  } else {
+    let s = top - 52u;
+    m = shr64(v, s);
+    let rem = v.x & ((1u << s) - 1u);
+    let half = 1u << (s - 1u);
+    if (rem > half || (rem == half && (m.x & 1u) != 0u)) {
+      m = add64(m, vec2<u32>(1u, 0u));
+      if ((m.y & 0x00200000u) != 0u) {
+        m = shr64(m, 1u);
+        exponent += 1u;
+      }
+    }
+  }
+  return vec2<u32>(m.x, sign | (exponent << 20u) | (m.y & 0x000fffffu));
+}",
+    ),
+    (
+        "d2f",
+        "\
+fn d2fBits(lo: u32, hi: u32, ftz: bool) -> u32 {
+  // A double's bits to a single's, rounded to nearest even; any NaN is NVIDIA's canonical one.
+  let sign = hi & 0x80000000u;
+  let exp = (hi >> 20u) & 0x7ffu;
+  let mhi = hi & 0x000fffffu;
+  if (exp == 0x7ffu) {
+    if (mhi != 0u || lo != 0u) { return 0x7fffffffu; }
+    return sign | 0x7f800000u;
+  }
+  if (exp == 0u) { return sign; }
+  let e = i32(exp) - 896;
+  if (e >= 255) { return sign | 0x7f800000u; }
+  if (e > 0) {
+    let m = (mhi << 3u) | (lo >> 29u);
+    let rem = lo & 0x1fffffffu;
+    var r = sign | (u32(e) << 23u) | m;
+    if (rem > 0x10000000u || (rem == 0x10000000u && (m & 1u) != 0u)) { r += 1u; }
+    return r;
+  }
+  // A single's denormal: the 53-bit significand shifted down past the exponent's floor.
+  let shift = u32(30 - e);
+  if (shift > 53u) { return sign; }
+  let sig = vec2<u32>(lo, mhi | 0x00100000u);
+  let q = shr64(sig, shift);
+  let rem = sub64(sig, shl64(q, shift));
+  let half = shl64(vec2<u32>(1u, 0u), shift - 1u);
+  var r = sign | q.x;
+  if (gt64(rem, half) || (all(rem == half) && (q.x & 1u) != 0u)) { r += 1u; }
+  if (ftz && (r & 0x7f800000u) == 0u) { return sign; }
+  return r;
+}",
+    ),
     (
         "f2i_u",
         "\

@@ -419,6 +419,20 @@ pub enum Op {
     },
 
     // ---- conversions ----
+    /// `i2f.f64`: an integer register, or a 64-bit pair from `src`, to a double in the pair
+    /// from `dst` (low word first), rounded to nearest even.
+    I2d {
+        dst: u8,
+        src: u8,
+        src_bytes: u8,
+        src_signed: bool,
+    },
+    /// `f2f.f32.f64`: the double in the pair from `src` to a single, rounded to nearest even.
+    D2f {
+        dst: u8,
+        src: u8,
+        ftz: bool,
+    },
     /// Integer -> float.
     I2f {
         dst: u8,

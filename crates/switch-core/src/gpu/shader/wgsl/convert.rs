@@ -8,6 +8,30 @@ impl Emitter<'_> {
     pub(super) fn emit_conversion(&mut self, at: usize, op: Op) -> Result<(), Unsupported> {
         match op {
             // ---- conversions ----
+            Op::I2d {
+                dst,
+                src,
+                src_bytes,
+                src_signed,
+            } => {
+                self.helpers.insert("u64");
+                self.helpers.insert("i2d");
+                let lo = self.r(src);
+                let hi = match (src_bytes, src_signed) {
+                    (8, _) => self.r(src.wrapping_add(1)),
+                    (_, true) => format!("select(0u, 0xffffffffu, ({lo} & 0x80000000u) != 0u)"),
+                    _ => "0u".to_string(),
+                };
+                let double = self.bind(&format!("i2dBits({lo}, {hi}, {src_signed})"));
+                self.set_r(dst, &format!("{double}.x"));
+                self.set_r(dst.wrapping_add(1), &format!("{double}.y"));
+            }
+            Op::D2f { dst, src, ftz } => {
+                self.helpers.insert("u64");
+                self.helpers.insert("d2f");
+                let (lo, hi) = (self.r(src), self.r(src.wrapping_add(1)));
+                self.set_r(dst, &format!("d2fBits({lo}, {hi}, {ftz})"));
+            }
             Op::I2f {
                 dst,
                 src,

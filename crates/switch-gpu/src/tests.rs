@@ -2905,3 +2905,203 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
         .expect("the reuse");
     assert_eq!(gpu.held_copies_reused, reused + 1);
 }
+
+/// The WGSL forms of `i2f.f64` and `f2f.f32.f64` give the interpreter's bits for every edge
+/// of the conversions: rounding ties, carries into the exponent, single denormals, overflow,
+/// infinities and NaNs, and a spread of arbitrary words.
+#[test]
+fn the_double_conversion_helpers_match_the_interpreter_on_the_device() {
+    use switch_core::gpu::shader::interp::{f64_to_f32_bits, int_to_f64_bits};
+    use switch_core::gpu::shader::wgsl::helper_source;
+    let Some((_serial, gpu)) = device() else {
+        return;
+    };
+    let mut inputs: Vec<u64> = vec![
+        0,
+        1,
+        2,
+        (1 << 52) - 1,
+        1 << 52,
+        (1 << 53) - 1,
+        1 << 53,
+        (1 << 53) + 1,
+        (1 << 53) + 2,
+        (1 << 53) + 3,
+        (1 << 54) + 2,
+        (1 << 54) + 6,
+        u64::MAX,
+        u64::MAX - 1,
+        1 << 63,
+        (1 << 63) + 1,
+        i64::MAX as u64,
+        (-1i64) as u64,
+        (-(1i64 << 53) - 1) as u64,
+    ];
+    let doubles = [
+        0.0f64,
+        -0.0,
+        1.0,
+        -1.5,
+        f64::from(f32::MAX),
+        f64::from(f32::MAX) * (1.0 + f64::EPSILON),
+        // Half a single's top ulp past its largest: a tie that rounds to infinity.
+        f64::from(f32::MAX) + 2f64.powi(103),
+        f64::from(f32::MIN_POSITIVE),
+        f64::from(f32::MIN_POSITIVE) * 0.5,
+        f64::from(f32::MIN_POSITIVE) * 0.75,
+        f64::from(f32::from_bits(1)),
+        f64::from(f32::from_bits(1)) * 0.5,
+        f64::from(f32::from_bits(1)) * 0.5000001,
+        f64::from(f32::from_bits(1)) * 1.5,
+        f64::from(f32::from_bits(3)) * 0.5,
+        f64::from(f32::from_bits(0x007f_ffff)) * (1.0 + 1e-9),
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::MAX,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        1.0 + f64::from(f32::EPSILON) * 0.5,
+        1.0 + f64::from(f32::EPSILON) * 1.5,
+        1.0 + f64::from(f32::EPSILON) * 0.5 * (1.0 + f64::EPSILON),
+        16_777_217.0,
+        16_777_219.0,
+    ];
+    inputs.extend(doubles.iter().map(|d| d.to_bits()));
+    inputs.extend(doubles.iter().map(|d| (-d).to_bits()));
+    // Every single's exponent band, each with a tie and a near-tie below it.
+    for exponent in 0..2048u64 {
+        let base = exponent << 52;
+        inputs.extend([
+            base,
+            base | 1 << 28,
+            base | (1 << 29) | (1 << 28),
+            base | 0x000f_ffff_ffff_ffff,
+        ]);
+    }
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..8192 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        inputs.push(state);
+        inputs.push(state >> (state % 64));
+    }
+
+    let source = format!(
+        "{}\n{}\n{}\n\
+         @group(0) @binding(0) var<storage, read> inputs: array<vec2<u32>>;\n\
+         @group(0) @binding(1) var<storage, read_write> doubles: array<vec4<u32>>;\n\
+         @group(0) @binding(2) var<storage, read_write> singles: array<vec2<u32>>;\n\
+         @compute @workgroup_size(64)\n\
+         fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n\
+           let i = id.x;\n\
+           if (i >= arrayLength(&inputs)) {{ return; }}\n\
+           let v = inputs[i];\n\
+           let u = i2dBits(v.x, v.y, false);\n\
+           let s = i2dBits(v.x, v.y, true);\n\
+           doubles[i] = vec4<u32>(u.x, u.y, s.x, s.y);\n\
+           singles[i] = vec2<u32>(d2fBits(v.x, v.y, false), d2fBits(v.x, v.y, true));\n\
+         }}\n",
+        helper_source("u64").expect("the u64 helpers"),
+        helper_source("i2d").expect("the i2d helper"),
+        helper_source("d2f").expect("the d2f helper"),
+    );
+    let module = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+    let pipeline = gpu
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let count = inputs.len() as u64;
+    let words: Vec<u8> = inputs.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let input = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: count * 8,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    gpu.queue.write_buffer(&input, 0, &words);
+    let storage = |size: u64| {
+        gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    };
+    let (doubles_out, singles_out) = (storage(count * 16), storage(count * 8));
+    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: count * 24,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: doubles_out.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: singles_out.as_entire_binding(),
+            },
+        ],
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(count.div_ceil(64) as u32, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&doubles_out, 0, &readback, 0, count * 16);
+    encoder.copy_buffer_to_buffer(&singles_out, 0, &readback, count * 16, count * 8);
+    gpu.queue.submit([encoder.finish()]);
+    readback
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.expect("the readback"));
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("the device");
+    let mapped = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("the mapped readback");
+    let word = |at: u64| {
+        let at = at as usize * 4;
+        u32::from_le_bytes(mapped[at..at + 4].try_into().unwrap())
+    };
+    let wide = |at: u64| u64::from(word(at)) | u64::from(word(at + 1)) << 32;
+    for (i, &v) in inputs.iter().enumerate() {
+        let i = i as u64;
+        assert_eq!(wide(i * 4), int_to_f64_bits(v, false), "u64 {v:#x}");
+        assert_eq!(wide(i * 4 + 2), int_to_f64_bits(v, true), "s64 {v:#x}");
+        let singles = count * 4 + i * 2;
+        assert_eq!(word(singles), f64_to_f32_bits(v, false), "f64 {v:#x}");
+        assert_eq!(
+            word(singles + 1),
+            f64_to_f32_bits(v, true),
+            "f64 {v:#x}, ftz"
+        );
+    }
+}

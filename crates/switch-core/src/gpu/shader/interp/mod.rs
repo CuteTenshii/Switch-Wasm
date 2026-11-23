@@ -13,6 +13,7 @@ mod warp;
 
 pub use backends::*;
 use math::*;
+pub use math::{f64_to_f32_bits, int_to_f64_bits};
 use regs::*;
 pub use warp::*;
 
@@ -737,7 +738,9 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::I2i { dst, .. }
         | Op::Shfl { dst, .. }
         | Op::Vote { dst, .. }
-        | Op::Fswzadd { dst, .. } => vec![dst],
+        | Op::Fswzadd { dst, .. }
+        | Op::D2f { dst, .. } => vec![dst],
+        Op::I2d { dst, .. } => vec![dst, dst.wrapping_add(1)],
         Op::Texs {
             dst,
             dst2,

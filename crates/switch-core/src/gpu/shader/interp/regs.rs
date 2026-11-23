@@ -152,6 +152,8 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
         Op::I2f { src, .. } | Op::F2i { src, .. } | Op::F2f { src, .. } | Op::I2i { src, .. } => {
             operand_reg(src).into_iter().collect()
         }
+        Op::I2d { src, src_bytes, .. } => (0..src_bytes / 4).map(|i| src.wrapping_add(i)).collect(),
+        Op::D2f { src, .. } => vec![src, src.wrapping_add(1)],
         Op::Ldc { idx, .. } => vec![idx],
         Op::Ldg { addr, .. } | Op::Ldl { addr, .. } => vec![addr, addr.wrapping_add(1)],
         Op::Stg {

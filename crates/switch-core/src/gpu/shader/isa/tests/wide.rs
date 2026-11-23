@@ -270,6 +270,33 @@ fn a_negative_immediate_does_not_change_the_opcode() {
     ));
 }
 
+/// Pokémon Legends: Z-A turns a 64-bit tick difference into a single through a double.
+#[test]
+fn a_conversion_through_a_double_decodes_as_its_two_halves() {
+    assert_eq!(
+        op(0x5cb8_0000_00c7_0f0c),
+        Op::I2d {
+            dst: 12,
+            src: 12,
+            src_bytes: 8,
+            src_signed: false,
+        }
+    );
+    assert_eq!(
+        op(0x5ca8_0000_00c7_0e03),
+        Op::D2f {
+            dst: 3,
+            src: 12,
+            ftz: false,
+        }
+    );
+    // A double from a negated source is not modelled.
+    assert!(matches!(
+        op(0x5cb8_2000_00c7_0f0c),
+        Op::Unimplemented { .. }
+    ));
+}
+
 /// Pokémon Legends: Z-A's surface reduction, read with Eden's fields.
 #[test]
 fn a_surface_reduction_decodes_with_its_operation_and_type() {
@@ -1088,7 +1115,7 @@ fn iscadd32i_decodes_its_scale_and_carry_out() {
 }
 
 #[test]
-fn i2f_decodes_a_half_destination_and_rejects_a_double() {
+fn i2f_decodes_a_half_destination_and_a_double() {
     // i2f.f16.s32 r0, r1
     let word = |float_format| {
         asm(
@@ -1104,7 +1131,15 @@ fn i2f_decodes_a_half_destination_and_rejects_a_double() {
     };
     assert!(matches!(op(word(1)), Op::I2f { dst_bits: 16, .. }));
     assert!(matches!(op(word(2)), Op::I2f { dst_bits: 32, .. }));
-    assert!(unimplemented(word(3)));
+    assert_eq!(
+        op(word(3)),
+        Op::I2d {
+            dst: 0,
+            src: 1,
+            src_bytes: 4,
+            src_signed: true,
+        }
+    );
 }
 
 /// Eden throws on `.cc` for each of these, so a decode must not ignore the bit.
