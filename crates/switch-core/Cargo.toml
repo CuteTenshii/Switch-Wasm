@@ -7,6 +7,10 @@ license = "MIT"
 
 [dependencies]
 
+[features]
+# The `testing` fixture modules, for other crates' tests.
+testing = []
+
 [lints]
 workspace = true
 

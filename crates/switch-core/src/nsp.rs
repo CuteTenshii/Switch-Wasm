@@ -239,7 +239,8 @@ pub(crate) fn read_cstr(data: &[u8], at: usize) -> Option<&str> {
     std::str::from_utf8(&data[at..end]).ok()
 }
 
-/// Container fixtures; not `#[cfg(test)]` so `switch-wasm` can use them.
+/// Container fixtures; other crates' tests get them through the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::*;
 

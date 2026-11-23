@@ -515,7 +515,8 @@ fn read_i64_if_present(data: &[u8], at: usize) -> i64 {
     }
 }
 
-/// Control fixtures; not `#[cfg(test)]` so `switch-wasm` can use them (see [`crate::nsp::testing`]).
+/// Control data fixtures; other crates' tests get them through the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::*;
 

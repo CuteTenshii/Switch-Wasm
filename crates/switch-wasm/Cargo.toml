@@ -92,5 +92,8 @@ features = [
   "VideoPixelFormat",
 ]
 
+[dev-dependencies]
+switch-core = { path = "../switch-core", features = ["testing"] }
+
 [lints]
 workspace = true

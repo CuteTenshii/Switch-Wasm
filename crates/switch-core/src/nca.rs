@@ -887,7 +887,8 @@ pub fn find_html_document<'a, S: ByteSource>(
     })
 }
 
-/// NCA fixtures; not `#[cfg(test)]` so `switch-wasm` can use them (see [`crate::nsp::testing`]).
+/// NCA fixtures; other crates' tests get them through the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::*;
     use crate::crypto::aes128_encrypt_block;

@@ -137,7 +137,8 @@ fn read_u64(data: &[u8], at: usize) -> u64 {
     ])
 }
 
-/// Fixtures for the on-disk format; not `#[cfg(test)]` (see [`crate::nsp::testing`]).
+/// Cartridge image fixtures; other crates' tests get them through the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::*;
     use crate::nsp::testing::partition_fs;

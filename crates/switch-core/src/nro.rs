@@ -762,7 +762,8 @@ fn copy_segment(mem: &Memory, data: &[u8], off: u32, size: u32, addr: u32) -> Re
     mem.map(u64::from(addr), &data[start..end])
 }
 
-/// NRO fixtures; not `#[cfg(test)]` so `switch-wasm` can use them (see [`crate::nsp::testing`]).
+/// NRO fixtures; other crates' tests get them through the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::*;
 
