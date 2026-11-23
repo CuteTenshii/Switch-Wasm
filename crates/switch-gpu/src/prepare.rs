@@ -29,6 +29,12 @@ impl Gpu {
             .depth
             .is_some_and(|d| d.write_enabled || d.compare != state::Compare::Always);
         let depth = targets.depth.filter(|_| uses_depth);
+        // A target every channel of which is masked off takes nothing, so a draw with depth to
+        // render to leaves it unattached, free for its fragment stage to store to as an image.
+        let masked = state
+            .target
+            .is_some_and(|t| t.write_mask.iter().all(|&on| !on));
+        let color = color.filter(|_| !(masked && depth.is_some()));
         // Attachments must match in size, so the pass covers the intersection. A depth surface is
         // cropped along each axis it is larger; a colour target larger along either draws into a
         // scratch texture copied back afterwards.
@@ -502,13 +508,25 @@ impl Gpu {
         };
         let targets = self.storage_images(fs_layout, pools, ctx)?;
         // A texture bound for storage cannot also be an attachment of the pass.
-        if targets.iter().flatten().any(|image| {
-            drawn
-                .iter()
-                .flatten()
-                .any(|t| spans_overlap(&surface_span(t), &surface_span(image)))
-        }) {
-            return Err("stores to an image over a surface the draw renders to".into());
+        for image in targets.iter().flatten() {
+            for (what, surface) in ["colour", "depth"].iter().zip(drawn) {
+                let Some(surface) = surface else { continue };
+                if spans_overlap(&surface_span(&surface), &surface_span(image)) {
+                    let state = Pipeline::of(engine).map_err(|e| e.to_string())?;
+                    return Err(format!(
+                        "stores to an image at {:#x} ({}x{}) over the {what} target at {:#x} \
+                         ({}x{}); colour writes {:?}, depth {:?}",
+                        image.addr,
+                        image.width,
+                        image.height,
+                        surface.addr,
+                        surface.width,
+                        surface.height,
+                        state.target.map(|t| t.write_mask),
+                        state.depth
+                    ));
+                }
+            }
         }
         let textures = self.storage_textures(&targets, fs_layout, ctx)?;
         Ok(targets.into_iter().zip(textures).collect())

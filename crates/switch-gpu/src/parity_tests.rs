@@ -4739,3 +4739,56 @@ fn a_fragment_reads_its_window_position_on_both_renderers() {
     assert_eq!(gpu.device_error(), None, "the device rejected the pass");
     assert_eq!(got, want, "the target differs");
 }
+
+/// A draw with every colour channel masked off, writing depth and storing to an image over its
+/// colour target, as Pokémon Legends: Z-A's depth pass does, runs on the device: the target
+/// takes nothing, so it is left unattached, and the image and depth land as the rasterizer's.
+#[test]
+fn a_masked_colour_target_stored_to_as_an_image_draws_on_the_device() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let size = testing::BINDLESS_TEXTURE_SIZE;
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::with_fragment_shader(testing::image_store_fragment_shader());
+        h.bindless_uint_texture();
+        let image = h.base + 0x1800;
+        // The colour target is the image's memory, with every channel masked off.
+        h.engine.regs.set(0x201, image as u32);
+        h.engine.regs.set(0x680, 0);
+        h.depth_target(0x0207);
+        let (w, h_) = (testing::TARGET_WIDTH as f32, testing::TARGET_HEIGHT as f32);
+        h.write_vertex(0, [-1.0, 1.0, 0.5, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.5, 1.0], [w, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.5, 1.0], [0.0, h_, 0.0, 1.0]);
+        h.draw_with(renderer).expect("the draw");
+        h.flush_with(renderer);
+        let words: Vec<u32> = {
+            let ctx = h.ctx();
+            (0..size * size * 4)
+                .map(|word| ctx.read_u32(image + u64::from(word) * 4).unwrap())
+                .collect()
+        };
+        (words, h.depth())
+    };
+    let want = build(&mut Software);
+    assert!(
+        want.0.iter().any(|&w| w != 0),
+        "the reference stored nothing"
+    );
+    assert!(
+        want.1.iter().any(|&d| d != 0),
+        "the reference wrote no depth"
+    );
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want);
+}
