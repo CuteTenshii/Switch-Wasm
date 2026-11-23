@@ -160,6 +160,26 @@ const PROGRAMS = [
     expect: { 0: 0x1234n, 2: 0x1234n },
   },
   {
+    name: 'a store, a load and an exclusive pair above 4 GiB',
+    data: false,
+    code: [
+      0x1000001e, // adr  x30, #0        -> x30 = BASE
+      0xd28acf00, // movz x0,  #0x5678
+      0xd2820001, // movz x1,  #0x1000
+      0xf2c00401, // movk x1,  #0x20, lsl #32 -> x1 = 0x20_0000_1000
+      0xf9000020, // str  x0,  [x1]
+      0xf9400022, // ldr  x2,  [x1]
+      0xc85f7c23, // ldxr x3,  [x1]
+      0x91000463, // add  x3,  x3, #1
+      0xc8047c23, // stxr w4,  x3, [x1]
+      0xf9400025, // ldr  x5,  [x1]
+      0xd65f03c0, // ret  x30
+    ],
+    // Eleven instructions a trip: 440001 steps is 40000 trips plus one.
+    steps: 440001n,
+    expect: { 2: 0x5678n, 4: 0n, 5: 0x5679n },
+  },
+  {
     name: 'a barrier, and a store-release the load-acquire reads back',
     data: true,
     code: [
