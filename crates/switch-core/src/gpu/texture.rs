@@ -38,13 +38,17 @@ pub enum TextureSlot {
         other_bank: u8,
         other_offset: u16,
     },
+    /// Mip level `level` of the `Bound(immediate)` texture, for a `tlds` naming its level.
+    Level { immediate: u16, level: u8 },
 }
 
 impl TextureSlot {
     /// The bank and byte offset of each word ORed into this slot's handle.
     pub fn handle_words(self, tex_cb_index: u8) -> ((u8, u16), Option<(u8, u16)>) {
         match self {
-            TextureSlot::Bound(immediate) => ((tex_cb_index, handle_offset(immediate)), None),
+            TextureSlot::Bound(immediate) | TextureSlot::Level { immediate, .. } => {
+                ((tex_cb_index, handle_offset(immediate)), None)
+            }
             TextureSlot::Bindless { bank, offset } => ((bank, offset), None),
             TextureSlot::BindlessPair {
                 bank,
@@ -55,11 +59,16 @@ impl TextureSlot {
         }
     }
 
-    /// A key for the WGSL sampling hooks: the top bit marks bindless slots, the next a pair.
+    /// A key for the WGSL sampling hooks: the top bit marks bindless slots, the next a pair,
+    /// the third a level.
     /// A pair keys by its first word, so two pairs sharing it clash; the translator refuses those.
     pub fn key(self) -> u32 {
         match self {
             TextureSlot::Bound(immediate) => u32::from(immediate),
+            // Bound immediates are 13 bits, so a level's key sits clear of them.
+            TextureSlot::Level { immediate, level } => {
+                1 << 29 | u32::from(level) << 16 | u32::from(immediate)
+            }
             TextureSlot::Bindless { bank, offset } => {
                 1 << 31 | u32::from(bank) << 16 | u32::from(offset)
             }

@@ -109,6 +109,7 @@ impl Gpu {
             sampler_pool: engine.tex_sampler_pool(),
             bank: &bank_of,
         };
+        crate::prepare::bind_levels_from(pools, ctx, &mut layout)?;
         let images = self.storage_images(&mut layout, pools, ctx)?;
         let stored: Vec<u64> = images.iter().flatten().map(|t| t.addr).collect();
         let textures = self.compute_textures(&mut layout, pools, ctx)?;

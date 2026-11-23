@@ -9,7 +9,7 @@ use super::layout::{
 use super::{Translation, Unsupported};
 use crate::gpu::pipeline::AttributeBase;
 use crate::gpu::shader::isa::TexDim;
-use crate::gpu::texture::SwizzleSource;
+use crate::gpu::texture::{SwizzleSource, TextureSlot};
 
 /// `quadSwapX`/`Y`/`Diagonal` from fine derivatives, for devices without quad
 /// operations (every browser). Exact because 16-bit halves survive the f32 round trip.
@@ -544,6 +544,38 @@ pub fn module(
             };
             out.push_str(&format!(
                 "        case {channel}u: {{ {prelude} return {texels}; }}\n"
+            ));
+        }
+        out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
+    }
+    out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+
+    // A `tlds` naming its level: each level binds as a texture of its own; past the levels
+    // bound, zero.
+    out.push_str(
+        "fn texFetchLevel(imm: u32, level: u32, x: u32, y: u32, z: u32) -> vec4<f32> {\n  \
+         switch (imm) {\n",
+    );
+    for &(base, levels) in &layout.fetch_levels {
+        let TextureSlot::Bound(immediate) = base else {
+            continue;
+        };
+        out.push_str(&format!(
+            "    case {}u: {{\n      switch (level) {{\n",
+            base.key()
+        ));
+        out.push_str(&format!(
+            "        case 0u: {{ return texFetch({}u, x, y, z); }}\n",
+            base.key()
+        ));
+        for level in 1..levels {
+            let slot = TextureSlot::Level {
+                immediate,
+                level: level as u8,
+            };
+            out.push_str(&format!(
+                "        case {level}u: {{ return texFetch({}u, x, y, z); }}\n",
+                slot.key()
             ));
         }
         out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");

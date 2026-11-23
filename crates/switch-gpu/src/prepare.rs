@@ -104,6 +104,8 @@ impl Gpu {
 
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
         let mut fs_layout = Layout::of(&fs, Stage::Fragment);
+        bind_fetch_levels(engine, ctx, &mut vs_layout, ShaderStage::VertexB)?;
+        bind_fetch_levels(engine, ctx, &mut fs_layout, ShaderStage::Fragment)?;
         let storage_limit = self
             .device_limits
             .clone()
@@ -192,16 +194,19 @@ impl Gpu {
         fs_layout.group = 1;
         let images = self.draw_images(engine, ctx, &vs_layout, &mut fs_layout, [color, depth])?;
 
+        // The layouts' textures: the translations' and the levels bound beside them.
         let mut slots: Vec<(ShaderStage, TextureSlot)> = Vec::new();
         slots.extend(
-            vs.textures
+            vs_layout
+                .textures
                 .iter()
-                .map(|&(slot, _, _)| (ShaderStage::VertexB, slot)),
+                .map(|b| (ShaderStage::VertexB, b.slot)),
         );
         slots.extend(
-            fs.textures
+            fs_layout
+                .textures
                 .iter()
-                .map(|&(slot, _, _)| (ShaderStage::Fragment, slot)),
+                .map(|b| (ShaderStage::Fragment, b.slot)),
         );
         let mut banks: Vec<(ShaderStage, u32, u32)> = Vec::new();
         for (stage, layout) in [(ShaderStage::VertexB, &vs), (ShaderStage::Fragment, &fs)] {
@@ -717,4 +722,48 @@ impl Gpu {
             }
         }
     }
+}
+
+/// The most levels a `tlds` naming its level binds; each is a texture binding of its own.
+const MAX_FETCH_LEVELS: u32 = 16;
+
+/// Bind every level of each texture a `stage` program fetches from a level register.
+pub(super) fn bind_fetch_levels(
+    engine: &Engine3D,
+    ctx: &ExecCtx,
+    layout: &mut Layout,
+    stage: ShaderStage,
+) -> std::result::Result<(), String> {
+    if layout.fetch_levels.is_empty() {
+        return Ok(());
+    }
+    let bank = |bank: u8| engine.bound_constbuf(stage, u32::from(bank));
+    let pools = TexturePools {
+        stage,
+        tex_cb_index: engine.tex_cb_index(),
+        header_pool: engine.tex_header_pool(),
+        sampler_pool: engine.tex_sampler_pool(),
+        bank: &bank,
+    };
+    bind_levels_from(pools, ctx, layout)
+}
+
+/// [`bind_fetch_levels`] against `pools`, for draws and launches alike.
+pub(super) fn bind_levels_from(
+    pools: TexturePools<'_>,
+    ctx: &ExecCtx,
+    layout: &mut Layout,
+) -> std::result::Result<(), String> {
+    let bases: Vec<TextureSlot> = layout.fetch_levels.iter().map(|&(slot, _)| slot).collect();
+    for base in bases {
+        let levels = switch_core::gpu::upload::texture_levels(pools, ctx, base)
+            .map_err(|e| format!("{e:?}"))?;
+        if levels > MAX_FETCH_LEVELS {
+            return Err(format!(
+                "fetches from an image of {levels} levels, past the {MAX_FETCH_LEVELS} bound"
+            ));
+        }
+        layout.bind_fetch_levels(base, levels);
+    }
+    Ok(())
 }

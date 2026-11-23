@@ -851,6 +851,10 @@ impl Gpu {
             || binding.dim != TexDim::T2d
             || upload.layers > 1
             || read_otherwise.contains(&binding.slot.key())
+            || matches!(
+                binding.slot,
+                switch_core::gpu::texture::TextureSlot::Level { .. }
+            )
             || !edge(upload.sampler.wrap_u)
             || !edge(upload.sampler.wrap_v)
             || drawn.contains(&Some(upload.key.addr))

@@ -45,6 +45,8 @@ pub(super) struct Emitter<'a> {
     /// Textures only `txq`'d, bound as 2D.
     pub(super) queried: Vec<TextureSlot>,
     pub(super) texture_offsets: Vec<(i32, i32, i32)>,
+    /// See [`super::Translation::fetched_levels`].
+    pub(super) fetched_levels: Vec<TextureSlot>,
     /// Special registers `s2r` reads.
     pub(super) special: BTreeSet<u8>,
     /// Texture keys read by anything but a plain sample: a fetch, a size query or a gather.
@@ -78,6 +80,7 @@ impl<'a> Emitter<'a> {
             before: Vec::new(),
             queried: Vec::new(),
             texture_offsets: Vec::new(),
+            fetched_levels: Vec::new(),
             special: BTreeSet::new(),
             read_otherwise: BTreeSet::new(),
         }

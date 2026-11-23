@@ -2,7 +2,7 @@
 
 use super::emitter::Emitter;
 use super::layout::{atom_code, generic_slot};
-use super::texture::Gather;
+use super::texture::{Fetch, Gather};
 use super::Unsupported;
 use crate::gpu::shader::isa::{
     AtomOp, AtomSpace, MemSize, Op, Operand, ShflMode, SurfaceData, SurfaceDim, TexDim, VoteMode,
@@ -162,10 +162,20 @@ impl Emitter<'_> {
                 dim,
                 ..
             } => {
-                if lod.is_some_and(|reg| reg != RZ) {
+                let level = lod.filter(|&reg| reg != RZ);
+                // Each level binds as a 2D texture of its own.
+                if level.is_some() && dim != TexDim::T2d {
                     return Err(Unsupported::Op { at, op });
                 }
-                self.fetch_texture(at, TextureSlot::Bound(handle), dim, coords, layer, offset)?;
+                let fetch = Fetch {
+                    slot: TextureSlot::Bound(handle),
+                    dim,
+                    coords,
+                    layer,
+                    offset,
+                    level,
+                };
+                self.fetch_texture(at, fetch)?;
             }
             // `tex` keeps the layer before the coordinates; `.LL`/`.LB` sample the one level.
             Op::Tex {

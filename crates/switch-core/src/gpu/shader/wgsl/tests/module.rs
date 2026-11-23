@@ -1584,9 +1584,12 @@ fn a_tlds_loads_the_texel_and_lands_it_like_texs() {
     );
 }
 
+/// A `tlds` naming its level in a register fetches through `texFetchLevel`, which picks the
+/// binding of each level the backend bound; past them it reads zero.
 #[test]
-fn a_tlds_of_a_level_register_is_refused_unless_it_is_rz() {
-    let tlds = |lod| {
+fn a_tlds_of_a_level_register_fetches_the_level_it_names() {
+    use crate::gpu::texture::TextureSlot;
+    let tlds = |lod, dim| {
         program(&[
             (
                 Op::Tlds {
@@ -1597,7 +1600,7 @@ fn a_tlds_of_a_level_register_is_refused_unless_it_is_rz() {
                     lod,
                     offset: None,
                     handle: 10,
-                    dim: TexDim::T2d,
+                    dim,
                     mask: [true, false, false, false],
                     f16: false,
                 },
@@ -1606,9 +1609,38 @@ fn a_tlds_of_a_level_register_is_refused_unless_it_is_rz() {
             (Op::Exit, ALWAYS),
         ])
     };
-    assert!(translate(&tlds(Some(RZ))).is_ok());
+    let plain = translate(&tlds(Some(RZ), TexDim::T2d)).unwrap();
+    assert!(plain.fetched_levels.is_empty());
+
+    let leveled = translate(&tlds(Some(6), TexDim::T2d)).unwrap();
+    assert_eq!(leveled.fetched_levels, vec![TextureSlot::Bound(10)]);
+    let mut layout = Layout::of(&leveled, Stage::Fragment);
+    layout.bind_fetch_levels(TextureSlot::Bound(10), 3);
+    assert_eq!(layout.textures.len(), 3);
+    let source = module(&leveled, Stage::Fragment, &layout).unwrap();
+    assert!(
+        source.contains("texFetchLevel(10u, r6, r2, r3, 0u)"),
+        "{source}"
+    );
+    let level = |level| {
+        TextureSlot::Level {
+            immediate: 10,
+            level,
+        }
+        .key()
+    };
+    for (n, key) in [(1, level(1)), (2, level(2))] {
+        assert!(
+            source.contains(&format!(
+                "case {n}u: {{ return texFetch({key}u, x, y, z); }}"
+            )),
+            "{source}"
+        );
+    }
+
+    // Each level binds as a 2D texture of its own, so an array's levels are not fetched.
     assert!(matches!(
-        translate(&tlds(Some(6))),
+        translate(&tlds(Some(6), TexDim::T3d)),
         Err(Unsupported::Op { at: 0, .. })
     ));
 }

@@ -118,15 +118,15 @@ impl Emitter<'_> {
     }
 
     /// `tlds`: the texel at integer coordinates, as `textureLoad` of level 0.
-    pub(super) fn fetch_texture(
-        &mut self,
-        at: usize,
-        slot: TextureSlot,
-        dim: TexDim,
-        coords: [u8; 3],
-        layer: Option<u8>,
-        offset: Option<u8>,
-    ) -> Result<(), Unsupported> {
+    pub(super) fn fetch_texture(&mut self, at: usize, fetch: Fetch) -> Result<(), Unsupported> {
+        let Fetch {
+            slot,
+            dim,
+            coords,
+            layer,
+            offset,
+            level,
+        } = fetch;
         self.bind_texture(at, slot, dim, false)?;
         self.read_otherwise.insert(slot.key());
         let mut x = self.r(coords[0]);
@@ -141,7 +141,19 @@ impl Emitter<'_> {
             (TexDim::T2dArray, Some(reg)) => format!("({} & 0xffffu)", self.r(reg)),
             _ => "0u".to_string(),
         };
-        let texel = self.bind(&format!("texFetch({}u, {x}, {y}, {z})", slot.key()));
+        let texel = match level {
+            Some(reg) => {
+                if !self.fetched_levels.contains(&slot) {
+                    self.fetched_levels.push(slot);
+                }
+                let level = self.r(reg);
+                self.bind(&format!(
+                    "texFetchLevel({}u, {level}, {x}, {y}, {z})",
+                    slot.key()
+                ))
+            }
+            None => self.bind(&format!("texFetch({}u, {x}, {y}, {z})", slot.key())),
+        };
         self.store_channels(at, &texel);
         Ok(())
     }
@@ -314,4 +326,14 @@ impl Emitter<'_> {
             }
         }
     }
+}
+
+/// A `tlds`: where and how it fetches, and the register naming its level, if one does.
+pub(super) struct Fetch {
+    pub(super) slot: TextureSlot,
+    pub(super) dim: TexDim,
+    pub(super) coords: [u8; 3],
+    pub(super) layer: Option<u8>,
+    pub(super) offset: Option<u8>,
+    pub(super) level: Option<u8>,
 }

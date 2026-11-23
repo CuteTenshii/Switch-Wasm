@@ -695,6 +695,13 @@ pub fn read_textures(
     Ok(textures)
 }
 
+/// How many mip levels the texture `slot` names has; one for a null image.
+pub fn texture_levels(pools: TexturePools<'_>, ctx: &ExecCtx, slot: TextureSlot) -> Result<u32> {
+    let handle = pools.handle(ctx, slot)?;
+    let at = pools.header_pool + u64::from(texture::image_id(handle)) * 32;
+    Ok(texture::read_bound_image(ctx, at)?.map_or(1, |image| image.levels.max(1)))
+}
+
 /// The surface a `sust` to `slot` writes, or `None` for a null image.
 pub fn image_target(
     pools: TexturePools<'_>,
@@ -755,7 +762,23 @@ fn read_texture(
         )?;
         return Ok(null_texture(stage, slot, handle, sampler));
     };
-    let (image, shrink) = fitting_level(&descriptors.texture)?;
+    let (image, shrink) = match slot {
+        TextureSlot::Level { level, .. } => {
+            let level = u32::from(level);
+            // Past the chain a fetch reads zero, as a null image does.
+            if level >= descriptors.texture.levels {
+                return Ok(null_texture(stage, slot, handle, descriptors.sampler));
+            }
+            let image = descriptors.texture.level(level).ok_or_else(|| {
+                Error::Gpu(format!(
+                    "upload: level {level} of a pitch or volume image, whose smaller levels are \
+                     not addressed"
+                ))
+            })?;
+            (image, 0)
+        }
+        _ => fitting_level(&descriptors.texture)?,
+    };
     let copy = image_copy(&image)?;
     let (format, row_bytes, rows) = copy.shape(&image);
     let source_row_bytes = copy.source_row_bytes(row_bytes);

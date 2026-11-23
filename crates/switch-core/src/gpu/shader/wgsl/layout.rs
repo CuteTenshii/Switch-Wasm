@@ -52,6 +52,9 @@ pub struct Layout {
     pub images: Vec<ImageBinding>,
     /// See [`Translation::texture_offsets`].
     pub texture_offsets: Vec<(i32, i32, i32)>,
+    /// Each of [`Translation::fetched_levels`] with the levels bound for it, level 0 its own
+    /// binding and each smaller one a [`TextureSlot::Level`]; filled by the backend.
+    pub fetch_levels: Vec<(TextureSlot, u32)>,
     pub globals: Vec<Global>,
     /// Colour targets written, from `r0` in fours. Zero is a depth-only pass.
     pub targets: u32,
@@ -135,6 +138,32 @@ pub struct ImageBinding {
     pub slot: TextureSlot,
     /// Filled from the TIC by the backend.
     pub format: Option<StorageFormat>,
+}
+
+impl Layout {
+    /// Bind `levels` levels of the fetched texture `base`, each smaller one as a texture of
+    /// its own read as `base` is.
+    pub fn bind_fetch_levels(&mut self, base: TextureSlot, levels: u32) {
+        let Some(entry) = self.fetch_levels.iter_mut().find(|(slot, _)| *slot == base) else {
+            return;
+        };
+        entry.1 = levels;
+        let Some(binding) = self.textures.iter().find(|b| b.slot == base).copied() else {
+            return;
+        };
+        let TextureSlot::Bound(immediate) = base else {
+            return;
+        };
+        for level in 1..levels {
+            let slot = TextureSlot::Level {
+                immediate,
+                level: level as u8,
+            };
+            if !self.textures.iter().any(|b| b.slot == slot) {
+                self.textures.push(TextureBinding { slot, ..binding });
+            }
+        }
+    }
 }
 
 /// A storage texel format, by its WGSL name, and what its texels hold.
@@ -339,6 +368,11 @@ impl Layout {
                 .map(|&slot| ImageBinding { slot, format: None })
                 .collect(),
             texture_offsets: translated.texture_offsets.clone(),
+            fetch_levels: translated
+                .fetched_levels
+                .iter()
+                .map(|&slot| (slot, 1))
+                .collect(),
             globals: translated.globals.clone(),
             targets: 1,
             uint_targets: Vec::new(),

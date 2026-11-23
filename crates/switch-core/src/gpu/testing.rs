@@ -1074,6 +1074,38 @@ impl Harness {
         }
     }
 
+    /// [`Harness::bindless_texture`] made block-linear with a second, 4x4 level whose texel
+    /// `(x, y)` is [`bindless_texel`]`(7 - x, 7 - y)`.
+    pub fn bindless_mipmapped_texture(&mut self) {
+        self.bindless_texture();
+        let tic = self.base + 0x1400 + 32;
+        let image = self.base + 0x1800;
+        let size = BINDLESS_TEXTURE_SIZE;
+        let mut ctx = self.ctx();
+        // BLOCKLINEAR, one GOB high, two levels.
+        ctx.write_u32(tic + 8, (image >> 32) as u32 | (3 << 21))
+            .unwrap();
+        ctx.write_u32(tic + 12, 1 << 28).unwrap();
+        let texture = crate::gpu::texture::read_image(&ctx, tic).unwrap();
+        let level = texture.level(1).unwrap();
+        for (surface, extent, texel) in [
+            (
+                &texture,
+                size,
+                (|x, y| bindless_texel(x, y)) as fn(u32, u32) -> u32,
+            ),
+            (&level, size / 2, |x, y| bindless_texel(7 - x, 7 - y)),
+        ] {
+            for y in 0..extent {
+                for x in 0..extent {
+                    let at = surface.layout.offset(x * 4, y, extent * 4);
+                    ctx.write_u32(surface.addr + u64::from(at), texel(x, y))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
     /// Multisample the target: on Maxwell the pixel extent shrinks, the surface does not.
     pub fn multisample(&mut self, mode: u32, samples_x: u32, samples_y: u32) {
         self.engine.regs.set(MULTISAMPLE_ENABLE, 1);

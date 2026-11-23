@@ -149,6 +149,9 @@ fn texGather(imm: u32, component: u32, u: f32, v: f32, w: f32, layer: u32) -> ve
 fn texStep(imm: u32) -> vec2<f32> {
   return vec2<f32>(1.0, 1.0);
 }
+fn texFetchLevel(imm: u32, level: u32, x: u32, y: u32, z: u32) -> vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
 fn texFetch(imm: u32, x: u32, y: u32, z: u32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
@@ -194,6 +197,8 @@ pub struct Translation {
     pub images: Vec<TextureSlot>,
     /// The [`Translation::textures`] only `txq` reads, whose texels nothing reads.
     pub sized_only: Vec<TextureSlot>,
+    /// Bound textures a `tlds` fetches from a level a register names.
+    pub fetched_levels: Vec<TextureSlot>,
     /// Distinct `tex.aoffi` offsets `(x, y, z)`, named by index since WGSL needs constants.
     pub texture_offsets: Vec<(i32, i32, i32)>,
     /// The first instruction asking which quad lane it is.
@@ -262,6 +267,7 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         textures: emitter.textures.clone(),
         images: emitter.images.clone(),
         sized_only,
+        fetched_levels: emitter.fetched_levels.clone(),
         texture_offsets: emitter.texture_offsets.clone(),
         quad: emitter.quad,
         quad_swap: emitter.quad_swap,

@@ -1414,6 +1414,30 @@ fn a_tlds_fetches_the_texel_the_rasterizer_fetches() {
     }
 }
 
+/// A `tlds` naming its level in a register reads that level, as Pokémon Legends: Z-A's depth
+/// pyramid does, on both renderers; a level past the chain reads zero.
+#[test]
+fn a_tlds_fetches_the_level_its_register_names() {
+    use testing::{bindless_texel, tlds_fragment_shader};
+    let set_up = |h: &mut Harness| {
+        h.bindless_mipmapped_texture();
+        colour_triangle(h, [[0.0; 4]; 3]);
+    };
+    for (level, texel) in [(0, bindless_texel(2, 3)), (1, bindless_texel(5, 4)), (2, 0)] {
+        // Encoding 5: x and y from r4 and r5, the level from r6.
+        let set = [(4, 2), (5, 3), (6, level)];
+        let new = move || Harness::with_fragment_shader(tlds_fragment_shader(5, &set));
+        let mut h = new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        let drawn: std::collections::BTreeSet<u32> = h.target().into_iter().collect();
+        let want: std::collections::BTreeSet<u32> = [0, texel].into();
+        assert_eq!(drawn, want, "level {level}: the texel the registers name");
+
+        agrees_shading(new, |_| {}, set_up);
+    }
+}
+
 /// `tld4` forms beyond the plain gather: a shadow gather, a gather with an offset per texel and a
 /// cube gather read what the rasterizer reads.
 #[test]
