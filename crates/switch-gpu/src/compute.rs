@@ -594,12 +594,8 @@ impl Gpu {
         for upload in &textures {
             self.hold_at_sampled_size(upload, ctx)
                 .map_err(|e| format!("{e:?}"))?;
-            if !self.space.texture_cache.contains_key(&upload.key) {
-                self.uploaded.add_texture(upload.bytes.len());
-                self.to_remember
-                    .push((upload.key, upload.bytes.clone(), upload.source_len));
-            }
         }
+        self.keep_textures(ctx, &textures);
         self.fill_texture_bindings(layout, pools.stage, &textures)?;
         self.share_samplers(layout, pools.stage, &textures);
         let samplers = layout

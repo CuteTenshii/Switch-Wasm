@@ -6,7 +6,7 @@ use crate::{Gpu, Input, INPUT_CACHE_BYTES, PAGE_BITS, SHARED_BUFFER_BYTES, TEXTU
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Software;
 use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
-use switch_core::gpu::upload::TextureKey;
+use switch_core::gpu::upload::{TextureKey, TextureUpload};
 
 /// Bounds [`Gpu::built_modules`]; a title draws with far fewer program and layout pairs.
 const BUILT_MODULE_ENTRIES: usize = 4096;
@@ -301,25 +301,24 @@ impl Gpu {
         }
     }
 
-    /// Keep what this draw read and watch its pages; textures with no watchable pages are not kept.
-    pub(super) fn remember_textures(&mut self, ctx: &mut ExecCtx) {
-        for (page, key) in std::mem::take(&mut self.shader_to_watch) {
-            ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
-            self.space.shader_pages.entry(page).or_default().push(key);
-        }
-        for (key, bytes, source_len) in std::mem::take(&mut self.to_remember) {
+    /// Keep the textures a draw read before it binds them, so a new texture's device copy is
+    /// kept from its first draw; textures with no watchable pages are not kept.
+    pub(super) fn keep_textures(&mut self, ctx: &ExecCtx, uploads: &[TextureUpload]) {
+        for upload in uploads {
+            let key = upload.key;
             if self.space.texture_cache.contains_key(&key) {
                 continue;
             }
+            self.uploaded.add_texture(upload.bytes.len());
             self.texture_misses += 1;
             // `source_len` is an upper bound that can exceed the mapping, so stop where the mapping does.
-            let pages = guest_pages(ctx, key.addr, source_len);
+            let pages = guest_pages(ctx, key.addr, upload.source_len);
             // A null image's stand-in has no pages, and nothing can write it.
             if pages.is_empty() && key.addr != 0 {
                 continue;
             }
             // Whole-cache eviction, every address space's: the limit is shared.
-            let len = bytes.len() as u64;
+            let len = upload.bytes.len() as u64;
             if self.cached_bytes + len > TEXTURE_CACHE_BYTES {
                 self.submit_batch();
                 for space in std::iter::once(&mut self.space).chain(self.parked.values_mut()) {
@@ -335,11 +334,22 @@ impl Gpu {
                 self.cached_bytes = 0;
             }
             for &page in &pages {
-                ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
+                self.texture_pages_to_watch.push(page);
                 self.space.page_owners.entry(page).or_default().push(key);
             }
-            self.space.texture_cache.insert(key, bytes);
+            self.space.texture_cache.insert(key, upload.bytes.clone());
             self.cached_bytes += len;
+        }
+    }
+
+    /// Watch the pages of what the last draw or launch kept, now that `ctx` is mutable.
+    pub(super) fn remember_textures(&mut self, ctx: &mut ExecCtx) {
+        for (page, key) in std::mem::take(&mut self.shader_to_watch) {
+            ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
+            self.space.shader_pages.entry(page).or_default().push(key);
+        }
+        for page in std::mem::take(&mut self.texture_pages_to_watch) {
+            ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
         }
     }
 

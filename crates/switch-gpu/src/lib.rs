@@ -750,8 +750,8 @@ pub struct Gpu {
     pub compute_refusals: std::collections::BTreeMap<String, u64>,
     compute_pipelines: std::collections::HashMap<compute::ComputeKey, wgpu::ComputePipeline>,
     gpu_texture_bytes: u64,
-    /// Textures `prepare` read and has not watched yet.
-    to_remember: Vec<(TextureKey, std::sync::Arc<[u8]>, u64)>,
+    /// Pages of textures `prepare` kept and has not watched yet.
+    texture_pages_to_watch: Vec<u32>,
     /// `--only <i>` or `<a>..<b>`: render only those draws of each frame here, for bisecting.
     only: Option<std::ops::Range<u32>>,
 }

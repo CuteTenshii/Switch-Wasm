@@ -278,13 +278,7 @@ impl Gpu {
             })
             .collect::<std::result::Result<Vec<_>, String>>()?;
         self.uploaded.add_but_textures(&uploads);
-        for upload in &uploads.textures {
-            if !self.space.texture_cache.contains_key(&upload.key) {
-                self.uploaded.add_texture(upload.bytes.len());
-                self.to_remember
-                    .push((upload.key, upload.bytes.clone(), upload.source_len));
-            }
-        }
+        self.keep_textures(ctx, &uploads.textures);
 
         self.fill_texture_bindings(&mut vs_layout, ShaderStage::VertexB, &uploads.textures)?;
         self.fill_texture_bindings(&mut fs_layout, ShaderStage::Fragment, &uploads.textures)?;

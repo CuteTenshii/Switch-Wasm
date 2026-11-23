@@ -127,7 +127,7 @@ impl Gpu {
             compute_pipelines: std::collections::HashMap::new(),
             texture_misses: 0,
             gpu_texture_bytes: 0,
-            to_remember: Vec::new(),
+            texture_pages_to_watch: Vec::new(),
             only: None,
         }
     }
