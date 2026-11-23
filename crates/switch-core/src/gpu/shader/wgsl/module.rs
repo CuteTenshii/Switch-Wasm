@@ -173,6 +173,7 @@ pub fn module(
             GLOBAL_BINDING + slot as u32
         ));
     }
+    // An image is bound as its one layer, so a store to any other layer is out of range.
     let mut stores = String::new();
     for (index, image) in layout.images.iter().enumerate() {
         let format = image.format.ok_or(Unsupported::ImageFormat)?;
@@ -188,7 +189,7 @@ pub fn module(
             StorageNumeric::Sint => "bitcast<vec4<i32>>(value)",
         };
         stores.push_str(&format!(
-            "    case {}u: {{ if (all(vec2<u32>(x, y) < textureDimensions(img{index}))) {{ \
+            "    case {}u: {{ if (layer == 0u && all(vec2<u32>(x, y) < textureDimensions(img{index}))) {{ \
              textureStore(img{index}, vec2<u32>(x, y), {texel}); }} }}\n",
             image.slot.key()
         ));
@@ -201,7 +202,7 @@ pub fn module(
         out.push('\n');
     }
     out.push_str(&format!(
-        "fn imgStore(key: u32, x: u32, y: u32, value: vec4<u32>) {{\n  switch (key) {{\n{stores}    \
+        "fn imgStore(key: u32, x: u32, y: u32, layer: u32, value: vec4<u32>) {{\n  switch (key) {{\n{stores}    \
          default: {{ }}\n  }}\n}}\n\n"
     ));
     if !layout.globals.is_empty() {

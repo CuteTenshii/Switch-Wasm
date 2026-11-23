@@ -122,7 +122,7 @@ fn sreg(sr: u32) -> u32 { return 0u; }
 fn gRead(slot: u32, offset: u32) -> u32 { return 0u; }
 fn gWrite(slot: u32, offset: u32, value: u32, mask: u32) { }
 fn gAtom(op: u32, slot: u32, offset: u32, value: u32, stored: u32) -> u32 { return 0u; }
-fn imgStore(key: u32, x: u32, y: u32, value: vec4<u32>) { }
+fn imgStore(key: u32, x: u32, y: u32, layer: u32, value: vec4<u32>) { }
 fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }

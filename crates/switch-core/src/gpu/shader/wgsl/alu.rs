@@ -559,7 +559,7 @@ impl Emitter<'_> {
                 coords,
                 handle,
                 handle_reg,
-                dim: SurfaceDim::D2,
+                dim: dim @ (SurfaceDim::D2 | SurfaceDim::Array2d),
                 data: SurfaceData::Formatted([true, true, true, true]),
             } => {
                 let slot = match handle_reg {
@@ -570,9 +570,15 @@ impl Emitter<'_> {
                 };
                 self.bind_image(at, slot)?;
                 let (x, y) = (self.r(coords), self.r(coords.wrapping_add(1)));
+                let layer = match dim {
+                    SurfaceDim::Array2d => {
+                        format!("({} & 0xffffu)", self.r(coords.wrapping_add(2)))
+                    }
+                    _ => "0u".to_string(),
+                };
                 let value: Vec<String> = (0..4).map(|i| self.r(src.wrapping_add(i))).collect();
                 self.line(&format!(
-                    "imgStore({}u, {x}, {y}, vec4<u32>({}));",
+                    "imgStore({}u, {x}, {y}, {layer}, vec4<u32>({}));",
                     slot.key(),
                     value.join(", ")
                 ));

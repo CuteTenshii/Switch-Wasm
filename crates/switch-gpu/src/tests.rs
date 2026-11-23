@@ -1939,6 +1939,61 @@ fn a_compute_launch_stores_sampled_texels_to_an_image_on_the_device() {
     assert_eq!(device.image(), expected);
 }
 
+/// A 2D-array store to a one-layer image lands in layer 0 and is dropped past it, on the device
+/// as in the software dispatch.
+#[test]
+fn a_compute_array_store_reaches_only_the_layer_the_image_has() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::{
+        image_copy_array_program, image_copy_program, ComputeHarness, IMAGE_COPY_SIZE,
+    };
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = IMAGE_COPY_SIZE;
+    let block = [width, height, 1];
+    let mut plain = ComputeHarness::new(&image_copy_program(), [1, 1, 1], block, 0);
+    let engine = plain.image_copy();
+    switch_core::gpu::compute::dispatch(&engine, &mut plain.ctx()).unwrap();
+    let flat = plain.image();
+    assert!(
+        flat.iter().any(|&texel| texel != 0),
+        "the 2D store wrote nothing"
+    );
+    for layer in [0, 1] {
+        let mut software = ComputeHarness::new(&image_copy_array_program(), [1, 1, 1], block, 0);
+        let engine = software.image_copy();
+        software.set_image_layer(layer);
+        switch_core::gpu::compute::dispatch(&engine, &mut software.ctx()).unwrap();
+        let want = if layer == 0 {
+            flat.clone()
+        } else {
+            vec![0; flat.len()]
+        };
+        assert_eq!(
+            software.image(),
+            want,
+            "layer {layer}: the software dispatch"
+        );
+
+        let mut device = ComputeHarness::new(&image_copy_array_program(), [1, 1, 1], block, 0);
+        let engine = device.image_copy();
+        device.set_image_layer(layer);
+        assert!(
+            gpu.dispatch(&engine, &mut device.ctx()).unwrap(),
+            "layer {layer}: refused: {:?}",
+            gpu.compute_refusals
+        );
+        let mut flushes = 0;
+        while gpu.flush(&mut device.ctx()).unwrap() == Flush::Pending {
+            flushes += 1;
+            assert!(flushes < 100, "the readback never landed");
+        }
+        assert_eq!(device.image(), want, "layer {layer}: the device");
+    }
+}
+
 /// The distinct subgroup sizes one 64-invocation workgroup runs with.
 fn subgroup_sizes(gpu: &super::Gpu) -> Vec<u32> {
     let module = gpu

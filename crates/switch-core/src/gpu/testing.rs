@@ -1149,6 +1149,7 @@ impl ComputeHarness {
             (IMAGE_COPY_V, (1.0f32 / 8.0).to_bits()),
             (IMAGE_SIZE_LEVEL, 1),
             (IMAGE_SIZE_HANDLE, 2),
+            (IMAGE_COPY_LAYER, 0),
         ] {
             ctx.write_u32(bank + u64::from(offset), word).unwrap();
         }
@@ -1164,6 +1165,12 @@ impl ComputeHarness {
     pub fn null_texture(&mut self) {
         let at = self.base + COMPUTE_BANK_AT + u64::from(IMAGE_COPY_TEXTURE);
         self.ctx().write_u32(at, 3 | (1 << 20)).unwrap();
+    }
+
+    /// Set the layer [`image_copy_array_program`] stores to, after [`Self::image_copy`].
+    pub fn set_image_layer(&mut self, layer: u32) {
+        let at = self.base + COMPUTE_BANK_AT + u64::from(IMAGE_COPY_LAYER);
+        self.ctx().write_u32(at, layer).unwrap();
     }
 
     /// Replace the launch's program, leaving the rest as it is.
@@ -1443,6 +1450,8 @@ pub const IMAGE_COPY_TEXTURE: u32 = 0x60;
 pub const IMAGE_COPY_IMAGE: u32 = 0x64;
 pub const IMAGE_COPY_U: u32 = 0x68;
 pub const IMAGE_COPY_V: u32 = 0x6c;
+/// The layer [`image_copy_array_program`] stores to; zero unless a test sets it.
+pub const IMAGE_COPY_LAYER: u32 = 0x74;
 
 /// Assert `word` decodes as `expected`.
 fn checked(word: u64, expected: crate::gpu::shader::Op) -> u64 {
@@ -1473,11 +1482,26 @@ fn ldc0(dst: u8, offset: u32) -> u64 {
 
 /// `sust.p.2d.rgba [coords], src, handle_reg`.
 fn sust_p_2d(src: u8, coords: u8, handle_reg: u8) -> u64 {
+    sust_p(
+        crate::gpu::shader::isa::SurfaceDim::D2,
+        src,
+        coords,
+        handle_reg,
+    )
+}
+
+/// `sust.p.rgba [coords], src, handle_reg` of `dim`, a 2D image or array.
+fn sust_p(dim: crate::gpu::shader::isa::SurfaceDim, src: u8, coords: u8, handle_reg: u8) -> u64 {
     use crate::gpu::shader::isa::{SurfaceData, SurfaceDim};
+    let code = match dim {
+        SurfaceDim::D2 => 3,
+        SurfaceDim::Array2d => 4,
+        other => panic!("no encoding here for a {other:?} store"),
+    };
     checked(
         0xeb20u64 << 48
             | u64::from(handle_reg) << 39
-            | 3 << 33
+            | code << 33
             | 0xf << 20
             | PT
             | u64::from(coords) << 8
@@ -1487,7 +1511,7 @@ fn sust_p_2d(src: u8, coords: u8, handle_reg: u8) -> u64 {
             coords,
             handle: 0,
             handle_reg: Some(handle_reg),
-            dim: SurfaceDim::D2,
+            dim,
             data: SurfaceData::Formatted([true; 4]),
         },
     )
@@ -1503,6 +1527,16 @@ fn exit_word() -> u64 {
 /// Thread `(x, y)` samples the bindless texture at `(2^x * u, 2^y * v)` and stores the texel
 /// to texel `(x, y)` of the bindless image.
 pub fn image_copy_program() -> Vec<u64> {
+    image_copy_program_as(crate::gpu::shader::isa::SurfaceDim::D2)
+}
+
+/// [`image_copy_program`], storing as a 2D array to the layer bank word
+/// [`IMAGE_COPY_LAYER`] holds, as Pokémon Legends: Z-A does.
+pub fn image_copy_array_program() -> Vec<u64> {
+    image_copy_program_as(crate::gpu::shader::isa::SurfaceDim::Array2d)
+}
+
+fn image_copy_program_as(dim: crate::gpu::shader::isa::SurfaceDim) -> Vec<u64> {
     use crate::gpu::shader::isa::{Operand, TexDim};
     use crate::gpu::shader::Op;
     let s2r = |dst: u8, sr: u8| {
@@ -1556,8 +1590,9 @@ pub fn image_copy_program() -> Vec<u64> {
                 mask: [true; 4],
             },
         ),
+        ldc0(10, IMAGE_COPY_LAYER),
         ldc0(39, IMAGE_COPY_IMAGE),
-        sust_p_2d(0, 8, 39),
+        sust_p(dim, 0, 8, 39),
         exit_word(),
     ]
 }
