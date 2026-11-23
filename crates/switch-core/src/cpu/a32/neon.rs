@@ -382,7 +382,13 @@ impl Cpu {
                 if unsigned {
                     return self.neon_pairwise_minmax_f32(quad, vd, a, b, minimum);
                 }
-                self.neon_f32(a, b, quad, |x, y| if minimum { x.min(y) } else { x.max(y) })
+                self.neon_f32(a, b, quad, |x, y| {
+                    if minimum {
+                        crate::cpu::bits::min_f32(x, y)
+                    } else {
+                        crate::cpu::bits::max_f32(x, y)
+                    }
+                })
             }
             (0xF, true) => {
                 // VRECPS and VRSQRTS.
@@ -463,7 +469,13 @@ impl Cpu {
         let y = lanes_of(b, 32, count);
         let mut out = [0u64; 16];
         let half = count as usize / 2;
-        let pick = |p: f32, q: f32| if minimum { p.min(q) } else { p.max(q) };
+        let pick = |p: f32, q: f32| {
+            if minimum {
+                crate::cpu::bits::min_f32(p, q)
+            } else {
+                crate::cpu::bits::max_f32(p, q)
+            }
+        };
         for i in 0..half {
             let v = pick(
                 f32::from_bits(x[2 * i] as u32),

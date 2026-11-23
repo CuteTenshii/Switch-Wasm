@@ -626,7 +626,11 @@ impl Cpu {
             0b00 => {
                 let (a, b) = self.vfp_pair(double, rn, rm);
                 let minimum = (insn >> 6) & 1 != 0;
-                let result = if minimum { a.min(b) } else { a.max(b) };
+                let result = if minimum {
+                    crate::cpu::bits::min_f64(a, b)
+                } else {
+                    crate::cpu::bits::max_f64(a, b)
+                };
                 self.vfp_store(double, rd, result);
             }
             // VRINTA/N/P/M and VCVTA/N/P/M

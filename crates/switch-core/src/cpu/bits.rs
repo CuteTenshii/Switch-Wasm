@@ -271,7 +271,7 @@ pub(crate) fn fp_max(a: f64, b: f64) -> f64 {
     } else if b.is_nan() {
         b
     } else {
-        a.max(b)
+        max_f64(a, b)
     }
 }
 
@@ -280,6 +280,43 @@ pub(crate) fn fp_min(a: f64, b: f64) -> f64 {
         a
     } else if b.is_nan() {
         b
+    } else {
+        min_f64(a, b)
+    }
+}
+
+/// The larger of two numbers as Arm's FPMax gives it: `f64::max` leaves the sign of two
+/// zeros open, and Arm gives +0 unless both are -0.
+pub(crate) fn max_f64(a: f64, b: f64) -> f64 {
+    if a == 0.0 && b == 0.0 {
+        f64::from_bits(a.to_bits() & b.to_bits())
+    } else {
+        a.max(b)
+    }
+}
+
+/// The smaller, likewise: -0 unless both are +0.
+pub(crate) fn min_f64(a: f64, b: f64) -> f64 {
+    if a == 0.0 && b == 0.0 {
+        f64::from_bits(a.to_bits() | b.to_bits())
+    } else {
+        a.min(b)
+    }
+}
+
+/// [`max_f64`] for singles.
+pub(crate) fn max_f32(a: f32, b: f32) -> f32 {
+    if a == 0.0 && b == 0.0 {
+        f32::from_bits(a.to_bits() & b.to_bits())
+    } else {
+        a.max(b)
+    }
+}
+
+/// [`min_f64`] for singles.
+pub(crate) fn min_f32(a: f32, b: f32) -> f32 {
+    if a == 0.0 && b == 0.0 {
+        f32::from_bits(a.to_bits() | b.to_bits())
     } else {
         a.min(b)
     }
@@ -712,4 +749,26 @@ pub(crate) fn f64_to_f16(v: f64) -> u16 {
         half_exp += 1;
     }
     sign | ((half_exp as u16) << 10) | ((mant as u16) & 0x3FF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Arm's FPMax and FPMin fix the sign `f64::max`/`min` leave open for opposite zeros.
+    #[test]
+    fn max_and_min_of_opposite_zeros_follow_arm() {
+        let sign = |v: f64| v.is_sign_negative();
+        for (a, b) in [(0.0, -0.0), (-0.0, 0.0)] {
+            assert!(!sign(fp_max(a, b)), "max({a}, {b})");
+            assert!(!sign(fp_maxnum(a, b)), "maxnm({a}, {b})");
+            assert!(sign(fp_min(a, b)), "min({a}, {b})");
+            assert!(sign(fp_minnum(a, b)), "minnm({a}, {b})");
+            assert!(!max_f32(a as f32, b as f32).is_sign_negative());
+            assert!(min_f32(a as f32, b as f32).is_sign_negative());
+        }
+        assert!(sign(fp_max(-0.0, -0.0)));
+        assert!(!sign(fp_min(0.0, 0.0)));
+        assert_eq!(fp_maxnum(f64::NAN, -0.0).to_bits(), (-0.0f64).to_bits());
+    }
 }
