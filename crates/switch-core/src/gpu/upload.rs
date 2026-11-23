@@ -1041,7 +1041,7 @@ impl Copy {
                 }
                 // The words as they are; the device converts them. See `Widen::PackedDepth`.
                 TexelKind::Depth(DepthTexel::S8D24Uint) => {
-                    (Format::R32Uint, image.width * unit, image.height)
+                    (Format::PackedDepth, image.width * unit, image.height)
                 }
                 TexelKind::Depth(DepthTexel::F32X24S8) => {
                     unreachable!("a float depth texel is copied as FloatDepth")
@@ -1637,7 +1637,7 @@ mod tests {
         let packed = image(TexelKind::Depth(DepthTexel::S8D24Uint), 16, 8, false);
         let copy = image_copy(&packed).unwrap();
         assert!(matches!(copy, Copy::Raw { unit: 4 }), "{copy:?}");
-        assert_eq!(copy.shape(&packed), (Format::R32Uint, 64, 8));
+        assert_eq!(copy.shape(&packed), (Format::PackedDepth, 64, 8));
         assert_eq!(copy.source_row_bytes(64), 64);
     }
 

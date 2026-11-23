@@ -4093,18 +4093,22 @@ fn a_draw_beside_a_depth_surface_larger_only_one_way_agrees() {
     assert_eq!(got.1, want.1, "depth");
 }
 
-/// An `RGBA32_UINT` target takes the fragment shader's register words as they are, and an
-/// `RGBA16_UINT` one saturates them, on both renderers.
+/// An `RGBA32_UINT` target takes the fragment shader's register words as they are, and
+/// `RGBA16_UINT` and `R8_UINT` ones saturate them, on both renderers.
 #[test]
 fn an_integer_target_takes_the_shader_words_on_both_renderers() {
     let Some((_serial, mut gpu)) = device() else {
         return;
     };
     let colour = [1.0f32, 2.0, 0.0, 4.0];
-    // The format, its texel's bytes and the top-left texel's words.
-    let formats: [(u32, u32, &[u32]); 2] = [
-        (0xC2, 16, &colour.map(f32::to_bits)),
-        (0xC9, 8, &[0xFFFF_FFFF, 0xFFFF_0000]),
+    // The format, its texel's bytes and the top-left texel.
+    let words = colour.map(f32::to_bits);
+    let rgba32: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let formats: [(u32, u32, &[u8]); 4] = [
+        (0xC2, 16, &rgba32),
+        (0xC9, 8, &[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0xFF, 0xFF]),
+        (0xE4, 4, &rgba32[..4]),
+        (0xF6, 1, &[0xFF]),
     ];
     for (format, bytes, top_left) in formats {
         let build = |gpu: Option<&mut super::Gpu>| {
@@ -4143,7 +4147,8 @@ fn an_integer_target_takes_the_shader_words_on_both_renderers() {
             "{format:#x}: the device rejected the pass"
         );
         assert_eq!(got, want, "{format:#x}");
-        assert_eq!(got[..top_left.len()], *top_left, "{format:#x}");
+        let bytes: Vec<u8> = got.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(bytes[..top_left.len()], *top_left, "{format:#x}");
     }
 }
 

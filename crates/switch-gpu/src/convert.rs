@@ -190,7 +190,7 @@ pub(crate) fn sampled_texture_format(
     features: wgpu::Features,
     format: Format,
 ) -> Result<(wgpu::TextureFormat, Widen)> {
-    if format == Format::R32Uint {
+    if format == Format::PackedDepth {
         return Ok((wgpu::TextureFormat::Rg32Float, Widen::PackedDepth));
     }
     match device_texture_format(features, format) {
@@ -297,7 +297,7 @@ pub(crate) fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
         Format::Bgra8UnormSrgb => T::Bgra8UnormSrgb,
         Format::Rgb10a2Unorm => T::Rgb10a2Unorm,
         Format::R32Float => T::R32Float,
-        Format::R32Uint => T::R32Uint,
+        Format::PackedDepth => T::R32Uint,
         Format::Rg32Float => T::Rg32Float,
         Format::R16Float => T::R16Float,
         Format::Rg16Float => T::Rg16Float,
@@ -309,6 +309,8 @@ pub(crate) fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
         Format::Rgba16Snorm => T::Rgba16Snorm,
         Format::Rgba16Float => T::Rgba16Float,
         Format::Rgba32Float => T::Rgba32Float,
+        Format::R8Uint => T::R8Uint,
+        Format::R32Uint => T::R32Uint,
         Format::Rgba16Uint => T::Rgba16Uint,
         Format::Rgba32Uint => T::Rgba32Uint,
         Format::Depth16Unorm => T::Depth16Unorm,

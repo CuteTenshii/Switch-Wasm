@@ -1971,7 +1971,7 @@ impl Gpu {
             Format::Bgra8Unorm => (4, 2, Red::Unorm8),
             Format::Rgba16Float => (8, 0, Red::Float16),
             Format::Rgba32Float => (8 * 2, 0, Red::Float32),
-            Format::R32Uint => (4, 0, Red::StencilBits),
+            Format::PackedDepth => (4, 0, Red::StencilBits),
             other => return Err(format!("a shadow map stored as {other:?}")),
         };
         let mut out = Vec::with_capacity(upload.bytes.len() / unit * 4);

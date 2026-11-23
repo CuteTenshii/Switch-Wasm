@@ -135,8 +135,9 @@ impl Format {
     /// The largest value an integer channel holds; written words saturate to it.
     pub fn uint_max(self) -> Option<u32> {
         match self {
+            Format::R8Uint => Some(0xFF),
             Format::Rgba16Uint => Some(0xFFFF),
-            Format::Rgba32Uint => Some(u32::MAX),
+            Format::R32Uint | Format::Rgba32Uint => Some(u32::MAX),
             _ => None,
         }
     }
@@ -166,9 +167,13 @@ pub enum Format {
     Rgba16Float,
     R32Float,
     /// A texture's raw 32-bit words, for a conversion pass to turn into something sampleable.
-    R32Uint,
+    PackedDepth,
     Rg32Float,
     Rgba32Float,
+    /// `R8_UINT`: as `Rgba32Uint`, one channel saturated to 8 bits.
+    R8Uint,
+    /// `R32_UINT`: as `Rgba32Uint`, one channel.
+    R32Uint,
     /// `RGBA16_UINT`: as `Rgba32Uint`, each word saturated to 16 bits.
     Rgba16Uint,
     /// `RGBA32_UINT`: raw words, written and read as integers and never blended.
@@ -765,6 +770,7 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
         0xEB => Format::Rg8Snorm,
         0xF3 => Format::R8Unorm,
         0xF4 => Format::R8Snorm,
+        0xF6 => Format::R8Uint,
         // Sixteen. Normalized needs `texture-format-16bit-norm` (native only).
         0xC6 => Format::Rgba16Unorm,
         0xC7 => Format::Rgba16Snorm,
@@ -779,6 +785,7 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
         // Thirty-two, and the packed formats WebGPU has.
         0xC0 | 0xC3 => Format::Rgba32Float,
         0xC2 => Format::Rgba32Uint,
+        0xE4 => Format::R32Uint,
         0xCB => Format::Rg32Float,
         0xE5 => Format::R32Float,
         0xD1 => Format::Rgb10a2Unorm,
@@ -1123,7 +1130,7 @@ mod tests {
 
     fn shape(format: Format) -> (u32, bool) {
         match format {
-            Format::R8Unorm | Format::R8Snorm => (1, false),
+            Format::R8Unorm | Format::R8Snorm | Format::R8Uint => (1, false),
             Format::Rg8Unorm | Format::Rg8Snorm => (2, false),
             Format::R16Unorm | Format::R16Snorm | Format::R16Float => (2, false),
             Format::Rgba8Unorm
@@ -1134,6 +1141,7 @@ mod tests {
             | Format::Rg16Snorm
             | Format::Rg16Float
             | Format::R32Float
+            | Format::R32Uint
             | Format::Rg11b10Ufloat => (4, false),
             Format::Rgba8UnormSrgb | Format::Bgra8UnormSrgb => (4, true),
             Format::Rgba16Unorm
@@ -1155,6 +1163,8 @@ mod tests {
             | Format::R32Float
             | Format::Rg32Float
             | Format::Rgba32Float
+            | Format::R8Uint
+            | Format::R32Uint
             | Format::Rgba16Uint
             | Format::Rgba32Uint
             | Format::Rg11b10Ufloat => None,
@@ -1189,10 +1199,9 @@ mod tests {
     /// Codes `gpu::surface` stores that have no device name, deliberately.
     #[test]
     fn the_codes_with_no_webgpu_name_are_the_ones_that_cannot_have_one() {
-        const UNNAMED: [u32; 24] = [
-            0xC1, 0xC4, 0xC5, 0xC8, 0xCC, 0xCD, 0xD2, 0xD8, 0xD9, 0xDC, 0xDD, 0xE3, 0xE4, 0xEC,
-            0xED, 0xF0, 0xF1, 0xF5, 0xF6,
-            // `A2R10G10B10`, `R5G6B5`, `A1R5G5B5`, `X1R5G5B5`, `A8`.
+        const UNNAMED: [u32; 22] = [
+            0xC1, 0xC4, 0xC5, 0xC8, 0xCC, 0xCD, 0xD2, 0xD8, 0xD9, 0xDC, 0xDD, 0xE3, 0xEC, 0xED,
+            0xF0, 0xF1, 0xF5, // `A2R10G10B10`, `R5G6B5`, `A1R5G5B5`, `X1R5G5B5`, `A8`.
             0xDF, 0xE8, 0xE9, 0xF7, 0xF8,
         ];
         let mut unnamed = Vec::new();
