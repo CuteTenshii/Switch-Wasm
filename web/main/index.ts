@@ -41,12 +41,13 @@ async function init(): Promise<void> {
   try {
     initWorker();
     await whenStarted();
+    // Firefox settles this only once its prompt is answered, so boot must not wait on it.
+    void sdRequestPersistence();
     // The worker paints the screen from here on.
     attachScreen(screenEl.transferControlToOffscreen());
     loadPhase('Restoring the SD card, saves, profiles and keys');
     // Independent of each other; the worker built the session when it loaded the core.
     await Promise.all([
-      sdRequestPersistence(),
       call('restoreStorage'),
       loadProfiles().then(stageUsers),
       offerPreviousLog(),
