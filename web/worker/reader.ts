@@ -29,6 +29,9 @@ self.onmessage = (e: MessageEvent<Message>) => {
   else fetchChunks(m);
 };
 
+// Tells the system worker this one runs: its reads block the thread that starts it.
+self.postMessage('running');
+
 // Each slot is answered as soon as its chunk is in, with the generation it was asked for under.
 function fetchChunks(m: Message): void {
   const blob = files[m.file!];

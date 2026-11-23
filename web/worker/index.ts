@@ -81,11 +81,19 @@ void (async () => {
     setCore(await init({ module_or_path: module }) as unknown as WasmExports);
     // Install the panic hook before anything else can panic.
     switch_init();
-    switch_set_reader(new Worker(new URL('./reader.ts', import.meta.url), {
+    const reader = new Worker(new URL('./reader.ts', import.meta.url), {
       type: 'module',
       name: 'File reader',
-    }));
+    });
+    // This thread starts the reader, so a read that blocks it before the reader runs times out.
+    const readerRunning = new Promise<void>((resolve, reject) => {
+      reader.addEventListener('message', () => resolve(), { once: true });
+      reader.addEventListener('error', () => reject(new Error('the file reader worker did not start')),
+        { once: true });
+    });
+    switch_set_reader(reader);
     startCores(module, core.memory);
+    await readerRunning;
     reply({ type: 'ready' });
   } catch (err) {
     reply({ type: 'ready', error: String(err) });
