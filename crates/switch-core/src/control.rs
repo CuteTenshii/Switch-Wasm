@@ -416,20 +416,31 @@ impl Control {
     /// Read the `control.nacp` and icon from a homebrew NRO's asset section.
     pub fn from_nro(data: &[u8]) -> Option<Control> {
         let assets = crate::nro::assets(data)?;
-        if assets.icon.is_empty() && assets.nacp.is_empty() {
+        Control::from_nro_assets(assets.icon, assets.nacp)
+    }
+
+    /// [`Control::from_nro`] for an NRO read by range, so a large one is not read whole.
+    pub fn from_nro_source<S: ByteSource>(src: &S) -> Option<Control> {
+        let assets = crate::nro::assets_from_source(src)?;
+        Control::from_nro_assets(&assets.icon, &assets.nacp)
+    }
+
+    fn from_nro_assets(icon: &[u8], nacp: &[u8]) -> Option<Control> {
+        if icon.is_empty() && nacp.is_empty() {
             return None;
         }
         // A NACP that fails to parse still leaves a usable icon.
-        let nacp = Nacp::parse(assets.nacp).unwrap_or_else(|_| Nacp::empty());
+        let nacp_raw = nacp;
+        let nacp = Nacp::parse(nacp_raw).unwrap_or_else(|_| Nacp::empty());
         let title = nacp.preferred();
         Some(Control {
             title_id: 0,
             language: title.map_or("", |t| t.language),
             name: title.map_or(String::new(), |t| t.name.clone()),
             publisher: title.map_or(String::new(), |t| t.publisher.clone()),
-            icon: assets.icon.to_vec(),
+            icon: icon.to_vec(),
             nacp,
-            nacp_raw: assets.nacp.to_vec(),
+            nacp_raw: nacp_raw.to_vec(),
         })
     }
 
@@ -504,9 +515,26 @@ fn read_i64_if_present(data: &[u8], at: usize) -> i64 {
     }
 }
 
+/// Control fixtures; not `#[cfg(test)]` so `switch-wasm` can use them (see [`crate::nsp::testing`]).
+pub mod testing {
+    use super::*;
+
+    /// A full-size `control.nacp` with one American English title and a display version.
+    pub fn nacp(name: &str, publisher: &str, version: &str) -> Vec<u8> {
+        let mut data = vec![0u8; 0x4000];
+        data[..name.len()].copy_from_slice(name.as_bytes());
+        data[TITLE_NAME_SIZE..TITLE_NAME_SIZE + publisher.len()]
+            .copy_from_slice(publisher.as_bytes());
+        data[DISPLAY_VERSION_OFFSET..DISPLAY_VERSION_OFFSET + version.len()]
+            .copy_from_slice(version.as_bytes());
+        data
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nro::testing::with_assets as nro_with_assets;
 
     struct NacpBuilder {
         data: Vec<u8>,
@@ -746,26 +774,6 @@ mod tests {
         assert_eq!(quota.cache_storage_journal_size, 0x8_0000);
     }
 
-    /// A minimal NRO with an asset section appended.
-    fn nro_with_assets(icon: &[u8], nacp: &[u8]) -> Vec<u8> {
-        const HEADER_SIZE: u32 = 0x50;
-        let mut out = vec![0u8; HEADER_SIZE as usize];
-        out[0..4].copy_from_slice(&crate::nro::NRO0_MAGIC.to_le_bytes());
-        out[4..8].copy_from_slice(&1u32.to_le_bytes());
-        out[8..12].copy_from_slice(&HEADER_SIZE.to_le_bytes());
-        out.extend_from_slice(&crate::nro::ASET_MAGIC.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        let mut offset = 0x38u64;
-        for part in [icon, nacp, &[][..]] {
-            out.extend_from_slice(&offset.to_le_bytes());
-            out.extend_from_slice(&(part.len() as u64).to_le_bytes());
-            offset += part.len() as u64;
-        }
-        out.extend_from_slice(icon);
-        out.extend_from_slice(nacp);
-        out
-    }
-
     #[test]
     fn reads_a_homebrew_nros_own_name_and_icon() {
         let nacp = NacpBuilder::new()
@@ -781,6 +789,27 @@ mod tests {
         assert_eq!(control.icon, b"\xFF\xD8\xFF\xE0jpeg");
         assert_eq!(control.icon_mime(), "image/jpeg");
         assert_eq!(control.title_id, 0);
+    }
+
+    /// Reading by range finds the same control data as reading the whole file.
+    #[test]
+    fn an_nro_read_by_range_gives_what_the_whole_file_does() {
+        let nacp = NacpBuilder::new()
+            .title(0, "Taisei Project", "taisei-project.org")
+            .text(DISPLAY_VERSION_OFFSET, "1.4.6")
+            .unrated()
+            .build();
+        let nro = nro_with_assets(b"\xFF\xD8\xFF\xE0jpeg", &nacp);
+        let whole = Control::from_nro(&nro).unwrap();
+        assert_eq!(Control::from_nro_source(&SliceSource(&nro)), Some(whole));
+
+        assert_eq!(
+            Control::from_nro_source(&SliceSource(&nro_with_assets(b"", b""))),
+            None
+        );
+        // Cut inside the asset header.
+        assert_eq!(Control::from_nro_source(&SliceSource(&nro[..0x60])), None);
+        assert_eq!(Control::from_nro_source(&SliceSource(&[0u8; 0x50])), None);
     }
 
     #[test]

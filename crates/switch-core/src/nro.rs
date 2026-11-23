@@ -30,6 +30,7 @@
 
 use crate::mem::Memory;
 use crate::nsp::read_u32;
+use crate::source::ByteSource;
 use crate::{Error, Result};
 
 pub const NRO0_MAGIC: u32 = 0x304f524e; // "NRO0"
@@ -38,6 +39,8 @@ pub const ASET_MAGIC: u32 = 0x54455341; // "ASET"
 /// Where HBL maps NROs; homebrew is linked against it.
 pub const NRO_BASE: u32 = 0x0800_0000;
 const HEADER_MIN: usize = 0x50;
+/// Largest icon or NACP [`assets_from_source`] reads; real ones are a few hundred KiB at most.
+const MAX_ASSET_PART: u64 = 16 << 20;
 const ASSET_HEADER_SIZE: usize = 0x38;
 const ASSET_VERSION: u32 = 0;
 
@@ -84,6 +87,45 @@ pub struct Assets<'a> {
 
 pub fn assets(data: &[u8]) -> Option<Assets<'_>> {
     NroHeader::parse(data).ok()?.assets(data)
+}
+
+/// An NRO's icon and `control.nacp`, read out of its source; each is empty when absent.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AssetData {
+    pub icon: Vec<u8>,
+    pub nacp: Vec<u8>,
+}
+
+/// [`assets`] read by range from `src`: the header, the asset header and the two parts, so
+/// the image before them is never read. `None` when there is no asset section.
+pub fn assets_from_source<S: ByteSource>(src: &S) -> Option<AssetData> {
+    let head = src
+        .read_vec(0, src.len().min(0x100 + HEADER_MIN as u64))
+        .ok()?;
+    let h = find_magic(&head, NRO0_MAGIC)?;
+    if head.len() < h + 0x0C {
+        return None;
+    }
+    let base = u64::from(read_u32(&head, h + 0x08));
+    let header = src.read_vec(base, ASSET_HEADER_SIZE as u64).ok()?;
+    if read_u32(&header, 0) != ASET_MAGIC || read_u32(&header, 4) > ASSET_VERSION {
+        return None;
+    }
+    let part = |index: usize| -> Vec<u8> {
+        let entry = 8 + index * 16;
+        let size = read_u64(&header, entry + 8);
+        base.checked_add(read_u64(&header, entry))
+            .filter(|start| {
+                size <= MAX_ASSET_PART
+                    && start.checked_add(size).is_some_and(|end| end <= src.len())
+            })
+            .and_then(|start| src.read_vec(start, size).ok())
+            .unwrap_or_default()
+    };
+    Some(AssetData {
+        icon: part(0),
+        nacp: part(1),
+    })
 }
 
 /// Kept out of the image so crt0 BSS zeroing never touches it.
@@ -718,6 +760,31 @@ fn copy_segment(mem: &Memory, data: &[u8], off: u32, size: u32, addr: u32) -> Re
         return Err(Error::Nro("segment exceeds input data".into()));
     }
     mem.map(u64::from(addr), &data[start..end])
+}
+
+/// NRO fixtures; not `#[cfg(test)]` so `switch-wasm` can use them (see [`crate::nsp::testing`]).
+pub mod testing {
+    use super::*;
+
+    /// A minimal NRO, no code, with an asset section holding `icon` and `nacp`.
+    pub fn with_assets(icon: &[u8], nacp: &[u8]) -> Vec<u8> {
+        const HEADER_SIZE: u32 = 0x50;
+        let mut out = vec![0u8; HEADER_SIZE as usize];
+        out[0..4].copy_from_slice(&NRO0_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&1u32.to_le_bytes());
+        out[8..12].copy_from_slice(&HEADER_SIZE.to_le_bytes());
+        out.extend_from_slice(&ASET_MAGIC.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut offset = ASSET_HEADER_SIZE as u64;
+        for part in [icon, nacp, &[][..]] {
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            offset += part.len() as u64;
+        }
+        out.extend_from_slice(icon);
+        out.extend_from_slice(nacp);
+        out
+    }
 }
 
 #[cfg(test)]
