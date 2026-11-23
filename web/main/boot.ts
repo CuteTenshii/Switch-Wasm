@@ -45,7 +45,7 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
     const why = (err as Error).message;
     setState('fault');
     failLoad('Load failed: ' + why);
-    log('Load failed: ' + why, 'error');
+    log('Load failed: ' + why, 'error', { openConsole: false });
     return false;
   }
   const title = await homebrewTitle(name);
@@ -83,7 +83,7 @@ async function bootFile(file: File): Promise<void> {
   if (!verdict.ok) {
     // Not a fault: whatever is running keeps running.
     failLoad(verdict.why);
-    log(verdict.why, 'error');
+    log(verdict.why, 'error', { openConsole: false });
     return;
   }
   // Before the running title is ended for it.
@@ -107,7 +107,7 @@ async function replaceTitle(name: string): Promise<boolean> {
     const why = (err as Error).message;
     setState('fault');
     failLoad('The running title could not be ended: ' + why);
-    log('The running title could not be ended: ' + why, 'error');
+    log('The running title could not be ended: ' + why, 'error', { openConsole: false });
     return false;
   }
 }

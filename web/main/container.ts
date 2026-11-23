@@ -246,7 +246,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
         + ' NCA - only a Program NCA holds an executable.';
       setState('fault');
       failLoad(why);
-      log(why, 'error');
+      log(why, 'error', { openConsole: false });
       return;
     }
     await launchStandaloneNca(file);
@@ -569,7 +569,7 @@ export async function doLaunchNca(
     const why = (err as Error).message;
     setState('fault');
     failLoad('The running title could not be ended: ' + why);
-    log('The running title could not be ended: ' + why, 'error');
+    log('The running title could not be ended: ' + why, 'error', { openConsole: false });
     return;
   }
   try {
@@ -588,7 +588,7 @@ export async function doLaunchNca(
       failLoad('This game is encrypted. Load the prod.keys file from your Switch to play it.',
         undefined, action);
     }
-    log('Launch failed: ' + why, 'error');
+    log('Launch failed: ' + why, 'error', { openConsole: false });
     return;
   }
   setRunning({

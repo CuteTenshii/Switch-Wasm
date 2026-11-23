@@ -79,6 +79,8 @@ test('a launch without prod.keys says so, opens the panel on the keys, and rerun
   const loading = page.locator('#loading');
   await expect(loading.locator('#loading-phase'))
     .toHaveText('This game is encrypted. Load the prod.keys file from your Switch to play it.');
+  // The screen explains the failure, so the side panel stays shut.
+  await expect(page.locator('body')).not.toHaveClass(/panel-open/);
 
   await loading.getByRole('button', { name: 'Load prod.keys' }).click();
   await expect(page.getByRole('tab', { name: 'NAND' })).toHaveAttribute('aria-selected', 'true');

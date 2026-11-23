@@ -54,11 +54,18 @@ const backlog: Entry[] = [];
 let lastRow: HTMLElement | null = null;
 
 // One entry per line.
-export function log(text: string, level: LogLevel = 'log'): void {
-  for (const line of text.replace(/\n$/, '').split('\n')) logLine(line, level);
+/** Options for `log`. `openConsole: false` keeps an error from opening the Console tab, for one
+ * the page already explains where the user is looking. */
+export interface LogOptions {
+  openConsole?: boolean;
 }
 
-function logLine(msg: string, level: LogLevel): void {
+export function log(text: string, level: LogLevel = 'log', options: LogOptions = {}): void {
+  const reveal = level === 'error' && options.openConsole !== false;
+  for (const line of text.replace(/\n$/, '').split('\n')) logLine(line, level, reveal);
+}
+
+function logLine(msg: string, level: LogLevel, reveal: boolean): void {
   mirrorDirty = true;
   const visible = shown(level);
 
@@ -80,7 +87,7 @@ function logLine(msg: string, level: LogLevel): void {
   lastRow = row({ text: msg, level, count: 1 });
   newRows.push(lastRow);
   if (!frame) frame = requestAnimationFrame(flushRows);
-  if (level === 'error') openPanel('console');
+  if (reveal) openPanel('console');
 }
 
 // Rows reach the page once per frame: a flood of lines must not lay out the console per line.
