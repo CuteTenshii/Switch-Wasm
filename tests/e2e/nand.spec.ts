@@ -51,3 +51,78 @@ test('a firmware folder whose NCAs are in a sub-folder installs none', async ({ 
   await page.locator('#firmware-dir').setInputFiles(picked);
   await expect(page.locator('#firmware-status')).toHaveText('Nothing in Firmware is an NCA.');
 });
+
+// A PFS0 holding one file that is not an NCA, so it has no Program NCA to launch.
+function nspWithoutProgram(): Buffer {
+  const names = Buffer.from('a.txt\0\0\0');
+  const data = Buffer.from('not an NCA');
+  const header = Buffer.alloc(16);
+  header.write('PFS0');
+  header.writeUInt32LE(1, 4);
+  header.writeUInt32LE(names.length, 8);
+  const entry = Buffer.alloc(24);
+  entry.writeBigUInt64LE(BigInt(data.length), 8);
+  return Buffer.concat([header, entry, names, data]);
+}
+
+const FAKE_PROD_KEYS = {
+  name: 'prod.keys',
+  mimeType: 'text/plain',
+  buffer: Buffer.from('header_key = ' + '00'.repeat(32) + '\n'),
+};
+
+test('a launch without prod.keys says so, opens the panel on the keys, and reruns once they load', async ({ page }) => {
+  await openPage(page);
+  await page.locator('#nro-file').setInputFiles({
+    name: 'game.nsp', mimeType: 'application/octet-stream', buffer: nspWithoutProgram(),
+  });
+  const loading = page.locator('#loading');
+  await expect(loading.locator('#loading-phase'))
+    .toHaveText('This game is encrypted. Load the prod.keys file from your Switch to play it.');
+
+  await loading.getByRole('button', { name: 'Load prod.keys' }).click();
+  await expect(page.getByRole('tab', { name: 'NAND' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#keys-section > summary')).toBeFocused();
+
+  await page.locator('#prod-keys').setInputFiles(FAKE_PROD_KEYS);
+  // The rerun with keys finds no Program NCA either, and the core says so.
+  await expect(loading.locator('#loading-phase')).toHaveText(/^Launch failed: no Program NCA/);
+  await expect(page.locator('#console .info', { hasText: 'Launching game.nsp' })).toHaveCount(2);
+
+  // The fixture fails on logged errors, and these were expected.
+  await openPanel(page, 'Console');
+  await page.locator('#btn-clear-console').click();
+});
+
+test('a dismissed launch failure is not rerun when prod.keys loads', async ({ page }) => {
+  await openPage(page);
+  await page.locator('#nro-file').setInputFiles({
+    name: 'game.nsp', mimeType: 'application/octet-stream', buffer: nspWithoutProgram(),
+  });
+  const loading = page.locator('#loading');
+  await loading.getByRole('button', { name: 'Dismiss' }).click();
+  await expect(loading).toHaveClass(/hidden/);
+
+  await openPanel(page, 'NAND');
+  await page.locator('#prod-keys').setInputFiles(FAKE_PROD_KEYS);
+  await expect(page.locator('#keys-section .section-note')).toHaveText('1 loaded');
+  await expect(loading).toHaveClass(/hidden/);
+  await expect(page.locator('#console .info', { hasText: 'Launching game.nsp' })).toHaveCount(1);
+
+  await openPanel(page, 'Console');
+  await page.locator('#btn-clear-console').click();
+});
+
+test('a launch that fails with prod.keys loaded gives the core\'s reason, with no keys button', async ({ page }) => {
+  await openPage(page);
+  await page.locator('#prod-keys').setInputFiles(FAKE_PROD_KEYS);
+  await page.locator('#nro-file').setInputFiles({
+    name: 'game.nsp', mimeType: 'application/octet-stream', buffer: nspWithoutProgram(),
+  });
+  const loading = page.locator('#loading');
+  await expect(loading.locator('#loading-phase')).toHaveText(/^Launch failed: no Program NCA/);
+  await expect(loading.locator('#loading-action')).toBeHidden();
+
+  await openPanel(page, 'Console');
+  await page.locator('#btn-clear-console').click();
+});

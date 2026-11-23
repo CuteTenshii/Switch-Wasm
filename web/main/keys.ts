@@ -3,7 +3,7 @@ import { $, pickedFile } from './dom';
 import { readKeysFile } from './filetype';
 import { log } from './log';
 import { call, isReady } from './rpc';
-import { setNote } from './shell';
+import { openPanel, setNote } from './shell';
 
 const KEYS_STORE = { prod: 'switch-prod-keys', title: 'switch-title-keys' };
 
@@ -16,6 +16,15 @@ export function hasKeys(): boolean {
 
 export function hasProdKeys(): boolean {
   return Boolean(prodKeysText);
+}
+
+// Open the side panel on the Keys section, with focus on it for the keyboard.
+export function revealKeys(): void {
+  openPanel('nand');
+  const section = $<HTMLDetailsElement>('keys-section');
+  section.open = true;
+  section.scrollIntoView({ block: 'nearest' });
+  section.querySelector('summary')?.focus();
 }
 
 const keysListeners: (() => void)[] = [];

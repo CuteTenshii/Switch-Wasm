@@ -170,7 +170,10 @@
         <div class="loading-title" id="loading-title">Starting core...</div>
         <div class="loading-phase" id="loading-phase">Fetching and compiling the WebAssembly module</div>
         <div class="loading-detail" id="loading-detail"></div>
-        <button type="button" class="btn small ghost" id="loading-dismiss" hidden>Dismiss</button>
+        <div class="loading-actions">
+          <button type="button" class="btn small" id="loading-action" hidden></button>
+          <button type="button" class="btn small ghost" id="loading-dismiss" hidden>Dismiss</button>
+        </div>
       </div>
     </div>
 
@@ -564,7 +567,7 @@
   </section>
 
   <section class="tabpanel" data-panel="nand">
-    <details class="section" open>
+    <details class="section" id="keys-section" open>
       <summary class="section-head">
         <span class="section-title">Keys</span>
         <info-tip text="prod.keys decrypts NCA headers: installing firmware needs it, and so does any NCA from the CDN, whose header stays encrypted. Kept in this browser."></info-tip>

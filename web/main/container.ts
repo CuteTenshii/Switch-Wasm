@@ -6,7 +6,10 @@ import type {
 import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from './format';
-import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
+import { hasProdKeys, onKeysChanged, revealKeys } from './keys';
+import {
+  awaitFirstFrame, beginLoad, currentAction, failLoad, loadPhase, type LoadAction,
+} from './loading';
 import { log } from './log';
 import { call } from './rpc';
 import { run, updateReadouts } from './runloop';
@@ -511,8 +514,12 @@ function launchNca(name: string, index?: number): Promise<void> {
     .filter((held) => held.titleId === openTitleId)
     .reduce((n, held) => n + held.indices.length, 0);
   if (packs) notes.push(describeDlc(packs) + ' mounted.');
-  return doLaunchNca(name, () => call('launch', index), identity,
-    notes.join(' '));
+  // The title card also comes from an encrypted header, so a rerun once keys are in reads it again.
+  const relaunch = async () => {
+    await showTitleCard();
+    await launchNca(name, index);
+  };
+  return doLaunchNca(name, () => call('launch', index), identity, notes.join(' '), relaunch);
 }
 
 // Same as `launchNca`, for a standalone .nca that is already the open container.
@@ -531,11 +538,23 @@ function describeLaunch(file: string, identity?: LaunchIdentity | null): string 
   return 'Launching ' + parts.join(', ');
 }
 
+// A launch that failed for want of prod.keys, rerun as soon as they are loaded.
+let launchAwaitingKeys: { action: LoadAction; relaunch: () => Promise<void> } | null = null;
+
+onKeysChanged(() => {
+  const pending = launchAwaitingKeys;
+  if (!pending || !hasProdKeys()) return;
+  launchAwaitingKeys = null;
+  // Not when the failure was dismissed, or another load has replaced it.
+  if (currentAction() === pending.action) void pending.relaunch();
+});
+
 export async function doLaunchNca(
   name: string,
   loadFn: () => Promise<number>,
   identity?: LaunchIdentity | null,
   note?: string,
+  relaunch?: () => Promise<void>,
 ): Promise<void> {
   if (refuseBootWhileNandBusy(identity?.name || name)) return;
   log(describeLaunch(name, identity), 'info');
@@ -558,7 +577,17 @@ export async function doLaunchNca(
   } catch (err) {
     const why = (err as Error).message;
     setState('fault');
-    failLoad('Launch failed: ' + why);
+    // Without prod.keys no NCA header decrypts, so that is the cause whatever the core reports.
+    if (hasProdKeys()) failLoad('Launch failed: ' + why);
+    else {
+      const action = { label: 'Load prod.keys', run: revealKeys };
+      launchAwaitingKeys = {
+        action,
+        relaunch: relaunch ?? (() => doLaunchNca(name, loadFn, identity, note)),
+      };
+      failLoad('This game is encrypted. Load the prod.keys file from your Switch to play it.',
+        undefined, action);
+    }
     log('Launch failed: ' + why, 'error');
     return;
   }

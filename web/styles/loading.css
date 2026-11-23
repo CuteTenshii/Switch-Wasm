@@ -54,6 +54,13 @@
 
 .loading.is-error .loading-phase { color: var(--red); }
 
+.loading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
 /* Run-time fault overlay; the translucent ground keeps the last frame visible. */
 .crash {
   position: absolute;
