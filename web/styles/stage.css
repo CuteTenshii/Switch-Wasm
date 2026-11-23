@@ -203,6 +203,99 @@ body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-stat
   gap: 10px; margin: 20px 0 18px;
 }
 
+/* A picked folder's games take the place of the drop prompt. */
+.overlay.has-library .overlay-mark,
+.overlay.has-library h1,
+.overlay.has-library .overlay-actions { display: none; }
+.overlay.has-library .overlay-inner { width: min(560px, 100%); }
+.library { text-align: left; }
+.library-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+.library-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.library-tools {
+  display: flex;
+  gap: 6px;
+}
+.library-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.library-status:empty { display: none; }
+.library-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.library-row {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.library-row:hover { background: var(--hover-bg); }
+.library-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.library-icon {
+  display: block;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  background: var(--chrome-hi);
+  object-fit: cover;
+}
+.library-icon.blank { border: 1px solid var(--border); }
+.library-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.library-name {
+  font-size: var(--text-md);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.library-detail {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.library-format {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--dim);
+}
+
 .muted { color: var(--muted); }
 .tiny {
   font-size: var(--text-xs);

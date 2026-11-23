@@ -17,6 +17,11 @@ export const NAND_SAVES = 'saves';
 export const NAND_USERS = 'users';
 export const NAND_CONTROLS = 'controls';
 
+// The start screen's game folder, a `FileSystemDirectoryHandle` where the browser keeps one.
+export const LIBRARY_DB_NAME = 'switch-wasm-library';
+export const LIBRARY_STORE = 'folder';
+export const LIBRARY_KEY = 'handle';
+
 export interface StoredEntry {
   kind: 'dir' | 'file';
   data?: Bytes;
@@ -85,6 +90,23 @@ export function nandIdb(): Promise<IDBDatabase> {
 }
 
 // Keys and values are read in one transaction so they stay in step.
+let libraryDb: IDBDatabase | null = null;
+
+export function libraryIdb(): Promise<IDBDatabase> {
+  if (libraryDb) return Promise.resolve(libraryDb);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(LIBRARY_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(LIBRARY_STORE)) req.result.createObjectStore(LIBRARY_STORE);
+    };
+    req.onsuccess = () => {
+      libraryDb = req.result;
+      resolve(libraryDb);
+    };
+    req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
+  });
+}
+
 export function idbGetAll<T>(db: IDBDatabase, store: string): Promise<[string, T][]> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readonly');

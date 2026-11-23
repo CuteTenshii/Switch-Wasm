@@ -125,7 +125,22 @@
         <h1>Drop a <code>.nro</code>, <code>.nsp</code> or <code>.xci</code> to boot</h1>
         <div class="overlay-actions">
           <label class="btn primary big" id="overlay-open" for="nro-file">Open a file</label>
+          <!-- Shown by library.ts where the browser can pick a folder. -->
+          <button type="button" class="btn big" id="overlay-open-folder" hidden>Open a folder</button>
+          <input type="file" id="library-dir" webkitdirectory hidden>
         </div>
+        <!-- The picked folder's games; filled by library.ts. -->
+        <section class="library" id="library" aria-labelledby="library-title" hidden>
+          <div class="library-head">
+            <h2 class="library-title" id="library-title"></h2>
+            <div class="library-tools">
+              <button type="button" class="btn small" id="library-change">Change folder</button>
+              <button type="button" class="btn small ghost" id="library-close">Close</button>
+            </div>
+          </div>
+          <div class="library-status" id="library-status" role="status" aria-live="polite"></div>
+          <ul class="library-list" id="library-list"></ul>
+        </section>
       </div>
 
       <!-- Mirrors KEY_MAP in input.ts: each Switch button with the key that presses it. -->

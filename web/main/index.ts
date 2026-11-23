@@ -15,6 +15,7 @@ import { sdRequestPersistence } from './sdcard';
 import { screenEl, setState, showOverlay } from './shell';
 import { endTitle } from './session';
 import { setRunning } from './title';
+import { restoreLibrary } from './library';
 import { endLoad, failLoad, loadPhase } from './loading';
 
 // Imported for their side effects: each binds its own part of the page.
@@ -66,6 +67,7 @@ async function init(): Promise<void> {
     return;
   }
   endLoad();
+  await restoreLibrary();
 }
 
 $('btn-stop').addEventListener('click', async () => {

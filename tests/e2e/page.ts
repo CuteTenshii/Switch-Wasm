@@ -90,3 +90,16 @@ export const ASM = {
   // movz x1, #0x1000; ldr x0, [x1]: a read below the guest address space, where a NULL lands.
   unmappedRead: [0xd2820001, 0xf9400020],
 } as const;
+
+// A PFS0 holding one file that is not an NCA, so it has no Program NCA to launch.
+export function nspWithoutProgram(): Buffer {
+  const names = Buffer.from('a.txt\0\0\0');
+  const data = Buffer.from('not an NCA');
+  const header = Buffer.alloc(16);
+  header.write('PFS0');
+  header.writeUInt32LE(1, 4);
+  header.writeUInt32LE(names.length, 8);
+  const entry = Buffer.alloc(24);
+  entry.writeBigUInt64LE(BigInt(data.length), 8);
+  return Buffer.concat([header, entry, names, data]);
+}

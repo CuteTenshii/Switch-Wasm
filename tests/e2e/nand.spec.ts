@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, openPage, openPanel, test } from './page';
+import { expect, nspWithoutProgram, openPage, openPanel, test } from './page';
 
 const NEEDS_KEYS = 'Load prod.keys in the NAND tab to install firmware: each NCA is identified'
   + ' from its encrypted header before it is stored.';
@@ -51,19 +51,6 @@ test('a firmware folder whose NCAs are in a sub-folder installs none', async ({ 
   await page.locator('#firmware-dir').setInputFiles(picked);
   await expect(page.locator('#firmware-status')).toHaveText('Nothing in Firmware is an NCA.');
 });
-
-// A PFS0 holding one file that is not an NCA, so it has no Program NCA to launch.
-function nspWithoutProgram(): Buffer {
-  const names = Buffer.from('a.txt\0\0\0');
-  const data = Buffer.from('not an NCA');
-  const header = Buffer.alloc(16);
-  header.write('PFS0');
-  header.writeUInt32LE(1, 4);
-  header.writeUInt32LE(names.length, 8);
-  const entry = Buffer.alloc(24);
-  entry.writeBigUInt64LE(BigInt(data.length), 8);
-  return Buffer.concat([header, entry, names, data]);
-}
 
 const FAKE_PROD_KEYS = {
   name: 'prod.keys',

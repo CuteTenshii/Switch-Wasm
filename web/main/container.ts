@@ -147,27 +147,37 @@ function rememberDlc(titleId: string, name: string): void {
   }
 }
 
-function handleDlcFile(file: File, packs: DlcEntry[]): void {
+// `explain` says what happens to the file next; a launch that holds it says that itself.
+function handleDlcFile(file: File, packs: DlcEntry[], explain = true): void {
   const titleId = packs[0]?.title_id ?? '';
   heldDlc = heldDlc.filter((held) => held.file.name !== file.name);
   heldDlc.push({ file, titleId, indices: packs.map((e) => e.index) });
   rememberDlc(titleId, file.name);
   // The core has logged what the file holds; this is what happens to it.
-  log(titleId === openTitleId
+  if (explain) log(titleId === openTitleId
     ? 'The add-on content is mounted when this title launches.'
     : 'Open that game to launch it with the add-on content.', 'info');
   showPairedNotes();
+}
+
+// Hold each of `files`, updates and add-on content the caller has checked, for the next launch.
+export async function holdForLaunch(files: File[]): Promise<void> {
+  for (const file of files) {
+    const opened = await openFile(file);
+    if (opened?.kind === 'update') handleUpdateFile(file, opened, false);
+    else if (opened?.kind === 'dlc') handleDlcFile(file, opened.packs, false);
+  }
 }
 
 function describeDlc(packs: number): string {
   return packs === 1 ? '1 add-on content pack' : packs + ' add-on content packs';
 }
 
-function handleUpdateFile(file: File, { title: titleId, version }: UpdateInfo): void {
+function handleUpdateFile(file: File, { title: titleId, version }: UpdateInfo, explain = true): void {
   heldUpdate = { file, titleId, version };
   rememberUpdate(heldUpdate);
   // The core has logged what the file holds; this is what happens to it.
-  log(titleId === openTitleId
+  if (explain) log(titleId === openTitleId
     ? 'The update is applied when this title launches.'
     : 'Open that game to launch it patched.', 'info');
   showPairedNotes();

@@ -78,7 +78,7 @@ async function homebrewTitle(filename: string): Promise<RunningTitle> {
   };
 }
 
-async function bootFile(file: File): Promise<void> {
+export async function bootFile(file: File): Promise<void> {
   const verdict = await classify(file, ['nro', 'elf', 'pfs0', 'xci', 'nca']);
   if (!verdict.ok) {
     // Not a fault: whatever is running keeps running.
