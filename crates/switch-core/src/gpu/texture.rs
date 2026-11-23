@@ -520,8 +520,9 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         return Ok(TexelKind::Depth(DepthTexel::F32X24S8)); // ZF32_X24S8, R32_B24G8
     }
     const UINT: u32 = 4;
-    if (components_sizes, data_type) == (0x29, UINT) {
-        return Ok(TexelKind::Depth(DepthTexel::S8D24Uint)); // S8D24
+    // Z24S8 and G24R8 share one layout: stencil in the low byte, depth above it.
+    if matches!((components_sizes, data_type), (0x29 | 0x0E, UINT)) {
+        return Ok(TexelKind::Depth(DepthTexel::S8D24Uint));
     }
     // Float and packed render targets sampled back (HDR tonemapping, composites).
     let raw = match (components_sizes, data_type) {
@@ -529,6 +530,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x09, UNORM) => 0xD1, // A2B10G10R10       -> RGB10A2Unorm
         (0x18, UNORM) => 0xEA, // G8R8              -> RG8Unorm
         (0x1D, UNORM) => 0xF3, // R8                -> R8Unorm
+        (0x1D, UINT) => 0xF6,  // R8                -> R8Uint
         (0x01, FLOAT) => 0xC0, // R32_G32_B32_A32   -> RGBA32Float
         (0x01, UINT) => 0xC2,  // R32_G32_B32_A32   -> RGBA32Uint
         (0x03, FLOAT) => 0xCA, // R16_G16_B16_A16   -> RGBA16Float
@@ -538,6 +540,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x0C, UNORM) => 0xDA, // R16_G16           -> RG16Unorm
         (0x0C, SNORM) => 0xDB, // R16_G16           -> RG16Snorm
         (0x0F, FLOAT) => 0xE5, // R32               -> R32Float
+        (0x0F, UINT) => 0xE4,  // R32               -> R32Uint
         (0x1B, FLOAT) => 0xF2, // R16               -> R16Float
         (0x1B, UNORM) => 0xEE, // R16               -> R16Unorm
         (0x21, FLOAT) => 0xE0, // B10G11R11         -> B10G11R11Float
@@ -1338,6 +1341,15 @@ mod tests {
     }
 
     #[test]
+    fn a_g24r8_texture_samples_as_stencil_and_depth() {
+        const UINT: u32 = 4;
+        assert_eq!(
+            texel_kind_for(0x0e, UINT).unwrap(),
+            texel_kind_for(0x29, UINT).unwrap(),
+        );
+    }
+
+    #[test]
     fn a_16_bit_depth_surface_samples_as_one_normalized_channel() {
         const UNORM: u32 = 2;
         assert_eq!(
@@ -1774,6 +1786,18 @@ mod tests {
         assert_eq!(plain(0x0C, 2).bytes_per_pixel, 4);
         assert_eq!(plain(0x0C, 1).raw, 0xDB); // R16_G16         -> RG16Snorm
         assert!(texel_kind_for(0x09, 7).is_err());
+    }
+
+    #[test]
+    fn the_integer_tic_formats_map_to_their_surface_format() {
+        const UINT: u32 = 4;
+        let raw = |sizes| match texel_kind_for(sizes, UINT).unwrap() {
+            TexelKind::Plain(format) => format.raw,
+            other => panic!("{sizes:#x} is {other:?}, not a plain format"),
+        };
+        assert_eq!(raw(0x01), 0xC2); // R32_G32_B32_A32 -> RGBA32Uint
+        assert_eq!(raw(0x0F), 0xE4); // R32             -> R32Uint
+        assert_eq!(raw(0x1D), 0xF6); // R8              -> R8Uint
     }
 
     #[test]
