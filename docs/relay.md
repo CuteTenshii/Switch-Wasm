@@ -6,7 +6,7 @@ Nothing here is needed to play: with no relay URL set, the network stays empty.
 
 ## Using it
 
-Run `switch-relay` (no arguments), open the Network tab, and turn it on. The tab shows the relay's state and the guest's connections, UDP sockets and listeners: peer or port, state and bytes each way. The address defaults to `ws://127.0.0.1:18787` and is remembered.
+Download `switch-relay` for Linux, Windows or macOS from the Network tab's switch-relay section (the `relay-v*` releases), or build it with `cargo build --release -p switch-relay`. Run it with no arguments, open the Network tab, and turn it on. The tab shows the relay's state and the guest's connections, UDP sockets and listeners: peer or port, state and bytes each way. The address defaults to `ws://127.0.0.1:18787` and is remembered.
 
 ## Transport
 
