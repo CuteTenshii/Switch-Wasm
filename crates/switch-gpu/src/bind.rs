@@ -372,10 +372,7 @@ impl Gpu {
             .iter()
             .map(|r| match r {
                 Resource::Texture(_, texture, dimension) => {
-                    Some(texture.create_view(&wgpu::TextureViewDescriptor {
-                        dimension: Some(*dimension),
-                        ..Default::default()
-                    }))
+                    Some(self.view(texture, Some(*dimension)))
                 }
                 _ => None,
             })

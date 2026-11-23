@@ -644,6 +644,11 @@ pub struct Gpu {
     shared_bytes: u64,
     /// Render pipelines, by everything they were built from.
     pipelines: std::collections::HashMap<PipelineKey, wgpu::RenderPipeline>,
+    /// Texture views by texture and dimension. See [`Gpu::view`].
+    views: std::collections::HashMap<
+        (wgpu::Texture, Option<wgpu::TextureViewDimension>),
+        wgpu::TextureView,
+    >,
     /// Samplers by their settings; `createSampler` is slow in browsers.
     samplers: std::collections::HashMap<SamplerKey, wgpu::Sampler>,
     /// Bind group layouts, by the entries they describe.

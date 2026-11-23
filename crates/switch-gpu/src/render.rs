@@ -519,11 +519,8 @@ impl Gpu {
                     );
                 }
             }
-            let view = |texture: &wgpu::Texture| {
-                texture.create_view(&wgpu::TextureViewDescriptor::default())
-            };
-            let colour_view = colour_target.as_ref().map(view);
-            let depth_view = depth_target.as_ref().map(view);
+            let colour_view = colour_target.as_ref().map(|t| self.view(t, None));
+            let depth_view = depth_target.as_ref().map(|t| self.view(t, None));
             let colour: Vec<Option<wgpu::RenderPassColorAttachment>> = colour_view
                 .as_ref()
                 .map(|view| {

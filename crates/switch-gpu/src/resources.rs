@@ -11,6 +11,9 @@ use switch_core::gpu::renderer::Software;
 use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
 use switch_core::gpu::upload::{TextureKey, TextureUpload};
 
+/// Bounds [`Gpu::views`]; a title's draws bind far fewer textures.
+const MAX_VIEWS: usize = 4096;
+
 /// Bounds [`Gpu::built_modules`]; a title draws with far fewer program and layout pairs.
 const BUILT_MODULE_ENTRIES: usize = 4096;
 
@@ -359,6 +362,29 @@ impl Gpu {
         for page in std::mem::take(&mut self.texture_pages_to_watch) {
             ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
         }
+    }
+
+    /// A view of the whole of `texture`, of `dimension` or the texture's own; kept, since a
+    /// browser makes each view a JavaScript object and draws keep binding the same ones.
+    pub(super) fn view(
+        &mut self,
+        texture: &wgpu::Texture,
+        dimension: Option<wgpu::TextureViewDimension>,
+    ) -> wgpu::TextureView {
+        let key = (texture.clone(), dimension);
+        if let Some(view) = self.views.get(&key) {
+            return view.clone();
+        }
+        // Views of destroyed textures are never asked for again; this bounds them.
+        if self.views.len() >= MAX_VIEWS {
+            self.views.clear();
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension,
+            ..Default::default()
+        });
+        self.views.insert(key, view.clone());
+        view
     }
 
     /// The buffer [`Gpu::stage_constants`] places constants in.
