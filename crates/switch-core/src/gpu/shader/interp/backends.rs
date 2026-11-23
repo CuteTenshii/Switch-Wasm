@@ -211,6 +211,16 @@ pub trait TextureSource {
         )))
     }
 
+    /// [`TextureSource::fetch`] from mip level `level`.
+    fn fetch_level(&self, handle: u32, at: [u32; 3], level: u32) -> ShaderResult<[f32; 4]> {
+        if level == 0 {
+            return self.fetch(handle, at);
+        }
+        Err(fault(format!(
+            "shader: texel fetch of level {level} of handle {handle:#x}, but only level 0 is held"
+        )))
+    }
+
     /// The four texels of a gather, each compared against `reference` as 1.0 or 0.0.
     fn gather_compare(
         &self,
@@ -515,6 +525,34 @@ impl TextureSource for MemoryTextures<'_, '_> {
         Ok(crate::gpu::texture::fetch_with(
             self.ctx,
             &descriptors,
+            at,
+            self.blocks,
+        )?)
+    }
+
+    fn fetch_level(&self, handle: u32, at: [u32; 3], level: u32) -> ShaderResult<[f32; 4]> {
+        let Some(descriptors) = self.descriptors_for(handle)? else {
+            return Ok(crate::gpu::texture::NULL_TEXEL);
+        };
+        if level == 0 {
+            return self.fetch(handle, at);
+        }
+        // Past the chain there is no texel, so the fetch reads zero as outside the image does.
+        if level >= descriptors.texture.levels {
+            return Ok([0.0; 4]);
+        }
+        let Some(texture) = descriptors.texture.level(level) else {
+            return Err(fault(format!(
+                "shader: texel fetch of level {level} of a pitch or volume image, whose smaller \
+                 levels are not addressed"
+            )));
+        };
+        Ok(crate::gpu::texture::fetch_with(
+            self.ctx,
+            &crate::gpu::texture::Descriptors {
+                texture,
+                ..descriptors
+            },
             at,
             self.blocks,
         )?)

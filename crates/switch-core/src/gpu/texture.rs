@@ -1424,6 +1424,62 @@ mod tests {
         assert!(refused.contains("R_DATA_TYPE 0"), "{refused}");
     }
 
+    /// A texel fetch of a smaller level reads that level's texels, and past the chain reads zero.
+    #[test]
+    fn a_texel_fetch_reads_the_level_it_names() {
+        use crate::gpu::shader::interp::{MemoryTextures, TextureSource};
+        let (mut mem, vmm, base) = harness();
+        let (tic_pool, tsc_pool, tex_addr) = (base, base + 0x100, base + 0x400);
+        // 16x16 block-linear R32 float, one GOB high, two levels.
+        let tic = [
+            0x0f | 7 << 7 | IDENTITY_SWIZZLE,
+            tex_addr as u32,
+            (tex_addr >> 32) as u32 | 3 << 21,
+            1 << 28,
+            15 | 1 << 23,
+            15,
+            0,
+            0,
+        ];
+        for (i, word) in tic.iter().enumerate() {
+            vmm.write_u32(&mem, tic_pool + i as u64 * 4, *word).unwrap();
+        }
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            as_id: 0,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let image = read_bound_image(&ctx, tic_pool).unwrap().unwrap();
+        let level = image.level(1).unwrap();
+        for (from, to, value) in [
+            (image.addr, level.addr, 0.25f32),
+            (level.addr, level.addr + 0x200, 0.75),
+        ] {
+            for at in (from..to).step_by(4) {
+                ctx.vmm.write_u32(ctx.mem, at, value.to_bits()).unwrap();
+            }
+        }
+        let descriptors = RefCell::new(DescriptorCache::default());
+        let blocks = RefCell::new(BlockCache::default());
+        let textures = MemoryTextures {
+            ctx: &ctx,
+            tex_header_pool: tic_pool,
+            tex_sampler_pool: tsc_pool,
+            descriptors: &descriptors,
+            blocks: &blocks,
+            surface_stores: None,
+        };
+        assert_eq!(textures.fetch_level(0, [9, 9, 0], 0).unwrap()[0], 0.25);
+        assert_eq!(textures.fetch_level(0, [5, 6, 0], 1).unwrap()[0], 0.75);
+        assert_eq!(textures.fetch_level(0, [9, 0, 0], 1).unwrap(), [0.0; 4]);
+        assert_eq!(textures.fetch_level(0, [0, 0, 0], 2).unwrap(), [0.0; 4]);
+    }
+
     /// `S8D24` as an unsigned integer: stencil bits and unorm depth, never blended.
     #[test]
     fn an_integer_stencil_texture_reads_the_nearest_texel_bits() {

@@ -171,11 +171,7 @@ impl Invocation {
         else {
             unreachable!("run_tlds called with {op:?}");
         };
-        if let Some(level) = lod.map(|reg| self.reg(reg)).filter(|&level| level != 0) {
-            return Err(fault(format!(
-                "shader: tlds of level {level}, but only level 0 is held"
-            )));
-        }
+        let level = lod.map_or(0, |reg| self.reg(reg));
         let handle = env
             .consts
             .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
@@ -191,7 +187,7 @@ impl Invocation {
             TexDim::T2dArray => layer.map_or(0, |reg| self.reg(reg) & 0xffff),
             _ => 0,
         };
-        let texel = env.textures.fetch(handle, at)?;
+        let texel = env.textures.fetch_level(handle, at, level)?;
         self.land_texture(program, pc, texel, pending);
         Ok(())
     }

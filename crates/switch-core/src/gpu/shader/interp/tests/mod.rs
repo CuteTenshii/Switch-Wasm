@@ -546,7 +546,8 @@ fn a_tex_texel_offset_moves_the_sample_by_one_texel() {
 }
 
 /// `tlds` fetches by integer coordinates: an offset moves x and y, an array reads its layer from
-/// the low half of a register, a volume its third coordinate, and only level 0 is held.
+/// the low half of a register, a volume its third coordinate, and a source holding only level 0
+/// refuses the others.
 #[test]
 fn a_tlds_fetches_the_integer_texel_its_registers_and_offset_name() {
     struct Probe(std::cell::Cell<[u32; 3]>);
