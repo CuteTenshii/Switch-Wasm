@@ -159,18 +159,23 @@ impl Gpu {
         bytes: &[u8],
         usage: wgpu::BufferUsages,
     ) -> wgpu::Buffer {
-        // Padded to four bytes.
-        let mut padded = bytes.to_vec();
-        while !padded.len().is_multiple_of(4) || padded.is_empty() {
-            padded.push(0);
-        }
+        // Queue writes take whole words, so only a ragged or empty upload is copied to pad it.
+        let padded;
+        let bytes = if bytes.len().is_multiple_of(4) && !bytes.is_empty() {
+            bytes
+        } else {
+            let mut words = bytes.to_vec();
+            words.resize(bytes.len().next_multiple_of(4).max(4), 0);
+            padded = words;
+            &padded[..]
+        };
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(what),
-            size: padded.len() as u64,
+            size: bytes.len() as u64,
             usage: usage | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&buffer, 0, &padded);
+        self.queue.write_buffer(&buffer, 0, bytes);
         buffer
     }
 
