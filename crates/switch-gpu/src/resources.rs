@@ -401,10 +401,11 @@ impl Gpu {
             .clone()
     }
 
-    /// Place a stage's packed constants in the arena, answering the dynamic offset and the size
-    /// to bind; `None` when they could never fit. The size is rounded up to a power of two so
-    /// that bind groups repeat: `cbRead` bounds each bank by the table, never by the binding.
-    pub(super) fn stage_constants(&mut self, bytes: &[u8]) -> Option<(u32, u64)> {
+    /// Place a stage's packed constants in the arena (`stage` 0 for vertex, 1 for fragment),
+    /// answering the dynamic offset and the size to bind; `None` when they could never fit. The
+    /// size is rounded up to a power of two so that bind groups repeat: `cbRead` bounds each
+    /// bank by the table, never by the binding.
+    pub(super) fn stage_constants(&mut self, stage: usize, bytes: &[u8]) -> Option<(u32, u64)> {
         let size = (bytes.len() as u64).next_power_of_two().max(256);
         if size > CONSTANT_ARENA_BYTES {
             return None;
@@ -413,6 +414,18 @@ impl Gpu {
         // recorded and submitted.
         let placed_already = self.constants_unrecorded;
         self.constants_unrecorded = true;
+        // Instances of one draw usually repeat their constants, and the same offset lets the
+        // next instance widen the draw call before it.
+        if let Some((offset, last_size)) = self.last_constants[stage] {
+            let at = offset as usize;
+            let same = self
+                .constant_staging
+                .get(at..at + bytes.len())
+                .is_some_and(|held| same_bytes(held, bytes));
+            if same && last_size == size {
+                return Some((offset, size));
+            }
+        }
         let align = u64::from(self.device_limits.min_storage_buffer_offset_alignment);
         let mut offset = (self.constant_staging.len() as u64).next_multiple_of(align);
         if offset + size > CONSTANT_ARENA_BYTES {
@@ -431,6 +444,7 @@ impl Gpu {
         // Writes to the queue take whole words.
         let words = self.constant_staging.len().next_multiple_of(4);
         self.constant_staging.resize(words, 0);
+        self.last_constants[stage] = Some((offset as u32, size));
         Some((offset as u32, size))
     }
 
@@ -439,6 +453,7 @@ impl Gpu {
         if !self.constants_unrecorded {
             self.constant_staging.clear();
             self.constants_flushed = 0;
+            self.last_constants = [None; 2];
         }
     }
 

@@ -197,26 +197,19 @@ impl Gpu {
                 } else {
                     self.buffer("vertex", &f.bytes, wgpu::BufferUsages::VERTEX)
                 };
+                // Kept so the next instances can be laid out beside it; see `Gpu::emit_pending`.
+                let element = (f.step == wgpu::VertexStepMode::Instance && patches.is_empty())
+                    .then(|| f.bytes.to_vec());
                 Bound {
                     buffer,
                     patches,
                     attributes: f.attributes,
                     stride: f.stride,
                     step: f.step,
+                    element,
                 }
             })
             .collect();
-        let layouts: Vec<Option<wgpu::VertexBufferLayout>> = bound
-            .iter()
-            .map(|b| {
-                Some(wgpu::VertexBufferLayout {
-                    array_stride: b.stride,
-                    step_mode: b.step,
-                    attributes: &b.attributes,
-                })
-            })
-            .collect();
-
         let (vs_group_layout, vs_group, vs_offsets, vs_constants) =
             timed!(self, bind, self.bind_group(p, ShaderStage::VertexB, 0))?;
         let (fs_group_layout, fs_group, fs_offsets, fs_constants) =
@@ -237,64 +230,47 @@ impl Gpu {
             state::Topology::LineStrip | state::Topology::TriangleStrip => draw_index_format,
             _ => None,
         };
-        let mut key = PipelineKey {
-            vs: vs_key,
-            fs: fs_key,
-            target: target_format,
-            depth: depth_format
-                .zip(p.state.depth)
-                .map(|(format, d)| (format, d.write_enabled, d.compare)),
-            samples: multisample.count,
-            sample_mask: multisample.mask,
-            alpha_to_coverage: multisample.alpha_to_coverage_enabled,
-            sample_pass: None,
-            blend: p.state.target.and_then(|t| t.blend),
-            write_mask: p.state.target.map_or([true; 4], |t| t.write_mask),
-            topology: p.state.topology,
-            strip_index_format,
-            front_face: p.state.front_face,
-            cull: p.state.cull,
-            buffers: bound
-                .iter()
-                .map(|b| {
-                    let attributes = b
-                        .attributes
-                        .iter()
-                        .map(|a| (a.format, a.offset, a.shader_location))
-                        .collect();
-                    (
-                        b.stride as u32,
-                        b.step == wgpu::VertexStepMode::Instance,
-                        attributes,
-                    )
-                })
-                .collect(),
-        };
-        // A draw whose samples sit off their texel centres is drawn once per sample.
-        let passes: Vec<Option<u32>> =
-            if p.render == Render::Expanded && !p.state.grid.samples_at_texel_centres() {
-                (0..p.state.samples).map(Some).collect()
-            } else {
-                vec![None]
-            };
-        let mut pipelines = Vec::with_capacity(passes.len());
-        let mut layout = None;
-        for sample_pass in passes {
-            key.sample_pass = sample_pass;
-            if let Some(pipeline) = self.pipelines.get(&key) {
-                pipelines.push(pipeline.clone());
-                continue;
-            }
-            let pipeline_layout = layout.get_or_insert_with(|| {
-                self.device
-                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("draw"),
-                        bind_group_layouts: &[Some(&vs_group_layout), Some(&fs_group_layout)],
-                        immediate_size: 0,
-                    })
-            });
+        let recipe = Recipe {
+            key: PipelineKey {
+                vs: vs_key,
+                fs: fs_key,
+                target: target_format,
+                depth: depth_format
+                    .zip(p.state.depth)
+                    .map(|(format, d)| (format, d.write_enabled, d.compare)),
+                samples: multisample.count,
+                sample_mask: multisample.mask,
+                alpha_to_coverage: multisample.alpha_to_coverage_enabled,
+                sample_pass: None,
+                blend: p.state.target.and_then(|t| t.blend),
+                write_mask: p.state.target.map_or([true; 4], |t| t.write_mask),
+                topology: p.state.topology,
+                strip_index_format,
+                front_face: p.state.front_face,
+                cull: p.state.cull,
+                buffers: Vec::new(),
+            },
+            modules: [vs_module, fs_module],
+            group_layouts: [vs_group_layout, fs_group_layout],
+            primitive: wgpu::PrimitiveState {
+                topology: topology(p.state.topology),
+                strip_index_format,
+                front_face: match p.state.front_face {
+                    state::FrontFace::Ccw => wgpu::FrontFace::Ccw,
+                    state::FrontFace::Cw => wgpu::FrontFace::Cw,
+                },
+                cull_mode: match p.state.cull {
+                    state::Cull::None => None,
+                    state::Cull::Front => Some(wgpu::Face::Front),
+                    state::Cull::Back => Some(wgpu::Face::Back),
+                },
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            multisample,
             // Empty for a depth-only pass.
-            let colour_targets: Vec<Option<wgpu::ColorTargetState>> = target_format
+            colour_targets: target_format
                 .map(|format| {
                     Some(wgpu::ColorTargetState {
                         format,
@@ -306,74 +282,118 @@ impl Gpu {
                     })
                 })
                 .into_iter()
-                .collect();
-            let constants: Vec<(&str, f64)> = sample_pass
-                .map(|k| ("pass_sample", f64::from(k)))
-                .into_iter()
-                .collect();
-            let descriptor = wgpu::RenderPipelineDescriptor {
-                label: Some("draw"),
-                layout: Some(pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &vs_module,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &layouts,
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: topology(p.state.topology),
-                    strip_index_format,
-                    front_face: match p.state.front_face {
-                        state::FrontFace::Ccw => wgpu::FrontFace::Ccw,
-                        state::FrontFace::Cw => wgpu::FrontFace::Cw,
-                    },
-                    cull_mode: match p.state.cull {
-                        state::Cull::None => None,
-                        state::Cull::Front => Some(wgpu::Face::Front),
-                        state::Cull::Back => Some(wgpu::Face::Back),
-                    },
-                    unclipped_depth: false,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    conservative: false,
-                },
-                depth_stencil: key.depth.map(|(format, write_enabled, test)| {
-                    wgpu::DepthStencilState {
-                        format,
-                        depth_write_enabled: Some(write_enabled),
-                        depth_compare: Some(compare(test)),
-                        // Neither renderer tests stencil.
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    }
-                }),
-                multisample,
-                fragment: Some(wgpu::FragmentState {
-                    module: &fs_module,
-                    entry_point: Some("fs_main"),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &constants,
-                        ..Default::default()
-                    },
-                    targets: &colour_targets,
-                }),
-                multiview_mask: None,
-                cache: None,
-            };
-            let pipeline = timed!(
-                self,
-                pipeline,
-                self.device.create_render_pipeline(&descriptor)
-            );
-            self.pipelines.insert(key.clone(), pipeline.clone());
-            pipelines.push(pipeline);
+                .collect(),
+            buffers: Vec::new(),
         }
-        self.encode(p, &pipelines, &groups, &bound, ctx)
+        .with_buffers(
+            bound
+                .iter()
+                .map(|b| (b.stride, b.step, b.attributes.clone()))
+                .collect(),
+        );
+        // A draw whose samples sit off their texel centres is drawn once per sample.
+        let passes: Vec<Option<u32>> =
+            if p.render == Render::Expanded && !p.state.grid.samples_at_texel_centres() {
+                (0..p.state.samples).map(Some).collect()
+            } else {
+                vec![None]
+            };
+        let pipelines: Vec<wgpu::RenderPipeline> = passes
+            .into_iter()
+            .map(|sample_pass| self.pipeline(&recipe, sample_pass))
+            .collect();
+        self.encode(p, recipe, &pipelines, &groups, &bound, ctx)
+    }
+
+    /// The pipeline `recipe` describes, drawing only `sample_pass` when given; built once.
+    pub(super) fn pipeline(
+        &mut self,
+        recipe: &Recipe,
+        sample_pass: Option<u32>,
+    ) -> wgpu::RenderPipeline {
+        // A recipe's own key is the single-pass one, which most draws look up without a copy.
+        let key = match sample_pass {
+            None => std::borrow::Cow::Borrowed(&recipe.key),
+            Some(_) => std::borrow::Cow::Owned(PipelineKey {
+                sample_pass,
+                ..recipe.key.clone()
+            }),
+        };
+        if let Some(pipeline) = self.pipelines.get(&*key) {
+            return pipeline.clone();
+        }
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("draw"),
+                bind_group_layouts: &[
+                    Some(&recipe.group_layouts[0]),
+                    Some(&recipe.group_layouts[1]),
+                ],
+                immediate_size: 0,
+            });
+        let buffers: Vec<Option<wgpu::VertexBufferLayout>> = recipe
+            .buffers
+            .iter()
+            .map(|(stride, step, attributes)| {
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: *stride,
+                    step_mode: *step,
+                    attributes,
+                })
+            })
+            .collect();
+        let constants: Vec<(&str, f64)> = sample_pass
+            .map(|k| ("pass_sample", f64::from(k)))
+            .into_iter()
+            .collect();
+        let descriptor = wgpu::RenderPipelineDescriptor {
+            label: Some("draw"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &recipe.modules[0],
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &buffers,
+            },
+            primitive: recipe.primitive,
+            depth_stencil: key.depth.map(|(format, write_enabled, test)| {
+                wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: Some(write_enabled),
+                    depth_compare: Some(compare(test)),
+                    // Neither renderer tests stencil.
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }
+            }),
+            multisample: recipe.multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &recipe.modules[1],
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
+                targets: &recipe.colour_targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        };
+        let pipeline = timed!(
+            self,
+            pipeline,
+            self.device.create_render_pipeline(&descriptor)
+        );
+        self.pipelines.insert(key.into_owned(), pipeline.clone());
+        pipeline
     }
 
     /// Record and submit one draw against a built pipeline.
     fn encode(
         &mut self,
         p: &Prepared,
+        recipe: Recipe,
         pipelines: &[wgpu::RenderPipeline],
         groups: &Groups,
         bound: &[Bound],
@@ -560,36 +580,10 @@ impl Gpu {
                 depth: depth_target,
                 globals: held_globals,
                 set: crate::PassState::default(),
+                pending: None,
             });
         }
         {
-            let open = self.pass.as_mut().expect("a pass was opened or joined");
-            let (pass, set) = (&mut open.pass, &mut open.set);
-            let mut skipped = 0u64;
-            let mut fresh = |changed: bool| {
-                skipped += u64::from(!changed);
-                changed
-            };
-            for (slot, (group, offsets)) in [&groups.vs, &groups.fs]
-                .into_iter()
-                .zip(&groups.offsets)
-                .enumerate()
-            {
-                let now = Some((group.clone(), offsets.clone()));
-                if fresh(set.groups[slot] != now) {
-                    pass.set_bind_group(slot as u32, group, offsets);
-                    set.groups[slot] = now;
-                }
-            }
-            for (slot, b) in bound.iter().enumerate() {
-                if set.vertex.len() <= slot {
-                    set.vertex.resize(slot + 1, None);
-                }
-                if fresh(set.vertex[slot].as_ref() != Some(&b.buffer)) {
-                    pass.set_vertex_buffer(slot as u32, b.buffer.slice(..));
-                    set.vertex[slot] = Some(b.buffer.clone());
-                }
-            }
             // In pixels, except on the expanded route where the attachment is in texels.
             let (sx, sy) = match p.render {
                 Render::Expanded => (p.state.grid.samples_x, p.state.grid.samples_y),
@@ -597,66 +591,173 @@ impl Gpu {
             };
             let viewport = &p.state.viewport;
             let scissor = p.state.scissor;
-            let rect = [
+            let scissor = [
                 scissor.x0 * sx,
                 scissor.y0 * sy,
                 scissor.x1.saturating_sub(scissor.x0) * sx,
                 scissor.y1.saturating_sub(scissor.y0) * sy,
             ];
-            if fresh(set.scissor != Some(rect)) {
-                pass.set_scissor_rect(rect[0], rect[1], rect[2], rect[3]);
-                set.scissor = Some(rect);
-            }
-            if p.state.target.and_then(|t| t.blend).is_some()
-                && fresh(set.blend_constant != Some(p.state.blend_constant))
-            {
-                let [r, g, b, a] = p.state.blend_constant;
-                pass.set_blend_constant(wgpu::Color {
-                    r: f64::from(r),
-                    g: f64::from(g),
-                    b: f64::from(b),
-                    a: f64::from(a),
-                });
-                set.blend_constant = Some(p.state.blend_constant);
-            }
-            // One instance, numbered so `instance_index` matches `gl_InstanceID`.
-            let instances = p.instance..p.instance + 1;
-            if let Some((buffer, format, _)) = &index {
-                let now = Some((buffer.clone(), *format));
-                if fresh(set.index != now) {
-                    pass.set_index_buffer(buffer.slice(..), *format);
-                    set.index = now;
-                }
-            }
+            let blend_constant = p
+                .state
+                .target
+                .and_then(|t| t.blend)
+                .map(|_| p.state.blend_constant);
+            let index_buffer = index.as_ref().map(|(buffer, format, _)| (buffer, *format));
             // One pipeline, or one per sample with the geometry moved onto it.
-            for (sample, pipeline) in pipelines.iter().enumerate() {
-                let (shift_x, shift_y) = match pipelines.len() {
-                    1 => (0.0, 0.0),
-                    _ => p.state.grid.texel_shift(sample as u32),
+            let passes: Vec<(&wgpu::RenderPipeline, [f32; 6])> = pipelines
+                .iter()
+                .enumerate()
+                .map(|(sample, pipeline)| {
+                    let (shift_x, shift_y) = match pipelines.len() {
+                        1 => (0.0, 0.0),
+                        _ => p.state.grid.texel_shift(sample as u32),
+                    };
+                    let rect = [
+                        viewport.x * sx as f32 + shift_x,
+                        viewport.y * sy as f32 + shift_y,
+                        viewport.width * sx as f32,
+                        viewport.height * sy as f32,
+                        viewport.min_depth.clamp(0.0, 1.0),
+                        viewport.max_depth.clamp(0.0, 1.0),
+                    ];
+                    (pipeline, rect)
+                })
+                .collect();
+            // One instance, numbered so `instance_index` matches `gl_InstanceID`.
+            // One instance, numbered so `instance_index` matches `gl_InstanceID`.
+            let mut call = crate::DrawCall {
+                count: p.count,
+                base_vertex: index.as_ref().map(|(_, _, base)| *base),
+                instances: p.instance..p.instance + 1,
+                instanced: Vec::new(),
+                recipe: None,
+            };
+            // The next instance of the draw before, in the state it left, widens that draw, its
+            // instanced arrays' elements laid out after the earlier instances'.
+            let max_stride = u64::from(self.device_limits.max_vertex_buffer_array_stride);
+            let mut instanced = Vec::new();
+            let mut mergeable = passes.len() == 1;
+            for (slot, b) in bound.iter().enumerate() {
+                if b.step != wgpu::VertexStepMode::Instance {
+                    continue;
+                }
+                let Some(element) = b.element.as_deref() else {
+                    mergeable = false;
+                    continue;
                 };
-                if fresh(set.pipeline.as_ref() != Some(pipeline)) {
-                    pass.set_pipeline(pipeline);
-                    set.pipeline = Some(pipeline.clone());
+                let stride = crate::instance_stride(element.len());
+                mergeable &= !element.is_empty()
+                    && stride <= max_stride
+                    && b.attributes
+                        .iter()
+                        .all(|a| a.offset + a.format.size() <= stride);
+                instanced.push((slot, element));
+            }
+            let merges = mergeable
+                && self.pass.as_ref().is_some_and(|open| {
+                    open.pending
+                        .as_ref()
+                        .is_some_and(|d| d.continued_by(&call, &instanced))
+                        && open.set.holds(
+                            [&groups.vs, &groups.fs],
+                            &groups.offsets,
+                            bound.iter().map(|b| {
+                                (b.step == wgpu::VertexStepMode::Vertex).then_some(&b.buffer)
+                            }),
+                            scissor,
+                            blend_constant,
+                            index_buffer,
+                            passes[0],
+                        )
+                });
+            if merges {
+                let open = self.pass.as_mut().expect("a pass was opened or joined");
+                if let Some(pending) = open.pending.as_mut() {
+                    pending.instances.end += 1;
+                    for ((_, _, elements), (_, element)) in
+                        pending.instanced.iter_mut().zip(&instanced)
+                    {
+                        elements.extend_from_slice(element);
+                    }
                 }
-                let rect = [
-                    viewport.x * sx as f32 + shift_x,
-                    viewport.y * sy as f32 + shift_y,
-                    viewport.width * sx as f32,
-                    viewport.height * sy as f32,
-                    viewport.min_depth.clamp(0.0, 1.0),
-                    viewport.max_depth.clamp(0.0, 1.0),
-                ];
-                if fresh(set.viewport != Some(rect)) {
-                    pass.set_viewport(rect[0], rect[1], rect[2], rect[3], rect[4], rect[5]);
-                    set.viewport = Some(rect);
+                self.instances_merged += 1;
+            } else {
+                self.emit_pending();
+                if mergeable && !instanced.is_empty() {
+                    call.instanced = instanced
+                        .iter()
+                        .map(|(slot, element)| (*slot, element.len(), element.to_vec()))
+                        .collect();
+                    call.recipe = Some(Box::new(recipe));
                 }
-                match &index {
-                    // The vertex buffer starts at the draw's lowest index.
-                    Some((_, _, base)) => pass.draw_indexed(0..p.count, *base, instances.clone()),
-                    None => pass.draw(0..p.count, instances.clone()),
+                let open = self.pass.as_mut().expect("a pass was opened or joined");
+                let (pass, set) = (&mut open.pass, &mut open.set);
+                let mut skipped = 0u64;
+                let mut fresh = |changed: bool| {
+                    skipped += u64::from(!changed);
+                    changed
+                };
+                for (slot, (group, offsets)) in [&groups.vs, &groups.fs]
+                    .into_iter()
+                    .zip(&groups.offsets)
+                    .enumerate()
+                {
+                    let now = Some((group.clone(), offsets.clone()));
+                    if fresh(set.groups[slot] != now) {
+                        pass.set_bind_group(slot as u32, group, offsets);
+                        set.groups[slot] = now;
+                    }
+                }
+                for (slot, b) in bound.iter().enumerate() {
+                    if set.vertex.len() <= slot {
+                        set.vertex.resize(slot + 1, None);
+                    }
+                    if fresh(set.vertex[slot].as_ref() != Some(&b.buffer)) {
+                        pass.set_vertex_buffer(slot as u32, b.buffer.slice(..));
+                        set.vertex[slot] = Some(b.buffer.clone());
+                    }
+                }
+                if fresh(set.scissor != Some(scissor)) {
+                    pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
+                    set.scissor = Some(scissor);
+                }
+                if let Some(constant) = blend_constant {
+                    if fresh(set.blend_constant != Some(constant)) {
+                        let [r, g, b, a] = constant;
+                        pass.set_blend_constant(wgpu::Color {
+                            r: f64::from(r),
+                            g: f64::from(g),
+                            b: f64::from(b),
+                            a: f64::from(a),
+                        });
+                        set.blend_constant = Some(constant);
+                    }
+                }
+                if let Some((buffer, format)) = index_buffer {
+                    let now = Some((buffer.clone(), format));
+                    if fresh(set.index != now) {
+                        pass.set_index_buffer(buffer.slice(..), format);
+                        set.index = now;
+                    }
+                }
+                for &(pipeline, rect) in &passes {
+                    if fresh(set.pipeline.as_ref() != Some(pipeline)) {
+                        pass.set_pipeline(pipeline);
+                        set.pipeline = Some(pipeline.clone());
+                    }
+                    if fresh(set.viewport != Some(rect)) {
+                        pass.set_viewport(rect[0], rect[1], rect[2], rect[3], rect[4], rect[5]);
+                        set.viewport = Some(rect);
+                    }
+                    if !mergeable {
+                        call.record(pass);
+                    }
+                }
+                self.pass_calls_skipped += skipped;
+                if mergeable {
+                    open.pending = Some(call);
                 }
             }
-            self.pass_calls_skipped += skipped;
         }
         if stores {
             self.end_pass();
@@ -689,6 +790,7 @@ impl Gpu {
             }
             self.scratch.push(Scratch::Texture(texture.clone()));
         }
+        self.later_instances += u64::from(p.instance > 0);
         self.batched_draws += 1;
         if self.batched_draws >= crate::MAX_BATCHED_DRAWS {
             self.submit_batch();
@@ -727,7 +829,55 @@ impl Gpu {
 
     /// End the render pass draws share, so the encoder can record something else.
     pub(super) fn end_pass(&mut self) {
+        self.emit_pending();
         self.pass = None;
+    }
+
+    /// Record the draw the open pass holds back. Instances merged into it read their instanced
+    /// arrays from one buffer of their elements, each at `instance_index` strides in, through a
+    /// pipeline reading those arrays at that stride.
+    pub(super) fn emit_pending(&mut self) {
+        let Some(call) = self.pass.as_mut().and_then(|open| open.pending.take()) else {
+            return;
+        };
+        if call.instances.len() > 1 {
+            if let Some(recipe) = &call.recipe {
+                let strides: Vec<(usize, u64)> = call
+                    .instanced
+                    .iter()
+                    .map(|&(slot, len, _)| (slot, crate::instance_stride(len)))
+                    .collect();
+                let pipeline = self.pipeline(&recipe.with_strides(&strides), None);
+                let buffers: Vec<(usize, wgpu::Buffer)> = call
+                    .instanced
+                    .iter()
+                    .zip(&strides)
+                    .map(|((slot, len, elements), &(_, stride))| {
+                        let stride = stride as usize;
+                        // The instances before the first are never read.
+                        let mut bytes = vec![0u8; call.instances.start as usize * stride];
+                        for element in elements.chunks_exact(*len) {
+                            bytes.extend_from_slice(element);
+                            bytes.resize(bytes.len() + stride - len, 0);
+                        }
+                        (
+                            *slot,
+                            self.buffer("instances", &bytes, wgpu::BufferUsages::VERTEX),
+                        )
+                    })
+                    .collect();
+                let open = self.pass.as_mut().expect("the pass the draw was held in");
+                open.pass.set_pipeline(&pipeline);
+                open.set.pipeline = Some(pipeline);
+                for (slot, buffer) in buffers {
+                    open.pass.set_vertex_buffer(slot as u32, buffer.slice(..));
+                    open.set.vertex[slot] = Some(buffer);
+                }
+            }
+        }
+        if let Some(open) = self.pass.as_mut() {
+            call.record(&mut open.pass);
+        }
     }
 }
 
@@ -739,4 +889,52 @@ struct Groups {
     /// Each group's dynamic offsets: where its constants are in the arena.
     offsets: [Vec<u32>; 2],
     patched: Vec<(wgpu::Buffer, Vec<crate::Patch>)>,
+}
+
+/// Everything a draw's pipeline is built from, kept with a held-back draw so the pipeline can
+/// be rebuilt with its instanced arrays read at a real stride. See [`Gpu::emit_pending`].
+#[derive(Debug, Clone)]
+pub(crate) struct Recipe {
+    /// What the pipeline is cached by; its buffers follow [`Recipe::buffers`].
+    key: PipelineKey,
+    modules: [wgpu::ShaderModule; 2],
+    group_layouts: [wgpu::BindGroupLayout; 2],
+    primitive: wgpu::PrimitiveState,
+    multisample: wgpu::MultisampleState,
+    colour_targets: Vec<Option<wgpu::ColorTargetState>>,
+    /// Each vertex buffer's stride, step and attributes, in binding order.
+    buffers: Vec<(u64, wgpu::VertexStepMode, Vec<wgpu::VertexAttribute>)>,
+}
+
+impl Recipe {
+    fn with_buffers(
+        mut self,
+        buffers: Vec<(u64, wgpu::VertexStepMode, Vec<wgpu::VertexAttribute>)>,
+    ) -> Recipe {
+        self.key.buffers = buffers
+            .iter()
+            .map(|(stride, step, attributes)| {
+                let attributes = attributes
+                    .iter()
+                    .map(|a| (a.format, a.offset, a.shader_location))
+                    .collect();
+                (
+                    *stride as u32,
+                    *step == wgpu::VertexStepMode::Instance,
+                    attributes,
+                )
+            })
+            .collect();
+        self.buffers = buffers;
+        self
+    }
+
+    /// The same pipeline with each of `strides`' slots, an instanced array, read at its stride.
+    pub(crate) fn with_strides(&self, strides: &[(usize, u64)]) -> Recipe {
+        let mut buffers = self.buffers.clone();
+        for &(slot, stride) in strides {
+            buffers[slot].0 = stride;
+        }
+        self.clone().with_buffers(buffers)
+    }
 }

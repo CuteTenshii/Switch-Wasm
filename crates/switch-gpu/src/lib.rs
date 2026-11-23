@@ -272,6 +272,8 @@ struct Bound {
     /// Zero for an instanced array and for the constant attribute: one element read by every vertex.
     stride: u64,
     step: wgpu::VertexStepMode,
+    /// An instanced array's one element, unless compute launches patch it.
+    element: Option<Vec<u8>>,
 }
 
 /// A vertex buffer's bytes, the attributes that read them, how many bytes into the array they
@@ -508,6 +510,59 @@ struct OpenPass {
     /// What its draws last set, so a draw joining it sets only what changed: each call
     /// crosses into JavaScript in a browser.
     set: PassState,
+    /// The last draw, held back so the next instance of it can widen it into one call. Only
+    /// [`Gpu::end_pass`] closes a pass, and it records this first.
+    pending: Option<DrawCall>,
+}
+
+/// One draw call: vertices or indices, the base vertex of an indexed one, and its instances.
+#[derive(Debug)]
+struct DrawCall {
+    count: u32,
+    base_vertex: Option<i32>,
+    instances: std::ops::Range<u32>,
+    /// Each instanced array's slot, element length, and its instances' elements in order.
+    instanced: Vec<(usize, usize, Vec<u8>)>,
+    /// What its pipeline was built from, kept while it reads instanced arrays.
+    recipe: Option<Box<render::Recipe>>,
+}
+
+/// Past this many bytes of unread elements before a held-back draw's first instance, the next
+/// instance draws on its own.
+const MAX_INSTANCE_PADDING: u64 = 1 << 20;
+
+/// The stride instances' `len`-byte elements are laid out at: whole words, as WebGPU asks.
+fn instance_stride(len: usize) -> u64 {
+    (len as u64).next_multiple_of(4).max(4)
+}
+
+impl DrawCall {
+    fn record(&self, pass: &mut wgpu::RenderPass<'static>) {
+        match self.base_vertex {
+            // The vertex buffer starts at the draw's lowest index.
+            Some(base) => pass.draw_indexed(0..self.count, base, self.instances.clone()),
+            None => pass.draw(0..self.count, self.instances.clone()),
+        }
+    }
+
+    /// Whether `next`, reading these elements of its instanced arrays, draws the same vertices
+    /// as the instance after this call's last.
+    fn continued_by(&self, next: &DrawCall, instanced: &[(usize, &[u8])]) -> bool {
+        let same_arrays = self.instanced.len() == instanced.len()
+            && self.instanced.iter().zip(instanced).all(
+                |((slot, len, _), (next_slot, element))| {
+                    slot == next_slot
+                        && *len == element.len()
+                        && u64::from(self.instances.start) * instance_stride(*len)
+                            <= MAX_INSTANCE_PADDING
+                },
+            );
+        same_arrays
+            && self.count == next.count
+            && self.base_vertex == next.base_vertex
+            && next.instances.start == self.instances.end
+            && next.instances.len() == 1
+    }
 }
 
 /// The state a render pass was last given. Viewport and blend constant compare as floats, so a
@@ -521,6 +576,50 @@ struct PassState {
     scissor: Option<[u32; 4]>,
     viewport: Option<[f32; 6]>,
     blend_constant: Option<[f32; 4]>,
+}
+
+impl PassState {
+    /// Whether a draw wanting this state would set nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn holds<'a>(
+        &self,
+        groups: [&wgpu::BindGroup; 2],
+        offsets: &[Vec<u32>; 2],
+        vertex: impl Iterator<Item = Option<&'a wgpu::Buffer>>,
+        scissor: [u32; 4],
+        blend_constant: Option<[f32; 4]>,
+        index: Option<(&wgpu::Buffer, wgpu::IndexFormat)>,
+        (pipeline, viewport): (&wgpu::RenderPipeline, [f32; 6]),
+    ) -> bool {
+        let groups_held = groups
+            .iter()
+            .zip(offsets)
+            .zip(&self.groups)
+            .all(|((g, o), held)| {
+                held.as_ref()
+                    .is_some_and(|(held_group, held_offsets)| held_group == *g && held_offsets == o)
+            });
+        let mut vertex_held = true;
+        // `None` is a slot whatever it holds will do.
+        for (slot, buffer) in vertex.enumerate() {
+            vertex_held &= buffer.is_none_or(|buffer| {
+                self.vertex
+                    .get(slot)
+                    .is_some_and(|held| held.as_ref() == Some(buffer))
+            });
+        }
+        groups_held
+            && vertex_held
+            && self.scissor == Some(scissor)
+            && blend_constant.is_none_or(|c| self.blend_constant == Some(c))
+            && index.is_none_or(|(buffer, format)| {
+                self.index
+                    .as_ref()
+                    .is_some_and(|(held, held_format)| held == buffer && *held_format == format)
+            })
+            && self.pipeline.as_ref() == Some(pipeline)
+            && self.viewport == Some(viewport)
+    }
 }
 
 /// A buffer's bytes and the device buffer holding them; see [`Gpu::shared_buffer`].
@@ -700,6 +799,8 @@ pub struct Gpu {
     /// What the arena holds from its start, and how much of that is written to it already.
     constant_staging: Vec<u8>,
     constants_flushed: usize,
+    /// Where each stage's last constants placed are, and the size they are bound at.
+    last_constants: [Option<(u32, u64)>; 2],
     /// Whether a draw placed constants and is not recorded yet, so a submit in between must
     /// not start the arena over.
     constants_unrecorded: bool,
@@ -781,6 +882,10 @@ pub struct Gpu {
     pub compute_dispatched: u64,
     /// Draws recorded into the pass the draw before them opened.
     pub passes_joined: u64,
+    /// Draws of a second or later instance, and how many of those widened the draw call
+    /// before them instead of making their own.
+    pub later_instances: u64,
+    pub instances_merged: u64,
     /// Bind group, buffer, pipeline, viewport, scissor and blend constant calls left out
     /// because the pass already had that state.
     pub pass_calls_skipped: u64,
@@ -810,13 +915,16 @@ impl Drop for Gpu {
     fn drop(&mut self) {
         eprintln!(
             "[gpu] {} draws rendered, {} fell back, from {} pipelines and {} modules; {} joined \
-             the pass before them, {} pass calls left out as already set",
+             the pass before them, {} pass calls left out as already set; {} later instances, \
+             {} merged into the draw before",
             self.drawn,
             self.fallbacks,
             self.pipelines.len(),
             self.modules.len(),
             self.passes_joined,
             self.pass_calls_skipped,
+            self.later_instances,
+            self.instances_merged,
         );
         if self.expanded + self.multisampled + self.per_pixel > 0 {
             eprintln!(
@@ -1403,6 +1511,8 @@ impl Renderer for Gpu {
             .field("croppedBinds", self.cropped_binds)
             .field("passesJoined", self.passes_joined)
             .field("passCallsSkipped", self.pass_calls_skipped)
+            .field("laterInstances", self.later_instances)
+            .field("instancesMerged", self.instances_merged)
             .field("buffersUploaded", self.buffers_uploaded)
             .field("buffersReused", self.buffers_reused)
             .field("computeDispatched", self.compute_dispatched)

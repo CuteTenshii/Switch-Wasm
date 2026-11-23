@@ -3124,6 +3124,121 @@ fn an_instanced_array_reads_this_instance_and_not_the_first() {
     }
 }
 
+/// Draw `set_up` as instance `first`, then as the next instance after `between`, on both
+/// renderers.
+fn two_instances_from(
+    first: u32,
+    set_up: impl Fn(&mut Harness),
+    between: impl Fn(&mut Harness),
+) -> (super::Gpu, Vec<u32>, Vec<u32>) {
+    let (_serial, mut gpu) = device().expect("a device");
+    let draws = |h: &mut Harness, renderer: &mut dyn Renderer| {
+        set_up(h);
+        h.engine.set_instance_id(first);
+        h.draw_with(renderer).expect("the first instance");
+        between(h);
+        h.engine.set_instance_id(first + 1);
+        h.draw_with(renderer).expect("the next instance");
+    };
+    let mut h = Harness::new();
+    draws(&mut h, &mut Software);
+    let want = h.target();
+    let mut h = Harness::new();
+    draws(&mut h, &mut gpu);
+    h.flush_with(&mut gpu);
+    let got = h.target();
+    assert_eq!(gpu.fallbacks, 0, "{:?}", gpu.last_fallback);
+    (gpu, want, got)
+}
+
+fn two_instances(
+    set_up: impl Fn(&mut Harness),
+    between: impl Fn(&mut Harness),
+) -> (super::Gpu, Vec<u32>, Vec<u32>) {
+    two_instances_from(0, set_up, between)
+}
+
+#[test]
+fn the_next_instance_of_a_draw_widens_its_draw_call() {
+    if device().is_none() {
+        return;
+    }
+    let (gpu, want, got) = two_instances(
+        |h| {
+            h.depth_target(0x0207);
+            h.triangle([1.0, 0.0, 0.0, 1.0]);
+        },
+        |_| {},
+    );
+    assert_eq!(got, want, "the colour surface differs");
+    assert_eq!(
+        gpu.instances_merged, 1,
+        "instance 1 widened instance 0's call"
+    );
+}
+
+#[test]
+fn instances_reading_an_instanced_array_share_a_draw_call_and_each_read_their_own_element() {
+    if device().is_none() {
+        return;
+    }
+    const RED: u32 = 0xff00_00ff;
+    const GREEN: u32 = 0xff00_ff00;
+    const BLUE: u32 = 0xffff_0000;
+    const WHITE: u32 = 0xffff_ffff;
+    let colours = [
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0, 1.0],
+    ];
+    // Always lets the later instance win, and greater, over a depth surface of zeros, the
+    // earlier one, so each instance's element is seen; starting at 2 puts unread elements
+    // before the first.
+    for (first, compare, wins, loses) in [
+        (0, 0x0207, GREEN, RED),
+        (0, 0x0204, RED, GREEN),
+        (2, 0x0207, WHITE, BLUE),
+        (2, 0x0204, BLUE, WHITE),
+    ] {
+        let (gpu, want, got) = two_instances_from(
+            first,
+            |h| {
+                h.depth_target(compare);
+                h.triangle([0.0, 0.0, 0.0, 1.0]);
+                h.instanced_colour(first, &colours);
+            },
+            |_| {},
+        );
+        assert_eq!(
+            got, want,
+            "the colour surface differs from instance {first}"
+        );
+        assert_eq!(gpu.instances_merged, 1, "one call from instance {first}");
+        assert!(got.contains(&wins), "{wins:#x} from instance {first}");
+        assert!(!got.contains(&loses), "{loses:#x} from instance {first}");
+    }
+}
+
+#[test]
+fn an_instance_with_other_vertices_keeps_its_own_draw_call() {
+    if device().is_none() {
+        return;
+    }
+    let (gpu, want, got) = two_instances(
+        |h| {
+            h.depth_target(0x0207);
+            h.triangle([1.0, 0.0, 0.0, 1.0]);
+        },
+        |h| h.triangle([0.0, 0.0, 1.0, 1.0]),
+    );
+    assert_eq!(got, want, "the colour surface differs");
+    assert_eq!(
+        gpu.instances_merged, 0,
+        "the vertices changed between the instances"
+    );
+}
+
 #[test]
 fn a_zero_stride_array_feeds_every_vertex_its_one_element() {
     let set_up = |h: &mut Harness| {

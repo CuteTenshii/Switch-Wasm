@@ -200,7 +200,7 @@ impl Gpu {
             }
             // The copies land in it, so it is this draw's alone.
             let staged = if constant_patches.is_empty() {
-                self.stage_constants(&packed)
+                self.stage_constants(usize::from(stage != ShaderStage::VertexB), &packed)
             } else {
                 None
             };
