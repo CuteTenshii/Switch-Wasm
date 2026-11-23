@@ -2,7 +2,7 @@
 // (`crates/switch-relay`, run on this computer; see docs/relay.md), and the guest's
 // connections. Off, the guest sees a network that never answers.
 
-import { Power, PowerOff } from 'lucide';
+import { Download, Power, PowerOff } from 'lucide';
 import type { NetState } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { $ } from './dom';
@@ -34,6 +34,7 @@ const rows = $('net-rows');
 let state: NetState = 'off';
 
 urlInput.value = localStorage.getItem(URL_KEY) ?? DEFAULT_URL;
+$('net-download').prepend(icon(Download));
 
 const BADGES: Record<NetState, string> = {
   off: 'off',
@@ -97,7 +98,7 @@ async function refresh(): Promise<void> {
 onNetState((next) => {
   state = next;
   render();
-  say(next === 'unreachable' ? `No relay answered at ${urlInput.value}. Start switch-relay, then turn this on.` : '');
+  say(next === 'unreachable' ? `No relay answered at ${urlInput.value}. Download and start switch-relay, then turn this on.` : '');
   if (next === 'open') log('Online through the relay.');
   void refresh();
 });
