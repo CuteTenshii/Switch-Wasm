@@ -217,13 +217,14 @@ impl Gpu {
             })
             .collect();
 
-        let (vs_group_layout, vs_group, vs_constants) =
+        let (vs_group_layout, vs_group, vs_offsets, vs_constants) =
             timed!(self, bind, self.bind_group(p, ShaderStage::VertexB, 0))?;
-        let (fs_group_layout, fs_group, fs_constants) =
+        let (fs_group_layout, fs_group, fs_offsets, fs_constants) =
             timed!(self, bind, self.bind_group(p, ShaderStage::Fragment, 1))?;
         let groups = Groups {
             vs: vs_group,
             fs: fs_group,
+            offsets: [vs_offsets, fs_offsets],
             patched: vs_constants.into_iter().chain(fs_constants).collect(),
         };
         // An assembled topology is always `u32` indices.
@@ -575,8 +576,8 @@ impl Gpu {
                 .as_mut()
                 .expect("a pass was opened or joined")
                 .pass;
-            pass.set_bind_group(0, &groups.vs, &[]);
-            pass.set_bind_group(1, &groups.fs, &[]);
+            pass.set_bind_group(0, &groups.vs, &groups.offsets[0]);
+            pass.set_bind_group(1, &groups.fs, &groups.offsets[1]);
             for (slot, b) in bound.iter().enumerate() {
                 pass.set_vertex_buffer(slot as u32, b.buffer.slice(..));
             }
@@ -708,5 +709,7 @@ impl Gpu {
 struct Groups {
     vs: wgpu::BindGroup,
     fs: wgpu::BindGroup,
+    /// Each group's dynamic offsets: where its constants are in the arena.
+    offsets: [Vec<u32>; 2],
     patched: Vec<(wgpu::Buffer, Vec<crate::Patch>)>,
 }

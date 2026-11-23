@@ -188,6 +188,8 @@ enum Resource {
     Buffer(u32, wgpu::Buffer),
     /// Bytes for a buffer of the bind group's own.
     Bytes(u32, Vec<u8>),
+    /// The first bytes of a buffer, bound at a dynamic offset into it.
+    Window(u32, wgpu::Buffer, u64),
     Texture(u32, wgpu::Texture, wgpu::TextureViewDimension),
     Sampler(u32, wgpu::Sampler),
 }
@@ -196,6 +198,7 @@ impl PartialEq for Resource {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Buffer(a, x), Self::Buffer(b, y)) => a == b && x == y,
+            (Self::Window(a, x, m), Self::Window(b, y, n)) => a == b && x == y && m == n,
             (Self::Bytes(a, x), Self::Bytes(b, y)) => a == b && bind::same_bytes(x, y),
             (Self::Texture(a, x, p), Self::Texture(b, y, q)) => a == b && x == y && p == q,
             (Self::Sampler(a, x), Self::Sampler(b, y)) => a == b && x == y,
@@ -556,6 +559,9 @@ struct Input {
     pages: Vec<u32>,
 }
 
+/// The constants of the draws between two submits; a draw's are at most 18 banks of 64 KiB.
+const CONSTANT_ARENA_BYTES: u64 = 8 << 20;
+
 /// Past this, every shared vertex and index buffer is dropped.
 const SHARED_BUFFER_BYTES: u64 = 64 << 20;
 
@@ -661,6 +667,15 @@ pub struct Gpu {
     /// The render pass consecutive draws to the same surfaces share, recording into `batch`.
     /// Declared first so it ends before the encoder is dropped.
     pass: Option<OpenPass>,
+    /// Every draw's constants, at the dynamic offsets their bind groups are set with, so a
+    /// changed constant changes no bind group. See [`Gpu::stage_constants`].
+    constant_arena: Option<wgpu::Buffer>,
+    /// What the arena holds from its start, and how much of that is written to it already.
+    constant_staging: Vec<u8>,
+    constants_flushed: usize,
+    /// Whether a draw placed constants and is not recorded yet, so a submit in between must
+    /// not start the arena over.
+    constants_unrecorded: bool,
     /// Draws recorded and not yet submitted. See [`Gpu::submit_batch`].
     batch: Option<wgpu::CommandEncoder>,
     batched_draws: u32,
@@ -854,6 +869,9 @@ impl Drop for Gpu {
         }
         self.submit_batch();
         self.release_scratch();
+        if let Some(arena) = self.constant_arena.take() {
+            arena.destroy();
+        }
         if !self.device_is_shared {
             self.device.destroy();
         }
@@ -1079,6 +1097,8 @@ impl Renderer for Gpu {
             }
             Err(why) => Err(why),
         };
+        // Recorded, or never to be, so the constants it placed bind nothing further.
+        self.constants_unrecorded = false;
         // Watch `prepare`'s reads now that `ctx` is mutable.
         self.remember_textures(ctx);
         // See [`Gpu::scratch`].

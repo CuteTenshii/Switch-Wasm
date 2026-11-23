@@ -2,7 +2,10 @@
 
 use crate::bind::{bytes_fingerprint, same_bytes};
 use crate::readback::Scratch;
-use crate::{Gpu, Input, INPUT_CACHE_BYTES, PAGE_BITS, SHARED_BUFFER_BYTES, TEXTURE_CACHE_BYTES};
+use crate::{
+    Gpu, Input, CONSTANT_ARENA_BYTES, INPUT_CACHE_BYTES, PAGE_BITS, SHARED_BUFFER_BYTES,
+    TEXTURE_CACHE_BYTES,
+};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Software;
 use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
@@ -353,19 +356,90 @@ impl Gpu {
         }
     }
 
+    /// The buffer [`Gpu::stage_constants`] places constants in.
+    pub(super) fn constant_arena(&mut self) -> wgpu::Buffer {
+        self.constant_arena
+            .get_or_insert_with(|| {
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("constants"),
+                    size: CONSTANT_ARENA_BYTES,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .clone()
+    }
+
+    /// Place a stage's packed constants in the arena, answering the dynamic offset and the size
+    /// to bind; `None` when they could never fit. The size is rounded up to a power of two so
+    /// that bind groups repeat: `cbRead` bounds each bank by the table, never by the binding.
+    pub(super) fn stage_constants(&mut self, bytes: &[u8]) -> Option<(u32, u64)> {
+        let size = (bytes.len() as u64).next_power_of_two().max(256);
+        if size > CONSTANT_ARENA_BYTES {
+            return None;
+        }
+        // Whether this draw placed constants already, which the arena must keep until it is
+        // recorded and submitted.
+        let placed_already = self.constants_unrecorded;
+        self.constants_unrecorded = true;
+        let align = u64::from(self.device_limits.min_storage_buffer_offset_alignment);
+        let mut offset = (self.constant_staging.len() as u64).next_multiple_of(align);
+        if offset + size > CONSTANT_ARENA_BYTES {
+            // Starting over would let later draws overwrite what this one placed first.
+            if placed_already {
+                return None;
+            }
+            // Every draw placed so far goes with this submit, so the arena can start over.
+            self.constants_unrecorded = false;
+            self.submit_batch();
+            self.constants_unrecorded = true;
+            offset = 0;
+        }
+        self.constant_staging.resize(offset as usize, 0);
+        self.constant_staging.extend_from_slice(bytes);
+        // Writes to the queue take whole words.
+        let words = self.constant_staging.len().next_multiple_of(4);
+        self.constant_staging.resize(words, 0);
+        Some((offset as u32, size))
+    }
+
+    /// Start the arena over once a submit has taken every draw that reads it.
+    fn restart_constants(&mut self) {
+        if !self.constants_unrecorded {
+            self.constant_staging.clear();
+            self.constants_flushed = 0;
+        }
+    }
+
+    /// Write what was placed in the arena since the last submit, ahead of the next one. Only
+    /// new bytes are written: draws recorded but not yet submitted still read the older ones.
+    fn flush_constants(&mut self) {
+        let from = self.constants_flushed;
+        if self.constant_staging.len() > from {
+            if let Some(arena) = &self.constant_arena {
+                self.queue
+                    .write_buffer(arena, from as u64, &self.constant_staging[from..]);
+            }
+            self.constants_flushed = self.constant_staging.len();
+        }
+    }
+
     /// Submit the draws recorded so far. A queue submit costs over a millisecond in a browser,
     /// so draws share one; anything else that submits, or destroys what they use, goes first.
     pub(super) fn submit_batch(&mut self) {
         self.end_pass();
+        self.flush_constants();
         if let Some(batch) = self.batch.take() {
             self.batched_draws = 0;
             timed!(self, encode, self.queue.submit([batch.finish()]));
+            self.restart_constants();
         }
     }
 
     /// Submit an encoder after the draws recorded before it.
     pub(super) fn submit_with_batch(&mut self, encoder: wgpu::CommandEncoder) {
         self.end_pass();
+        self.flush_constants();
         let batch = self.batch.take().map(|batch| batch.finish());
         self.batched_draws = 0;
         timed!(
@@ -374,6 +448,7 @@ impl Gpu {
             self.queue
                 .submit(batch.into_iter().chain([encoder.finish()]))
         );
+        self.restart_constants();
     }
 
     pub(super) fn release_scratch(&mut self) {

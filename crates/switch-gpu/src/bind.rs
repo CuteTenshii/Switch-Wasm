@@ -132,12 +132,14 @@ fn pack_banks_at<'a>(
 type StageBinding = (
     wgpu::BindGroupLayout,
     wgpu::BindGroup,
+    Vec<u32>,
     Vec<(wgpu::Buffer, Vec<Patch>)>,
 );
 
 impl Gpu {
     /// One stage's bindings: constant banks, and textures with their samplers. With them, the
-    /// constant buffer and the copies of what compute launches wrote, to record before the draw.
+    /// group's dynamic offsets, and the constant buffer and the copies of what compute launches
+    /// wrote, to record before the draw.
     pub(super) fn bind_group(
         &mut self,
         p: &Prepared,
@@ -157,6 +159,8 @@ impl Gpu {
         // Why it is not: a held surface, a shadow map, a texture the cache does not keep, a global.
         let mut why = [false; 4];
         let mut constant_patches = Vec::new();
+        let mut dynamic_offsets = Vec::new();
+        let mut patched = None;
         // Buffers of this draw's own that copies fill before its pass.
         let mut snapshots = Vec::new();
         // Only its own stage reads a stage's buffers, and each stage has a storage buffer limit.
@@ -172,7 +176,7 @@ impl Gpu {
                 visibility: own,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
+                    has_dynamic_offset: true,
                     min_binding_size: None,
                 },
                 count: None,
@@ -195,8 +199,25 @@ impl Gpu {
                 }));
             }
             // The copies land in it, so it is this draw's alone.
-            persistent &= constant_patches.is_empty();
-            resources.push(Resource::Bytes(wgsl::CONSTANTS_BINDING, packed));
+            let staged = if constant_patches.is_empty() {
+                self.stage_constants(&packed)
+            } else {
+                None
+            };
+            let (buffer, offset, size) = match staged {
+                Some((offset, size)) => (self.constant_arena(), offset, size),
+                None => {
+                    persistent = false;
+                    let buffer = self.buffer("constants", &packed, wgpu::BufferUsages::STORAGE);
+                    let size = buffer.size();
+                    if !constant_patches.is_empty() {
+                        patched = Some((buffer.clone(), std::mem::take(&mut constant_patches)));
+                    }
+                    (buffer, 0, size)
+                }
+            };
+            dynamic_offsets.push(offset);
+            resources.push(Resource::Window(wgsl::CONSTANTS_BINDING, buffer, size));
         }
 
         let drawn: Vec<u64> = [p.color, p.depth]
@@ -299,7 +320,12 @@ impl Gpu {
             .filter(|cached| cached.entries == entries && cached.resources == resources)
         {
             self.bind_hits += 1;
-            return Ok((cached.layout.clone(), cached.group.clone(), Vec::new()));
+            return Ok((
+                cached.layout.clone(),
+                cached.group.clone(),
+                dynamic_offsets,
+                Vec::new(),
+            ));
         }
         let remembered = key.map(|key| (key, entries.clone(), resources.clone()));
         if key.is_some() {
@@ -324,26 +350,18 @@ impl Gpu {
             }
         };
         let mut owned = Vec::new();
-        let mut patched = None;
         let resources: Vec<Resource> = resources
             .into_iter()
             .map(|resource| match resource {
                 Resource::Bytes(binding, bytes) => {
-                    let what = if binding == wgsl::CONSTANTS_BINDING {
-                        "constants"
-                    } else {
-                        "global"
-                    };
                     let buffer = if persistent {
-                        let buffer = self.kept_buffer(what, &bytes, wgpu::BufferUsages::STORAGE);
+                        let buffer =
+                            self.kept_buffer("global", &bytes, wgpu::BufferUsages::STORAGE);
                         owned.push(buffer.clone());
                         buffer
                     } else {
-                        self.buffer(what, &bytes, wgpu::BufferUsages::STORAGE)
+                        self.buffer("global", &bytes, wgpu::BufferUsages::STORAGE)
                     };
-                    if binding == wgsl::CONSTANTS_BINDING && !constant_patches.is_empty() {
-                        patched = Some((buffer.clone(), std::mem::take(&mut constant_patches)));
-                    }
                     Resource::Buffer(binding, buffer)
                 }
                 other => other,
@@ -369,6 +387,14 @@ impl Gpu {
                 Resource::Buffer(binding, buffer) => wgpu::BindGroupEntry {
                     binding: *binding,
                     resource: buffer.as_entire_binding(),
+                },
+                Resource::Window(binding, buffer, size) => wgpu::BindGroupEntry {
+                    binding: *binding,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(*size),
+                    }),
                 },
                 Resource::Texture(binding, _, _) => wgpu::BindGroupEntry {
                     binding: *binding,
@@ -402,6 +428,7 @@ impl Gpu {
         Ok((
             layout,
             bind_group,
+            dynamic_offsets,
             patched.into_iter().chain(snapshots).collect(),
         ))
     }
