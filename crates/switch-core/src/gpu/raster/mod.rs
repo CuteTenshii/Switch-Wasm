@@ -20,7 +20,7 @@ pub use setup::{rasterize_triangle, rasterize_triangle_weighted, TriangleSetup};
 
 /// The `DkPrimitive` topologies (deko3d.h). Points and lines are recognised
 /// but not rasterized.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Primitive {
     Points,
     Lines,

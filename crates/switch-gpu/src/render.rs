@@ -444,14 +444,11 @@ impl Gpu {
         };
         let index = match &p.assembled {
             // An assembled topology is always drawn indexed.
-            Some((indices, base)) => {
-                let bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
-                Some((
-                    self.shared_buffer("assembled", &bytes, wgpu::BufferUsages::INDEX),
-                    wgpu::IndexFormat::Uint32,
-                    *base,
-                ))
-            }
+            Some((bytes, base)) => Some((
+                self.shared_buffer("assembled", bytes, wgpu::BufferUsages::INDEX),
+                wgpu::IndexFormat::Uint32,
+                *base,
+            )),
             None => p.uploads.index.as_ref().map(|index| {
                 (
                     self.shared_buffer("index", &index.bytes, wgpu::BufferUsages::INDEX),

@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use crate::convert::{held_attachment_format, Widen};
 use crate::held::{spans_overlap, surface_span};
-use crate::{CachedShader, Checked, Gpu, Prepared, Render, PAGE_BITS, SHADER_CACHE_ENTRIES};
+use crate::{
+    CachedShader, Checked, Gpu, Prepared, Render, PAGE_BITS, SEQUENTIAL_INDEX_LISTS,
+    SHADER_CACHE_ENTRIES,
+};
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state, AttributeBase, Pipeline};
@@ -316,34 +319,45 @@ impl Gpu {
         }
 
         // Fans, quad strips and polygons become triangle lists.
-        let assembled = match state.expand {
-            Some(primitive) => {
+        let assembled = match (state.expand, &uploads.index) {
+            // Indexed: triples index the index list; base vertex is the lowest index.
+            (Some(primitive), Some(index)) => {
                 let triangles =
                     switch_core::gpu::raster::assemble(primitive, engine.last_draw.count);
-                let mut indices = Vec::with_capacity(triangles.len() * 3);
-                match &uploads.index {
-                    // Indexed: triples index the index list; base vertex is the lowest index.
-                    Some(index) => {
-                        let list = index.indices();
-                        for triangle in triangles {
-                            for at in triangle {
-                                indices.push(*list.get(at as usize).ok_or_else(|| {
-                                    format!("assembling {primitive:?}: index {at} is past the list")
-                                })?);
-                            }
-                        }
-                        Some((indices, -(index.lowest as i32)))
-                    }
-                    // Sequential: triples are vertex ordinals, already relative to the upload.
-                    None => {
-                        for triangle in triangles {
-                            indices.extend_from_slice(&triangle);
-                        }
-                        Some((indices, 0))
+                let list = index.indices();
+                let mut bytes = Vec::with_capacity(triangles.len() * 12);
+                for triangle in triangles {
+                    for at in triangle {
+                        let index = list.get(at as usize).ok_or_else(|| {
+                            format!("assembling {primitive:?}: index {at} is past the list")
+                        })?;
+                        bytes.extend_from_slice(&index.to_le_bytes());
                     }
                 }
+                Some((Arc::from(bytes), -(index.lowest as i32)))
             }
-            None => None,
+            // Sequential: triples are vertex ordinals, already relative to the upload, so the
+            // list depends only on the primitive and the count.
+            (Some(primitive), None) => {
+                let key = (primitive, engine.last_draw.count);
+                let bytes = match self.sequential_indices.get(&key) {
+                    Some(bytes) => bytes.clone(),
+                    None => {
+                        let bytes: Arc<[u8]> = switch_core::gpu::raster::assemble(primitive, key.1)
+                            .into_iter()
+                            .flatten()
+                            .flat_map(u32::to_le_bytes)
+                            .collect();
+                        if self.sequential_indices.len() >= SEQUENTIAL_INDEX_LISTS {
+                            self.sequential_indices.clear();
+                        }
+                        self.sequential_indices.insert(key, bytes.clone());
+                        bytes
+                    }
+                };
+                Some((bytes, 0))
+            }
+            (None, _) => None,
         };
 
         let mut globals = self.global_uploads(&vs_layout, ShaderStage::VertexB, &uploads, ctx)?;
@@ -469,7 +483,7 @@ impl Gpu {
             constant_patches,
             globals,
             count: match &assembled {
-                Some((indices, _)) => indices.len() as u32,
+                Some((indices, _)) => (indices.len() / 4) as u32,
                 None => engine.last_draw.count,
             },
             assembled,

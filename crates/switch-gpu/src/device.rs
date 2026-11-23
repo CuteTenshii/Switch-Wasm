@@ -55,6 +55,7 @@ impl Gpu {
             translations: 0,
             no_fragment: None,
             constant_arena: None,
+            sequential_indices: std::collections::HashMap::new(),
             views: std::collections::HashMap::new(),
             pass_calls_skipped: 0,
             constant_staging: Vec::new(),

@@ -485,6 +485,9 @@ fn interleave(feeds: &[Feed<'_>], elements: usize) -> Feed<'static> {
 /// A ceiling for pathological titles; real ones use a few dozen.
 const SHADER_CACHE_ENTRIES: usize = 1024;
 
+/// Bounds [`Gpu::sequential_indices`]; a title draws few distinct fan or quad counts.
+const SEQUENTIAL_INDEX_LISTS: usize = 256;
+
 /// A translated shader and what it was translated from. See [`Gpu::shader_cache`].
 #[derive(Debug)]
 struct CachedShader {
@@ -644,6 +647,9 @@ pub struct Gpu {
     shared_bytes: u64,
     /// Render pipelines, by everything they were built from.
     pipelines: std::collections::HashMap<PipelineKey, wgpu::RenderPipeline>,
+    /// Assembled triangle lists of non-indexed draws, by primitive and vertex count.
+    sequential_indices:
+        std::collections::HashMap<(switch_core::gpu::raster::Primitive, u32), std::sync::Arc<[u8]>>,
     /// Texture views by texture and dimension. See [`Gpu::view`].
     views: std::collections::HashMap<
         (wgpu::Texture, Option<wgpu::TextureViewDimension>),
@@ -1054,8 +1060,9 @@ struct Prepared {
     globals: Vec<GlobalUpload>,
     /// Vertices, indices, or the length of [`Prepared::assembled`].
     count: u32,
-    /// Triangle list indices and base vertex for topologies WebGPU lacks, from `raster::assemble`.
-    assembled: Option<(Vec<u32>, i32)>,
+    /// Triangle list indices, as little-endian `u32` bytes, and base vertex for topologies
+    /// WebGPU lacks, from `raster::assemble`.
+    assembled: Option<(std::sync::Arc<[u8]>, i32)>,
     /// `gl_InstanceID`, reproduced as the first instance of a one-instance draw.
     instance: u32,
     /// The images the fragment stage stores to, each layer held (none for a null image), with
