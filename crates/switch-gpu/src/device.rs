@@ -53,6 +53,7 @@ impl Gpu {
             modules: std::collections::HashMap::new(),
             built_modules: std::collections::HashMap::new(),
             translations: 0,
+            no_fragment: None,
             shared_buffers: std::collections::HashMap::new(),
             shared_bytes: 0,
             passes_joined: 0,

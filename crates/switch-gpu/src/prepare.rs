@@ -1,5 +1,7 @@
 //! Checking and preparing a draw, and translating its shaders.
 
+use std::sync::Arc;
+
 use crate::convert::{held_attachment_format, Widen};
 use crate::held::{spans_overlap, surface_span};
 use crate::{CachedShader, Checked, Gpu, Prepared, Render, PAGE_BITS, SHADER_CACHE_ENTRIES};
@@ -647,14 +649,20 @@ impl Gpu {
         engine: &Engine3D,
         ctx: &ExecCtx,
         stage: ShaderStage,
-    ) -> std::result::Result<(Translation, u64), String> {
+    ) -> std::result::Result<(Arc<Translation>, u64), String> {
         let Some(binding) = engine.program(stage) else {
             if stage == ShaderStage::Fragment {
-                let program = switch_core::gpu::shader::no_fragment_program();
                 // Always the same program, so always the same serial.
-                return wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps(false))
-                    .map(|translation| (translation, 0))
-                    .map_err(|e| e.to_string());
+                if let Some(translation) = &self.no_fragment {
+                    return Ok((translation.clone(), 0));
+                }
+                let program = switch_core::gpu::shader::no_fragment_program();
+                let translation = Arc::new(
+                    wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps(false))
+                        .map_err(|e| e.to_string())?,
+                );
+                self.no_fragment = Some(translation.clone());
+                return Ok((translation, 0));
             }
             return Err(format!("no {stage:?} program"));
         };
@@ -672,7 +680,7 @@ impl Gpu {
         key: crate::ShaderKey,
         bank: &dyn Fn(u8) -> Option<(u64, u32)>,
         ctx: &ExecCtx,
-    ) -> std::result::Result<(Translation, u64), String> {
+    ) -> std::result::Result<(Arc<Translation>, u64), String> {
         // Validate hits: a `brx` jump table read from a constant buffer may have changed.
         if let Some(cached) = self.space.shader_cache.get(&key) {
             if cached.reads.constants_unchanged(ctx) {
@@ -684,9 +692,10 @@ impl Gpu {
         let (program, reads) =
             switch_core::gpu::shader::decode_program_from_memory_recording(ctx, key.0, bank)
                 .map_err(|e| format!("{e:?}"))?;
-        let translation =
+        let translation = Arc::new(
             wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps(key.1.is_none()))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?,
+        );
         // Watch the CPU page behind each virtual page the decode read.
         for &page in &reads.pages {
             if let Some((cpu, _)) = ctx.vmm.translate(page << PAGE_BITS) {

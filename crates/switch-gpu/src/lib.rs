@@ -485,7 +485,7 @@ const SHADER_CACHE_ENTRIES: usize = 1024;
 /// A translated shader and what it was translated from. See [`Gpu::shader_cache`].
 #[derive(Debug)]
 struct CachedShader {
-    translation: Translation,
+    translation: std::sync::Arc<Translation>,
     reads: switch_core::gpu::shader::DecodeReads,
     /// Unique to this translation; see [`Gpu::built_modules`].
     serial: u64,
@@ -614,6 +614,8 @@ pub struct Gpu {
     built_modules: std::collections::HashMap<(u64, u8), Vec<BuiltModule>>,
     /// Translations made so far, which numbers the next.
     translations: u64,
+    /// The stand-in fragment stage of a draw without one, translated once.
+    no_fragment: Option<std::sync::Arc<Translation>>,
     /// Vertex and index buffers by usage and fingerprint, with the bytes they hold: most draws
     /// repeat a mesh an earlier one uploaded. See [`Gpu::shared_buffer`].
     shared_buffers: std::collections::HashMap<(u32, u64), Vec<SharedBuffer>>,
@@ -978,8 +980,8 @@ struct Checked {
     color: Option<Target>,
     color_scratch: Option<(u32, u32)>,
     depth: Option<Target>,
-    vs: Translation,
-    fs: Translation,
+    vs: std::sync::Arc<Translation>,
+    fs: std::sync::Arc<Translation>,
     /// Each translation's serial; see [`Gpu::built_modules`].
     serials: [u64; 2],
 }
@@ -997,8 +999,8 @@ struct Prepared {
     color_scratch: Option<(u32, u32)>,
     /// The depth surface, or `None` for a draw that neither tests nor writes depth.
     depth: Option<Target>,
-    vs: Translation,
-    fs: Translation,
+    vs: std::sync::Arc<Translation>,
+    fs: std::sync::Arc<Translation>,
     serials: [u64; 2],
     vs_layout: Layout,
     fs_layout: Layout,
