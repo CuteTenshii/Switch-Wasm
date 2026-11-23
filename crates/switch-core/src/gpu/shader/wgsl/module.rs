@@ -312,7 +312,8 @@ pub fn module(
         if texture.uint {
             let (key, load) = (texture.slot.key(), uint_load(index, texture.dim, (0, 0))?);
             out.push_str(&format!(
-                "    case {key}u: {{ {load} return bitcast<vec4<f32>>(texel); }}\n"
+                "    case {key}u: {{ {load} return {}; }}\n",
+                uint_swizzled(texture.swizzle)
             ));
             continue;
         }
@@ -395,7 +396,8 @@ pub fn module(
             if texture.uint {
                 let load = uint_load(index, texture.dim, (x, y))?;
                 out.push_str(&format!(
-                    "        case {n}u: {{ {load} return bitcast<vec4<f32>>(texel); }}\n"
+                    "        case {n}u: {{ {load} return {}; }}\n",
+                    uint_swizzled(texture.swizzle)
                 ));
                 continue;
             }
@@ -510,11 +512,18 @@ pub fn module(
             "    case {key}u: {{\n      switch (component) {{\n"
         ));
         if texture.uint {
-            // The raw words, whatever the descriptor says.
-            for channel in 0..4 {
+            // The raw words through the swizzle, a one being the integer.
+            for (channel, source) in texture.swizzle.iter().enumerate() {
+                let texels = match source {
+                    SwizzleSource::Zero => "vec4<u32>(0u)".to_string(),
+                    SwizzleSource::One => "vec4<u32>(1u)".to_string(),
+                    picked => format!(
+                        "textureGather({}, tex{index}, smp{smp}, {coords})",
+                        swizzle_channel(*picked)
+                    ),
+                };
                 out.push_str(&format!(
-                    "        case {channel}u: {{ return bitcast<vec4<f32>>(textureGather({channel}, \
-                     tex{index}, smp{smp}, {coords})); }}\n"
+                    "        case {channel}u: {{ return bitcast<vec4<f32>>({texels}); }}\n"
                 ));
             }
             out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
@@ -579,7 +588,7 @@ pub fn module(
             ),
         };
         let result = if texture.uint {
-            format!("{load} return bitcast<vec4<f32>>(texel);")
+            format!("{load} return {};", uint_swizzled(texture.swizzle))
         } else {
             format!("{load} {}", return_swizzled("texel", texture.swizzle))
         };
@@ -739,6 +748,30 @@ fn uint_load(index: usize, dim: TexDim, offset: (i32, i32)) -> Result<String, Un
 }
 
 /// `return` a sample rearranged by a descriptor swizzle.
+/// An integer texel `texel` through `swizzle` as the float bits a shader reads; a one is
+/// the integer, as the rasterizer's is.
+fn uint_swizzled(swizzle: [SwizzleSource; 4]) -> String {
+    let channels: Vec<String> = swizzle
+        .iter()
+        .map(|source| match source {
+            SwizzleSource::Zero => "0u".to_string(),
+            SwizzleSource::One => "1u".to_string(),
+            picked => format!("texel[{}]", swizzle_channel(*picked)),
+        })
+        .collect();
+    format!("bitcast<vec4<f32>>(vec4<u32>({}))", channels.join(", "))
+}
+
+/// The channel index a picking swizzle source reads.
+fn swizzle_channel(source: SwizzleSource) -> u32 {
+    match source {
+        SwizzleSource::G => 1,
+        SwizzleSource::B => 2,
+        SwizzleSource::A => 3,
+        _ => 0,
+    }
+}
+
 fn return_swizzled(sample: &str, swizzle: [SwizzleSource; 4]) -> String {
     if swizzle == IDENTITY_SWIZZLE {
         return format!("return {sample};");

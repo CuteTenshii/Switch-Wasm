@@ -1681,6 +1681,44 @@ fn an_integer_image_gathers_and_offset_samples_the_words_the_rasterizer_reads() 
     }
 }
 
+/// An integer image read through a swizzle that moves, zeroes and sets channels to one gives
+/// the same pixels on both renderers, for samples, offset samples and gathers.
+#[test]
+fn an_integer_image_reads_through_its_swizzle_on_both_renderers() {
+    // `B, R, ZERO, ONE_INT` in TIC 1's word 0.
+    let swizzle = (4 << 19) | (2 << 22) | (6 << 28);
+    let set_up = move |h: &mut Harness| {
+        h.bindless_uint_texture();
+        let tic = h.base + 0x1400 + 32;
+        let mut ctx = h.ctx();
+        let word = ctx.read_u32(tic).unwrap();
+        ctx.write_u32(tic, (word & !(0xfff << 19)) | swizzle)
+            .unwrap();
+        h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+    };
+    type Shader = fn() -> Vec<u8>;
+    let shaders: [Shader; 4] = [
+        testing::bindless_fragment_shader,
+        || testing::gather_fragment_shader(1),
+        || testing::gather_offset_fragment_shader(2),
+        testing::offset_fragment_shader,
+    ];
+    let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    assert!(
+        h.target().iter().any(|&c| c != 0),
+        "the sample drew nothing"
+    );
+    // The gather of channel 2 reads the zeroed channel, so its pixels are all zero.
+    for shader in shaders {
+        agrees_shading(|| Harness::with_fragment_shader(shader()), |_| {}, set_up);
+    }
+}
+
 /// An 8-byte half-float colour on a 6-byte stride takes its alpha from the next vertex's red,
 /// as Tears of the Kingdom's arrays do, on both renderers.
 #[test]

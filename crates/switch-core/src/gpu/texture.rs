@@ -199,6 +199,17 @@ pub enum TexelKind {
     Depth(DepthTexel),
 }
 
+impl TexelKind {
+    /// Whether its channels reach the shader as integer bits rather than numbers.
+    pub fn is_integer(self) -> bool {
+        match self {
+            TexelKind::Plain(format) => format.is_integer(),
+            TexelKind::Depth(depth) => depth.is_integer(),
+            TexelKind::Block(_) => false,
+        }
+    }
+}
+
 /// A depth texel's layout; sampling returns the depth alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepthTexel {
@@ -773,14 +784,21 @@ fn trace_textures() -> bool {
     crate::trace::enabled(crate::trace::Trace::Tex)
 }
 
-fn apply_swizzle(swizzle: [SwizzleSource; 4], texel: [f32; 4]) -> [f32; 4] {
-    swizzle.map(|source| match source {
+/// `texel` through `texture`'s swizzle. One is one in the format's own type, as Eden maps
+/// both of the TIC's ones: an integer texel's channels reach the shader as bits.
+fn apply_swizzle(texture: &Texture, texel: [f32; 4]) -> [f32; 4] {
+    let one = if texture.kind.is_integer() {
+        f32::from_bits(1)
+    } else {
+        1.0
+    };
+    texture.swizzle.map(|source| match source {
         SwizzleSource::Zero => 0.0,
         SwizzleSource::R => texel[0],
         SwizzleSource::G => texel[1],
         SwizzleSource::B => texel[2],
         SwizzleSource::A => texel[3],
-        SwizzleSource::One => 1.0,
+        SwizzleSource::One => one,
     })
 }
 
@@ -920,12 +938,7 @@ pub fn read_descriptors(
     };
     let mut sampler = read_sampler(ctx, tex_sampler_pool + sampler_id(handle) as u64 * 32)?;
     // Integer textures are always read at the nearest texel.
-    let integer = match texture.kind {
-        TexelKind::Plain(format) => format.is_integer(),
-        TexelKind::Depth(depth) => depth.is_integer(),
-        TexelKind::Block(_) => false,
-    };
-    if integer {
+    if texture.kind.is_integer() {
         sampler.mag_linear = false;
         sampler.min_linear = false;
     }
@@ -994,7 +1007,7 @@ pub fn sample_with(
     } else {
         image.sample_point(px, py, layer, ctx, blocks)?
     };
-    Ok(apply_swizzle(texture.swizzle, texel))
+    Ok(apply_swizzle(texture, texel))
 }
 
 /// Gather post-swizzle channel `component` of the four texels a bilinear sample
@@ -1016,7 +1029,7 @@ pub fn gather_with(
         let x = wrap_index(sampler.wrap_u, x, texture.width);
         let y = wrap_index(sampler.wrap_v, y, texture.height);
         let texel = texture.texel(x, y, layer, ctx, blocks)?;
-        Ok(apply_swizzle(texture.swizzle, texel)[component & 3])
+        Ok(apply_swizzle(texture, texel)[component & 3])
     };
     Ok([
         at(x0, y0 + 1)?,
@@ -1040,7 +1053,7 @@ pub fn fetch_with(
         return Ok([0.0; 4]);
     }
     Ok(apply_swizzle(
-        texture.swizzle,
+        texture,
         texture.texel(x, y, layer, ctx, blocks)?,
     ))
 }
@@ -1220,7 +1233,7 @@ pub fn gather_cube_with(
     let mut out = [0.0; 4];
     for (value, (layer, x, y)) in out.iter_mut().zip(cube_gather_taps(d, direction, cube)) {
         let texel = d.texture.texel(x, y, layer, ctx, blocks)?;
-        *value = apply_swizzle(d.texture.swizzle, texel)[component & 3];
+        *value = apply_swizzle(&d.texture, texel)[component & 3];
     }
     Ok(out)
 }
@@ -1422,6 +1435,41 @@ mod tests {
         ctx.vmm.write_u32(ctx.mem, tic_pool + 4, 0x1000).unwrap();
         let refused = read_bound_image(&ctx, tic_pool).unwrap_err().to_string();
         assert!(refused.contains("R_DATA_TYPE 0"), "{refused}");
+    }
+
+    /// A swizzle's one is one in the texel's own type: integer bits for an integer format.
+    #[test]
+    fn a_swizzled_one_is_the_integer_for_an_integer_texel() {
+        let (mut mem, vmm, base) = harness();
+        let one_int = (2 << 19) | (0 << 22) | (6 << 25) | (7 << 28);
+        let read = |mem: &mut Memory, word0: u32| {
+            for (i, word) in [word0, 0x400, 2 << 21, 0, 1 << 23, 0, 0, 0]
+                .iter()
+                .enumerate()
+            {
+                vmm.write_u32(mem, base + i as u64 * 4, *word).unwrap();
+            }
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let ctx = ExecCtx {
+                mem,
+                vmm: &vmm,
+                as_id: 0,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
+            let texture = read_image(&ctx, base).unwrap();
+            apply_swizzle(&texture, [f32::from_bits(9), 0.0, 0.0, 0.0])
+        };
+        // R32 of UINT, then of FLOAT.
+        let integer = read(&mut mem, 0x0f | 4 << 7 | one_int);
+        assert_eq!(integer.map(f32::to_bits), [9, 0, 1, 1]);
+        let float = read(&mut mem, 0x0f | 7 << 7 | one_int);
+        assert_eq!(
+            float.map(f32::to_bits),
+            [9, 0, 1.0f32.to_bits(), 1.0f32.to_bits()]
+        );
     }
 
     /// A texel fetch of a smaller level reads that level's texels, and past the chain reads zero.

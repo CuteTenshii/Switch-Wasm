@@ -539,9 +539,9 @@ impl Gpu {
                 return Err("an integer image past the upload cap, read as a smaller level".into());
             }
             if binding.uint {
-                // Read texel by texel, with the raw words as they are.
-                if upload.swizzle != wgsl::IDENTITY_SWIZZLE || binding.compare {
-                    return Err("an integer image sampled through a swizzle or a comparison".into());
+                // Read texel by texel, the raw words through the swizzle.
+                if binding.compare {
+                    return Err("an integer image sampled through a comparison".into());
                 }
                 continue;
             }
