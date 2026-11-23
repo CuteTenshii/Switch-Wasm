@@ -17,8 +17,10 @@ pub(crate) struct AudioOut {
     pub started: bool,
     /// The volume the guest set, 0.0..=1.0. Applied when samples are taken.
     pub volume: f32,
-    /// Signalled every time a buffer is released.
+    /// Signalled once for each buffer that finishes playing.
     pub event: u64,
+    /// Buffers whose finish has been signalled, released or not.
+    pub signaled_buffers: u64,
     /// Appended, uncollected buffers with the cycle at which each finishes playing.
     pub queued: VecDeque<(u64, u64)>,
     /// The cycle the device finishes everything queued so far.
@@ -155,6 +157,7 @@ impl Cpu {
                         started: false,
                         volume: 1.0,
                         event,
+                        signaled_buffers: 0,
                         queued: VecDeque::new(),
                         free_at: 0,
                         played_frames: 0,
@@ -287,19 +290,26 @@ impl Cpu {
         }
     }
 
-    /// Fire the buffer event of every device that has finished a buffer, and
-    /// return the earliest cycle at which one of `handles` will have one to hand back.
+    /// Fire the buffer event of every device that has finished a buffer since the last
+    /// tick, and return the earliest cycle at which one of `handles` will finish another.
+    /// A finish fires once: re-firing while the buffer waited to be collected kept
+    /// `nn::os` waiters spinning (Pokémon Legends: Z-A's audio sink thread).
     pub(crate) fn audio_tick(&mut self, handles: &[u64]) -> Option<u64> {
         let now = self.cycles;
         let mut fire = Vec::new();
         let mut next = None;
-        for device in self.process().audio_outs.values() {
-            let Some(&(_, done_at)) = device.queued.front() else {
-                continue;
-            };
-            if done_at <= now {
+        for device in self.process_mut().audio_outs.values_mut() {
+            let finished = device
+                .queued
+                .iter()
+                .take_while(|&&(_, done_at)| done_at <= now);
+            let finished = device.released_buffers + finished.count() as u64;
+            if finished > device.signaled_buffers {
+                device.signaled_buffers = finished;
                 fire.push(device.event);
-            } else if handles.contains(&device.event) {
+            }
+            let pending = device.queued.iter().find(|&&(_, done_at)| done_at > now);
+            if let Some(&(_, done_at)) = pending.filter(|_| handles.contains(&device.event)) {
                 next = Some(next.map_or(done_at, |soonest: u64| soonest.min(done_at)));
             }
         }
@@ -567,5 +577,45 @@ mod tests {
         let _ = cpu.mem.write_u32(TLS + 0x20, 0);
         cpu.audctl_request(TLS, duplicate, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 7);
+    }
+
+    /// A finished buffer fires the event once, collected or not: `nn::os` clears it with
+    /// `svcResetSignal`, and firing again on every tick kept its waiter spinning.
+    #[test]
+    fn a_finished_buffer_fires_its_event_once() {
+        let mut cpu = request(false, 0, &[]);
+        let event = cpu.alloc_event("audout:buffer", true);
+        cpu.process_mut().audio_outs.insert(
+            9,
+            super::AudioOut {
+                sample_rate: 48_000,
+                channel_count: 2,
+                started: true,
+                volume: 1.0,
+                event,
+                signaled_buffers: 0,
+                queued: [(1, 100), (2, 200)].into(),
+                free_at: 200,
+                played_frames: 0,
+                appended_buffers: 2,
+                appended_frames: 0,
+                released_buffers: 0,
+                discarded_frames: 0,
+                unplayable_buffers: 0,
+            },
+        );
+        cpu.cycles = 150;
+        assert_eq!(cpu.audio_tick(&[event]), Some(200), "the next finish");
+        assert_eq!(cpu.event_signaled(event), Some(true), "the first finish");
+        cpu.clear_event(event);
+        cpu.audio_tick(&[event]);
+        assert_eq!(
+            cpu.event_signaled(event),
+            Some(false),
+            "fired again for a buffer already reported"
+        );
+        cpu.cycles = 250;
+        assert_eq!(cpu.audio_tick(&[event]), None);
+        assert_eq!(cpu.event_signaled(event), Some(true), "the second finish");
     }
 }
