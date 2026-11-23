@@ -123,6 +123,8 @@ impl Gpu {
                 ));
             }
         }
+        let origin = engine.window_origin();
+        fs_layout.window_height = origin.lower_left.then(|| engine.surface_clip_height());
         // A depth-only pass has no colour output.
         fs_layout.targets = u32::from(color.is_some());
         // An integer target takes raw words.

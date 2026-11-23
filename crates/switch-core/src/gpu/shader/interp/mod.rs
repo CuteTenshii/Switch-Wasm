@@ -50,6 +50,8 @@ pub struct SpecialRegs {
     pub local_size: u32,
     /// Window y grows upward, so `SR_Y_DIRECTION` reads -1.0. Follows `SET_WINDOW_ORIGIN_MODE`.
     pub y_negate: bool,
+    /// The surface clip height a fragment's window y is measured up from, when it grows upward.
+    pub window_height: Option<u32>,
 }
 
 impl SpecialRegs {

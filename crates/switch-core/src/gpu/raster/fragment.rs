@@ -131,8 +131,16 @@ fn seed_fragment(
     verts: &[ShadedVertex; 3],
     inv_w: [f32; 3],
     weights: [f32; 3],
+    (x, y, window_height): (u32, u32, Option<u32>),
 ) {
     inv.reset();
+    // `a[0x70]` and `a[0x74]`: the pixel's centre in window coordinates.
+    inv.attr_in.set(FRAG_COORD_X, x as f32 + 0.5);
+    let y = y as f32 + 0.5;
+    inv.attr_in.set(
+        FRAG_COORD_Y,
+        window_height.map_or(y, |height| height as f32 - y),
+    );
     let interp_inv_w = weights[0] * inv_w[0] + weights[1] * inv_w[1] + weights[2] * inv_w[2];
     inv.attr_in.set(INV_W_OFFSET, interp_inv_w);
     for &slot in program.interpolated_slots() {
@@ -170,16 +178,29 @@ fn fragment_color(inv: &Invocation, program: &Compiled) -> Option<[f32; 4]> {
     }))
 }
 
+/// Where a fragment's window coordinates are read from.
+const FRAG_COORD_X: u16 = 0x70;
+const FRAG_COORD_Y: u16 = 0x74;
+
 /// Shade one covered pixel.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn shade_fragment(
     inv: &mut Invocation,
     program: &Compiled,
     verts: &[ShadedVertex; 3],
     inv_w: [f32; 3],
     weights: [f32; 3],
+    (x, y): (u32, u32),
     env: &Env,
 ) -> Result<Option<[f32; 4]>> {
-    seed_fragment(inv, program, verts, inv_w, weights);
+    seed_fragment(
+        inv,
+        program,
+        verts,
+        inv_w,
+        weights,
+        (x, y, env.special.window_height),
+    );
     inv.execute(program, env)?;
     Ok(fragment_color(inv, program))
 }
@@ -196,16 +217,20 @@ pub(super) fn quad_pixel(x: u32, y: u32, lane: usize) -> (u32, u32) {
 /// Shade a 2x2 quad in lock-step so warp shuffles can read neighbours.
 /// Uncovered lanes run as helpers; diverged lanes read wherever the other
 /// lane is.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn shade_quad(
     lanes: &mut [Invocation; QUAD],
     program: &Compiled,
     verts: &[ShadedVertex; 3],
     inv_w: [f32; 3],
     weights: [[f32; 3]; QUAD],
+    (x, y): (u32, u32),
     env: &mut Env,
 ) -> Result<[Option<[f32; 4]>; QUAD]> {
     for (lane, invocation) in lanes.iter_mut().enumerate() {
-        seed_fragment(invocation, program, verts, inv_w, weights[lane]);
+        let (px, py) = quad_pixel(x, y, lane);
+        let at = (px, py, env.special.window_height);
+        seed_fragment(invocation, program, verts, inv_w, weights[lane], at);
         invocation.begin();
     }
     let mut running = [true; QUAD];
@@ -391,5 +416,6 @@ pub(super) fn with_fragment_env<T>(
     let mut env = Env::with_tex_cb_index(&fs_consts, &fs_textures, engine.tex_cb_index());
     env.memory = Some(&fs_global);
     env.special.y_negate = engine.window_origin().lower_left;
+    env.special.window_height = env.special.y_negate.then(|| engine.surface_clip_height());
     f(&mut env)
 }

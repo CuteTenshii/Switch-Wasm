@@ -4629,3 +4629,51 @@ fn a_fragment_image_store_lands_as_the_rasterizer_stores_it() {
     assert_eq!(gpu.device_error(), None, "the device rejected the pass");
     assert_eq!(got, want, "the stored image differs");
 }
+
+/// A fragment reads its pixel's centre from `a[0x70]` and `a[0x74]` on both renderers.
+#[test]
+fn a_fragment_reads_its_window_position_on_both_renderers() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = (testing::TARGET_WIDTH, testing::TARGET_HEIGHT);
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::with_fragment_shader(testing::frag_coord_fragment_shader());
+        // RGBA32_FLOAT, so the coordinates land unrounded, clear of the shaders.
+        let target = h.base + 0x2000;
+        h.engine.regs.set(0x201, target as u32);
+        h.engine.regs.set(0x202, width * 16);
+        h.engine.regs.set(0x204, 0xC0);
+        h.triangle([1.0; 4]);
+        h.draw_with(renderer).expect("the draw");
+        h.flush_with(renderer);
+        let ctx = h.ctx();
+        (0..width * height * 4)
+            .map(|word| f32::from_bits(ctx.read_u32(target + u64::from(word) * 4).unwrap()))
+            .collect::<Vec<f32>>()
+    };
+    let want = build(&mut Software);
+    let drawn: Vec<(u32, u32)> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| want[((y * width + x) * 4 + 3) as usize] != 0.0)
+        .collect();
+    assert!(drawn.len() > 8, "the reference drew {} pixels", drawn.len());
+    for &(x, y) in &drawn {
+        let at = ((y * width + x) * 4) as usize;
+        assert_eq!(
+            want[at..at + 2],
+            [x as f32 + 0.5, y as f32 + 0.5],
+            "the reference at ({x}, {y})"
+        );
+    }
+    let fallbacks = gpu.fallbacks;
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the target differs");
+}

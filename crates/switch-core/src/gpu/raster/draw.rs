@@ -605,6 +605,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                                     &shaded,
                                     inv_w,
                                     weights,
+                                    (x, y),
                                     env,
                                 )
                             },
@@ -663,7 +664,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         &blocks,
                         &global_stores,
                         &surface_stores,
-                        |env| shade_quad(quad, &fs_program, &shaded, inv_w, weights, env),
+                        |env| shade_quad(quad, &fs_program, &shaded, inv_w, weights, (x, y), env),
                     )?;
                     MemoryGlobal::land(ctx, &global_stores)?;
                     MemoryTextures::land(ctx, &surface_stores)?;

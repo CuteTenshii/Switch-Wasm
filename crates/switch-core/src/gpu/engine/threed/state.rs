@@ -181,7 +181,7 @@ impl Engine3D {
     }
 
     /// The height a bottom-left window origin is measured against (the surface clip's).
-    pub(crate) fn surface_clip_height(&self) -> u32 {
+    pub fn surface_clip_height(&self) -> u32 {
         self.regs.field(SCREEN_SCISSOR_VERTICAL, 16, 31)
     }
 

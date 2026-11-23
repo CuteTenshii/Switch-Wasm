@@ -147,6 +147,24 @@ pub fn bindless_array_fragment_shader() -> Vec<u8> {
     bytes
 }
 
+/// `oColor = vec4(gl_FragCoord.xy, 0, 1/w)`: the window position `a[0x70]` and `a[0x74]` hold.
+pub fn frag_coord_fragment_shader() -> Vec<u8> {
+    let sched = (0xe1a0070f, 0x00240401);
+    let mut bytes = block(
+        sched,
+        (0x0ff7ff00, 0xe003ff87), // ipa pass $r0 a[0x70] 0x0 0x0 0x1
+        (0x4ff7ff01, 0xe003ff87), // ipa pass $r1 a[0x74] 0x0 0x0 0x1
+        (0xcff7ff03, 0xe003ff87), // ipa pass $r3 a[0x7c] 0x0 0x0 0x1
+    );
+    bytes.extend(block(
+        sched,
+        mov32i(2, 0),
+        (0x0007000f, 0xe3000000), // exit
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
 /// `imageStore(bindless, uvec2(vColor.xy), uvec4(uvec2(vColor.xy), 0, 0))`, the image's
 /// handle from `c3[0x10]`: each fragment stores its own coordinates, so the order fragments
 /// run in cannot change what lands.

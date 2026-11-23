@@ -1034,6 +1034,25 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
             "  quad_lane = (u32(input.position.y) & 1u) * 2u + (u32(input.position.x) & 1u);\n",
         );
     }
+    // `a[0x70]` and `a[0x74]` are the pixel's centre in window coordinates; an expanded
+    // multisample attachment holds a pixel as a tile of texels.
+    let (samples_x, samples_y) = layout
+        .coverage
+        .as_ref()
+        .map_or((1, 1), |c| (c.samples_x, c.samples_y));
+    out.push_str(&format!(
+        "  attr_in[{}u] = floor(input.position.x / {samples_x}.0) + 0.5;\n",
+        POSITION / 4
+    ));
+    let y = format!("(floor(input.position.y / {samples_y}.0) + 0.5)");
+    out.push_str(&format!(
+        "  attr_in[{}u] = {};\n",
+        POSITION / 4 + 1,
+        match layout.window_height {
+            Some(height) => format!("{height}.0 - {y}"),
+            None => y,
+        }
+    ));
     // Fragment `position.w` is `1/w`, as `a[0x7c]` holds.
     out.push_str(&format!(
         "  attr_in[{}u] = input.position.w;\n",

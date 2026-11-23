@@ -1970,3 +1970,39 @@ fn window_coordinates_are_turned_into_clip_space_before_y_is_flipped() {
     let flip = source.find("out.position.y = -out.position.y;").unwrap();
     assert!(x < flip && y < flip, "converted, then mirrored");
 }
+
+/// `a[0x70]` and `a[0x74]` hold the pixel's centre: a multisample tile's texels share their
+/// pixel's, and with the window origin at the bottom y counts up from the surface clip.
+#[test]
+fn a_fragment_reads_its_pixel_centre_in_window_coordinates() {
+    let p = program(&[(Op::Exit, ALWAYS)]);
+    let translated = translate(&p).unwrap();
+    let mut layout = Layout::of(&translated, Stage::Fragment);
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(
+        source.contains("attr_in[28u] = floor(input.position.x / 1.0) + 0.5;"),
+        "{source}"
+    );
+    assert!(
+        source.contains("attr_in[29u] = (floor(input.position.y / 1.0) + 0.5);"),
+        "{source}"
+    );
+    layout.window_height = Some(720);
+    layout.coverage = Some(Coverage {
+        samples_x: 2,
+        samples_y: 2,
+        sample_of_slot: vec![0, 1, 2, 3],
+        sample_mask: u32::MAX,
+        alpha_to_coverage: false,
+        per_sample_pass: false,
+    });
+    let source = module(&translated, Stage::Fragment, &layout).unwrap();
+    assert!(
+        source.contains("attr_in[28u] = floor(input.position.x / 2.0) + 0.5;"),
+        "{source}"
+    );
+    assert!(
+        source.contains("attr_in[29u] = 720.0 - (floor(input.position.y / 2.0) + 0.5);"),
+        "{source}"
+    );
+}

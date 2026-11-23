@@ -83,6 +83,9 @@ pub struct Layout {
     pub packed_attributes: Vec<(usize, Packed1010102)>,
     /// Coverage for a backend rendering multisampled surfaces per texel.
     pub coverage: Option<Coverage>,
+    /// The surface clip height a fragment's window y is measured up from, when the window
+    /// origin is at the bottom; filled from the draw.
+    pub window_height: Option<u32>,
     /// Set by the backend for a compute module.
     pub compute: Option<ComputeShape>,
 }
@@ -348,6 +351,7 @@ impl Layout {
             bgra_attributes: Vec::new(),
             packed_attributes: Vec::new(),
             coverage: None,
+            window_height: None,
             compute: None,
         }
     }
