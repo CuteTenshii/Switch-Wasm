@@ -138,6 +138,45 @@ impl Emitter<'_> {
         self.fset(rd, double);
     }
 
+    /// FNMUL: the product negated, NaN included. An invalid product is Arm's default NaN, whose
+    /// sign the engine's multiply does not give (x86's is negative), so it is chosen here.
+    fn fnmul(&mut self, rd: u32, rn: u32, rm: u32, double: bool) {
+        let d = usize::from(double);
+        let (a, b) = if double {
+            (L_F64, L_F64B)
+        } else {
+            (L_F32, L_F32B)
+        };
+        self.fget(rn, double);
+        self.f.local_set(a);
+        self.fget(rm, double);
+        self.f.local_set(b);
+        if double {
+            self.f.f64_const(f64::from_bits(0xFFF8_0000_0000_0000));
+        } else {
+            self.f.f32_const(f32::from_bits(0xFFC0_0000));
+        }
+        self.f.local_get(a);
+        self.f.local_get(b);
+        self.f.op_raw(MUL[d]);
+        self.f.op_raw(NEG[d]);
+        // Invalid: the product is a NaN and neither operand was one.
+        for _ in 0..2 {
+            self.f.local_get(a);
+            self.f.local_get(b);
+            self.f.op_raw(MUL[d]);
+        }
+        self.f.op_raw(NE[d]);
+        for x in [a, b] {
+            self.f.local_get(x);
+            self.f.local_get(x);
+            self.f.op_raw(EQ[d]);
+            self.f.i32_and();
+        }
+        self.f.select();
+        self.fset(rd, double);
+    }
+
     /// One scalar floating-point instruction of `form`, or `false`.
     pub(super) fn fp(&mut self, insn: u32, form: FpForm, retired: usize) -> bool {
         if !self.simd {
@@ -185,16 +224,15 @@ impl Emitter<'_> {
                         1 => MUL[d],
                         5 => ADD[d],
                         7 => SUB[d],
-                        // FNMUL.
-                        17 => MUL[d],
+                        17 => {
+                            self.fnmul(rd, rn, rm, double);
+                            return true;
+                        }
                         _ => return false,
                     };
                     self.fget(rn, double);
                     self.fget(rm, double);
                     self.f.op_raw(opcode);
-                    if (insn >> 11) & 0x1F == 17 {
-                        self.f.op_raw(NEG[d]);
-                    }
                     self.fset(rd, double);
                 }
                 _ => return false,

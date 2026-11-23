@@ -511,7 +511,7 @@ impl Cpu {
                 11 => fp_min(a, b),    // FMIN
                 13 => fp_maxnum(a, b), // FMAXNM
                 15 => fp_minnum(a, b), // FMINNM
-                17 => -(a * b),        // FNMUL
+                17 => fnmul_f64(a, b), // FNMUL
                 _ => return Ok(false),
             };
             self.fp_set_f64(rd, r);
@@ -530,7 +530,7 @@ impl Cpu {
                 11 => fp_min(f64::from(a), f64::from(b)) as f32,
                 13 => fp_maxnum(f64::from(a), f64::from(b)) as f32,
                 15 => fp_minnum(f64::from(a), f64::from(b)) as f32,
-                17 => -(a * b),
+                17 => fnmul_f32(a, b),
                 _ => return Ok(false),
             };
             self.fp_set_f32(rd, r);

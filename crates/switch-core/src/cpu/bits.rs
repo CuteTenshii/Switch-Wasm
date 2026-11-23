@@ -285,6 +285,37 @@ pub(crate) fn fp_min(a: f64, b: f64) -> f64 {
     }
 }
 
+/// FNMUL: the product negated, NaN included, in bits so the compiler cannot fold the negation
+/// into an operand. An invalid product is Arm's default NaN, positive where x86's is negative.
+pub(crate) fn fnmul_f32(a: f32, b: f32) -> f32 {
+    let product = if a.is_nan() || b.is_nan() {
+        fmul_f32(a, b)
+    } else {
+        let p = a * b;
+        if p.is_nan() {
+            f32::from_bits(0x7FC0_0000)
+        } else {
+            p
+        }
+    };
+    f32::from_bits(product.to_bits() ^ 0x8000_0000)
+}
+
+/// [`fnmul_f32`] for doubles.
+pub(crate) fn fnmul_f64(a: f64, b: f64) -> f64 {
+    let product = if a.is_nan() || b.is_nan() {
+        fmul_f64(a, b)
+    } else {
+        let p = a * b;
+        if p.is_nan() {
+            f64::from_bits(0x7FF8_0000_0000_0000)
+        } else {
+            p
+        }
+    };
+    f64::from_bits(product.to_bits() ^ (1 << 63))
+}
+
 /// The larger of two numbers as Arm's FPMax gives it: `f64::max` leaves the sign of two
 /// zeros open, and Arm gives +0 unless both are -0.
 pub(crate) fn max_f64(a: f64, b: f64) -> f64 {
@@ -770,5 +801,23 @@ mod tests {
         assert!(sign(fp_max(-0.0, -0.0)));
         assert!(!sign(fp_min(0.0, 0.0)));
         assert_eq!(fp_maxnum(f64::NAN, -0.0).to_bits(), (-0.0f64).to_bits());
+    }
+
+    /// FNMUL negates Arm's positive default NaN, and an operand NaN with it.
+    #[test]
+    fn fnmul_negates_the_default_nan_and_operand_nans() {
+        let inf = f32::INFINITY;
+        assert_eq!(fnmul_f32(0.0, inf).to_bits(), 0xFFC0_0000);
+        assert_eq!(fnmul_f32(inf, -0.0).to_bits(), 0xFFC0_0000);
+        assert_eq!(
+            fnmul_f64(0.0, f64::INFINITY).to_bits(),
+            0xFFF8_0000_0000_0000
+        );
+        assert_eq!(
+            fnmul_f32(f32::from_bits(0x7FC0_1234), 2.0).to_bits(),
+            0xFFC0_1234
+        );
+        assert_eq!(fnmul_f32(2.0, 3.0), -6.0);
+        assert_eq!(fnmul_f32(-2.0, 3.0), 6.0);
     }
 }
