@@ -201,6 +201,7 @@ impl Gpu {
 
         let drawn: Vec<u64> = [p.color, p.depth]
             .iter()
+            .chain(p.images.iter().map(|(image, _)| image))
             .flatten()
             .map(|t| t.addr)
             .collect();
@@ -269,6 +270,29 @@ impl Gpu {
                 Some(held) => Resource::Buffer(binding, held.clone()),
                 None => Resource::Bytes(binding, global.bytes.to_vec()),
             });
+        }
+
+        if stage == ShaderStage::Fragment {
+            for (index, (_, texture)) in p.images.iter().enumerate() {
+                let binding = wgsl::IMAGE_BINDING + index as u32;
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: own,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: texture.format(),
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+                resources.push(Resource::Texture(
+                    binding,
+                    texture.clone(),
+                    wgpu::TextureViewDimension::D2,
+                ));
+                persistent = false;
+                why[0] = true;
+            }
         }
 
         let key = persistent.then(|| fingerprint(&entries, &resources));

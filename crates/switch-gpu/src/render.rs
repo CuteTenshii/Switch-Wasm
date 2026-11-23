@@ -472,7 +472,10 @@ impl Gpu {
             .filter(|g| !g.snapshot)
             .filter_map(|g| g.held.clone().map(|buffer| (buffer, g.writes)))
             .collect();
+        // A pass is one usage scope, and an image stored to is in no other use within its own.
+        let stores = !p.images.is_empty();
         let joins = !patched
+            && !stores
             && scratch.is_none()
             && self.pass.as_ref().is_some_and(|open| {
                 open.colour == colour_target
@@ -620,6 +623,19 @@ impl Gpu {
                     Some((_, _, base)) => pass.draw_indexed(0..p.count, *base, instances.clone()),
                     None => pass.draw(0..p.count, instances.clone()),
                 }
+            }
+        }
+        if stores {
+            self.end_pass();
+            for image in p.images.iter().filter_map(|(image, _)| image.as_ref()) {
+                let held = self
+                    .space
+                    .held
+                    .get_mut(&image.addr)
+                    .ok_or("an image that is no longer held")?;
+                held.dirty = true;
+                held.writes += 1;
+                held.overwritten.clear();
             }
         }
         if let Some((held, texture, size)) = &scratch {

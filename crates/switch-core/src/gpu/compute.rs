@@ -291,6 +291,7 @@ impl DispatchMemory<'_, '_> {
             tex_sampler_pool: self.tex_sampler_pool,
             descriptors: &self.descriptors,
             blocks: &self.blocks,
+            surface_stores: None,
         })
     }
 }

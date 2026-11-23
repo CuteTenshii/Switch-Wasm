@@ -147,6 +147,60 @@ pub fn bindless_array_fragment_shader() -> Vec<u8> {
     bytes
 }
 
+/// `imageStore(bindless, uvec2(vColor.xy), uvec4(uvec2(vColor.xy), 0, 0))`, the image's
+/// handle from `c3[0x10]`: each fragment stores its own coordinates, so the order fragments
+/// run in cannot change what lands.
+pub fn image_store_fragment_shader() -> Vec<u8> {
+    use crate::gpu::shader::isa::{FMod, FRound, Operand, SurfaceDim};
+    use crate::gpu::shader::Op;
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let f2i_u32 = |reg: u8| {
+        split(checked(
+            0x5cb0u64 << 48
+                | 3 << 39
+                | u64::from(reg) << 20
+                | PT
+                | 2 << 10
+                | 2 << 8
+                | u64::from(reg),
+            Op::F2i {
+                dst: reg,
+                src: Operand::Reg(reg),
+                sm: FMod {
+                    neg: false,
+                    abs: false,
+                },
+                dst_bytes: 4,
+                dst_signed: false,
+                round: FRound::Trunc,
+                ftz: false,
+                src_bits: 32,
+                hi: false,
+            },
+        ))
+    };
+    let sched = (0xe1a0070f, 0x00240401);
+    let mut bytes = block(
+        sched,
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff04, 0xe043ff88), // ipa $r4 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        sched,
+        (0x4037ff05, 0xe043ff88), // ipa $r5 a[0x84] $r3 0x0 0x1
+        f2i_u32(4),
+        f2i_u32(5),
+    ));
+    bytes.extend(block(
+        sched,
+        (0x0107ff08, 0xef940030), // ld b32 $r8 c3[0x10]
+        split(sust_p(SurfaceDim::D2, 4, 4, 8)),
+        (0x0007000f, 0xe3000000), // exit
+    ));
+    bytes
+}
+
 /// [`bindless_array_fragment_shader`]'s sample: the layer in `r0`, then `u` and `v`.
 pub const BINDLESS_ARRAY_TEX: (u32, u32) = (0xb0470000, 0xdeba0007);
 

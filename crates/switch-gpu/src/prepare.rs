@@ -1,6 +1,7 @@
 //! Checking and preparing a draw, and translating its shaders.
 
 use crate::convert::{held_attachment_format, Widen};
+use crate::held::{spans_overlap, surface_span};
 use crate::{CachedShader, Checked, Gpu, Prepared, Render, PAGE_BITS, SHADER_CACHE_ENTRIES};
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
@@ -8,7 +9,7 @@ use switch_core::gpu::pipeline::{self as state, AttributeBase, Pipeline};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation};
 use switch_core::gpu::texture::TextureSlot;
-use switch_core::gpu::upload::{Banks, Targets, Uploads};
+use switch_core::gpu::upload::{Banks, Target, Targets, TexturePools, Uploads};
 
 impl Gpu {
     /// Decide whether a draw can run here, without uploading anything.
@@ -187,6 +188,7 @@ impl Gpu {
         // One bind group per stage; see `Layout::group`.
         vs_layout.group = 0;
         fs_layout.group = 1;
+        let images = self.draw_images(engine, ctx, &vs_layout, &mut fs_layout, [color, depth])?;
 
         let mut slots: Vec<(ShaderStage, TextureSlot)> = Vec::new();
         slots.extend(
@@ -463,7 +465,54 @@ impl Gpu {
             },
             assembled,
             instance: engine.instance_id(),
+            images,
         })
+    }
+
+    /// The images a draw's fragment stage stores to, held as storage textures, with their
+    /// formats filled into `fs_layout`. WebGPU lets no vertex stage store to one.
+    fn draw_images(
+        &mut self,
+        engine: &Engine3D,
+        ctx: &ExecCtx,
+        vs_layout: &Layout,
+        fs_layout: &mut Layout,
+        drawn: [Option<Target>; 2],
+    ) -> std::result::Result<Vec<(Option<Target>, wgpu::Texture)>, String> {
+        if !vs_layout.images.is_empty() {
+            return Err("a vertex stage stores to an image, which WebGPU cannot".into());
+        }
+        if fs_layout.images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bank = |bank: u8| engine.bound_constbuf(ShaderStage::Fragment, u32::from(bank));
+        let pools = TexturePools {
+            stage: ShaderStage::Fragment,
+            tex_cb_index: engine.tex_cb_index(),
+            header_pool: engine.tex_header_pool(),
+            sampler_pool: engine.tex_sampler_pool(),
+            bank: &bank,
+        };
+        let targets = self.storage_images(fs_layout, pools, ctx)?;
+        let mut images = Vec::with_capacity(targets.len());
+        for target in targets {
+            let texture = match &target {
+                Some(image) => {
+                    // A texture bound for storage cannot also be an attachment of the pass.
+                    if drawn
+                        .iter()
+                        .flatten()
+                        .any(|t| spans_overlap(&surface_span(t), &surface_span(image)))
+                    {
+                        return Err("stores to an image over a surface the draw renders to".into());
+                    }
+                    self.storage_surface(image, ctx)?
+                }
+                None => self.null_image(),
+            };
+            images.push((target, texture));
+        }
+        Ok(images)
     }
 
     /// What a stage's texture bindings take from the descriptors: the swizzle, which WebGPU has

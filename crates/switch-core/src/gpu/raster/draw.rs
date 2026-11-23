@@ -273,6 +273,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     tex_sampler_pool: engine.tex_sampler_pool(),
                     descriptors: &descriptors,
                     blocks: &blocks,
+                    surface_stores: None,
                 };
                 shade_vertex(
                     &vs_program,
@@ -478,6 +479,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // What the draw's shaders store to global memory, landed after each
     // shading step: see `MemoryGlobal`.
     let global_stores = std::cell::RefCell::new(Vec::new());
+    let surface_stores = std::cell::RefCell::new(Vec::new());
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
         for &ordinal in &tri {
@@ -506,6 +508,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 tex_sampler_pool: engine.tex_sampler_pool(),
                 descriptors: &descriptors,
                 blocks: &blocks,
+                surface_stores: None,
             };
             let v = shade_vertex(
                 &vs_program,
@@ -594,6 +597,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                             &descriptors,
                             &blocks,
                             &global_stores,
+                            &surface_stores,
                             |env| {
                                 shade_fragment(
                                     &mut fragment,
@@ -606,6 +610,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                             },
                         )?;
                         MemoryGlobal::land(ctx, &global_stores)?;
+                        MemoryTextures::land(ctx, &surface_stores)?;
                         // `kil` skips the depth write too, so it waits for shading.
                         let Some(color) = color else {
                             tally.killed += 1;
@@ -657,9 +662,11 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         &descriptors,
                         &blocks,
                         &global_stores,
+                        &surface_stores,
                         |env| shade_quad(quad, &fs_program, &shaded, inv_w, weights, env),
                     )?;
                     MemoryGlobal::land(ctx, &global_stores)?;
+                    MemoryTextures::land(ctx, &surface_stores)?;
                     for lane in 0..QUAD {
                         if covered[lane] == 0 {
                             continue;

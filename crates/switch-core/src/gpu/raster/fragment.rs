@@ -371,6 +371,7 @@ pub(super) fn with_fragment_env<T>(
     descriptors: &std::cell::RefCell<crate::gpu::texture::DescriptorCache>,
     blocks: &std::cell::RefCell<crate::gpu::texture::BlockCache>,
     stores: &std::cell::RefCell<Vec<(u64, u32)>>,
+    surface_stores: &std::cell::RefCell<Vec<crate::gpu::shader::interp::SurfaceWrite>>,
     f: impl FnOnce(&mut Env) -> Result<T>,
 ) -> Result<T> {
     let fs_consts = MemoryConstants {
@@ -384,6 +385,7 @@ pub(super) fn with_fragment_env<T>(
         tex_sampler_pool: engine.tex_sampler_pool(),
         descriptors,
         blocks,
+        surface_stores: Some(surface_stores),
     };
     let fs_global = MemoryGlobal { ctx, stores };
     let mut env = Env::with_tex_cb_index(&fs_consts, &fs_textures, engine.tex_cb_index());

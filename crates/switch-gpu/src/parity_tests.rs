@@ -4577,3 +4577,55 @@ fn a_padded_held_surface_is_sampled_in_place_as_its_copy_would_be() {
         assert_eq!(got, want, "linear {linear}: the sampled corner differs");
     }
 }
+
+/// A fragment stage storing to an image writes the same texels on the device as in the
+/// rasterizer: every texel the triangle covers holds its own coordinates, the rest untouched.
+#[test]
+fn a_fragment_image_store_lands_as_the_rasterizer_stores_it() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let size = testing::BINDLESS_TEXTURE_SIZE;
+    // RGBA32_UINT texels at the harness's bindless image.
+    let texel_bytes = 16;
+    let build = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::with_fragment_shader(testing::image_store_fragment_shader());
+        h.bindless_uint_texture();
+        // The varying is the pixel position, so a fragment's coordinates are its pixel's.
+        let (w, h_) = (testing::TARGET_WIDTH as f32, testing::TARGET_HEIGHT as f32);
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [w, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, h_, 0.0, 1.0]);
+        h.draw_with(renderer).expect("the draw");
+        h.flush_with(renderer);
+        let image = h.base + 0x1800;
+        let ctx = h.ctx();
+        (0..size * size * texel_bytes / 4)
+            .map(|word| ctx.read_u32(image + u64::from(word) * 4).unwrap())
+            .collect::<Vec<u32>>()
+    };
+    let want = build(&mut Software);
+    let stored = want
+        .chunks(4)
+        .enumerate()
+        .filter(|(i, texel)| {
+            let (x, y) = (*i as u32 % size, *i as u32 / size);
+            texel[..2] == [x, y] && texel[2..] == [0, 0]
+        })
+        .count();
+    assert!(
+        stored > 8 && stored < (size * size) as usize,
+        "the reference stored {stored} texels: {want:x?}"
+    );
+    let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+    let got = build(&mut gpu);
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the stored image differs");
+}

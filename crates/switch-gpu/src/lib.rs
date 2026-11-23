@@ -1010,6 +1010,9 @@ struct Prepared {
     assembled: Option<(Vec<u32>, i32)>,
     /// `gl_InstanceID`, reproduced as the first instance of a one-instance draw.
     instance: u32,
+    /// The images the fragment stage stores to, `None` for a null image, each with the
+    /// storage-capable texture it is bound as.
+    images: Vec<(Option<Target>, wgpu::Texture)>,
 }
 
 /// Whether the rasterizer would only run the draw's vertex shader for what it stores.

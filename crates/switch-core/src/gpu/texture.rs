@@ -330,7 +330,7 @@ impl Texture {
 
     /// A surface access's texel address and size, or `None` outside the image.
     /// `at` is `x`, `y` and the layer or slice.
-    fn surface_texel(&self, at: [u32; 3]) -> Result<Option<(u64, u32)>> {
+    pub(crate) fn surface_texel(&self, at: [u32; 3]) -> Result<Option<(u64, u32)>> {
         let bytes = match self.kind {
             TexelKind::Plain(format) => format.bytes_per_pixel,
             TexelKind::Depth(depth) => depth.bytes_per_texel(),
@@ -795,7 +795,16 @@ pub fn surface_load(
     let Some((addr, bytes)) = texture.surface_texel(at)? else {
         return Ok([0; 4]);
     };
-    let raw = ctx.read_pixel(addr, bytes)?;
+    surface_registers(texture, bytes, ctx.read_pixel(addr, bytes)?, data)
+}
+
+/// The registers a `suld` reads from a texel of `bytes` bytes holding `raw`.
+pub fn surface_registers(
+    texture: &Texture,
+    bytes: u32,
+    raw: u128,
+    data: SurfaceData,
+) -> Result<[u32; 4]> {
     match data {
         SurfaceData::Formatted(_) => match texture.kind {
             TexelKind::Plain(format) => format.decode_registers(raw),
@@ -823,8 +832,22 @@ pub fn surface_store(
     data: SurfaceData,
     regs: [u32; 4],
 ) -> Result<()> {
+    match surface_write(texture, at, data, regs)? {
+        Some((addr, bytes, raw)) => ctx.write_pixel(addr, bytes, raw),
+        None => Ok(()),
+    }
+}
+
+/// What a `sust` writes: the texel's address, its size and its bytes, or `None` outside the
+/// image.
+pub fn surface_write(
+    texture: &Texture,
+    at: [u32; 3],
+    data: SurfaceData,
+    regs: [u32; 4],
+) -> Result<Option<(u64, u32, u128)>> {
     let Some((addr, bytes)) = texture.surface_texel(at)? else {
-        return Ok(());
+        return Ok(None);
     };
     let raw = match data {
         SurfaceData::Formatted(_) => match texture.kind {
@@ -838,7 +861,7 @@ pub fn surface_store(
                 .fold(0u128, |raw, (i, &word)| raw | u128::from(word) << (32 * i))
         }
     };
-    ctx.write_pixel(addr, bytes, raw)
+    Ok(Some((addr, bytes, raw)))
 }
 
 /// A raw access must move whole texels.
@@ -1389,6 +1412,7 @@ mod tests {
             tex_sampler_pool: tsc_pool,
             descriptors: &descriptors,
             blocks: &blocks,
+            surface_stores: None,
         };
         assert_eq!(textures.sample(0, 0.5, 0.5, 0).unwrap(), NULL_TEXEL);
         assert_eq!(textures.sample_cube(0, 1.0, 0.0, 0.0).unwrap(), NULL_TEXEL);

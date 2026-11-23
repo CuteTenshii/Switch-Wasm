@@ -349,7 +349,7 @@ impl Gpu {
 impl Gpu {
     /// The images a launch stores to, each held on the device or `None` for a null image, with
     /// their storage formats filled into `layout`.
-    fn storage_images(
+    pub(super) fn storage_images(
         &mut self,
         layout: &mut Layout,
         pools: TexturePools<'_>,
@@ -441,7 +441,7 @@ impl Gpu {
     }
 
     /// The held surface at `target`, made writable by a shader if it was not.
-    fn storage_surface(
+    pub(super) fn storage_surface(
         &mut self,
         target: &Target,
         ctx: &ExecCtx,
@@ -483,7 +483,7 @@ impl Gpu {
     }
 
     /// What a store to a null image lands in: one texel nothing reads.
-    fn null_image(&mut self) -> wgpu::Texture {
+    pub(super) fn null_image(&mut self) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("null image"),
             size: wgpu::Extent3d {

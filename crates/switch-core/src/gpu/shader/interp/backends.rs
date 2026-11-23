@@ -285,6 +285,30 @@ pub struct MemoryTextures<'a, 'b> {
     pub descriptors: &'a std::cell::RefCell<crate::gpu::texture::DescriptorCache>,
     /// Decoded compressed blocks, shared across the draw.
     pub blocks: &'a std::cell::RefCell<crate::gpu::texture::BlockCache>,
+    /// Where `sust` queues its writes, landed after each shading step as global stores are;
+    /// `None` where a stage cannot store to an image.
+    pub surface_stores: Option<&'a std::cell::RefCell<Vec<SurfaceWrite>>>,
+}
+
+/// A queued `sust`: the texel's address, its size in bytes and its bytes.
+pub type SurfaceWrite = (u64, u32, u128);
+
+impl MemoryTextures<'_, '_> {
+    /// Write out queued surface stores oldest first, so a later one to the same texel wins.
+    pub fn land(
+        ctx: &mut ExecCtx,
+        stores: &std::cell::RefCell<Vec<SurfaceWrite>>,
+    ) -> crate::Result<()> {
+        for (addr, bytes, raw) in stores.borrow_mut().drain(..) {
+            ctx.write_pixel(addr, bytes, raw)?;
+        }
+        Ok(())
+    }
+
+    fn surface(&self, handle: u32) -> ShaderResult<Option<crate::gpu::texture::Texture>> {
+        let at = self.tex_header_pool + u64::from(crate::gpu::texture::image_id(handle)) * 32;
+        Ok(crate::gpu::texture::read_bound_image(self.ctx, at)?)
+    }
 }
 
 impl MemoryTextures<'_, '_> {
@@ -508,6 +532,52 @@ impl TextureSource for MemoryTextures<'_, '_> {
             reference,
             self.blocks,
         )?)
+    }
+
+    fn surface_load(&self, handle: u32, at: [u32; 3], data: SurfaceData) -> ShaderResult<[u32; 4]> {
+        let Some(image) = self.surface(handle)? else {
+            return Ok([0; 4]);
+        };
+        let Some((addr, bytes)) = image.surface_texel(at)? else {
+            return Ok([0; 4]);
+        };
+        // A store this step queued is newer than memory.
+        let queued = self.surface_stores.and_then(|stores| {
+            stores
+                .borrow()
+                .iter()
+                .rev()
+                .find(|&&(to, len, _)| to == addr && len == bytes)
+                .map(|&(_, _, raw)| raw)
+        });
+        let raw = match queued {
+            Some(raw) => raw,
+            None => self.ctx.read_pixel(addr, bytes)?,
+        };
+        Ok(crate::gpu::texture::surface_registers(
+            &image, bytes, raw, data,
+        )?)
+    }
+
+    fn surface_store(
+        &self,
+        handle: u32,
+        at: [u32; 3],
+        data: SurfaceData,
+        regs: [u32; 4],
+    ) -> ShaderResult<()> {
+        let Some(stores) = self.surface_stores else {
+            return Err(fault(format!(
+                "shader: surface store to handle {handle:#x} from a stage that cannot store"
+            )));
+        };
+        let Some(image) = self.surface(handle)? else {
+            return Ok(());
+        };
+        if let Some(write) = crate::gpu::texture::surface_write(&image, at, data, regs)? {
+            stores.borrow_mut().push(write);
+        }
+        Ok(())
     }
 }
 
